@@ -56,6 +56,7 @@ import {
 	startUsageWorker,
 	stopGlobalTokenHealthChecks,
 	terminateUsageWorker,
+	unregisterCodexUsageRefresher,
 } from "@better-ccflare/proxy";
 import { validatePathOrThrow } from "@better-ccflare/security";
 import {
@@ -203,6 +204,7 @@ function serveDashboardFile(
 
 // Module-level server instance
 let serverInstance: ReturnType<typeof serve> | null = null;
+let registeredServerId: string | null = null;
 let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
@@ -859,6 +861,8 @@ export default async function startServer(options?: {
 
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
+	// Track at module scope so handleGracefulShutdown can unregister cleanly.
+	registeredServerId = serverId;
 	registerRefreshClearer(serverId, (accountId: string) => {
 		// Clear refresh cache for this account in this server's context
 		proxyContext.refreshInFlight.delete(accountId);
@@ -987,13 +991,24 @@ export default async function startServer(options?: {
 
 		const fiveHour = fetchResult.data.five_hour?.utilization ?? 0;
 		const sevenDay = fetchResult.data.seven_day?.utilization ?? 0;
+		const isRateLimited = fetchResult.response.status === 429;
 		log.info(
-			`Codex usage refreshed for '${account.name}': 5h=${fiveHour}%, 7d=${sevenDay}%`,
+			`Codex usage refreshed for '${account.name}': 5h=${fiveHour}%, 7d=${sevenDay}%${
+				isRateLimited ? " (rate-limited)" : ""
+			}`,
 		);
+
+		// 429 still produces a successful header refresh (the usage payload is
+		// what we wanted), but the dashboard message must not celebrate it —
+		// otherwise the operator sees "refreshed successfully" while the
+		// account is fully exhausted. See tombii's PR #219 review note.
+		const message = isRateLimited
+			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
+			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
 
 		return {
 			success: true,
-			message: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`,
+			message,
 		};
 	});
 
@@ -1538,6 +1553,14 @@ async function handleGracefulShutdown(signal: string) {
 
 		// Stop token health monitoring
 		stopGlobalTokenHealthChecks();
+
+		// Unregister this server's Codex on-demand usage refresher so the
+		// module-level registry doesn't keep a stale callback after restart.
+		// Mirrors the cleanup pattern used by the schedulers above.
+		if (registeredServerId) {
+			unregisterCodexUsageRefresher(registeredServerId);
+			registeredServerId = null;
+		}
 
 		// Clear all pending usage polling retry timeouts
 		if (usagePollingRetryTimeouts.size > 0) {
