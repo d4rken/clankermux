@@ -86,6 +86,9 @@ export interface RequestResponse {
 	project?: string;
 	billingType?: string;
 	comboName?: string;
+	// Derived from statusCode === 429 server-side so the list view can render
+	// the "Rate Limited" badge without lazy-loading the full payload.
+	rateLimited?: boolean;
 }
 
 // Detailed request with payload
@@ -121,6 +124,10 @@ export interface RequestPayload {
 		// without request/response bodies. Consumers that need bodies must
 		// re-fetch via GET /api/requests/payload/:id.
 		bodiesOmitted?: boolean;
+		// Mirror of RequestResponse.rateLimited so the list view can render
+		// the "Rate Limited" badge from a summary-only payload (no body
+		// hydration required).
+		rateLimited?: boolean;
 	};
 }
 
@@ -199,6 +206,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		project: request.project,
 		billingType: request.billingType,
 		comboName: request.comboName,
+		rateLimited: request.statusCode === 429,
 	};
 }
 

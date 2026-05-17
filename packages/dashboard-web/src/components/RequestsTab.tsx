@@ -849,6 +849,7 @@ export function RequestsTab() {
 										summary?.billingType ||
 										(summary?.tokensPerSecond ?? 0) > 0 ||
 										accountLabel ||
+										request.meta.rateLimited ||
 										isZaiPeak ||
 										isAnthropicPeak) && (
 										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
@@ -913,6 +914,11 @@ export function RequestsTab() {
 												<span className="text-xs text-muted-foreground">
 													via {accountLabel}
 												</span>
+											)}
+											{request.meta.rateLimited && (
+												<Badge variant="warning" className="text-xs">
+													Rate Limited
+												</Badge>
 											)}
 											{(isZaiPeak || isAnthropicPeak) && (
 												<Badge

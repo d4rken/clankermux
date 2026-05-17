@@ -30,6 +30,9 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 			path: summary.path,
 			method: summary.method,
 			agentUsed: summary.agentUsed,
+			// Server derives this from statusCode === 429 so the list view can
+			// render the Rate Limited badge without lazy-loading the body.
+			rateLimited: summary.rateLimited,
 			bodiesOmitted: true,
 		},
 	};
