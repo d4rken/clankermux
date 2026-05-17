@@ -195,6 +195,7 @@ export function createAccountsListHandler(
 			cross_region_mode: string | null;
 			model_fallbacks: string | null;
 			billing_type: string | null;
+			pause_reason: string | null;
 		}>(
 			`
 				SELECT
@@ -228,6 +229,7 @@ export function createAccountsListHandler(
 					cross_region_mode,
 					model_fallbacks,
 					billing_type,
+					pause_reason,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -261,8 +263,16 @@ export function createAccountsListHandler(
 								id: a.id,
 								provider: a.provider ?? "",
 								paused: !!a.paused,
+								// pause_reason and rate_limit_reset feed wouldAutoUnpause —
+								// without them peek() can't simulate the auto-unpause that
+								// select() performs on safe-reason paused accounts whose
+								// upstream window has reset.
+								pause_reason: a.pause_reason ?? null,
 								rate_limited_until: a.rate_limited_until
 									? Number(a.rate_limited_until)
+									: null,
+								rate_limit_reset: a.rate_limit_reset
+									? Number(a.rate_limit_reset)
 									: null,
 								session_start: a.session_start ? Number(a.session_start) : null,
 								priority: a.priority,

@@ -10,6 +10,7 @@ import {
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
 } from "@better-ccflare/types";
+import { isPeekAvailable } from "./peek-availability";
 
 export { LeastUsedStrategy } from "./least-used";
 
@@ -105,8 +106,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	peek(accounts: Account[]): string | null {
 		const now = Date.now();
 
+		// isPeekAvailable simulates the auto-unpause that select() performs on
+		// safe-reason paused accounts (auto_fallback_enabled + window elapsed).
+		// Without it, peek() and select() disagree whenever such an account is
+		// the would-be Primary, flagging the wrong row on the dashboard while
+		// real traffic goes to the auto-unpaused one.
 		const isAvailable = (account: Account): boolean =>
-			isAccountAvailable(account, now);
+			isPeekAvailable(account, now);
 
 		// Mirror the auto-fallback path from select(), but without unpausing.
 		// When fallback would trigger, select() re-evaluates the priority queue
@@ -116,9 +122,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// flagged Primary while a higher-priority non-fallback account is the
 		// one that would actually be picked.
 		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
-		const fallbackTriggered = fallbackCandidates.some(
-			(c) => !c.paused && isAvailable(c),
-		);
+		const fallbackTriggered = fallbackCandidates.some((c) => isAvailable(c));
 		if (fallbackTriggered) {
 			const sorted = accounts
 				.filter((a) => isAvailable(a))
