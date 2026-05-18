@@ -37,6 +37,9 @@ After merging, update the Acknowledgements section in README.md to thank the con
 ## Fork Workflow
 This repo is a fork of `tombii/better-ccflare`. When fixing bugs or making changes that should also be contributed upstream, follow `.claude/rules/fork-workflow.md`. It covers the two lanes (`fix/*` for upstream-bound, `fork/*` for fork-only), the `--no-ff` merge pattern, and how to reconcile local history after upstream lands or rejects a PR.
 
+## Upstream PR Review Loop
+After opening any upstream PR, follow `.claude/rules/upstream-pr-review-loop.md` to monitor Greptile and address findings until 5/5 + no outstanding issues + all threads resolved. Covers the signals to read (Greptile edits in-place, no thumbs-up emoji here), the cherry-pick-not-merge rule for local-main divergence, cadence, and post-merge service restart.
+
 ## Issue Management
 - Never close issues automatically
 - Wait for the issue reporter to confirm that fixes work for them before closing
