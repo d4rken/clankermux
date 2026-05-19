@@ -9,6 +9,7 @@ import {
 	enableApiKey,
 	generateApiKey,
 	listApiKeys,
+	regenerateApiKey,
 } from "@better-ccflare/cli-commands";
 import { DatabaseOperations } from "@better-ccflare/database";
 import { AuthService } from "@better-ccflare/http-api";
@@ -232,6 +233,12 @@ describe("API Key lifecycle", () => {
 		);
 	});
 
+	test("rejects a name longer than 100 characters", async () => {
+		await expect(generateApiKey(dbOps, "a".repeat(101))).rejects.toThrow(
+			"API key name cannot exceed 100 characters",
+		);
+	});
+
 	test("rejects duplicate key names", async () => {
 		await generateApiKey(dbOps, "dup");
 		await expect(generateApiKey(dbOps, "dup")).rejects.toThrow(
@@ -290,5 +297,81 @@ describe("API Key lifecycle", () => {
 		await expect(disableApiKey(dbOps, "nope")).rejects.toThrow("not found");
 		await expect(enableApiKey(dbOps, "nope")).rejects.toThrow("not found");
 		await expect(deleteApiKey(dbOps, "nope")).rejects.toThrow("not found");
+	});
+
+	test("regenerateApiKey returns a fresh secret and preserves row metadata", async () => {
+		const original = await generateApiKey(dbOps, "rotate-me");
+		// Capture the original row's stats; bump usage so we can assert it survives.
+		const repo = dbOps.getApiKeyRepository();
+		await repo.updateUsage(original.id, Date.now());
+		const before = await repo.findById(original.id);
+		if (!before) throw new Error("setup: original key missing");
+
+		const result = await regenerateApiKey(dbOps, "rotate-me");
+
+		expect(result.id).toBe(original.id);
+		expect(result.name).toBe("rotate-me");
+		expect(result.apiKey).toMatch(/^btr-[a-zA-Z0-9]{32}$/);
+		expect(result.apiKey).not.toBe(original.apiKey);
+		expect(result.prefixLast8).toHaveLength(8);
+		expect(result.prefixLast8).not.toBe(original.prefixLast8);
+
+		const after = await repo.findById(original.id);
+		if (!after) throw new Error("regenerated key missing");
+		expect(after.hashedKey).not.toBe(before.hashedKey);
+		expect(after.prefixLast8).toBe(result.prefixLast8);
+		// Preserved fields
+		expect(after.createdAt).toBe(before.createdAt);
+		expect(after.usageCount).toBe(before.usageCount);
+		expect(after.isActive).toBe(true);
+	});
+
+	test("regenerateApiKey on a missing key throws not-found", async () => {
+		await expect(regenerateApiKey(dbOps, "nope")).rejects.toThrow("not found");
+	});
+
+	test("regenerateApiKey on a disabled key throws", async () => {
+		await generateApiKey(dbOps, "frozen");
+		await disableApiKey(dbOps, "frozen");
+		await expect(regenerateApiKey(dbOps, "frozen")).rejects.toThrow(
+			"disabled",
+		);
+	});
+
+	test("rotateSecret refuses to rotate a disabled row even with matching hash", async () => {
+		// Defense-in-depth: app code checks isActive before calling rotate, but
+		// a TOCTOU window could let a parallel disable land in between.
+		const original = await generateApiKey(dbOps, "disabled-rotate");
+		await disableApiKey(dbOps, "disabled-rotate");
+		const repo = dbOps.getApiKeyRepository();
+		const row = await repo.findById(original.id);
+		if (!row) throw new Error("setup: row missing");
+		const ok = await repo.rotateSecret(
+			row.id,
+			row.hashedKey, // matching hash — only is_active=1 predicate should block
+			"new:hash",
+			"newprefx",
+		);
+		expect(ok).toBe(false);
+	});
+
+	test("regenerateApiKey races: second concurrent caller gets a 409 Conflict", async () => {
+		// Simulates two regenerate requests that both read the same row before
+		// either writes. The first wins; the second's optimistic guard misses,
+		// preventing it from returning a plaintext that was silently superseded.
+		await generateApiKey(dbOps, "raced");
+		const first = await regenerateApiKey(dbOps, "raced");
+		expect(first.apiKey).toMatch(/^btr-[a-zA-Z0-9]{32}$/);
+		// After the first regenerate, the second one (which conceptually started
+		// with the pre-first hash) is modeled by directly calling the repo with a
+		// stale `expectedHashedKey`.
+		const repo = dbOps.getApiKeyRepository();
+		const updated = await repo.rotateSecret(
+			first.id,
+			"stale:hash", // pretend we read this before `first` ran
+			"new:hash",
+			"newprefx",
+		);
+		expect(updated).toBe(false);
 	});
 });

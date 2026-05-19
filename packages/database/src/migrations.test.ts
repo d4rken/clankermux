@@ -894,9 +894,7 @@ describe("Database Backup Behavior", () => {
 		try {
 			// Trigger a migration so a new backup gets written + prune fires.
 			const db2 = new Database(dbPath);
-			db2
-				.prepare("ALTER TABLE accounts ADD COLUMN account_tier TEXT")
-				.run();
+			db2.prepare("ALTER TABLE accounts ADD COLUMN account_tier TEXT").run();
 			db2.close();
 
 			const db3 = new Database(dbPath);
@@ -1039,9 +1037,7 @@ describe("Database Backup Behavior", () => {
 		process.env.BETTER_CCFLARE_MIGRATION_BACKUP_KEEP = "0";
 		try {
 			const db2 = new Database(dbPath);
-			db2
-				.prepare("ALTER TABLE accounts ADD COLUMN account_tier TEXT")
-				.run();
+			db2.prepare("ALTER TABLE accounts ADD COLUMN account_tier TEXT").run();
 			db2.close();
 
 			const db3 = new Database(dbPath);
@@ -1060,5 +1056,124 @@ describe("Database Backup Behavior", () => {
 			.filter((f) => f.startsWith("nokeep.db.backup."));
 		// All 3 pre-existing stubs + 1 fresh backup survive.
 		expect(backups.length).toBe(4);
+	});
+
+	it("should fall back to the default retention for negative env values", () => {
+		const dbPath = path.join(tmpDir, "negative.db");
+		const db = new Database(dbPath);
+		ensureSchema(db);
+		db.close();
+
+		fs.writeFileSync(path.join(tmpDir, "negative.db.backup.1000"), "x");
+		fs.writeFileSync(path.join(tmpDir, "negative.db.backup.2000"), "x");
+		fs.writeFileSync(path.join(tmpDir, "negative.db.backup.3000"), "x");
+		fs.writeFileSync(path.join(tmpDir, "negative.db.backup.4000"), "x");
+		fs.writeFileSync(path.join(tmpDir, "negative.db.backup.5000"), "x");
+
+		const prev = process.env.BETTER_CCFLARE_MIGRATION_BACKUP_KEEP;
+		process.env.BETTER_CCFLARE_MIGRATION_BACKUP_KEEP = "-1";
+		try {
+			const db2 = new Database(dbPath);
+			db2.prepare("ALTER TABLE accounts ADD COLUMN account_tier TEXT").run();
+			db2.close();
+
+			const db3 = new Database(dbPath);
+			runMigrations(db3, dbPath);
+			db3.close();
+		} finally {
+			if (prev === undefined) {
+				delete process.env.BETTER_CCFLARE_MIGRATION_BACKUP_KEEP;
+			} else {
+				process.env.BETTER_CCFLARE_MIGRATION_BACKUP_KEEP = prev;
+			}
+		}
+
+		const backups = fs
+			.readdirSync(tmpDir)
+			.filter((f) => f.startsWith("negative.db.backup."));
+		// "-1" is not a non-negative integer — default of 3 applies.
+		// 5 stale + 1 fresh = 6 candidates, default retention 3 → 3 survive.
+		expect(backups).toHaveLength(3);
+	});
+
+	it("should NOT create backup when only additive migrations are needed", () => {
+		// Build a DB that's missing several add-only columns but has no
+		// destructive migrations pending (no account_tier/tier/strict-notnull
+		// refresh_token). Migration should run and add the columns without
+		// creating a backup file.
+		const dbPath = path.join(tmpDir, "addonly.db");
+		const db = new Database(dbPath);
+		db.exec(`
+			CREATE TABLE accounts (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				provider TEXT DEFAULT 'anthropic',
+				api_key TEXT,
+				refresh_token TEXT,
+				access_token TEXT,
+				expires_at INTEGER,
+				created_at INTEGER NOT NULL,
+				last_used INTEGER,
+				request_count INTEGER DEFAULT 0,
+				total_requests INTEGER DEFAULT 0,
+				priority INTEGER DEFAULT 0
+			);
+			CREATE TABLE requests (
+				id TEXT PRIMARY KEY,
+				timestamp INTEGER NOT NULL,
+				method TEXT NOT NULL,
+				path TEXT NOT NULL,
+				account_used TEXT,
+				status_code INTEGER,
+				success BOOLEAN,
+				error_message TEXT,
+				response_time_ms INTEGER,
+				failover_attempts INTEGER DEFAULT 0
+			);
+			CREATE TABLE request_payloads (
+				id TEXT PRIMARY KEY,
+				json TEXT NOT NULL
+			);
+			CREATE TABLE oauth_sessions (
+				id TEXT PRIMARY KEY,
+				account_name TEXT NOT NULL,
+				verifier TEXT NOT NULL,
+				mode TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL
+			);
+			CREATE TABLE api_keys (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				hashed_key TEXT NOT NULL UNIQUE,
+				prefix_last_8 TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				last_used INTEGER,
+				usage_count INTEGER DEFAULT 0,
+				is_active INTEGER DEFAULT 1
+			);
+		`);
+		db.close();
+
+		const db2 = new Database(dbPath);
+		runMigrations(db2, dbPath);
+		db2.close();
+
+		const backups = fs
+			.readdirSync(tmpDir)
+			.filter((f) => f.startsWith("addonly.db.backup"));
+		expect(backups).toHaveLength(0);
+
+		// And verify the migration actually ran something — at least one of
+		// the add-only columns should now be present.
+		const db3 = new Database(dbPath);
+		const cols = (
+			db3.prepare("PRAGMA table_info(accounts)").all() as Array<{
+				name: string;
+			}>
+		).map((c) => c.name);
+		db3.close();
+		expect(cols).toContain("rate_limited_until");
+		expect(cols).toContain("paused");
 	});
 });

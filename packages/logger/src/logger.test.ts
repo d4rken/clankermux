@@ -7,14 +7,19 @@ describe("Logger error serialization", () => {
 	const handler = (event: LogEvent) => {
 		captured.push(event);
 	};
+	let savedLogLevel: string | undefined;
 
 	beforeEach(() => {
 		captured = [];
+		savedLogLevel = process.env.LOG_LEVEL;
+		delete process.env.LOG_LEVEL;
 		logBus.on("log", handler);
 	});
 
 	afterEach(() => {
 		logBus.off("log", handler);
+		if (savedLogLevel === undefined) delete process.env.LOG_LEVEL;
+		else process.env.LOG_LEVEL = savedLogLevel;
 	});
 
 	it("emits Error name, message, and stack as plain object data", () => {

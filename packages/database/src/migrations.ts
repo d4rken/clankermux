@@ -7,7 +7,7 @@ import { addPerformanceIndexes } from "./performance-indexes";
 const log = new Logger("DatabaseMigrations");
 
 const DEFAULT_BACKUP_RETENTION = 3;
-const INTEGER_RE = /^-?\d+$/;
+const INTEGER_RE = /^\d+$/;
 
 /**
  * Keep at most this many `.backup.<timestamp>` files alongside the live DB.
@@ -31,9 +31,7 @@ function getBackupRetention(): number {
 		);
 		return DEFAULT_BACKUP_RETENTION;
 	}
-	const parsed = Number.parseInt(raw, 10);
-	if (parsed < 0) return DEFAULT_BACKUP_RETENTION;
-	return parsed;
+	return Number.parseInt(raw, 10);
 }
 
 function pruneOldBackups(absoluteSourcePath: string): void {
@@ -50,7 +48,9 @@ function pruneOldBackups(absoluteSourcePath: string): void {
 	try {
 		entries = fs.readdirSync(dir);
 	} catch (error) {
-		log.warn(`Could not list backup directory for pruning: ${(error as Error).message}`);
+		log.warn(
+			`Could not list backup directory for pruning: ${(error as Error).message}`,
+		);
 		return;
 	}
 
@@ -78,7 +78,9 @@ function pruneOldBackups(absoluteSourcePath: string): void {
 			fs.unlinkSync(filePath);
 			log.info(`Pruned old DB backup: ${entry.name}`);
 		} catch (error) {
-			log.warn(`Failed to prune backup ${entry.name}: ${(error as Error).message}`);
+			log.warn(
+				`Failed to prune backup ${entry.name}: ${(error as Error).message}`,
+			);
 		}
 	}
 }
@@ -918,8 +920,18 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					error,
 				);
 			}
-			db.prepare("ALTER TABLE api_keys DROP COLUMN role").run();
-			log.info("Removed role column from api_keys table");
+			// SQLite 3.35+ supports DROP COLUMN, but older bundled versions don't —
+			// degrade gracefully like the Postgres migration does, otherwise a
+			// boot-time exception here halts startup on a deployment with an old
+			// sqlite binary.
+			try {
+				db.prepare("ALTER TABLE api_keys DROP COLUMN role").run();
+				log.info("Removed role column from api_keys table");
+			} catch (error) {
+				log.warn(
+					`Could not drop api_keys.role column (continuing): ${(error as Error).message}`,
+				);
+			}
 		}
 
 		// Add performance indexes
