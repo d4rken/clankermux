@@ -28,8 +28,8 @@ function parseArguments(args: string): unknown {
 function translateTools(tools: ResponsesTool[]): AnthropicTool[] {
 	const result: AnthropicTool[] = [];
 	for (const tool of tools) {
-		if (BUILTIN_TOOL_TYPES.has(tool.name)) {
-			logger.warn(`Skipping built-in tool: ${tool.name}`);
+		if (tool.type !== "function") {
+			logger.warn(`Skipping built-in / unsupported tool: ${tool.type}`);
 			continue;
 		}
 		result.push({
