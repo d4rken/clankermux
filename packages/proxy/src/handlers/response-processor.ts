@@ -5,7 +5,7 @@ import {
 	parseCodexUsageHeaders,
 	usageCache,
 } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+import type { Account, RateLimitReason } from "@better-ccflare/types";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 
@@ -257,7 +257,7 @@ export async function processProxyResponse(
 			// Derive a 529-specific reason override so the audit trail reflects
 			// the actual HTTP status (529 overloaded vs 429 rate-limited).
 			// applyRateLimitCooldown auto-derives the 429 reason when reason is undefined.
-			const reason: import("@better-ccflare/types").RateLimitReason | undefined =
+			const reason: RateLimitReason | undefined =
 				response.status === 529
 					? rateLimitInfo.resetTime
 						? "upstream_529_overloaded_with_reset"

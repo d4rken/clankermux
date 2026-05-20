@@ -4,7 +4,7 @@ import {
 	withSanitizedProxyHeaders,
 } from "@better-ccflare/http-common";
 import { ANALYTICS_STREAM_SYMBOL } from "@better-ccflare/http-common/symbols";
-import type { Account } from "@better-ccflare/types";
+import type { Account, RateLimitReason } from "@better-ccflare/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
@@ -305,7 +305,7 @@ export async function forwardToClient(
 								// Map firedReason to the correct RateLimitReason override:
 								//   "overloaded_error" → upstream_529_overloaded_with_reset
 								//   "rate_limit_error" → let applyRateLimitCooldown auto-derive (429)
-								const reason: import("@better-ccflare/types").RateLimitReason | undefined =
+								const reason: RateLimitReason | undefined =
 									rateLimitSniffer.firedReason === "overloaded_error"
 										? "upstream_529_overloaded_with_reset"
 										: undefined;
