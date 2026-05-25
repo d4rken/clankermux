@@ -26,27 +26,6 @@ export interface AnthropicUsageData {
 	seven_day_opus?: UsageWindowData;
 }
 
-// Usage data types for NanoGPT accounts
-export interface NanoGPTUsageWindow {
-	used: number;
-	remaining: number;
-	percentUsed: number; // 0-1 decimal range from API, displayed as 0-100%
-	resetAt: number; // Unix timestamp in milliseconds
-}
-
-export interface NanoGPTUsageData {
-	active: boolean; // true = subscription active, false = PayG mode
-	limits: {
-		daily: number;
-		monthly: number;
-	};
-	enforceDailyLimit: boolean;
-	daily: NanoGPTUsageWindow;
-	monthly: NanoGPTUsageWindow;
-	state: "active" | "grace" | "inactive";
-	graceUntil: string | null;
-}
-
 // Usage data types for Zai accounts
 export interface ZaiUsageWindow {
 	used: number;
@@ -89,7 +68,6 @@ export interface AlibabaCodingPlanUsageData {
 // Combined usage data type that supports all providers
 export type FullUsageData =
 	| AnthropicUsageData
-	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData;
@@ -124,7 +102,6 @@ export interface AccountRow {
 	peak_hours_pause_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
-	cross_region_mode?: string | null; // Bedrock cross-region inference mode
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
@@ -161,7 +138,6 @@ export interface Account {
 	peak_hours_pause_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
-	cross_region_mode: string | null; // Bedrock cross-region inference mode
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
@@ -212,7 +188,6 @@ export interface AccountResponse {
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
-	crossRegionMode?: string | null; // Cross-region inference mode for Bedrock accounts
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
 	sessionStats: SessionStats | null;
@@ -265,9 +240,6 @@ export interface AccountListItem {
 		| "minimax"
 		| "anthropic-compatible"
 		| "openai-compatible"
-		| "nanogpt"
-		| "vertex-ai"
-		| "bedrock"
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
@@ -279,7 +251,6 @@ export interface AccountListItem {
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
 	customEndpoint?: string | null;
-	crossRegionMode?: string | null; // Bedrock cross-region inference mode
 }
 
 // Account creation types
@@ -292,7 +263,6 @@ export interface AddAccountOptions {
 		| "minimax"
 		| "anthropic-compatible"
 		| "openai-compatible"
-		| "bedrock"
 		| "openrouter";
 	priority?: number;
 	customEndpoint?: string;
@@ -342,7 +312,6 @@ export function toAccount(row: AccountRow): Account {
 		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
-		cross_region_mode: row.cross_region_mode || null,
 		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
@@ -436,7 +405,6 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
-		crossRegionMode: account.cross_region_mode,
 		modelFallbacks,
 		billingType: account.billing_type,
 		sessionStats: null,

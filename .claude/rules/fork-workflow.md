@@ -78,7 +78,7 @@ of specific commits — never a merge or a re-baseline.** See the
 `project_rebaseline_strategy` memory for the full rationale; the short version:
 
 - ClankerMux **intentionally and permanently removes** code upstream keeps
-  (e.g. Vertex/Bedrock and other unused providers are slated for removal). This
+  (e.g. Vertex/Bedrock and other unused providers, now removed). This
   is a Type-D divergence upstream will never accept.
 - A `git merge upstream/main` or a re-baseline-onto-upstream **re-adds that
   removed code every time**, silently undoing fork-only decisions. Don't do it.

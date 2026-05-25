@@ -1,7 +1,4 @@
-import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { Config } from "@clankermux/config";
 import type { ModelMapping } from "@clankermux/core";
 import {
@@ -40,9 +37,6 @@ export interface AddAccountOptionsWithAdapter {
 		| "minimax"
 		| "anthropic-compatible"
 		| "openai-compatible"
-		| "nanogpt"
-		| "vertex-ai"
-		| "bedrock"
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
@@ -56,7 +50,6 @@ export interface AddAccountOptionsWithAdapter {
 	/** @deprecated Use comma-separated values in modelMappings instead */
 	modelFallbacks?: { [key: string]: string };
 	profile?: string;
-	crossRegionMode?: "geographic" | "global" | "regional";
 	adapter?: PromptAdapter;
 }
 
@@ -72,9 +65,6 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "minimax"
 		| "anthropic-compatible"
 		| "openai-compatible"
-		| "nanogpt"
-		| "vertex-ai"
-		| "bedrock"
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
@@ -150,64 +140,6 @@ async function createMinimaxAccount(
 			now,
 			validatedPriority,
 			null, // No custom endpoint for minimax
-		],
-	);
-}
-
-/**
- * Create a NanoGPT account in the database
- */
-export async function createNanoGPTAccount(
-	dbOps: DatabaseOperations,
-	name: string,
-	apiKey: string,
-	priority: number,
-	customEndpoint?: string,
-	modelMappings?: { [key: string]: string | string[] } | null,
-	modelFallbacks?: { [key: string]: string | string[] } | null,
-): Promise<void> {
-	const accountId = crypto.randomUUID();
-	const now = Date.now();
-	// Validate inputs
-	const validatedApiKey = validateApiKey(apiKey, "NanoGPT API key");
-	const validatedPriority = validatePriority(priority, "priority");
-	// Validate and sanitize custom endpoint if provided
-	let validatedEndpoint = null;
-	if (customEndpoint) {
-		validatedEndpoint = validateEndpointUrl(customEndpoint, "custom endpoint");
-	}
-	// Validate and sanitize model mappings if provided
-	let validatedModelMappings = null;
-	if (modelMappings && Object.keys(modelMappings).length > 0) {
-		const validatedMappings = validateAndSanitizeModelMappings(modelMappings);
-		validatedModelMappings = JSON.stringify(validatedMappings);
-	}
-	// Validate model fallbacks
-	let validatedModelFallbacks = null;
-	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
-		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
-		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
-	}
-	await dbOps.getAdapter().run(
-		`INSERT INTO accounts (
-			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			accountId,
-			name,
-			"nanogpt",
-			validatedApiKey,
-			null,
-			null,
-			null,
-			now,
-			0,
-			0,
-			validatedPriority,
-			validatedEndpoint,
-			validatedModelMappings,
-			validatedModelFallbacks,
 		],
 	);
 }
@@ -475,145 +407,6 @@ async function createZaiAccount(
 
 	console.log(`\nAccount '${name}' added successfully!`);
 	console.log("Type: z.ai (API key)");
-}
-
-/**
- * Check if an AWS profile exists in ~/.aws/credentials
- */
-function checkAwsProfileExists(profile: string): boolean {
-	try {
-		const credentialsPath = join(homedir(), ".aws", "credentials");
-		const content = readFileSync(credentialsPath, "utf-8");
-		// Match [profile] section header (handles default and named profiles)
-		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
-		return profileRegex.test(content);
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Read region from ~/.aws/config for a given profile
- * AWS config format: [profile <name>] for named profiles, [default] for default
- */
-function readAwsRegion(profile: string): string | null {
-	try {
-		const configPath = join(homedir(), ".aws", "config");
-		const content = readFileSync(configPath, "utf-8");
-		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
-		const sectionHeader =
-			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
-		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
-		const sectionMatch = content.match(sectionRegex);
-		if (!sectionMatch) return null;
-		const regionMatch = sectionMatch[0].match(/^region\s*=\s*(.+)$/m);
-		return regionMatch ? regionMatch[1].trim() : null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Create a Bedrock account in the database
- */
-async function createBedrockAccount(
-	dbOps: DatabaseOperations,
-	name: string,
-	profile: string,
-	region: string,
-	priority: number,
-	crossRegionMode?: "geographic" | "global" | "regional",
-): Promise<void> {
-	const accountId = crypto.randomUUID();
-	const now = Date.now();
-	const validatedPriority = validatePriority(priority, "priority");
-
-	// Store as "bedrock:profile:region" format
-	const customEndpoint = `bedrock:${profile}:${region}`;
-
-	await dbOps.getAdapter().run(
-		`INSERT INTO accounts (
-			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, cross_region_mode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			accountId,
-			name,
-			"bedrock",
-			null, // No API key - uses AWS profiles
-			null, // No refresh token
-			null, // No access token
-			null,
-			now,
-			0,
-			0,
-			validatedPriority,
-			customEndpoint,
-			crossRegionMode || "geographic",
-		],
-	);
-}
-
-/**
- * Create a Vertex AI account in the database
- */
-async function createVertexAIAccount(
-	dbOps: DatabaseOperations,
-	name: string,
-	projectId: string,
-	region: string,
-	priority: number,
-): Promise<void> {
-	const accountId = crypto.randomUUID();
-	const now = Date.now();
-
-	// Validate inputs
-	if (!projectId || projectId.trim().length === 0) {
-		throw new Error("Project ID is required for Vertex AI account");
-	}
-	if (!region || region.trim().length === 0) {
-		throw new Error("Region is required for Vertex AI account");
-	}
-	const validatedPriority = validatePriority(priority, "priority");
-
-	// Store project ID and region in custom_endpoint as JSON
-	const vertexConfig = JSON.stringify({
-		projectId: projectId.trim(),
-		region: region.trim(),
-	});
-
-	await dbOps.getAdapter().run(
-		`INSERT INTO accounts (
-			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			accountId,
-			name,
-			"vertex-ai",
-			null, // No API key - uses Google Cloud credentials
-			null, // No refresh token
-			null, // Access token will be fetched on first use
-			null, // Expiry will be set on first token refresh
-			now,
-			0,
-			0,
-			validatedPriority,
-			vertexConfig,
-		],
-	);
-
-	console.log(`\nAccount '${name}' added successfully!`);
-	console.log("Type: Vertex AI (Google Cloud credentials)");
-	console.log(`Project ID: ${projectId}`);
-	console.log(`Region: ${region}`);
-	console.log(
-		"\nMake sure you've authenticated with Google Cloud using one of:",
-	);
-	console.log("  • gcloud auth application-default login");
-	console.log(
-		"  • export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json",
-	);
 }
 
 /**
@@ -1043,8 +836,6 @@ export async function addAccount(
 			{ label: "Claude API account", value: "console" },
 			{ label: "Codex (OpenAI OAuth)", value: "codex" },
 			{ label: "Qwen (Alibaba Cloud OAuth)", value: "qwen" },
-			{ label: "Vertex AI (Google Cloud)", value: "vertex-ai" },
-			{ label: "AWS Bedrock (AWS profile credentials)", value: "bedrock" },
 			{ label: "z.ai account (API key)", value: "zai" },
 			{ label: "Minimax account (API key)", value: "minimax" },
 			{ label: "Kilo Gateway (API key)", value: "kilo" },
@@ -1071,91 +862,7 @@ export async function addAccount(
 			},
 		]));
 
-	if (mode === "bedrock") {
-		// Handle Bedrock accounts with AWS profile credentials
-		const profile = options.profile;
-
-		if (!profile) {
-			throw new Error("--profile flag is required for bedrock mode");
-		}
-
-		// Validate profile exists
-		if (!checkAwsProfileExists(profile)) {
-			throw new Error(
-				`Profile "${profile}" not found. Check ~/.aws/credentials or run: aws configure --profile ${profile}`,
-			);
-		}
-
-		// Read region from ~/.aws/config
-		const region = readAwsRegion(profile);
-		if (!region) {
-			throw new Error(
-				`No region configured for profile "${profile}". Set region in ~/.aws/config or run: aws configure --profile ${profile}`,
-			);
-		}
-
-		// Get priority
-		const priority = providedPriority || 0;
-
-		// Create account
-		await createBedrockAccount(
-			dbOps,
-			name,
-			profile,
-			region,
-			priority,
-			options.crossRegionMode,
-		);
-		// DO NOT print success message - main.ts handles this
-	} else if (mode === "vertex-ai") {
-		// Handle Vertex AI accounts with Google Cloud credentials
-		console.log("\nVertex AI uses Google Cloud authentication.");
-		console.log("Make sure you have authenticated using:");
-		console.log("  • gcloud auth application-default login");
-		console.log("  OR set GOOGLE_APPLICATION_CREDENTIALS env var\n");
-
-		// Get project ID from environment or prompt
-		const envProjectId =
-			process.env.ANTHROPIC_VERTEX_PROJECT_ID ||
-			process.env.GCLOUD_PROJECT ||
-			process.env.GOOGLE_CLOUD_PROJECT;
-
-		const projectId =
-			envProjectId ||
-			(await adapter.input("\nEnter your Google Cloud Project ID: ")).trim();
-
-		if (!projectId) {
-			throw new Error("Project ID is required for Vertex AI account");
-		}
-
-		// Get region from environment or prompt
-		const envRegion = process.env.CLOUD_ML_REGION;
-		const region =
-			envRegion ||
-			(
-				await adapter.input(
-					"\nEnter region (e.g., global, us-east5, europe-west1, default: global): ",
-				)
-			).trim() ||
-			"global";
-
-		// Get priority
-		const priority =
-			providedPriority ??
-			(await adapter.input(
-				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
-			));
-
-		await createVertexAIAccount(
-			dbOps,
-			name,
-			projectId,
-			region,
-			typeof priority === "string"
-				? parseInt(priority, 10) || 0
-				: priority || 0,
-		);
-	} else if (mode === "zai") {
+	if (mode === "zai") {
 		// Handle z.ai accounts with API keys
 		const apiKey = await adapter.input("\nEnter your z.ai API key: ");
 
@@ -1270,40 +977,6 @@ export async function addAccount(
 		await createMinimaxAccount(dbOps, name, apiKey, providedPriority || 0);
 		console.log(`\nAccount '${name}' added successfully!`);
 		console.log("Type: Minimax (API key)");
-	} else if (mode === "nanogpt") {
-		// Handle NanoGPT accounts with API keys
-		const apiKey = await adapter.input("\nEnter your NanoGPT API key: ");
-		// Get custom endpoint
-		const endpoint =
-			customEndpoint ||
-			(await adapter.input(
-				"\nEnter API endpoint URL (press Enter for default https://nano-gpt.com/api): ",
-			)) ||
-			undefined;
-		// Get priority
-		const priority =
-			providedPriority ??
-			(await adapter.input(
-				"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
-			));
-		// Get model mappings
-		const finalModelMappings = await promptModelMappings(
-			adapter,
-			modelMappings,
-		);
-
-		await createNanoGPTAccount(
-			dbOps,
-			name,
-			apiKey,
-			typeof priority === "string"
-				? parseInt(priority, 10) || 0
-				: priority || 0,
-			endpoint,
-			finalModelMappings,
-		);
-		console.log(`\nAccount '${name}' added successfully!`);
-		console.log("Type: NanoGPT (API key)");
 	} else if (mode === "kilo") {
 		// Handle Kilo Gateway accounts with API keys
 		const apiKey = await adapter.input("\nEnter your Kilo API key: ");
@@ -1655,7 +1328,6 @@ export async function getAccountsList(
 					account.provider === "zai" ||
 					account.provider === "minimax" ||
 					account.provider === "anthropic-compatible" ||
-					account.provider === "bedrock" ||
 					account.provider === "openrouter" ||
 					account.provider === "codex"
 				) {
@@ -1668,7 +1340,6 @@ export async function getAccountsList(
 			autoFallbackEnabled: account.auto_fallback_enabled,
 			autoRefreshEnabled: account.auto_refresh_enabled,
 			customEndpoint: account.custom_endpoint || null,
-			crossRegionMode: account.cross_region_mode || null,
 		};
 	});
 }

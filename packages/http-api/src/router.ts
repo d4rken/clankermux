@@ -20,16 +20,12 @@ import {
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
 	createAnthropicCompatibleAccountAddHandler,
-	createAwsProfilesListHandler,
-	createBedrockAccountAddHandler,
 	createKiloAccountAddHandler,
 	createMinimaxAccountAddHandler,
-	createNanoGPTAccountAddHandler,
 	createOllamaAccountAddHandler,
 	createOllamaCloudAccountAddHandler,
 	createOpenAIAccountAddHandler,
 	createOpenRouterAccountAddHandler,
-	createVertexAIAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
 import {
@@ -156,15 +152,11 @@ export class APIRouter {
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
-		const vertexAIAccountAddHandler = createVertexAIAccountAddHandler(dbOps);
-		const bedrockAccountAddHandler = createBedrockAccountAddHandler(dbOps);
-		const awsProfilesListHandler = createAwsProfilesListHandler();
 		const alibabaCodingPlanAccountAddHandler =
 			createAlibabaCodingPlanAccountAddHandler(dbOps);
 		const kiloAccountAddHandler = createKiloAccountAddHandler(dbOps);
 		const openrouterAccountAddHandler =
 			createOpenRouterAccountAddHandler(dbOps);
-		const nanogptAccountAddHandler = createNanoGPTAccountAddHandler(dbOps);
 		const anthropicCompatibleAccountAddHandler =
 			createAnthropicCompatibleAccountAddHandler(dbOps);
 		const ollamaAccountAddHandler = createOllamaAccountAddHandler(dbOps);
@@ -226,13 +218,6 @@ export class APIRouter {
 		this.handlers.set("POST:/api/accounts/minimax", (req) =>
 			minimaxAccountAddHandler(req),
 		);
-		this.handlers.set("POST:/api/accounts/vertex-ai", (req) =>
-			vertexAIAccountAddHandler(req),
-		);
-		this.handlers.set("POST:/api/accounts/bedrock", (req) =>
-			bedrockAccountAddHandler(req),
-		);
-		this.handlers.set("GET:/api/aws/profiles", () => awsProfilesListHandler());
 		this.handlers.set("POST:/api/accounts/alibaba-coding-plan", (req) =>
 			alibabaCodingPlanAccountAddHandler(req),
 		);
@@ -241,9 +226,6 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/openrouter", (req) =>
 			openrouterAccountAddHandler(req),
-		);
-		this.handlers.set("POST:/api/accounts/nanogpt", (req) =>
-			nanogptAccountAddHandler(req),
 		);
 		this.handlers.set("POST:/api/accounts/anthropic-compatible", (req) =>
 			anthropicCompatibleAccountAddHandler(req),

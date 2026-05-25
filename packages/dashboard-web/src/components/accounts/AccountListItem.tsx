@@ -100,7 +100,7 @@ export function AccountListItem({
 	const showForceReset =
 		(isHardLimited || isBlockedByLegacyLock) && !presenter.isPaused;
 	// staleLockDetected only fires when numeric usage data exists (Anthropic accounts);
-	// Zai/NanoGPT accounts have usageUtilization === null and are correctly excluded
+	// Zai accounts have usageUtilization === null and are correctly excluded
 	const staleLockDetected =
 		showForceReset &&
 		typeof account.usageUtilization === "number" &&
@@ -114,19 +114,6 @@ export function AccountListItem({
 			account.hasRefreshToken &&
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth);
-
-	// Parse Bedrock profile and region from custom_endpoint
-	let bedrockProfile: string | null = null;
-	let bedrockRegion: string | null = null;
-	let bedrockCrossRegionMode: string | null = null;
-	if (account.provider === "bedrock" && account.customEndpoint) {
-		const match = account.customEndpoint.match(/^bedrock:([^:]+):(.+)$/);
-		if (match) {
-			bedrockProfile = match[1];
-			bedrockRegion = match[2];
-		}
-		bedrockCrossRegionMode = account.crossRegionMode || "geographic";
-	}
 
 	return (
 		<div
@@ -359,32 +346,6 @@ export function AccountListItem({
 			)}
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 				<span>{account.provider}</span>
-				{account.provider === "bedrock" && bedrockProfile && (
-					<>
-						<span>·</span>
-						<span>Profile: {bedrockProfile}</span>
-						{bedrockRegion && (
-							<>
-								<span>·</span>
-								<div
-									className="flex items-center gap-1"
-									title={`Region: ${bedrockRegion}`}
-								>
-									<Globe className="h-3 w-3" />
-									<span>{bedrockRegion}</span>
-								</div>
-							</>
-						)}
-						{bedrockCrossRegionMode && (
-							<>
-								<span>·</span>
-								<span title="Cross-region inference mode">
-									{bedrockCrossRegionMode}
-								</span>
-							</>
-						)}
-					</>
-				)}
 			</div>
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
 				{presenter.isRateLimited && (

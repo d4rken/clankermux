@@ -4,7 +4,6 @@ import {
 	computePoolUsage,
 	isAlibabaShape,
 	isAnthropicStyleShape,
-	isNanoGPTShape,
 	isZaiShape,
 	normalizeResetMs,
 } from "../pool-usage";
@@ -44,7 +43,6 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],
 		hasRefreshToken: true,
-		crossRegionMode: null,
 		modelFallbacks: null,
 		billingType: null,
 		sessionStats: null,
@@ -78,16 +76,6 @@ describe("normalizeResetMs", () => {
 });
 
 describe("shape detectors", () => {
-	it("isNanoGPTShape true for NanoGPT data", () => {
-		expect(
-			isNanoGPTShape({
-				active: true,
-				daily: { used: 0, remaining: 0, percentUsed: 0, resetAt: 0 },
-				monthly: { used: 0, remaining: 0, percentUsed: 0, resetAt: 0 },
-			} as never),
-		).toBe(true);
-	});
-
 	it("isAlibabaShape true for Alibaba data", () => {
 		expect(
 			isAlibabaShape({
@@ -105,7 +93,7 @@ describe("shape detectors", () => {
 		).toBe(true);
 	});
 
-	it("isAnthropicStyleShape excludes alibaba/zai/nanogpt", () => {
+	it("isAnthropicStyleShape excludes alibaba/zai", () => {
 		expect(
 			isAnthropicStyleShape({
 				five_hour: { utilization: 0, resets_at: null },

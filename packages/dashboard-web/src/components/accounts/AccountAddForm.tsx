@@ -21,9 +21,6 @@ interface AccountAddFormProps {
 			| "minimax"
 			| "anthropic-compatible"
 			| "openai-compatible"
-			| "nanogpt"
-			| "vertex-ai"
-			| "bedrock"
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
@@ -56,33 +53,12 @@ interface AccountAddFormProps {
 		customEndpoint?: string;
 		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
-	onAddNanoGPTAccount: (params: {
-		name: string;
-		apiKey: string;
-		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
-	}) => Promise<void>;
 	onAddOpenAIAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
 		modelMappings?: { [key: string]: string };
-	}) => Promise<void>;
-	onAddVertexAIAccount: (params: {
-		name: string;
-		projectId: string;
-		region: string;
-		priority: number;
-	}) => Promise<void>;
-	onAddBedrockAccount: (params: {
-		name: string;
-		profile: string;
-		region: string;
-		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
 	}) => Promise<void>;
 	onAddAlibabaCodingPlanAccount: (params: {
 		name: string;
@@ -125,10 +101,7 @@ export function AccountAddForm({
 	onAddZaiAccount,
 	onAddMinimaxAccount,
 	onAddAnthropicCompatibleAccount,
-	onAddNanoGPTAccount,
 	onAddOpenAIAccount,
-	onAddVertexAIAccount,
-	onAddBedrockAccount,
 	onAddAlibabaCodingPlanAccount,
 	onAddKiloAccount,
 	onAddOpenRouterAccount,
@@ -150,9 +123,6 @@ export function AccountAddForm({
 			| "minimax"
 			| "anthropic-compatible"
 			| "openai-compatible"
-			| "nanogpt"
-			| "vertex-ai"
-			| "bedrock"
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
@@ -167,8 +137,6 @@ export function AccountAddForm({
 		region: "global",
 		profile: "",
 		awsRegion: "",
-		crossRegionMode: "geographic" as "geographic" | "global" | "regional",
-		customBedrockModel: "",
 		opusModel: "",
 		sonnetModel: "",
 		haikuModel: "",
@@ -198,11 +166,6 @@ export function AccountAddForm({
 		null,
 	);
 
-	const [awsProfiles, setAwsProfiles] = useState<
-		Array<{ name: string; region: string | null }>
-	>([]);
-	const [loadingProfiles, setLoadingProfiles] = useState(false);
-
 	// Cleanup Qwen polling on unmount
 	useEffect(() => {
 		return () => {
@@ -220,25 +183,6 @@ export function AccountAddForm({
 			}
 		};
 	}, []);
-
-	// Load AWS profiles when bedrock mode is selected
-	useEffect(() => {
-		if (newAccount.mode === "bedrock") {
-			setLoadingProfiles(true);
-			api
-				.getAwsProfiles()
-				.then((profiles) => {
-					setAwsProfiles(profiles);
-				})
-				.catch((error) => {
-					console.error("Failed to load AWS profiles:", error);
-					setAwsProfiles([]);
-				})
-				.finally(() => {
-					setLoadingProfiles(false);
-				});
-		}
-	}, [newAccount.mode]);
 
 	const validateCustomEndpoint = (endpoint: string): boolean => {
 		if (!endpoint) return true; // Empty is fine (use default)
@@ -306,8 +250,6 @@ export function AccountAddForm({
 								region: "global",
 								profile: "",
 								awsRegion: "",
-								crossRegionMode: "geographic",
-								customBedrockModel: "",
 								opusModel: "",
 								sonnetModel: "",
 								haikuModel: "",
@@ -375,8 +317,6 @@ export function AccountAddForm({
 								region: "global",
 								profile: "",
 								awsRegion: "",
-								crossRegionMode: "geographic",
-								customBedrockModel: "",
 								opusModel: "",
 								sonnetModel: "",
 								haikuModel: "",
@@ -426,7 +366,6 @@ export function AccountAddForm({
 				| "minimax"
 				| "anthropic-compatible"
 				| "openai-compatible"
-				| "bedrock"
 				| "kilo"
 				| "openrouter"
 				| "alibaba-coding-plan",
@@ -435,80 +374,6 @@ export function AccountAddForm({
 				customEndpoint: newAccount.customEndpoint.trim(),
 			}),
 		};
-
-		if (newAccount.mode === "vertex-ai") {
-			if (!newAccount.projectId) {
-				onError("Google Cloud Project ID is required for Vertex AI accounts");
-				return;
-			}
-			// For Vertex AI accounts, we don't need OAuth flow
-			await onAddVertexAIAccount({
-				name: newAccount.name,
-				projectId: newAccount.projectId.trim(),
-				region: newAccount.region || "global",
-				priority: newAccount.priority,
-			});
-			// Reset form and signal success
-			setNewAccount({
-				name: "",
-				mode: "claude-oauth",
-				priority: 0,
-				apiKey: "",
-				customEndpoint: "",
-				projectId: "",
-				region: "global",
-				profile: "",
-				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
-			});
-			onSuccess();
-			return;
-		}
-
-		if (newAccount.mode === "bedrock") {
-			if (!newAccount.profile) {
-				onError("AWS profile is required for Bedrock accounts");
-				return;
-			}
-			if (!newAccount.awsRegion) {
-				onError(
-					"Region not found for selected profile. Configure ~/.aws/config",
-				);
-				return;
-			}
-			// For Bedrock accounts, we don't need OAuth flow
-			await onAddBedrockAccount({
-				name: newAccount.name,
-				profile: newAccount.profile,
-				region: newAccount.awsRegion,
-				priority: newAccount.priority,
-				cross_region_mode: newAccount.crossRegionMode,
-				customModel: newAccount.customBedrockModel || undefined,
-			});
-			// Reset form and signal success
-			setNewAccount({
-				name: "",
-				mode: "claude-oauth",
-				priority: 0,
-				apiKey: "",
-				customEndpoint: "",
-				projectId: "",
-				region: "global",
-				profile: "",
-				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
-			});
-			onSuccess();
-			return;
-		}
 
 		if (newAccount.mode === "zai") {
 			if (!newAccount.apiKey) {
@@ -543,8 +408,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -575,54 +438,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
-			});
-			onSuccess();
-			return;
-		}
-
-		if (newAccount.mode === "nanogpt") {
-			if (!newAccount.apiKey) {
-				onError("API key is required for NanoGPT accounts");
-				return;
-			}
-			// Build model mappings from form fields
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) {
-				modelMappings.opus = newAccount.opusModel;
-			}
-			if (newAccount.sonnetModel) {
-				modelMappings.sonnet = newAccount.sonnetModel;
-			}
-			if (newAccount.haikuModel) {
-				modelMappings.haiku = newAccount.haikuModel;
-			}
-			// For NanoGPT accounts, we don't need OAuth flow
-			await onAddNanoGPTAccount({
-				name: newAccount.name,
-				apiKey: newAccount.apiKey,
-				priority: newAccount.priority,
-				customEndpoint: newAccount.customEndpoint || undefined,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
-			});
-			// Reset form and signal success
-			setNewAccount({
-				name: "",
-				mode: "claude-oauth",
-				priority: 0,
-				apiKey: "",
-				customEndpoint: "",
-				projectId: "",
-				region: "global",
-				profile: "",
-				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -661,8 +476,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -697,8 +510,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -733,8 +544,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -774,8 +583,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -821,8 +628,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -854,8 +659,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -891,8 +694,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				crossRegionMode: "geographic",
-				customBedrockModel: "",
 				opusModel: "",
 				sonnetModel: "",
 				haikuModel: "",
@@ -940,8 +741,6 @@ export function AccountAddForm({
 			region: "global",
 			profile: "",
 			awsRegion: "",
-			crossRegionMode: "geographic",
-			customBedrockModel: "",
 			opusModel: "",
 			sonnetModel: "",
 			haikuModel: "",
@@ -973,8 +772,6 @@ export function AccountAddForm({
 			region: "global",
 			profile: "",
 			awsRegion: "",
-			crossRegionMode: "geographic",
-			customBedrockModel: "",
 			opusModel: "",
 			sonnetModel: "",
 			haikuModel: "",
@@ -1015,7 +812,6 @@ export function AccountAddForm({
 									| "minimax"
 									| "anthropic-compatible"
 									| "openai-compatible"
-									| "bedrock"
 									| "kilo"
 									| "openrouter"
 									| "codex"
@@ -1034,13 +830,8 @@ export function AccountAddForm({
 								<SelectItem value="console">Claude API</SelectItem>
 								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
 								<SelectItem value="qwen">Qwen (Alibaba Cloud OAuth)</SelectItem>
-								<SelectItem value="vertex-ai">
-									Vertex AI (Google Cloud)
-								</SelectItem>
-								<SelectItem value="bedrock">AWS Bedrock</SelectItem>
 								<SelectItem value="zai">z.ai (API Key)</SelectItem>
 								<SelectItem value="minimax">Minimax (API Key)</SelectItem>
-								<SelectItem value="nanogpt">NanoGPT (API Key)</SelectItem>
 								<SelectItem value="anthropic-compatible">
 									Anthropic-Compatible (API Key)
 								</SelectItem>
@@ -1189,199 +980,6 @@ export function AccountAddForm({
 							)}
 						</div>
 					)}
-					{newAccount.mode === "vertex-ai" && (
-						<>
-							<div className="space-y-2">
-								<Label htmlFor="projectId">Google Cloud Project ID</Label>
-								<Input
-									id="projectId"
-									value={newAccount.projectId}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											projectId: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="your-project-id"
-								/>
-								<p className="text-xs text-muted-foreground">
-									Your Google Cloud project ID where Vertex AI is enabled
-								</p>
-							</div>
-							<div className="space-y-2">
-								<Label htmlFor="region">Region</Label>
-								<Select
-									value={newAccount.region}
-									onValueChange={(value: string) =>
-										setNewAccount({ ...newAccount, region: value })
-									}
-								>
-									<SelectTrigger id="region">
-										<SelectValue />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="global">Global (Recommended)</SelectItem>
-										<SelectItem value="us-east5">us-east5</SelectItem>
-										<SelectItem value="us-central1">us-central1</SelectItem>
-										<SelectItem value="europe-west1">europe-west1</SelectItem>
-										<SelectItem value="europe-west4">europe-west4</SelectItem>
-										<SelectItem value="asia-southeast1">
-											asia-southeast1
-										</SelectItem>
-									</SelectContent>
-								</Select>
-								<p className="text-xs text-muted-foreground">
-									Global for best availability, regional for data residency
-								</p>
-							</div>
-							<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
-								<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-									Authentication Required
-								</p>
-								<p className="text-xs text-blue-800 dark:text-blue-200">
-									Vertex AI uses Google Cloud credentials. Ensure you've run:{" "}
-									<code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">
-										gcloud auth application-default login
-									</code>
-								</p>
-							</div>
-						</>
-					)}
-					{newAccount.mode === "bedrock" && (
-						<>
-							{awsProfiles.length === 0 && !loadingProfiles && (
-								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
-									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-										No AWS profiles found
-									</p>
-									<p className="text-xs text-blue-800 dark:text-blue-200">
-										Run{" "}
-										<code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">
-											aws configure
-										</code>{" "}
-										to set up profiles.
-									</p>
-								</div>
-							)}
-							{awsProfiles.length > 0 && (
-								<>
-									<div className="space-y-2">
-										<Label htmlFor="awsProfile">AWS Profile</Label>
-										<Select
-											value={newAccount.profile}
-											onValueChange={(value: string) => {
-												const selectedProfile = awsProfiles.find(
-													(p) => p.name === value,
-												);
-												setNewAccount({
-													...newAccount,
-													profile: value,
-													awsRegion: selectedProfile?.region || "",
-												});
-											}}
-										>
-											<SelectTrigger id="awsProfile">
-												<SelectValue placeholder="Select AWS profile" />
-											</SelectTrigger>
-											<SelectContent>
-												{awsProfiles.map((profile) => (
-													<SelectItem key={profile.name} value={profile.name}>
-														{profile.name}
-														{profile.region && ` (${profile.region})`}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-										<p className="text-xs text-muted-foreground">
-											Your AWS profile from ~/.aws/credentials
-										</p>
-									</div>
-									<div className="space-y-2">
-										<Label htmlFor="awsRegion">Region (Auto-detected)</Label>
-										<Input
-											id="awsRegion"
-											value={newAccount.awsRegion}
-											disabled
-											placeholder="Select profile to detect region"
-										/>
-										<p className="text-xs text-muted-foreground">
-											Region from ~/.aws/config for selected profile
-										</p>
-										{newAccount.profile &&
-											!newAccount.awsRegion &&
-											!loadingProfiles && (
-												<p className="text-xs text-yellow-600 dark:text-yellow-400">
-													No default region found for this profile. Configure
-													region in ~/.aws/config
-												</p>
-											)}
-									</div>
-									<div className="space-y-2">
-										<Label htmlFor="crossRegionMode">Cross-Region Mode</Label>
-										<Select
-											value={newAccount.crossRegionMode}
-											onValueChange={(
-												value: "geographic" | "global" | "regional",
-											) =>
-												setNewAccount({ ...newAccount, crossRegionMode: value })
-											}
-										>
-											<SelectTrigger id="crossRegionMode">
-												<SelectValue />
-											</SelectTrigger>
-											<SelectContent>
-												<SelectItem value="geographic">
-													Geographic (default - routes within your region's
-													geography)
-												</SelectItem>
-												<SelectItem value="global">
-													Global (routes globally, ~10% cost savings, premium
-													models only)
-												</SelectItem>
-												<SelectItem value="regional">
-													Regional (single region, no failover)
-												</SelectItem>
-											</SelectContent>
-										</Select>
-										<p className="text-xs text-muted-foreground">
-											Controls how Bedrock routes requests for cross-region
-											inference
-										</p>
-									</div>
-									<div className="space-y-2">
-										<Label htmlFor="customBedrockModel">
-											Custom Model ID (Optional)
-										</Label>
-										<Input
-											id="customBedrockModel"
-											value={newAccount.customBedrockModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													customBedrockModel: (e.target as HTMLInputElement)
-														.value,
-												})
-											}
-											placeholder="e.g., anthropic.claude-opus-4-6-v1:0"
-										/>
-										<p className="text-xs text-muted-foreground">
-											Specify a Bedrock model ID to bypass automatic model
-											detection. Leave empty to use fuzzy matching.
-										</p>
-									</div>
-									<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
-										<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-											Authentication Required
-										</p>
-										<p className="text-xs text-blue-800 dark:text-blue-200">
-											Bedrock uses AWS credentials from the selected profile.
-											Ensure your credentials are configured.
-										</p>
-									</div>
-								</>
-							)}
-						</>
-					)}
 					{newAccount.mode === "zai" && (
 						<>
 							<div className="space-y-2">
@@ -1479,356 +1077,6 @@ export function AccountAddForm({
 								placeholder="Enter your Minimax API key"
 							/>
 						</div>
-					)}
-					{newAccount.mode === "nanogpt" && (
-						<>
-							<div className="space-y-2">
-								<Label htmlFor="apiKey">NanoGPT API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your NanoGPT API key"
-								/>
-							</div>
-							<div className="space-y-2">
-								<Label htmlFor="customEndpoint">
-									Custom Endpoint (Optional)
-								</Label>
-								<Input
-									id="customEndpoint"
-									type="url"
-									value={newAccount.customEndpoint}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											customEndpoint: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="https://nano-gpt.com/api (default)"
-								/>
-							</div>
-							<div className="space-y-2">
-								<Label className="text-sm font-medium">
-									Model Mappings (Optional)
-								</Label>
-								<p className="text-xs text-muted-foreground">
-									Map Anthropic model names to NanoGPT-specific models. Leave
-									empty to use defaults.
-								</p>
-								<div className="space-y-2 pl-4">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="nanogpt-ultra (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="nanogpt-pro (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="nanogpt-lite (default)"
-											className="mt-1"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
-					)}
-					{newAccount.mode === "kilo" && (
-						<>
-							<div className="space-y-2">
-								<Label htmlFor="apiKey">Kilo API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your Kilo API key"
-								/>
-								<p className="text-xs text-muted-foreground">
-									Endpoint: https://api.kilo.ai/api/gateway
-								</p>
-							</div>
-							<div className="space-y-2">
-								<Label className="text-sm font-medium">
-									Model Mappings (Optional)
-								</Label>
-								<p className="text-xs text-muted-foreground">
-									Map Anthropic model names to Kilo-specific models. Leave empty
-									to use defaults.
-								</p>
-								<div className="space-y-2 pl-4">
-									<div>
-										<Label htmlFor="kiloOpusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="kiloOpusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-opus-4-6 (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="kiloSonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="kiloSonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-sonnet-4-6 (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="kiloHaikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="kiloHaikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-haiku-4-5 (default)"
-											className="mt-1"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
-					)}
-					{newAccount.mode === "openrouter" && (
-						<>
-							<div className="space-y-2">
-								<Label htmlFor="apiKey">OpenRouter API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your OpenRouter API key"
-								/>
-								<p className="text-xs text-muted-foreground">
-									Endpoint: https://openrouter.ai/api/v1
-								</p>
-							</div>
-							<div className="space-y-2">
-								<Label className="text-sm font-medium">
-									Model Mappings (Optional)
-								</Label>
-								<p className="text-xs text-muted-foreground">
-									Map Anthropic model names to OpenRouter-specific models. Leave
-									empty to pass model names through unchanged.
-								</p>
-								<div className="space-y-2 pl-4">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-opus-4-5"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-sonnet-4-5"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., anthropic/claude-haiku-4-5"
-											className="mt-1"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
-					)}
-					{newAccount.mode === "alibaba-coding-plan" && (
-						<>
-							<div className="space-y-2">
-								<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your Alibaba Coding Plan API key"
-								/>
-								<p className="text-xs text-muted-foreground">
-									Endpoint: https://bailian-singapore-cs.alibabacloud.com
-								</p>
-							</div>
-							<div className="space-y-2">
-								<Label className="text-sm font-medium">
-									Model Mappings (Optional)
-								</Label>
-								<p className="text-xs text-muted-foreground">
-									Map Anthropic model names to Alibaba-specific models. Leave
-									empty to use defaults.
-								</p>
-								<div className="space-y-2 pl-4">
-									<div>
-										<Label htmlFor="alibabaOpusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="alibabaOpusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., qwen-max (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="alibabaSonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="alibabaSonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., qwen-plus (default)"
-											className="mt-1"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="alibabaHaikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="alibabaHaikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g., qwen-turbo (default)"
-											className="mt-1"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
 					)}
 					{newAccount.mode === "anthropic-compatible" && (
 						<>

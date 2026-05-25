@@ -65,7 +65,6 @@ import {
 import { container, SERVICE_KEYS } from "@clankermux/core-di";
 import { DatabaseFactory } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
-import { parseBedrockConfig } from "@clankermux/providers";
 // Import server
 import startServer from "@clankermux/server";
 
@@ -85,8 +84,6 @@ interface ParsedArgs {
 		| "minimax"
 		| "anthropic-compatible"
 		| "openai-compatible"
-		| "nanogpt"
-		| "bedrock"
 		| "kilo"
 		| "alibaba-coding-plan"
 		| "codex"
@@ -94,7 +91,6 @@ interface ParsedArgs {
 		| null;
 	priority: number | null;
 	profile: string | null;
-	crossRegionMode?: "geographic" | "global" | "regional";
 	list: boolean;
 	remove: string | null;
 	pause: string | null;
@@ -442,7 +438,6 @@ function parseArgs(args: string[]): ParsedArgs {
 		mode: null,
 		priority: null,
 		profile: null,
-		crossRegionMode: undefined,
 		list: false,
 		remove: null,
 		pause: null,
@@ -536,8 +531,6 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "minimax"
 					| "anthropic-compatible"
 					| "openai-compatible"
-					| "nanogpt"
-					| "bedrock"
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
@@ -557,10 +550,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
-					| "nanogpt"
 					| "anthropic-compatible"
 					| "openai-compatible"
-					| "bedrock"
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
@@ -570,10 +561,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					| "console"
 					| "zai"
 					| "minimax"
-					| "nanogpt"
 					| "anthropic-compatible"
 					| "openai-compatible"
-					| "bedrock"
 					| "kilo"
 					| "alibaba-coding-plan"
 					| "codex"
@@ -583,10 +572,8 @@ function parseArgs(args: string[]): ParsedArgs {
 					"console",
 					"zai",
 					"minimax",
-					"nanogpt",
 					"anthropic-compatible",
 					"openai-compatible",
-					"bedrock",
 					"kilo",
 					"alibaba-coding-plan",
 					"codex",
@@ -621,9 +608,6 @@ function parseArgs(args: string[]): ParsedArgs {
 					console.error(
 						"  bun run cli --add-account anthropic-account --mode anthropic-compatible --priority 50",
 					);
-					console.error(
-						"  bun run cli --add-account bedrock-account --mode bedrock --profile default",
-					);
 
 					fastExit(1);
 				}
@@ -648,28 +632,6 @@ function parseArgs(args: string[]): ParsedArgs {
 				}
 				parsed.profile = args[++i];
 				break;
-			case "--cross-region-mode": {
-				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
-					console.error("❌ --cross-region-mode requires a value");
-					fastExit(1);
-				}
-				const crossRegionValue = args[++i];
-				if (
-					crossRegionValue !== "geographic" &&
-					crossRegionValue !== "global" &&
-					crossRegionValue !== "regional"
-				) {
-					console.error(
-						"Invalid --cross-region-mode value. Must be one of: geographic, global, regional",
-					);
-					fastExit(1);
-				}
-				parsed.crossRegionMode = crossRegionValue as
-					| "geographic"
-					| "global"
-					| "regional";
-				break;
-			}
 			case "--list":
 				parsed.list = true;
 				break;
@@ -845,17 +807,13 @@ Options:
   --ssl-cert <path>    Path to SSL certificate file (enables HTTPS)
   --stats              Show statistics (JSON output)
   --add-account <name> Add a new account
-    --mode <claude-oauth|console|zai|minimax|nanogpt|anthropic-compatible|openai-compatible|bedrock|kilo|alibaba-coding-plan|codex>  Account mode (default: claude-oauth)
+    --mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible|kilo|alibaba-coding-plan|codex>  Account mode (default: claude-oauth)
       claude-oauth: Claude CLI account (OAuth)
       console: Claude API account (OAuth)
       zai: z.ai account (API key)
       minimax: Minimax account (API key)
-      nanogpt: NanoGPT provider (API key)
       anthropic-compatible: Anthropic-compatible provider (API key)
       openai-compatible: OpenAI-compatible provider (API key)
-      bedrock: AWS Bedrock account (AWS profile credentials)
-        --profile <name>  AWS profile name from ~/.aws/credentials (required)
-        --cross-region-mode <mode>   Cross-region inference mode: geographic (default), global, or regional
       kilo: Kilo Gateway provider (API key)
       alibaba-coding-plan: Alibaba Coding Plan International provider (API key)
       codex: Codex (OpenAI OAuth) provider
@@ -894,7 +852,6 @@ Examples:
   clankermux --serve                # Start server
   clankermux --serve --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem  # Start server with HTTPS
   clankermux --add-account work --mode claude-oauth --priority 0  # Add account
-  clankermux --add-account my-bedrock --mode bedrock --profile default  # Add Bedrock account
   clankermux --reauthenticate work  # Re-authenticate account (preserves metadata)
   clankermux --force-reset-rate-limit work  # Force-clear stale rate-limit lock
   clankermux --pause work           # Pause account
@@ -1001,14 +958,12 @@ Examples:
 			console.error("  --mode console         Claude API account (OAuth)");
 			console.error("  --mode zai             z.ai account (API key)");
 			console.error("  --mode minimax         Minimax account (API key)");
-			console.error("  --mode nanogpt         NanoGPT account (API key)");
 			console.error(
 				"  --mode anthropic-compatible  Anthropic-compatible provider",
 			);
 			console.error(
 				"  --mode openai-compatible     OpenAI-compatible provider",
 			);
-			console.error("  --mode bedrock         AWS Bedrock (AWS profile)");
 			console.error("  --mode kilo            Kilo Gateway provider (API key)");
 			console.error(
 				"  --mode alibaba-coding-plan  Alibaba Coding Plan International (API key)",
@@ -1040,30 +995,6 @@ Examples:
 					mode,
 					priority,
 					adapter: stdPromptAdapter,
-				});
-			} else if (mode === "bedrock") {
-				// Bedrock uses AWS profiles, not API keys
-				if (!parsed.profile) {
-					console.error("❌ --profile flag is required for bedrock mode");
-					console.error(
-						"Example: bun run cli --add-account my-bedrock --mode bedrock --profile default",
-					);
-					await exitGracefully(1);
-				}
-				await addAccount(dbOps, new Config(), {
-					name: parsed.addAccount,
-					mode: "bedrock",
-					priority,
-					profile: parsed.profile || undefined,
-					crossRegionMode: parsed.crossRegionMode,
-					adapter: {
-						select: async <T extends string | number>(
-							_prompt: string,
-							_options: Array<{ label: string; value: T }>,
-						) => (_options[0]?.value as T) || ("yes" as T),
-						input: async (_prompt: string) => "",
-						confirm: async (_prompt: string) => true,
-					},
 				});
 			} else if (
 				mode === "anthropic-compatible" ||
@@ -1129,15 +1060,6 @@ Examples:
 		} else {
 			console.log("\nAccounts:");
 			accounts.forEach((acc) => {
-				if (acc.mode === "bedrock" && acc.customEndpoint) {
-					const config = parseBedrockConfig(acc.customEndpoint);
-					if (config) {
-						console.log(
-							`  - ${acc.name} (bedrock, profile=${config.profile}, region=${config.region}, cross_region_mode=${acc.crossRegionMode ?? "geographic"}, priority=${acc.priority})`,
-						);
-						return;
-					}
-				}
 				console.log(
 					`  - ${acc.name} (${acc.mode} mode, priority ${acc.priority})`,
 				);

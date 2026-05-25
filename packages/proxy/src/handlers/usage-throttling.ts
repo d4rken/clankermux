@@ -103,31 +103,6 @@ function collectWindows(data: AnyUsageData | null): UsageWindowSnapshot[] {
 		return windows;
 	}
 
-	if ("active" in data && "daily" in data && "monthly" in data) {
-		const nanogpt = data as {
-			active?: boolean;
-			daily?: { percentUsed?: number; resetAt?: number };
-			monthly?: { percentUsed?: number; resetAt?: number };
-		};
-		if (nanogpt.active) {
-			pushWindow(
-				"daily",
-				typeof nanogpt.daily?.percentUsed === "number"
-					? nanogpt.daily.percentUsed * 100
-					: null,
-				nanogpt.daily?.resetAt,
-			);
-			pushWindow(
-				"monthly",
-				typeof nanogpt.monthly?.percentUsed === "number"
-					? nanogpt.monthly.percentUsed * 100
-					: null,
-				nanogpt.monthly?.resetAt,
-			);
-		}
-		return windows;
-	}
-
 	if ("weekly" in data && "monthly" in data && "five_hour" in data) {
 		const alibaba = data as {
 			five_hour?: { percentUsed?: number; resetAt?: number | null };

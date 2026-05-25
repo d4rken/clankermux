@@ -18,7 +18,7 @@ Why it diverged:
   and others), so a Claude-specific name was misleading. "Mux" = it multiplexes many
   requests across many accounts.
 - **Build-from-source + systemd only.** No npm / release / Docker publishing lane.
-- **Leaner over time.** Unused providers (e.g. Vertex/Bedrock) are slated for removal.
+- **Leaner over time.** Unused providers (e.g. Vertex/Bedrock) have been removed.
 
 ## Build from source
 

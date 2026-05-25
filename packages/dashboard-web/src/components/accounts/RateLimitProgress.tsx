@@ -167,7 +167,7 @@ export function RateLimitProgress({
 		return unregisterInterval;
 	}, []);
 
-	// Allow null resetIso for providers that show usage data (like NanoGPT in PayG mode)
+	// Allow null resetIso for providers that show usage data (e.g. PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
 	if (!resetIso && !usageData && !usageRateLimitedUntil) return null;
 
@@ -231,13 +231,6 @@ export function RateLimitProgress({
 	// Determine which usage windows to display
 	const usages: UsageDisplay[] = [];
 
-	// Check if this is NanoGPT usage data (has 'active' and 'daily' properties)
-	const isNanoGPTData =
-		usageData &&
-		"active" in usageData &&
-		"daily" in usageData &&
-		"monthly" in usageData;
-
 	// Check if this is Zai usage data (has 'time_limit' and 'tokens_limit' properties)
 	const isZaiData =
 		usageData && ("time_limit" in usageData || "tokens_limit" in usageData);
@@ -252,8 +245,7 @@ export function RateLimitProgress({
 		"five_hour" in usageData &&
 		"seven_day" in usageData &&
 		!isAlibabaData &&
-		!isZaiData &&
-		!isNanoGPTData;
+		!isZaiData;
 
 	if (isAlibabaData && showWeekly) {
 		const alibabaData = usageData as {
@@ -308,41 +300,6 @@ export function RateLimitProgress({
 				resetTime: zaiData.time_limit.resetAt
 					? new Date(zaiData.time_limit.resetAt).toISOString()
 					: null,
-			});
-		}
-	} else if (isNanoGPTData && showWeekly) {
-		// NanoGPT usage data - show daily and monthly windows
-		const nanogptData = usageData as {
-			active: boolean;
-			daily: { percentUsed: number; resetAt: number };
-			monthly: { percentUsed: number; resetAt: number };
-		};
-
-		// Only show usage if subscription is active
-		if (nanogptData.active) {
-			// Daily usage
-			if (nanogptData.daily) {
-				usages.push({
-					utilization: nanogptData.daily.percentUsed * 100, // Convert 0-1 to 0-100
-					window: "daily",
-					resetTime: new Date(nanogptData.daily.resetAt).toISOString(),
-				});
-			}
-
-			// Monthly usage
-			if (nanogptData.monthly) {
-				usages.push({
-					utilization: nanogptData.monthly.percentUsed * 100, // Convert 0-1 to 0-100
-					window: "monthly",
-					resetTime: new Date(nanogptData.monthly.resetAt).toISOString(),
-				});
-			}
-		} else {
-			// PayG mode - show that no subscription is active
-			usages.push({
-				utilization: null,
-				window: "daily",
-				resetTime: null,
 			});
 		}
 	} else if (hasAnthropicStyleData && showWeekly) {
@@ -516,7 +473,7 @@ export function RateLimitProgress({
 					// Special handling for weekly opus/sonnet data when reset time is not available
 					windowTimeText = "Data unavailable";
 				} else if (usage.window === "daily" || usage.window === "monthly") {
-					// Special handling for NanoGPT when no subscription is active (PayG mode)
+					// Special handling when no subscription is active (PayG mode)
 					windowTimeText = "No subscription (PayG mode)";
 				}
 
