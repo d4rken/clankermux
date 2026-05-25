@@ -24,11 +24,10 @@ import { ThemeToggle } from "./theme-toggle";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 
-// Store update command globally
-let updateCommand: string = "npm install -g clankermux@latest";
-let detectedPackageManager: "npm" | "bun" | "unknown" = "npm";
-let isBinaryInstallation: boolean = false;
-let isDockerInstallation: boolean = false;
+// ClankerMux is build-from-source + systemd only, so "updating" means pulling
+// main and rebuilding — there is no npm/bun/binary install to detect.
+const UPDATE_COMMAND =
+	"git pull --ff-only && bun run build && sudo systemctl restart clankermux";
 
 interface NavItem {
 	label: string;
@@ -56,9 +55,14 @@ interface NavigationProps {
 export function Navigation({ showCombos = false }: NavigationProps = {}) {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const [updateStatus, setUpdateStatus] = useState<
-		"idle" | "checking" | "available" | "current" | "error"
+		"idle" | "checking" | "available" | "current" | "unknown" | "error"
 	>("idle");
-	const [latestVersion, setLatestVersion] = useState<string>("");
+	const [updateInfo, setUpdateInfo] = useState<{
+		currentSha: string | null;
+		latestSha: string;
+		latestUrl: string | null;
+		dirty: boolean;
+	} | null>(null);
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
@@ -95,196 +99,46 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 		};
 	}, []);
 
-	const detectPackageManager = async (): Promise<{
-		packageManager: "npm" | "bun" | "unknown";
-		isBinary: boolean;
-		isDocker: boolean;
-	}> => {
-		try {
-			// Check if the binary exists in bun's global path
-			try {
-				const response = await fetch("/api/system/package-manager");
-				if (response.ok) {
-					const data = await response.json();
-					isBinaryInstallation = data.isBinary || false;
-					isDockerInstallation = data.isDocker || false;
-					return {
-						packageManager: data.packageManager,
-						isBinary: data.isBinary || false,
-						isDocker: data.isDocker || false,
-					};
-				}
-			} catch {
-				// Fallback to client-side detection
-			}
-
-			// Fallback: check if user agent indicates bun (this is a weak signal)
-			const userAgent = navigator.userAgent;
-			if (userAgent.includes("Bun")) {
-				return { packageManager: "bun", isBinary: false, isDocker: false };
-			}
-
-			// Default to npm as it's more common
-			return { packageManager: "npm", isBinary: false, isDocker: false };
-		} catch (error) {
-			console.error("Error detecting package manager:", error);
-			return { packageManager: "npm", isBinary: false, isDocker: false }; // Default fallback
-		}
-	};
-
-	const getUpdateCommand = (
-		packageManager: "npm" | "bun" | "unknown",
-		isBinary: boolean = false,
-		isDocker: boolean = false,
-	): string => {
-		if (isDocker) {
-			// For Docker installations, provide instructions to pull latest image
-			return "docker pull ghcr.io/tombii/better-ccflare:latest";
-		}
-
-		if (isBinary) {
-			// For binary installations, provide instructions to download from GitHub releases
-			const platform = navigator.platform.toLowerCase();
-			let _arch = "x64";
-
-			// Detect architecture
-			if (platform.includes("arm") || platform.includes("aarch64")) {
-				_arch = "arm64";
-			}
-
-			let _os = "linux";
-			if (platform.includes("win")) {
-				_os = "windows";
-			} else if (platform.includes("mac")) {
-				_os = "darwin";
-			}
-
-			// Return GitHub releases URL instead of a command
-			return "Download latest binary from GitHub releases";
-		}
-
-		switch (packageManager) {
-			case "bun":
-				return "bun install -g clankermux@latest";
-			default:
-				return "npm install -g clankermux@latest";
-		}
-	};
-
 	/**
-	 * Compare two semantic versions
-	 * @returns true if latest > current (update available), false otherwise
+	 * Check whether the running checkout is behind the repo's main branch.
+	 *
+	 * The backend (`/api/version/check`) compares the deployed commit (local
+	 * `git HEAD`) against the latest commit on GitHub's main branch and returns
+	 * the decision directly — there is no npm/registry version to compare.
+	 * Called on mount and then hourly. The backend caches the GitHub lookup for
+	 * an hour, so re-checks are cheap.
 	 */
-	const compareVersions = (latest: string, current: string): boolean => {
-		const latestParts = latest.split(".").map(Number);
-		const currentParts = current.split(".").map(Number);
-
-		for (
-			let i = 0;
-			i < Math.max(latestParts.length, currentParts.length);
-			i++
-		) {
-			const latestPart = latestParts[i] || 0;
-			const currentPart = currentParts[i] || 0;
-
-			if (latestPart > currentPart) return true;
-			if (latestPart < currentPart) return false;
-		}
-
-		return false; // Versions are equal
-	};
-
-	/**
-	 * Check for available updates from npm registry
-	 * Uses localStorage to cache results and prevent excessive checks (max once per hour)
-	 * This function is called on component mount and then every hour via setInterval
-	 */
-	// biome-ignore lint/correctness/useExhaustiveDependencies: helper functions are stable and don't need to be dependencies
 	const checkForUpdates = useCallback(async () => {
 		if (!isMountedRef.current) return;
-
-		// Check localStorage for last check time to avoid excessive checks
-		const lastCheckTime = localStorage.getItem("updateCheckLastTime");
-		const now = Date.now();
-		const oneHour = 60 * 60 * 1000;
-
-		// Check cache to avoid excessive npm registry requests
-		// Recheck every hour regardless of status to keep version info fresh
-		if (lastCheckTime && now - Number.parseInt(lastCheckTime, 10) < oneHour) {
-			const cachedStatus = localStorage.getItem("updateCheckStatus");
-			const cachedVersion = localStorage.getItem("updateCheckVersion");
-
-			// Remove 'v' prefix from version for comparison
-			const currentVersion = version.replace(/^v/, "");
-
-			if (cachedStatus === "available" && cachedVersion) {
-				// Check if user has updated since cache was created
-				// If cached version <= current version, they've updated, so clear cache
-				if (!compareVersions(cachedVersion, currentVersion)) {
-					localStorage.removeItem("updateCheckStatus");
-					localStorage.removeItem("updateCheckVersion");
-					localStorage.removeItem("updateCheckLastTime");
-					// Fall through to do a fresh check
-				} else {
-					setUpdateStatus("available");
-					setLatestVersion(cachedVersion);
-					return;
-				}
-			}
-
-			if (cachedStatus === "current") {
-				setUpdateStatus("current");
-				return;
-			}
-		}
 
 		setUpdateStatus("checking");
 		setUpdateError(null);
 		try {
-			const [response, packageInfo] = await Promise.all([
-				fetch("/api/version/check"),
-				detectPackageManager(),
-			]);
-
+			const response = await fetch("/api/version/check");
 			if (!response.ok) {
 				throw await parseHttpError(response);
 			}
 
 			const data = await response.json();
-			const latest = data.version;
 
 			// Only update state if component is still mounted
 			if (!isMountedRef.current) return;
 
-			setLatestVersion(latest);
+			const status: "available" | "current" | "unknown" = data.status;
+			setUpdateInfo({
+				currentSha: data.current?.shortSha ?? null,
+				latestSha: data.latest?.shortSha ?? "",
+				latestUrl: data.latest?.url ?? null,
+				dirty: data.current?.dirty ?? false,
+			});
+			setUpdateStatus(status);
 
-			// Remove 'v' prefix from version for comparison
-			const currentVersion = version.replace(/^v/, "");
-
-			// Use semantic version comparison: only show update if latest > current
-			if (compareVersions(latest, currentVersion)) {
-				setUpdateStatus("available");
-				updateCommand = getUpdateCommand(
-					packageInfo.packageManager,
-					packageInfo.isBinary,
-					packageInfo.isDocker,
-				);
-				detectedPackageManager = packageInfo.packageManager;
+			if (status === "available") {
 				console.log(
-					`🚀 Update available: ${currentVersion} → ${latest}\nDetected package manager: ${packageInfo.packageManager}\nRun: ${updateCommand}`,
+					`🚀 Update available: ${data.current?.shortSha ?? "?"} → ${data.latest?.shortSha} (${data.repo}@${data.branch})\nRun: ${UPDATE_COMMAND}`,
 				);
-
-				// Cache "available" status - will recheck after 1 hour for newer versions
-				localStorage.setItem("updateCheckStatus", "available");
-				localStorage.setItem("updateCheckVersion", latest);
-				localStorage.setItem("updateCheckLastTime", now.toString());
-			} else {
-				setUpdateStatus("current");
-				console.log(`✅ You're on the latest version (${currentVersion})`);
-
-				// Cache "current" status - will recheck after 1 hour
-				localStorage.setItem("updateCheckStatus", "current");
-				localStorage.setItem("updateCheckLastTime", now.toString());
+			} else if (status === "current") {
+				console.log(`✅ Up to date (${data.current?.shortSha ?? "?"})`);
 			}
 		} catch (error) {
 			// Only update state if component is still mounted
@@ -368,9 +222,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 							</div>
 							<div>
 								<h1 className="font-semibold text-lg">ClankerMux</h1>
-								<p className="text-xs text-muted-foreground">
-									Powerful proxy for Claude Code
-								</p>
+								<p className="text-xs text-muted-foreground">Rate-Unlimiter</p>
 							</div>
 						</div>
 					</div>
@@ -443,6 +295,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 											updateStatus === "checking" && "animate-spin",
 											updateStatus === "available" && "text-green-500",
 											updateStatus === "current" && "text-primary",
+											updateStatus === "unknown" && "text-muted-foreground",
 											updateStatus === "error" && "text-red-500",
 										)}
 									/>
@@ -451,39 +304,50 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 										{updateStatus === "checking" && "Checking..."}
 										{updateStatus === "available" && "Update Available"}
 										{updateStatus === "current" && "Up to Date"}
+										{updateStatus === "unknown" && "Status Unknown"}
 										{updateStatus === "error" && "Check Failed"}
 									</span>
 								</div>
 							</button>
 							{updateStatus === "available" && (
 								<div className="mt-2 space-y-1">
-									<p className="text-xs text-muted-foreground text-left">
-										{version.replace(/^v/, "")} → {latestVersion}
+									<p className="text-xs text-muted-foreground text-left font-mono">
+										{updateInfo?.currentSha ?? "?"} → {updateInfo?.latestSha}
 									</p>
 									<div className="flex items-center gap-1">
 										<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
-											{updateCommand}
+											{UPDATE_COMMAND}
 										</code>
 										<CopyButton
-											value={updateCommand}
+											value={UPDATE_COMMAND}
 											size="sm"
 											variant="ghost"
 											className="h-6 w-6 p-0"
 											title="Copy update command"
 										/>
 									</div>
-									<p className="text-xs text-muted-foreground text-left">
-										{isDockerInstallation
-											? "Detected: Docker 🐳"
-											: isBinaryInstallation
-												? "Detected: Binary Installation 📦"
-												: `Detected: ${detectedPackageManager} 📦`}
-									</p>
+									{updateInfo?.latestUrl && (
+										<a
+											href={updateInfo.latestUrl}
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-xs text-muted-foreground hover:text-foreground underline text-left block"
+										>
+											View latest commit
+										</a>
+									)}
 								</div>
 							)}
 							{updateStatus === "current" && (
+								<p className="mt-1 text-xs text-muted-foreground text-left font-mono">
+									{updateInfo?.currentSha
+										? `${updateInfo.currentSha}${updateInfo.dirty ? " (modified)" : ""}`
+										: version.replace(/^v/, "")}
+								</p>
+							)}
+							{updateStatus === "unknown" && (
 								<p className="mt-1 text-xs text-muted-foreground text-left">
-									Version {version.replace(/^v/, "")}
+									Could not determine the deployed commit (not a git checkout?).
 								</p>
 							)}
 							{updateStatus === "error" && updateError && (
