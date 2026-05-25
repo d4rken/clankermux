@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-Load balancer proxy for Claude distributing requests across multiple account providers to avoid rate limiting.
+ClankerMux (slug `clankermux`) — a multiplexing load-balancer proxy that fans requests across multiple backend accounts/providers (Anthropic, Codex/OpenAI, and others) through one front door to avoid rate limiting. Formerly `better-ccflare`; legacy `BETTER_CCFLARE_*` env vars and the `x-better-ccflare-account-id` header are still accepted.
 
 ## ⚠️ CRITICAL: Testing Restrictions
 
-**NEVER curl the Anthropic endpoint** — not directly, and not via the proxy using the `claude` account. Real Anthropic accounts can get banned for automated/scripted usage. The `claude` account must only be used through real Claude Code. For testing, always use non-Anthropic accounts (ollama, litellm, omniroute, etc.) and force-route with `x-clankermux-account-id`.
+**NEVER curl the Anthropic endpoint** — not directly, and not via the proxy using the `claude` account. Real Anthropic accounts can get banned for automated/scripted usage. The `claude` account must only be used through real Claude Code. For testing, always use non-Anthropic accounts (ollama, litellm, omniroute, etc.) and force-route with `x-clankermux-account-id` (the legacy `x-better-ccflare-account-id` header is also still accepted).
 
 ## ⚠️ CRITICAL: File Exclusions
 
@@ -19,7 +19,7 @@ If accidentally modified: `git checkout -- <path>`
 
 ## ⚠️ CRITICAL: Main Checkout Safety
 
-The directory `/home/darken/better-ccflare` is the **live systemd deployment** — the `better-ccflare.service` unit runs the proxy and rebuilds the dashboard from this working tree on every restart. **NEVER run destructive git commands here**: `git checkout <branch>`, `git switch`, `git reset --hard`, `git restore`, `git checkout .`, `git clean`, `git stash`, `git rebase`. They will silently change what gets deployed on the next reboot and may erase the user's uncommitted WIP. For any branch switch, PR review, or work on a different feature, **use a worktree** (`EnterWorktree` in Claude Code, or `git worktree add .claude/worktrees/<name>`). For read-only inspection of other branches, use `git show <ref>:<path>` and `git diff <ref>` — they never touch HEAD or the working tree. Full rule and recovery procedure: `.claude/rules/main-checkout-safety.md`.
+The directory `/home/darken/better-ccflare` is the **live systemd deployment** — the `clankermux.service` unit runs the proxy and rebuilds the dashboard from this working tree on every restart. (The checkout directory name is unchanged; only the service/config/DB were renamed.) **NEVER run destructive git commands here**: `git checkout <branch>`, `git switch`, `git reset --hard`, `git restore`, `git checkout .`, `git clean`, `git stash`, `git rebase`. They will silently change what gets deployed on the next reboot and may erase the user's uncommitted WIP. For any branch switch, PR review, or work on a different feature, **use a worktree** (`EnterWorktree` in Claude Code, or `git worktree add .claude/worktrees/<name>`). For read-only inspection of other branches, use `git show <ref>:<path>` and `git diff <ref>` — they never touch HEAD or the working tree. Full rule and recovery procedure: `.claude/rules/main-checkout-safety.md`.
 
 ## Git Refspecs
 This repo has both a `main` branch and a `main` tag. **Always use `refs/heads/main`** (not `main`) for all git log, diff, checkout, and merge-base commands to avoid ambiguous refspec errors. Applies to: `git log refs/heads/main`, `git diff refs/heads/main...`, `git merge-base refs/heads/main`, etc.
@@ -29,41 +29,19 @@ Always branch from `main` with a fresh pull. Never make changes directly on main
 PRs: `gh pr checkout <PR_NUMBER>` or `git checkout <branch-name>`.
 - If `git push origin main` fails with `src refspec main matches more than one` (branch/tag name collision), push explicitly: `git push origin refs/heads/main:refs/heads/main`.
 
-## PR Review Against Current Main (MANDATORY)
+## Development Workflow
+ClankerMux is its own project (a soft fork of `tombii/better-ccflare`). Branch from `origin/main`, **never** `upstream/main`; merge back into `main` with `--no-ff`. **No upstream PRs** — we don't contribute to `tombii/better-ccflare`. The `upstream` remote is fetch-only (push is DISABLED) and pulled from only via occasional cherry-pick of specific commits (never merge/re-baseline — it would re-add intentionally-removed code). Full details: `.claude/rules/fork-workflow.md`.
 
-Before reviewing or merging any PR, always find the merge base and identify what main has added since the PR branched:
+## Merging Inbound PRs (external contributors to ClankerMux)
+When merging a PR from an external contributor, **create a merge commit** (`git merge --no-ff <branch-name>`) instead of squashing/rebasing, so their commit history and identity are preserved. **Do NOT use `gh pr merge`** (it may squash/rebase). If the branch isn't local: `git fetch origin pull/<PR_NUMBER>/head:<branch-name>`. After merging, thank the contributor in the README Acknowledgements.
 
+Before merging any branch, check what `main` gained since it forked so you don't regress recent fixes:
 ```bash
-git fetch origin pull/<PR_NUMBER>/head:<branch-name>
 MERGE_BASE=$(git merge-base <branch-name> origin/main)
-git log $MERGE_BASE..origin/main --oneline          # commits on main the PR doesn't have
-git diff $MERGE_BASE..origin/main --name-only        # files main changed since PR branched
+git log $MERGE_BASE..origin/main --oneline       # commits on main the branch lacks
+git diff $MERGE_BASE..origin/main --name-only     # files main changed since
 ```
-
-Cross-check the PR's changed files against main's post-branch files. If they overlap, inspect those specific hunks to confirm the PR doesn't regress recent fixes. A PR based on an old main can silently overwrite hotfixes, security patches, or behaviour changes that landed after it branched.
-
-## Merging PRs from External Contributors
-When merging PRs from external contributors (not tombii), **create a merge commit** instead of squashing or rebasing. This preserves the contributor's commit history and ensures they appear in the git log as a contributor. Use:
-```bash
-git merge --no-ff <branch-name>
-```
-The `--no-ff` flag creates a merge commit even if the branch could be fast-forwarded.
-
-**Do NOT use `gh pr merge`** — it may squash or rebase, losing the contributor's identity. Always merge manually with `git merge --no-ff`.
-
-If the PR branch isn't available locally, fetch it first:
-```bash
-git fetch origin pull/<PR_NUMBER>/head:<branch-name>
-git merge --no-ff <branch-name>
-```
-
-After merging, update the Acknowledgements section in README.md to thank the contributor for their specific contributions.
-
-## Fork Workflow
-This repo is a fork of `tombii/better-ccflare`. When fixing bugs or making changes that should also be contributed upstream, follow `.claude/rules/fork-workflow.md`. It covers the two lanes (`fix/*` for upstream-bound, `fork/*` for fork-only), the `--no-ff` merge pattern, and how to reconcile local history after upstream lands or rejects a PR.
-
-## Upstream PR Review Loop
-After opening any upstream PR, follow `.claude/rules/upstream-pr-review-loop.md` to monitor Greptile and address findings until 5/5 + no outstanding issues + all threads resolved. Covers the signals to read (Greptile edits in-place, no thumbs-up emoji here), the cherry-pick-not-merge rule for local-main divergence, cadence, and post-merge service restart.
+Cross-check overlapping files and inspect those hunks before merging.
 
 ## Issue Management
 - Never close issues automatically
@@ -77,9 +55,9 @@ git log refs/heads/main --since='<issue-open-date>' --oneline --no-merges -- <re
 Check if recent commits already partially or fully address the issue. Rate limiting, health, and proxy code change frequently. Ask the user "does this issue still apply given recent changes?" before proceeding. Especially check: has the reported symptom been fixed? Does the proposal conflict with new architecture?
 
 ## Database
-- Default: `~/.config/better-ccflare/better-ccflare.db`
-- Custom: Set `BETTER_CCFLARE_DB_PATH=/path/to/dev.db` in env or .env
-- Query: `sqlite3 ~/.config/better-ccflare/better-ccflare.db "SELECT name, provider, custom_endpoint FROM accounts;"`
+- Default: `~/.config/clankermux/clankermux.db`
+- Custom: Set `CLANKERMUX_DB_PATH=/path/to/dev.db` in env or .env (legacy `BETTER_CCFLARE_DB_PATH` still honored)
+- Query: `sqlite3 ~/.config/clankermux/clankermux.db "SELECT name, provider, custom_endpoint FROM accounts;"`
 
 ## ⚠️ CRITICAL: Database Migrations — Port to PostgreSQL
 
@@ -115,15 +93,12 @@ After pushing commits to main, run `npx gitnexus analyze` to keep the GitNexus i
 - Use `git add <specific-files>` (not `git add .`) to avoid committing inline-worker.ts
 - Check `git status` before committing
 
-## Publishing to npm
-- Use `cd apps/cli && bun publish` (avoids workspace errors)
-- When pushing to git (triggers auto-publish), show complete output including npmjs.com auth URL: `https://www.npmjs.com/auth/cli/[uuid]`
-- **NEVER bump the version** — version bumps are handled automatically by the release system
+## Publishing
+**ClankerMux is not published** — build-from-source + systemd only. There is no npm publish / release lane (the `release*.yml` and `docker-publish.yml` workflows were removed). Do not run `bun publish`.
 
 ## Version Updates
-**NEVER bump the version** — handled automatically by the release system.
-`CLAUDE_CLI_VERSION` in `packages/core/src/version.ts` tracks Claude Code CLI version (auto-updated by pre-push hook).
-If ever needed manually: update both `package.json` (root) and `apps/cli/package.json`.
+**NEVER bump the version manually.**
+`CLAUDE_CLI_VERSION` in `packages/core/src/version.ts` tracks the Claude Code CLI version (auto-updated by pre-push hook). The build injects the app version via the `__CLANKERMUX_VERSION__` define (legacy `BETTER_CCFLARE_VERSION` env still honored at runtime).
 
 ## Commands
 
