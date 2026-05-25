@@ -18,6 +18,6 @@
 		"@clankermux/providers": "workspace:*",
 		"@clankermux/security": "workspace:*",
 		"@clankermux/ui-common": "workspace:*",
-		"@dqbd/tiktoken": "^1.0.22"
+		"@dqbd/tiktoken": "1.0.22"
 	}
 }
