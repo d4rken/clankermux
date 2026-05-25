@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: "1.3.14"
+
+jobs:
+  lint:
+    name: Lint & format (biome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # `biome ci` is the read-only counterpart to the local `bun run lint`
+      # (which uses --write --unsafe). It checks formatting + lint rules and
+      # fails on errors without mutating any files.
+      - run: bunx --bun biome ci .
+
+  typecheck:
+    name: Typecheck (tsc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # The 5 gitignored inline worker files are absent on a fresh checkout;
+      # write empty placeholders so tsc can resolve their imports.
+      - run: bash .github/scripts/gen-autogen-placeholders.sh
+      - run: bun run typecheck
+
+  test:
+    name: Unit tests (bun test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bash .github/scripts/gen-autogen-placeholders.sh
+      - run: bun test
