@@ -45,13 +45,16 @@ export function MetricCard({
 
 	return (
 		<Card>
-			<CardContent className="p-6">
-				<div className="flex items-center justify-between mb-4">
-					<Icon className="h-8 w-8 text-muted-foreground/20" />
+			<CardContent className="p-4">
+				<div className="flex items-center justify-between gap-2 mb-1.5">
+					<div className="flex items-center gap-1.5 min-w-0">
+						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+						<p className="text-sm text-muted-foreground truncate">{title}</p>
+					</div>
 					{trendPeriod && trendElement ? (
 						<Popover>
 							<PopoverTrigger asChild>
-								<div className="flex items-center gap-1 cursor-help">
+								<div className="flex items-center gap-1 cursor-help shrink-0">
 									{trendElement}
 									<Info className="h-3 w-3 text-muted-foreground" />
 								</div>
@@ -64,10 +67,7 @@ export function MetricCard({
 						trendElement
 					)}
 				</div>
-				<div className="space-y-1">
-					<p className="text-sm text-muted-foreground">{title}</p>
-					<p className="text-2xl font-bold">{value}</p>
-				</div>
+				<p className="text-2xl font-bold">{value}</p>
 				{subRows && subRows.length > 0 && (
 					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
 						{subRows.map((row) => (

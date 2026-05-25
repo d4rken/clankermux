@@ -1,31 +1,8 @@
 #!/usr/bin/env bun
-// Load .env file to ensure environment variables are available
-import { config } from "dotenv";
-
-// Load .env with robust path resolution for different deployment scenarios:
-// 1. Current directory (when binary is in project root)
-// 2. Project root (when running from source with bun run)
-// 3. Executable directory (when binary is deployed elsewhere)
-const possibleEnvPaths = [
-	".env", // Current directory
-	"../../.env", // Project root from apps/cli/src
-];
-
-// For deployed binaries, also check the executable's directory
-if (process.argv[1]) {
-	const execPath = require("node:path").dirname(
-		require("node:path").resolve(process.argv[1]),
-	);
-	possibleEnvPaths.push(require("node:path").join(execPath, ".env"));
-}
-
-// Try each possible .env location
-for (const envPath of possibleEnvPaths) {
-	const result = config({ path: envPath });
-	if (result.parsed && Object.keys(result.parsed).length > 0) {
-		break; // Stop after finding the first .env with variables
-	}
-}
+// Bun automatically loads `.env` (and `.env.local`/`.env.<NODE_ENV>`) from the
+// current working directory before this script runs, so no explicit loader is
+// needed. This matches how apps/server already relies on Bun's native .env
+// loading in the systemd deployment.
 
 import {
 	addAccount,
