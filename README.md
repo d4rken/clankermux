@@ -9,6 +9,16 @@ add your accounts in the dashboard, and it routes and falls back across them.
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
 (itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)).
+After many upstream PR's I decided to diverge further and tailor it even more to my use-cases:
+
+* Deployed always from source, low overhead updates.
+* Hosted locally or on local LAN, external access only via VPN.
+* API keys are for attribution, not access control ☝️.
+* Reduced provider support, smaller supply-chain attack surfaces.
+
+Feel free to use this fork.
+Bug reports are welcome, feature requests are not.
+I'm the target user, use it as is, or don't 🤷‍♂️.
 
 ## Build from source
 
