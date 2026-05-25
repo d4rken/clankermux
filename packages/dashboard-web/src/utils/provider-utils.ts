@@ -33,7 +33,7 @@ export function providerSupportsCustomBilling(provider: string): boolean {
 
 /**
  * Check if a provider shows quota-window usage information on the account page.
- * Anthropic and Codex show 5-hour and 7-day windows, NanoGPT shows daily/monthly,
+ * Anthropic and Codex show 5-hour and 7-day windows,
  * and Zai exposes time/token quota windows.
  */
 /**
@@ -48,7 +48,6 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
 	return (
 		provider === PROVIDER_NAMES.ANTHROPIC ||
 		provider === PROVIDER_NAMES.CODEX ||
-		provider === PROVIDER_NAMES.NANOGPT ||
 		provider === PROVIDER_NAMES.ZAI
 	);
 }

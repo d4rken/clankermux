@@ -6,7 +6,6 @@ import {
 	DEFAULT_STRATEGY,
 	getVersion,
 	HTTP_STATUS,
-	initializeNanoGPTPricingIfAccountsExist,
 	NETWORK,
 	readEnv,
 	registerCleanup,
@@ -33,11 +32,6 @@ import {
 	getRepresentativeUtilizationForProvider,
 	usageCache,
 } from "@clankermux/providers";
-import {
-	canUseInferenceProfileDynamic,
-	parseBedrockConfig,
-	translateModelName,
-} from "@clankermux/providers/bedrock";
 import {
 	AutoRefreshScheduler,
 	CacheKeepaliveScheduler,
@@ -272,31 +266,6 @@ async function runStartupMaintenance(
 	}
 	// Return a no-op stopper for compatibility
 	return () => {};
-}
-
-/**
- * Pre-warm Bedrock model and inference profile caches for faster first request
- */
-async function prewarmBedrockCache(account: Account, region: string) {
-	const logger = new Logger("BedrockCachePrewarm");
-
-	try {
-		// Pre-warm model cache
-		await translateModelName("claude-opus-4-6", account);
-
-		// Pre-warm inference profile cache
-		await canUseInferenceProfileDynamic(
-			"claude-opus-4-6",
-			"geographic",
-			account,
-		);
-
-		logger.info(`Successfully pre-warmed Bedrock caches for region ${region}`);
-	} catch (error) {
-		logger.error(
-			`Failed to pre-warm Bedrock caches for region ${region}: ${(error as Error).message}`,
-		);
-	}
 }
 
 /**
@@ -1363,44 +1332,6 @@ Available endpoints:
 		log.info(`No Anthropic accounts found, usage polling will not start`);
 	}
 
-	// Start usage polling for NanoGPT accounts (PayG with optional subscription tracking)
-	const nanogptAccounts = accounts.filter((a) => a.provider === "nanogpt");
-	if (nanogptAccounts.length > 0) {
-		log.info(
-			`Found ${nanogptAccounts.length} NanoGPT accounts, starting usage polling...`,
-		);
-		for (const account of nanogptAccounts) {
-			log.debug(`Processing NanoGPT account: ${account.name}`, {
-				accountId: account.id,
-				hasApiKey: !!account.api_key,
-				paused: account.paused,
-				customEndpoint: account.custom_endpoint,
-			});
-
-			if (account.api_key) {
-				// NanoGPT uses API key authentication, no token refresh needed
-				// Create a simple token provider that returns the API key
-				const apiKeyProvider = async () => account.api_key || "";
-
-				// Start usage polling with the API key
-				usageCache.startPolling(
-					account.id,
-					apiKeyProvider,
-					account.provider,
-					config.getUsagePollIntervalMs(),
-					account.custom_endpoint,
-				);
-				log.info(`Started usage polling for NanoGPT account ${account.name}`);
-			} else {
-				log.warn(
-					`NanoGPT account ${account.name} has no API key, skipping usage polling`,
-				);
-			}
-		}
-	} else {
-		log.info(`No NanoGPT accounts found, usage polling will not start`);
-	}
-
 	// Start usage polling for Zai accounts
 	const zaiAccounts = accounts.filter((a) => a.provider === "zai");
 	if (zaiAccounts.length > 0) {
@@ -1474,39 +1405,6 @@ Available endpoints:
 	} else {
 		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
 	}
-
-	// Pre-warm Bedrock model and inference profile caches
-	const bedrockAccounts = accounts.filter((a) => a.provider === "bedrock");
-	if (bedrockAccounts.length > 0) {
-		log.info(
-			`Found ${bedrockAccounts.length} Bedrock accounts, pre-warming caches...`,
-		);
-
-		// Group accounts by region to avoid duplicate cache loads
-		const regionMap = new Map<string, Account[]>();
-		for (const account of bedrockAccounts) {
-			const config = parseBedrockConfig(account.custom_endpoint);
-			if (config) {
-				const accounts = regionMap.get(config.region) || [];
-				accounts.push(account);
-				regionMap.set(config.region, accounts);
-			}
-		}
-
-		// Pre-warm caches per region (don't block startup)
-		for (const [region, regionAccounts] of regionMap) {
-			prewarmBedrockCache(regionAccounts[0], region).catch((err) => {
-				log.warn(
-					`Failed to pre-warm Bedrock cache for region ${region}: ${err.message}`,
-				);
-			});
-		}
-	} else {
-		log.info(`No Bedrock accounts found, cache pre-warming will not start`);
-	}
-
-	// Initialize NanoGPT pricing refresh if there are NanoGPT accounts (non-blocking)
-	void initializeNanoGPTPricingIfAccountsExist(dbOps, pricingLogger);
 
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {

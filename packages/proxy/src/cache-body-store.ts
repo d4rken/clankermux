@@ -22,7 +22,7 @@ const log = new Logger("CacheBodyStore");
  * Note: client headers ARE stored because some providers (e.g. Anthropic) copy
  * incoming headers in prepareHeaders() and augment them, so the replay needs to
  * carry the original client headers to produce an identical upstream request.
- * Providers that build headers from scratch (Qwen, Bedrock) simply ignore them.
+ * Providers that build headers from scratch (Qwen) simply ignore them.
  *
  * Sensitive and internal headers are stripped before storing.
  */

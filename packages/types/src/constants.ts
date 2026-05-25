@@ -33,7 +33,6 @@ export const ACCOUNT_MODES = {
 	MINIMAX: "minimax", // Minimax account (API key)
 	ANTHROPIC_COMPATIBLE: "anthropic-compatible", // Anthropic-compatible provider (API key)
 	OPENAI_COMPATIBLE: "openai-compatible", // OpenAI-compatible provider (API key)
-	NANOGPT: "nanogpt", // NanoGPT provider (API key)
 	OLLAMA: "ollama", // Ollama local provider (v0.14.0+, no API key required)
 } as const;
 
@@ -67,8 +66,6 @@ export function getProviderFromMode(mode: AccountMode): ProviderName {
 			return PROVIDER_NAMES.ANTHROPIC_COMPATIBLE;
 		case ACCOUNT_MODES.OPENAI_COMPATIBLE:
 			return PROVIDER_NAMES.OPENAI_COMPATIBLE;
-		case ACCOUNT_MODES.NANOGPT:
-			return PROVIDER_NAMES.NANOGPT;
 		case ACCOUNT_MODES.OLLAMA:
 			return PROVIDER_NAMES.OLLAMA;
 		default:

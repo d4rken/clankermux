@@ -119,7 +119,7 @@ export class CacheKeepaliveScheduler {
 			// Reconstruct headers from the stored snapshot.
 			// Anthropic's prepareHeaders() copies incoming client headers and augments
 			// them, so we need to replay them faithfully. Providers that build from
-			// scratch (Qwen, Bedrock) simply ignore whatever we send here.
+			// scratch (Qwen) simply ignore whatever we send here.
 			// Auth and internal proxy headers were stripped at capture time.
 			const replayHeaders = new Headers(cached.headers);
 			replayHeaders.set("content-type", "application/json");

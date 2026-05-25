@@ -104,9 +104,6 @@ export function AccountsTab() {
 			| "minimax"
 			| "anthropic-compatible"
 			| "openai-compatible"
-			| "nanogpt"
-			| "vertex-ai"
-			| "bedrock"
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
@@ -120,42 +117,6 @@ export function AccountsTab() {
 			const result = await api.initAddAccount(params);
 			setActionError(null);
 			return result;
-		} catch (err) {
-			setActionError(formatError(err));
-			throw err;
-		}
-	};
-
-	const handleAddVertexAIAccount = async (params: {
-		name: string;
-		projectId: string;
-		region: string;
-		priority: number;
-	}) => {
-		try {
-			await api.addVertexAIAccount(params);
-			await loadAccounts();
-			setAdding(false);
-			setActionError(null);
-		} catch (err) {
-			setActionError(formatError(err));
-			throw err;
-		}
-	};
-
-	const handleAddBedrockAccount = async (params: {
-		name: string;
-		profile: string;
-		region: string;
-		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
-	}) => {
-		try {
-			await api.addBedrockAccount(params);
-			await loadAccounts();
-			setAdding(false);
-			setActionError(null);
 		} catch (err) {
 			setActionError(formatError(err));
 			throw err;
@@ -220,24 +181,6 @@ export function AccountsTab() {
 	}) => {
 		try {
 			await api.addMinimaxAccount(params);
-			await loadAccounts();
-			setAdding(false);
-			setActionError(null);
-		} catch (err) {
-			setActionError(formatError(err));
-			throw err;
-		}
-	};
-
-	const handleAddNanoGPTAccount = async (params: {
-		name: string;
-		apiKey: string;
-		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
-	}) => {
-		try {
-			await api.addNanoGPTAccount(params);
 			await loadAccounts();
 			setAdding(false);
 			setActionError(null);
@@ -592,11 +535,8 @@ export function AccountsTab() {
 						<AccountAddForm
 							onAddAccount={handleAddAccount}
 							onCompleteAccount={handleCompleteAccount}
-							onAddVertexAIAccount={handleAddVertexAIAccount}
-							onAddBedrockAccount={handleAddBedrockAccount}
 							onAddZaiAccount={handleAddZaiAccount}
 							onAddMinimaxAccount={handleAddMinimaxAccount}
-							onAddNanoGPTAccount={handleAddNanoGPTAccount}
 							onAddAlibabaCodingPlanAccount={handleAddAlibabaCodingPlanAccount}
 							onAddKiloAccount={handleAddKiloAccount}
 							onAddOpenRouterAccount={handleAddOpenRouterAccount}

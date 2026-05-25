@@ -77,17 +77,6 @@ export function normalizeResetMs(
 	return null;
 }
 
-export function isNanoGPTShape(
-	usageData: FullUsageData | null | undefined,
-): boolean {
-	return (
-		usageData != null &&
-		"active" in usageData &&
-		"daily" in usageData &&
-		"monthly" in usageData
-	);
-}
-
 export function isAlibabaShape(
 	usageData: FullUsageData | null | undefined,
 ): boolean {
@@ -107,7 +96,6 @@ export function isAnthropicStyleShape(
 	usageData: FullUsageData | null | undefined,
 ): boolean {
 	if (usageData == null) return false;
-	if (isNanoGPTShape(usageData)) return false;
 	if (isAlibabaShape(usageData)) return false;
 	if (isZaiShape(usageData)) return false;
 	return "five_hour" in usageData && "seven_day" in usageData;
@@ -119,7 +107,6 @@ interface ExtractedValue {
 }
 
 function extractFiveHour(usageData: FullUsageData): ExtractedValue | null {
-	if (isNanoGPTShape(usageData)) return null;
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			five_hour: { percentUsed: number | null; resetAt: number | null };
@@ -162,7 +149,6 @@ function extractFiveHour(usageData: FullUsageData): ExtractedValue | null {
 }
 
 function extractSevenDay(usageData: FullUsageData): ExtractedValue | null {
-	if (isNanoGPTShape(usageData)) return null;
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			weekly: { percentUsed: number | null; resetAt: number | null };

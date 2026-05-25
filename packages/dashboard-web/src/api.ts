@@ -186,9 +186,6 @@ class API extends HttpClient {
 			| "minimax"
 			| "anthropic-compatible"
 			| "openai-compatible"
-			| "nanogpt"
-			| "vertex-ai"
-			| "bedrock"
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
@@ -321,37 +318,6 @@ class API extends HttpClient {
 		}
 	}
 
-	async addNanoGPTAccount(data: {
-		name: string;
-		apiKey: string;
-		priority: number;
-		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
-	}): Promise<{ message: string; account: Account }> {
-		const startTime = Date.now();
-		const url = "/api/accounts/nanogpt";
-		this.logger.debug(`→ POST ${url}`, { data });
-		try {
-			const response = await this.post<{ message: string; account: Account }>(
-				url,
-				data,
-			);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
 	async addAlibabaCodingPlanAccount(data: {
 		name: string;
 		apiKey: string;
@@ -449,96 +415,6 @@ class API extends HttpClient {
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/minimax";
-
-		this.logger.debug(`→ POST ${url}`, { data });
-
-		try {
-			const response = await this.post<{ message: string; account: Account }>(
-				url,
-				data,
-			);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async addVertexAIAccount(data: {
-		name: string;
-		projectId: string;
-		region: string;
-		priority: number;
-	}): Promise<{ message: string; account: Account }> {
-		const startTime = Date.now();
-		const url = "/api/accounts/vertex-ai";
-
-		this.logger.debug(`→ POST ${url}`, { data });
-
-		try {
-			const response = await this.post<{ message: string; account: Account }>(
-				url,
-				data,
-			);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async getAwsProfiles(): Promise<
-		Array<{ name: string; region: string | null }>
-	> {
-		const startTime = Date.now();
-		const url = "/api/aws/profiles";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response =
-				await this.get<Array<{ name: string; region: string | null }>>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async addBedrockAccount(data: {
-		name: string;
-		profile: string;
-		region: string;
-		priority: number;
-		cross_region_mode?: "geographic" | "global" | "regional";
-		customModel?: string;
-	}): Promise<{ message: string; account: Account }> {
-		const startTime = Date.now();
-		const url = "/api/accounts/bedrock";
 
 		this.logger.debug(`→ POST ${url}`, { data });
 

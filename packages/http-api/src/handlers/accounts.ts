@@ -1,7 +1,4 @@
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import * as cliCommands from "@clankermux/cli-commands";
 import type { Config } from "@clankermux/config";
 import {
@@ -194,7 +191,6 @@ export function createAccountsListHandler(
 			peak_hours_pause_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
-			cross_region_mode: string | null;
 			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
@@ -228,7 +224,6 @@ export function createAccountsListHandler(
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 
 					model_mappings,
-					cross_region_mode,
 					model_fallbacks,
 					billing_type,
 					pause_reason,
@@ -356,28 +351,6 @@ export function createAccountsListHandler(
 							);
 						}
 					}
-				} else if (account.provider === "nanogpt" && usageData) {
-					// NanoGPT usage data - type guard to check it's NanoGPTUsageData
-					const isNanoGPTData =
-						"active" in usageData &&
-						"daily" in usageData &&
-						"monthly" in usageData;
-					if (isNanoGPTData) {
-						try {
-							const {
-								getRepresentativeNanoGPTUtilization,
-								getRepresentativeNanoGPTWindow,
-							} = require("@clankermux/providers");
-							usageUtilization = getRepresentativeNanoGPTUtilization(usageData);
-							usageWindow = getRepresentativeNanoGPTWindow(usageData);
-							fullUsageData = usageData as FullUsageData;
-						} catch (error) {
-							log.warn(
-								`Failed to process NanoGPT usage data for account ${account.name}:`,
-								error,
-							);
-						}
-					}
 				} else if (account.provider === "zai" && usageData) {
 					// Zai usage data - type guard to check it's ZaiUsageData
 					const isZaiData =
@@ -458,7 +431,7 @@ export function createAccountsListHandler(
 					usageThrottledWindows = usageThrottleStatus.throttledWindows;
 				}
 
-				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, NanoGPT, and OpenRouter providers
+				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, and OpenRouter providers
 				let modelMappings: { [key: string]: string } | null = null;
 				if (account.model_mappings) {
 					try {
@@ -545,7 +518,6 @@ export function createAccountsListHandler(
 					hasRefreshToken:
 						!!account.refresh_token &&
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields
-					crossRegionMode: account.cross_region_mode,
 					modelFallbacks,
 					billingType: account.billing_type,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
@@ -1235,146 +1207,6 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 	};
 }
 
-/**
- * Create a Minimax account add handler
- */
-export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
-	return async (req: Request): Promise<Response> => {
-		try {
-			const body = await req.json();
-
-			// Validate account name
-			const name = validateString(body.name, "name", {
-				required: true,
-				minLength: 1,
-				maxLength: 100,
-				pattern: patterns.accountName,
-				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
-				transform: sanitizers.trim,
-			});
-
-			if (!name) {
-				return errorResponse(BadRequest("Account name is required"));
-			}
-
-			// Validate project ID
-			const projectId = validateString(body.projectId, "projectId", {
-				required: true,
-				minLength: 1,
-				transform: sanitizers.trim,
-			});
-
-			if (!projectId) {
-				return errorResponse(BadRequest("Project ID is required"));
-			}
-
-			// Validate region
-			const region = validateString(body.region, "region", {
-				required: true,
-				minLength: 1,
-				transform: sanitizers.trim,
-			});
-
-			if (!region) {
-				return errorResponse(BadRequest("Region is required"));
-			}
-
-			// Validate priority
-			const priority = validatePriority(body.priority);
-
-			// Store project ID and region in custom_endpoint as JSON
-			const vertexConfig = JSON.stringify({
-				projectId,
-				region,
-			});
-
-			// Create Vertex AI account directly in database
-			const accountId = crypto.randomUUID();
-			const now = Date.now();
-			const db = dbOps.getAdapter();
-			await db.run(
-				`INSERT INTO accounts (
-					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
-					accountId,
-					name,
-					"vertex-ai",
-					null, // No API key - uses Google Cloud credentials
-					"", // Empty refresh token
-					null, // Access token will be fetched on first use
-					null, // Expiry will be set on first token refresh
-					now,
-					0,
-					0,
-					priority,
-					vertexConfig,
-				],
-			);
-
-			log.info(
-				`Successfully added Vertex AI account: ${name} (Project: ${projectId}, Region: ${region}, Priority ${priority})`,
-			);
-
-			// Get the created account for response
-			const account = await db.get<{
-				id: string;
-				name: string;
-				provider: string;
-				request_count: number;
-				total_requests: number;
-				last_used: number | null;
-				created_at: number;
-				expires_at: number | null;
-				refresh_token: string;
-				paused: number;
-			}>(
-				`SELECT
-					id, name, provider, request_count, total_requests,
-					last_used, created_at, expires_at, refresh_token,
-					COALESCE(paused, 0) as paused
-				FROM accounts WHERE id = ?`,
-				[accountId],
-			);
-
-			if (!account) {
-				return errorResponse(
-					InternalServerError("Failed to retrieve created account"),
-				);
-			}
-
-			return jsonResponse({
-				message: `Vertex AI account '${name}' added successfully`,
-				account: {
-					id: account.id,
-					name: account.name,
-					provider: account.provider,
-					request_count: account.request_count,
-					total_requests: account.total_requests,
-					last_used: account.last_used,
-					created_at: new Date(account.created_at),
-					expires_at: account.expires_at ? new Date(account.expires_at) : null,
-					tokenStatus: "valid",
-					mode: "vertex-ai",
-					paused: account.paused === 1,
-				},
-			});
-		} catch (error) {
-			log.error("Failed to add Vertex AI account:", error);
-			if (error instanceof ValidationError) {
-				return errorResponse(BadRequest(error.message));
-			}
-			return errorResponse(
-				InternalServerError(
-					error instanceof Error ? error.message : "Failed to add account",
-				),
-			);
-		}
-	};
-}
-
 export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 	return async (req: Request): Promise<Response> => {
 		try {
@@ -1499,173 +1331,6 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to create Minimax account"),
-			);
-		}
-	};
-}
-
-/**
- * Create a NanoGPT account add handler
- */
-export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
-	return async (req: Request): Promise<Response> => {
-		try {
-			const body = await req.json();
-			// Validate account name
-			const name = validateString(body.name, "name", {
-				required: true,
-				minLength: 1,
-				maxLength: 100,
-				pattern: patterns.accountName,
-				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
-				transform: sanitizers.trim,
-			});
-			if (!name) {
-				return errorResponse(BadRequest("Account name is required"));
-			}
-			// Validate API key
-			const apiKey = validateString(body.apiKey, "apiKey", {
-				required: true,
-				minLength: 1,
-			});
-			if (!apiKey) {
-				return errorResponse(BadRequest("API key is required"));
-			}
-			// Validate priority
-			const priority =
-				validateNumber(body.priority, "priority", {
-					min: 0,
-					max: 100,
-					integer: true,
-				}) || 0;
-			// Validate custom endpoint (optional for NanoGPT)
-			const customEndpoint = validateString(
-				body.customEndpoint || null,
-				"customEndpoint",
-				{
-					required: false,
-					transform: (value: string) => {
-						if (!value) return "";
-						const trimmed = value.trim();
-						if (!trimmed) return "";
-						// Validate URL format
-						try {
-							new URL(trimmed);
-							return trimmed;
-						} catch {
-							throw new ValidationError("Invalid URL format");
-						}
-					},
-				},
-			);
-			// Validate and sanitize model mappings (optional)
-			let modelMappings = null;
-			if (body.modelMappings) {
-				if (typeof body.modelMappings !== "object") {
-					throw new ValidationError("Model mappings must be an object");
-				}
-				try {
-					const validatedMappings = validateAndSanitizeModelMappings(
-						body.modelMappings,
-					);
-					// Only store if there are actual mappings (non-empty object)
-					if (validatedMappings && Object.keys(validatedMappings).length > 0) {
-						modelMappings = JSON.stringify(validatedMappings);
-					}
-				} catch (error) {
-					if (error instanceof ValidationError) {
-						throw error;
-					}
-					throw new ValidationError("Invalid model mappings format");
-				}
-			}
-			// Create NanoGPT account directly in database
-			const accountId = crypto.randomUUID();
-			const now = Date.now();
-			const db = dbOps.getAdapter();
-			await db.run(
-				`INSERT INTO accounts (
-					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
-					accountId,
-					name,
-					"nanogpt",
-					apiKey,
-					apiKey, // Use API key as refresh token for consistency with CLI
-					apiKey, // Use API key as access token
-					now + 365 * 24 * 60 * 60 * 1000, // 1 year from now
-					now,
-					0,
-					0,
-					priority,
-					customEndpoint || null,
-					modelMappings,
-				],
-			);
-			log.info(
-				`Successfully added NanoGPT account: ${name} (Priority ${priority})`,
-			);
-			// Get the created account for response
-			const account = await db.get<{
-				id: string;
-				name: string;
-				provider: string;
-				request_count: number;
-				total_requests: number;
-				last_used: number | null;
-				created_at: number;
-				expires_at: number;
-				refresh_token: string;
-				paused: number;
-			}>(
-				`SELECT
-					id, name, provider, request_count, total_requests,
-					last_used, created_at, expires_at, refresh_token,
-					COALESCE(paused, 0) as paused
-				FROM accounts WHERE id = ?`,
-				[accountId],
-			);
-			if (!account) {
-				return errorResponse(
-					InternalServerError("Failed to retrieve created account"),
-				);
-			}
-			return jsonResponse({
-				message: `NanoGPT account '${name}' added successfully`,
-				account: {
-					id: account.id,
-					name: account.name,
-					provider: account.provider,
-					requestCount: account.request_count,
-					totalRequests: account.total_requests,
-					lastUsed: account.last_used
-						? new Date(account.last_used).toISOString()
-						: null,
-					created: new Date(account.created_at).toISOString(),
-					paused: account.paused === 1,
-					priority: priority,
-					tokenStatus: "valid" as const,
-					tokenExpiresAt: new Date(account.expires_at).toISOString(),
-					rateLimitStatus: "OK",
-					rateLimitReset: null,
-					rateLimitRemaining: null,
-					rateLimitedUntil: null,
-					sessionInfo: "No active session",
-					hasRefreshToken: false,
-				},
-			});
-		} catch (error) {
-			log.error("NanoGPT account creation error:", error);
-			if (error instanceof ValidationError) {
-				return errorResponse(BadRequest(error.message));
-			}
-			return errorResponse(
-				error instanceof Error
-					? error
-					: new Error("Failed to create NanoGPT account"),
 			);
 		}
 	};
@@ -2741,7 +2406,7 @@ export function createAccountForceResetRateLimitHandler(
 
 			// Best-effort fallback: use raw DB token for Anthropic OAuth accounts.
 			// Only Anthropic accounts support direct usage fetch via fetchUsageData();
-			// other providers (Zai, NanoGPT) use different endpoints handled by their own fetchers.
+			// other providers (e.g. Zai) use different endpoints handled by their own fetchers.
 			// This bypasses token refresh, but is acceptable since this path only runs when
 			// no active polling exists and the token is likely fresh from recent proxy requests.
 			if (
@@ -2819,267 +2484,6 @@ export function createAccountReloadHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to reload account tokens"),
-			);
-		}
-	};
-}
-
-/**
- * Check if an AWS profile exists in ~/.aws/credentials
- */
-function checkAwsProfileExists(profile: string): boolean {
-	try {
-		const credentialsPath = join(homedir(), ".aws", "credentials");
-		if (!existsSync(credentialsPath)) {
-			return false;
-		}
-		const content = readFileSync(credentialsPath, "utf-8");
-		// Match [profile] section header (handles default and named profiles)
-		const profileRegex = new RegExp(`^\\[${profile}\\]`, "m");
-		return profileRegex.test(content);
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Read region from ~/.aws/config for a given profile
- * AWS config format: [profile <name>] for named profiles, [default] for default
- */
-function readAwsRegion(profile: string): string | null {
-	try {
-		const configPath = join(homedir(), ".aws", "config");
-		if (!existsSync(configPath)) {
-			return null;
-		}
-		const content = readFileSync(configPath, "utf-8");
-		// In ~/.aws/config, the default profile is [default], named profiles are [profile <name>]
-		const sectionHeader =
-			profile === "default" ? "\\[default\\]" : `\\[profile ${profile}\\]`;
-		const sectionRegex = new RegExp(`${sectionHeader}[\\s\\S]*?(?=\\[|$)`);
-		const sectionMatch = content.match(sectionRegex);
-		if (!sectionMatch) return null;
-		const regionMatch = sectionMatch[0].match(/^region\s*=\s*(.+)$/m);
-		return regionMatch ? regionMatch[1].trim() : null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Create an AWS profiles list handler
- * Returns all AWS profiles from ~/.aws/credentials with their regions
- */
-export function createAwsProfilesListHandler() {
-	return async (): Promise<Response> => {
-		try {
-			const credentialsPath = join(homedir(), ".aws", "credentials");
-
-			// If credentials file doesn't exist, return empty array
-			if (!existsSync(credentialsPath)) {
-				log.debug("AWS credentials file not found");
-				return jsonResponse([]);
-			}
-
-			// Read and parse credentials file
-			const content = readFileSync(credentialsPath, "utf-8");
-			const profiles: Array<{ name: string; region: string | null }> = [];
-
-			// Match all profile sections [profile-name]
-			const profileMatches = content.matchAll(/^\[([^\]]+)\]/gm);
-
-			for (const match of profileMatches) {
-				const profileName = match[1];
-				// Try to read region from config
-				const region = readAwsRegion(profileName);
-				profiles.push({ name: profileName, region });
-			}
-
-			log.debug(`Found ${profiles.length} AWS profiles`);
-			return jsonResponse(profiles);
-		} catch (error) {
-			log.error("Failed to list AWS profiles:", error);
-			// Return empty array on error instead of failing
-			return jsonResponse([]);
-		}
-	};
-}
-
-/**
- * Create a Bedrock account add handler
- */
-export function createBedrockAccountAddHandler(dbOps: DatabaseOperations) {
-	return async (req: Request): Promise<Response> => {
-		try {
-			const body = await req.json();
-
-			// Validate account name
-			const name = validateString(body.name, "name", {
-				required: true,
-				minLength: 1,
-				maxLength: 100,
-				pattern: patterns.accountName,
-				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
-				transform: sanitizers.trim,
-			});
-
-			if (!name) {
-				return errorResponse(BadRequest("Account name is required"));
-			}
-
-			// Validate profile
-			const profile = validateString(body.profile, "profile", {
-				required: true,
-				minLength: 1,
-				transform: sanitizers.trim,
-			});
-
-			if (!profile) {
-				return errorResponse(BadRequest("AWS profile is required"));
-			}
-
-			// Validate region
-			const region = validateString(body.region, "region", {
-				required: true,
-				minLength: 1,
-				transform: sanitizers.trim,
-			});
-
-			if (!region) {
-				return errorResponse(BadRequest("Region is required"));
-			}
-
-			// Validate priority
-			const priority = validatePriority(body.priority);
-
-			// Validate cross_region_mode
-			const crossRegionMode = body.cross_region_mode ?? "geographic";
-			if (
-				crossRegionMode !== "geographic" &&
-				crossRegionMode !== "global" &&
-				crossRegionMode !== "regional"
-			) {
-				return errorResponse(
-					BadRequest(
-						"cross_region_mode must be one of: geographic, global, regional",
-					),
-				);
-			}
-
-			// Validate custom model (optional)
-			const customModel = body.customModel
-				? validateString(body.customModel, "customModel", {
-						required: false,
-						minLength: 1,
-						maxLength: 200,
-						transform: sanitizers.trim,
-					})
-				: undefined;
-
-			// Build model_mappings JSON if custom model specified
-			let modelMappings: string | null = null;
-			if (customModel) {
-				modelMappings = JSON.stringify({ custom: customModel });
-			}
-
-			// Check if AWS profile exists
-			if (!checkAwsProfileExists(profile)) {
-				return errorResponse(
-					BadRequest(
-						`AWS profile '${profile}' not found. Check ~/.aws/credentials or run: aws configure --profile ${profile}`,
-					),
-				);
-			}
-
-			// Store profile and region in custom_endpoint as "bedrock:profile:region"
-			const bedrockConfig = `bedrock:${profile}:${region}`;
-
-			// Create Bedrock account directly in database
-			const accountId = crypto.randomUUID();
-			const now = Date.now();
-			const oneYearFromNow = now + 365 * 24 * 60 * 60 * 1000; // 1 year expiry
-			const db = dbOps.getAdapter();
-			await db.run(
-				`INSERT INTO accounts (
-					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, cross_region_mode, model_mappings
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
-					accountId,
-					name,
-					"bedrock",
-					null, // No API key - uses AWS credentials
-					"", // Empty refresh token
-					null, // No access token
-					oneYearFromNow, // Set expiry to 1 year from now
-					now,
-					0,
-					0,
-					priority,
-					bedrockConfig,
-					crossRegionMode,
-					modelMappings,
-				],
-			);
-
-			log.info(
-				`Successfully added Bedrock account: ${name} (Profile: ${profile}, Region: ${region}, CrossRegionMode: ${crossRegionMode}, Priority ${priority}${customModel ? `, CustomModel: ${customModel}` : ""})`,
-			);
-
-			// Get the created account for response
-			const account = await db.get<{
-				id: string;
-				name: string;
-				provider: string;
-				request_count: number;
-				total_requests: number;
-				last_used: number | null;
-				created_at: number;
-				expires_at: number | null;
-				refresh_token: string;
-				paused: number;
-			}>(
-				`SELECT
-					id, name, provider, request_count, total_requests,
-					last_used, created_at, expires_at, refresh_token,
-					COALESCE(paused, 0) as paused
-				FROM accounts WHERE id = ?`,
-				[accountId],
-			);
-
-			if (!account) {
-				return errorResponse(
-					InternalServerError("Failed to retrieve created account"),
-				);
-			}
-
-			return jsonResponse({
-				message: `Bedrock account '${name}' added successfully`,
-				account: {
-					id: account.id,
-					name: account.name,
-					provider: account.provider,
-					request_count: account.request_count,
-					total_requests: account.total_requests,
-					last_used: account.last_used,
-					created_at: new Date(account.created_at),
-					expires_at: account.expires_at ? new Date(account.expires_at) : null,
-					tokenStatus: "valid",
-					mode: "bedrock",
-					paused: account.paused === 1,
-					cross_region_mode: crossRegionMode,
-				},
-			});
-		} catch (error) {
-			log.error("Failed to add Bedrock account:", error);
-			if (error instanceof ValidationError) {
-				return errorResponse(BadRequest(error.message));
-			}
-			return errorResponse(
-				InternalServerError(
-					error instanceof Error ? error.message : "Failed to add account",
-				),
 			);
 		}
 	};

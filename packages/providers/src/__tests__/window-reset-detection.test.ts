@@ -45,7 +45,7 @@ describe("extractWindowResetTime", () => {
 	});
 
 	it("returns null for unknown/unsupported provider", () => {
-		expect(extractWindowResetTime({} as any, "nanogpt")).toBeNull();
+		expect(extractWindowResetTime({} as any, "unknown-provider")).toBeNull();
 	});
 });
 
