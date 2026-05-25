@@ -67,6 +67,24 @@ git push origin main
 After the merge, the change is in `main` and immediately usable — the systemd
 service rebuilds from the working tree on the next restart.
 
+### Clean up the worktree after a confirmed merge
+
+Once the user has confirmed they're happy with the change **and** it has been
+merged into `main`, **automatically clean up the worktree** the work was done in
+— don't leave it lying around or wait to be asked.
+
+- In Claude Code, the work was done in an `EnterWorktree` worktree: call
+  `ExitWorktree(action: "remove")` after the merge is pushed. (It refuses to
+  remove a worktree with uncommitted files or unmerged commits — if it does,
+  surface that to the user rather than forcing it.)
+- Outside the agent / for a manually-created worktree:
+  `git worktree remove .claude/worktrees/<name>` then delete the merged topic
+  branch (`git branch -d <name>`).
+
+Only skip cleanup if the user explicitly says they want to keep iterating in the
+worktree. "Merge it into main" with no other caveat means: merge, push, then
+remove the worktree.
+
 ## The `upstream` remote: fetch-only, cherry-pick-only
 
 The `upstream` remote (`tombii/better-ccflare`) is kept for **fetch only**; its

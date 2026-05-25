@@ -91,6 +91,21 @@ git log origin/main..HEAD --oneline               # commits you have that main d
 git log HEAD..origin/main --oneline               # commits main has that you don't
 ```
 
+### Clean up the worktree after a confirmed merge
+
+A worktree exists to isolate in-progress work — once that work lands, remove it.
+**When the user confirms they're happy with a change and it has been merged into
+`main`, clean up the worktree automatically** (don't wait to be asked):
+
+- Claude Code (`EnterWorktree` worktree): `ExitWorktree(action: "remove")` after
+  the merge is pushed. It refuses to remove a worktree with uncommitted files or
+  unmerged commits — if it does, surface that rather than forcing it.
+- Manual worktree: `git worktree remove .claude/worktrees/<name>` then
+  `git branch -d <merged-branch>`.
+
+Only keep the worktree if the user explicitly wants to keep iterating in it. See
+`fork-workflow.md` → "Clean up the worktree after a confirmed merge".
+
 ## Recovery procedure: if you discover the main checkout is on the wrong branch with missing WIP
 
 **STOP. Do not run any git commands. Tell the user immediately.** Their uncommitted work may still be recoverable, but a wrong move erases it.
