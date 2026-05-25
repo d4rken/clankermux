@@ -1,5 +1,10 @@
 # ClankerMux 🛡️
 
+[![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
+[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.2.8-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 A multiplexing load-balancer proxy for Claude Code (and Codex/OpenAI). It fans your
 requests across multiple backend accounts through one local endpoint, so you stop
 hitting per-account rate limits. Point Claude Code at it with `ANTHROPIC_BASE_URL`,
