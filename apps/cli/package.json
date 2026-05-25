@@ -33,9 +33,7 @@
 	"devDependencies": {
 		"@types/node": "^20.0.0"
 	},
-	"dependencies": {
-		"dotenv": "^17.4.0"
-	},
+	"dependencies": {},
 	"files": [
 		"dist/clankermux",
 		"README.md"

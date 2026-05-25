@@ -16,7 +16,6 @@
 		"@clankermux/config": "workspace:*",
 		"@clankermux/errors": "workspace:*",
 		"@clankermux/providers": "workspace:*",
-		"@clankermux/oauth-flow": "workspace:*",
-		"open": "^11.0.0"
+		"@clankermux/oauth-flow": "workspace:*"
 	}
 }
