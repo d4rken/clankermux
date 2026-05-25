@@ -8,17 +8,7 @@ add your accounts in the dashboard, and it routes and falls back across them.
 ## A fork, doing its own thing
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
-(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)). It has
-diverged far enough — and intentionally removed things upstream keeps — that it's now
-its own project rather than a contribute-back fork.
-
-Why it diverged:
-
-- **Provider-agnostic identity.** It routes to non-Claude providers too (Codex/OpenAI
-  and others), so a Claude-specific name was misleading. "Mux" = it multiplexes many
-  requests across many accounts.
-- **Build-from-source + systemd only.** No npm / release / Docker publishing lane.
-- **Leaner over time.** Unused providers (e.g. Vertex/Bedrock) are slated for removal.
+(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)).
 
 ## Build from source
 
