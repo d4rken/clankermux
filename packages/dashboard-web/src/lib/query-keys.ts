@@ -27,4 +27,5 @@ export const queryKeys = {
 	families: () => [...queryKeys.all, "families"] as const,
 	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
 	storage: () => [...queryKeys.all, "storage"] as const,
+	systemStatus: () => [...queryKeys.all, "system-status"] as const,
 } as const;

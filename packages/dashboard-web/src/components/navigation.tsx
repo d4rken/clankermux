@@ -20,6 +20,7 @@ import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { CopyButton } from "./CopyButton";
+import { SidebarStatus } from "./overview/system-status/SidebarStatus";
 import { ThemeToggle } from "./theme-toggle";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
@@ -265,15 +266,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 
 					{/* Footer */}
 					<div className="p-4 space-y-4">
-						<div className="rounded-lg bg-muted/50 p-3">
-							<div className="flex items-center gap-2 text-sm">
-								<Zap className="h-4 w-4 text-primary" />
-								<span className="font-medium">Status</span>
-							</div>
-							<p className="mt-1 text-xs text-muted-foreground">
-								All systems operational
-							</p>
-						</div>
+						<SidebarStatus />
 
 						{/* Update Check */}
 						<div

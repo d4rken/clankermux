@@ -13,6 +13,7 @@ import type {
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
+	SystemStatusResponse,
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 
@@ -2047,6 +2048,24 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<StorageInfoResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	async getSystemStatus(): Promise<SystemStatusResponse> {
+		const startTime = Date.now();
+		const url = "/api/system/status";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<SystemStatusResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
