@@ -1,5 +1,5 @@
-import { getModelShortName } from "@better-ccflare/core";
-import { formatCost, formatTokensPerSecond } from "@better-ccflare/ui-common";
+import { getModelShortName } from "@clankermux/core";
+import { formatCost, formatTokensPerSecond } from "@clankermux/ui-common";
 import {
 	Area,
 	AreaChart,

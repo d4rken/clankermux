@@ -2,10 +2,10 @@ import {
 	requestEvents,
 	ServiceUnavailableError,
 	trackClientVersion,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import { usageCache } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { usageCache } from "@clankermux/providers";
+import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
 	createPoolExhaustedResponse,
@@ -352,7 +352,7 @@ export async function handleProxy(
 		// scheduler already gets the equivalent treatment via its loop-prevention
 		// header path; this brings auto-refresh in line.
 		const isAutoRefreshProbe =
-			req.headers.get("x-better-ccflare-auto-refresh") === "true";
+			req.headers.get("x-clankermux-auto-refresh") === "true";
 		if (!isAutoRefreshProbe) {
 			// Send error message to usage worker for request history logging
 			ctx.usageWorker.postMessage({

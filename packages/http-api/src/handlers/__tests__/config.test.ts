@@ -30,7 +30,7 @@ function makeConfig() {
 		getCacheKeepaliveTtlMinutes: () => 0,
 		setCacheKeepaliveTtlMinutes: mock(() => {}),
 		setSystemPromptCacheTtl1h: mock(() => {}),
-	} as unknown as import("@better-ccflare/config").Config;
+	} as unknown as import("@clankermux/config").Config;
 }
 
 describe("createConfigHandlers", () => {

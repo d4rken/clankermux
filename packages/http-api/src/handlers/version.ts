@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import {
 	errorResponse,
 	InternalServerError,
@@ -30,7 +30,7 @@ export function createVersionCheckHandler() {
 
 			// Fetch latest version from npm registry
 			const response = await fetch(
-				"https://registry.npmjs.org/better-ccflare/latest",
+				"https://registry.npmjs.org/clankermux/latest",
 			);
 
 			if (!response.ok) {

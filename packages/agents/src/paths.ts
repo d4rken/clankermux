@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("AgentPaths");
 

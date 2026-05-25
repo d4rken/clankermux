@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/logger",
+	"name": "@clankermux/logger",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -10,7 +10,7 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/core": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

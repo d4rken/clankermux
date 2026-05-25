@@ -6,7 +6,7 @@ import {
 	isKnownProvider,
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 
 /**
  * Check if a provider supports auto-fallback and auto-refresh features

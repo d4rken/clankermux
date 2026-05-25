@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 
 export type ErrorWindowKey = "1h" | "24h" | "7d" | "all";
 
-const STORAGE_KEY = "better-ccflare:errors:window";
+const STORAGE_KEY = "clankermux:errors:window";
 const DEFAULT: ErrorWindowKey = "24h";
 const HOURS: Record<ErrorWindowKey, number> = {
 	"1h": 1,

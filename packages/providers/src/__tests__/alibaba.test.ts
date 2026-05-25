@@ -1,5 +1,5 @@
-import type { OpenAIRequest } from "@better-ccflare/openai-formats";
-import type { Account } from "@better-ccflare/types";
+import type { OpenAIRequest } from "@clankermux/openai-formats";
+import type { Account } from "@clankermux/types";
 import { OpenAICompatibleProvider } from "../providers/openai/provider";
 
 describe("OpenAICompatibleProvider Alibaba Features", () => {

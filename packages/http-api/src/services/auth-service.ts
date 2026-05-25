@@ -1,5 +1,5 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { NodeCryptoUtils } from "@better-ccflare/types";
+import type { DatabaseOperations } from "@clankermux/database";
+import { NodeCryptoUtils } from "@clankermux/types";
 import { extractApiKey } from "./extract-api-key";
 
 export interface AuthenticationResult {
@@ -15,7 +15,7 @@ export interface AuthenticationResult {
  * The model is intentionally narrow. API keys gate UPSTREAM AI TRAFFIC only
  * (/v1/* and /messages/*). The management surface (/api/*, /health) is
  * unauthenticated — trust boundary is "can you reach the port." Operators are
- * expected to bind better-ccflare to a loopback address or put it behind a
+ * expected to bind ClankerMux to a loopback address or put it behind a
  * reverse proxy that enforces authentication.
  */
 type AuthRequirement = "public" | "api_key";

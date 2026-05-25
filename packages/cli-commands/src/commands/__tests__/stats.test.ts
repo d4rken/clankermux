@@ -15,7 +15,7 @@ function makeConfig(payloadDays = 3, requestDays = 90) {
 	return {
 		getDataRetentionDays: () => payloadDays,
 		getRequestRetentionDays: () => requestDays,
-	} as unknown as import("@better-ccflare/config").Config;
+	} as unknown as import("@clankermux/config").Config;
 }
 
 function makeDbOps(result: {
@@ -24,7 +24,7 @@ function makeDbOps(result: {
 }) {
 	return {
 		cleanupOldRequests: mock(async () => result),
-	} as unknown as import("@better-ccflare/database").DatabaseOperations;
+	} as unknown as import("@clankermux/database").DatabaseOperations;
 }
 
 function makeCompactDbOps(
@@ -46,7 +46,7 @@ function makeCompactDbOps(
 		// the probe.
 		getResolvedDbPath: () => dbPath,
 		compact: mock(async () => result),
-	} as unknown as import("@better-ccflare/database").DatabaseOperations;
+	} as unknown as import("@clankermux/database").DatabaseOperations;
 }
 
 const COMPACT_RESULT = {

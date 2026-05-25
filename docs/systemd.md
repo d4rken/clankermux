@@ -1,30 +1,30 @@
 # Systemd Deployment Guide
 
-Production deployment of better-ccflare as a systemd service on Linux.
+Production deployment of ClankerMux as a systemd service on Linux.
 
 ## Reference Unit File
 
 ```ini
 [Unit]
-Description=better-ccflare proxy
+Description=ClankerMux proxy
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=better-ccflare
-Group=better-ccflare
+User=clankermux
+Group=clankermux
 
 # --- Environment ---
 Environment=PORT=8889
 Environment=BUN_JSC_forceRAMSize=2147483648
 
 # --- Preflight: strip invalid BUN_JSC_* vars before Bun starts ---
-ExecStartPre=/opt/better-ccflare/scripts/preflight-env.sh
+ExecStartPre=/opt/clankermux/scripts/preflight-env.sh
 
 # --- Main process ---
 # --smol enables aggressive GC (the correct way to reduce memory usage)
-ExecStart=/usr/bin/better-ccflare --smol --serve --port 8889
+ExecStart=/usr/bin/clankermux --smol --serve --port 8889
 
 # --- Resource limits ---
 MemoryMax=3G
@@ -41,13 +41,13 @@ StartLimitBurst=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/better-ccflare
+ReadWritePaths=/var/lib/clankermux
 PrivateTmp=true
 
 # --- Logging ---
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=better-ccflare
+SyslogIdentifier=clankermux
 
 [Install]
 WantedBy=multi-user.target
@@ -60,7 +60,7 @@ WantedBy=multi-user.target
 The `--smol` CLI flag is Bun's **supported** mechanism for reducing memory usage. It enables aggressive garbage collection and is safe for production use:
 
 ```ini
-ExecStart=/usr/bin/better-ccflare --smol --serve --port 8889
+ExecStart=/usr/bin/clankermux --smol --serve --port 8889
 ```
 
 This is equivalent to JavaScriptCore's "small heap" mode but exposed through Bun's stable CLI interface.
@@ -98,18 +98,18 @@ The `scripts/preflight-env.sh` script strips invalid `BUN_JSC_*` environment var
 ### Wiring as ExecStartPre
 
 ```ini
-ExecStartPre=/opt/better-ccflare/scripts/preflight-env.sh
-ExecStart=/usr/bin/better-ccflare --smol --serve --port 8889
+ExecStartPre=/opt/clankermux/scripts/preflight-env.sh
+ExecStart=/usr/bin/clankermux --smol --serve --port 8889
 ```
 
 systemd runs `ExecStartPre` before the main process. If a stale or invalid `BUN_JSC_*` variable exists in the environment (from a previous configuration, an inherited environment, or a mistake in the unit file), the preflight script catches it.
 
 ### Sourcing interactively
 
-When running better-ccflare outside systemd, source the script before starting:
+When running ClankerMux outside systemd, source the script before starting:
 
 ```sh
-. /opt/better-ccflare/scripts/preflight-env.sh
+. /opt/clankermux/scripts/preflight-env.sh
 exec bun run better-ccflare --smol --serve
 ```
 
@@ -122,7 +122,7 @@ MemoryMax=3G      # Hard kill if exceeded (OOM)
 MemoryHigh=2G     # Kernel applies memory pressure, reclaims pages
 ```
 
-Set `MemoryMax` above what the process actually needs. `MemoryHigh` applies back-pressure before the hard limit. Combined with `--smol`, this keeps better-ccflare within predictable bounds.
+Set `MemoryMax` above what the process actually needs. `MemoryHigh` applies back-pressure before the hard limit. Combined with `--smol`, this keeps ClankerMux within predictable bounds.
 
 ### CPU
 
@@ -146,7 +146,7 @@ This means:
 - systemd restarts the process on any exit (including crashes)
 - It waits 5 seconds between restart attempts
 - If the process crashes 5 times within 120 seconds, systemd stops trying and marks the unit as failed
-- After a `StartLimitBurst` failure, manual intervention is required: `systemctl reset-failed better-ccflare && systemctl start better-ccflare`
+- After a `StartLimitBurst` failure, manual intervention is required: `systemctl reset-failed clankermux && systemctl start clankermux`
 
 Without the preflight script, an invalid `BUN_JSC_*` variable would burn through all 5 restart attempts in ~25 seconds, causing total proxy downtime until an operator notices.
 
@@ -162,14 +162,14 @@ Without the preflight script, an invalid `BUN_JSC_*` variable would burn through
 
 ```sh
 # Check journal for the crash
-journalctl -u better-ccflare --no-pager -n 20
+journalctl -u clankermux --no-pager -n 20
 
 # Reset the failed state
-systemctl reset-failed better-ccflare
+systemctl reset-failed clankermux
 
 # Fix the unit file, then reload and start
 systemctl daemon-reload
-systemctl start better-ccflare
+systemctl start clankermux
 ```
 
 ### Forgetting daemon-reload
@@ -178,12 +178,12 @@ After editing a unit file, you must run `systemctl daemon-reload` before restart
 
 ### Running as root
 
-The reference unit file uses a dedicated `better-ccflare` user. Create it:
+The reference unit file uses a dedicated `clankermux` user. Create it:
 
 ```sh
-useradd --system --no-create-home --shell /usr/sbin/nologin better-ccflare
-mkdir -p /var/lib/better-ccflare
-chown better-ccflare:better-ccflare /var/lib/better-ccflare
+useradd --system --no-create-home --shell /usr/sbin/nologin clankermux
+mkdir -p /var/lib/clankermux
+chown clankermux:clankermux /var/lib/clankermux
 ```
 
 ### Database path permissions
@@ -191,12 +191,12 @@ chown better-ccflare:better-ccflare /var/lib/better-ccflare
 If using the default SQLite database, ensure the service user has write access:
 
 ```sh
-mkdir -p /var/lib/better-ccflare
-chown better-ccflare:better-ccflare /var/lib/better-ccflare
+mkdir -p /var/lib/clankermux
+chown clankermux:clankermux /var/lib/clankermux
 ```
 
-Set the database path in the unit file:
+Set the database path in the unit file (legacy `BETTER_CCFLARE_DB_PATH` still honored):
 
 ```ini
-Environment=BETTER_CCFLARE_DB_PATH=/var/lib/better-ccflare/better-ccflare.db
+Environment=CLANKERMUX_DB_PATH=/var/lib/clankermux/clankermux.db
 ```

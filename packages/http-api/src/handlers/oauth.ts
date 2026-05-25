@@ -1,28 +1,24 @@
 import crypto from "node:crypto";
-import { Config } from "@better-ccflare/config";
-import {
-	patterns,
-	validatePriority,
-	validateString,
-} from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import { Config } from "@clankermux/config";
+import { patterns, validatePriority, validateString } from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	BadRequest,
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
 	NotFound,
-} from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
-import { createOAuthFlow } from "@better-ccflare/oauth-flow";
+} from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
+import { createOAuthFlow } from "@clankermux/oauth-flow";
 import {
 	initiateCodexDeviceFlow,
 	pollCodexForToken,
-} from "@better-ccflare/providers/codex";
+} from "@clankermux/providers/codex";
 import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
-} from "@better-ccflare/providers/qwen";
+} from "@clankermux/providers/qwen";
 
 const log = new Logger("OAuthHandler");
 
@@ -699,8 +695,8 @@ export function createAnthropicReauthCallbackHandler(
 			try {
 				const oauthFlow = await createOAuthFlow(dbOps, config);
 
-				const oauthProvider = await import("@better-ccflare/providers").then(
-					(m) => m.getOAuthProvider("anthropic"),
+				const oauthProvider = await import("@clankermux/providers").then((m) =>
+					m.getOAuthProvider("anthropic"),
 				);
 				if (!oauthProvider) {
 					throw new Error("OAuth provider not found");
@@ -911,8 +907,8 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 
 				// We need to reconstruct the flow data since we can't pass the full BeginResult through HTTP
 				// The OAuth flow will handle the token exchange and account creation
-				const oauthProvider = await import("@better-ccflare/providers").then(
-					(m) => m.getOAuthProvider("anthropic"),
+				const oauthProvider = await import("@clankermux/providers").then((m) =>
+					m.getOAuthProvider("anthropic"),
 				);
 				if (!oauthProvider) {
 					throw new Error("OAuth provider not found");

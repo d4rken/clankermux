@@ -1,6 +1,6 @@
-import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { jsonResponse } from "@better-ccflare/http-common";
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
+import { jsonResponse } from "@clankermux/http-common";
 import type { CleanupResponse } from "../types";
 
 export function createCleanupHandler(

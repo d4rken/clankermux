@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 
 /**
  * Payload encryption at rest using AES-256-GCM (Web Crypto).

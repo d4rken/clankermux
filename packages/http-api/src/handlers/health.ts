@@ -1,8 +1,8 @@
-import type { Config } from "@better-ccflare/config";
-import { isAccountAvailable, TtlCache } from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { jsonResponse } from "@better-ccflare/http-common";
-import type { Account } from "@better-ccflare/types";
+import type { Config } from "@clankermux/config";
+import { isAccountAvailable, TtlCache } from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
+import { jsonResponse } from "@clankermux/http-common";
+import type { Account } from "@clankermux/types";
 import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
 
 type AsyncWriterHealthFn = () => {

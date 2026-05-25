@@ -62,7 +62,7 @@ describe("CLI Integration Tests", () => {
 
 	beforeEach(() => {
 		// Create temp directory for SSL cert tests
-		tempDir = join(tmpdir(), `better-ccflare-test-${Date.now()}`);
+		tempDir = join(tmpdir(), `clankermux-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempSslKeyPath = join(tempDir, "test.key");
 		tempSslCertPath = join(tempDir, "test.crt");
@@ -92,7 +92,7 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["--version"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("ClankerMux v");
 			expect(result.stdout).toMatch(/v\d+\.\d+\.\d+/);
 		});
 
@@ -100,7 +100,7 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["-v"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("ClankerMux v");
 		});
 
 		it("should exit quickly for version command", async () => {
@@ -118,7 +118,7 @@ describe("CLI Integration Tests", () => {
 			const result = await runCLI(["--help"]);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare");
+			expect(result.stdout).toContain("ClankerMux");
 			expect(result.stdout).toContain("Usage:");
 			expect(result.stdout).toContain("Options:");
 			expect(result.stdout).toContain("--serve");
@@ -232,9 +232,7 @@ describe("CLI Integration Tests", () => {
 
 			const output = result.stdout + result.stderr;
 			expect(output).toContain("Example:");
-			expect(output).toMatch(
-				/better-ccflare.*--add-account.*--mode.*--priority/,
-			);
+			expect(output).toMatch(/clankermux.*--add-account.*--mode.*--priority/);
 		});
 
 		// Note: "max" mode is remapped to "claude-oauth" with a deprecation warning,
@@ -271,7 +269,7 @@ describe("CLI Integration Tests", () => {
 
 			// Version should take precedence and exit early
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain("better-ccflare v");
+			expect(result.stdout).toContain("ClankerMux v");
 		});
 	});
 

@@ -3,15 +3,11 @@ import {
 	logError,
 	ProviderError,
 	TIME_CONSTANTS,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import { stripCacheControlFromOpenAIRequest } from "@better-ccflare/openai-formats";
-import { getProvider, usageCache } from "@better-ccflare/providers";
-import type {
-	Account,
-	RateLimitReason,
-	RequestMeta,
-} from "@better-ccflare/types";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
+import { getProvider, usageCache } from "@clankermux/providers";
+import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
@@ -538,8 +534,8 @@ export async function proxyWithAccount(
 		// keepalive guard's behaviour: any non-empty header value triggers the
 		// skip, matching what `!req.headers.get(...)` returned before.
 		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+			!!req.headers.get("x-clankermux-keepalive") ||
+			!!req.headers.get("x-clankermux-auto-refresh");
 		if (!isSyntheticInternal) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
@@ -738,7 +734,7 @@ export async function proxyWithAccount(
 						// here drains the pool to zero routable accounts even
 						// though no real user-facing rate limit was hit.
 						const isKeepalive =
-							req.headers.get("x-better-ccflare-keepalive") === "true";
+							req.headers.get("x-clankermux-keepalive") === "true";
 						if (isKeepalive) {
 							log.warn(
 								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
@@ -881,7 +877,7 @@ export async function proxyWithAccount(
 					// keepalive bursts can trip Anthropic's per-IP limit even when
 					// individual accounts are healthy.
 					const isKeepalive =
-						req.headers.get("x-better-ccflare-keepalive") === "true";
+						req.headers.get("x-clankermux-keepalive") === "true";
 					if (isKeepalive) {
 						log.warn(
 							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
@@ -934,15 +930,12 @@ export async function proxyWithAccount(
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID without needing the original request object.
 		const responseHeaders = new Headers(rawResponse.headers);
-		responseHeaders.set("x-better-ccflare-request-id", requestMeta.id);
+		responseHeaders.set("x-clankermux-request-id", requestMeta.id);
 		const internalRequestStream = transformedRequest.headers.get(
-			"x-better-ccflare-request-stream",
+			"x-clankermux-request-stream",
 		);
 		if (internalRequestStream === "true" || internalRequestStream === "false") {
-			responseHeaders.set(
-				"x-better-ccflare-request-stream",
-				internalRequestStream,
-			);
+			responseHeaders.set("x-clankermux-request-stream", internalRequestStream);
 		}
 		const taggedRawResponse = new Response(rawResponse.body, {
 			status: rawResponse.status,
@@ -1112,7 +1105,7 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 			headers: {
 				"Content-Type": "application/json",
 				"Retry-After": String(retryAfterSeconds),
-				"x-better-ccflare-pool-status": "exhausted",
+				"x-clankermux-pool-status": "exhausted",
 			},
 		},
 	);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
-import { CLAUDE_MODEL_IDS } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { CLAUDE_MODEL_IDS } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import { resolveDbPath } from "./paths";
 import { analyzeIndexUsage } from "./performance-indexes";
 

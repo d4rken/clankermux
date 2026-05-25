@@ -2,13 +2,10 @@ import {
 	registerDisposable,
 	ServiceUnavailableError,
 	TokenRefreshError,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import {
-	getProvider,
-	type TokenRefreshResult,
-} from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { getProvider, type TokenRefreshResult } from "@clankermux/providers";
+import type { Account } from "@clankermux/types";
 import { TOKEN_REFRESH_BACKOFF_MS, TOKEN_SAFETY_WINDOW_MS } from "../constants";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {

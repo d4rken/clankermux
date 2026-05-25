@@ -1,4 +1,4 @@
-import type { Config } from "@better-ccflare/config";
+import type { Config } from "@clankermux/config";
 import {
 	DEFAULT_AGENT_MODEL,
 	NETWORK,
@@ -7,12 +7,12 @@ import {
 	TIME_CONSTANTS,
 	validateNumber,
 	validateString,
-} from "@better-ccflare/core";
+} from "@clankermux/core";
 import {
 	BadRequest,
 	errorResponse,
 	jsonResponse,
-} from "@better-ccflare/http-common";
+} from "@clankermux/http-common";
 import type { ConfigResponse, RetentionSetRequest } from "../types";
 
 /**

@@ -1,4 +1,4 @@
-import type { AnalyticsResponse } from "@better-ccflare/types";
+import type { AnalyticsResponse } from "@clankermux/types";
 import { useCallback, useEffect, useRef } from "react";
 import { api } from "../api";
 import { useRequestDeduplication } from "./useRequestBatching";

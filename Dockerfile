@@ -43,27 +43,28 @@ RUN echo "=== Binary Download Information ===" && \
       DOWNLOAD_URL="https://github.com/tombii/better-ccflare/releases/download/v${VERSION}/better-ccflare-linux-${ARCH}"; \
     fi && \
     echo "Downloading from: ${DOWNLOAD_URL}" && \
-    curl -L -f -o /usr/local/bin/better-ccflare "${DOWNLOAD_URL}" || (echo "Failed to download binary from ${DOWNLOAD_URL}"; exit 1) && \
-    chmod +x /usr/local/bin/better-ccflare && \
+    curl -L -f -o /usr/local/bin/clankermux "${DOWNLOAD_URL}" || (echo "Failed to download binary from ${DOWNLOAD_URL}"; exit 1) && \
+    chmod +x /usr/local/bin/clankermux && \
     echo "Binary downloaded successfully" && \
-    file /usr/local/bin/better-ccflare && \
+    file /usr/local/bin/clankermux && \
     # Verify the binary can execute (basic sanity check)
-    /usr/local/bin/better-ccflare --version || (echo "Binary verification failed - exec format error"; exit 1) && \
+    /usr/local/bin/clankermux --version || (echo "Binary verification failed - exec format error"; exit 1) && \
     echo "==================================="
 
 # Create a non-root user to run the application
-RUN useradd -r -u 1000 -m -s /bin/bash ccflare && \
+RUN useradd -r -u 1000 -m -s /bin/bash clankermux && \
     mkdir -p /data && \
-    chown -R ccflare:ccflare /data /app
+    chown -R clankermux:clankermux /data /app
 
 # Set environment variables
+# (legacy BETTER_CCFLARE_* names are still honored by the app)
 ENV NODE_ENV=production
-ENV BETTER_CCFLARE_DB_PATH=/data/better-ccflare.db
+ENV CLANKERMUX_DB_PATH=/data/clankermux.db
 ENV XDG_CONFIG_HOME=/data
-ENV BETTER_CCFLARE_LOG_DIR=/app/logs
+ENV CLANKERMUX_LOG_DIR=/app/logs
 
 # Create logs directory with proper permissions
-RUN mkdir -p /app/logs /data && chown -R ccflare:ccflare /app/logs /data
+RUN mkdir -p /app/logs /data && chown -R clankermux:clankermux /app/logs /data
 
 # Expose default port
 EXPOSE 8080
@@ -75,25 +76,25 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Add labels for version tracking (will be overridden by GitHub Actions metadata)
 ARG VERSION
 LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.title="better-ccflare"
+LABEL org.opencontainers.image.title="ClankerMux"
 LABEL org.opencontainers.image.description="Load balancer proxy for Claude API with intelligent distribution across multiple OAuth accounts"
 LABEL org.opencontainers.image.source="https://github.com/tombii/better-ccflare"
 
 # Create startup script that shows version
 RUN echo '#!/bin/bash\n\
 echo "================================="\n\
-echo "better-ccflare Docker Container"\n\
+echo "ClankerMux Docker Container"\n\
 echo "================================="\n\
 echo "Architecture: $(uname -m)"\n\
 echo ""\n\
-/usr/local/bin/better-ccflare --version\n\
+/usr/local/bin/clankermux --version\n\
 echo "================================="\n\
 echo ""\n\
-exec /usr/local/bin/better-ccflare "$@"\n\
+exec /usr/local/bin/clankermux "$@"\n\
 ' > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 
 # Switch to non-root user
-USER ccflare
+USER clankermux
 
 # Add volume mount for persistent data only
 VOLUME ["/data"]

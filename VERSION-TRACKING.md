@@ -69,18 +69,18 @@ The version number is defined in:
    const packageJson = await Bun.file("./package.json").json();
    const version = packageJson.version; // "1.2.28"
    ```
-4. Bun compiles with: `--define process.env.BETTER_CCFLARE_VERSION='"1.2.28"'`
+4. Bun compiles with: `--define __CLANKERMUX_VERSION__='"1.2.28"'`
 
 **Where it appears**:
 - GitHub Release: `v1.2.28`
 - Binary filenames: `better-ccflare-linux-amd64` (version in release tag)
-- Runtime: `better-ccflare --version` → `1.2.28`
+- Runtime: `clankermux --version` → `1.2.28`
 - Download URL: `https://github.com/tombii/better-ccflare/releases/download/v1.2.28/better-ccflare-linux-amd64`
 
 **How it's set**:
 - Release tag: From git tag (`v1.2.28`)
 - Binary version: From `package.json` during build
-- Runtime version: Compiled into binary via `BETTER_CCFLARE_VERSION` env var
+- Runtime version: Compiled into binary via the `__CLANKERMUX_VERSION__` build define (legacy `BETTER_CCFLARE_VERSION` env var still honored)
 
 ### 3. Docker Images (ghcr.io)
 
@@ -109,7 +109,7 @@ The version number is defined in:
 - Image tags: `ghcr.io/tombii/better-ccflare:latest`
 - Image labels: `org.opencontainers.image.version=1.2.28`
 - Container registry: https://github.com/tombii/better-ccflare/pkgs/container/better-ccflare
-- Runtime inside container: `better-ccflare --version` → `1.2.28`
+- Runtime inside container: `clankermux --version` → `1.2.28`
 
 **How it's set**:
 - Image tags: Automatically from git tag via `docker/metadata-action`
@@ -122,7 +122,7 @@ The version number is defined in:
 docker inspect ghcr.io/tombii/better-ccflare:latest | jq '.[0].Config.Labels'
 
 # Check binary version inside container
-docker run --rm ghcr.io/tombii/better-ccflare:latest better-ccflare --version
+docker run --rm ghcr.io/tombii/better-ccflare:latest clankermux --version
 ```
 
 ## Version Consistency Verification
@@ -158,13 +158,13 @@ docker image inspect ghcr.io/tombii/better-ccflare:latest | jq '.[0].Config.Labe
 # Output: "1.2.28"
 
 # Check binary version
-docker run --rm ghcr.io/tombii/better-ccflare:latest better-ccflare --version
+docker run --rm ghcr.io/tombii/better-ccflare:latest clankermux --version
 # Output: 1.2.28
 ```
 
 ### Installed Binary
 ```bash
-better-ccflare --version
+clankermux --version
 # Output: 1.2.28
 ```
 
@@ -175,9 +175,11 @@ The version is accessible at runtime via:
 ```typescript
 // packages/core/src/version.ts
 export function getVersion(): string {
-  // Try environment variable first (set during compilation)
-  if (process.env.BETTER_CCFLARE_VERSION) {
-    return process.env.BETTER_CCFLARE_VERSION;
+  // Try environment variable first (set during compilation).
+  // readEnv honors CLANKERMUX_VERSION and the legacy BETTER_CCFLARE_VERSION name.
+  const envVersion = readEnv("VERSION");
+  if (envVersion) {
+    return envVersion;
   }
 
   // Fallback to hardcoded version (updated by pre-push hook)
@@ -215,7 +217,7 @@ When git tag `v1.2.28` is pushed, the following Docker tags are created:
 
 ## Versioning Scheme
 
-better-ccflare follows Semantic Versioning (SemVer):
+ClankerMux follows Semantic Versioning (SemVer):
 
 ```
 v1.2.28
@@ -270,7 +272,7 @@ git push origin v1.2.28
 **Fix**: Rebuild with proper version:
 ```bash
 cd apps/tui
-bun run build  # Includes BETTER_CCFLARE_VERSION
+bun run build  # Includes CLANKERMUX_VERSION
 ```
 
 ## Summary
@@ -281,6 +283,6 @@ bun run build  # Includes BETTER_CCFLARE_VERSION
 ✅ **Git tag drives automation**: Triggers multi-arch builds + Docker publish
 ✅ **Semantic versioning**: Major.Minor.Patch (currently auto-incrementing patch only)
 ✅ **Multiple Docker tags**: Specific version + minor + major + latest
-✅ **Runtime accessible**: `better-ccflare --version` works everywhere
+✅ **Runtime accessible**: `clankermux --version` works everywhere
 
 The entire system ensures that when you push to `main`, all platforms receive the same version number automatically!

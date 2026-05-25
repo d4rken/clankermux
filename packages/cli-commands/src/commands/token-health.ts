@@ -1,9 +1,9 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	checkAllAccountsHealth,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
-} from "@better-ccflare/proxy";
+} from "@clankermux/proxy";
 
 /**
  * Check token health for all accounts

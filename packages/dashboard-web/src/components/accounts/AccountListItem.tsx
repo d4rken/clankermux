@@ -1,4 +1,4 @@
-import { AccountPresenter } from "@better-ccflare/ui-common";
+import { AccountPresenter } from "@clankermux/ui-common";
 import {
 	AlertCircle,
 	Edit2,

@@ -1,4 +1,4 @@
-import { formatCost } from "@better-ccflare/ui-common";
+import { formatCost } from "@clankermux/ui-common";
 import { useMemo } from "react";
 import { CHART_COLORS, COLORS } from "../../constants";
 import {

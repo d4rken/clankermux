@@ -2,16 +2,20 @@ import { existsSync, realpathSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { Config } from "@better-ccflare/config";
-import { CLAUDE_MODEL_IDS, isValidClaudeModel } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import { validatePathOrThrow } from "@better-ccflare/security";
+import { Config } from "@clankermux/config";
+import {
+	CLAUDE_MODEL_IDS,
+	isValidClaudeModel,
+	readEnv,
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { validatePathOrThrow } from "@clankermux/security";
 import type {
 	Agent,
 	AgentTool,
 	AgentWorkspace,
 	AllowedModel,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import {
 	getAgentsDirectory,
 	getPluginManifestPath,
@@ -26,7 +30,8 @@ interface AgentCache {
 
 const CACHE_TTL_MS = 30 * 1000; // 30 seconds
 const DEFAULT_COLOR = "gray";
-const PLUGIN_AGENT_DISCOVERY_ENV = "BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS";
+// Plugin-agent discovery is opt-in via CLANKERMUX_DISCOVER_PLUGIN_AGENTS=true
+// (legacy BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS still honored via readEnv).
 
 const log = new Logger("AgentRegistry");
 
@@ -309,7 +314,7 @@ export class AgentRegistry {
 		seenIds: Set<string>,
 		seenRealPaths: Set<string>,
 	): Promise<void> {
-		if (process.env[PLUGIN_AGENT_DISCOVERY_ENV] !== "true") return;
+		if (readEnv("DISCOVER_PLUGIN_AGENTS") !== "true") return;
 
 		const manifestPath = this.manifestPathOverride ?? getPluginManifestPath();
 		const pluginEntries = parsePluginManifest(manifestPath);

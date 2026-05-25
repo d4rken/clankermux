@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	checkAllAccountsHealth,
 	getAccountsNeedingReauth,
-} from "@better-ccflare/proxy";
+} from "@clankermux/proxy";
 import {
 	createAccountTokenHealthHandler,
 	createReauthNeededHandler,

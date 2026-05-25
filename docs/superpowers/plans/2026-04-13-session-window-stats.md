@@ -82,7 +82,7 @@ git commit -m "feat: add sessionStats field to AccountResponse type"
 In `packages/database/src/repositories/stats.repository.ts`, add this import at the top (after the existing import):
 
 ```typescript
-import type { SessionStats } from "@better-ccflare/types";
+import type { SessionStats } from "@clankermux/types";
 ```
 
 Then add the `getSessionStats()` method at the end of the `StatsRepository` class, before the closing `}`:

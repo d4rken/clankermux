@@ -7,8 +7,8 @@ import {
 	it,
 } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { DatabaseFactory } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
+import { DatabaseFactory } from "@clankermux/database";
 import { createAccountModelMappingsUpdateHandler } from "../accounts";
 
 const TEST_DB_PATH = "/tmp/test-model-mappings-update.db";

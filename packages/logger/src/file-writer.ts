@@ -8,7 +8,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { LogEvent } from "@better-ccflare/types";
+import { readEnv } from "@clankermux/core";
+import type { LogEvent } from "@clankermux/types";
 
 // Local constants to avoid circular dependency with core
 const BUFFER_SIZES = {
@@ -41,9 +42,7 @@ export class LogFileWriter implements Disposable {
 
 	constructor() {
 		// Use environment variable if set, otherwise use tmp folder
-		this.logDir =
-			process.env.BETTER_CCFLARE_LOG_DIR ||
-			join(tmpdir(), "better-ccflare-logs");
+		this.logDir = readEnv("LOG_DIR") || join(tmpdir(), "clankermux-logs");
 		if (!existsSync(this.logDir)) {
 			mkdirSync(this.logDir, { recursive: true });
 		}

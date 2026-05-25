@@ -1,6 +1,6 @@
-# Contributing to better-ccflare
+# Contributing to ClankerMux
 
-Welcome to better-ccflare! We're thrilled that you're interested in contributing to our Claude load balancer project. This document provides guidelines and instructions for contributing to the project.
+Welcome to ClankerMux! We're thrilled that you're interested in contributing to our Claude load balancer project. This document provides guidelines and instructions for contributing to the project.
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ Welcome to better-ccflare! We're thrilled that you're interested in contributing
 
 ## Welcome & Code of Conduct
 
-First off, thank you for considering contributing to better-ccflare! We welcome contributions from everyone, regardless of their background or experience level.
+First off, thank you for considering contributing to ClankerMux! We welcome contributions from everyone, regardless of their background or experience level.
 
 ### Our Pledge
 
@@ -172,7 +172,7 @@ When contributing, ensure any major architectural changes or new patterns are do
 
 ## Project Structure
 
-better-ccflare is organized as a Bun monorepo with clear separation of concerns:
+ClankerMux is organized as a Bun monorepo with clear separation of concerns:
 
 ```
 better-ccflare/
@@ -208,7 +208,7 @@ better-ccflare/
 ### Package Naming Convention
 
 - Apps: Simple names (e.g., `server`, `cli`, `lander`)
-- Packages: Prefixed with `@better-ccflare/` (e.g., `@better-ccflare/core`, `@better-ccflare/database`)
+- Packages: Prefixed with `@clankermux/` (e.g., `@clankermux/core`, `@clankermux/database`)
 
 ## Coding Standards
 
@@ -303,7 +303,7 @@ bun run lint
 
 1. **Import Order** (automatically organized by Biome):
    - External packages
-   - Internal packages (`@better-ccflare/*`)
+   - Internal packages (`@clankermux/*`)
    - Relative imports
    - Type imports
 
@@ -314,10 +314,10 @@ bun run lint
 
    ```typescript
    // Good
-   import { Database } from '@better-ccflare/database';
-   import { LoadBalancer } from '@better-ccflare/load-balancer';
+   import { Database } from '@clankermux/database';
+   import { LoadBalancer } from '@clankermux/load-balancer';
    import { formatDate } from './utils';
-   import type { Account } from '@better-ccflare/types';
+   import type { Account } from '@clankermux/types';
    
    // Bad
    import { Database } from '../../../packages/database/src';
@@ -720,7 +720,7 @@ Contributors are recognized in:
 The CLI functionality provides explicit commands for all operations. Use `bun run cli` with command-line flags:
 
 ```bash
-# If better-ccflare is not installed globally, use:
+# If clankermux is not installed globally, use:
 # bun run cli [options]
 # or build and run with: bun run better-ccflare
 
@@ -813,7 +813,7 @@ bun run build:lander
 
 1. **TypeScript errors**: Run `bun run typecheck` to identify issues
 2. **Formatting issues**: Run `bun run format` to auto-fix
-3. **Import errors**: Ensure you're using workspace imports (`@better-ccflare/*`) for cross-package dependencies
+3. **Import errors**: Ensure you're using workspace imports (`@clankermux/*`) for cross-package dependencies
 4. **Database issues**: The SQLite database is created automatically in the data directory
 
-Thank you for contributing to better-ccflare! Your efforts help make Claude AI more accessible to everyone.
+Thank you for contributing to ClankerMux! Your efforts help make Claude AI more accessible to everyone.

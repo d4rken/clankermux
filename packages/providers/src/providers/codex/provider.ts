@@ -2,19 +2,19 @@ import {
 	mapModelName,
 	ValidationError,
 	validateEndpointUrl,
-} from "@better-ccflare/core";
-import { sanitizeProxyHeaders } from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
-import { resolveReasoningEffort } from "@better-ccflare/openai-formats";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import { sanitizeProxyHeaders } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
+import { resolveReasoningEffort } from "@clankermux/openai-formats";
+import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 
 const log = new Logger("CodexProvider");
 
 const INTERNAL_HEADERS = [
-	"x-better-ccflare-request-id",
-	"x-better-ccflare-request-stream",
+	"x-clankermux-request-id",
+	"x-clankermux-request-stream",
 ];
 
 function sanitizeResponseHeaders(headers: Headers): Headers {
@@ -202,8 +202,8 @@ interface StreamState {
 
 export class CodexProvider extends BaseProvider {
 	name = "codex";
-	// Fallback map: proxy-operations.ts injects x-better-ccflare-request-id and
-	// x-better-ccflare-request-stream into the upstream response before calling
+	// Fallback map: proxy-operations.ts injects x-clankermux-request-id and
+	// x-clankermux-request-stream into the upstream response before calling
 	// processResponse, so headerRequestedStream is normally set. This map covers
 	// the race where a response arrives after the 30s TTL sweep evicts the entry.
 	private requestStreamById = new Map<
@@ -340,7 +340,7 @@ export class CodexProvider extends BaseProvider {
 		try {
 			this.sweepRequestStreamById();
 			const body = (await request.json()) as AnthropicRequest;
-			const requestId = request.headers.get("x-better-ccflare-request-id");
+			const requestId = request.headers.get("x-clankermux-request-id");
 			if (requestId) {
 				this.requestStreamById.set(requestId, {
 					stream: body.stream === true,
@@ -356,7 +356,7 @@ export class CodexProvider extends BaseProvider {
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
 			newHeaders.set(
-				"x-better-ccflare-request-stream",
+				"x-clankermux-request-stream",
 				body.stream === true ? "true" : "false",
 			);
 			newHeaders.delete("content-length");
@@ -380,9 +380,9 @@ export class CodexProvider extends BaseProvider {
 		_account: Account | null,
 	): Promise<Response> {
 		const contentType = response.headers.get("content-type");
-		const requestId = response.headers.get("x-better-ccflare-request-id");
+		const requestId = response.headers.get("x-clankermux-request-id");
 		const headerRequestedStream = response.headers.get(
-			"x-better-ccflare-request-stream",
+			"x-clankermux-request-stream",
 		);
 		const requestedStream =
 			headerRequestedStream === "true"
@@ -689,7 +689,7 @@ export class CodexProvider extends BaseProvider {
 		response: Response,
 	): Promise<Response> {
 		const requestId =
-			response.headers.get("x-better-ccflare-request-id") ?? "unknown";
+			response.headers.get("x-clankermux-request-id") ?? "unknown";
 		const transformed = this.transformStreamingResponse(response);
 		const reader = transformed.body
 			?.pipeThrough(new TextDecoderStream())
@@ -865,7 +865,7 @@ export class CodexProvider extends BaseProvider {
 
 	private transformStreamingResponse(response: Response): Response {
 		const requestId =
-			response.headers.get("x-better-ccflare-request-id") ?? "unknown";
+			response.headers.get("x-clankermux-request-id") ?? "unknown";
 		if (process.env.DEBUG?.includes("model") || process.env.DEBUG === "true") {
 			log.info(
 				`[codex:model-debug] request_id=${requestId} transformStreamingResponse initial fallback model=gpt-5.4 until response.created arrives`,

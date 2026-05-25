@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { TtlCache } from "@better-ccflare/core";
+import { TtlCache } from "@clankermux/core";
 
 describe("TtlCache", () => {
 	let currentTime: number;

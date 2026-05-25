@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import type { LogEvent } from "@better-ccflare/types";
+import { readEnv } from "@clankermux/core";
+import type { LogEvent } from "@clankermux/types";
 import { logFileWriter } from "./file-writer";
 
 export enum LogLevel {
@@ -45,7 +46,7 @@ export class Logger {
 		this.prefix = prefix;
 		this.level = this.getLogLevelFromEnv() ?? level;
 		this.format = this.getFormatFromEnv();
-		// Only show console output in debug mode or if BETTER_CCFLARE_DEBUG or legacy ccflare_DEBUG is set
+		// Only show console output in debug mode or if CLANKERMUX_DEBUG (or legacy BETTER_CCFLARE_DEBUG/ccflare_DEBUG) is set
 		this.silentConsole = !(
 			this.isDebugEnabled() || this.level === LogLevel.DEBUG
 		);
@@ -76,10 +77,7 @@ export class Logger {
 		if (typeof process === "undefined" || !process.env) {
 			return false;
 		}
-		return (
-			process.env.BETTER_CCFLARE_DEBUG === "1" ||
-			process.env.ccflare_DEBUG === "1"
-		);
+		return readEnv("DEBUG") === "1";
 	}
 
 	// biome-ignore lint/suspicious/noExplicitAny: Logger needs to accept any data type

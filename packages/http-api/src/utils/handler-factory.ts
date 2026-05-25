@@ -1,4 +1,4 @@
-import { errorResponse } from "@better-ccflare/http-common";
+import { errorResponse } from "@clankermux/http-common";
 import type { APIContext } from "../types";
 
 export interface HandlerOptions {

@@ -1,4 +1,4 @@
-import type { Combo } from "@better-ccflare/types";
+import type { Combo } from "@clankermux/types";
 import { Edit, Trash2 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";

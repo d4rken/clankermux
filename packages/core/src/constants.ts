@@ -1,5 +1,5 @@
 /**
- * Centralized constants for the better-ccflare application
+ * Centralized constants for the ClankerMux application
  * All magic numbers should be defined here to improve maintainability
  */
 

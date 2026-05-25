@@ -2,8 +2,8 @@ import {
 	getEndpointUrl,
 	ValidationError,
 	validateEndpointUrl,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import {
 	convertAnthropicPathToOpenAI,
 	convertAnthropicRequestToOpenAI,
@@ -11,8 +11,8 @@ import {
 	type OpenAIRequest,
 	sanitizeHeaders,
 	transformStreamingResponse,
-} from "@better-ccflare/openai-formats";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/openai-formats";
+import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 

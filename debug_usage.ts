@@ -4,8 +4,8 @@
 import { usageCache, fetchUsageData } from "./packages/providers/src/usage-fetcher.ts";
 import { getValidAccessToken } from "./packages/proxy/src/handlers/token-manager.ts";
 import { createProxyContext } from "./packages/proxy/src/proxy.ts";
-import { DatabaseFactory } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
+import { DatabaseFactory } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("DebugUsage");
 

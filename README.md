@@ -1,4 +1,4 @@
-# better-ccflare 🛡️
+# ClankerMux 🛡️
 [![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
 
 **Track Every Request. Go Low-Level. Never Hit Rate Limits Again.**
@@ -8,9 +8,9 @@ The ultimate Claude API proxy with intelligent load balancing across multiple ac
 https://github.com/user-attachments/assets/c859872f-ca5e-4f8b-b6a0-7cc7461fe62a
 
 
-![better-ccflare Dashboard](apps/lander/src/screenshot-dashboard.png)
+![ClankerMux Dashboard](apps/lander/src/screenshot-dashboard.png)
 
-## Why better-ccflare?
+## Why ClankerMux?
 
 - **🚀 Zero Rate Limit Errors** - Automatically distribute requests across multiple accounts
 - **🤖 Multi-Provider Support** - Claude OAuth, Claude API console, Vertex AI, AWS Bedrock, NanoGPT, z.ai, Minimax, OpenRouter, Kilo, Codex (OpenAI OAuth), Anthropic-compatible, and OpenAI-compatible providers
@@ -65,8 +65,8 @@ This project builds upon the excellent foundation of [snipeship/ccflare](https:/
 ```bash
 npm install -g better-ccflare
 
-# Start better-ccflare (Server + Dashboard)
-better-ccflare
+# Start ClankerMux (Server + Dashboard)
+clankermux
 ```
 Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
 
@@ -76,8 +76,8 @@ Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#conf
 ```bash
 bun install -g better-ccflare
 
-# Start better-ccflare (Server + Dashboard)
-better-ccflare
+# Start ClankerMux (Server + Dashboard)
+clankermux
 ```
 Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
 ### Install Pre-compiled Binary (All Architectures)
@@ -147,7 +147,7 @@ bun install
 # Build dashboard (required before first run)
 bun run build
 
-# Start better-ccflare (TUI + Server)
+# Start ClankerMux (TUI + Server)
 bun run better-ccflare
 ```
 Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#configure-claude-sdk).
@@ -156,21 +156,21 @@ Continue to [Configure Claude SDK](https://github.com/tombii/better-ccflare#conf
 
 ### Environment Variables
 
-better-ccflare supports several environment variables for configuration:
+ClankerMux supports several environment variables for configuration. The `CLANKERMUX_*` names below are primary; the legacy `BETTER_CCFLARE_*` names are still honored for backward compatibility:
 
 ```bash
 # Server Configuration
 PORT=8080                              # Server port (default: 8080)
-BETTER_CCFLARE_HOST=0.0.0.0           # Server binding host (default: 0.0.0.0, use 127.0.0.1 for localhost-only)
+CLANKERMUX_HOST=0.0.0.0               # Server binding host (default: 0.0.0.0, use 127.0.0.1 for localhost-only) (legacy BETTER_CCFLARE_HOST still honored)
 CLIENT_ID=your-client-id              # OAuth client ID
-BETTER_CCFLARE_CONFIG_PATH=/path/to/config.json  # Custom config location
-BETTER_CCFLARE_DB_PATH=/path/to/database.db  # Custom database path (default: ~/.config/better-ccflare/better-ccflare.db)
+CLANKERMUX_CONFIG_PATH=/path/to/config.json  # Custom config location (legacy BETTER_CCFLARE_CONFIG_PATH still honored)
+CLANKERMUX_DB_PATH=/path/to/database.db  # Custom database path (default: ~/.config/clankermux/clankermux.db) (legacy BETTER_CCFLARE_DB_PATH still honored)
                                        # Use this for development/testing with a separate database
 
 # Logging and Debugging
 LOG_LEVEL=INFO                         # Log level (ERROR, WARN, INFO, DEBUG)
 LOG_FORMAT=json                        # Log format (json or text)
-better-ccflare_DEBUG=0                  # Enable debug mode (1 for enabled)
+CLANKERMUX_DEBUG=0                     # Enable debug mode (1 for enabled) (legacy BETTER_CCFLARE_DEBUG still honored)
 
 # SSL/TLS Configuration
 SSL_KEY_PATH=/path/to/key.pem          # SSL private key path (for HTTPS)
@@ -189,7 +189,7 @@ RETRY_BACKOFF=2                        # Retry backoff multiplier
 HEALTH_DETAIL_ENABLED=false            # Enable ?detail=1 on /health to expose per-account status (default: off, set true for internal monitoring)
 
 # Agent Discovery
-BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS=false  # Set to true to discover agents distributed by Claude Code plugins
+CLANKERMUX_DISCOVER_PLUGIN_AGENTS=false  # Set to true to discover agents distributed by Claude Code plugins (legacy BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS still honored)
                                        # (reads ~/.claude/plugins/installed_plugins.json)
 
 # Storage
@@ -216,13 +216,13 @@ PAYLOAD_ENCRYPTION_KEY=                # 64-character hex (32 bytes / AES-256). 
 - The key is read once at process start (and once per Bun worker). Rotating it requires a re-encrypt migration; not yet built.
 
 **Security Notes**:
-- Use `BETTER_CCFLARE_HOST=127.0.0.1` to bind only to localhost for better security
+- Use `CLANKERMUX_HOST=127.0.0.1` (legacy `BETTER_CCFLARE_HOST` still honored) to bind only to localhost for better security
 - Never commit `.env` files containing sensitive values to version control
 - Use environment-specific configuration for production deployments
 
 ### Using .env Files
 
-better-ccflare automatically supports `.env` files for easy configuration management. You can create a `.env` file in your project directory:
+ClankerMux automatically supports `.env` files for easy configuration management. You can create a `.env` file in your project directory:
 
 ```bash
 # Copy the example .env file
@@ -263,7 +263,7 @@ STORE_PAYLOADS=true
 **Usage with different deployment methods**:
 ```bash
 # CLI (binary or local development)
-better-ccflare --serve
+clankermux --serve
 
 # Docker Compose (place .env alongside docker-compose.yml)
 docker-compose up
@@ -288,15 +288,15 @@ docker-compose up -d
 
 # Or use docker run with environment variables
 docker run -d \
-  --name better-ccflare \
+  --name clankermux \
   -p 8080:8080 \
-  -v better-ccflare-data:/data \
+  -v clankermux-data:/data \
   -e SSL_KEY_PATH=/path/to/ssl/key.pem \
   -e SSL_CERT_PATH=/path/to/ssl/cert.pem \
   ghcr.io/tombii/better-ccflare:latest
 
 # View logs
-docker logs -f better-ccflare
+docker logs -f clankermux
 ```
 
 Once the container is running, **open http://localhost:8080 in your browser** to add and manage accounts through the Web UI. This is the recommended way — using `docker exec` to run CLI commands inside the container won't work for OAuth-based account modes since the container has no browser.
@@ -313,7 +313,7 @@ See [DOCKER.md](DOCKER.md) for detailed Docker documentation.
 
 ### Systemd Deployment
 
-For running better-ccflare as a native systemd service on Linux (without Docker), see the [Systemd Deployment Guide](docs/systemd.md). It covers unit file configuration, memory management with `--smol`, restart policies, and a preflight script that prevents `BUN_JSC_*` environment variable crashes.
+For running ClankerMux as a native systemd service on Linux (without Docker), see the [Systemd Deployment Guide](docs/systemd.md). It covers unit file configuration, memory management with `--smol`, restart policies, and a preflight script that prevents `BUN_JSC_*` environment variable crashes.
 
 ## Configure Claude SDK
 
@@ -325,7 +325,7 @@ If you have a Claude Pro or Team subscription and are logged into Claude CLI:
 # Set only the base URL - no API key needed!
 export ANTHROPIC_BASE_URL=http://localhost:8080
 
-# Make sure to configure your accounts in the better-ccflare dashboard
+# Make sure to configure your accounts in the ClankerMux dashboard
 
 # Start Claude CLI (uses your existing login)
 claude
@@ -344,14 +344,14 @@ claude /logout
 # Then set both the base URL and API key
 export ANTHROPIC_BASE_URL=http://localhost:8080
 
-# If better-ccflare has NO API keys configured (open access):
+# If ClankerMux has NO API keys configured (open access):
 export ANTHROPIC_AUTH_TOKEN=dummy-key
 
-# If better-ccflare HAS API keys configured (protected):
-# Generate a key first: better-ccflare --generate-api-key "My VPS"
-export ANTHROPIC_AUTH_TOKEN=btr-abcdef1234567890...  # Use your real better-ccflare API key
+# If ClankerMux HAS API keys configured (protected):
+# Generate a key first: clankermux --generate-api-key "My VPS"
+export ANTHROPIC_AUTH_TOKEN=btr-abcdef1234567890...  # Use your real ClankerMux API key
 
-# Make sure to configure your accounts in the better-ccflare dashboard
+# Make sure to configure your accounts in the ClankerMux dashboard
 
 # Start Claude CLI
 claude
@@ -359,34 +359,34 @@ claude
 
 ### Option 3: Remote/Headless VPS Setup (Secure Proxy)
 
-Use better-ccflare on a trusted server to avoid storing OAuth credentials on untrusted/temporary machines:
+Use ClankerMux on a trusted server to avoid storing OAuth credentials on untrusted/temporary machines:
 
-**On your trusted server (running better-ccflare):**
+**On your trusted server (running ClankerMux):**
 ```bash
 # Add your Claude account with OAuth
-better-ccflare --add-account myaccount --mode claude-oauth --priority 0
+clankermux --add-account myaccount --mode claude-oauth --priority 0
 
 # Generate an API key for remote access
-better-ccflare --generate-api-key "Remote VPS"
+clankermux --generate-api-key "Remote VPS"
 # Save the generated key: btr-abcdef1234567890...
 
 # Start the server (ensure it's accessible remotely)
-better-ccflare --serve
+clankermux --serve
 ```
 
 **On your untrusted/temporary VPS:**
 ```bash
-# Set the remote better-ccflare URL and API key
+# Set the remote ClankerMux URL and API key
 export ANTHROPIC_BASE_URL=https://your-server.com:8080
-export ANTHROPIC_AUTH_TOKEN=btr-abcdef1234567890...  # Your better-ccflare API key
+export ANTHROPIC_AUTH_TOKEN=btr-abcdef1234567890...  # Your ClankerMux API key
 
-# Start Claude CLI (no need to login - better-ccflare handles auth)
+# Start Claude CLI (no need to login - ClankerMux handles auth)
 claude
 ```
 
 **How it works:**
-- Claude Code CLI sends requests with your better-ccflare API key
-- better-ccflare validates the API key and proxies requests using its stored OAuth credentials
+- Claude Code CLI sends requests with your ClankerMux API key
+- ClankerMux validates the API key and proxies requests using its stored OAuth credentials
 - Your OAuth credentials stay secure on your trusted server
 - You can use Claude Code on any machine without storing sensitive credentials
 
@@ -394,27 +394,27 @@ claude
 
 - **Have Claude Pro/Team and working locally?** Use Option 1 (OAuth only) - simpler and no API key needed
 - **Working on untrusted/temporary machines?** Use Option 3 (Remote VPS setup) - keeps credentials secure
-- **Using only API keys in better-ccflare?** Use Option 2 (logout + API key)
+- **Using only API keys in ClankerMux?** Use Option 2 (logout + API key)
 - **Getting auth conflict warnings?** You have both methods active - choose one and follow its steps above
 
 ### SSL/HTTPS Configuration
 
-To enable HTTPS with better-ccflare, you'll need SSL certificates. Here are your options:
+To enable HTTPS with ClankerMux, you'll need SSL certificates. Here are your options:
 
 #### Option 1: Generate Self-Signed Certificates (Development/Local Use)
 
 ```bash
-# Generate a self-signed certificate on the better-ccflare host
+# Generate a self-signed certificate on the ClankerMux host
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes \
   -subj "/C=US/ST=State/L=City/O=Organization/CN=yourhostname"
 
-# Start better-ccflare with SSL
+# Start ClankerMux with SSL
 export SSL_KEY_PATH=/path/to/key.pem
 export SSL_CERT_PATH=/path/to/cert.pem
-better-ccflare
+clankermux
 
 # Or use command line flags
-better-ccflare --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem
+clankermux --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem
 ```
 
 **Trust the self-signed certificate on client machines:**
@@ -423,27 +423,27 @@ For self-signed certificates, you need to add the certificate to your system's t
 
 - **Linux (Ubuntu/Debian):**
   ```bash
-  # Copy cert.pem from the better-ccflare host to your client machine
-  sudo cp cert.pem /usr/local/share/ca-certificates/better-ccflare.crt
+  # Copy cert.pem from the ClankerMux host to your client machine
+  sudo cp cert.pem /usr/local/share/ca-certificates/clankermux.crt
   sudo update-ca-certificates
   ```
 
 - **Linux (Arch/Manjaro):**
   ```bash
-  # Copy cert.pem from the better-ccflare host to your client machine
-  sudo cp cert.pem /etc/ca-certificates/trust-source/anchors/better-ccflare.crt
+  # Copy cert.pem from the ClankerMux host to your client machine
+  sudo cp cert.pem /etc/ca-certificates/trust-source/anchors/clankermux.crt
   sudo trust extract-compat
   ```
 
 - **macOS:**
   ```bash
-  # Copy cert.pem from the better-ccflare host to your client machine
+  # Copy cert.pem from the ClankerMux host to your client machine
   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain cert.pem
   ```
 
 - **Windows (PowerShell as Administrator):**
   ```powershell
-  # Copy cert.pem from the better-ccflare host to your client machine
+  # Copy cert.pem from the ClankerMux host to your client machine
   Import-Certificate -FilePath cert.pem -CertStoreLocation Cert:\LocalMachine\Root
   ```
 
@@ -461,13 +461,13 @@ The `NODE_OPTIONS="--use-system-ca"` is **required** for Claude Code and other N
 
 #### Option 2: Use Production Certificates (Production/Remote Access)
 
-If you're running better-ccflare on a server with a domain name, use Let's Encrypt or your certificate provider:
+If you're running ClankerMux on a server with a domain name, use Let's Encrypt or your certificate provider:
 
 ```bash
 # Using Let's Encrypt certificates
 export SSL_KEY_PATH=/etc/letsencrypt/live/yourdomain.com/privkey.pem
 export SSL_CERT_PATH=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
-better-ccflare
+clankermux
 
 # Set the base URL to use HTTPS
 export ANTHROPIC_BASE_URL=https://yourdomain.com:8080
@@ -502,16 +502,16 @@ services:
       - ./letsencrypt:/letsencrypt
     restart: unless-stopped
 
-  better-ccflare:
+  clankermux:
     image: ghcr.io/tombii/better-ccflare:latest
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.ccflare.rule=Host(`your-domain.com`)"
-      - "traefik.http.routers.ccflare.entrypoints=websecure"
-      - "traefik.http.routers.ccflare.tls.certresolver=myresolver"
-      - "traefik.http.services.ccflare.loadbalancer.server.port=8080"
+      - "traefik.http.routers.clankermux.rule=Host(`your-domain.com`)"
+      - "traefik.http.routers.clankermux.entrypoints=websecure"
+      - "traefik.http.routers.clankermux.tls.certresolver=myresolver"
+      - "traefik.http.services.clankermux.loadbalancer.server.port=8080"
     volumes:
-      - ~/.config/better-ccflare:/root/.config/better-ccflare
+      - ~/.config/clankermux:/root/.config/clankermux
     restart: unless-stopped
 ```
 
@@ -551,7 +551,7 @@ No `NODE_OPTIONS` needed - Traefik provides trusted certificates automatically!
 3. Verify the certificate is in the system store:
    ```bash
    # Linux
-   ls -la /etc/ssl/certs/ | grep better-ccflare
+   ls -la /etc/ssl/certs/ | grep clankermux
 
    # macOS
    security find-certificate -a -c yourhostname -p /Library/Keychains/System.keychain
@@ -571,7 +571,7 @@ No `NODE_OPTIONS` needed - Traefik provides trusted certificates automatically!
 
 ### Issue: "Command is misspelled or could not be found" after npm install
 
-If you installed better-ccflare via npm on Windows and encounter an error like:
+If you installed ClankerMux via npm on Windows and encounter an error like:
 
 ```
 The command "C:\Program Files\nodejs\\node_modules\better-ccflare\dist\better-ccflare" is either
@@ -588,7 +588,7 @@ This is a **known npm bug on Windows** (see [npm/cli#969](https://github.com/npm
 npx better-ccflare
 ```
 
-This bypasses the npm wrapper script entirely and runs better-ccflare directly.
+This bypasses the npm wrapper script entirely and runs ClankerMux directly.
 
 **Option 2: Use the Pre-compiled Binary**
 
@@ -623,12 +623,12 @@ Bun doesn't have this bug and works correctly on Windows:
 ```powershell
 # Install bun from https://bun.sh
 bun install -g better-ccflare
-better-ccflare
+clankermux
 ```
 
 ### Root Cause
 
-This issue is caused by a bug in npm's wrapper script generation on Windows, where it incorrectly constructs paths with double backslashes (`\\nodejs\\\\node_modules`). This is a longstanding npm bug that affects many CLI packages, not just better-ccflare.
+This issue is caused by a bug in npm's wrapper script generation on Windows, where it incorrectly constructs paths with double backslashes (`\\nodejs\\\\node_modules`). This is a longstanding npm bug that affects many CLI packages, not just ClankerMux.
 
 The issue is being tracked in:
 - [npm/cli#969](https://github.com/npm/cli/issues/969) - Generated .cmd script bugs
@@ -666,7 +666,7 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 - API key performance tracking and detailed analytics
 
 ### 🛠️ Developer Tools
-- Powerful CLI (`better-ccflare`)
+- Powerful CLI (`clankermux`)
 - Web dashboard (`http://localhost:8080/dashboard`)
 - CLI for account management
 - REST API for automation

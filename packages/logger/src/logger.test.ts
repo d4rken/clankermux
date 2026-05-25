@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import type { LogEvent } from "@better-ccflare/types";
+import type { LogEvent } from "@clankermux/types";
 import { Logger, LogLevel, logBus } from "./index";
 
 describe("Logger error serialization", () => {

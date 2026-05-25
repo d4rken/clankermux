@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Account, RequestMeta } from "@better-ccflare/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -560,7 +560,7 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 
 describe("getModelList — model_fallbacks merge", () => {
 	it("merges model_fallbacks into the model list", async () => {
-		const { getModelList } = await import("@better-ccflare/core");
+		const { getModelList } = await import("@clankermux/core");
 		const account = makeAccount({
 			model_mappings: JSON.stringify({ sonnet: "qwen/qwen3.6-plus:free" }),
 			model_fallbacks: JSON.stringify({
@@ -575,13 +575,13 @@ describe("getModelList — model_fallbacks merge", () => {
 	});
 
 	it("returns single-element list when no fallbacks", async () => {
-		const { getModelList } = await import("@better-ccflare/core");
+		const { getModelList } = await import("@clankermux/core");
 		const list = getModelList("claude-sonnet-4-5", makeAccount());
 		expect(list).toEqual(["qwen/qwen3.6-plus:free"]);
 	});
 
 	it("returns array directly when model_mappings value is an array", async () => {
-		const { getModelList } = await import("@better-ccflare/core");
+		const { getModelList } = await import("@clankermux/core");
 		const account = makeAccount({
 			model_mappings: JSON.stringify({
 				sonnet: ["qwen/qwen3.6-plus:free", "meta-llama/llama-3.3-70b:free"],

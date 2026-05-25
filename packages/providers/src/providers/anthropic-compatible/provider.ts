@@ -1,5 +1,5 @@
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import {
 	type AnthropicCompatibleConfig,
 	BaseAnthropicCompatibleProvider,

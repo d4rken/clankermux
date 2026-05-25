@@ -1,4 +1,4 @@
-import { formatPercentage } from "@better-ccflare/ui-common";
+import { formatPercentage } from "@clankermux/ui-common";
 import { COLORS } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { BaseScatterChart } from "./BaseScatterChart";

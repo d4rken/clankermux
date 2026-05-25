@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-// Force @better-ccflare/core to initialise before @better-ccflare/types resolves its
+// Force @clankermux/core to initialise before @clankermux/types resolves its
 // circular dependency (types/agent.ts → core → core/strategy.ts → types/StrategyName).
 // Without this the enum is undefined when strategy.ts runs. Same pattern as stats-session-cost.test.ts.
-import "@better-ccflare/core";
+import "@clankermux/core";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { AccountRepository } from "../account.repository";
 

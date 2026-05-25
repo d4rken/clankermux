@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { AsyncDbWriter } from "@better-ccflare/database";
+import { AsyncDbWriter } from "@clankermux/database";
 import { createHealthHandler } from "../health";
 
 describe("health runtime payload", () => {
@@ -9,11 +9,11 @@ describe("health runtime payload", () => {
 				{ name: "paused1", paused: true, rate_limited_until: null },
 				{ name: "paused2", paused: true, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health");
@@ -32,11 +32,11 @@ describe("health runtime payload", () => {
 				{ name: "acc2", paused: false, rate_limited_until: null },
 				{ name: "acc3", paused: false, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(
 			db,
@@ -78,11 +78,11 @@ describe("health runtime payload", () => {
 			getAllAccounts: async () => [
 				{ name: "acc1", paused: false, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health");
@@ -300,10 +300,10 @@ describe("HTTP status codes", () => {
 			getAllAccounts: async () => [
 				{ name: "acc1", paused: false, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 		const response = await createHealthHandler(
 			db,
 			config,
@@ -320,10 +320,10 @@ describe("HTTP status codes", () => {
 					rate_limited_until: Date.now() + 3600000,
 				},
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 		const response = await createHealthHandler(
 			db,
 			config,
@@ -338,10 +338,10 @@ describe("HTTP status codes", () => {
 			getAllAccounts: async () => [
 				{ name: "acc1", paused: true, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 		const response = await createHealthHandler(
 			db,
 			config,
@@ -359,10 +359,10 @@ describe("HTTP status codes", () => {
 					rate_limited_until: Date.now() + 3600000,
 				},
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 		const config = {
 			getStrategy: () => "session",
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 		const response = await createHealthHandler(
 			db,
 			config,
@@ -399,12 +399,12 @@ describe("?detail=1 parameter", () => {
 					rate_limited_at: Date.now() - 60000,
 				},
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
@@ -441,12 +441,12 @@ describe("?detail=1 parameter", () => {
 			getAllAccounts: async () => [
 				{ name: "acc1", paused: false, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health");
@@ -465,12 +465,12 @@ describe("?detail=1 parameter", () => {
 					rate_limited_until: Date.now() - 1000,
 				},
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
@@ -486,12 +486,12 @@ describe("?detail=1 parameter", () => {
 			getAllAccounts: async () => [
 				{ name: "acc1", paused: false, rate_limited_until: null },
 			],
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => false,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
@@ -515,12 +515,12 @@ describe("cache isolation between detail and non-detail", () => {
 					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
 				];
 			},
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 
@@ -549,12 +549,12 @@ describe("cache isolation between detail and non-detail", () => {
 					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
 				];
 			},
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 
@@ -582,12 +582,12 @@ describe("cache isolation between detail and non-detail", () => {
 					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
 				];
 			},
-		} as unknown as import("@better-ccflare/database").DatabaseOperations;
+		} as unknown as import("@clankermux/database").DatabaseOperations;
 
 		const config = {
 			getStrategy: () => "session",
 			getHealthDetailEnabled: () => true,
-		} as unknown as import("@better-ccflare/config").Config;
+		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
 

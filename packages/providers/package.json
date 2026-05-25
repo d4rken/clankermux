@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/providers",
+	"name": "@clankermux/providers",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -16,8 +16,8 @@
 		"@aws-sdk/client-bedrock": "^3.991.0",
 		"@aws-sdk/client-bedrock-runtime": "^3.1014.0",
 		"@aws-sdk/credential-providers": "^3.1021.0",
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/openai-formats": "workspace:*",
+		"@clankermux/core": "workspace:*",
+		"@clankermux/openai-formats": "workspace:*",
 		"google-auth-library": "^10.6.2"
 	}
 }

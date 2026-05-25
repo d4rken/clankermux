@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import { EMBEDDED_WORKER_CODE } from "./inline-worker";
 import type {
 	OutgoingWorkerMessage,

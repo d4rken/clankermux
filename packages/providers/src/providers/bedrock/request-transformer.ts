@@ -2,7 +2,7 @@ import type {
 	ConverseStreamCommandInput,
 	Message,
 } from "@aws-sdk/client-bedrock-runtime";
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("BedrockRequestTransformer");
 

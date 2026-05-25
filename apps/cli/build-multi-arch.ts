@@ -15,27 +15,27 @@ const projectRoot = join(import.meta.dir, "../..");
 const platforms: Platform[] = [
 	{
 		target: "bun-linux-amd64",
-		outfile: "better-ccflare-linux-amd64",
+		outfile: "clankermux-linux-amd64",
 		description: "Linux x86_64",
 	},
 	{
 		target: "bun-linux-arm64",
-		outfile: "better-ccflare-linux-arm64",
+		outfile: "clankermux-linux-arm64",
 		description: "Linux ARM64",
 	},
 	{
 		target: "bun-darwin-x64",
-		outfile: "better-ccflare-macos-x86_64",
+		outfile: "clankermux-macos-x86_64",
 		description: "macOS Intel",
 	},
 	{
 		target: "bun-darwin-arm64",
-		outfile: "better-ccflare-macos-arm64",
+		outfile: "clankermux-macos-arm64",
 		description: "macOS Apple Silicon",
 	},
 	{
 		target: "bun-windows-x64",
-		outfile: "better-ccflare-windows-x64.exe",
+		outfile: "clankermux-windows-x64.exe",
 		description: "Windows x86_64",
 	},
 ];
@@ -132,7 +132,7 @@ async function buildWorker() {
 
 	// Build worker (now that embedded-tiktoken-wasm.ts exists)
 	execSync(
-		`BETTER_CCFLARE_VERSION=${version} bun build ../../packages/proxy/src/post-processor.worker.ts --outfile dist/post-processor.worker.js --target=bun --minify`,
+		`CLANKERMUX_VERSION=${version} bun build ../../packages/proxy/src/post-processor.worker.ts --outfile dist/post-processor.worker.js --target=bun --minify`,
 		{ stdio: "inherit" },
 	);
 
@@ -232,7 +232,7 @@ async function buildPlatform(platform: Platform) {
 		`--outfile dist/${platform.outfile}`,
 		`--target=${platform.target}`,
 		"--minify",
-		`--define __BETTER_CCFLARE_VERSION__='"${version}"'`,
+		`--define __CLANKERMUX_VERSION__='"${version}"'`,
 	].join(" ");
 
 	try {

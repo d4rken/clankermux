@@ -10,7 +10,7 @@
 # until StartLimitBurst is exhausted, resulting in total proxy downtime.
 #
 # This script is meant to run as ExecStartPre= in a systemd unit file,
-# or sourced before launching better-ccflare. It strips any BUN_JSC_*
+# or sourced before launching clankermux. It strips any BUN_JSC_*
 # variable not on a known-good allowlist.
 #
 # The allowlist is intentionally conservative. BUN_JSC_* is an unstable
@@ -18,8 +18,8 @@
 # the supported way to enable aggressive GC.
 #
 # Usage:
-#   ExecStartPre=/opt/better-ccflare/scripts/preflight-env.sh
-#   ExecStart=/usr/bin/better-ccflare --smol --serve --port 8889
+#   ExecStartPre=/opt/clankermux/scripts/preflight-env.sh
+#   ExecStart=/usr/bin/clankermux --smol --serve --port 8889
 #
 # This script always exits 0 so systemd does not abort the service start.
 #

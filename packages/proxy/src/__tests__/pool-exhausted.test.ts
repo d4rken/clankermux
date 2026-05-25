@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
 
@@ -134,7 +134,7 @@ describe("pool exhausted — 503 response", () => {
 		expect(Number(retryAfter)).toBeGreaterThan(0);
 	});
 
-	it("returns x-better-ccflare-pool-status: exhausted header", async () => {
+	it("returns x-clankermux-pool-status: exhausted header", async () => {
 		const ctx = makeContext([]);
 		const response = await handleProxy(
 			makeRequest(),
@@ -143,9 +143,7 @@ describe("pool exhausted — 503 response", () => {
 		);
 
 		expect(response.status).toBe(503);
-		expect(response.headers.get("x-better-ccflare-pool-status")).toBe(
-			"exhausted",
-		);
+		expect(response.headers.get("x-clankermux-pool-status")).toBe("exhausted");
 	});
 
 	it("returns Content-Type: application/json header", async () => {

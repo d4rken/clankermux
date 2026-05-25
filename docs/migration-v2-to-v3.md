@@ -1,6 +1,6 @@
 # Migration Guide: Version 2 to Version 3
 
-This guide covers the important changes and migration steps when upgrading from better-ccflare version 2.x to version 3.x.
+This guide covers the important changes and migration steps when upgrading from ClankerMux version 2.x to version 3.x.
 
 ## Overview
 
@@ -91,7 +91,7 @@ No breaking changes to the public API. All endpoints continue to work as before.
 Before upgrading, create a backup of your database:
 
 ```bash
-cp ~/.config/better-ccflare/better-ccflare.db ~/.config/better-ccflare/better-ccflare.db.backup
+cp ~/.config/clankermux/clankermux.db ~/.config/clankermux/clankermux.db.backup
 ```
 
 ### 2. Update to Version 3
@@ -111,10 +111,10 @@ bun install -g better-ccflare@latest
 
 ### 3. Start the Application
 
-Start better-ccflare normally. The migration will run automatically:
+Start ClankerMux normally. The migration will run automatically:
 
 ```bash
-better-ccflare
+clankermux
 ```
 
 You should see log messages indicating the migration is running:
@@ -129,7 +129,7 @@ Check that your accounts are properly configured:
 
 ```bash
 # List all accounts to verify provider types
-better-ccflare --list
+clankermux --list
 ```
 
 ## Provider-Specific Behavior

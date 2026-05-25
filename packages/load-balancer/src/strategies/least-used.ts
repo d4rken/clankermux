@@ -1,11 +1,11 @@
-import { isAccountAvailable } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { isAccountAvailable } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import type {
 	Account,
 	LoadBalancingStrategy,
 	RequestMeta,
 	StrategyStore,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { isPeekAvailable, wouldAutoUnpause } from "./peek-availability";
 
 /**

@@ -1,12 +1,12 @@
-import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	generatePKCE,
 	getOAuthProvider,
 	type OAuthProviderConfig,
 	type OAuthTokens,
 	type PKCEChallenge,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 
 export interface BeginOptions {
 	name: string;

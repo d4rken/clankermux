@@ -1,4 +1,4 @@
-import { HttpClient, HttpError } from "@better-ccflare/http-common";
+import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	Agent,
@@ -13,7 +13,7 @@ import type {
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 
 // Re-export types with dashboard-specific aliases for backward compatibility
@@ -31,7 +31,7 @@ export type {
 	AgentWorkspace,
 	RequestPayload,
 	RequestResponse,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 
 // Agent response interface
 export interface AgentsResponse {

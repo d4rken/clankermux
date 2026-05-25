@@ -1,11 +1,11 @@
-import { getRateLimitResetStabilityMs, logError } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import {
 	type Provider,
 	parseCodexUsageHeaders,
 	usageCache,
-} from "@better-ccflare/providers";
-import type { Account, RateLimitReason } from "@better-ccflare/types";
+} from "@clankermux/providers";
+import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 
@@ -247,7 +247,7 @@ export async function processProxyResponse(
 		// was actually exhausted. Loop-prevention header set by
 		// cache-keepalive-scheduler.ts; only synthetic replays carry it.
 		const isKeepalive =
-			requestMeta?.headers?.get("x-better-ccflare-keepalive") === "true";
+			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
 		if (isKeepalive) {
 			log.warn(
 				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
@@ -267,14 +267,14 @@ export async function processProxyResponse(
 		}
 		// Also update metadata for rate-limited responses
 		const bypassSession =
-			requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
+			requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 		return true; // Signal rate limit
 	}
 
 	// Update account metadata in background
 	const bypassSession =
-		requestMeta?.headers?.get("x-better-ccflare-bypass-session") === "true";
+		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 
 	// On any successful upstream response, run the two side-effects independently:

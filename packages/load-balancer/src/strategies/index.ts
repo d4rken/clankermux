@@ -1,15 +1,15 @@
-import { isAccountAvailable, TIME_CONSTANTS } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { isAccountAvailable, TIME_CONSTANTS } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import type {
 	Account,
 	LoadBalancingStrategy,
 	RequestMeta,
 	StrategyStore,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import {
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { isPeekAvailable } from "./peek-availability";
 
 export { LeastUsedStrategy } from "./least-used";
@@ -176,7 +176,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const now = Date.now();
 
 		// Check if session tracking should be bypassed (for auto-refresh messages)
-		const bypassHeader = meta.headers?.get("x-better-ccflare-bypass-session");
+		const bypassHeader = meta.headers?.get("x-clankermux-bypass-session");
 		const bypassSession = bypassHeader === "true";
 
 		this.log.info(

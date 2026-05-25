@@ -101,7 +101,7 @@ export interface ShutdownCompleteMessage {
 
 export interface SummaryMessage {
 	type: "summary";
-	summary: import("@better-ccflare/types").RequestResponse;
+	summary: import("@clankermux/types").RequestResponse;
 }
 
 export type OutgoingWorkerMessage =

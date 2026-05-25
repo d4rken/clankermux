@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OAuthError } from "@better-ccflare/core";
+import { OAuthError } from "@clankermux/core";
 import { AnthropicOAuthProvider } from "../oauth";
 
 /**

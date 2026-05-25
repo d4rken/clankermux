@@ -1,14 +1,14 @@
-// Re-export provider-related types and functions from @better-ccflare/providers
+// Re-export provider-related types and functions from @clankermux/providers
 export type {
 	Provider,
 	RateLimitInfo,
 	TokenRefreshResult,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 export {
 	getProvider,
 	listProviders,
 	registerProvider,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { dispatchProxyRequest } from "./dispatch";

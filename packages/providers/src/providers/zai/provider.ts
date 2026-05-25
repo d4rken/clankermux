@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import type { RateLimitInfo } from "../../types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 

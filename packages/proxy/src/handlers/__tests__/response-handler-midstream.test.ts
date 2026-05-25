@@ -9,7 +9,7 @@
  * from being routed to the overloaded account until the cooldown expires.
  */
 import { describe, expect, it } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import { applyRateLimitCooldown } from "../rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "../sse-rate-limit-sniffer";

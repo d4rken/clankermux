@@ -1,6 +1,6 @@
-# @better-ccflare/security
+# @clankermux/security
 
-Centralized security utilities for path validation and sanitization in the better-ccflare monorepo.
+Centralized security utilities for path validation and sanitization in the ClankerMux monorepo.
 
 ## Purpose
 
@@ -24,7 +24,7 @@ This is an internal workspace package. Add it to your package dependencies:
 ```json
 {
   "dependencies": {
-    "@better-ccflare/security": "workspace:*"
+    "@clankermux/security": "workspace:*"
   }
 }
 ```
@@ -34,7 +34,7 @@ This is an internal workspace package. Add it to your package dependencies:
 ### Basic Usage
 
 ```typescript
-import { validatePath } from '@better-ccflare/security';
+import { validatePath } from '@clankermux/security';
 
 const result = validatePath('/home/user/data/file.txt', {
   description: 'user data file'
@@ -52,7 +52,7 @@ const content = readFileSync(result.resolvedPath, 'utf-8');
 ### Throw on Invalid Path
 
 ```typescript
-import { validatePathOrThrow } from '@better-ccflare/security';
+import { validatePathOrThrow } from '@clankermux/security';
 
 try {
   const safePath = validatePathOrThrow('/home/user/../../etc/passwd', {
@@ -67,7 +67,7 @@ try {
 ### Custom Allowed Directories
 
 ```typescript
-import { validatePath } from '@better-ccflare/security';
+import { validatePath } from '@clankermux/security';
 
 const result = validatePath('/opt/app/data/file.txt', {
   description: 'application data',
@@ -78,7 +78,7 @@ const result = validatePath('/opt/app/data/file.txt', {
 ### Block Symbolic Links
 
 ```typescript
-import { validatePath } from '@better-ccflare/security';
+import { validatePath } from '@clankermux/security';
 
 const result = validatePath('/home/user/link', {
   description: 'user file',
@@ -91,7 +91,7 @@ const result = validatePath('/home/user/link', {
 By default, empty strings are allowed and resolve to the current working directory. Use `allowEmpty: false` to reject empty paths:
 
 ```typescript
-import { validatePath } from '@better-ccflare/security';
+import { validatePath } from '@clankermux/security';
 
 // For user uploads: disallow empty paths to prevent security issues
 const result = validatePath(userPath, {
@@ -124,7 +124,7 @@ The `validatePath()` function implements 7 validation layers:
 
 By default, paths are allowed within:
 
-- Better-ccflare config directory (`~/.config/better-ccflare` on Linux/macOS, `AppData/Local/better-ccflare` on Windows)
+- ClankerMux config directory (`~/.config/clankermux` on Linux/macOS, `AppData/Local/clankermux` on Windows)
 - Current working directory (`process.cwd()`)
 - Temp directory (cross-platform: `/tmp` on Unix, `C:\temp` on Windows)
 
@@ -307,7 +307,7 @@ The security package includes built-in performance optimizations:
 ### Monitoring Cache Performance
 
 ```typescript
-import { getValidationCacheSize, clearValidationCache } from '@better-ccflare/security';
+import { getValidationCacheSize, clearValidationCache } from '@clankermux/security';
 
 // Monitor cache size
 console.log(`Cache entries: ${getValidationCacheSize()}`);
@@ -336,4 +336,4 @@ When adding new validation layers:
 
 ## License
 
-Part of the better-ccflare project.
+Part of the ClankerMux project.

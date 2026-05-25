@@ -107,8 +107,8 @@ function detectRunningFromBinary(): boolean {
 	// 2. Not the node/bun executable itself
 	// 3. Has a name that matches our binary pattern
 
-	// If execPath contains 'better-ccflare' and is not in node_modules, it's likely a binary
-	if (execPath.includes("better-ccflare")) {
+	// If execPath contains 'clankermux' and is not in node_modules, it's likely a binary
+	if (execPath.includes("clankermux")) {
 		// Check if it's not in node_modules (which would indicate npm/bun installation)
 		if (!execPath.includes("node_modules")) {
 			return true;
@@ -138,7 +138,7 @@ function detectRunningFromBinary(): boolean {
 	if (execName && !nodeExecutables.includes(execName)) {
 		// If the executable name contains our app name and it's not a package manager
 		// it's likely a binary
-		if (execName.includes("better-ccflare")) {
+		if (execName.includes("clankermux")) {
 			return true;
 		}
 	}

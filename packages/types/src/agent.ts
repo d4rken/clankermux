@@ -1,4 +1,4 @@
-import { CLAUDE_MODEL_IDS, isValidClaudeModel } from "@better-ccflare/core";
+import { CLAUDE_MODEL_IDS, isValidClaudeModel } from "@clankermux/core";
 
 export type AgentSource = "global" | "workspace" | "plugin";
 

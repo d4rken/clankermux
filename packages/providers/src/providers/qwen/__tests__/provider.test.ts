@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import type { OpenAIRequest } from "@better-ccflare/openai-formats";
-import type { Account } from "@better-ccflare/types";
+import type { OpenAIRequest } from "@clankermux/openai-formats";
+import type { Account } from "@clankermux/types";
 import { QwenProvider } from "../provider";
 
 // ---------------------------------------------------------------------------

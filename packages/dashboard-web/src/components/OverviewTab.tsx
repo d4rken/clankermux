@@ -1,10 +1,10 @@
-import { registerUIRefresh } from "@better-ccflare/core";
+import { registerUIRefresh } from "@clankermux/core";
 import {
 	formatCost,
 	formatNumber,
 	formatPercentage,
 	formatTokensPerSecond,
-} from "@better-ccflare/ui-common";
+} from "@clankermux/ui-common";
 import { format } from "date-fns";
 import {
 	Activity,

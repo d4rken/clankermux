@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/http-common",
+	"name": "@clankermux/http-common",
 	"private": true,
 	"version": "0.0.0",
 	"type": "module",
@@ -11,8 +11,8 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/types": "workspace:*",
-		"@better-ccflare/errors": "workspace:*"
+		"@clankermux/types": "workspace:*",
+		"@clankermux/errors": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.2",

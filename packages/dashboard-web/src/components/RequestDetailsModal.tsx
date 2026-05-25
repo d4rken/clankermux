@@ -1,9 +1,9 @@
-import { HttpError } from "@better-ccflare/http-common";
+import { HttpError } from "@clankermux/http-common";
 import {
 	formatCost,
 	formatTimestamp,
 	formatTokens,
-} from "@better-ccflare/ui-common";
+} from "@clankermux/ui-common";
 import { Eye } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";

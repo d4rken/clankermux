@@ -1,8 +1,5 @@
-import type { Config } from "@better-ccflare/config";
-import type {
-	BunSqlAdapter,
-	DatabaseOperations,
-} from "@better-ccflare/database";
+import type { Config } from "@clankermux/config";
+import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import type { Account } from "./account";
 import type { RequestMeta } from "./api";
 import type { ApiKey } from "./api-key";

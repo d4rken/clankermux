@@ -5,10 +5,10 @@ import {
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
-} from "@better-ccflare/cli-commands";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { BadRequest } from "@better-ccflare/errors";
-import type { ApiKeyGenerationResult } from "@better-ccflare/types";
+} from "@clankermux/cli-commands";
+import type { DatabaseOperations } from "@clankermux/database";
+import { BadRequest } from "@clankermux/errors";
+import type { ApiKeyGenerationResult } from "@clankermux/types";
 import { errorResponse } from "../utils/http-error";
 
 export function createApiKeysListHandler(dbOps: DatabaseOperations) {

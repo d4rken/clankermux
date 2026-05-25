@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("CacheBodyStore");
 
@@ -73,15 +73,17 @@ export interface CachedRequestEntry {
 
 // Strip sensitive and internal headers before storing.
 // Auth headers are injected by prepareHeaders() from account credentials.
-// Internal x-better-ccflare-* headers are injected fresh by the scheduler.
+// Internal x-clankermux-* headers are injected fresh by the scheduler.
 const STRIP_HEADERS = new Set([
 	"authorization",
 	"x-api-key",
 	"cookie",
+	"x-clankermux-account-id",
+	// Legacy alias still accepted on inbound requests (dual-accept), strip it too.
 	"x-better-ccflare-account-id",
-	"x-better-ccflare-bypass-session",
-	"x-better-ccflare-skip-cache",
-	"x-better-ccflare-keepalive",
+	"x-clankermux-bypass-session",
+	"x-clankermux-skip-cache",
+	"x-clankermux-keepalive",
 	"content-length",
 	"transfer-encoding",
 	"accept-encoding",

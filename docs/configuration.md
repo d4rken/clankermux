@@ -1,6 +1,6 @@
-# better-ccflare Configuration Guide
+# ClankerMux Configuration Guide
 
-This guide covers all configuration options for better-ccflare, including file-based configuration, environment variables, and runtime API updates.
+This guide covers all configuration options for ClankerMux, including file-based configuration, environment variables, and runtime API updates.
 
 ## Table of Contents
 
@@ -17,20 +17,20 @@ This guide covers all configuration options for better-ccflare, including file-b
 
 ## Configuration Overview
 
-better-ccflare uses a flexible configuration system that supports:
+ClankerMux uses a flexible configuration system that supports:
 
 - **File-based configuration**: JSON configuration file for persistent settings
 - **Environment variables**: Override configuration for deployment flexibility
 - **Runtime updates**: Modify certain settings via API without restart
 
-Configuration is managed through the `@better-ccflare/config` package, which provides automatic loading, validation, and change notifications.
+Configuration is managed through the `@clankermux/config` package, which provides automatic loading, validation, and change notifications.
 
 ## Configuration Precedence
 
 Configuration values are resolved in the following order (highest to lowest priority):
 
 1. **Environment variables** - Always take precedence when set
-2. **Configuration file** - Values from `~/.config/better-ccflare/better-ccflare.json` (or custom path)
+2. **Configuration file** - Values from `~/.config/clankermux/clankermux.json` (or custom path)
 3. **Default values** - Built-in defaults when no other value is specified
 
 ### Special Cases
@@ -42,9 +42,9 @@ Configuration values are resolved in the following order (highest to lowest prio
 
 The configuration file is stored at:
 
-- **Linux/macOS**: `~/.config/better-ccflare/better-ccflare.json` (or `$XDG_CONFIG_HOME/better-ccflare/better-ccflare.json`)
-- **Windows**: `%LOCALAPPDATA%\better-ccflare\better-ccflare.json` (or `%APPDATA%\better-ccflare\better-ccflare.json`)
-- **Custom path**: Set via `better-ccflare_CONFIG_PATH` environment variable
+- **Linux/macOS**: `~/.config/clankermux/clankermux.json` (or `$XDG_CONFIG_HOME/clankermux/clankermux.json`)
+- **Windows**: `%LOCALAPPDATA%\clankermux\clankermux.json` (or `%APPDATA%\clankermux\clankermux.json`)
+- **Custom path**: Set via `CLANKERMUX_CONFIG_PATH` (legacy `BETTER_CCFLARE_CONFIG_PATH` still honored) environment variable
 
 ### File Structure
 
@@ -88,7 +88,7 @@ The configuration file is stored at:
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | string | `"INFO"` | Logging level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `LOG_FORMAT` | string | `"pretty"` | Log format: `"pretty"` or `"json"` |
-| `better-ccflare_DEBUG` | string | - | Set to `"1"` to enable debug mode with console output |
+| `CLANKERMUX_DEBUG` | string | - | Set to `"1"` to enable debug mode with console output (legacy `BETTER_CCFLARE_DEBUG` still honored) |
 
 ## Environment Variables
 
@@ -105,7 +105,7 @@ The configuration file is stored at:
 | `PORT` | `port` | number | `PORT=3000` |
 | `DATA_RETENTION_DAYS` | `data_retention_days` | number | `DATA_RETENTION_DAYS=3` (payloads) |
 | `REQUEST_RETENTION_DAYS` | `request_retention_days` | number | `REQUEST_RETENTION_DAYS=90` (metadata) |
-| `better-ccflare_CONFIG_PATH` | - | string | `better-ccflare_CONFIG_PATH=/etc/better-ccflare.json` |
+| `CLANKERMUX_CONFIG_PATH` | - | string | `CLANKERMUX_CONFIG_PATH=/etc/clankermux.json` (legacy `BETTER_CCFLARE_CONFIG_PATH` still honored) |
 
 ### Additional Environment Variables
 
@@ -115,9 +115,9 @@ These environment variables are not stored in the configuration file and must be
 |----------|-------------|---------|---------|
 | `LOG_LEVEL` | Set logging verbosity (DEBUG, INFO, WARN, ERROR) | `INFO` | `LOG_LEVEL=DEBUG` |
 | `LOG_FORMAT` | Set log output format (pretty, json) | `pretty` | `LOG_FORMAT=json` |
-| `better-ccflare_DEBUG` | Enable debug mode with console output | - | `better-ccflare_DEBUG=1` |
-| `better-ccflare_DB_PATH` | Custom database file path (SQLite only) | Platform-specific | `better-ccflare_DB_PATH=/var/lib/better-ccflare/db.sqlite` |
-| `DATABASE_URL` | Use PostgreSQL instead of SQLite. Set to a `postgresql://` or `postgres://` connection string. When set, `better-ccflare_DB_PATH` is ignored. | - | `DATABASE_URL=postgresql://user:pass@localhost:5432/ccflare` |
+| `CLANKERMUX_DEBUG` | Enable debug mode with console output (legacy `BETTER_CCFLARE_DEBUG` still honored) | - | `CLANKERMUX_DEBUG=1` |
+| `CLANKERMUX_DB_PATH` | Custom database file path (SQLite only) (legacy `BETTER_CCFLARE_DB_PATH` still honored) | Platform-specific | `CLANKERMUX_DB_PATH=/var/lib/clankermux/db.sqlite` |
+| `DATABASE_URL` | Use PostgreSQL instead of SQLite. Set to a `postgresql://` or `postgres://` connection string. When set, `CLANKERMUX_DB_PATH` (legacy `BETTER_CCFLARE_DB_PATH`) is ignored. | - | `DATABASE_URL=postgresql://user:pass@localhost:5432/clankermux` |
 | `CF_PRICING_REFRESH_HOURS` | Hours between pricing data refreshes | `24` | `CF_PRICING_REFRESH_HOURS=12` |
 | `CF_PRICING_OFFLINE` | Disable online pricing updates | - | `CF_PRICING_OFFLINE=1` |
 | `CF_STREAM_USAGE_BUFFER_KB` | Stream usage buffer size in KB | `64` | `CF_STREAM_USAGE_BUFFER_KB=128` |
@@ -126,20 +126,20 @@ These environment variables are not stored in the configuration file and must be
 
 ## Database Configuration
 
-better-ccflare supports two database backends:
+ClankerMux supports two database backends:
 
 | Backend | When used | Environment variable |
 |---------|-----------|---------------------|
-| **SQLite** (default) | `DATABASE_URL` is not set, or starts with `sqlite://` | `BETTER_CCFLARE_DB_PATH` (optional path override) |
+| **SQLite** (default) | `DATABASE_URL` is not set, or starts with `sqlite://` | `CLANKERMUX_DB_PATH` (legacy `BETTER_CCFLARE_DB_PATH`) (optional path override) |
 | **PostgreSQL** | `DATABASE_URL` starts with `postgres://` or `postgresql://` | `DATABASE_URL=postgresql://user:pass@host:5432/db` |
 
 ### SQLite (default)
 
-No configuration required. The database is created automatically in the platform-specific directory (`~/.config/better-ccflare/better-ccflare.db`).
+No configuration required. The database is created automatically in the platform-specific directory (`~/.config/clankermux/clankermux.db`).
 
 ```bash
-# Optional: store database at a custom path
-export BETTER_CCFLARE_DB_PATH=/var/lib/better-ccflare/better-ccflare.db
+# Optional: store database at a custom path (legacy BETTER_CCFLARE_DB_PATH still honored)
+export CLANKERMUX_DB_PATH=/var/lib/clankermux/clankermux.db
 ```
 
 ### PostgreSQL
@@ -147,7 +147,7 @@ export BETTER_CCFLARE_DB_PATH=/var/lib/better-ccflare/better-ccflare.db
 Set `DATABASE_URL` to a PostgreSQL connection string:
 
 ```bash
-export DATABASE_URL=postgresql://ccflare_user:secret@localhost:5432/ccflare
+export DATABASE_URL=postgresql://clankermux_user:secret@localhost:5432/clankermux
 ```
 
 The schema and any missing columns are created automatically on startup. No manual migration steps are required. This backend is recommended for Kubernetes or other multi-pod deployments where multiple instances need to share the same database.
@@ -157,10 +157,10 @@ The schema and any missing columns are created automatically on startup. No manu
 apiVersion: v1
 kind: Secret
 metadata:
-  name: better-ccflare-secrets
+  name: clankermux-secrets
 type: Opaque
 stringData:
-  database-url: "postgresql://ccflare_user:secret@postgres-svc:5432/ccflare"
+  database-url: "postgresql://clankermux_user:secret@postgres-svc:5432/clankermux"
 ```
 
 ```yaml
@@ -169,7 +169,7 @@ env:
 - name: DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: better-ccflare-secrets
+      name: clankermux-secrets
       key: database-url
 ```
 
@@ -235,7 +235,7 @@ Response:
 ["session"]
 ```
 
-⚠️ **NOTE**: Only the `"session"` strategy is available in better-ccflare. Other strategies (round-robin, least-requests, weighted) have been removed from the codebase as they can trigger Claude's anti-abuse systems and result in account bans.
+⚠️ **NOTE**: Only the `"session"` strategy is available in ClankerMux. Other strategies (round-robin, least-requests, weighted) have been removed from the codebase as they can trigger Claude's anti-abuse systems and result in account bans.
 
 ### Runtime Update Behavior
 
@@ -313,7 +313,7 @@ Environment variables:
 export PORT=3000
 export LOG_LEVEL=DEBUG
 export LOG_FORMAT=pretty
-export better-ccflare_DEBUG=1
+export CLANKERMUX_DEBUG=1                 # legacy BETTER_CCFLARE_DEBUG still honored
 export RETRY_ATTEMPTS=5
 ```
 
@@ -363,17 +363,17 @@ Configuration for optimizing account usage with automatic fallback to higher pri
 # Setup accounts with auto-fallback for optimal usage
 
 # Add primary account with highest priority and auto-fallback enabled
-better-ccflare --add-account primary-account --mode max --priority 0
+clankermux --add-account primary-account --mode max --priority 0
 
 # Add secondary accounts with lower priorities
-better-ccflare --add-account secondary-1 --mode max --priority 10
-better-ccflare --add-account secondary-2 --mode max --priority 20
+clankermux --add-account secondary-1 --mode max --priority 10
+clankermux --add-account secondary-2 --mode max --priority 20
 
 # Add backup account with lowest priority
-better-ccflare --add-account backup --mode console --priority 50
+clankermux --add-account backup --mode console --priority 50
 
 # Enable auto-fallback on primary account (API call)
-ACCOUNT_ID=$(better-ccflare --list | grep "primary-account" | jq -r '.id')
+ACCOUNT_ID=$(clankermux --list | grep "primary-account" | jq -r '.id')
 curl -X POST http://localhost:8080/api/accounts/$ACCOUNT_ID/auto-fallback \
   -H "Content-Type: application/json" \
   -d '{"enabled": 1}'
@@ -410,7 +410,7 @@ echo "Backup account (priority 50): emergency fallback"
 
 ```bash
 # Monitor logs for auto-fallback events
-tail -f ~/.local/share/better-ccflare/logs/better-ccflare.log | grep "Auto-fallback"
+tail -f ~/.local/share/clankermux/logs/clankermux.log | grep "Auto-fallback"
 
 # Check account status
 curl http://localhost:8080/api/accounts | jq '.[] | {name, priority, autoFallbackEnabled, rateLimitStatus}'
@@ -423,7 +423,7 @@ watch -n 5 'curl -s http://localhost:8080/api/accounts | jq ".[] | select(.autoF
 
 ### Automatic Validation
 
-better-ccflare performs validation on:
+ClankerMux performs validation on:
 
 1. **Strategy names**: Must be one of the valid strategy options (validated by `isValidStrategy`)
 2. **Numeric values**: Parsed and validated as integers/floats
@@ -454,24 +454,24 @@ If migrating from environment variables to file-based configuration:
 
 1. Create the configuration file:
    ```bash
-   mkdir -p ~/.config/better-ccflare
+   mkdir -p ~/.config/clankermux
    ```
 
 2. Export current configuration:
    ```bash
-   curl http://localhost:8080/api/config > ~/.config/better-ccflare/better-ccflare.json
+   curl http://localhost:8080/api/config > ~/.config/clankermux/clankermux.json
    ```
 
 3. Edit and format the file:
    ```bash
-   jq '.' ~/.config/better-ccflare/better-ccflare.json > temp.json && mv temp.json ~/.config/better-ccflare/better-ccflare.json
+   jq '.' ~/.config/clankermux/clankermux.json > temp.json && mv temp.json ~/.config/clankermux/clankermux.json
    ```
 
 ### From Older Versions
 
 #### Pre-1.0 to Current
 
-1. **Configuration location**: Move from `~/.better-ccflare/config.json` to platform-specific paths
+1. **Configuration location**: Move from `~/.clankermux/config.json` to platform-specific paths
 2. **Field naming**: Update any deprecated field names (none currently deprecated)
 3. **Strategy names**: Only `"session"` strategy is available (must be lowercase)
 
@@ -480,7 +480,7 @@ If migrating from environment variables to file-based configuration:
 Always backup your configuration before upgrades:
 
 ```bash
-cp ~/.config/better-ccflare/better-ccflare.json ~/.config/better-ccflare/better-ccflare.json.backup
+cp ~/.config/clankermux/clankermux.json ~/.config/clankermux/clankermux.json.backup
 ```
 
 ### Rollback Procedure
@@ -496,8 +496,8 @@ If issues occur after configuration changes:
 ### Common Issues
 
 1. **Configuration not loading**:
-   - Check file permissions: `ls -la ~/.config/better-ccflare/`
-   - Verify JSON syntax: `jq '.' ~/.config/better-ccflare/better-ccflare.json`
+   - Check file permissions: `ls -la ~/.config/clankermux/`
+   - Verify JSON syntax: `jq '.' ~/.config/clankermux/clankermux.json`
    - Check logs for parse errors
 
 2. **Environment variables not working**:
@@ -515,7 +515,7 @@ If issues occur after configuration changes:
 Enable comprehensive debugging:
 
 ```bash
-export better-ccflare_DEBUG=1
+export CLANKERMUX_DEBUG=1                 # legacy BETTER_CCFLARE_DEBUG still honored
 export LOG_LEVEL=DEBUG
 export LOG_FORMAT=json  # For structured logging
 ```

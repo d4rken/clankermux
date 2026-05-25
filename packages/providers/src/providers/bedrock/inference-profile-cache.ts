@@ -2,8 +2,8 @@ import {
 	BedrockClient,
 	ListInferenceProfilesCommand,
 } from "@aws-sdk/client-bedrock";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import { createBedrockCredentialChain, parseBedrockConfig } from "./index";
 import type { CrossRegionMode } from "./model-transformer";
 

@@ -1,5 +1,5 @@
-import { computeWindowStartMs } from "@better-ccflare/core";
-import type { AccountResponse, FullUsageData } from "@better-ccflare/types";
+import { computeWindowStartMs } from "@clankermux/core";
+import type { AccountResponse, FullUsageData } from "@clankermux/types";
 
 export type PoolWindow = "five_hour" | "seven_day";
 

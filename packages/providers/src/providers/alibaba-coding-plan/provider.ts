@@ -1,4 +1,4 @@
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 
 const ALIBABA_CODING_PLAN_DEFAULT_ENDPOINT =

@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/dashboard-web",
+	"name": "@clankermux/dashboard-web",
 	"version": "1.0.0",
 	"private": true,
 	"type": "module",
@@ -9,12 +9,12 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/errors": "workspace:*",
-		"@better-ccflare/http-common": "workspace:*",
-		"@better-ccflare/types": "workspace:*",
-		"@better-ccflare/ui-common": "workspace:*",
-		"@better-ccflare/ui-constants": "workspace:*",
+		"@clankermux/core": "workspace:*",
+		"@clankermux/errors": "workspace:*",
+		"@clankermux/http-common": "workspace:*",
+		"@clankermux/types": "workspace:*",
+		"@clankermux/ui-common": "workspace:*",
+		"@clankermux/ui-constants": "workspace:*",
 		"@dnd-kit/core": "^6.3.1",
 		"@dnd-kit/sortable": "^10.0.0",
 		"@dnd-kit/utilities": "^3.2.2",

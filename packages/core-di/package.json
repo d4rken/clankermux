@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/core-di",
+	"name": "@clankermux/core-di",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",

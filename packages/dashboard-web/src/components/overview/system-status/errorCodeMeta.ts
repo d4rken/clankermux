@@ -1,4 +1,4 @@
-import type { RateLimitReason } from "@better-ccflare/types";
+import type { RateLimitReason } from "@clankermux/types";
 
 export type ErrorSeverity = "warning" | "error";
 

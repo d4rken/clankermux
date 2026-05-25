@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { TIME_CONSTANTS } from "@better-ccflare/core";
+import { TIME_CONSTANTS } from "@clankermux/core";
 import { extractCooldownUntil } from "../proxy-operations";
 
 const ACCOUNT_ID = "acct-test";

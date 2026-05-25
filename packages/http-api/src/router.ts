@@ -1,4 +1,4 @@
-import { validateNumber } from "@better-ccflare/core";
+import { validateNumber } from "@clankermux/core";
 import {
 	createAccountAddHandler,
 	createAccountAutoFallbackHandler,

@@ -1,5 +1,5 @@
-import { computeWindowStartMs, registerUIRefresh } from "@better-ccflare/core";
-import type { FullUsageData } from "@better-ccflare/types";
+import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
+import type { FullUsageData } from "@clankermux/types";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import {

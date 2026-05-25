@@ -1,4 +1,4 @@
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 
 export class OllamaProvider extends BaseAnthropicCompatibleProvider {

@@ -4,7 +4,7 @@
  * Licensed under the CAT Commercial License.
  * See LICENSE.md in the project root for license terms.
  */
-import { getModelFamily, ValidationError } from "@better-ccflare/core";
+import { getModelFamily, ValidationError } from "@clankermux/core";
 
 export const REASONING_EFFORT_VALUES = [
 	"minimal",

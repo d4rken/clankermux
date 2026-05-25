@@ -7,7 +7,7 @@
  *   3. proxy.ts             — pool-exhausted path skips usageWorker.postMessage for probes
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -54,43 +54,43 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 // ---------------------------------------------------------------------------
 // Site 1: isSyntheticInternal in proxy-operations.ts
 //
-// The guard is: isSyntheticInternal = !!req.headers.get("x-better-ccflare-auto-refresh")
+// The guard is: isSyntheticInternal = !!req.headers.get("x-clankermux-auto-refresh")
 // We test the header detection logic in isolation — the exact boolean produced
 // by the header check — rather than mocking cache-body-store (which poisons
 // the module registry in Bun and breaks cache-body-store.test.ts).
 // ---------------------------------------------------------------------------
 
 describe("proxy-operations — isSyntheticInternal header detection", () => {
-	it("header x-better-ccflare-auto-refresh: true is truthy (probe detected)", () => {
+	it("header x-clankermux-auto-refresh: true is truthy (probe detected)", () => {
 		const req = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
-			headers: { "x-better-ccflare-auto-refresh": "true" },
+			headers: { "x-clankermux-auto-refresh": "true" },
 		});
 		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+			!!req.headers.get("x-clankermux-keepalive") ||
+			!!req.headers.get("x-clankermux-auto-refresh");
 		expect(isSyntheticInternal).toBe(true);
 	});
 
-	it("header x-better-ccflare-auto-refresh absent is falsy (normal request)", () => {
+	it("header x-clankermux-auto-refresh absent is falsy (normal request)", () => {
 		const req = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 		});
 		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+			!!req.headers.get("x-clankermux-keepalive") ||
+			!!req.headers.get("x-clankermux-auto-refresh");
 		expect(isSyntheticInternal).toBe(false);
 	});
 
 	it("keepalive header also triggers isSyntheticInternal (existing guard preserved)", () => {
 		const req = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
-			headers: { "x-better-ccflare-keepalive": "1" },
+			headers: { "x-clankermux-keepalive": "1" },
 		});
 		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+			!!req.headers.get("x-clankermux-keepalive") ||
+			!!req.headers.get("x-clankermux-auto-refresh");
 		expect(isSyntheticInternal).toBe(true);
 	});
 
@@ -99,8 +99,8 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 			method: "POST",
 		});
 		const isSyntheticInternal =
-			!!req.headers.get("x-better-ccflare-keepalive") ||
-			!!req.headers.get("x-better-ccflare-auto-refresh");
+			!!req.headers.get("x-clankermux-keepalive") ||
+			!!req.headers.get("x-clankermux-auto-refresh");
 		expect(isSyntheticInternal).toBe(false);
 	});
 });
@@ -131,7 +131,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 		});
 
 		const requestHeaders = new Headers({
-			"x-better-ccflare-auto-refresh": "true",
+			"x-clankermux-auto-refresh": "true",
 		});
 
 		await forwardToClient(
@@ -249,7 +249,7 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
-				"x-better-ccflare-auto-refresh": "true",
+				"x-clankermux-auto-refresh": "true",
 			},
 			body: JSON.stringify({
 				model: "claude-haiku-4-5",

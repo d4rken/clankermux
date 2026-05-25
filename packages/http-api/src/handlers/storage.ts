@@ -1,9 +1,9 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { jsonResponse } from "@better-ccflare/http-common";
+import type { DatabaseOperations } from "@clankermux/database";
+import { jsonResponse } from "@clankermux/http-common";
 import {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,
-} from "@better-ccflare/proxy";
+} from "@clankermux/proxy";
 
 export function createStorageHandler(dbOps: DatabaseOperations) {
 	return async (): Promise<Response> => {

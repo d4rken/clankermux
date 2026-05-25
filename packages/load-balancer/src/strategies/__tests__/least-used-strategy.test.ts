@@ -1,10 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { LeastUsedStrategy } from "@better-ccflare/load-balancer";
-import type {
-	Account,
-	RequestMeta,
-	StrategyStore,
-} from "@better-ccflare/types";
+import { LeastUsedStrategy } from "@clankermux/load-balancer";
+import type { Account, RequestMeta, StrategyStore } from "@clankermux/types";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {

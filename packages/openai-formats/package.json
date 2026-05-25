@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/openai-formats",
+	"name": "@clankermux/openai-formats",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -10,9 +10,9 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/http-common": "workspace:*",
-		"@better-ccflare/logger": "workspace:*",
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/core": "workspace:*",
+		"@clankermux/http-common": "workspace:*",
+		"@clankermux/logger": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

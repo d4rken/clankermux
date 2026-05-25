@@ -1,10 +1,10 @@
-# better-ccflare Deployment Documentation
+# ClankerMux Deployment Documentation
 
 ## Overview
 
-better-ccflare is a load balancer proxy for Claude API accounts that can be deployed in various configurations, from simple local development to production-grade distributed systems. This document covers all deployment options, from single-instance setups to scalable architectures.
+ClankerMux is a load balancer proxy for Claude API accounts that can be deployed in various configurations, from simple local development to production-grade distributed systems. This document covers all deployment options, from single-instance setups to scalable architectures.
 
-> **Important**: better-ccflare provides a powerful CLI interface and web dashboard for monitoring and management. The main executable `better-ccflare` provides all functionality through command-line flags.
+> **Important**: ClankerMux provides a powerful CLI interface and web dashboard for monitoring and management. The main executable `clankermux` provides all functionality through command-line flags.
 
 ## Table of Contents
 
@@ -73,7 +73,7 @@ bun install
 # Build the project (dashboard and CLI)
 bun run build
 
-# Start better-ccflare (Server + Dashboard)
+# Start ClankerMux (Server + Dashboard)
 bun run better-ccflare
 
 # Or use CLI commands:
@@ -117,37 +117,37 @@ bun run better-ccflare
 
 ### Bun Binary Compilation
 
-Compile better-ccflare into a single executable for easy deployment:
+Compile ClankerMux into a single executable for easy deployment:
 
 ```bash
 # Build all components (dashboard and CLI)
 bun run build
 
-# Build the main better-ccflare binary (includes CLI and server)
+# Build the main ClankerMux binary (includes CLI and server)
 cd apps/cli
-bun build src/main.ts --compile --outfile dist/better-ccflare --target=bun
+bun build src/main.ts --compile --outfile dist/clankermux --target=bun
 
 # Copy binary to deployment location
-cp apps/cli/dist/better-ccflare /opt/better-ccflare/
+cp apps/cli/dist/clankermux /opt/clankermux/
 # Make it executable
-chmod +x /opt/better-ccflare/better-ccflare
+chmod +x /opt/clankermux/clankermux
 ```
 
 #### Binary Deployment Structure
 
 ```
-/opt/better-ccflare/
-├── better-ccflare             # Main binary (CLI + Server)
+/opt/clankermux/
+├── clankermux             # Main binary (CLI + Server)
 ├── config/
 │   └── config.json     # Configuration (optional)
 └── data/
-    ├── better-ccflare.db      # SQLite database
+    ├── clankermux.db      # SQLite database
     └── logs/           # Log files (if configured)
 ```
 
 **Note**: The configuration and database are automatically created in platform-specific directories:
-- **Linux/macOS**: `~/.config/better-ccflare/`
-- **Windows**: `%LOCALAPPDATA%\better-ccflare\` or `%APPDATA%\better-ccflare\`
+- **Linux/macOS**: `~/.config/clankermux/`
+- **Windows**: `%LOCALAPPDATA%\clankermux\` or `%APPDATA%\clankermux\`
 
 ### Process Management
 
@@ -161,8 +161,8 @@ npm install -g pm2
 cat > ecosystem.config.js << 'EOF'
 module.exports = {
   apps: [{
-    name: 'better-ccflare',
-    script: '/opt/better-ccflare/better-ccflare',
+    name: 'clankermux',
+    script: '/opt/clankermux/clankermux',
     args: '--serve',
     instances: 1,
     exec_mode: 'fork',
@@ -177,9 +177,9 @@ module.exports = {
       RETRY_DELAY_MS: 1000,
       RETRY_BACKOFF: 2
     },
-    error_file: '/opt/better-ccflare/data/logs/error.log',
-    out_file: '/opt/better-ccflare/data/logs/out.log',
-    log_file: '/opt/better-ccflare/data/logs/combined.log',
+    error_file: '/opt/clankermux/data/logs/error.log',
+    out_file: '/opt/clankermux/data/logs/out.log',
+    log_file: '/opt/clankermux/data/logs/combined.log',
     time: true,
     autorestart: true,
     max_restarts: 10,
@@ -201,17 +201,17 @@ Create a systemd service file:
 
 ```bash
 # Create service file
-sudo cat > /etc/systemd/system/better-ccflare.service << 'EOF'
+sudo cat > /etc/systemd/system/clankermux.service << 'EOF'
 [Unit]
-Description=better-ccflare Load Balancer
+Description=ClankerMux Load Balancer
 After=network.target
 
 [Service]
 Type=simple
-User=better-ccflare
-Group=better-ccflare
-WorkingDirectory=/opt/better-ccflare
-ExecStart=/opt/better-ccflare/better-ccflare --serve
+User=clankermux
+Group=clankermux
+WorkingDirectory=/opt/clankermux
+ExecStart=/opt/clankermux/clankermux --serve
 Restart=always
 RestartSec=5
 
@@ -231,7 +231,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/better-ccflare/data
+ReadWritePaths=/opt/clankermux/data
 
 # Resource limits
 LimitNOFILE=65536
@@ -242,14 +242,14 @@ WantedBy=multi-user.target
 EOF
 
 # Create user and directories
-sudo useradd -r -s /bin/false better-ccflare
-sudo mkdir -p /opt/better-ccflare/{config,data/logs}
-sudo chown -R better-ccflare:better-ccflare /opt/better-ccflare
+sudo useradd -r -s /bin/false clankermux
+sudo mkdir -p /opt/clankermux/{config,data/logs}
+sudo chown -R clankermux:clankermux /opt/clankermux
 
 # Enable and start service
 sudo systemctl daemon-reload
-sudo systemctl enable better-ccflare
-sudo systemctl start better-ccflare
+sudo systemctl enable clankermux
+sudo systemctl start clankermux
 ```
 
 ## Docker Deployment
@@ -273,8 +273,8 @@ COPY tsconfig.json ./
 # Install dependencies and build
 RUN bun install --frozen-lockfile
 RUN bun run build
-RUN cd apps/server && bun build src/server.ts --compile --outfile dist/better-ccflare-server
-RUN cd apps/cli && bun build src/cli.ts --compile --outfile dist/better-ccflare-cli
+RUN cd apps/server && bun build src/server.ts --compile --outfile dist/clankermux-server
+RUN cd apps/cli && bun build src/cli.ts --compile --outfile dist/clankermux-cli
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -285,32 +285,33 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user
-RUN useradd -r -s /bin/false better-ccflare
+RUN useradd -r -s /bin/false clankermux
 
 # Copy binary and dashboard
-COPY --from=builder /app/apps/cli/dist/better-ccflare /usr/local/bin/better-ccflare
-COPY --from=builder /app/packages/dashboard-web/dist /opt/better-ccflare/dashboard
+COPY --from=builder /app/apps/cli/dist/clankermux /usr/local/bin/clankermux
+COPY --from=builder /app/packages/dashboard-web/dist /opt/clankermux/dashboard
 
 # Set permissions
-RUN chmod +x /usr/local/bin/better-ccflare
+RUN chmod +x /usr/local/bin/clankermux
 
 # Create data directories
-RUN mkdir -p /data /config && chown -R better-ccflare:better-ccflare /data /config
+RUN mkdir -p /data /config && chown -R clankermux:clankermux /data /config
 
-USER better-ccflare
+USER clankermux
 
 # Environment
+# (legacy BETTER_CCFLARE_CONFIG_PATH is still honored by the app)
 ENV PORT=8080
-ENV better-ccflare_CONFIG_PATH=/config/better-ccflare.json
+ENV CLANKERMUX_CONFIG_PATH=/config/clankermux.json
 
 EXPOSE 8080
 
 VOLUME ["/data", "/config"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/better-ccflare-server", "health"] || exit 1
+  CMD ["/usr/local/bin/clankermux-server", "health"] || exit 1
 
-ENTRYPOINT ["/usr/local/bin/better-ccflare", "--serve"]
+ENTRYPOINT ["/usr/local/bin/clankermux", "--serve"]
 ```
 
 ### Example Docker Compose
@@ -319,9 +320,9 @@ ENTRYPOINT ["/usr/local/bin/better-ccflare", "--serve"]
 version: '3.8'
 
 services:
-  better-ccflare:
+  clankermux:
     build: .
-    container_name: better-ccflare
+    container_name: clankermux
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -345,12 +346,12 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - better-ccflare-net
+      - clankermux-net
 
   # Optional: Reverse proxy
   nginx:
     image: nginx:alpine
-    container_name: better-ccflare-nginx
+    container_name: clankermux-nginx
     restart: unless-stopped
     ports:
       - "80:80"
@@ -359,12 +360,12 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
     depends_on:
-      - better-ccflare
+      - clankermux
     networks:
-      - better-ccflare-net
+      - clankermux-net
 
 networks:
-  better-ccflare-net:
+  clankermux-net:
     driver: bridge
 ```
 
@@ -372,16 +373,16 @@ networks:
 
 ```bash
 # Build the Docker image
-docker build -t better-ccflare:latest .
+docker build -t clankermux:latest .
 
 # Run with Docker
 docker run -d \
-  --name better-ccflare \
+  --name clankermux \
   -p 8080:8080 \
   -v $(pwd)/data:/data \
   -v $(pwd)/config:/config \
   -e LB_STRATEGY=session \
-  better-ccflare:latest
+  clankermux:latest
 
 # Or use Docker Compose
 docker-compose up -d
@@ -431,25 +432,25 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 ### Nginx Configuration
 
 ```nginx
-# /etc/nginx/sites-available/better-ccflare
-upstream better-ccflare_backend {
+# /etc/nginx/sites-available/clankermux
+upstream clankermux_backend {
     server 127.0.0.1:8080 max_fails=3 fail_timeout=30s;
     keepalive 32;
 }
 
 server {
     listen 80;
-    server_name better-ccflare.yourdomain.com;
+    server_name clankermux.yourdomain.com;
     return 301 https://$server_name$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name better-ccflare.yourdomain.com;
+    server_name clankermux.yourdomain.com;
 
     # SSL configuration
-    ssl_certificate /etc/letsencrypt/live/better-ccflare.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/better-ccflare.yourdomain.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/clankermux.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/clankermux.yourdomain.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
     ssl_prefer_server_ciphers on;
@@ -476,12 +477,12 @@ server {
 
     # Main proxy
     location / {
-        proxy_pass http://better-ccflare_backend;
+        proxy_pass http://clankermux_backend;
     }
 
     # API endpoints
     location /v1/ {
-        proxy_pass http://better-ccflare_backend;
+        proxy_pass http://clankermux_backend;
         
         # Increase limits for AI requests
         client_max_body_size 100M;
@@ -491,7 +492,7 @@ server {
 
     # WebSocket support for real-time updates
     location /ws {
-        proxy_pass http://better-ccflare_backend;
+        proxy_pass http://clankermux_backend;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -500,7 +501,7 @@ server {
 
     # Static assets caching
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        proxy_pass http://better-ccflare_backend;
+        proxy_pass http://clankermux_backend;
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
@@ -510,7 +511,7 @@ server {
 ### Caddy Configuration
 
 ```caddyfile
-better-ccflare.yourdomain.com {
+clankermux.yourdomain.com {
     # Automatic HTTPS
     tls your-email@example.com
 
@@ -568,10 +569,10 @@ better-ccflare.yourdomain.com {
 ```mermaid
 graph TB
     subgraph "Logging Architecture"
-        APP[better-ccflare Server]
+        APP[ClankerMux Server]
         
         subgraph "Log Outputs"
-            FILE[File Logs<br/>/var/log/better-ccflare/]
+            FILE[File Logs<br/>/var/log/clankermux/]
             STDOUT[Container Stdout]
             SYSLOG[Syslog]
         end
@@ -611,26 +612,26 @@ import { register, Counter, Histogram, Gauge } from 'prom-client';
 
 export const metrics = {
   requestsTotal: new Counter({
-    name: 'better-ccflare_requests_total',
+    name: 'clankermux_requests_total',
     help: 'Total number of requests',
     labelNames: ['method', 'status', 'account']
   }),
   
   requestDuration: new Histogram({
-    name: 'better-ccflare_request_duration_seconds',
+    name: 'clankermux_request_duration_seconds',
     help: 'Request duration in seconds',
     labelNames: ['method', 'status'],
     buckets: [0.1, 0.5, 1, 2, 5, 10]
   }),
   
   activeAccounts: new Gauge({
-    name: 'better-ccflare_active_accounts',
+    name: 'clankermux_active_accounts',
     help: 'Number of active accounts',
     labelNames: ['priority']
   }),
   
   rateLimitedAccounts: new Gauge({
-    name: 'better-ccflare_rate_limited_accounts',
+    name: 'clankermux_rate_limited_accounts',
     help: 'Number of rate limited accounts'
   })
 };
@@ -679,7 +680,7 @@ services:
     volumes:
       - ./promtail-config.yaml:/etc/promtail/config.yml
       - /var/log:/var/log:ro
-      - /opt/better-ccflare/data/logs:/app/logs:ro
+      - /opt/clankermux/data/logs:/app/logs:ro
     command: -config.file=/etc/promtail/config.yml
 
 volumes:
@@ -694,8 +695,8 @@ volumes:
 
 ```bash
 # Increase file descriptor limits
-echo "better-ccflare soft nofile 65536" >> /etc/security/limits.conf
-echo "better-ccflare hard nofile 65536" >> /etc/security/limits.conf
+echo "clankermux soft nofile 65536" >> /etc/security/limits.conf
+echo "clankermux hard nofile 65536" >> /etc/security/limits.conf
 
 # TCP tuning for high throughput
 cat >> /etc/sysctl.conf << EOF
@@ -721,7 +722,7 @@ sysctl -p
 ### Application Tuning
 
 ```json
-// ~/.config/better-ccflare/config.json (or platform-specific location)
+// ~/.config/clankermux/config.json (or platform-specific location)
 {
   "lb_strategy": "session",
   "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
@@ -763,9 +764,9 @@ graph TB
     end
     
     subgraph "Application Instances"
-        APP1[better-ccflare-1<br/>Port 8081]
-        APP2[better-ccflare-2<br/>Port 8082]
-        APP3[better-ccflare-N<br/>Port 808N]
+        APP1[clankermux-1<br/>Port 8081]
+        APP2[clankermux-2<br/>Port 8082]
+        APP3[clankermux-N<br/>Port 808N]
     end
     
     subgraph "Shared Data Layer"
@@ -800,12 +801,12 @@ graph TB
 
 ### Database Considerations
 
-better-ccflare uses SQLite by default, which is suitable for single-instance deployments. For Kubernetes multi-pod deployments, set `DATABASE_URL` to use PostgreSQL (see [PostgreSQL Support for Multi-Pod Deployments](#postgresql-support-for-multi-pod-deployments) above).
+ClankerMux uses SQLite by default, which is suitable for single-instance deployments. For Kubernetes multi-pod deployments, set `DATABASE_URL` to use PostgreSQL (see [PostgreSQL Support for Multi-Pod Deployments](#postgresql-support-for-multi-pod-deployments) above).
 
 #### SQLite Optimization (Default)
 
 ```sql
--- These optimizations are automatically applied by better-ccflare
+-- These optimizations are automatically applied by ClankerMux
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA cache_size = -20000;  -- 20MB cache
@@ -815,16 +816,16 @@ PRAGMA mmap_size = 268435456;
 
 ### PostgreSQL Support for Multi-Pod Deployments
 
-SQLite is unsuitable for Kubernetes deployments with multiple replicas because pods cannot safely share a single file. better-ccflare has first-class PostgreSQL support via `Bun.SQL` — set the `DATABASE_URL` environment variable and the schema is created automatically on startup.
+SQLite is unsuitable for Kubernetes deployments with multiple replicas because pods cannot safely share a single file. ClankerMux has first-class PostgreSQL support via `Bun.SQL` — set the `DATABASE_URL` environment variable and the schema is created automatically on startup.
 
 ```bash
 # Create a PostgreSQL database
-psql -U postgres -c "CREATE DATABASE ccflare;"
-psql -U postgres -c "CREATE USER ccflare_user WITH PASSWORD 'secret';"
-psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ccflare TO ccflare_user;"
+psql -U postgres -c "CREATE DATABASE clankermux;"
+psql -U postgres -c "CREATE USER clankermux_user WITH PASSWORD 'secret';"
+psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE clankermux TO clankermux_user;"
 
 # Set DATABASE_URL — that's all that's needed
-export DATABASE_URL=postgresql://ccflare_user:secret@postgres-host:5432/ccflare
+export DATABASE_URL=postgresql://clankermux_user:secret@postgres-host:5432/clankermux
 ```
 
 The full schema (`accounts`, `requests`, `request_payloads`, `oauth_sessions`, `agent_preferences`, `api_keys`, `model_translations`, `strategies`) is created with `CREATE TABLE IF NOT EXISTS` on first start. Column migrations use `information_schema` checks and are applied automatically on every startup.
@@ -834,33 +835,33 @@ The full schema (`accounts`, `requests`, `request_payloads`, `oauth_sessions`, `
 > **Important**: For multi-pod Kubernetes deployments, you **must** use PostgreSQL. Set `DATABASE_URL` to share a single database across all replicas. SQLite cannot be safely shared across pods.
 
 ```yaml
-# better-ccflare-deployment.yaml
+# clankermux-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: better-ccflare
+  name: clankermux
   labels:
-    app: better-ccflare
+    app: clankermux
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: better-ccflare
+      app: clankermux
   template:
     metadata:
       labels:
-        app: better-ccflare
+        app: clankermux
     spec:
       containers:
-      - name: better-ccflare
-        image: your-registry/better-ccflare:latest
+      - name: clankermux
+        image: your-registry/clankermux:latest
         ports:
         - containerPort: 8080
         env:
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: better-ccflare-secrets
+              name: clankermux-secrets
               key: database-url
         - name: LB_STRATEGY
           value: "session"
@@ -891,10 +892,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: better-ccflare
+  name: clankermux
 spec:
   selector:
-    app: better-ccflare
+    app: clankermux
   ports:
   - port: 80
     targetPort: 8080
@@ -904,10 +905,10 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: better-ccflare-secrets
+  name: clankermux-secrets
 type: Opaque
 stringData:
-  database-url: "postgresql://ccflare_user:secret@postgres-svc:5432/ccflare"
+  database-url: "postgresql://clankermux_user:secret@postgres-svc:5432/clankermux"
 ```
 
 ### High Availability Checklist
@@ -955,7 +956,7 @@ stringData:
 
 ### Health Check Endpoint
 
-better-ccflare provides a health check endpoint for monitoring:
+ClankerMux provides a health check endpoint for monitoring:
 
 ```bash
 # Check health status
@@ -1063,32 +1064,32 @@ healthcheck:
    ```bash
    # Find the actual database location
    # Linux/macOS:
-   sqlite3 ~/.config/better-ccflare/better-ccflare.db "PRAGMA journal_mode=WAL;"
+   sqlite3 ~/.config/clankermux/clankermux.db "PRAGMA journal_mode=WAL;"
    
    # Windows:
-   sqlite3 %LOCALAPPDATA%\better-ccflare\better-ccflare.db "PRAGMA journal_mode=WAL;"
+   sqlite3 %LOCALAPPDATA%\clankermux\clankermux.db "PRAGMA journal_mode=WAL;"
    ```
 
 2. **High Memory Usage**
    ```bash
    # Check for memory leaks
-   node --inspect=0.0.0.0:9229 /opt/better-ccflare/better-ccflare-server
+   node --inspect=0.0.0.0:9229 /opt/clankermux/clankermux-server
    ```
 
 3. **Connection Refused**
    ```bash
    # Check if service is running
-   systemctl status better-ccflare
+   systemctl status clankermux
    # Check logs
-   journalctl -u better-ccflare -f
+   journalctl -u clankermux -f
    ```
 
 4. **Rate Limit Issues**
    ```bash
    # Check account status
-   better-ccflare --list
+   clankermux --list
    # Reset statistics
-   better-ccflare --reset-stats
+   clankermux --reset-stats
    ```
 
 ## Maintenance
@@ -1097,18 +1098,18 @@ healthcheck:
 
 ```bash
 # Daily: Check recent logs
-better-ccflare --logs 100 | grep ERROR
+clankermux --logs 100 | grep ERROR
 
 # Weekly: Database maintenance
 # Linux/macOS:
-sqlite3 ~/.config/better-ccflare/better-ccflare.db "VACUUM;"
-sqlite3 ~/.config/better-ccflare/better-ccflare.db "ANALYZE;"
+sqlite3 ~/.config/clankermux/clankermux.db "VACUUM;"
+sqlite3 ~/.config/clankermux/clankermux.db "ANALYZE;"
 
 # Monthly: Clean old request history
-better-ccflare --clear-history
+clankermux --clear-history
 
 # Quarterly: Update dependencies (if running from source)
-cd /path/to/better-ccflare
+cd /path/to/clankermux
 bun update
 ```
 
@@ -1118,20 +1119,20 @@ bun update
 #!/bin/bash
 # backup.sh - Run daily via cron
 
-BACKUP_DIR="/backup/better-ccflare/$(date +%Y%m%d)"
+BACKUP_DIR="/backup/clankermux/$(date +%Y%m%d)"
 mkdir -p "$BACKUP_DIR"
 
 # Determine config directory based on OS
 if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    CONFIG_DIR="$HOME/.config/better-ccflare"
+    CONFIG_DIR="$HOME/.config/clankermux"
 elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-    CONFIG_DIR="$LOCALAPPDATA/better-ccflare"
+    CONFIG_DIR="$LOCALAPPDATA/clankermux"
 else
-    CONFIG_DIR="$HOME/.config/better-ccflare"  # Default fallback
+    CONFIG_DIR="$HOME/.config/clankermux"  # Default fallback
 fi
 
 # Backup database and config
-sqlite3 "$CONFIG_DIR/better-ccflare.db" ".backup $BACKUP_DIR/better-ccflare.db"
+sqlite3 "$CONFIG_DIR/clankermux.db" ".backup $BACKUP_DIR/clankermux.db"
 cp "$CONFIG_DIR/config.json" "$BACKUP_DIR/" 2>/dev/null || true
 
 # Compress
@@ -1139,7 +1140,7 @@ tar -czf "$BACKUP_DIR.tar.gz" "$BACKUP_DIR"
 rm -rf "$BACKUP_DIR"
 
 # Keep only last 30 days
-find /backup/better-ccflare -name "*.tar.gz" -mtime +30 -delete
+find /backup/clankermux -name "*.tar.gz" -mtime +30 -delete
 ```
 
 ## Environment Variables Reference
@@ -1152,7 +1153,7 @@ find /backup/better-ccflare -name "*.tar.gz" -mtime +30 -delete
 | `LB_STRATEGY` | session | Load balancing strategy (only 'session' is supported) |
 | `LOG_LEVEL` | INFO | Logging level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `LOG_FORMAT` | pretty | Log format: `pretty` (human-readable) or `json` (structured) |
-| `better-ccflare_DEBUG` | 0 | Enable debug mode (1/0) - enables console output |
+| `CLANKERMUX_DEBUG` | 0 | Enable debug mode (1/0) - enables console output (legacy `BETTER_CCFLARE_DEBUG` still honored) |
 
 ### Advanced Configuration
 
@@ -1163,13 +1164,13 @@ find /backup/better-ccflare -name "*.tar.gz" -mtime +30 -delete
 | `RETRY_ATTEMPTS` | 3 | Number of retry attempts for failed requests |
 | `RETRY_DELAY_MS` | 1000 | Initial delay between retries in milliseconds |
 | `RETRY_BACKOFF` | 2 | Backoff multiplier for exponential retry delays |
-| `better-ccflare_CONFIG_PATH` | Platform-specific | Path to configuration file |
-| `better-ccflare_DB_PATH` | Platform-specific | Path to SQLite database file (ignored when `DATABASE_URL` is set) |
+| `CLANKERMUX_CONFIG_PATH` | Platform-specific | Path to configuration file (legacy `BETTER_CCFLARE_CONFIG_PATH` still honored) |
+| `CLANKERMUX_DB_PATH` | Platform-specific | Path to SQLite database file (ignored when `DATABASE_URL` is set) (legacy `BETTER_CCFLARE_DB_PATH` still honored) |
 | `DATABASE_URL` | - | PostgreSQL connection string. When set, PostgreSQL is used instead of SQLite. Required for multi-pod Kubernetes deployments. Example: `postgresql://user:pass@host:5432/db` |
 
 ### Configuration File
 
-better-ccflare also supports a JSON configuration file that takes precedence over environment variables:
+ClankerMux also supports a JSON configuration file that takes precedence over environment variables:
 
 ```json
 {
@@ -1184,12 +1185,12 @@ better-ccflare also supports a JSON configuration file that takes precedence ove
 ```
 
 The configuration file is located at:
-- **Linux/macOS**: `~/.config/better-ccflare/config.json`
-- **Windows**: `%APPDATA%\better-ccflare\config.json`
+- **Linux/macOS**: `~/.config/clankermux/config.json`
+- **Windows**: `%APPDATA%\clankermux\config.json`
 
 ## Conclusion
 
-better-ccflare is designed to be flexible and scalable, supporting everything from simple local deployments to complex distributed architectures. Choose the deployment option that best fits your needs and scale as your requirements grow.
+ClankerMux is designed to be flexible and scalable, supporting everything from simple local deployments to complex distributed architectures. Choose the deployment option that best fits your needs and scale as your requirements grow.
 
 ### Key Features Summary
 
@@ -1209,13 +1210,13 @@ better-ccflare is designed to be flexible and scalable, supporting everything fr
 
 ## Web Dashboard
 
-better-ccflare includes a powerful web-based dashboard for monitoring and management.
+ClankerMux includes a powerful web-based dashboard for monitoring and management.
 
 ### Accessing the Dashboard
 
 ```bash
-# Start better-ccflare server with embedded dashboard
-better-ccflare --serve
+# Start ClankerMux server with embedded dashboard
+clankermux --serve
 
 # Or from source:
 bun run better-ccflare
@@ -1244,12 +1245,12 @@ bun run better-ccflare
 
 ### Remote API Connection
 
-The better-ccflare CLI can connect to a remote API server for distributed deployments:
+The ClankerMux CLI can connect to a remote API server for distributed deployments:
 
 ```bash
-# Set API URL for remote connection
-export BETTER_CCFLARE_API_URL=https://better-ccflare.example.com
-better-ccflare --list  # Will query the remote server
+# Set API URL for remote connection (legacy BETTER_CCFLARE_API_URL still honored)
+export CLANKERMUX_API_URL=https://clankermux.example.com
+clankermux --list  # Will query the remote server
 ```
 
 For support and updates, check the project repository and documentation.

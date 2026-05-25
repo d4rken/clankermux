@@ -2,9 +2,9 @@ import {
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
-} from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
-import { NO_ACCOUNT_ID } from "@better-ccflare/types";
+} from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
+import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { AnalyticsResponse, APIContext } from "../types";
 
 const log = new Logger("AnalyticsHandler");

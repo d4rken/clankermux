@@ -1,6 +1,6 @@
-import { CLAUDE_CLI_VERSION } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import { supportsUsageTracking } from "@better-ccflare/types";
+import { CLAUDE_CLI_VERSION } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { supportsUsageTracking } from "@clankermux/types";
 import {
 	type AlibabaCodingPlanUsageData,
 	fetchAlibabaCodingPlanUsageData,

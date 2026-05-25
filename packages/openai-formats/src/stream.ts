@@ -1,5 +1,5 @@
-import { ANALYTICS_STREAM_SYMBOL } from "@better-ccflare/http-common/symbols";
-import { Logger } from "@better-ccflare/logger";
+import { ANALYTICS_STREAM_SYMBOL } from "@clankermux/http-common/symbols";
+import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
 import { repairTruncatedToolJson } from "./utils";
 

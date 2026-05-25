@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from "bun:test";
 import { translateBedrockError } from "../error-handler";
 
 // Mock database dependencies used by getModelNotFoundSuggestion
-mock.module("@better-ccflare/database", () => ({
+mock.module("@clankermux/database", () => ({
 	DatabaseFactory: {
 		getInstance: mock(() => ({
 			getDatabase: mock(() => ({})),

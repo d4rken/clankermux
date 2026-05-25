@@ -1,6 +1,6 @@
-import { getModelFamily, parseModelMappings } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { getModelFamily, parseModelMappings } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 
 const log = new Logger("ModelMappingUtils");
 

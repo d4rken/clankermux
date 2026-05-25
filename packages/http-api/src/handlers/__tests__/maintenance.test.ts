@@ -21,7 +21,7 @@ function makeConfig(
 		getDataRetentionDays: () => payloadDays,
 		getRequestRetentionDays: () => requestDays,
 		getStorePayloads: () => storePayloads ?? true,
-	} as unknown as import("@better-ccflare/config").Config;
+	} as unknown as import("@clankermux/config").Config;
 }
 
 function makeDbOps(
@@ -41,7 +41,7 @@ function makeDbOps(
 		compact: mock(async () => compactResult),
 		getTableRowCounts: mock(async () => tableRowCounts ?? []),
 		getDbSizeBytes: mock(async () => dbSizeBytes ?? 0),
-	} as unknown as import("@better-ccflare/database").DatabaseOperations;
+	} as unknown as import("@clankermux/database").DatabaseOperations;
 }
 
 // ---------------------------------------------------------------------------

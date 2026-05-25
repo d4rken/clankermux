@@ -1,4 +1,4 @@
-import type { MessageData } from "@better-ccflare/types";
+import type { MessageData } from "@clankermux/types";
 
 export const genMessageKey = (msg: MessageData, index: number): string => {
 	const preview = msg.content?.slice(0, 20).replace(/\s/g, "-");

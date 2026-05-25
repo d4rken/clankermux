@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import { BaseRepository } from "./base.repository";
 
 const log = new Logger("ModelTranslationRepository");

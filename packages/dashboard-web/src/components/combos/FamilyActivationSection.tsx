@@ -1,4 +1,4 @@
-import type { ComboFamily } from "@better-ccflare/types";
+import type { ComboFamily } from "@clankermux/types";
 import { useAssignFamily, useCombos, useFamilies } from "../../hooks/queries";
 import { Badge } from "../ui/badge";
 import {

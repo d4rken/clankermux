@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { TIME_CONSTANTS } from "@better-ccflare/core";
-import { usageCache } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+import { TIME_CONSTANTS } from "@clankermux/core";
+import { usageCache } from "@clankermux/providers";
+import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { processProxyResponse } from "../handlers/response-processor";
 import { handleProxy } from "../proxy";

@@ -1,4 +1,4 @@
-import { HttpError, parseHttpError } from "@better-ccflare/errors";
+import { HttpError, parseHttpError } from "@clankermux/errors";
 
 export interface RequestOptions extends RequestInit {
 	timeout?: number;

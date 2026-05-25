@@ -1,16 +1,13 @@
-import { agentRegistry } from "@better-ccflare/agents";
-import {
-	getAllowedModelsMessage,
-	isValidClaudeModel,
-} from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import { agentRegistry } from "@clankermux/agents";
+import { getAllowedModelsMessage, isValidClaudeModel } from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	errorResponse,
 	Forbidden,
 	jsonResponse,
-} from "@better-ccflare/http-common";
-import type { AgentTool, AllowedModel } from "@better-ccflare/types";
-import { TOOL_PRESETS } from "@better-ccflare/types";
+} from "@clankermux/http-common";
+import type { AgentTool, AllowedModel } from "@clankermux/types";
+import { TOOL_PRESETS } from "@clankermux/types";
 
 type ToolMode = keyof typeof TOOL_PRESETS | "custom";
 

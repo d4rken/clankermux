@@ -3,7 +3,7 @@ import {
 	formatDuration,
 	formatTokens,
 	formatTokensPerSecond,
-} from "@better-ccflare/ui-common";
+} from "@clankermux/ui-common";
 import {
 	Bot,
 	Calendar,

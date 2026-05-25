@@ -1,4 +1,4 @@
-import type { AgentUpdatePayload } from "@better-ccflare/types";
+import type { AgentUpdatePayload } from "@clankermux/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { queryKeys } from "../lib/query-keys";

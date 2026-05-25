@@ -2,12 +2,14 @@
  * Version utility that works in both development and production environments
  */
 
+import { readEnv } from "./env";
+
 // Claude CLI version to use in user-agent headers
 export const CLAUDE_CLI_VERSION = "2.1.143";
 
-// Build-time injected version via --define __BETTER_CCFLARE_VERSION__="x.y.z"
+// Build-time injected version via --define __CLANKERMUX_VERSION__="x.y.z"
 // Replaced by bun bundler with a string literal; undefined at dev/runtime.
-declare const __BETTER_CCFLARE_VERSION__: string | undefined;
+declare const __CLANKERMUX_VERSION__: string | undefined;
 
 // Cache the version to avoid repeated file reads
 let cachedVersion: string | null = null;
@@ -18,17 +20,15 @@ export async function getVersion(): Promise<string> {
 	}
 
 	// 1. Build-time injected version (reliable for compiled binaries)
-	if (
-		typeof __BETTER_CCFLARE_VERSION__ !== "undefined" &&
-		__BETTER_CCFLARE_VERSION__
-	) {
-		cachedVersion = __BETTER_CCFLARE_VERSION__;
+	if (typeof __CLANKERMUX_VERSION__ !== "undefined" && __CLANKERMUX_VERSION__) {
+		cachedVersion = __CLANKERMUX_VERSION__;
 		return cachedVersion;
 	}
 
 	// 2. Runtime env var fallback (dev/test environments)
-	if (process.env.BETTER_CCFLARE_VERSION) {
-		cachedVersion = process.env.BETTER_CCFLARE_VERSION;
+	const envVersion = readEnv("VERSION");
+	if (envVersion) {
+		cachedVersion = envVersion;
 		return cachedVersion;
 	}
 
@@ -65,17 +65,15 @@ export function getVersionSync(): string {
 	}
 
 	// 1. Build-time injected version (reliable for compiled binaries)
-	if (
-		typeof __BETTER_CCFLARE_VERSION__ !== "undefined" &&
-		__BETTER_CCFLARE_VERSION__
-	) {
-		cachedVersion = __BETTER_CCFLARE_VERSION__;
+	if (typeof __CLANKERMUX_VERSION__ !== "undefined" && __CLANKERMUX_VERSION__) {
+		cachedVersion = __CLANKERMUX_VERSION__;
 		return cachedVersion;
 	}
 
 	// 2. Runtime env var fallback
-	if (process.env.BETTER_CCFLARE_VERSION) {
-		cachedVersion = process.env.BETTER_CCFLARE_VERSION;
+	const envVersion = readEnv("VERSION");
+	if (envVersion) {
+		cachedVersion = envVersion;
 		return cachedVersion;
 	}
 

@@ -1,6 +1,6 @@
-import { Logger } from "@better-ccflare/logger";
-import type { OpenAIRequest } from "@better-ccflare/openai-formats";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { OpenAIRequest } from "@clankermux/openai-formats";
+import type { Account } from "@clankermux/types";
 import type { RateLimitInfo } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
 

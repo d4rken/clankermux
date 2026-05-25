@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/security",
+	"name": "@clankermux/security",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -10,6 +10,6 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/logger": "workspace:*"
+		"@clankermux/logger": "workspace:*"
 	}
 }

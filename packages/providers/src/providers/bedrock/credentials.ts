@@ -3,8 +3,8 @@ import {
 	fromEnv,
 	fromIni,
 } from "@aws-sdk/credential-providers";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import type { AwsCredentialIdentity, Provider } from "@smithy/types";
 
 const log = new Logger("BedrockCredentials");

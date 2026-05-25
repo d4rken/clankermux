@@ -1,8 +1,8 @@
 import { parseArgs } from "node:util";
-import { Config } from "@better-ccflare/config";
-import { shutdown } from "@better-ccflare/core";
-import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
-import { DatabaseFactory } from "@better-ccflare/database";
+import { Config } from "@clankermux/config";
+import { shutdown } from "@clankermux/core";
+import { container, SERVICE_KEYS } from "@clankermux/core-di";
+import { DatabaseFactory } from "@clankermux/database";
 import {
 	addAccount,
 	getAccountsList,
@@ -48,7 +48,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				if (!name) {
 					console.error("Error: Account name is required");
 					console.log(
-						"Usage: ccflare-cli add <name> [--mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible>] [--priority <number>] [--modelMappings <JSON>]",
+						"Usage: clankermux add <name> [--mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible>] [--priority <number>] [--modelMappings <JSON>]",
 					);
 					process.exit(1);
 				}
@@ -141,7 +141,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				const name = positionals[1];
 				if (!name) {
 					console.error("Error: Account name is required");
-					console.log("Usage: ccflare-cli remove <name> [--force]");
+					console.log("Usage: clankermux remove <name> [--force]");
 					process.exit(1);
 				}
 
@@ -175,7 +175,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				const name = positionals[1];
 				if (!name) {
 					console.error("Error: Account name is required");
-					console.log("Usage: ccflare-cli pause <name>");
+					console.log("Usage: clankermux pause <name>");
 					process.exit(1);
 				}
 
@@ -191,7 +191,7 @@ export async function runCli(argv: string[]): Promise<void> {
 				const name = positionals[1];
 				if (!name) {
 					console.error("Error: Account name is required");
-					console.log("Usage: ccflare-cli resume <name>");
+					console.log("Usage: clankermux resume <name>");
 					process.exit(1);
 				}
 
@@ -209,13 +209,13 @@ export async function runCli(argv: string[]): Promise<void> {
 
 				if (!name) {
 					console.error("Error: Account name is required");
-					console.log("Usage: ccflare-cli set-priority <name> <priority>");
+					console.log("Usage: clankermux set-priority <name> <priority>");
 					process.exit(1);
 				}
 
 				if (priorityValue === undefined) {
 					console.error("Error: Priority value is required");
-					console.log("Usage: ccflare-cli set-priority <name> <priority>");
+					console.log("Usage: clankermux set-priority <name> <priority>");
 					process.exit(1);
 				}
 

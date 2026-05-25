@@ -2,7 +2,7 @@
 
 ## Overview
 
-better-ccflare now supports optional API authentication that allows you to secure your proxy endpoint with API keys. When API keys are configured, all requests to the proxy API must include a valid API key.
+ClankerMux now supports optional API authentication that allows you to secure your proxy endpoint with API keys. When API keys are configured, all requests to the proxy API must include a valid API key.
 
 ## 🚀 Quick Start
 
@@ -10,7 +10,7 @@ better-ccflare now supports optional API authentication that allows you to secur
 
 ```bash
 # Generate a new API key
-better-ccflare --generate-api-key "Production App"
+clankermux --generate-api-key "Production App"
 
 # ✅ API Key Generated Successfully!
 # Name: Production App
@@ -72,18 +72,18 @@ Authorization: Bearer btr-abcdef1234567890...
 ### Generate API Keys
 ```bash
 # Generate new API key
-better-ccflare --generate-api-key "My App"
+clankermux --generate-api-key "My App"
 
 # Generate multiple keys for different environments
-better-ccflare --generate-api-key "Production"
-better-ccflare --generate-api-key "Development"
-better-ccflare --generate-api-key "Testing"
+clankermux --generate-api-key "Production"
+clankermux --generate-api-key "Development"
+clankermux --generate-api-key "Testing"
 ```
 
 ### List API Keys
 ```bash
 # List all API keys with status
-better-ccflare --list-api-keys
+clankermux --list-api-keys
 
 # Output:
 # API Keys:
@@ -102,19 +102,19 @@ better-ccflare --list-api-keys
 ### Manage API Keys
 ```bash
 # Disable an API key (temporary)
-better-ccflare --disable-api-key "Production"
+clankermux --disable-api-key "Production"
 
 # Enable a disabled API key
-better-ccflare --enable-api-key "Production"
+clankermux --enable-api-key "Production"
 
 # Delete an API key permanently
-better-ccflare --delete-api-key "Production"
+clankermux --delete-api-key "Production"
 ```
 
 ## 🌐 Web Dashboard
 
 ### Access the API Keys Interface
-1. Navigate to your better-ccflare dashboard (default: http://localhost:8080)
+1. Navigate to your ClankerMux dashboard (default: http://localhost:8080)
 2. Click **"API Keys"** in the navigation menu
 3. View statistics, generate new keys, and manage existing ones
 
@@ -242,22 +242,22 @@ curl -X DELETE http://localhost:8080/api/api-keys/Production \
 ### **Environment-Specific Keys**
 ```bash
 # Production environment
-better-ccflare --generate-api-key "Production-Web-App"
-better-ccflare --generate-api-key "Production-API"
+clankermux --generate-api-key "Production-Web-App"
+clankermux --generate-api-key "Production-API"
 
 # Development environment
-better-ccflare --generate-api-key "Dev-Local"
-better-ccflare --generate-api-key "Dev-Testing"
+clankermux --generate-api-key "Dev-Local"
+clankermux --generate-api-key "Dev-Testing"
 
 # Staging environment
-better-ccflare --generate-api-key "Staging-App"
+clankermux --generate-api-key "Staging-App"
 ```
 
 ### **Access Control**
 ```bash
 # Create keys with limited scope
-better-ccflare --generate-api-key "Read-Only-Integration"
-better-ccflare --generate-api-key "Write-Access-Service"
+clankermux --generate-api-key "Read-Only-Integration"
+clankermux --generate-api-key "Write-Access-Service"
 ```
 
 ## ⚡ Performance
@@ -294,7 +294,7 @@ Run the performance benchmark script to test your setup:
 
 2. **Generate First API Key**:
    ```bash
-   better-ccflare --generate-api-key "First Key"
+   clankermux --generate-api-key "First Key"
    ```
 
 3. **Update Client Code**:
@@ -314,7 +314,7 @@ Run the performance benchmark script to test your setup:
 #### API Key Not Working
 ```bash
 # Check if API key exists and is active
-better-ccflare --list-api-keys
+clankermux --list-api-keys
 
 # Verify key format (should start with "btr-")
 echo "btr-abcdef1234567890..." | grep -E "^btr-[a-zA-Z0-9]{32}$"
@@ -327,7 +327,7 @@ curl -v -X GET http://localhost:8080/api/stats \
   -H "x-api-key: your-key-here"
 
 # Check server logs for authentication details
-tail -f ~/.config/better-ccflare/better-ccflare.log
+tail -f ~/.config/clankermux/clankermux.log
 ```
 
 #### Dashboard Issues
@@ -336,8 +336,8 @@ tail -f ~/.config/better-ccflare/better-ccflare.log
 curl http://localhost:8080/health
 
 # Restart server with clean state
-pkill better-ccflare
-better-ccflare --serve
+pkill clankermux
+clankermux --serve
 ```
 
 ### **Debug Mode**
@@ -345,7 +345,7 @@ Enable verbose logging for authentication debugging:
 
 ```bash
 # Start server with debug logging
-DEBUG=auth:* better-ccflare --serve
+DEBUG=auth:* clankermux --serve
 ```
 
 ## 📚 Reference
@@ -371,17 +371,17 @@ The following paths are exempt from authentication:
 ### **CLI Reference**
 ```bash
 # Help
-better-ccflare --help
+clankermux --help
 
 # Version
-better-ccflare --version
+clankermux --version
 
 # API Key Commands
-better-ccflare --generate-api-key <name>
-better-ccflare --list-api-keys
-better-ccflare --disable-api-key <name>
-better-ccflare --enable-api-key <name>
-better-ccflare --delete-api-key <name>
+clankermux --generate-api-key <name>
+clankermux --list-api-keys
+clankermux --disable-api-key <name>
+clankermux --enable-api-key <name>
+clankermux --delete-api-key <name>
 ```
 
 ## 🚀 Advanced Usage
@@ -410,8 +410,8 @@ console.log(`Generated key: ${apiKey} (prefix: ${prefixLast8})`);
 # deploy.sh - Deployment automation script
 
 # Generate deployment keys
-PROD_KEY=$(better-ccflare --generate-api-key "production" | grep "Key:" | awk '{print $2}')
-STAGING_KEY=$(better-ccflare --generate-api-key "staging" | grep "Key:" | awk '{print $2}')
+PROD_KEY=$(clankermux --generate-api-key "production" | grep "Key:" | awk '{print $2}')
+STAGING_KEY=$(clankermux --generate-api-key "staging" | grep "Key:" | awk '{print $2}')
 
 # Store keys securely (example with environment variables)
 export PROD_API_KEY="$PROD_KEY"
@@ -425,11 +425,11 @@ echo "✅ API keys generated for deployment"
 # Dockerfile.example
 FROM node:18-alpine
 
-# Install better-ccflare
+# Install ClankerMux
 RUN npm install -g better-ccflare
 
 # Generate API key during build
-RUN better-ccflare --generate-api-key "docker-container" | grep "Key:" | awk '{print $2}' > /app/api-key
+RUN clankermux --generate-api-key "docker-container" | grep "Key:" | awk '{print $2}' > /app/api-key
 
 # Your application code
 COPY . /app
@@ -447,4 +447,4 @@ CMD ["node", "server.js"]
 
 ---
 
-*API authentication is optional. Your better-ccflare instance will work exactly as before until you generate your first API key.*
+*API authentication is optional. Your ClankerMux instance will work exactly as before until you generate your first API key.*

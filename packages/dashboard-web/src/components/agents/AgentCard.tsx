@@ -1,6 +1,6 @@
-import { getModelDisplayName } from "@better-ccflare/core";
-import type { Agent } from "@better-ccflare/types";
-import { COMMON_MODELS } from "@better-ccflare/types";
+import { getModelDisplayName } from "@clankermux/core";
+import type { Agent } from "@clankermux/types";
+import { COMMON_MODELS } from "@clankermux/types";
 import { Bot, Cpu, Edit3, Folder, Globe, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { Badge } from "../ui/badge";

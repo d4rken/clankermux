@@ -2,11 +2,11 @@
 
 **Last Security Review**: October 27, 2025
 
-This document outlines the security considerations, practices, and recommendations for the better-ccflare load balancer system.
+This document outlines the security considerations, practices, and recommendations for the ClankerMux load balancer system.
 
 ## ⚠️ Critical Security Notice
 
-**IMPORTANT**: better-ccflare is designed for local development and trusted environments. The current implementation has several security limitations:
+**IMPORTANT**: ClankerMux is designed for local development and trusted environments. The current implementation has several security limitations:
 
 1. **No Authentication**: All API endpoints and the dashboard are publicly accessible
 2. **Network Exposure**: Server binds to all interfaces (0.0.0.0) by default
@@ -45,7 +45,7 @@ Based on the latest security review, the following critical issues require immed
 
 ## Security Overview
 
-better-ccflare is a load balancer proxy that manages multiple OAuth accounts to distribute requests to the Claude API. The system handles sensitive authentication tokens and request/response data, requiring careful security considerations.
+ClankerMux is a load balancer proxy that manages multiple OAuth accounts to distribute requests to the Claude API. The system handles sensitive authentication tokens and request/response data, requiring careful security considerations.
 
 ### Key Security Components
 
@@ -178,7 +178,7 @@ async function encryptToken(token: string, key: Buffer): Promise<EncryptedToken>
 ```
 
 #### 2. Key Management
-- Use environment variable for encryption key: `better-ccflare_ENCRYPTION_KEY`
+- Use environment variable for encryption key: `CLANKERMUX_ENCRYPTION_KEY` (legacy `BETTER_CCFLARE_ENCRYPTION_KEY` still honored)
 - Implement key derivation from master password
 - Consider integration with OS keychain/credential store
 
@@ -250,7 +250,7 @@ iptables -A INPUT -p tcp --dport 8080 -s 127.0.0.1 -j ACCEPT
 iptables -A INPUT -p tcp --dport 8080 -j DROP
 ```
 
-**✅ Implemented**: Server now supports the `BETTER_CCFLARE_HOST` environment variable for binding configuration:
+**✅ Implemented**: Server now supports the `CLANKERMUX_HOST` environment variable for binding configuration (the legacy `BETTER_CCFLARE_HOST` name is still honored):
 ```typescript
 // Implemented in apps/server/src/server.ts:480
 const hostname = process.env.BETTER_CCFLARE_HOST || "0.0.0.0"; // Allow binding configuration
@@ -264,16 +264,16 @@ const serverConfig = {
 
 **Usage Examples**:
 ```bash
-# Bind to localhost only (secure)
-export BETTER_CCFLARE_HOST=127.0.0.1
+# Bind to localhost only (secure) — legacy BETTER_CCFLARE_HOST still honored
+export CLANKERMUX_HOST=127.0.0.1
 bun start
 
 # Bind to all interfaces (default - insecure)
-export BETTER_CCFLARE_HOST=0.0.0.0
+export CLANKERMUX_HOST=0.0.0.0
 bun start
 
 # Bind to specific network interface
-export BETTER_CCFLARE_HOST=192.168.1.100
+export CLANKERMUX_HOST=192.168.1.100
 bun start
 ```
 
@@ -282,7 +282,7 @@ bun start
 # Nginx configuration example
 server {
     listen 443 ssl http2;
-    server_name better-ccflare.internal;
+    server_name clankermux.internal;
     
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
@@ -524,7 +524,7 @@ interface User {
 ### Deployment Checklist
 
 - [ ] **Network Configuration**
-  - [ ] ✅ Bind server to localhost only using `BETTER_CCFLARE_HOST=127.0.0.1`
+  - [ ] ✅ Bind server to localhost only using `CLANKERMUX_HOST=127.0.0.1` (legacy `BETTER_CCFLARE_HOST` still honored)
   - [ ] Configure firewall rules
   - [ ] Set up reverse proxy with TLS
   - [ ] Disable unnecessary network services
@@ -602,7 +602,7 @@ interface User {
 ## Common Security Pitfalls
 
 ### 1. Exposed Development Instance
-**Risk**: Running better-ccflare with default settings exposes it to the network
+**Risk**: Running ClankerMux with default settings exposes it to the network
 **Mitigation**: Always bind to localhost in development
 
 ### 2. Token in Logs
@@ -759,15 +759,15 @@ function addSecurityHeaders(response: Response): Response {
 # Logging and Debugging
 LOG_LEVEL=INFO                  # Set to ERROR in production
 LOG_FORMAT=json                 # Use json for structured logging
-better-ccflare_DEBUG=0            # Set to 1 only for debugging
+CLANKERMUX_DEBUG=0            # Set to 1 only for debugging (legacy BETTER_CCFLARE_DEBUG still honored)
 
 # Configuration
-better-ccflare_CONFIG_PATH=/path/to/config.json  # Custom config location
+CLANKERMUX_CONFIG_PATH=/path/to/config.json  # Custom config location (legacy BETTER_CCFLARE_CONFIG_PATH still honored)
 CLIENT_ID=your-client-id       # OAuth client ID
 
 # Server Configuration
 PORT=8080                      # Server port
-BETTER_CCFLARE_HOST=0.0.0.0   # Server binding host (use 127.0.0.1 for localhost-only)
+CLANKERMUX_HOST=0.0.0.0       # Server binding host (use 127.0.0.1 for localhost-only) (legacy BETTER_CCFLARE_HOST still honored)
 LB_STRATEGY=session           # Load balancing strategy
 
 # Retry Configuration
@@ -822,14 +822,14 @@ SESSION_DURATION_MS=18000000 # Session duration (5 hours)
 grep -v "127.0.0.1\|::1" access.log
 
 # Monitor for high request volumes
-sqlite3 better-ccflare.db "SELECT COUNT(*) as count, account_used 
+sqlite3 clankermux.db "SELECT COUNT(*) as count, account_used 
 FROM requests 
 WHERE timestamp > strftime('%s', 'now', '-1 hour') * 1000 
 GROUP BY account_used 
 ORDER BY count DESC"
 
 # Check for configuration changes
-sqlite3 better-ccflare.db "SELECT * FROM audit_log WHERE action LIKE '%config%'"
+sqlite3 clankermux.db "SELECT * FROM audit_log WHERE action LIKE '%config%'"
 ```
 
 ### Incident Response
@@ -838,7 +838,7 @@ sqlite3 better-ccflare.db "SELECT * FROM audit_log WHERE action LIKE '%config%'"
    - Immediately pause affected accounts via API
    - Rotate OAuth tokens through Anthropic console
    - Review request logs for unauthorized usage
-   - Update tokens in better-ccflare
+   - Update tokens in ClankerMux
 
 2. **Unauthorized Access**
    - Implement firewall rules immediately
@@ -905,7 +905,7 @@ curl -I http://localhost:8080/api/health
 Security is an ongoing process. This documentation should be reviewed and updated regularly as the system evolves and new threats emerge. All contributors should familiarize themselves with these security considerations and follow the best practices outlined above.
 
 ### Key Takeaways
-1. **better-ccflare prioritizes functionality over security** - suitable for development, not production
+1. **ClankerMux prioritizes functionality over security** - suitable for development, not production
 2. **Network isolation is critical** - always restrict access to trusted networks
 3. **Token security requires enhancement** - implement encryption for production use
 4. **Authentication is missing** - all endpoints are currently public

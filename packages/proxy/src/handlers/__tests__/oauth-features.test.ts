@@ -1,10 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import {
-	AnthropicOAuthProvider,
-	generatePKCE,
-} from "@better-ccflare/providers";
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
+import { AnthropicOAuthProvider, generatePKCE } from "@clankermux/providers";
 
 // Mock database operations for testing
 const _mockDbOps = {
@@ -228,7 +225,7 @@ describe("CLI Command Integration", () => {
 		// This test verifies that the CLI command exports are available
 		expect(() => {
 			// Import should not throw if CLI commands exist
-			require("@better-ccflare/cli-commands");
+			require("@clankermux/cli-commands");
 		}).not.toThrow();
 	});
 });
@@ -397,7 +394,7 @@ describe("HTTP API Integration", () => {
 	it("should be importable", () => {
 		// Verify that the HTTP API module can be imported without errors
 		expect(() => {
-			require("@better-ccflare/http-api");
+			require("@clankermux/http-api");
 		}).not.toThrow();
 	});
 });

@@ -1,4 +1,4 @@
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 
 export interface TokenRefreshResult {
 	accessToken: string;
