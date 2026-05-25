@@ -1,5 +1,6 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatCost, formatTokensPerSecond } from "@clankermux/ui-common";
+import type { ComponentProps } from "react";
 import {
 	Area,
 	AreaChart,
@@ -17,6 +18,8 @@ import {
 import { CHART_HEIGHTS, CHART_PROPS, COLORS } from "../../constants";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
 interface ModelComparisonData {
 	model: string;
@@ -164,14 +167,13 @@ export function ModelPerformanceComparison({
 								borderRadius: "8px",
 								backdropFilter: "blur(8px)",
 							}}
-							// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 							formatter={
 								((value: number, name: string) => {
 									if (name === "Speed")
 										return [formatTokensPerSecond(value), name];
 									if (name === "Cost/1K") return [formatCost(value), name];
 									return [value, name];
-								}) as any
+								}) as TooltipFormatterProp
 							}
 						/>
 						<Legend
@@ -262,13 +264,12 @@ export function ModelPerformanceComparison({
 						/>
 						<Tooltip
 							contentStyle={getTooltipStyles("dark")}
-							// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 							formatter={
 								((value: number, name: string) => {
 									if (name === "Response Time") return [`${value}ms`, name];
 									if (name === "Error Rate") return [`${value}%`, name];
 									return [value, name];
-								}) as any
+								}) as TooltipFormatterProp
 							}
 						/>
 						<Legend verticalAlign="top" height={36} iconType="rect" />

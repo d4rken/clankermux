@@ -143,8 +143,9 @@ export function createHealthHandler(
 			if (!response.runtime) {
 				response.runtime = {};
 			}
+			const runtime = response.runtime;
 			const integrity = getIntegrityStatus();
-			response.runtime!.storage = {
+			runtime.storage = {
 				integrity: {
 					status: integrity.status,
 					runningKind: integrity.runningKind,

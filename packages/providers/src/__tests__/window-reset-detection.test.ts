@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
-import type { UsageData } from "../usage-fetcher";
+import type { AnyUsageData, UsageData } from "../usage-fetcher";
 import { extractWindowResetTime, usageCache } from "../usage-fetcher";
 import type { ZaiUsageData } from "../zai-usage-fetcher";
 
@@ -45,7 +45,9 @@ describe("extractWindowResetTime", () => {
 	});
 
 	it("returns null for unknown/unsupported provider", () => {
-		expect(extractWindowResetTime({} as any, "unknown-provider")).toBeNull();
+		expect(
+			extractWindowResetTime({} as unknown as AnyUsageData, "unknown-provider"),
+		).toBeNull();
 	});
 });
 

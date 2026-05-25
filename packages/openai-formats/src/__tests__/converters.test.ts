@@ -13,6 +13,12 @@ import type {
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
+// Element type of AnthropicRequest["system"] when it is an array of blocks.
+type AnthropicSystemBlock = Extract<
+	AnthropicRequest["system"],
+	ReadonlyArray<unknown>
+>[number];
+
 function anthropicRequest(
 	overrides: Partial<AnthropicRequest> = {},
 ): AnthropicRequest {
@@ -174,7 +180,7 @@ describe("convertAnthropicRequestToOpenAI — system message", () => {
 					{
 						type: "image",
 						source: { type: "base64", media_type: "image/png", data: "abc" },
-					} as any,
+					} as unknown as AnthropicSystemBlock,
 					{ type: "text", text: "Only text." },
 				],
 			}),
@@ -707,7 +713,7 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			}),
 		);
 		expect(result.stop_reason).toBe("tool_use");
-		const content = (result as any).content as Array<{
+		const content = result.content as Array<{
 			type: string;
 			id: string;
 			name: string;
@@ -735,17 +741,15 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 	});
 
 	it("maps token usage to input_tokens / output_tokens", () => {
-		const result = convertOpenAIResponseToAnthropic(
-			openaiTextResponse(),
-		) as any;
-		expect(result.usage.input_tokens).toBe(10);
-		expect(result.usage.output_tokens).toBe(5);
+		const result = convertOpenAIResponseToAnthropic(openaiTextResponse());
+		expect(result.usage?.input_tokens).toBe(10);
+		expect(result.usage?.output_tokens).toBe(5);
 	});
 
 	it("passes through the response id", () => {
 		const result = convertOpenAIResponseToAnthropic(
 			openaiTextResponse({ id: "chatcmpl-xyz" }),
-		) as any;
+		);
 		expect(result.id).toBe("chatcmpl-xyz");
 	});
 
@@ -770,7 +774,7 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 					},
 				],
 			}),
-		) as any;
+		);
 		const content = result.content as Array<{ type: string }>;
 		expect(content.some((c) => c.type === "text")).toBe(true);
 		expect(content.some((c) => c.type === "tool_use")).toBe(true);
@@ -781,18 +785,18 @@ describe("convertOpenAIResponseToAnthropic — error cases", () => {
 	it("returns error type when response has error field", () => {
 		const result = convertOpenAIResponseToAnthropic({
 			error: { type: "invalid_request_error", message: "Bad request" },
-		} as any) as any;
+		} as unknown as OpenAIResponse);
 		expect(result.type).toBe("error");
-		expect(result.error.message).toBe("Bad request");
+		expect(result.error?.message).toBe("Bad request");
 	});
 
 	it("returns error when choices array is missing", () => {
 		const result = convertOpenAIResponseToAnthropic({
 			id: "xyz",
 			choices: [],
-		} as any) as any;
+		} as unknown as OpenAIResponse);
 		expect(result.type).toBe("error");
-		expect(result.error.type).toBe("invalid_response");
+		expect(result.error?.type).toBe("invalid_response");
 	});
 
 	it("handles malformed tool call arguments gracefully via safeParseJSON", () => {
@@ -816,9 +820,9 @@ describe("convertOpenAIResponseToAnthropic — error cases", () => {
 					},
 				],
 			}),
-		) as any;
+		);
 		// Should not throw — safeParseJSON returns {}
-		const toolBlock = result.content?.find((c: any) => c.type === "tool_use");
+		const toolBlock = result.content?.find((c) => c.type === "tool_use");
 		expect(toolBlock?.input).toEqual({});
 	});
 });

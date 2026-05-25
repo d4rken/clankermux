@@ -39,14 +39,14 @@ const mockUsageCache = {
 		}
 	},
 
-	set(accountId: string, data: any) {
+	set(accountId: string, data: unknown) {
 		this.cache.set(accountId, { data, timestamp: Date.now() });
 		if (this.cache.size % 100 === 0) {
 			this.cleanupStaleEntries();
 		}
 	},
 
-	get(accountId: string): any {
+	get(accountId: string): unknown {
 		const cached = this.cache.get(accountId);
 		if (!cached) return null;
 

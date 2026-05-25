@@ -167,7 +167,9 @@ export class UsageWorkerController {
 	private handleMessage(data: OutgoingWorkerMessage): void {
 		switch (data.type) {
 			case "ready":
-				clearTimeout(this.startupTimer!);
+				if (this.startupTimer !== null) {
+					clearTimeout(this.startupTimer);
+				}
 				this.startupTimer = null;
 				this.state = "ready";
 				this.startedAt = Date.now();

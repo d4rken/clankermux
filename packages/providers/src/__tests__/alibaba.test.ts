@@ -2,6 +2,17 @@ import type { OpenAIRequest } from "@clankermux/openai-formats";
 import type { Account } from "@clankermux/types";
 import { OpenAICompatibleProvider } from "../providers/openai/provider";
 
+/** Exposes the private injectDashScopeReasoning method for testing. */
+type WithDashScopeReasoning = {
+	injectDashScopeReasoning(
+		openaiBody: OpenAIRequest,
+		anthropicBody: Record<string, unknown>,
+	): void;
+};
+
+/** OpenAI request shape including the DashScope-only enable_thinking flag. */
+type OpenAIRequestWithThinking = OpenAIRequest & { enable_thinking?: boolean };
+
 describe("OpenAICompatibleProvider Alibaba Features", () => {
 	let provider: OpenAICompatibleProvider;
 	let mockAccount: Account;
@@ -56,7 +67,7 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			expect(systemMsg.role).toBe("system");
 			if (Array.isArray(systemMsg.content)) {
 				expect(systemMsg.content[0]).toHaveProperty("cache_control");
-				expect((systemMsg.content[0] as any).cache_control).toEqual({
+				expect(systemMsg.content[0].cache_control).toEqual({
 					type: "ephemeral",
 				});
 			}
@@ -146,10 +157,15 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			provider.afterConvert(openaiBody);
 
 			// Then call injectDashScopeReasoning (as done in transformRequestBody)
-			(provider as any).injectDashScopeReasoning(openaiBody, anthropicBody);
+			(provider as unknown as WithDashScopeReasoning).injectDashScopeReasoning(
+				openaiBody,
+				anthropicBody,
+			);
 
 			// enable_thinking should be injected for Qwen reasoning models
-			expect((openaiBody as any).enable_thinking).toBe(true);
+			expect((openaiBody as OpenAIRequestWithThinking).enable_thinking).toBe(
+				true,
+			);
 		});
 
 		it("should NOT inject enable_thinking for kimi-k2-thinking", async () => {
@@ -168,9 +184,14 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 			};
 
 			provider.afterConvert(openaiBody);
-			(provider as any).injectDashScopeReasoning(openaiBody, anthropicBody);
+			(provider as unknown as WithDashScopeReasoning).injectDashScopeReasoning(
+				openaiBody,
+				anthropicBody,
+			);
 
-			expect((openaiBody as any).enable_thinking).toBeUndefined();
+			expect(
+				(openaiBody as OpenAIRequestWithThinking).enable_thinking,
+			).toBeUndefined();
 		});
 	});
 });

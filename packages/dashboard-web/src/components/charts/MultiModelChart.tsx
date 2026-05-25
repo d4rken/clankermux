@@ -5,6 +5,7 @@ import {
 	formatTokens,
 	formatTokensPerSecond,
 } from "@clankermux/ui-common";
+import type { ComponentProps } from "react";
 import {
 	CartesianGrid,
 	Legend,
@@ -27,6 +28,11 @@ import {
 } from "../../lib/chart-utils";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
+type TooltipLabelFormatterProp = ComponentProps<
+	typeof Tooltip
+>["labelFormatter"];
 
 interface MultiModelChartProps {
 	data: Array<{
@@ -217,14 +223,15 @@ export function MultiModelChart({
 				/>
 				<Tooltip
 					contentStyle={getTooltipStyles("dark")}
-					// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
-					formatter={((value: number) => formatValue(value, metric)) as any}
-					// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened labelFormatter label to ReactNode
+					formatter={
+						((value: number) =>
+							formatValue(value, metric)) as TooltipFormatterProp
+					}
 					labelFormatter={
 						((label: string) =>
 							viewMode === "cumulative"
 								? `Cumulative at ${label}`
-								: label) as any
+								: label) as TooltipLabelFormatterProp
 					}
 				/>
 				<Legend

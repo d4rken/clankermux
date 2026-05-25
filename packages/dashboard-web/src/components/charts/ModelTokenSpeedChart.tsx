@@ -1,5 +1,6 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
+import type { ComponentProps } from "react";
 import {
 	Bar,
 	BarChart,
@@ -11,6 +12,12 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
+type TooltipLabelFormatterProp = ComponentProps<
+	typeof Tooltip
+>["labelFormatter"];
+
 import { CHART_PROPS, COLORS } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { getTooltipStyles } from "./chart-utils";
@@ -129,17 +136,17 @@ export function ModelTokenSpeedChart({
 				/>
 				<Tooltip
 					contentStyle={getTooltipStyles("default")}
-					// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 					formatter={
 						((value: number, name: string) => {
 							if (name === "avgSpeed") {
 								return [formatTokensPerSecond(value), "Avg Speed"];
 							}
 							return [value, name];
-						}) as any
+						}) as TooltipFormatterProp
 					}
-					// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened labelFormatter label to ReactNode
-					labelFormatter={((label: string) => `Model: ${label}`) as any}
+					labelFormatter={
+						((label: string) => `Model: ${label}`) as TooltipLabelFormatterProp
+					}
 				/>
 				<Bar dataKey="avgSpeed" name="Average Speed">
 					{chartData.map((entry) => (

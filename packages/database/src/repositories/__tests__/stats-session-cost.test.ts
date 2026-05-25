@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import "@clankermux/core";
+import type { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { StatsRepository } from "../stats.repository";
 
 const createRepoWithRows = (rows: Array<Record<string, unknown>>) => {
@@ -7,7 +8,7 @@ const createRepoWithRows = (rows: Array<Record<string, unknown>>) => {
 		query: async () => rows,
 	};
 
-	return new StatsRepository(adapter as any);
+	return new StatsRepository(adapter as unknown as BunSqlAdapter);
 };
 
 describe("getSessionStats cost aggregation", () => {
@@ -64,7 +65,7 @@ describe("getSessionStats cost aggregation", () => {
 			query: async () => {
 				throw new Error("query should not run when no sessions are active");
 			},
-		} as any);
+		} as unknown as BunSqlAdapter);
 
 		const result = await repo.getSessionStats([
 			{ id: "acc-3", session_start: null },

@@ -1,6 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { OAuthError } from "@clankermux/core";
+import type { OAuthProviderConfig } from "../../../types";
 import { AnthropicOAuthProvider } from "../oauth";
+
+/** Minimal shape of a fake fetch Response used by the OAuth tests. */
+type MockResponse = {
+	ok: boolean;
+	status?: number;
+	statusText?: string;
+	json: () => Promise<unknown>;
+};
+
+/** Recorded fetch invocation as inspected by the tests: [url, init-with-body]. */
+type RecordedFetchCall = [url: string, init: { body: string }];
 
 /**
  * Helper: installs a one-shot fetch mock that records calls.
@@ -8,16 +20,16 @@ import { AnthropicOAuthProvider } from "../oauth";
  * Uses direct globalThis.fetch assignment instead of spyOn because
  * Bun does not support spyOn on accessor properties.
  */
-function mockFetchOnce(response: any): {
-	mock: { calls: any[][] };
+function mockFetchOnce(response: MockResponse): {
+	mock: { calls: RecordedFetchCall[] };
 	mockRestore: () => void;
 } {
 	const originalFetch = globalThis.fetch;
-	const calls: any[][] = [];
-	globalThis.fetch = ((...args: any[]) => {
-		calls.push(args);
+	const calls: RecordedFetchCall[] = [];
+	globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+		calls.push(args as unknown as RecordedFetchCall);
 		return Promise.resolve(response);
-	}) as any;
+	}) as unknown as typeof globalThis.fetch;
 	return {
 		mock: { calls },
 		mockRestore: () => {
@@ -38,14 +50,21 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 		}),
 	});
 
-	const createMockErrorResponse = (errorResponse: any, status = 400) => ({
+	const createMockErrorResponse = (
+		errorResponse: unknown,
+		status = 400,
+	): MockResponse => ({
 		ok: false,
 		status,
 		statusText: "Bad Request",
 		json: async () => errorResponse,
 	});
 
-	const createTestConfig = (overrides: any = {}) => ({
+	const createTestConfig = (
+		overrides: Partial<OAuthProviderConfig> = {},
+	): OAuthProviderConfig => ({
+		authorizeUrl: "https://platform.claude.com/oauth/authorize",
+		scopes: ["org:create_api_key", "user:profile", "user:inference"],
 		clientId: "test-client-id",
 		redirectUri: "https://platform.claude.com/oauth/code/callback",
 		tokenUrl: "https://platform.claude.com/v1/oauth/token",

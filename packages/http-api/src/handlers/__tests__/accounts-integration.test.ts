@@ -18,7 +18,7 @@ const mockUsageCache = {
 		return cached ? Date.now() - cached.timestamp : null;
 	},
 
-	set: (accountId: string, data: any) => {
+	set: (accountId: string, data: unknown) => {
 		mockUsageCache.cache.set(accountId, { data, timestamp: Date.now() });
 	},
 
@@ -49,7 +49,8 @@ const mockGetRepresentativeUtilization = (
 	const utils = Object.values(usageData)
 		.filter(
 			(v): v is { utilization: number } =>
-				v != null && typeof (v as any).utilization === "number",
+				v != null &&
+				typeof (v as { utilization?: unknown }).utilization === "number",
 		)
 		.map((v) => v.utilization);
 	return utils.length > 0 ? Math.max(...utils) : 70;
@@ -82,10 +83,14 @@ const mockDbOps = {
 };
 
 // Mock Database instance
-const mockDatabase = {
+interface MockDatabase {
+	query: () => typeof mockQuery;
+	run: (sql?: string, args?: unknown[]) => unknown;
+}
+const mockDatabase: MockDatabase = {
 	query: () => mockQuery,
 	run: () => {},
-} as any;
+};
 
 const mockQuery = {
 	all: () => [],
@@ -93,17 +98,20 @@ const mockQuery = {
 };
 
 // Mock response helpers
-const mockJsonResponse = (data: any) => ({
+const mockJsonResponse = (data: unknown) => ({
 	ok: true,
 	json: async () => data,
 	status: 200,
 	headers: new Headers(),
 });
 
-const mockErrorResponse = (error: any) => ({
+const mockErrorResponse = (error: unknown) => ({
 	ok: false,
 	json: async () => error,
-	status: error.status || 400,
+	status:
+		(typeof error === "object" && error !== null
+			? (error as { status?: number }).status
+			: undefined) || 400,
 	headers: new Headers(),
 });
 
@@ -809,6 +817,17 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 });
 
 // Mock factory functions to create handlers with our mocked dependencies
+interface MockAccount {
+	id: string;
+	name: string;
+	provider: string;
+	access_token: string | null;
+	refresh_token: string | null;
+	rate_limited_until: number | null;
+	rate_limited: number;
+	[key: string]: unknown;
+}
+
 function createMockAccountsListHandler(
 	CACHE_FRESHNESS_THRESHOLD_MS: number,
 	fetchData: typeof mockFetchUsageData = mockFetchUsageData,
@@ -822,7 +841,7 @@ function createMockAccountsListHandler(
 			now,
 			now,
 			sessionDuration,
-		) as Array<any>;
+		) as MockAccount[];
 
 		// Fetch usage data for all Claude CLI OAuth accounts
 		const oauthAccounts = accounts.filter(

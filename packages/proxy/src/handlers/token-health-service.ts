@@ -103,7 +103,10 @@ export function createTokenHealthService(): TokenHealthService {
 		getAccounts: () => Account[] | Promise<Account[]>,
 	): Promise<TokenHealthReport> => {
 		await performHealthCheck(getAccounts);
-		return lastHealthReport!;
+		if (!lastHealthReport) {
+			throw new Error("Health check did not produce a report");
+		}
+		return lastHealthReport;
 	};
 
 	return {

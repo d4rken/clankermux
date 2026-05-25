@@ -1,6 +1,22 @@
 import { describe, expect, it } from "bun:test";
 import { AsyncDbWriter } from "@clankermux/database";
+import type { Account } from "@clankermux/types";
 import { createHealthHandler } from "../health";
+
+/** Partial shape of the /health JSON body, covering fields asserted in tests. */
+interface HealthTestBody {
+	status?: string;
+	accounts?: number;
+	strategy?: string;
+	pool?: unknown;
+	runtime?: {
+		asyncWriter?: unknown;
+		usageWorker?: unknown;
+		[key: string]: unknown;
+	};
+	accounts_detail?: Array<Record<string, unknown>>;
+	[key: string]: unknown;
+}
 
 describe("health runtime payload", () => {
 	it("returns unhealthy status when no routable accounts and no recovery time", async () => {
@@ -52,7 +68,7 @@ describe("health runtime payload", () => {
 
 		const url = new URL("http://localhost/health");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthTestBody;
 
 		expect(response.status).toBe(200);
 		expect(body.status).toBe("ok");
@@ -103,6 +119,14 @@ describe("AsyncDbWriter.getHealth", () => {
 			failureCount: 0,
 			recentDrops: 0,
 			queuedJobs: 0,
+			metadataQueuedJobs: 0,
+			payloadQueuedJobs: 0,
+			payloadBytesPending: 0,
+			oldestMetadataAgeMs: 0,
+			oldestPayloadAgeMs: 0,
+			metadataDropped: 0,
+			payloadDropped: 0,
+			payloadDroppedBytes: 0,
 		});
 
 		await writer.dispose();
@@ -135,7 +159,7 @@ describe("computePoolStatus", () => {
 				paused: false,
 				rate_limited_until: now + 3600000,
 			},
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -164,7 +188,7 @@ describe("computePoolStatus", () => {
 		const accounts = [
 			{ name: "paused1", paused: true, rate_limited_until: null },
 			{ name: "paused2", paused: true, rate_limited_until: null },
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, Date.now());
 
@@ -189,7 +213,7 @@ describe("computePoolStatus", () => {
 				paused: false,
 				rate_limited_until: now + 3600000,
 			},
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -212,7 +236,7 @@ describe("computePoolStatus", () => {
 				rate_limited_until: now - 1000,
 			},
 			{ name: "available", paused: false, rate_limited_until: null },
-		] as any[];
+		] as unknown as Account[];
 
 		const status = computePoolStatus(accounts, now);
 
@@ -409,7 +433,7 @@ describe("?detail=1 parameter", () => {
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthTestBody;
 
 		expect(body.accounts_detail).toBeDefined();
 		expect(body.accounts_detail).toHaveLength(3);
@@ -475,7 +499,7 @@ describe("?detail=1 parameter", () => {
 		const handler = createHealthHandler(db, config);
 		const url = new URL("http://localhost/health?detail=1");
 		const response = await handler(url);
-		const body = (await response.json()) as Record<string, any>;
+		const body = (await response.json()) as HealthTestBody;
 
 		expect(body.accounts_detail[0].status).toBe("available");
 		expect(body.accounts_detail[0].rate_limited_until).toBeNull();
@@ -528,7 +552,7 @@ describe("cache isolation between detail and non-detail", () => {
 		const detailResp = await handler(
 			new URL("http://localhost/health?detail=1"),
 		);
-		const detailBody = (await detailResp.json()) as Record<string, any>;
+		const detailBody = (await detailResp.json()) as HealthTestBody;
 		expect(detailBody.accounts_detail).toBeDefined();
 		expect(detailBody.accounts_detail[0].name).toBe("acc-1");
 		expect(callCount).toBe(1);
@@ -568,7 +592,7 @@ describe("cache isolation between detail and non-detail", () => {
 		const detailResp = await handler(
 			new URL("http://localhost/health?detail=1"),
 		);
-		const detailBody = (await detailResp.json()) as Record<string, any>;
+		const detailBody = (await detailResp.json()) as HealthTestBody;
 		expect(detailBody.accounts_detail).toBeDefined();
 		expect(callCount).toBe(2);
 	});
@@ -592,13 +616,13 @@ describe("cache isolation between detail and non-detail", () => {
 		const handler = createHealthHandler(db, config);
 
 		const resp1 = await handler(new URL("http://localhost/health"));
-		const body1 = (await resp1.json()) as Record<string, any>;
+		const body1 = (await resp1.json()) as HealthTestBody;
 		expect(body1.accounts_detail).toBeUndefined();
 		expect(callCount).toBe(1);
 
 		// Repeated non-detail request — should hit cache
 		const resp2 = await handler(new URL("http://localhost/health"));
-		const body2 = (await resp2.json()) as Record<string, any>;
+		const body2 = (await resp2.json()) as HealthTestBody;
 		expect(body2.accounts_detail).toBeUndefined();
 		expect(callCount).toBe(1); // no extra DB call
 	});

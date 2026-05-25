@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import {
 	CartesianGrid,
 	ResponsiveContainer,
@@ -21,6 +21,8 @@ import type {
 	ChartDataPoint,
 	TooltipFormatterFunction,
 } from "./types";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
 interface BaseScatterChartProps {
 	data: ChartDataPoint[];
@@ -120,10 +122,9 @@ export function BaseScatterChart({
 								: undefined
 						}
 					/>
-					{/* biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined */}
 					<Tooltip
 						contentStyle={tooltipStyles}
-						formatter={tooltipFormatter as any}
+						formatter={tooltipFormatter as TooltipFormatterProp}
 					/>
 					<Scatter
 						name="Data"
