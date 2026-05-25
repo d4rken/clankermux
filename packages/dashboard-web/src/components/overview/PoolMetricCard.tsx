@@ -170,7 +170,7 @@ export function PoolMetricCard({
 			<PopoverTrigger asChild>
 				<button
 					type="button"
-					className="flex items-center gap-1 text-xs text-muted-foreground cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+					className="flex items-center gap-1 shrink-0 text-xs text-muted-foreground cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
 				>
 					<span className="tabular-nums">
 						({contributing.length}/{eligibleTotal} active)
@@ -315,13 +315,15 @@ export function PoolMetricCard({
 
 	return (
 		<Card>
-			<CardContent className="p-6">
-				<div className="flex items-center justify-between mb-4">
-					<Icon className="h-8 w-8 text-muted-foreground/20" />
+			<CardContent className="p-4">
+				<div className="flex items-center justify-between gap-2 mb-1.5">
+					<div className="flex items-center gap-1.5 min-w-0">
+						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+						<p className="text-sm text-muted-foreground truncate">{title}</p>
+					</div>
 					{triggerNode}
 				</div>
 				<div className="space-y-1">
-					<p className="text-sm text-muted-foreground">{title}</p>
 					<p className={cn("text-2xl font-bold", colorClass)}>{headline}</p>
 					<p className="text-xs text-muted-foreground truncate">
 						capacity used
