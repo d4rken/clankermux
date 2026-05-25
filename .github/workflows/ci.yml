@@ -43,6 +43,9 @@ jobs:
       # The 5 gitignored inline worker files are absent on a fresh checkout;
       # write empty placeholders so tsc can resolve their imports.
       - run: bash .github/scripts/gen-autogen-placeholders.sh
+      # apps/server imports the gitignored dashboard build artifacts
+      # (dist/embedded.ts, dist/manifest.json); generate them (~1s).
+      - run: bun run build:dashboard
       - run: bun run typecheck
 
   test:
@@ -55,4 +58,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
       - run: bash .github/scripts/gen-autogen-placeholders.sh
+      # The --serve CLI test boots the server, which imports the dashboard
+      # build artifacts; without them that test hangs to timeout.
+      - run: bun run build:dashboard
       - run: bun test
