@@ -3,8 +3,6 @@ import type { FullUsageData } from "@clankermux/types";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import {
-	isAnthropicPeakHour,
-	isZaiPeakHour,
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
 } from "../../utils/provider-utils";
@@ -167,7 +165,7 @@ export function RateLimitProgress({
 		return unregisterInterval;
 	}, []);
 
-	// Allow null resetIso for providers that show usage data (like NanoGPT in PayG mode)
+	// Allow null resetIso for providers that show usage data (e.g. PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
 	if (!resetIso && !usageData && !usageRateLimitedUntil) return null;
 
@@ -231,13 +229,6 @@ export function RateLimitProgress({
 	// Determine which usage windows to display
 	const usages: UsageDisplay[] = [];
 
-	// Check if this is NanoGPT usage data (has 'active' and 'daily' properties)
-	const isNanoGPTData =
-		usageData &&
-		"active" in usageData &&
-		"daily" in usageData &&
-		"monthly" in usageData;
-
 	// Check if this is Zai usage data (has 'time_limit' and 'tokens_limit' properties)
 	const isZaiData =
 		usageData && ("time_limit" in usageData || "tokens_limit" in usageData);
@@ -252,8 +243,7 @@ export function RateLimitProgress({
 		"five_hour" in usageData &&
 		"seven_day" in usageData &&
 		!isAlibabaData &&
-		!isZaiData &&
-		!isNanoGPTData;
+		!isZaiData;
 
 	if (isAlibabaData && showWeekly) {
 		const alibabaData = usageData as {
@@ -308,41 +298,6 @@ export function RateLimitProgress({
 				resetTime: zaiData.time_limit.resetAt
 					? new Date(zaiData.time_limit.resetAt).toISOString()
 					: null,
-			});
-		}
-	} else if (isNanoGPTData && showWeekly) {
-		// NanoGPT usage data - show daily and monthly windows
-		const nanogptData = usageData as {
-			active: boolean;
-			daily: { percentUsed: number; resetAt: number };
-			monthly: { percentUsed: number; resetAt: number };
-		};
-
-		// Only show usage if subscription is active
-		if (nanogptData.active) {
-			// Daily usage
-			if (nanogptData.daily) {
-				usages.push({
-					utilization: nanogptData.daily.percentUsed * 100, // Convert 0-1 to 0-100
-					window: "daily",
-					resetTime: new Date(nanogptData.daily.resetAt).toISOString(),
-				});
-			}
-
-			// Monthly usage
-			if (nanogptData.monthly) {
-				usages.push({
-					utilization: nanogptData.monthly.percentUsed * 100, // Convert 0-1 to 0-100
-					window: "monthly",
-					resetTime: new Date(nanogptData.monthly.resetAt).toISOString(),
-				});
-			}
-		} else {
-			// PayG mode - show that no subscription is active
-			usages.push({
-				utilization: null,
-				window: "daily",
-				resetTime: null,
 			});
 		}
 	} else if (hasAnthropicStyleData && showWeekly) {
@@ -446,46 +401,10 @@ export function RateLimitProgress({
 		});
 	}
 
-	const isZaiPeak = provider === "zai" && isZaiPeakHour(now);
-	const isAnthropicPeak = provider === "anthropic" && isAnthropicPeakHour(now);
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	return (
 		<div className={cn("space-y-3", className)}>
-			{provider === "zai" && (
-				<div className="flex items-center gap-2">
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isZaiPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isZaiPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{isZaiPeak ? "Peak hours (14:00–18:00 SGT)" : "Off-peak hours"}
-					</span>
-				</div>
-			)}
-			{provider === "anthropic" && (
-				<div className="flex items-center gap-2">
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isAnthropicPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isAnthropicPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{isAnthropicPeak
-							? "Peak hours (5–11am PT, weekdays)"
-							: "Off-peak hours"}
-					</span>
-				</div>
-			)}
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
@@ -516,7 +435,7 @@ export function RateLimitProgress({
 					// Special handling for weekly opus/sonnet data when reset time is not available
 					windowTimeText = "Data unavailable";
 				} else if (usage.window === "daily" || usage.window === "monthly") {
-					// Special handling for NanoGPT when no subscription is active (PayG mode)
+					// Special handling when no subscription is active (PayG mode)
 					windowTimeText = "No subscription (PayG mode)";
 				}
 

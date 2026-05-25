@@ -8,9 +8,6 @@ export const PROVIDER_NAMES = {
 	MINIMAX: "minimax",
 	ANTHROPIC_COMPATIBLE: "anthropic-compatible",
 	OPENAI_COMPATIBLE: "openai-compatible",
-	NANOGPT: "nanogpt",
-	VERTEX_AI: "vertex-ai",
-	BEDROCK: "bedrock",
 	KILO: "kilo",
 	OPENROUTER: "openrouter",
 	ALIBABA_CODING_PLAN: "alibaba-coding-plan",
@@ -82,24 +79,6 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		supportsUsageTracking: false, // OpenAI-compatible providers typically don't support usage tracking
 		supportsOAuth: false, // OpenAI-compatible uses API key authentication
 		defaultEndpoint: "https://api.anthropic.com", // Default, can be overridden via custom endpoint
-	},
-	[PROVIDER_NAMES.NANOGPT]: {
-		requiresSessionTracking: false, // NanoGPT is pay-as-you-go (no session stickiness)
-		supportsUsageTracking: true, // NanoGPT supports subscription usage tracking via API
-		supportsOAuth: false, // NanoGPT uses API key authentication
-		defaultEndpoint: "https://nano-gpt.com/api", // Default, can be overridden via custom endpoint
-	},
-	[PROVIDER_NAMES.VERTEX_AI]: {
-		requiresSessionTracking: false, // Vertex AI is pay-as-you-go via Google Cloud billing
-		supportsUsageTracking: false, // Vertex AI doesn't have a usage tracking API
-		supportsOAuth: false, // Vertex AI uses Google Cloud authentication (not Anthropic OAuth)
-		defaultEndpoint: "https://aiplatform.googleapis.com",
-	},
-	[PROVIDER_NAMES.BEDROCK]: {
-		requiresSessionTracking: false, // Pay-as-you-go, no 5-hour windows
-		supportsUsageTracking: false, // Usage extracted per-request, not via polling API
-		supportsOAuth: false, // AWS credentials, not OAuth
-		defaultEndpoint: "bedrock://aws", // Placeholder (SDK-based, not HTTP)
 	},
 	[PROVIDER_NAMES.KILO]: {
 		requiresSessionTracking: false, // Kilo is credit-based, no session windows

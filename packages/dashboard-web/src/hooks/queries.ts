@@ -58,6 +58,22 @@ export const useStorageInfo = (refetchInterval?: number) => {
 	});
 };
 
+export const useSystemStatus = (refetchInterval?: number) => {
+	return useQuery({
+		queryKey: queryKeys.systemStatus(),
+		queryFn: () => api.getSystemStatus(),
+		// Short staleness: uptime/RSS are live signals the tile re-renders often.
+		staleTime: 5_000,
+		// Poll every 10s when healthy; tighten to 5s while degraded/unhealthy so
+		// the dashboard reflects recovery (or further trouble) promptly.
+		refetchInterval: (query) => {
+			if (refetchInterval !== undefined) return refetchInterval;
+			return query.state.data?.status === "ok" ? 10_000 : 5_000;
+		},
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useTriggerIntegrityCheck = () => {
 	const queryClient = useQueryClient();
 	return useMutation({

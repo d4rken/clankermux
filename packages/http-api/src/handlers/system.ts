@@ -1,8 +1,77 @@
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
+import type { IntegrityStatus, SystemStatusResponse } from "@clankermux/types";
 import {
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
 } from "../utils/http-error";
+import { computeHealthStatus, computePoolStatus } from "./health";
+
+type AsyncWriterHealthFn = () => { healthy: boolean };
+type UsageWorkerHealthFn = () => { state: string };
+type IntegrityStatusFn = () => IntegrityStatus;
+
+/**
+ * `GET /api/system/status` — live operational snapshot for the dashboard's
+ * System Status tile: the same health rollup as `/health`, plus process
+ * uptime and current RSS. The rollup is derived from the identical
+ * `computePoolStatus`/`computeHealthStatus` helpers so the tile never
+ * disagrees with `/health`.
+ *
+ * Always responds 200 (it's a dashboard info endpoint, not a liveness probe);
+ * the `status` field carries ok/degraded/unhealthy.
+ */
+export function createSystemStatusHandler(
+	dbOps: DatabaseOperations,
+	config: Config,
+	getAsyncWriterHealth?: AsyncWriterHealthFn,
+	getUsageWorkerHealth?: UsageWorkerHealthFn,
+	getIntegrityStatus?: IntegrityStatusFn,
+) {
+	return async (): Promise<Response> => {
+		try {
+			const accounts = await dbOps.getAllAccounts();
+			const now = Date.now();
+			const pool = computePoolStatus(accounts, now);
+
+			const asyncWriterHealthy = getAsyncWriterHealth
+				? getAsyncWriterHealth().healthy
+				: true;
+			const usageWorkerState = getUsageWorkerHealth
+				? getUsageWorkerHealth().state
+				: "ok";
+			const integrityStatus = getIntegrityStatus
+				? getIntegrityStatus().status
+				: "unchecked";
+
+			const runtimeHealthy = asyncWriterHealthy && usageWorkerState !== "error";
+			const status = computeHealthStatus(runtimeHealthy, pool);
+
+			const rss = process.memoryUsage.rss();
+			const response: SystemStatusResponse = {
+				status,
+				uptime_s: Math.round(process.uptime()),
+				memory: {
+					rss_bytes: rss,
+					rss_mb: Math.round(rss / 1024 / 1024),
+				},
+				pool,
+				runtime: {
+					asyncWriterHealthy,
+					usageWorkerState,
+					integrityStatus,
+				},
+				strategy: config.getStrategy(),
+				timestamp: new Date().toISOString(),
+			};
+
+			return jsonResponse(response);
+		} catch (_error) {
+			return errorResponse(InternalServerError("Failed to get system status"));
+		}
+	};
+}
 
 export function createSystemInfoHandler() {
 	return async (): Promise<Response> => {

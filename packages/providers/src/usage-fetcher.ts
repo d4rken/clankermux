@@ -13,11 +13,6 @@ import {
 	getRepresentativeKiloWindow,
 	type KiloUsageData,
 } from "./kilo-usage-fetcher";
-import {
-	fetchNanoGPTUsageData,
-	getRepresentativeNanoGPTUtilization,
-	type NanoGPTUsageData,
-} from "./nanogpt-usage-fetcher";
 import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
@@ -51,7 +46,6 @@ export interface UsageData {
 // Union type for all provider usage data
 export type AnyUsageData =
 	| UsageData
-	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData;
@@ -294,9 +288,6 @@ export function getRepresentativeUtilizationForProvider(
 			if (d.extra_usage?.utilization != null)
 				utils.push(d.extra_usage.utilization);
 			return utils.length > 0 ? Math.max(...utils) : null;
-		}
-		case "nanogpt": {
-			return getRepresentativeNanoGPTUtilization(data as NanoGPTUsageData);
 		}
 		case "zai": {
 			const zai = data as ZaiUsageData;
@@ -578,7 +569,7 @@ class UsageCache {
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
 		provider?: string,
-		customEndpoint?: string | null,
+		_customEndpoint?: string | null,
 	): Promise<{ success: boolean; retryAfterMs: number | null }> {
 		try {
 			// Get a fresh access token or API key on each fetch
@@ -611,29 +602,7 @@ class UsageCache {
 			// Fetch data based on provider type
 			let data: AnyUsageData | null = null;
 
-			if (provider === "nanogpt") {
-				// Fetch NanoGPT usage data
-				data = await fetchNanoGPTUsageData(token, customEndpoint);
-				if (data) {
-					// Import NanoGPT helper functions
-					const {
-						getRepresentativeNanoGPTUtilization,
-						getRepresentativeNanoGPTWindow,
-					} = await import("./nanogpt-usage-fetcher");
-
-					this.cache.set(accountId, { data, timestamp: Date.now() });
-					const utilization = getRepresentativeNanoGPTUtilization(
-						data as NanoGPTUsageData,
-					);
-					const window = getRepresentativeNanoGPTWindow(
-						data as NanoGPTUsageData,
-					);
-					log.debug(
-						`Successfully fetched NanoGPT usage data for account ${accountId}: ${utilization}% (${window} window)`,
-					);
-					return { success: true, retryAfterMs: null };
-				}
-			} else if (provider === "zai") {
+			if (provider === "zai") {
 				// Fetch Zai usage data
 				data = await fetchZaiUsageData(token);
 				if (data) {

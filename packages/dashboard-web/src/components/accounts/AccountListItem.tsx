@@ -15,6 +15,8 @@ import {
 import { useState } from "react";
 import type { Account } from "../../api";
 import {
+	isAnthropicPeakHour,
+	isZaiPeakHour,
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
 	providerSupportsAutoFeatures,
@@ -24,13 +26,15 @@ import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Button } from "../ui/button";
 import {
 	DropdownMenu,
+	DropdownMenuCheckboxItem,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuLabel,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
-import { Switch } from "../ui/switch";
 import { RateLimitProgress } from "./RateLimitProgress";
+import { RateLimitStatusChip } from "./RateLimitStatusChip";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -100,7 +104,7 @@ export function AccountListItem({
 	const showForceReset =
 		(isHardLimited || isBlockedByLegacyLock) && !presenter.isPaused;
 	// staleLockDetected only fires when numeric usage data exists (Anthropic accounts);
-	// Zai/NanoGPT accounts have usageUtilization === null and are correctly excluded
+	// Zai accounts have usageUtilization === null and are correctly excluded
 	const staleLockDetected =
 		showForceReset &&
 		typeof account.usageUtilization === "number" &&
@@ -115,18 +119,27 @@ export function AccountListItem({
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth);
 
-	// Parse Bedrock profile and region from custom_endpoint
-	let bedrockProfile: string | null = null;
-	let bedrockRegion: string | null = null;
-	let bedrockCrossRegionMode: string | null = null;
-	if (account.provider === "bedrock" && account.customEndpoint) {
-		const match = account.customEndpoint.match(/^bedrock:([^:]+):(.+)$/);
-		if (match) {
-			bedrockProfile = match[1];
-			bedrockRegion = match[2];
-		}
-		bedrockCrossRegionMode = account.crossRegionMode || "geographic";
-	}
+	// Peak/off-peak status chip (rendered inline in the status row to save a row).
+	// Only zai and anthropic have peak-hour windows.
+	const now = Date.now();
+	const isZaiPeak = account.provider === "zai" && isZaiPeakHour(now);
+	const isAnthropicPeak =
+		account.provider === "anthropic" && isAnthropicPeakHour(now);
+	const showPeakChip =
+		account.provider === "zai" || account.provider === "anthropic";
+	const isPeak = isZaiPeak || isAnthropicPeak;
+	const peakChipLabel = isPeak
+		? account.provider === "zai"
+			? "Peak hours (14:00–18:00 SGT)"
+			: "Peak hours (5–11am PT, weekdays)"
+		: "Off-peak hours";
+
+	// Whether the overflow menu should show the "Automation" toggle group.
+	const hasAutomationToggles =
+		providerSupportsAutoFeatures(account.provider) ||
+		providerSupportsCustomBilling(account.provider) ||
+		(account.provider === "anthropic" && !!onAutoPauseOnOverageToggle) ||
+		(account.provider === "zai" && !!onPeakHoursPauseToggle);
 
 	return (
 		<div
@@ -198,6 +211,65 @@ export function AccountListItem({
 							</Button>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end">
+							{hasAutomationToggles && (
+								<>
+									<DropdownMenuLabel>Automation</DropdownMenuLabel>
+									{providerSupportsAutoFeatures(account.provider) && (
+										<>
+											<DropdownMenuCheckboxItem
+												checked={account.autoFallbackEnabled}
+												onCheckedChange={() => onAutoFallbackToggle(account)}
+												onSelect={(e) => e.preventDefault()}
+												title="Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities."
+											>
+												Auto-fallback
+											</DropdownMenuCheckboxItem>
+											<DropdownMenuCheckboxItem
+												checked={account.autoRefreshEnabled}
+												onCheckedChange={() => onAutoRefreshToggle(account)}
+												onSelect={(e) => e.preventDefault()}
+												title="Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing."
+											>
+												Auto-refresh
+											</DropdownMenuCheckboxItem>
+										</>
+									)}
+									{providerSupportsCustomBilling(account.provider) && (
+										<DropdownMenuCheckboxItem
+											checked={account.billingType === "plan"}
+											onCheckedChange={() => onBillingTypeToggle(account)}
+											onSelect={(e) => e.preventDefault()}
+											title="Toggle plan billing for this account"
+										>
+											Plan billing
+										</DropdownMenuCheckboxItem>
+									)}
+									{account.provider === "anthropic" &&
+										onAutoPauseOnOverageToggle && (
+											<DropdownMenuCheckboxItem
+												checked={account.autoPauseOnOverageEnabled ?? false}
+												onCheckedChange={() =>
+													onAutoPauseOnOverageToggle(account)
+												}
+												onSelect={(e) => e.preventDefault()}
+												title="Automatically pause account when overage usage is detected. Note: detection only happens when Anthropic API reports overage, so some overage usage may occur before pausing. Account resumes when usage window resets."
+											>
+												Auto-pause on overage
+											</DropdownMenuCheckboxItem>
+										)}
+									{account.provider === "zai" && onPeakHoursPauseToggle && (
+										<DropdownMenuCheckboxItem
+											checked={account.peakHoursPauseEnabled ?? false}
+											onCheckedChange={() => onPeakHoursPauseToggle(account)}
+											onSelect={(e) => e.preventDefault()}
+											title="Automatically pause this account during Zai peak hours (14:00–18:00 SGT)"
+										>
+											Peak hours pause
+										</DropdownMenuCheckboxItem>
+									)}
+									<DropdownMenuSeparator />
+								</>
+							)}
 							<DropdownMenuItem onClick={() => onRename(account)}>
 								<Edit2 className="mr-2 h-4 w-4" />
 								Rename
@@ -290,101 +362,8 @@ export function AccountListItem({
 					</Button>
 				</div>
 			</div>
-			{(providerSupportsAutoFeatures(account.provider) ||
-				providerSupportsCustomBilling(account.provider) ||
-				(account.provider === "anthropic" && onAutoPauseOnOverageToggle) ||
-				(account.provider === "zai" && onPeakHoursPauseToggle)) && (
-				<div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-					{providerSupportsAutoFeatures(account.provider) && (
-						<>
-							<div className="flex items-center gap-2">
-								<span className="text-xs text-muted-foreground">
-									Auto-fallback:
-								</span>
-								<Switch
-									checked={account.autoFallbackEnabled}
-									onCheckedChange={() => onAutoFallbackToggle(account)}
-									title="Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities."
-								/>
-							</div>
-							<div className="flex items-center gap-2">
-								<span className="text-xs text-muted-foreground">
-									Auto-refresh:
-								</span>
-								<Switch
-									checked={account.autoRefreshEnabled}
-									onCheckedChange={() => onAutoRefreshToggle(account)}
-									title="Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing."
-								/>
-							</div>
-						</>
-					)}
-					{providerSupportsCustomBilling(account.provider) && (
-						<div className="flex items-center gap-2">
-							<span className="text-xs text-muted-foreground">
-								Plan billing:
-							</span>
-							<Switch
-								checked={account.billingType === "plan"}
-								onCheckedChange={() => onBillingTypeToggle(account)}
-								title="Toggle plan billing for this account"
-							/>
-						</div>
-					)}
-					{account.provider === "anthropic" && onAutoPauseOnOverageToggle && (
-						<div className="flex items-center gap-2">
-							<span className="text-xs text-muted-foreground">
-								Auto-pause on overage:
-							</span>
-							<Switch
-								checked={account.autoPauseOnOverageEnabled ?? false}
-								onCheckedChange={() => onAutoPauseOnOverageToggle(account)}
-								title="Automatically pause account when overage usage is detected. Note: detection only happens when Anthropic API reports overage, so some overage usage may occur before pausing. Account resumes when usage window resets."
-							/>
-						</div>
-					)}
-					{account.provider === "zai" && onPeakHoursPauseToggle && (
-						<div className="flex items-center gap-2">
-							<span className="text-xs text-muted-foreground">
-								Peak hours pause:
-							</span>
-							<Switch
-								checked={account.peakHoursPauseEnabled ?? false}
-								onCheckedChange={() => onPeakHoursPauseToggle(account)}
-								title="Automatically pause this account during Zai peak hours (14:00–18:00 SGT)"
-							/>
-						</div>
-					)}
-				</div>
-			)}
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 				<span>{account.provider}</span>
-				{account.provider === "bedrock" && bedrockProfile && (
-					<>
-						<span>·</span>
-						<span>Profile: {bedrockProfile}</span>
-						{bedrockRegion && (
-							<>
-								<span>·</span>
-								<div
-									className="flex items-center gap-1"
-									title={`Region: ${bedrockRegion}`}
-								>
-									<Globe className="h-3 w-3" />
-									<span>{bedrockRegion}</span>
-								</div>
-							</>
-						)}
-						{bedrockCrossRegionMode && (
-							<>
-								<span>·</span>
-								<span title="Cross-region inference mode">
-									{bedrockCrossRegionMode}
-								</span>
-							</>
-						)}
-					</>
-				)}
 			</div>
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
 				{presenter.isRateLimited && (
@@ -398,19 +377,7 @@ export function AccountListItem({
 					<span className="text-muted-foreground">Paused</span>
 				)}
 				{!presenter.isPaused && presenter.rateLimitStatus !== "OK" && (
-					<span
-						className={
-							presenter.rateLimitStatus
-								.toLowerCase()
-								.startsWith("allowed_warning")
-								? "text-amber-600"
-								: presenter.rateLimitStatus.toLowerCase().startsWith("allowed")
-									? "text-green-600"
-									: "text-destructive"
-						}
-					>
-						{presenter.rateLimitStatus}
-					</span>
+					<RateLimitStatusChip status={presenter.rateLimitStatus} />
 				)}
 				{staleLockDetected && (
 					<span
@@ -426,6 +393,20 @@ export function AccountListItem({
 						title="Usage throttling is delaying requests for this account until pacing catches up"
 					>
 						Usage throttled
+					</span>
+				)}
+				{showPeakChip && (
+					<span
+						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+							isPeak
+								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+						}`}
+					>
+						<span
+							className={`h-1.5 w-1.5 rounded-full ${isPeak ? "bg-orange-500" : "bg-green-500"}`}
+						/>
+						{peakChipLabel}
 					</span>
 				)}
 				{showForceReset && (

@@ -454,7 +454,7 @@ describe("UsageCache - Memory Management", () => {
 
 			// Set up polling entries
 			mockUsageCache.startPolling(accountId1, "token1", "anthropic");
-			mockUsageCache.startPolling(accountId2, "token2", "nanogpt");
+			mockUsageCache.startPolling(accountId2, "token2", "zai");
 
 			// Verify resources are allocated
 			expect(mockUsageCache.cache.size).toBeGreaterThan(0);

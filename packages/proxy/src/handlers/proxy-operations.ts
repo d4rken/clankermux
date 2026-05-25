@@ -89,28 +89,6 @@ export function extractCooldownUntil(
 }
 
 /**
- * Bedrock provider currently returns a synthetic Request containing the
- * provider response payload (instead of a real URL to fetch).
- * Detect and unwrap that request so we don't try to fetch a fake host.
- */
-function isSyntheticProviderResponse(request: Request): boolean {
-	return (
-		request.headers.get("x-bedrock-response") === "true" &&
-		request.url.startsWith("https://bedrock.aws/response")
-	);
-}
-
-function materializeSyntheticResponse(request: Request): Response {
-	const headers = new Headers(request.headers);
-	headers.delete("x-bedrock-response");
-
-	return new Response(request.body, {
-		status: 200,
-		headers,
-	});
-}
-
-/**
  * Filters thinking blocks from request body
  * Used when Claude rejects thinking blocks with invalid signatures from other providers
  * @param requestBodyBuffer - The original request body buffer
@@ -322,7 +300,7 @@ async function isCacheControlRejectionError(
 /**
  * Checks if a response error indicates the requested model is unavailable.
  * Covers Anthropic (not_found_error), OpenAI-compat (model_not_found),
- * generic messages, and Bedrock (ResourceNotFoundException).
+ * and generic messages.
  */
 export async function isModelUnavailableError(
 	response: Response,
@@ -362,15 +340,6 @@ export async function isModelUnavailableError(
 			typeof json.error.message === "string" &&
 			(json.error.message.toLowerCase().includes("model not found") ||
 				json.error.message.toLowerCase().includes("does not exist"))
-		) {
-			return true;
-		}
-
-		// Bedrock: ResourceNotFoundException
-		if (
-			json.error?.message &&
-			typeof json.error.message === "string" &&
-			json.error.message.includes("ResourceNotFoundException")
 		) {
 			return true;
 		}
@@ -615,10 +584,8 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Make the request (or unwrap a synthetic provider response)
-		let rawResponse = isSyntheticProviderResponse(transformedRequest)
-			? materializeSyntheticResponse(transformedRequest)
-			: await makeProxyRequest(transformedRequest);
+		// Make the request
+		let rawResponse = await makeProxyRequest(transformedRequest);
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
 		const isClaudeProvider =
@@ -649,10 +616,8 @@ export async function proxyWithAccount(
 					? await provider.transformRequestBody(retryProviderRequest, account)
 					: retryProviderRequest;
 
-				// Make the retry request (or unwrap a synthetic provider response)
-				rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
-					? materializeSyntheticResponse(retryTransformedRequest)
-					: await makeProxyRequest(retryTransformedRequest);
+				// Make the retry request
+				rawResponse = await makeProxyRequest(retryTransformedRequest);
 			} else {
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
@@ -682,9 +647,7 @@ export async function proxyWithAccount(
 					headers: transformedRequest.headers,
 					body: JSON.stringify(retryBodyJson),
 				});
-				rawResponse = isSyntheticProviderResponse(retryRequest)
-					? materializeSyntheticResponse(retryRequest)
-					: await makeProxyRequest(retryRequest);
+				rawResponse = await makeProxyRequest(retryRequest);
 			} catch (err) {
 				log.warn("Failed to retry without cache_control:", err);
 			}
@@ -848,9 +811,7 @@ export async function proxyWithAccount(
 						// If re-patching fails, proceed with the transformed request as-is
 					}
 
-					rawResponse = isSyntheticProviderResponse(retryTransformedRequest)
-						? materializeSyntheticResponse(retryTransformedRequest)
-						: await makeProxyRequest(retryTransformedRequest);
+					rawResponse = await makeProxyRequest(retryTransformedRequest);
 
 					if (!(await isModelUnavailableError(rawResponse.clone()))) {
 						break; // Success — stop cycling

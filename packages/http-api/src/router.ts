@@ -20,16 +20,12 @@ import {
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
 	createAnthropicCompatibleAccountAddHandler,
-	createAwsProfilesListHandler,
-	createBedrockAccountAddHandler,
 	createKiloAccountAddHandler,
 	createMinimaxAccountAddHandler,
-	createNanoGPTAccountAddHandler,
 	createOllamaAccountAddHandler,
 	createOllamaCloudAccountAddHandler,
 	createOpenAIAccountAddHandler,
 	createOpenRouterAccountAddHandler,
-	createVertexAIAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
 import {
@@ -96,7 +92,10 @@ import {
 	createIntegrityCheckHandler,
 	createStorageHandler,
 } from "./handlers/storage";
-import { createSystemInfoHandler } from "./handlers/system";
+import {
+	createSystemInfoHandler,
+	createSystemStatusHandler,
+} from "./handlers/system";
 import {
 	createAccountTokenHealthHandler,
 	createReauthNeededHandler,
@@ -156,15 +155,11 @@ export class APIRouter {
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
-		const vertexAIAccountAddHandler = createVertexAIAccountAddHandler(dbOps);
-		const bedrockAccountAddHandler = createBedrockAccountAddHandler(dbOps);
-		const awsProfilesListHandler = createAwsProfilesListHandler();
 		const alibabaCodingPlanAccountAddHandler =
 			createAlibabaCodingPlanAccountAddHandler(dbOps);
 		const kiloAccountAddHandler = createKiloAccountAddHandler(dbOps);
 		const openrouterAccountAddHandler =
 			createOpenRouterAccountAddHandler(dbOps);
-		const nanogptAccountAddHandler = createNanoGPTAccountAddHandler(dbOps);
 		const anthropicCompatibleAccountAddHandler =
 			createAnthropicCompatibleAccountAddHandler(dbOps);
 		const ollamaAccountAddHandler = createOllamaAccountAddHandler(dbOps);
@@ -197,6 +192,13 @@ export class APIRouter {
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
+		const systemStatusHandler = createSystemStatusHandler(
+			dbOps,
+			config,
+			getAsyncWriterHealth,
+			getUsageWorkerHealth,
+			getIntegrityStatus,
+		);
 		const versionCheckHandler = createVersionCheckHandler();
 		const featuresHandler = createFeaturesHandler();
 
@@ -226,13 +228,6 @@ export class APIRouter {
 		this.handlers.set("POST:/api/accounts/minimax", (req) =>
 			minimaxAccountAddHandler(req),
 		);
-		this.handlers.set("POST:/api/accounts/vertex-ai", (req) =>
-			vertexAIAccountAddHandler(req),
-		);
-		this.handlers.set("POST:/api/accounts/bedrock", (req) =>
-			bedrockAccountAddHandler(req),
-		);
-		this.handlers.set("GET:/api/aws/profiles", () => awsProfilesListHandler());
 		this.handlers.set("POST:/api/accounts/alibaba-coding-plan", (req) =>
 			alibabaCodingPlanAccountAddHandler(req),
 		);
@@ -241,9 +236,6 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/openrouter", (req) =>
 			openrouterAccountAddHandler(req),
-		);
-		this.handlers.set("POST:/api/accounts/nanogpt", (req) =>
-			nanogptAccountAddHandler(req),
 		);
 		this.handlers.set("POST:/api/accounts/anthropic-compatible", (req) =>
 			anthropicCompatibleAccountAddHandler(req),
@@ -357,6 +349,7 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
+		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
 		this.handlers.set("GET:/api/features", () => featuresHandler());
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
