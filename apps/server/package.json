@@ -17,6 +17,7 @@
 		"@better-ccflare/logger": "workspace:*",
 		"@better-ccflare/load-balancer": "workspace:*",
 		"@better-ccflare/proxy": "workspace:*",
+		"@better-ccflare/openai-responses-adapter": "workspace:*",
 		"@better-ccflare/dashboard-web": "workspace:*",
 		"@better-ccflare/http-api": "workspace:*",
 		"@better-ccflare/security": "workspace:*",
