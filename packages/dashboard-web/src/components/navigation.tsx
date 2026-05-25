@@ -63,6 +63,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 		latestSha: string;
 		latestUrl: string | null;
 		dirty: boolean;
+		behindBy: number | null;
 	} | null>(null);
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
@@ -131,6 +132,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 				latestSha: data.latest?.shortSha ?? "",
 				latestUrl: data.latest?.url ?? null,
 				dirty: data.current?.dirty ?? false,
+				behindBy: typeof data.behindBy === "number" ? data.behindBy : null,
 			});
 			setUpdateStatus(status);
 
@@ -307,6 +309,13 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 									<p className="text-xs text-muted-foreground text-left font-mono">
 										{updateInfo?.currentSha ?? "?"} → {updateInfo?.latestSha}
 									</p>
+									{typeof updateInfo?.behindBy === "number" &&
+										updateInfo.behindBy > 0 && (
+											<p className="text-xs text-muted-foreground text-left">
+												{updateInfo.behindBy} commit
+												{updateInfo.behindBy === 1 ? "" : "s"} behind
+											</p>
+										)}
 									<div className="flex items-center gap-1">
 										<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
 											{UPDATE_COMMAND}

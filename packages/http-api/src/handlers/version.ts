@@ -149,6 +149,66 @@ async function getLatestCommit(
 	return { commit, htmlUrl, cached: false };
 }
 
+// Cache the commits-behind count keyed on the (current, latest) sha pair so a
+// re-check with unchanged commits doesn't spend another GitHub compare request.
+interface BehindCacheEntry {
+	base: string;
+	head: string;
+	behindBy: number;
+	timestamp: number;
+}
+let behindCache: BehindCacheEntry | null = null;
+
+/**
+ * Count how many commits the local checkout is behind the remote HEAD.
+ *
+ * Tries local git first (free, no rate limit) in case the remote commit object
+ * is already present locally; otherwise falls back to GitHub's compare API,
+ * whose `ahead_by` is the number of commits the remote `head` has that our
+ * `base` lacks — i.e. how many we're behind. Returns null when the count can't
+ * be determined (so the UI can simply omit it rather than show a wrong number).
+ */
+async function getCommitsBehind(
+	repo: string,
+	base: string,
+	head: string,
+): Promise<number | null> {
+	if (base === head) return 0;
+
+	// Local attempt: only succeeds if the remote object is present locally.
+	const local = runGit(["rev-list", "--count", `${base}..${head}`]);
+	if (local !== null && /^\d+$/.test(local)) return Number(local);
+
+	const now = Date.now();
+	if (
+		behindCache &&
+		behindCache.base === base &&
+		behindCache.head === head &&
+		now - behindCache.timestamp < CACHE_DURATION_MS
+	) {
+		return behindCache.behindBy;
+	}
+
+	try {
+		const response = await fetch(
+			`https://api.github.com/repos/${repo}/compare/${base}...${head}`,
+			{
+				headers: {
+					Accept: "application/vnd.github+json",
+					"User-Agent": "clankermux-update-check",
+				},
+			},
+		);
+		if (!response.ok) return null;
+		const data = (await response.json()) as { ahead_by?: number };
+		if (typeof data.ahead_by !== "number") return null;
+		behindCache = { base, head, behindBy: data.ahead_by, timestamp: now };
+		return data.ahead_by;
+	} catch {
+		return null;
+	}
+}
+
 export function createVersionCheckHandler() {
 	return async (): Promise<Response> => {
 		const repo = readEnv("UPDATE_REPO") || DEFAULT_REPO;
@@ -170,10 +230,19 @@ export function createVersionCheckHandler() {
 					: false,
 			});
 
+			// Only spend a compare request when there's actually a gap to measure.
+			const behindBy =
+				status === "available" && current
+					? await getCommitsBehind(repo, current.sha, latest.sha)
+					: status === "current"
+						? 0
+						: null;
+
 			return jsonResponse({
 				status,
 				repo,
 				branch,
+				behindBy,
 				current: current
 					? {
 							sha: current.sha,
