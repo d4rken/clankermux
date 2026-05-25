@@ -1,0 +1,43 @@
+# Dependabot keeps our exact-pinned dependencies and SHA-pinned GitHub Actions
+# patched. Because every dependency is pinned to an exact version (no semver
+# ranges), nothing updates on its own — Dependabot is what surfaces upstream
+# security fixes and version bumps as reviewable PRs.
+version: 2
+updates:
+  # JS/TS dependencies across the Bun workspace (root + apps/* + packages/*).
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "update"
+      include: scope
+    groups:
+      # Batch low-risk dev/type updates into one PR to cut review noise.
+      dev-dependencies:
+        dependency-type: development
+      # Keep the React/Radix/dnd-kit dashboard stack together.
+      dashboard-ui:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "react-router-dom"
+          - "@radix-ui/*"
+          - "@dnd-kit/*"
+          - "@tanstack/*"
+          - "recharts"
+          - "tailwind*"
+          - "lucide-react"
+
+  # GitHub Actions: keeps the commit-SHA pins in .github/workflows current.
+  # Dependabot bumps both the SHA and the trailing "# vX.Y.Z" comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "update"
