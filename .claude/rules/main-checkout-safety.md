@@ -34,7 +34,6 @@ The following commands are **FORBIDDEN inside `/home/darken/clankermux`** (the m
 | `git clean -fd` / `git clean -fx` | Deletes untracked files (often the user's WIP additions). |
 | `git stash` / `git stash push` | Moves work off the tree where it can be forgotten. |
 | `git rebase`, `git rebase -i` | Rewrites history and re-applies commits to the working tree. |
-| `git merge <branch>` (without explicit user approval) | Can introduce conflicts that mangle working-tree files. |
 | `git revert` (without explicit user approval) | Changes the working tree. |
 | `gh pr checkout <n>` | Checks out the PR's branch, moving HEAD. |
 
@@ -44,6 +43,7 @@ The following commands are **FORBIDDEN inside `/home/darken/clankermux`** (the m
 - Fetch: `git fetch`, `git fetch upstream`, `git fetch origin` (updates refs only, never the working tree)
 - Add/commit on the *current* branch: `git add <specific-files>`, `git commit` (per CLAUDE.md: never `git add .`)
 - Pull on the current branch, **only when the user explicitly asks**: `git pull --ff-only` (refuses if a non-fast-forward would touch the working tree)
+- **Merge a topic branch into the currently-checked-out `main`** (`git merge --no-ff <branch>`): allowed. This is how fork work lands (see `fork-workflow.md`). It does not switch HEAD to a different branch — it advances `main` in place. Before merging, confirm the working tree is clean (`git status`) so a conflict can't leave conflict markers in the deployed tree; if the merge conflicts, abort (`git merge --abort`) and resolve on a worktree branch instead. Everything else in the forbidden table above still stands.
 
 ## What to do instead
 
