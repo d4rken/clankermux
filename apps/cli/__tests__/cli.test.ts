@@ -403,14 +403,25 @@ describe("CLI Security Tests", () => {
 	});
 
 	it("should sanitize error messages", async () => {
+		// Provide BOTH --ssl-key and --ssl-cert so HTTPS startup actually runs
+		// the SSL path validation. With only --ssl-key the server falls back to
+		// HTTP (protocol = sslKey && sslCert ? https : http), ignores the key,
+		// and boots successfully — which hangs the test until it times out on a
+		// clean runner (it only "passed" locally when port 8080 was already in
+		// use). A path outside the allowed dirs fails validation fast and
+		// non-zero, the same way the sibling SSL-rejection tests above do.
 		const result = await runCLI([
 			"--serve",
 			"--ssl-key",
-			"/tmp/nonexistent-key-with-sensitive-data-abc123.pem",
+			"/nonexistent/sensitive-key-abc123.pem",
+			"--ssl-cert",
+			"/nonexistent/sensitive-cert-abc123.pem",
 		]);
 
-		const _output = result.stdout + result.stderr;
-		// Should show error but not leak full paths unnecessarily
+		const output = result.stdout + result.stderr;
+		// Fails fast on validation rather than booting a server...
 		expect(result.exitCode).toBeGreaterThan(0);
+		// ...and surfaces a sanitized validation message.
+		expect(output).toContain("SSL file path validation failed");
 	});
 });
