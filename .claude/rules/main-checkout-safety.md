@@ -8,9 +8,9 @@ This rule is in addition to (not a replacement for) `.claude/rules/fork-workflow
 
 ## Why this rule exists
 
-The main checkout at `/home/darken/better-ccflare` is the **live deployment**. The systemd unit `clankermux.service` (defined at `/etc/systemd/system/clankermux.service` with drop-in `dashboard-build.conf`) runs the proxy from this directory:
+The main checkout at `/home/darken/clankermux` is the **live deployment**. The systemd unit `clankermux.service` (defined at `/etc/systemd/system/clankermux.service` with drop-in `dashboard-build.conf`) runs the proxy from this directory:
 
-- `WorkingDirectory=/home/darken/better-ccflare`
+- `WorkingDirectory=/home/darken/clankermux`
 - `ExecStartPre=bun run build:dashboard` — rebuilds the dashboard from working-tree source on every restart
 - `ExecStart=bun run apps/server/src/server.ts` — runs the server directly from working-tree TypeScript
 
@@ -20,7 +20,7 @@ Past incident: an agent ran `git checkout upstream/main` (or equivalent) in this
 
 ## Hard rule
 
-The following commands are **FORBIDDEN inside `/home/darken/better-ccflare`** (the main checkout). They are **allowed inside `/home/darken/better-ccflare/.claude/worktrees/<name>/`** (worktrees).
+The following commands are **FORBIDDEN inside `/home/darken/clankermux`** (the main checkout). They are **allowed inside `/home/darken/clankermux/.claude/worktrees/<name>/`** (worktrees).
 
 | Forbidden command | Reason |
 |-------------------|--------|

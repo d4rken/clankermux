@@ -61,7 +61,7 @@ git push origin main
 
 > **Reminder (main-checkout-safety):** the steps above that move HEAD
 > (`git checkout`, `git merge`) are forbidden *inside the live checkout*
-> `/home/darken/better-ccflare`. Do the branch + merge work in a worktree, or
+> `/home/darken/clankermux`. Do the branch + merge work in a worktree, or
 > have the user run the merge. See `main-checkout-safety.md`.
 
 After the merge, the change is in `main` and immediately usable — the systemd
