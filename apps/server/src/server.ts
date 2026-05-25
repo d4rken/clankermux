@@ -27,6 +27,7 @@ import {
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
+import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	fetchCodexUsageOnDemand,
@@ -46,6 +47,7 @@ import {
 	getUsageWorker,
 	getUsageWorkerHealth,
 	getValidAccessToken,
+	handleProxy,
 	type ProxyContext,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
@@ -1135,6 +1137,48 @@ export default async function startServer(options?: {
 								status: 401,
 								headers: { "Content-Type": "application/json" },
 							},
+						);
+					}
+
+					// Codex CLI first tries WebSocket transport for /v1/responses.
+					// We only support HTTP — reject the upgrade cleanly so Codex
+					// falls back to HTTPS without hitting the proxy with an empty body.
+					if (
+						req.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+						(url.pathname === "/v1/responses" ||
+							url.pathname === "/v1/responses/compact")
+					) {
+						return new Response(
+							JSON.stringify({
+								type: "error",
+								error: {
+									type: "not_supported_error",
+									message:
+										"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
+								},
+							}),
+							{
+								status: 503,
+								headers: { "Content-Type": "application/json" },
+							},
+						);
+					}
+
+					// Codex CLI speaks the OpenAI Responses API; translate
+					// /v1/responses(/compact) to Anthropic /v1/messages and run it
+					// through the normal proxy pipeline via handleProxy.
+					if (
+						req.method === "POST" &&
+						(url.pathname === "/v1/responses" ||
+							url.pathname === "/v1/responses/compact")
+					) {
+						return await handleResponsesRequest(
+							req,
+							url,
+							handleProxy as Parameters<typeof handleResponsesRequest>[2],
+							proxyContext,
+							authResult.apiKeyId,
+							authResult.apiKeyName,
 						);
 					}
 
