@@ -169,9 +169,9 @@ export function transformStreamingResponse(response: Response): Response {
 	// Use pipeThrough to transform the stream while preserving clonability
 	const transformedBody = response.body.pipeThrough(
 		new TransformStream<Uint8Array, Uint8Array>({
-			start(_controller) {
+			start(this: { context: TransformStreamContext | null }, _controller) {
 				// Initialize context object for streaming state
-				(this as any).context = {
+				this.context = {
 					buffer: "",
 					hasStarted: false,
 					extractedModel: "unknown",
@@ -194,9 +194,13 @@ export function transformStreamingResponse(response: Response): Response {
 					maxToolCallIndex: 100,
 				} as TransformStreamContext;
 			},
-			transform(chunk, controller) {
+			transform(
+				this: { context: TransformStreamContext | null },
+				chunk,
+				controller,
+			) {
 				try {
-					const context = (this as any).context as TransformStreamContext;
+					const context = this.context;
 					if (!context) {
 						log.error("TransformStream context not initialized");
 						return;
@@ -274,7 +278,7 @@ export function transformStreamingResponse(response: Response): Response {
 							}
 
 							// Cleanup entire context after stream completion
-							(this as any).context = null;
+							this.context = null;
 							continue;
 						}
 
@@ -579,8 +583,8 @@ export function transformStreamingResponse(response: Response): Response {
 					log.error("Error in transform:", error);
 				}
 			},
-			flush(controller) {
-				const context = (this as any).context as TransformStreamContext;
+			flush(this: { context: TransformStreamContext | null }, controller) {
+				const context = this.context;
 				if (!context) return;
 
 				// Stream ended without [DONE] (e.g. timeout/truncation).
@@ -648,7 +652,7 @@ export function transformStreamingResponse(response: Response): Response {
 					);
 				}
 
-				(this as any).context = null;
+				this.context = null;
 			},
 		}),
 	);

@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { SQL } from "bun";
 
 /**
@@ -145,9 +145,10 @@ export class BunSqlAdapter {
 	async query<R>(sqlStr: string, params: unknown[] = []): Promise<R[]> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			return this.withBusyRetry(() =>
-				db.query<R, any[]>(sqlStr).all(...(params as any[])),
+				db
+					.query<R, SQLQueryBindings[]>(sqlStr)
+					.all(...(params as SQLQueryBindings[])),
 			);
 		}
 		// PostgreSQL via Bun.SQL unsafe
@@ -163,9 +164,10 @@ export class BunSqlAdapter {
 	async get<R>(sqlStr: string, params: unknown[] = []): Promise<R | null> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			const result = await this.withBusyRetry(() =>
-				db.query<R, any[]>(sqlStr).get(...(params as any[])),
+				db
+					.query<R, SQLQueryBindings[]>(sqlStr)
+					.get(...(params as SQLQueryBindings[])),
 			);
 			return (result as R) ?? null;
 		}
@@ -181,8 +183,9 @@ export class BunSqlAdapter {
 	async run(sqlStr: string, params: unknown[] = []): Promise<void> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
-			await this.withBusyRetry(() => db.run(sqlStr, params as any[]));
+			await this.withBusyRetry(() =>
+				db.run(sqlStr, params as SQLQueryBindings[]),
+			);
 			return;
 		}
 		const pgQuery = this.pgSql(sqlStr);
@@ -199,9 +202,8 @@ export class BunSqlAdapter {
 	): Promise<number> {
 		if (this.isSQLite && this.sqliteDb) {
 			const db = this.sqliteDb;
-			// biome-ignore lint/suspicious/noExplicitAny: SQLite params can be any binding type
 			const result = await this.withBusyRetry(() =>
-				db.run(sqlStr, params as any[]),
+				db.run(sqlStr, params as SQLQueryBindings[]),
 			);
 			return result.changes;
 		}

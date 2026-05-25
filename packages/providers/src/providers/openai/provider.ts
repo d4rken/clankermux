@@ -419,7 +419,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					lastPart.type === "text"
 				) {
 					// Inject cache_control (snake_case for OpenAI-compatible API)
-					(lastPart as any).cache_control = { type: "ephemeral" };
+					lastPart.cache_control = { type: "ephemeral" };
 				}
 			} else if (typeof msg.content === "string" && msg.content.length > 0) {
 				// Convert string content to array with cache_control
@@ -457,19 +457,22 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 		// Check if model is a reasoning model (has thinking/reasoning capabilities)
 		const modelId = this.currentModel?.toLowerCase() || "";
+		const thinking = anthropicBody.thinking as { type?: string } | undefined;
 		const isReasoningModel =
 			modelId.includes("qwen") ||
 			modelId.includes("qwq") ||
 			modelId.includes("deepseek-r1") ||
 			// Also check if anthropic request indicates thinking
-			(anthropicBody as any).thinking?.type === "enabled";
+			thinking?.type === "enabled";
 
 		// Skip if it's kimi-k2-thinking (returns reasoning_content by default)
 		if (modelId.includes("kimi-k2-thinking")) return;
 
 		// Inject enable_thinking flag
 		if (isReasoningModel) {
-			(openaiBody as any).enable_thinking = true;
+			(
+				openaiBody as OpenAIRequest & { enable_thinking?: boolean }
+			).enable_thinking = true;
 			log.debug(
 				`Injected enable_thinking for DashScope reasoning model: ${modelId}`,
 			);

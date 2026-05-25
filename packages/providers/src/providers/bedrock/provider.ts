@@ -1,7 +1,10 @@
 import {
 	BedrockRuntimeClient,
 	ConverseCommand,
+	type ConverseCommandInput,
 	ConverseStreamCommand,
+	type ConverseStreamCommandInput,
+	type ConverseStreamOutput,
 } from "@aws-sdk/client-bedrock-runtime";
 import { estimateCostUSD } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
@@ -35,6 +38,21 @@ import {
 } from "./response-parser";
 
 const log = new Logger("BedrockProvider");
+
+/**
+ * Usage block parsed from a Bedrock SSE stream. Bedrock may emit either
+ * camelCase (Converse API) or snake_case field names, so both are optional.
+ */
+interface BedrockSseUsage {
+	inputTokens?: number;
+	input_tokens?: number;
+	outputTokens?: number;
+	output_tokens?: number;
+	cacheWriteInputTokens?: number;
+	cache_write_input_tokens?: number;
+	cacheReadInputTokens?: number;
+	cache_read_input_tokens?: number;
+}
 
 /**
  * AWS Bedrock provider for ClankerMux
@@ -83,7 +101,7 @@ export class BedrockProvider extends BaseProvider implements Provider {
 	}
 
 	private createAnthropicCompatibleStream(
-		bedrockStream: AsyncIterable<any> | undefined,
+		bedrockStream: AsyncIterable<ConverseStreamOutput> | undefined,
 		clientModelName: string,
 	): ReadableStream {
 		const encoder = new TextEncoder();
@@ -180,15 +198,23 @@ export class BedrockProvider extends BaseProvider implements Provider {
 											text: delta.text,
 										},
 									});
-								} else if (delta?.toolUse?.inputChunk) {
-									emit("content_block_delta", {
-										type: "content_block_delta",
-										index,
-										delta: {
-											type: "input_json_delta",
-											partial_json: delta.toolUse.inputChunk,
-										},
-									});
+								} else {
+									// Preserve the original (pre-typing) field access: this
+									// reads `inputChunk`, which the SDK's ToolUseBlockDelta does
+									// not declare, so the branch behaves exactly as before.
+									const toolUseDelta = delta?.toolUse as
+										| { inputChunk?: string }
+										| undefined;
+									if (toolUseDelta?.inputChunk) {
+										emit("content_block_delta", {
+											type: "content_block_delta",
+											index,
+											delta: {
+												type: "input_json_delta",
+												partial_json: toolUseDelta.inputChunk,
+											},
+										});
+									}
 								}
 								continue;
 							}
@@ -604,13 +630,13 @@ export class BedrockProvider extends BaseProvider implements Provider {
 				const command = new ConverseStreamCommand({
 					modelId: transformedModelId,
 					...converseInput,
-				} as any); // Cast to any due to ConverseStreamCommandInput type constraints
+				} as unknown as ConverseStreamCommandInput); // Local transform types are looser than the SDK input
 
 				const response = await client.send(command);
 
 				const clientModelName = generateClientModelName(transformedModelId);
 				const stream = this.createAnthropicCompatibleStream(
-					response.stream as AsyncIterable<any> | undefined,
+					response.stream as AsyncIterable<ConverseStreamOutput> | undefined,
 					clientModelName,
 				);
 
@@ -629,7 +655,7 @@ export class BedrockProvider extends BaseProvider implements Provider {
 				const command = new ConverseCommand({
 					modelId: transformedModelId,
 					...converseInput,
-				} as any); // Cast to any due to ConverseCommandInput type constraints
+				} as unknown as ConverseCommandInput); // Local transform types are looser than the SDK input
 
 				const response = await client.send(command);
 
@@ -638,12 +664,20 @@ export class BedrockProvider extends BaseProvider implements Provider {
 					model: generateClientModelName(transformedModelId),
 				});
 			}
-		} catch (error: any) {
+		} catch (error: unknown) {
+			const errorName =
+				error instanceof Error
+					? error.name
+					: (error as { name?: string })?.name;
+			const errorMessage =
+				error instanceof Error
+					? error.message
+					: (error as { message?: string })?.message;
 			// Streaming fallback logic
 			if (
 				isStreaming &&
-				error.name === "ValidationException" &&
-				error.message?.includes("streaming")
+				errorName === "ValidationException" &&
+				errorMessage?.includes("streaming")
 			) {
 				log.warn(
 					`Model ${finalModelId} does not support streaming, falling back to non-streaming`,
@@ -653,7 +687,7 @@ export class BedrockProvider extends BaseProvider implements Provider {
 				const command = new ConverseCommand({
 					modelId: transformedModelId,
 					...transformMessagesRequest(body),
-				} as any);
+				} as unknown as ConverseCommandInput);
 
 				const response = await client.send(command);
 
@@ -794,7 +828,7 @@ export class BedrockProvider extends BaseProvider implements Provider {
 
 			const decoder = new TextDecoder();
 			let buffer = "";
-			let usage: any = null;
+			let usage: BedrockSseUsage | null = null;
 
 			try {
 				while (true) {
@@ -812,7 +846,10 @@ export class BedrockProvider extends BaseProvider implements Provider {
 						if (data === "[DONE]") continue;
 
 						try {
-							const event = JSON.parse(data);
+							const event = JSON.parse(data) as {
+								type?: string;
+								usage?: BedrockSseUsage;
+							};
 
 							// Bedrock SSE format: look for usage in various event types
 							if (event.usage) {

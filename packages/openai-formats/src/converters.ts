@@ -22,7 +22,7 @@ const log = new Logger("openai-formats/converters");
 /**
  * Safely parse JSON with error handling
  */
-export function safeParseJSON(jsonString: string): any {
+export function safeParseJSON(jsonString: string): unknown {
 	try {
 		return JSON.parse(jsonString);
 	} catch (error) {
@@ -350,7 +350,10 @@ export function convertOpenAIResponseToAnthropic(
 			type: "tool_use",
 			id: toolCall.id,
 			name: toolCall.function.name,
-			input: safeParseJSON(toolCall.function.arguments || "{}"),
+			input: safeParseJSON(toolCall.function.arguments || "{}") as Record<
+				string,
+				unknown
+			>,
 		});
 	}
 

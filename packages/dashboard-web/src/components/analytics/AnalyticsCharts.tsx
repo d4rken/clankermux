@@ -1,6 +1,6 @@
 import type { TimePoint } from "@clankermux/types";
 import { formatCost, formatNumber, formatTokens } from "@clankermux/ui-common";
-import { useState } from "react";
+import { type ComponentProps, useState } from "react";
 import {
 	Area,
 	AreaChart,
@@ -20,6 +20,8 @@ import {
 import {
 	formatCompactCurrency,
 	formatCompactNumber,
+	type TooltipFormatter,
+	type TooltipLabelFormatter,
 } from "../../lib/chart-utils";
 import {
 	BaseAreaChart,
@@ -49,6 +51,8 @@ import {
 	SelectValue,
 } from "../ui/select";
 import { Switch } from "../ui/switch";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
 interface ChartData {
 	time: string;
@@ -328,21 +332,19 @@ export function MainMetricsChart({
 											tickFormatter={formatCompactCurrency}
 										/>
 										<Tooltip
-											// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 											formatter={
 												((value: number, name: string) => [
 													formatCost(Number(value)),
 													name === "planCost"
 														? "Plan Cost"
 														: "API/Overage Cost",
-												]) as any
+												]) as TooltipFormatter
 											}
-											// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened labelFormatter label to ReactNode
 											labelFormatter={
 												((label: string) =>
 													viewMode === "cumulative"
 														? `Cumulative at ${label}`
-														: label) as any
+														: label) as TooltipLabelFormatter
 											}
 										/>
 										<Legend height={36} />
@@ -784,13 +786,12 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 								borderRadius: "8px",
 								backdropFilter: "blur(8px)",
 							}}
-							// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 							formatter={
 								((value: number | string, name: string) => {
 									if (name === "Total Cost")
 										return [formatCost(Number(value)), "Total Cost"];
 									return [formatTokens(value as number), "Total Tokens"];
-								}) as any
+								}) as TooltipFormatterProp
 							}
 						/>
 						<Legend

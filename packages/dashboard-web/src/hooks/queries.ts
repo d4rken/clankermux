@@ -505,7 +505,12 @@ export const useUpdateCombo = () => {
 export const useGetCombo = (id: string | null) => {
 	return useQuery({
 		queryKey: ["combo", id],
-		queryFn: () => api.getCombo(id!),
+		queryFn: () => {
+			if (id === null) {
+				throw new Error("combo id is required");
+			}
+			return api.getCombo(id);
+		},
 		enabled: !!id,
 	});
 };

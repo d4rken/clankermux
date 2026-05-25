@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import type { ListInferenceProfilesCommandInput } from "@aws-sdk/client-bedrock";
 import type { Account } from "@clankermux/types";
 import {
 	canUseInferenceProfile,
@@ -12,7 +13,9 @@ const mockBedrockClient = mock(() => ({ send: mockSend }));
 
 mock.module("@aws-sdk/client-bedrock", () => ({
 	BedrockClient: mockBedrockClient,
-	ListInferenceProfilesCommand: mock((input: any) => input),
+	ListInferenceProfilesCommand: mock(
+		(input: ListInferenceProfilesCommandInput) => input,
+	),
 }));
 
 // Mock credentials and config parsers

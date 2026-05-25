@@ -64,7 +64,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 		it("returns result on second attempt after one SQLITE_BUSY", async () => {
 			db.run("INSERT INTO t (id, val) VALUES (1, 'hello')");
 
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const restore = stubBusyOnce(sqliteDb, "query");
 			try {
 				const rows = await adapter.query<{ id: number; val: string }>(
@@ -82,7 +82,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 		it("returns the row on second attempt after one SQLITE_BUSY", async () => {
 			db.run("INSERT INTO t (id, val) VALUES (2, 'world')");
 
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const restore = stubBusyOnce(sqliteDb, "query");
 			try {
 				const row = await adapter.get<{ id: number; val: string }>(
@@ -99,7 +99,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 
 	describe("run() retries on SQLITE_BUSY", () => {
 		it("completes successfully on second attempt after one SQLITE_BUSY", async () => {
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const restore = stubBusyOnce(sqliteDb, "run");
 			try {
 				await adapter.run("INSERT INTO t (id, val) VALUES (?, ?)", [
@@ -120,7 +120,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 		it("returns affected-row count on second attempt after one SQLITE_BUSY", async () => {
 			db.run("INSERT INTO t (id, val) VALUES (4, 'before')");
 
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const restore = stubBusyOnce(sqliteDb, "run");
 			try {
 				const changes = await adapter.runWithChanges(
@@ -137,17 +137,18 @@ describe("BunSqlAdapter withBusyRetry", () => {
 	describe("non-SQLITE_BUSY errors are not retried", () => {
 		it("propagates a non-busy error immediately without retrying", async () => {
 			// Inject an error whose code is NOT SQLITE_BUSY
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const original = sqliteDb.query.bind(sqliteDb);
 			let calls = 0;
-			// biome-ignore lint/suspicious/noExplicitAny: test stub
-			(sqliteDb as any).query = (...args: any[]) => {
+			(
+				sqliteDb as unknown as { query: (...args: unknown[]) => unknown }
+			).query = (...args: unknown[]) => {
 				calls++;
 				throw Object.assign(new Error("disk I/O error"), {
 					code: "SQLITE_IOERR",
 				});
 				// biome-ignore lint/correctness/noUnreachable: intentional unreachable for type
-				return (original as any)(...args);
+				return (original as (...a: unknown[]) => unknown)(...args);
 			};
 
 			try {
@@ -165,7 +166,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 
 	describe("SQLITE_BUSY past deadline is propagated", () => {
 		it("throws SQLITE_BUSY when Date.now() is already past the retry deadline", async () => {
-			const sqliteDb = (adapter as any).sqliteDb as Database;
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
 			const originalQuery = sqliteDb.query.bind(sqliteDb);
 			const originalDateNow = Date.now;
 

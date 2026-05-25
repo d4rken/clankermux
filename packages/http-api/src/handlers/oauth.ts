@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import { Config } from "@clankermux/config";
-import { patterns, validatePriority, validateString } from "@clankermux/core";
+import {
+	patterns,
+	ValidationError,
+	validatePriority,
+	validateString,
+} from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	BadRequest,
@@ -873,16 +878,23 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 			const body = await req.json();
 
 			// Validate session ID - validateString throws ValidationError if invalid
+			// required:true guarantees a string (it throws otherwise); guard narrows the type
 			const sessionId = validateString(body.sessionId, "sessionId", {
 				required: true,
 				pattern: patterns.uuid,
-			})!;
+			});
+			if (sessionId === undefined) {
+				throw new ValidationError("sessionId is required", "sessionId");
+			}
 
 			// Validate code - validateString throws ValidationError if invalid
 			const code = validateString(body.code, "code", {
 				required: true,
 				minLength: 1,
-			})!;
+			});
+			if (code === undefined) {
+				throw new ValidationError("code is required", "code");
+			}
 
 			// Get stored PKCE verifier from database
 			const oauthSession = await dbOps.getOAuthSession(sessionId);

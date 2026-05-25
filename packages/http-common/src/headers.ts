@@ -51,7 +51,9 @@ export function withSanitizedProxyHeaders(res: Response): Response {
 	});
 
 	// Preserve __analyticsStream property if present (used by OpenAI provider)
-	const analyticsStream = (res as any)[ANALYTICS_STREAM_SYMBOL];
+	const analyticsStream = (res as { [ANALYTICS_STREAM_SYMBOL]?: unknown })[
+		ANALYTICS_STREAM_SYMBOL
+	];
 	if (analyticsStream) {
 		Object.defineProperty(newResponse, ANALYTICS_STREAM_SYMBOL, {
 			value: analyticsStream,

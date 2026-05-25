@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, type Mock, mock } from "bun:test";
 import type { Account, ComboWithSlots, RequestMeta } from "@clankermux/types";
 import {
 	getComboSlotInfo,
@@ -305,7 +305,7 @@ describe("selectAccountsForRequest — combo routing", () => {
 		const meta = makeRequestMeta();
 
 		await selectAccountsForRequest(meta, ctx, "claude-haiku-4-5");
-		expect((meta as any).comboName).toBe("Test Combo");
+		expect(meta.comboName).toBe("Test Combo");
 	});
 
 	it("skips disabled slots", async () => {
@@ -418,8 +418,11 @@ describe("selectAccountsForRequest — combo routing", () => {
 			"gpt-4-turbo-unknown",
 		);
 		// getActiveComboForFamily should not be called for unknown families
-		const ctxAny = ctx as any;
-		expect(ctxAny.dbOps.getActiveComboForFamily).not.toHaveBeenCalled();
+		expect(
+			ctx.dbOps.getActiveComboForFamily as unknown as Mock<
+				typeof ctx.dbOps.getActiveComboForFamily
+			>,
+		).not.toHaveBeenCalled();
 		expect(result[0]?.id).toBe("acc-normal");
 	});
 

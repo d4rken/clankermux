@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { OpenAIRequest } from "@clankermux/openai-formats";
+import type { OpenAIMessage, OpenAIRequest } from "@clankermux/openai-formats";
 import type { Account } from "@clankermux/types";
 import { QwenProvider } from "../provider";
 
@@ -43,7 +43,7 @@ function makeOpenAIRequest(systemContent: unknown): OpenAIRequest {
 	return {
 		model: "coder-model",
 		messages: [
-			{ role: "system", content: systemContent as any },
+			{ role: "system", content: systemContent as OpenAIMessage["content"] },
 			{ role: "user", content: "Hello" },
 		],
 	};
@@ -449,7 +449,10 @@ describe("QwenProvider", () => {
 					{ type: "text", text: "Instruction." },
 				]);
 				provider.afterConvert(body);
-				expect((body as any).vl_high_resolution_images).toBe(true);
+				expect(
+					(body as OpenAIRequest & { vl_high_resolution_images?: boolean })
+						.vl_high_resolution_images,
+				).toBe(true);
 			});
 
 			it("sets vl_high_resolution_images even when no system message exists", () => {
@@ -458,7 +461,10 @@ describe("QwenProvider", () => {
 					messages: [{ role: "user", content: "Hello" }],
 				};
 				provider.afterConvert(body);
-				expect((body as any).vl_high_resolution_images).toBe(true);
+				expect(
+					(body as OpenAIRequest & { vl_high_resolution_images?: boolean })
+						.vl_high_resolution_images,
+				).toBe(true);
 			});
 		});
 

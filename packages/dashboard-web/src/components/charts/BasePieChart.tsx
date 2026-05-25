@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import {
 	Cell,
 	Legend,
@@ -15,6 +15,8 @@ import {
 import { ChartContainer } from "./ChartContainer";
 import { getChartHeight, getTooltipStyles } from "./chart-utils";
 import type { ChartClickHandler, TooltipFormatterFunction } from "./types";
+
+type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
 interface BasePieChartProps {
 	data: Array<{ name: string; value: number; [key: string]: string | number }>;
@@ -102,10 +104,9 @@ export function BasePieChart({
 							/>
 						))}
 					</Pie>
-					{/* biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined */}
 					<Tooltip
 						contentStyle={tooltipStyles}
-						formatter={tooltipFormatter as any}
+						formatter={tooltipFormatter as TooltipFormatterProp}
 					/>
 					{showLegend && (
 						<Legend

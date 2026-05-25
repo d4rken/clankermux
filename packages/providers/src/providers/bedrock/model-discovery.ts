@@ -74,10 +74,13 @@ export async function discoverBedrockModels(
 		}
 
 		const models: DiscoveredModel[] = response.modelSummaries
-			.filter((model): model is FoundationModelSummary => !!model.modelId)
+			.filter(
+				(model): model is FoundationModelSummary & { modelId: string } =>
+					!!model.modelId,
+			)
 			.map((model) => ({
-				modelId: model.modelId!,
-				modelName: model.modelName || model.modelId!,
+				modelId: model.modelId,
+				modelName: model.modelName || model.modelId,
 				providerName: model.providerName || "Unknown",
 				inputModalities: model.inputModalities || [],
 				outputModalities: model.outputModalities || [],

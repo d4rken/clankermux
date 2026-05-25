@@ -280,7 +280,10 @@ function processEvent(
 				state,
 			);
 		} else if (state.toolByBlock.has(blockIndex)) {
-			const tool = state.toolByBlock.get(blockIndex)!;
+			const tool = state.toolByBlock.get(blockIndex);
+			if (!tool) {
+				throw new Error(`Tool state missing for block index ${blockIndex}`);
+			}
 			emitSse(
 				controller,
 				"response.function_call_arguments.done",

@@ -209,10 +209,13 @@ async function fetchModelsFromBedrockWithRetry(
 		}
 
 		const models: BedrockModel[] = response.modelSummaries
-			.filter((model): model is FoundationModelSummary => !!model.modelId)
+			.filter(
+				(model): model is FoundationModelSummary & { modelId: string } =>
+					!!model.modelId,
+			)
 			.map((model) => ({
-				modelId: model.modelId!,
-				searchKey: normalizeModelName(model.modelId!),
+				modelId: model.modelId,
+				searchKey: normalizeModelName(model.modelId),
 			}));
 
 		log.info(
@@ -295,9 +298,10 @@ async function getOrRefreshCache(
 	const cacheAge = now - lastRefreshTime;
 
 	// Return cached models if cache is fresh
-	if (modelCache.has(region) && cacheAge < CACHE_TTL_MS) {
+	const cachedModels = modelCache.get(region);
+	if (cachedModels !== undefined && cacheAge < CACHE_TTL_MS) {
 		log.debug(`Using cached models for region ${region} (age: ${cacheAge}ms)`);
-		return modelCache.get(region)!;
+		return cachedModels;
 	}
 
 	// Evict oldest region if we're at capacity and adding a new region
