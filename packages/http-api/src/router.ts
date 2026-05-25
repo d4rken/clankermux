@@ -96,7 +96,10 @@ import {
 	createIntegrityCheckHandler,
 	createStorageHandler,
 } from "./handlers/storage";
-import { createSystemInfoHandler } from "./handlers/system";
+import {
+	createSystemInfoHandler,
+	createSystemStatusHandler,
+} from "./handlers/system";
 import {
 	createAccountTokenHealthHandler,
 	createReauthNeededHandler,
@@ -197,6 +200,13 @@ export class APIRouter {
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
+		const systemStatusHandler = createSystemStatusHandler(
+			dbOps,
+			config,
+			getAsyncWriterHealth,
+			getUsageWorkerHealth,
+			getIntegrityStatus,
+		);
 		const versionCheckHandler = createVersionCheckHandler();
 		const featuresHandler = createFeaturesHandler();
 
@@ -357,6 +367,7 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
+		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
 		this.handlers.set("GET:/api/features", () => featuresHandler());
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
