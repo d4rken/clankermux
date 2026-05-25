@@ -1,4 +1,4 @@
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { AnthropicCompatibleProvider } from "../anthropic-compatible/provider";
 
 const OPENROUTER_DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1";

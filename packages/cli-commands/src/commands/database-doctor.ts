@@ -1,5 +1,5 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
+import type { DatabaseOperations } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 
 export async function runDoctor(
 	dbOps: DatabaseOperations,
@@ -8,7 +8,7 @@ export async function runDoctor(
 	const logger = new Logger("Doctor");
 	let exitCode = 0;
 
-	console.log("\n🏥 better-ccflare doctor");
+	console.log("\n🏥 ClankerMux doctor");
 	console.log("═".repeat(50));
 
 	// Integrity check

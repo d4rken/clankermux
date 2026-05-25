@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { OllamaProvider } from "../provider";
 
 describe("OllamaProvider", () => {

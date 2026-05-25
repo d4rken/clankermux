@@ -235,7 +235,7 @@ class PriceCatalogue {
 	}
 
 	private getCacheDir(): string {
-		return join(tmpdir(), "better-ccflare");
+		return join(tmpdir(), "clankermux");
 	}
 
 	private getCachePath(): string {

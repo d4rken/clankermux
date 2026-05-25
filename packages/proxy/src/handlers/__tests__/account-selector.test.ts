@@ -1,9 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
-import type {
-	Account,
-	ComboWithSlots,
-	RequestMeta,
-} from "@better-ccflare/types";
+import type { Account, ComboWithSlots, RequestMeta } from "@clankermux/types";
 import {
 	getComboSlotInfo,
 	selectAccountsForRequest,
@@ -117,8 +113,21 @@ describe("setComboSlotInfo / getComboSlotInfo", () => {
 
 // ── selectAccountsForRequest — forced account via header ──────────────────────
 
-describe("selectAccountsForRequest — x-better-ccflare-account-id header", () => {
+describe("selectAccountsForRequest — x-clankermux-account-id header", () => {
 	it("returns exactly the forced account when the header matches", async () => {
+		const acc1 = makeAccount({ id: "acc-1", name: "first" });
+		const acc2 = makeAccount({ id: "acc-2", name: "second" });
+		const ctx = makeCtx({ accounts: [acc1, acc2] });
+		const meta = makeRequestMeta({
+			headers: new Headers({ "x-clankermux-account-id": "acc-2" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-2");
+	});
+
+	it("still routes via the legacy x-better-ccflare-account-id header (dual-accept)", async () => {
 		const acc1 = makeAccount({ id: "acc-1", name: "first" });
 		const acc2 = makeAccount({ id: "acc-2", name: "second" });
 		const ctx = makeCtx({ accounts: [acc1, acc2] });
@@ -131,11 +140,27 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 		expect(result[0]?.id).toBe("acc-2");
 	});
 
+	it("prefers the new header over the legacy one when both are present", async () => {
+		const acc1 = makeAccount({ id: "acc-1", name: "first" });
+		const acc2 = makeAccount({ id: "acc-2", name: "second" });
+		const ctx = makeCtx({ accounts: [acc1, acc2] });
+		const meta = makeRequestMeta({
+			headers: new Headers({
+				"x-clankermux-account-id": "acc-1",
+				"x-better-ccflare-account-id": "acc-2",
+			}),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-1");
+	});
+
 	it("falls through to normal selection when forced account id is not found", async () => {
 		const acc = makeAccount({ id: "acc-1" });
 		const ctx = makeCtx({ accounts: [acc] });
 		const meta = makeRequestMeta({
-			headers: new Headers({ "x-better-ccflare-account-id": "nonexistent" }),
+			headers: new Headers({ "x-clankermux-account-id": "nonexistent" }),
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
@@ -163,7 +188,7 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
-			headers: new Headers({ "x-better-ccflare-account-id": "acc-paused" }),
+			headers: new Headers({ "x-clankermux-account-id": "acc-paused" }),
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
@@ -191,7 +216,7 @@ describe("selectAccountsForRequest — x-better-ccflare-account-id header", () =
 			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
-			headers: new Headers({ "x-better-ccflare-account-id": "acc-rl" }),
+			headers: new Headers({ "x-clankermux-account-id": "acc-rl" }),
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
@@ -437,8 +462,8 @@ describe("selectAccountsForRequest — combo routing", () => {
 describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accounts)", () => {
 	/**
 	 * The auto-refresh scheduler intentionally refreshes accounts that are paused
-	 * due to auto_pause_on_overage. It sends x-better-ccflare-bypass-session: true
-	 * alongside x-better-ccflare-account-id. The selector must allow these through
+	 * due to auto_pause_on_overage. It sends x-clankermux-bypass-session: true
+	 * alongside x-clankermux-account-id. The selector must allow these through
 	 * so the scheduler can hit the real endpoint and trigger auto-resume.
 	 */
 	it("allows overage-paused account when bypass-session header is present", async () => {
@@ -462,8 +487,8 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
-				"x-better-ccflare-account-id": "acc-overage",
-				"x-better-ccflare-bypass-session": "true",
+				"x-clankermux-account-id": "acc-overage",
+				"x-clankermux-bypass-session": "true",
 			}),
 		});
 
@@ -493,7 +518,7 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
-				"x-better-ccflare-account-id": "acc-overage",
+				"x-clankermux-account-id": "acc-overage",
 				// No bypass-session header — normal user traffic should still be blocked
 			}),
 		});
@@ -529,8 +554,8 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
-				"x-better-ccflare-account-id": "acc-manual",
-				"x-better-ccflare-bypass-session": "true",
+				"x-clankermux-account-id": "acc-manual",
+				"x-clankermux-bypass-session": "true",
 			}),
 		});
 
@@ -563,8 +588,8 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
-				"x-better-ccflare-account-id": "acc-rl",
-				"x-better-ccflare-bypass-session": "true",
+				"x-clankermux-account-id": "acc-rl",
+				"x-clankermux-bypass-session": "true",
 			}),
 		});
 
@@ -595,8 +620,8 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
-				"x-better-ccflare-account-id": "acc-broken",
-				"x-better-ccflare-bypass-session": "true",
+				"x-clankermux-account-id": "acc-broken",
+				"x-clankermux-bypass-session": "true",
 			}),
 		});
 

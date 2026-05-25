@@ -1,5 +1,5 @@
 export const queryKeys = {
-	all: ["better-ccflare"] as const,
+	all: ["clankermux"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
 	agents: () => [...queryKeys.all, "agents"] as const,
 	stats: (errorsSinceHours?: number) =>

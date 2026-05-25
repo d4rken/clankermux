@@ -2,10 +2,10 @@ import {
 	BUFFER_SIZES,
 	mapModelName,
 	validateEndpointUrl,
-} from "@better-ccflare/core";
-import { sanitizeProxyHeaders } from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import { sanitizeProxyHeaders } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";

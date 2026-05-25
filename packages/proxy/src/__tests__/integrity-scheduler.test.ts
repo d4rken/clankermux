@@ -14,12 +14,12 @@
  * with `dbPath: "/tmp/anything"` exercise the worker branch.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 
 // ---------------------------------------------------------------------------
 // Module mock — must be declared before importing the scheduler so that
 // bun's module resolution picks up the mock when it resolves
-// @better-ccflare/database. The scheduler imports `runIntegrityCheckInWorker`
+// @clankermux/database. The scheduler imports `runIntegrityCheckInWorker`
 // as a value (only thing we need to fake); `DatabaseOperations` is a
 // type-only import and is erased at runtime, so it doesn't need a stub.
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ const mockRunIntegrityCheckInWorker = mock(
 	): Promise<WorkerResult> => workerResultByKind[options.kind],
 );
 
-mock.module("@better-ccflare/database", () => ({
+mock.module("@clankermux/database", () => ({
 	runIntegrityCheckInWorker: mockRunIntegrityCheckInWorker,
 }));
 

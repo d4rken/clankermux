@@ -209,14 +209,14 @@ The user is experiencing rate limiting issues when using multiple accounts.
 
 Thank you for reporting this issue! This appears to be related to the account
 rotation logic in the proxy. Please provide:
-1. Your better-ccflare version
+1. Your ClankerMux version
 2. Number of accounts configured
 3. Any error messages from the logs
 
 The team will investigate and respond soon.
 
 ---
-*This automated triage was performed by the better-ccflare Issue Triage Agent using Claude via OpenRouter.*
+*This automated triage was performed by the ClankerMux Issue Triage Agent using Claude via OpenRouter.*
 ```
 
 ## Support

@@ -13,5 +13,5 @@ set -e
 
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 bun run build:dashboard
-sudo systemctl restart better-ccflare
-echo "Done. Tail logs: journalctl -u better-ccflare -f"
+sudo systemctl restart clankermux
+echo "Done. Tail logs: journalctl -u clankermux -f"

@@ -1,8 +1,5 @@
-import type {
-	BunSqlAdapter,
-	DatabaseOperations,
-} from "@better-ccflare/database";
-import { jsonResponse } from "@better-ccflare/http-common";
+import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
+import { jsonResponse } from "@clankermux/http-common";
 import type { RequestResponse } from "../types";
 
 const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history

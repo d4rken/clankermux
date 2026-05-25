@@ -1,5 +1,5 @@
-import type { RuntimeConfig } from "@better-ccflare/config";
-import { registerDisposable, unregisterDisposable } from "@better-ccflare/core";
+import type { RuntimeConfig } from "@clankermux/config";
+import { registerDisposable, unregisterDisposable } from "@clankermux/core";
 import {
 	type DatabaseConfig,
 	DatabaseOperations,

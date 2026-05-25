@@ -1,4 +1,4 @@
-# better-ccflare Documentation
+# ClankerMux Documentation
 
 ## Track Every Request. Go Low-Level. Never Hit Rate Limits Again.
 
@@ -9,11 +9,11 @@
 
 ## Overview
 
-better-ccflare is the ultimate Claude API proxy with intelligent load balancing across multiple accounts. Built with TypeScript and Bun runtime, it provides full visibility into every request, response, and rate limit, ensuring your AI applications never experience downtime due to rate limiting.
+ClankerMux is the ultimate Claude API proxy with intelligent load balancing across multiple accounts. Built with TypeScript and Bun runtime, it provides full visibility into every request, response, and rate limit, ensuring your AI applications never experience downtime due to rate limiting.
 
-### Why better-ccflare?
+### Why ClankerMux?
 
-When working with Claude API at scale, rate limits can become a significant bottleneck. better-ccflare solves this by:
+When working with Claude API at scale, rate limits can become a significant bottleneck. ClankerMux solves this by:
 
 - **🚀 Zero Rate Limit Errors**: Automatically distributes requests across multiple accounts with intelligent failover
 - **📊 Request-Level Analytics**: Track latency, token usage, and costs in real-time with <10ms overhead
@@ -75,7 +75,7 @@ When working with Claude API at scale, rate limits can become a significant bott
 
 ## Quick Start
 
-### 1. Install better-ccflare
+### 1. Install ClankerMux
 
 ```bash
 # Clone the repository
@@ -86,10 +86,10 @@ cd better-ccflare
 bun install
 ```
 
-### 2. Start better-ccflare (CLI + Server)
+### 2. Start ClankerMux (CLI + Server)
 
 ```bash
-# Start better-ccflare with CLI (automatically starts server if no command specified)
+# Start ClankerMux with CLI (automatically starts server if no command specified)
 bun run cli
 
 # Or start just the server
@@ -119,14 +119,14 @@ bun run apps/cli/src/main.ts --add-account personal-account --mode max --priorit
 bun run apps/cli/src/main.ts --add-account pro-account --mode max --priority 0
 bun run apps/cli/src/main.ts --add-account max-account --mode max --priority 10
 
-# Or if you have better-ccflare command available globally
-better-ccflare --add-account work-account --mode max --priority 0
+# Or if you have clankermux command available globally
+clankermux --add-account work-account --mode max --priority 0
 ```
 
 ### 4. Configure Your Claude Client
 
 ```bash
-# Set the base URL to use better-ccflare
+# Set the base URL to use ClankerMux
 export ANTHROPIC_BASE_URL=http://localhost:8080
 ```
 
@@ -183,7 +183,7 @@ bun run format         # Format code
 
 ## CLI Commands
 
-The better-ccflare CLI provides comprehensive command-line interface for management and monitoring:
+The ClankerMux CLI provides comprehensive command-line interface for management and monitoring:
 
 ```bash
 # If running without global install, use the full path:
@@ -246,11 +246,11 @@ NODE_ENV=production            # Environment mode
 
 ### Support
 - [GitHub Repository](https://github.com/snipeship/better-ccflare) - Source code and issues
-- [Contributing](./contributing.md) - How to contribute to better-ccflare
+- [Contributing](./contributing.md) - How to contribute to ClankerMux
 
 ## License
 
-better-ccflare is open source software licensed under the MIT License. See the [LICENSE](../LICENSE) file for details.
+ClankerMux is open source software licensed under the MIT License. See the [LICENSE](../LICENSE) file for details.
 
 ---
 

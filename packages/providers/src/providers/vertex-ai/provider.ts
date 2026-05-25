@@ -1,6 +1,6 @@
-import { TIME_CONSTANTS } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { TIME_CONSTANTS } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import { GoogleAuth } from "google-auth-library";
 import type { TokenRefreshResult } from "../../types";
 import { getModelName } from "../../utils/model-mapping";

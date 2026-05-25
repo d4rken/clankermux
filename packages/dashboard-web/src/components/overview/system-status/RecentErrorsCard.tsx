@@ -1,4 +1,4 @@
-import { NO_ACCOUNT_ID, type RecentErrorGroup } from "@better-ccflare/types";
+import { NO_ACCOUNT_ID, type RecentErrorGroup } from "@clankermux/types";
 import { useState } from "react";
 import { useAccounts, useStats } from "../../../hooks/queries";
 import {

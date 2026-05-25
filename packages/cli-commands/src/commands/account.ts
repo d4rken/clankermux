@@ -2,27 +2,27 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "@better-ccflare/config";
-import type { ModelMapping } from "@better-ccflare/core";
+import type { Config } from "@clankermux/config";
+import type { ModelMapping } from "@clankermux/core";
 import {
 	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 	validateApiKey,
 	validateEndpointUrl,
 	validatePriority,
-} from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { createOAuthFlow } from "@better-ccflare/oauth-flow";
+} from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
+import { createOAuthFlow } from "@clankermux/oauth-flow";
 import {
 	generatePKCE,
 	getOAuthProvider,
 	type TokenRefreshResult as TokenResult,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
-} from "@better-ccflare/providers/qwen";
-import type { AccountListItem } from "@better-ccflare/types";
+} from "@clankermux/providers/qwen";
+import type { AccountListItem } from "@clankermux/types";
 import {
 	type PromptAdapter,
 	promptAccountRemovalConfirmation,
@@ -61,7 +61,7 @@ export interface AddAccountOptionsWithAdapter {
 }
 
 // Re-export AccountListItem from types for backward compatibility
-export type { AccountListItem } from "@better-ccflare/types";
+export type { AccountListItem } from "@clankermux/types";
 
 // Add mode property to AccountListItem for CLI display
 export interface AccountListItemWithMode extends AccountListItem {

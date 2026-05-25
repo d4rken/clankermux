@@ -1,7 +1,7 @@
-import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import type { OAuthFlow } from "@better-ccflare/oauth-flow";
-import { generatePKCE } from "@better-ccflare/providers";
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
+import type { OAuthFlow } from "@clankermux/oauth-flow";
+import { generatePKCE } from "@clankermux/providers";
 
 /**
  * Result interface for OAuth redirect URI creation

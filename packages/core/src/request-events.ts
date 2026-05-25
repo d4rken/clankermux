@@ -13,7 +13,7 @@ export type RequestStartEvt = {
 
 export type RequestSummaryEvt = {
 	type: "summary";
-	payload: import("@better-ccflare/types").RequestResponse;
+	payload: import("@clankermux/types").RequestResponse;
 };
 
 export type RequestEvt = RequestStartEvt | RequestSummaryEvt;

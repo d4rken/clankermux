@@ -1,12 +1,12 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { BadRequest, Conflict, NotFound } from "@better-ccflare/errors";
-import { Logger } from "@better-ccflare/logger";
+import type { DatabaseOperations } from "@clankermux/database";
+import { BadRequest, Conflict, NotFound } from "@clankermux/errors";
+import { Logger } from "@clankermux/logger";
 import {
 	type ApiKeyGenerationResult,
 	type ApiKeyResponse,
 	NodeCryptoUtils,
 	toApiKeyResponse,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 
 const logger = new Logger("ApiKey");
 

@@ -1,5 +1,5 @@
-import { OAuthError } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { OAuthError } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import type {
 	OAuthProvider,
 	OAuthProviderConfig,

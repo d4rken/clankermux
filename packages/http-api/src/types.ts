@@ -17,4 +17,4 @@ export type {
 	StrategyUpdateRequest,
 	TimePoint,
 	TokenBreakdown,
-} from "@better-ccflare/types";
+} from "@clankermux/types";

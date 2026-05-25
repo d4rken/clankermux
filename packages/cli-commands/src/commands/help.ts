@@ -3,7 +3,7 @@
  */
 export function getHelpText(): string {
 	return `
-Usage: better-ccflare <command> [options]
+Usage: clankermux <command> [options]
 
 Commands:
   add <name> [--mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible|nanogpt|kilo|openrouter|ollama|ollama-cloud>] [--priority <number>] [--modelMappings <JSON>]
@@ -61,16 +61,16 @@ Commands:
     Show this help message
 
 Examples:
-  better-ccflare add myaccount --mode claude-oauth --priority 10
-  better-ccflare add anthropic-account --mode anthropic-compatible --priority 5 --modelMappings '{"opus":"claude-3-opus","sonnet":"claude-3-sonnet"}'
-  better-ccflare add "My Account" --mode claude-oauth --priority 10  # Account names with spaces must be quoted
-  better-ccflare list
-  better-ccflare remove myaccount
-  better-ccflare pause "My Account"  # Use quotes for names with spaces
-  better-ccflare resume myaccount
-  better-ccflare set-priority myaccount 20
-  better-ccflare token-health
-  better-ccflare reauth-needed
+  clankermux add myaccount --mode claude-oauth --priority 10
+  clankermux add anthropic-account --mode anthropic-compatible --priority 5 --modelMappings '{"opus":"claude-3-opus","sonnet":"claude-3-sonnet"}'
+  clankermux add "My Account" --mode claude-oauth --priority 10  # Account names with spaces must be quoted
+  clankermux list
+  clankermux remove myaccount
+  clankermux pause "My Account"  # Use quotes for names with spaces
+  clankermux resume myaccount
+  clankermux set-priority myaccount 20
+  clankermux token-health
+  clankermux reauth-needed
 
 Note: Account names can contain letters, numbers, spaces, hyphens, and underscores.
       When using names with spaces, wrap them in quotes (e.g., "My Account").

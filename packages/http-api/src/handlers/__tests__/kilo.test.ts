@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { DatabaseFactory } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
+import { DatabaseFactory } from "@clankermux/database";
 import { createKiloAccountAddHandler } from "../accounts";
 
 // Test database path

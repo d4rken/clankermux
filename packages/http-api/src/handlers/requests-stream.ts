@@ -1,4 +1,4 @@
-import { type RequestEvt, requestEvents } from "@better-ccflare/core";
+import { type RequestEvt, requestEvents } from "@clankermux/core";
 
 export function createRequestsStreamHandler() {
 	return (req: Request): Response => {

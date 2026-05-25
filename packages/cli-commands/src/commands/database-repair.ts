@@ -1,4 +1,4 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 
 interface RepairResult {
 	integrityOk: boolean;

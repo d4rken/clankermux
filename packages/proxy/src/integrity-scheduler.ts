@@ -1,7 +1,7 @@
-import { TIME_CONSTANTS } from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { runIntegrityCheckInWorker } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
+import { TIME_CONSTANTS } from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
+import { runIntegrityCheckInWorker } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 
 /**
  * Periodic integrity scheduler. Two probes run on independent timers:

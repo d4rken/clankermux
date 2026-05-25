@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { agentRegistry } from "@better-ccflare/agents";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
-import { validatePath } from "@better-ccflare/security";
-import type { Agent } from "@better-ccflare/types";
+import { agentRegistry } from "@clankermux/agents";
+import type { DatabaseOperations } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
+import { validatePath } from "@clankermux/security";
+import type { Agent } from "@clankermux/types";
 import { RequestBodyContext } from "../request-body-context";
 
 const log = new Logger("AgentInterceptor");

@@ -1,4 +1,4 @@
-# better-ccflare HTTP API Documentation
+# ClankerMux HTTP API Documentation
 
 ## Quick Start
 
@@ -25,7 +25,7 @@ open http://localhost:8080/dashboard
 
 ## Overview
 
-better-ccflare provides a RESTful HTTP API for managing accounts, monitoring usage, and proxying requests to Claude. The API runs on port 8080 by default and requires no authentication.
+ClankerMux provides a RESTful HTTP API for managing accounts, monitoring usage, and proxying requests to Claude. The API runs on port 8080 by default and requires no authentication.
 
 ### Base URL
 
@@ -43,7 +43,7 @@ All API responses are in JSON format with `Content-Type: application/json`.
 
 #### GET /health
 
-Check the health status of the better-ccflare service.
+Check the health status of the ClankerMux service.
 
 **HTTP status codes:**
 - `200` — `status: "ok"` (routable accounts available)
@@ -108,11 +108,11 @@ Proxy requests to Claude API. All requests to paths starting with `/v1/` are for
 - `POST /v1/complete` - Text completion (legacy)
 - Any other Claude API v1 endpoint
 
-**Note:** There is no `/v1/models` endpoint provided by better-ccflare. Model listing would need to be done directly through Claude's API if such an endpoint exists.
+**Note:** There is no `/v1/models` endpoint provided by ClankerMux. Model listing would need to be done directly through Claude's API if such an endpoint exists.
 
 **Headers:**
 - All standard Claude API headers are supported
-- `Authorization` header is managed by better-ccflare (no need to provide)
+- `Authorization` header is managed by ClankerMux (no need to provide)
 
 **Request Body:**
 Same as Claude API requirements for the specific endpoint.
@@ -121,7 +121,7 @@ Same as Claude API requirements for the specific endpoint.
 Proxied response from Claude API, including streaming responses.
 
 **Automatic Failover:**
-If a request fails or an account is rate limited, better-ccflare automatically retries with the next available account according to the configured load balancing strategy. This ensures high availability and reliability.
+If a request fails or an account is rate limited, ClankerMux automatically retries with the next available account according to the configured load balancing strategy. This ensures high availability and reliability.
 
 **Example:**
 ```bash
@@ -874,7 +874,7 @@ All API errors follow a consistent format:
 
 ### Rate Limiting
 
-When an account hits rate limits, better-ccflare automatically fails over to the next available account. If all accounts are rate limited, a 503 error is returned.
+When an account hits rate limits, ClankerMux automatically fails over to the next available account. If all accounts are rate limited, a 503 error is returned.
 
 Rate limit information is included in account responses:
 - `rateLimitStatus` - Current status (e.g., "allowed", "allowed_warning", "rate_limited")
@@ -892,7 +892,7 @@ The proxy endpoints support streaming responses for compatible Claude API calls.
 3. Each chunk is delivered as a Server-Sent Event
 
 **Streaming Response Capture:**
-better-ccflare automatically captures streaming response bodies for analytics and debugging purposes:
+ClankerMux automatically captures streaming response bodies for analytics and debugging purposes:
 - Captured data is limited to `CF_STREAM_BODY_MAX_BYTES` (default: 256KB)
 - The capture process doesn't interfere with the client's stream
 - Captured bodies are stored base64-encoded in the request history
@@ -934,7 +934,7 @@ The dashboard provides a visual interface for:
 
 ### Environment Variables
 
-better-ccflare can be configured using the following environment variables:
+ClankerMux can be configured using the following environment variables:
 
 - `PORT` - Server port (default: 8080)
 - `LB_STRATEGY` - Load balancing strategy (default: session)
@@ -947,10 +947,10 @@ better-ccflare can be configured using the following environment variables:
 
 ### Configuration File
 
-In addition to environment variables, better-ccflare supports configuration through a JSON file. The config file location varies by platform:
-- macOS: `~/Library/Application Support/better-ccflare/config.json`
-- Linux: `~/.config/better-ccflare/config.json`
-- Windows: `%APPDATA%\better-ccflare\config.json`
+In addition to environment variables, ClankerMux supports configuration through a JSON file. The config file location varies by platform:
+- macOS: `~/Library/Application Support/clankermux/config.json`
+- Linux: `~/.config/clankermux/config.json`
+- Windows: `%APPDATA%\clankermux\config.json`
 
 **Supported Configuration Keys:**
 ```json
@@ -977,9 +977,9 @@ The following strategy is available:
 
 ## Notes
 
-1. **No Authentication**: The API endpoints do not require authentication. better-ccflare manages the OAuth tokens internally for proxying to Claude.
+1. **No Authentication**: The API endpoints do not require authentication. ClankerMux manages the OAuth tokens internally for proxying to Claude.
 
-2. **Automatic Failover**: When a request fails or an account is rate limited, better-ccflare automatically tries the next available account. If no accounts are available, requests are forwarded without authentication as a fallback.
+2. **Automatic Failover**: When a request fails or an account is rate limited, ClankerMux automatically tries the next available account. If no accounts are available, requests are forwarded without authentication as a fallback.
 
 3. **Token Refresh**: Access tokens are automatically refreshed when they expire.
 

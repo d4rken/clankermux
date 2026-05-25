@@ -1,4 +1,4 @@
-import { processTokenUsage } from "@better-ccflare/ui-common";
+import { processTokenUsage } from "@clankermux/ui-common";
 import type { RequestSummary } from "../api";
 
 interface TokenUsageDisplayProps {

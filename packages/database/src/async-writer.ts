@@ -1,5 +1,5 @@
-import type { Disposable } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import type { Disposable } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 
 const logger = new Logger("async-db-writer");
 

@@ -1,10 +1,10 @@
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { BadRequest, NotFound } from "@better-ccflare/errors";
+import type { DatabaseOperations } from "@clankermux/database";
+import { BadRequest, NotFound } from "@clankermux/errors";
 import type {
 	ComboFamily,
 	ComboFamilyAssignment,
 	ComboWithSlots,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { errorResponse } from "../utils/http-error";
 
 /**

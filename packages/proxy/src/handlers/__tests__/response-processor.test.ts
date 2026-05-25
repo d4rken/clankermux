@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import { processProxyResponse } from "../response-processor";
 
@@ -404,7 +404,7 @@ describe("processProxyResponse — 529 overload reason", () => {
 			},
 		);
 		const requestMeta = {
-			headers: new Headers({ "x-better-ccflare-keepalive": "true" }),
+			headers: new Headers({ "x-clankermux-keepalive": "true" }),
 		};
 
 		await processProxyResponse(response, account, ctx, undefined, requestMeta);

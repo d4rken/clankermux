@@ -1,8 +1,8 @@
 import {
 	DatabaseFactory,
 	ModelTranslationRepository,
-} from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
+} from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("BedrockErrorHandler");
 

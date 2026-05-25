@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import type { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 
 const log = new Logger("DatabaseMigrations-PG");

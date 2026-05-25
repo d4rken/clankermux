@@ -9,4 +9,4 @@ export {
 	jsonResponse,
 	NotFound,
 	Unauthorized,
-} from "@better-ccflare/http-common";
+} from "@clankermux/http-common";

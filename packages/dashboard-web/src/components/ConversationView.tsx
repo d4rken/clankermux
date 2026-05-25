@@ -1,10 +1,10 @@
-import type { MessageData } from "@better-ccflare/types";
+import type { MessageData } from "@clankermux/types";
 import {
 	cleanLineNumbers,
 	genMessageKey,
 	parseAssistantMessage,
 	parseRequestMessages,
-} from "@better-ccflare/ui-common";
+} from "@clankermux/ui-common";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Message } from "./conversation";
 

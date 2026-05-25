@@ -1,4 +1,4 @@
-import { BUFFER_SIZES } from "@better-ccflare/core";
+import { BUFFER_SIZES } from "@clankermux/core";
 
 /**
  * Tees a ReadableStream to capture data without blocking the original stream.

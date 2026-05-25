@@ -1,4 +1,4 @@
-import { TIME_CONSTANTS } from "@better-ccflare/core";
+import { TIME_CONSTANTS } from "@clankermux/core";
 
 /**
  * Format duration in milliseconds to human-readable string

@@ -8,7 +8,7 @@ This rule is in addition to (not a replacement for) `.claude/rules/fork-workflow
 
 ## Why this rule exists
 
-The main checkout at `/home/darken/better-ccflare` is the **live deployment**. The systemd unit `better-ccflare.service` (defined at `/etc/systemd/system/better-ccflare.service` with drop-in `dashboard-build.conf`) runs the proxy from this directory:
+The main checkout at `/home/darken/better-ccflare` is the **live deployment**. The systemd unit `clankermux.service` (defined at `/etc/systemd/system/clankermux.service` with drop-in `dashboard-build.conf`) runs the proxy from this directory:
 
 - `WorkingDirectory=/home/darken/better-ccflare`
 - `ExecStartPre=bun run build:dashboard` — rebuilds the dashboard from working-tree source on every restart
@@ -111,6 +111,6 @@ A future hardening step is a `PreToolUse` hook in `.claude/settings.json` that i
 ## Related references
 
 - `CLAUDE.md` — general repo rules, file exclusions, commit prefixes, the lint/typecheck/format requirement
-- `.claude/rules/fork-workflow.md` — two-lane workflow (upstream-bound vs fork-only), `--no-ff` merge pattern, Procedure A/B/C
-- `/etc/systemd/system/better-ccflare.service` — the systemd unit that makes this directory live
-- `/etc/systemd/system/better-ccflare.service.d/dashboard-build.conf` — the drop-in that adds the `ExecStartPre` dashboard rebuild
+- `.claude/rules/fork-workflow.md` — ClankerMux dev workflow (fork-only, branch from origin/main), `--no-ff` merge pattern, cherry-pick-from-upstream
+- `/etc/systemd/system/clankermux.service` — the systemd unit that makes this directory live
+- `/etc/systemd/system/clankermux.service.d/dashboard-build.conf` — the drop-in that adds the `ExecStartPre` dashboard rebuild

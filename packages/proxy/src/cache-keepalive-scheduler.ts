@@ -1,6 +1,6 @@
-import type { Config } from "@better-ccflare/config";
-import { registerHeartbeat } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import type { Config } from "@clankermux/config";
+import { registerHeartbeat } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import { cacheBodyStore } from "./cache-body-store";
 import { dispatchProxyRequest } from "./dispatch";
 import type { ProxyContext } from "./proxy";
@@ -124,13 +124,13 @@ export class CacheKeepaliveScheduler {
 			const replayHeaders = new Headers(cached.headers);
 			replayHeaders.set("content-type", "application/json");
 			// Inject routing headers fresh — these were stripped from the snapshot
-			replayHeaders.set("x-better-ccflare-account-id", accountId);
-			replayHeaders.set("x-better-ccflare-bypass-session", "true");
+			replayHeaders.set("x-clankermux-account-id", accountId);
+			replayHeaders.set("x-clankermux-bypass-session", "true");
 
 			// Tag as keepalive for dual purpose:
 			//  1. Visibility: request logger can identify synthetic requests
 			//  2. Loop prevention: proxy skips staging to avoid infinite replay cycle
-			replayHeaders.set("x-better-ccflare-keepalive", "true");
+			replayHeaders.set("x-clankermux-keepalive", "true");
 
 			log.debug(
 				`Replaying cached request for account ${accountId} (${cached.body.length} bytes, recorded ${Math.round((Date.now() - cached.timestamp) / 1000)}s ago)`,
@@ -153,8 +153,8 @@ export class CacheKeepaliveScheduler {
 
 			// Dispatch in-process through the proxy pipeline. No HTTP self-loop,
 			// no TLS, no port. The URL is just for handleProxy's parsing — the
-			// real routing is driven by x-better-ccflare-account-id above.
-			const url = new URL(`http://internal.better-ccflare${cached.path}`);
+			// real routing is driven by x-clankermux-account-id above.
+			const url = new URL(`http://internal.clankermux${cached.path}`);
 			const req = new Request(url, {
 				method: "POST",
 				headers: replayHeaders,

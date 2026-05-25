@@ -1,6 +1,6 @@
 # Anthropic API Changelog
 
-This document tracks changes to the Anthropic API responses that affect better-ccflare.
+This document tracks changes to the Anthropic API responses that affect ClankerMux.
 
 ## Usage API Endpoint
 
@@ -95,7 +95,7 @@ Accept: application/json
 
 ## Implementation Notes
 
-### How better-ccflare Handles API Changes
+### How ClankerMux Handles API Changes
 
 The usage fetcher in `packages/providers/src/usage-fetcher.ts` is designed to be resilient to API changes:
 
@@ -110,7 +110,7 @@ To test the current API response:
 
 ```bash
 # Get an access token from the database
-sqlite3 ~/.config/better-ccflare/better-ccflare.db "SELECT access_token FROM accounts WHERE name = 'claude' LIMIT 1;"
+sqlite3 ~/.config/clankermux/clankermux.db "SELECT access_token FROM accounts WHERE name = 'claude' LIMIT 1;"
 
 # Test the API endpoint
 curl -v -X GET "https://api.anthropic.com/api/oauth/usage" \

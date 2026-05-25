@@ -2,11 +2,11 @@ import {
 	CLAUDE_MODEL_IDS,
 	getClientVersion,
 	registerHeartbeat,
-} from "@better-ccflare/core";
-import type { BunSqlAdapter } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
-import { fetchUsageData, getProvider } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import type { BunSqlAdapter } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
+import { fetchUsageData, getProvider } from "@clankermux/providers";
+import type { Account } from "@clankermux/types";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
 import { getValidAccessToken } from "./handlers";
@@ -144,7 +144,7 @@ export class AutoRefreshScheduler {
 						OR rate_limit_reset < (? - 24 * 60 * 60 * 1000)
 					)
 					-- Skip accounts that are still inside an active per-account cooldown.
-					-- ccflare already knows upstream will reject us until rate_limited_until,
+					-- ClankerMux already knows upstream will reject us until rate_limited_until,
 					-- so probing during that window is a guaranteed-fail call that wastes
 					-- quota, re-applies the same cooldown, and pollutes the request log
 					-- with synthetic 503s (issue #199, bug 1).
@@ -327,9 +327,9 @@ export class AutoRefreshScheduler {
 
 			// Dispatch through the proxy pipeline in-process via dispatchProxyRequest.
 			// The URL is constructed for handleProxy's URL parsing only — there is no
-			// HTTP self-loop, no port, no TLS. The x-better-ccflare-account-id header
+			// HTTP self-loop, no port, no TLS. The x-clankermux-account-id header
 			// is what actually forces routing to this specific account.
-			const endpoint = "http://internal.better-ccflare/v1/messages";
+			const endpoint = "http://internal.clankermux/v1/messages";
 			const url = new URL(endpoint);
 
 			// Use same headers as normal Claude Code CLI requests, plus the special account ID header
@@ -355,16 +355,16 @@ export class AutoRefreshScheduler {
 				"x-stainless-runtime-version": "v24.9.0",
 				"x-stainless-timeout": "600",
 				// CRITICAL: Force the proxy to use this specific account
-				"x-better-ccflare-account-id": account.id,
+				"x-clankermux-account-id": account.id,
 				// CRITICAL: Bypass session tracking for auto-refresh messages
-				"x-better-ccflare-bypass-session": "true",
+				"x-clankermux-bypass-session": "true",
 				// Tag the request as a synthetic auto-refresh probe so downstream
 				// pipeline layers can distinguish it from real user traffic
 				// (cache-body-store skips staging for these, request logging
 				// and pool-exhausted 503 metrics filter them out — issue #199,
-				// bug 2). Mirrors the existing x-better-ccflare-keepalive
+				// bug 2). Mirrors the existing x-clankermux-keepalive
 				// pattern used by cache-keepalive-scheduler.ts.
-				"x-better-ccflare-auto-refresh": "true",
+				"x-clankermux-auto-refresh": "true",
 			});
 
 			// Try sending with multiple models if needed

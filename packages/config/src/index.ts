@@ -11,9 +11,9 @@ import {
 	ValidationError,
 	validateNumber,
 	validateString,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import { validatePathOrThrow } from "@better-ccflare/security";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { validatePathOrThrow } from "@clankermux/security";
 import { resolveConfigPath } from "./paths";
 
 const log = new Logger("Config");
@@ -585,6 +585,10 @@ export class Config extends EventEmitter {
 }
 
 // Re-export types
-export type { StrategyName } from "@better-ccflare/core";
+export type { StrategyName } from "@clankermux/core";
 export { resolveConfigPath } from "./paths";
-export { getLegacyConfigDir, getPlatformConfigDir } from "./paths-common";
+export {
+	getLegacyConfigDir,
+	getLegacyConfigDirs,
+	getPlatformConfigDir,
+} from "./paths-common";

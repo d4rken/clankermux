@@ -16,12 +16,8 @@
  * account's in-memory `paused` flag is (or is not) cleared.
  */
 import { beforeEach, describe, expect, it } from "bun:test";
-import { SessionStrategy } from "@better-ccflare/load-balancer";
-import type {
-	Account,
-	RequestMeta,
-	StrategyStore,
-} from "@better-ccflare/types";
+import { SessionStrategy } from "@clankermux/load-balancer";
+import type { Account, RequestMeta, StrategyStore } from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
 // Helpers

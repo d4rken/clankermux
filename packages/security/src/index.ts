@@ -1,5 +1,5 @@
 /**
- * @better-ccflare/security
+ * @clankermux/security
  *
  * Centralized security utilities for path validation and sanitization.
  *

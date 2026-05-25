@@ -1,8 +1,8 @@
-# better-ccflare Architecture Documentation
+# ClankerMux Architecture Documentation
 
 ## Overview
 
-better-ccflare is a sophisticated load balancer proxy system designed to distribute requests across multiple OAuth accounts for AI services (currently focused on Anthropic's Claude API). It prevents rate limiting by intelligently routing requests through different authenticated accounts using a session-based load balancing strategy.
+ClankerMux is a sophisticated load balancer proxy system designed to distribute requests across multiple OAuth accounts for AI services (currently focused on Anthropic's Claude API). It prevents rate limiting by intelligently routing requests through different authenticated accounts using a session-based load balancing strategy.
 
 The system is built with a modular, microservices-inspired architecture using TypeScript and Bun runtime, emphasizing separation of concerns, extensibility, and real-time monitoring capabilities. Recent enhancements include asynchronous database operations, streaming response capture for analytics, advanced request filtering, and agent detection with model preference management.
 
@@ -16,7 +16,7 @@ graph LR
         UI3[API Clients]
     end
     
-    subgraph "better-ccflare Core"
+    subgraph "ClankerMux Core"
         LB[Load Balancer]
         PROXY[Proxy Engine]
         AUTH[OAuth Manager]
@@ -66,7 +66,7 @@ graph TB
     end
 
     %% API Gateway Layer
-    subgraph "better-ccflare Server"
+    subgraph "ClankerMux Server"
         SERVER[HTTP Server<br/>apps/server]
         
         subgraph "Request Processing"
@@ -311,7 +311,7 @@ classDiagram
 ```
 
 **Agent Discovery Process:**
-1. **Global Agents**: Loaded from `~/.config/better-ccflare/agents/` directory
+1. **Global Agents**: Loaded from `~/.config/clankermux/agents/` directory
 2. **Workspace Agents**: Dynamically discovered from `<workspace>/.claude/agents/` directories
 3. **Agent Format**: Markdown files with frontmatter containing metadata
 4. **Workspace Detection**: Automatically registers workspaces from system prompts containing CLAUDE.md references
@@ -962,12 +962,12 @@ graph TB
 
 ## Agent System Architecture
 
-The agent system allows better-ccflare to automatically detect and apply model preferences based on the agent being used:
+The agent system allows ClankerMux to automatically detect and apply model preferences based on the agent being used:
 
 ```mermaid
 graph TB
     subgraph "Agent Discovery"
-        GLOBAL[Global Agents<br/>~/.config/better-ccflare/agents/]
+        GLOBAL[Global Agents<br/>~/.config/clankermux/agents/]
         WORKSPACE[Workspace Agents<br/><workspace>/.claude/agents/]
         REGISTRY[Agent Registry]
     end
@@ -1166,7 +1166,7 @@ stateDiagram-v2
 
 ### Streaming Architecture
 
-better-ccflare implements sophisticated streaming support for handling large language model responses:
+ClankerMux implements sophisticated streaming support for handling large language model responses:
 
 ```mermaid
 graph TB
@@ -1346,7 +1346,7 @@ The architecture supports:
 ```mermaid
 graph TB
     subgraph "Local Machine"
-        SERVER[better-ccflare Server<br/>Port 8080]
+        SERVER[ClankerMux Server<br/>Port 8080]
         DB[(SQLite DB)]
         LOGS[Log Files]
         CONFIG[Config Files]
@@ -1377,9 +1377,9 @@ graph TB
     end
     
     subgraph "Application Tier"
-        APP1[better-ccflare Instance 1]
-        APP2[better-ccflare Instance 2]
-        APP3[better-ccflare Instance N]
+        APP1[ClankerMux Instance 1]
+        APP2[ClankerMux Instance 2]
+        APP3[ClankerMux Instance N]
     end
     
     subgraph "Data Tier"

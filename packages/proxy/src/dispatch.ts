@@ -1,5 +1,5 @@
-import { HTTP_STATUS } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { HTTP_STATUS } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import { handleProxy, type ProxyContext } from "./proxy";
 
 const log = new Logger("ProxyDispatch");

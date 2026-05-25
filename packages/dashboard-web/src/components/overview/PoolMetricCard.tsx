@@ -1,4 +1,4 @@
-import { formatPercentage } from "@better-ccflare/ui-common";
+import { formatPercentage } from "@clankermux/ui-common";
 import { Info } from "lucide-react";
 import type {
 	ExcludedReason,

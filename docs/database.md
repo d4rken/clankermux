@@ -2,7 +2,7 @@
 
 ## Overview
 
-better-ccflare supports two database backends:
+ClankerMux supports two database backends:
 
 - **SQLite** (default) — zero-configuration, embedded, great for single-node deployments
 - **PostgreSQL** — set `DATABASE_URL` to a `postgresql://` connection string; required for Kubernetes / multi-pod deployments where pods cannot safely share a SQLite file
@@ -13,7 +13,7 @@ Both backends use [Bun's built-in SQL client (`Bun.SQL`)](https://bun.sh/docs/ap
 
 | Backend | Trigger | Notes |
 |---------|---------|-------|
-| SQLite | `DATABASE_URL` not set (or starts with `sqlite://`) | Default; database file at `~/.config/better-ccflare/better-ccflare.db` or `BETTER_CCFLARE_DB_PATH` |
+| SQLite | `DATABASE_URL` not set (or starts with `sqlite://`) | Default; database file at `~/.config/clankermux/clankermux.db` or `CLANKERMUX_DB_PATH` (legacy `BETTER_CCFLARE_DB_PATH` still honored) |
 | PostgreSQL | `DATABASE_URL` starts with `postgres://` or `postgresql://` | Shared database for multi-pod; full schema created on first start |
 
 ### Key Features
@@ -336,14 +336,14 @@ const db = container.resolve<DatabaseOperations>(SERVICE_KEYS.Database);
 
 The database file is stored in a platform-specific configuration directory:
 
-- **macOS**: `~/Library/Application Support/better-ccflare/better-ccflare.db`
-- **Linux**: `~/.config/better-ccflare/better-ccflare.db`
-- **Windows**: `%APPDATA%\better-ccflare\better-ccflare.db`
+- **macOS**: `~/Library/Application Support/clankermux/clankermux.db`
+- **Linux**: `~/.config/clankermux/clankermux.db`
+- **Windows**: `%APPDATA%\clankermux\clankermux.db`
 
-You can override the default location using the `BETTER_CCFLARE_DB_PATH` environment variable:
+You can override the default location using the `CLANKERMUX_DB_PATH` (legacy `BETTER_CCFLARE_DB_PATH` still honored) environment variable:
 
 ```bash
-export BETTER_CCFLARE_DB_PATH=/custom/path/to/database.db
+export CLANKERMUX_DB_PATH=/custom/path/to/database.db
 ```
 
 ### PostgreSQL
@@ -351,7 +351,7 @@ export BETTER_CCFLARE_DB_PATH=/custom/path/to/database.db
 Set `DATABASE_URL` to use PostgreSQL instead of SQLite:
 
 ```bash
-export DATABASE_URL=postgresql://ccflare_user:secret@localhost:5432/ccflare
+export DATABASE_URL=postgresql://clankermux_user:secret@localhost:5432/clankermux
 ```
 
 The full schema is created automatically on first startup (`CREATE TABLE IF NOT EXISTS ...`). Column migrations are applied automatically using `information_schema` checks, so upgrading an existing deployment is seamless.
@@ -601,7 +601,7 @@ These commands directly interact with the database through the `DatabaseOperatio
 
 1. **File-based Backup**: Simple copy of the SQLite file when the application is stopped:
 ```bash
-cp better-ccflare.db better-ccflare.db.backup
+cp clankermux.db clankermux.db.backup
 ```
 
 2. **Online Backup**: Use SQLite's backup API for hot backups:
@@ -612,7 +612,7 @@ VACUUM INTO 'backup.db';
 3. **Automated Backups**: Schedule regular backups using cron or system schedulers:
 ```bash
 # Daily backup with rotation
-0 2 * * * cp /path/to/better-ccflare.db /backups/better-ccflare-$(date +\%Y\%m\%d).db
+0 2 * * * cp /path/to/clankermux.db /backups/clankermux-$(date +\%Y\%m\%d).db
 ```
 
 ### Maintenance Operations
@@ -673,7 +673,7 @@ Key metrics to monitor:
 
 2. **Access Control**: Ensure proper file permissions:
 ```bash
-chmod 600 better-ccflare.db
+chmod 600 clankermux.db
 ```
 
 3. **SQL Injection**: The codebase uses parameterized queries throughout, providing protection against SQL injection.

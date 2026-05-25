@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { platform } from "node:process";
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("PathValidator");
 
@@ -232,25 +232,29 @@ export function getDefaultAllowedBasePaths(forceRefresh = false): string[] {
 
 	const paths: string[] = [];
 
-	// Better-ccflare config directory (OS-independent)
+	// ClankerMux config directories (current + legacy), OS-independent.
+	// The project was renamed ccflare → better-ccflare → ClankerMux; allow the
+	// legacy dirs too so files created under a prior install still validate.
+	// (Inlined rather than imported from @clankermux/config to avoid a
+	// config → security → config dependency cycle.)
 	try {
 		const home = homedir();
 		if (home) {
-			let configDir: string;
+			let baseDir: string;
 			if (platform === "win32") {
 				// Windows: Use LOCALAPPDATA or APPDATA
-				const baseDir =
+				baseDir =
 					process.env.LOCALAPPDATA ??
 					process.env.APPDATA ??
 					join(home, "AppData", "Local");
-				configDir = join(baseDir, "better-ccflare");
 			} else {
 				// Linux/macOS: Follow XDG Base Directory specification
 				const xdgConfig = process.env.XDG_CONFIG_HOME;
-				const baseDir = xdgConfig ?? join(home, ".config");
-				configDir = join(baseDir, "better-ccflare");
+				baseDir = xdgConfig ?? join(home, ".config");
 			}
-			paths.push(configDir);
+			for (const name of ["clankermux", "better-ccflare", "ccflare"]) {
+				paths.push(join(baseDir, name));
+			}
 		}
 	} catch {
 		// homedir() can fail in some environments
@@ -295,7 +299,7 @@ export function getDefaultAllowedBasePaths(forceRefresh = false): string[] {
  * - **Cross-platform**: Handles both Unix (/) and Windows (\) path separators
  *
  * **Production Security Warning:**
- * The default allowed paths (better-ccflare config directory, current directory, temp directory)
+ * The default allowed paths (ClankerMux config directory, current directory, temp directory)
  * may still be too permissive for some production environments. Always specify explicit
  * `additionalAllowedPaths` in production for maximum security.
  *

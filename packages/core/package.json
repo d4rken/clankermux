@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/core",
+	"name": "@clankermux/core",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -10,6 +10,6 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/types": "workspace:*"
 	}
 }

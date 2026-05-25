@@ -1,17 +1,17 @@
-import { agentRegistry } from "@better-ccflare/agents";
+import { agentRegistry } from "@clankermux/agents";
 import {
 	getAllowedModelsMessage,
 	isValidClaudeModel,
 	validateString,
-} from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
+} from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	BadRequest,
 	errorResponse,
 	HttpError,
 	jsonResponse,
-} from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
+} from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
 
 const log = new Logger("AgentsHandler");
 

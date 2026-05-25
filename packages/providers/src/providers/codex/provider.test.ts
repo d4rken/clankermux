@@ -406,7 +406,7 @@ describe("CodexProvider.processResponse", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-better-ccflare-request-id": requestId,
+				"x-clankermux-request-id": requestId,
 			},
 			body: JSON.stringify({
 				model: "claude-sonnet-4-5",
@@ -440,8 +440,8 @@ describe("CodexProvider.processResponse", () => {
 			status: 200,
 			headers: {
 				"content-type": "text/event-stream",
-				"x-better-ccflare-request-id": requestId,
-				"x-better-ccflare-request-stream": "false",
+				"x-clankermux-request-id": requestId,
+				"x-clankermux-request-stream": "false",
 			},
 		});
 
@@ -471,7 +471,7 @@ describe("CodexProvider.processResponse", () => {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-better-ccflare-request-id": requestId,
+				"x-clankermux-request-id": requestId,
 			},
 			body: JSON.stringify({
 				model: "claude-sonnet-4-5",
@@ -523,8 +523,8 @@ describe("CodexProvider.processResponse", () => {
 			status: 200,
 			headers: {
 				"content-type": "text/event-stream",
-				"x-better-ccflare-request-id": requestId,
-				"x-better-ccflare-request-stream": "false",
+				"x-clankermux-request-id": requestId,
+				"x-clankermux-request-stream": "false",
 			},
 		});
 

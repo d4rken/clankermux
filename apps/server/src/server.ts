@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { Config, type RuntimeConfig } from "@better-ccflare/config";
+import { Config, type RuntimeConfig } from "@clankermux/config";
 import {
 	CACHE,
 	DEFAULT_STRATEGY,
@@ -8,38 +8,36 @@ import {
 	HTTP_STATUS,
 	initializeNanoGPTPricingIfAccountsExist,
 	NETWORK,
+	readEnv,
 	registerCleanup,
 	registerDisposable,
 	setPricingLogger,
 	shutdown,
 	TIME_CONSTANTS,
-} from "@better-ccflare/core";
-import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
-import type { DatabaseOperations } from "@better-ccflare/database";
+} from "@clankermux/core";
+import { container, SERVICE_KEYS } from "@clankermux/core-di";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	AsyncDbWriter,
 	DatabaseFactory,
 	initPayloadEncryption,
-} from "@better-ccflare/database";
-import { APIRouter, AuthService } from "@better-ccflare/http-api";
-import {
-	LeastUsedStrategy,
-	SessionStrategy,
-} from "@better-ccflare/load-balancer";
-import { Logger } from "@better-ccflare/logger";
-import { handleResponsesRequest } from "@better-ccflare/openai-responses-adapter";
+} from "@clankermux/database";
+import { APIRouter, AuthService } from "@clankermux/http-api";
+import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
+import { Logger } from "@clankermux/logger";
+import { handleResponsesRequest } from "@clankermux/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	fetchCodexUsageOnDemand,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
 	usageCache,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 import {
 	canUseInferenceProfileDynamic,
 	parseBedrockConfig,
 	translateModelName,
-} from "@better-ccflare/providers/bedrock";
+} from "@clankermux/providers/bedrock";
 import {
 	AutoRefreshScheduler,
 	CacheKeepaliveScheduler,
@@ -59,14 +57,14 @@ import {
 	stopGlobalTokenHealthChecks,
 	terminateUsageWorker,
 	unregisterCodexUsageRefresher,
-} from "@better-ccflare/proxy";
-import { validatePathOrThrow } from "@better-ccflare/security";
+} from "@clankermux/proxy";
+import { validatePathOrThrow } from "@clankermux/security";
 import {
 	type Account,
 	type LoadBalancingStrategy,
 	StrategyName,
 	type StrategyStore,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { serve } from "bun";
 
 /**
@@ -94,14 +92,14 @@ let dashboardManifest: Record<string, string> | null = null;
 
 // Try to load embedded dashboard (will exist in production build)
 try {
-	const embedded = await import("@better-ccflare/dashboard-web/dist/embedded");
+	const embedded = await import("@clankermux/dashboard-web/dist/embedded");
 	embeddedDashboard = embedded.embeddedDashboard;
 	dashboardManifest = embedded.dashboardManifest;
 } catch {
 	// Fallback: try loading from file system (development)
 	try {
 		const manifestModule = await import(
-			"@better-ccflare/dashboard-web/dist/manifest.json"
+			"@clankermux/dashboard-web/dist/manifest.json"
 		);
 		dashboardManifest = manifestModule.default as Record<string, string>;
 	} catch {
@@ -119,7 +117,7 @@ function resolveDashboardAsset(assetPath: string): string | null {
 	try {
 		// Try resolving as a package first
 		return Bun.resolveSync(
-			`@better-ccflare/dashboard-web/dist${assetPath}`,
+			`@clankermux/dashboard-web/dist${assetPath}`,
 			dirname(import.meta.path),
 		);
 	} catch {
@@ -266,7 +264,7 @@ async function runStartupMaintenance(
 	}
 	try {
 		// Prune old agent workspaces (not seen in 7 days)
-		const { agentRegistry } = await import("@better-ccflare/agents");
+		const { agentRegistry } = await import("@clankermux/agents");
 		await agentRegistry.pruneOldWorkspaces();
 		log.info("Pruned old agent workspaces");
 	} catch (err) {
@@ -1045,7 +1043,7 @@ export default async function startServer(options?: {
 
 	// Main server
 	// Build server configuration with optional TLS and hostname binding
-	const hostname = process.env.BETTER_CCFLARE_HOST || "0.0.0.0"; // Allow binding configuration
+	const hostname = readEnv("HOST") || "0.0.0.0"; // Allow binding configuration
 	try {
 		const serverConfig = {
 			port: runtime.port,
@@ -1264,11 +1262,11 @@ export default async function startServer(options?: {
 	const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 	if (!loopbackHosts.has(hostname)) {
 		log.warn(
-			`better-ccflare is bound to '${hostname}' and the management API ` +
+			`ClankerMux is bound to '${hostname}' and the management API ` +
 				"(/api/*) is unauthenticated. Anyone who can reach this port can " +
 				"manage accounts, create/revoke API keys, read request logs, and " +
-				"download heap snapshots. Bind to localhost (set BETTER_CCFLARE_HOST=127.0.0.1) " +
-				"or put better-ccflare behind a reverse proxy that enforces authentication.",
+				"download heap snapshots. Bind to localhost (set CLANKERMUX_HOST=127.0.0.1) " +
+				"or put ClankerMux behind a reverse proxy that enforces authentication.",
 		);
 	}
 
@@ -1284,7 +1282,7 @@ export default async function startServer(options?: {
 					? "unavailable (assets not found)"
 					: "disabled";
 		console.log(`
-🎯 better-ccflare Server v${version}
+🎯 ClankerMux Server v${version}
 🌐 Port: ${serverInstance.port}
 🌍 Host: ${hostname}
 ${tlsEnabled ? "🔒 TLS: enabled" : ""}

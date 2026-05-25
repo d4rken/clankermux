@@ -1,11 +1,11 @@
-import { getModelFamily, isAccountAvailable } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
+import { getModelFamily, isAccountAvailable } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
 import type {
 	Account,
 	ComboFamily,
 	ComboSlotInfo,
 	RequestMeta,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("AccountSelector");
@@ -71,9 +71,13 @@ export async function selectAccountsForRequest(
 	ctx: ProxyContext,
 	model?: string,
 ): Promise<Account[]> {
-	// Check if a specific account is requested via special header
+	// Check if a specific account is requested via special header.
+	// Accept the legacy x-better-ccflare-account-id name too — this is the
+	// hand-typed force-route testing header, so old scripts keep working.
 	if (meta.headers) {
-		const forcedAccountId = meta.headers.get("x-better-ccflare-account-id");
+		const forcedAccountId =
+			meta.headers.get("x-clankermux-account-id") ??
+			meta.headers.get("x-better-ccflare-account-id");
 		if (forcedAccountId) {
 			try {
 				const allAccounts = await ctx.dbOps.getAllAccounts();
@@ -81,7 +85,7 @@ export async function selectAccountsForRequest(
 					(acc) => acc.id === forcedAccountId,
 				);
 				if (forcedAccount) {
-					// The auto-refresh scheduler sends dummy messages with x-better-ccflare-bypass-session
+					// The auto-refresh scheduler sends dummy messages with x-clankermux-bypass-session
 					// to intentionally refresh accounts that are paused due to auto_pause_on_overage,
 					// or to probe accounts that are rate-limited (to detect when the window has reset).
 					// For those requests we must allow through an overage-paused or rate-limited account
@@ -92,7 +96,7 @@ export async function selectAccountsForRequest(
 					// This mirrors the scheduler eligibility query and the sendDummyMessage resume guard
 					// (auto_pause_on_overage_enabled=1 AND pause_reason IN (NULL,'overage')).
 					const isAutoRefreshBypass =
-						meta.headers.get("x-better-ccflare-bypass-session") === "true";
+						meta.headers.get("x-clankermux-bypass-session") === "true";
 					const available = isAccountAvailable(forcedAccount);
 					const isOveragePaused =
 						forcedAccount.paused &&

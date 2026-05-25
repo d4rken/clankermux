@@ -1,10 +1,7 @@
-import type { Config, RuntimeConfig } from "@better-ccflare/config";
-import type {
-	AsyncDbWriter,
-	DatabaseOperations,
-} from "@better-ccflare/database";
-import type { Provider } from "@better-ccflare/providers";
-import type { LoadBalancingStrategy } from "@better-ccflare/types";
+import type { Config, RuntimeConfig } from "@clankermux/config";
+import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
+import type { Provider } from "@clankermux/providers";
+import type { LoadBalancingStrategy } from "@clankermux/types";
 import type { UsageWorkerController } from "../usage-worker-controller";
 
 export interface ProxyContext {

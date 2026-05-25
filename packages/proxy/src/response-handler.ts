@@ -1,10 +1,10 @@
-import { requestEvents, TIME_CONSTANTS } from "@better-ccflare/core";
+import { requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
-} from "@better-ccflare/http-common";
-import { ANALYTICS_STREAM_SYMBOL } from "@better-ccflare/http-common/symbols";
-import type { Account, RateLimitReason } from "@better-ccflare/types";
+} from "@clankermux/http-common";
+import { ANALYTICS_STREAM_SYMBOL } from "@clankermux/http-common/symbols";
+import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
@@ -126,7 +126,7 @@ export async function forwardToClient(
 	//     internal scheduler activity. Header set by AutoRefreshScheduler
 	//     mirrors the existing keepalive pattern.
 	const isAutoRefreshProbe =
-		requestHeaders.get("x-better-ccflare-auto-refresh") === "true";
+		requestHeaders.get("x-clankermux-auto-refresh") === "true";
 	const shouldProcessRequest =
 		!(
 			ctx.provider.name === "openai-compatible" &&

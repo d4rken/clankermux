@@ -1,10 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
-import {
-	DatabaseFactory,
-	type DatabaseOperations,
-} from "@better-ccflare/database";
+import { DatabaseFactory, type DatabaseOperations } from "@clankermux/database";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import type { ProxyContext } from "../proxy";
 

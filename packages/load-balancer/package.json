@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/load-balancer",
+	"name": "@clankermux/load-balancer",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -10,8 +10,8 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/database": "workspace:*",
-		"@better-ccflare/logger": "workspace:*"
+		"@clankermux/core": "workspace:*",
+		"@clankermux/database": "workspace:*",
+		"@clankermux/logger": "workspace:*"
 	}
 }

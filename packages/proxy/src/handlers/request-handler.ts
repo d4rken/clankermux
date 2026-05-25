@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import { TIME_CONSTANTS, ValidationError } from "@better-ccflare/core";
-import type { Provider } from "@better-ccflare/providers";
-import type { RequestMeta } from "@better-ccflare/types";
+import { TIME_CONSTANTS, ValidationError } from "@clankermux/core";
+import type { Provider } from "@clankermux/providers";
+import type { RequestMeta } from "@clankermux/types";
 import { ERROR_MESSAGES } from "./proxy-types";
 
 /**

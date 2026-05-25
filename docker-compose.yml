@@ -1,18 +1,19 @@
 services:
-  better-ccflare:
+  clankermux:
     image: ghcr.io/tombii/better-ccflare:latest
-    container_name: better-ccflare
+    container_name: clankermux
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       # Persist database
-      - better-ccflare-data:/data
+      - clankermux-data:/data
       # Optional: mount custom config
       # - ./config:/app/config:ro
     environment:
       - NODE_ENV=production
-      - BETTER_CCFLARE_DB_PATH=/data/better-ccflare.db
+      # (legacy BETTER_CCFLARE_DB_PATH is still honored by the app)
+      - CLANKERMUX_DB_PATH=/data/clankermux.db
       - XDG_CONFIG_HOME=/data
       # Optional: configure logging
       # - LOG_LEVEL=info
@@ -39,5 +40,5 @@ services:
           memory: 256M
 
 volumes:
-  better-ccflare-data:
+  clankermux-data:
     driver: local

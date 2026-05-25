@@ -1,4 +1,4 @@
-import type { ComboSlot, ComboWithSlots } from "@better-ccflare/types";
+import type { ComboSlot, ComboWithSlots } from "@clankermux/types";
 import {
 	closestCenter,
 	DndContext,

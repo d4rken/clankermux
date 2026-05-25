@@ -10,9 +10,9 @@ import {
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
-} from "@better-ccflare/cli-commands";
-import { DatabaseOperations } from "@better-ccflare/database";
-import { AuthService } from "@better-ccflare/http-api";
+} from "@clankermux/cli-commands";
+import { DatabaseOperations } from "@clankermux/database";
+import { AuthService } from "@clankermux/http-api";
 
 function tempDbPath(): string {
 	return join(tmpdir(), `test-api-auth-${randomBytes(6).toString("hex")}.db`);

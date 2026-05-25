@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/oauth-flow",
+	"name": "@clankermux/oauth-flow",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/index.ts",
@@ -7,9 +7,9 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/config": "workspace:*",
-		"@better-ccflare/database": "workspace:*",
-		"@better-ccflare/providers": "workspace:*",
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/config": "workspace:*",
+		"@clankermux/database": "workspace:*",
+		"@clankermux/providers": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

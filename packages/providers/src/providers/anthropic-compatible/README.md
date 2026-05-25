@@ -14,7 +14,7 @@ A flexible, configurable provider that can interface with any Anthropic-compatib
 ## Installation
 
 ```typescript
-import { AnthropicCompatibleProvider } from "@better-ccflare/providers";
+import { AnthropicCompatibleProvider } from "@clankermux/providers";
 ```
 
 ## Basic Usage
@@ -22,7 +22,7 @@ import { AnthropicCompatibleProvider } from "@better-ccflare/providers";
 ### 1. Simple Configuration
 
 ```typescript
-import { AnthropicCompatibleProvider } from "@better-ccflare/providers";
+import { AnthropicCompatibleProvider } from "@clankermux/providers";
 
 // Create a basic provider with API key authentication
 const provider = new AnthropicCompatibleProvider({
@@ -95,7 +95,7 @@ For common use cases, use the provided factory functions:
 ### Create Generic Provider
 
 ```typescript
-import { createAnthropicCompatibleProvider } from "@better-ccflare/providers";
+import { createAnthropicCompatibleProvider } from "@clankermux/providers";
 
 const provider = createAnthropicCompatibleProvider({
   name: "generic-service",
@@ -107,7 +107,7 @@ const provider = createAnthropicCompatibleProvider({
 ### Create Provider for Specific Service
 
 ```typescript
-import { createProviderForService } from "@better-ccflare/providers";
+import { createProviderForService } from "@clankermux/providers";
 
 // For services using custom API key headers
 const apiKeyProvider = createProviderForService(
@@ -129,7 +129,7 @@ const authProvider = createProviderForService(
 For common Anthropic-compatible services:
 
 ```typescript
-import { PresetProviders } from "@better-ccflare/providers";
+import { PresetProviders } from "@clankermux/providers";
 
 // Zai-compatible provider (based on z.ai API)
 const zaiProvider = PresetProviders.createZaiCompatible();
@@ -196,8 +196,8 @@ const provider = new AnthropicCompatibleProvider({
 ## Integration with Registry
 
 ```typescript
-import { registerProvider } from "@better-ccflare/providers";
-import { createAnthropicCompatibleProvider } from "@better-ccflare/providers";
+import { registerProvider } from "@clankermux/providers";
+import { createAnthropicCompatibleProvider } from "@clankermux/providers";
 
 // Register the provider
 const myProvider = createAnthropicCompatibleProvider({
@@ -209,7 +209,7 @@ const myProvider = createAnthropicCompatibleProvider({
 registerProvider(myProvider);
 
 // Now you can get it by name
-import { getProvider } from "@better-ccflare/providers";
+import { getProvider } from "@clankermux/providers";
 const provider = getProvider("my-anthropic-service");
 ```
 
@@ -231,7 +231,7 @@ import {
   AnthropicCompatibleProvider,
   createAnthropicCompatibleProvider,
   registerProvider 
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 
 // Method 1: Direct instantiation
 const customProvider = new AnthropicCompatibleProvider({
@@ -259,7 +259,7 @@ registerProvider(customProvider);
 registerProvider(aiProvider);
 
 // Check what providers are available
-import { listProviders } from "@better-ccflare/providers";
+import { listProviders } from "@clankermux/providers";
 console.log("Available providers:", listProviders());
 // ["anthropic", "minimax", "zai", "openai", "my-ai-service", "company-ai"]
 ```
@@ -295,19 +295,19 @@ If you're migrating from z.ai or minimax providers:
 
 ```typescript
 // Old z.ai setup
-import { ZaiProvider } from "@better-ccflare/providers";
+import { ZaiProvider } from "@clankermux/providers";
 const zaiProvider = new ZaiProvider();
 
 // New anthropic-compatible setup (equivalent)
-import { PresetProviders } from "@better-ccflare/providers";
+import { PresetProviders } from "@clankermux/providers";
 const zaiCompatibleProvider = PresetProviders.createZaiCompatible();
 
 // Old minimax setup
-import { MinimaxProvider } from "@better-ccflare/providers";
+import { MinimaxProvider } from "@clankermux/providers";
 const minimaxProvider = new MinimaxProvider();
 
 // New anthropic-compatible setup (equivalent)
-import { PresetProviders } from "@better-ccflare/providers";
+import { PresetProviders } from "@clankermux/providers";
 const minimaxCompatibleProvider = PresetProviders.createMinimaxCompatible();
 ```
 

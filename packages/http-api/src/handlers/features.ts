@@ -1,3 +1,4 @@
+import { readEnv } from "@clankermux/core";
 import { jsonResponse } from "../utils/http-error";
 
 /**
@@ -6,7 +7,7 @@ import { jsonResponse } from "../utils/http-error";
 export function createFeaturesHandler() {
 	return async (): Promise<Response> => {
 		const features = {
-			showCombos: process.env.BETTER_CCFLARE_SHOW_COMBOS === "true",
+			showCombos: readEnv("SHOW_COMBOS") === "true",
 		};
 
 		return jsonResponse({

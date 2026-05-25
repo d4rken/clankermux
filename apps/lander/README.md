@@ -1,6 +1,6 @@
-# better-ccflare Landing Page
+# ClankerMux Landing Page
 
-Static landing page for better-ccflare - showcasing how simple it is to never hit rate limits again.
+Static landing page for ClankerMux - showcasing how simple it is to never hit rate limits again.
 
 ## 🚀 Getting Started is This Simple
 
@@ -68,14 +68,14 @@ bun run build
    ```bash
    cd apps/lander
    bun run build
-   wrangler pages deploy dist --project-name=better-ccflare-landing
+   wrangler pages deploy dist --project-name=clankermux-landing
    ```
 
 ## Features
 
-- Dark theme matching better-ccflare dashboard
+- Dark theme matching ClankerMux dashboard
 - Mobile responsive
 - Security headers configured
 - Optimized for performance
 - Static HTML/CSS (no JavaScript framework)
-- Real screenshots from actual better-ccflare usage
+- Real screenshots from actual ClankerMux usage

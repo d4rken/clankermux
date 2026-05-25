@@ -1,10 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { SessionStrategy } from "@better-ccflare/load-balancer";
-import type {
-	Account,
-	RequestMeta,
-	StrategyStore,
-} from "@better-ccflare/types";
+import { SessionStrategy } from "@clankermux/load-balancer";
+import type { Account, RequestMeta, StrategyStore } from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
 // Shared Account factory — keeps every test focused on the fields that

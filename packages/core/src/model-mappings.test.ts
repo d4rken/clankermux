@@ -5,8 +5,8 @@ import {
 	isValidClaudeModel,
 	mapModelName,
 	parseModelMappings,
-} from "@better-ccflare/core";
-import type { Account } from "@better-ccflare/types";
+} from "@clankermux/core";
+import type { Account } from "@clankermux/types";
 
 describe("Model Mapping", () => {
 	test("parseModelMappings handles valid JSON", () => {

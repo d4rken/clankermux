@@ -64,7 +64,7 @@
 
 ## Overview
 
-The better-ccflare providers system is a modular architecture designed to support multiple AI service providers through a unified interface. Currently, it implements support for Anthropic's services through a single provider that can operate in two modes:
+The ClankerMux providers system is a modular architecture designed to support multiple AI service providers through a unified interface. Currently, it implements support for Anthropic's services through a single provider that can operate in two modes:
 
 ### Supported Providers
 
@@ -424,7 +424,7 @@ The `OpenAICompatibleProvider` (registered as `"openai-compatible"`) enables ful
 
 ### Architecture
 ```
-Anthropic Client → better-ccflare Proxy → OpenAI Provider (OpenRouter, etc.) → Transformed Response → Client
+Anthropic Client → ClankerMux Proxy → OpenAI Provider (OpenRouter, etc.) → Transformed Response → Client
 ```
 - **Path conversion**: `/v1/messages` → `/v1/chat/completions`
 - **Model mapping**: `claude-3-haiku` → `openai/gpt-5-mini` (via `model-mapping.ts`)
@@ -570,7 +570,7 @@ export OPENAI_COMPATIBLE_MODEL_MAPPINGS='{
 
 **OpenRouter:**
 ```bash
-better-ccflare --add-account openrouter-account \
+clankermux --add-account openrouter-account \
   --provider openai-compatible \
   --api-key sk-or-v1-... \
   --endpoint https://openrouter.ai/api/v1 \
@@ -579,7 +579,7 @@ better-ccflare --add-account openrouter-account \
 
 **Together AI:**
 ```bash
-better-ccflare --add-account together-account \
+clankermux --add-account together-account \
   --provider openai-compatible \
   --api-key ... \
   --endpoint https://api.together.xyz/v1 \
@@ -588,7 +588,7 @@ better-ccflare --add-account together-account \
 
 **Local Models (Ollama/LM Studio):**
 ```bash
-better-ccflare --add-account local-models \
+clankermux --add-account local-models \
   --provider openai-compatible \
   --api-key dummy-key \
   --endpoint http://localhost:11434/v1 \
@@ -598,7 +598,7 @@ better-ccflare --add-account local-models \
 **Custom Model Mappings via JSON Configuration:**
 ```bash
 # Store custom mappings in custom_endpoint as JSON
-better-ccflare --add-account custom-provider \
+clankermux --add-account custom-provider \
   --provider openai-compatible \
   --api-key sk-... \
   --endpoint '{"modelMappings": {"opus": "gpt-4-turbo", "haiku": "gpt-3.5-turbo"}}'
@@ -742,7 +742,7 @@ The BaseProvider abstract class provides default implementations for common func
 
 ## Account Priority System
 
-better-ccflare uses an account priority system to control request routing order:
+ClankerMux uses an account priority system to control request routing order:
 
 | Priority | Value | Description |
 |----------|-------|-------------|
@@ -757,9 +757,9 @@ better-ccflare uses an account priority system to control request routing order:
 Accounts are selected based on their priority value (lower numbers = higher priority). The priority system works with the session-based load balancing strategy:
 
 ```bash
-better-ccflare --add-account primary-account --mode max --priority 0
-better-ccflare --add-account secondary-account --mode max --priority 10
-better-ccflare --add-account backup-account --mode max --priority 50
+clankermux --add-account primary-account --mode max --priority 0
+clankermux --add-account secondary-account --mode max --priority 10
+clankermux --add-account backup-account --mode max --priority 50
 ```
 
 ### Priority-Based Load Balancing

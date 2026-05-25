@@ -6,10 +6,7 @@ import { existsSync, unlinkSync } from "node:fs";
  * Tests the directory traversal protection in extractAgentDirectories()
  */
 
-import {
-	DatabaseFactory,
-	type DatabaseOperations,
-} from "@better-ccflare/database";
+import { DatabaseFactory, type DatabaseOperations } from "@clankermux/database";
 // We need to import the function we want to test
 // Since extractAgentDirectories is not exported, we'll test via the public API
 import { interceptAndModifyRequest } from "../agent-interceptor";

@@ -1,6 +1,6 @@
 # Auto-Refresh Configuration Guide
 
-This guide covers the auto-refresh feature in better-ccflare, which automatically sends dummy messages to Anthropic accounts when their usage windows reset to start a new window.
+This guide covers the auto-refresh feature in ClankerMux, which automatically sends dummy messages to Anthropic accounts when their usage windows reset to start a new window.
 
 ## Table of Contents
 
@@ -122,7 +122,7 @@ curl -s http://localhost:8080/api/accounts | \
   jq '.[] | {name, autoRefreshEnabled, rateLimitReset}'
 
 # Monitor logs
-tail -f ~/.local/share/better-ccflare/logs/better-ccflare.log | grep "Auto-refresh"
+tail -f ~/.local/share/clankermux/logs/clankermux.log | grep "Auto-refresh"
 ```
 
 ## Configuration Examples
@@ -199,7 +199,7 @@ done
 
 ```bash
 # Monitor auto-refresh events in real-time
-tail -f ~/.local/share/better-ccflare/logs/better-ccflare.log | grep "Auto-refresh"
+tail -f ~/.local/share/clankermux/logs/clankermux.log | grep "Auto-refresh"
 
 # Check refresh status
 watch -n 30 'curl -s http://localhost:8080/api/accounts | jq ".[] | select(.autoRefreshEnabled == true)"'
@@ -274,10 +274,10 @@ Enable debug logging to troubleshoot issues:
 export LOG_LEVEL=DEBUG
 
 # Restart server
-better-ccflare
+clankermux
 
 # Monitor detailed logs
-tail -f ~/.local/share/better-ccflare/logs/better-ccflare.log | grep -E "(Auto-refresh|AutoRefreshScheduler)"
+tail -f ~/.local/share/clankermux/logs/clankermux.log | grep -E "(Auto-refresh|AutoRefreshScheduler)"
 ```
 
 ### Health Checks
@@ -384,7 +384,7 @@ Set up monitoring for auto-refresh events:
 # Script to monitor and alert on auto-refresh
 #!/bin/bash
 while true; do
-  if tail -n 10 ~/.local/share/better-ccflare/logs/better-ccflare.log | grep -q "Auto-refresh.*failed"; then
+  if tail -n 10 ~/.local/share/clankermux/logs/clankermux.log | grep -q "Auto-refresh.*failed"; then
     echo "⚠️ Auto-refresh failed at $(date)"
     # Send notification (email, Slack, etc.)
   fi

@@ -11,7 +11,7 @@ import {
 	toCombo,
 	toComboFamilyAssignment,
 	toComboSlot,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 export class ComboRepository extends BaseRepository<Combo> {

@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import type { DatabaseRetryConfig } from "./database-operations";
 
 const logger = new Logger("db-retry");

@@ -1,6 +1,6 @@
-import { TIME_CONSTANTS } from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { analyzeIndexUsage } from "@better-ccflare/database";
+import { TIME_CONSTANTS } from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
+import { analyzeIndexUsage } from "@clankermux/database";
 
 /**
  * Analyze query performance and index usage

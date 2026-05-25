@@ -1,4 +1,4 @@
-import type { AccountResponse } from "@better-ccflare/types";
+import type { AccountResponse } from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
 import {
 	Card,

@@ -1,7 +1,7 @@
-import { NO_ACCOUNT_ID, type RecentErrorGroup } from "@better-ccflare/types";
+import { NO_ACCOUNT_ID, type RecentErrorGroup } from "@clankermux/types";
 import { useCallback, useEffect, useState } from "react";
 
-const STORAGE_KEY = "better-ccflare:dismissed-errors";
+const STORAGE_KEY = "clankermux:dismissed-errors";
 const PRUNE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 
 function keyFor(group: RecentErrorGroup): string {

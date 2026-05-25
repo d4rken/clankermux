@@ -1,4 +1,4 @@
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import type { UsageData } from "../../usage-fetcher";
 import {
 	CODEX_DEFAULT_ENDPOINT,

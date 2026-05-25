@@ -3,7 +3,7 @@ import {
 	type AccountRow,
 	type RateLimitReason,
 	toAccount,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 export class AccountRepository extends BaseRepository<Account> {

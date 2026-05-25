@@ -3,7 +3,7 @@ import {
 	computeRateLimitBackoffMs,
 	getRateLimitResetStabilityMs,
 	TIME_CONSTANTS,
-} from "@better-ccflare/core";
+} from "@clankermux/core";
 
 const BASE = TIME_CONSTANTS.RATE_LIMIT_BACKOFF_BASE_MS; // 30_000
 const MAX = TIME_CONSTANTS.RATE_LIMIT_BACKOFF_MAX_MS; // 300_000

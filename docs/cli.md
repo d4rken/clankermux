@@ -1,6 +1,6 @@
-# better-ccflare CLI Documentation
+# ClankerMux CLI Documentation
 
-The better-ccflare CLI provides a command-line interface for managing OAuth accounts, monitoring usage statistics, and controlling the load balancer.
+The ClankerMux CLI provides a command-line interface for managing OAuth accounts, monitoring usage statistics, and controlling the load balancer.
 
 ## Table of Contents
 
@@ -46,7 +46,7 @@ bun run build
 ```bash
 bun run cli [command]
 # or if globally installed:
-better-ccflare [command]
+clankermux [command]
 ```
 
 ### First-time Setup
@@ -82,9 +82,9 @@ bun run cli -h
 ### Help Output Format
 
 ```
-🎯 better-ccflare - Load Balancer for Claude
+🎯 ClankerMux - Load Balancer for Claude
 
-Usage: better-ccflare [options]
+Usage: clankermux [options]
 
 Options:
   --serve              Start API server with dashboard
@@ -508,26 +508,26 @@ bun run cli --set-priority primary-account 10  # Restore normal priority
 
 ### Configuration File Location
 
-better-ccflare stores its configuration in platform-specific directories:
+ClankerMux stores its configuration in platform-specific directories:
 
 #### macOS/Linux
 ```
-~/.config/better-ccflare/better-ccflare.json
+~/.config/clankermux/clankermux.json
 ```
 
 Or if `XDG_CONFIG_HOME` is set:
 ```
-$XDG_CONFIG_HOME/better-ccflare/better-ccflare.json
+$XDG_CONFIG_HOME/clankermux/clankermux.json
 ```
 
 #### Windows
 ```
-%LOCALAPPDATA%\better-ccflare\better-ccflare.json
+%LOCALAPPDATA%\clankermux\clankermux.json
 ```
 
 Or fallback to:
 ```
-%APPDATA%\better-ccflare\better-ccflare.json
+%APPDATA%\clankermux\clankermux.json
 ```
 
 ### Configuration Structure
@@ -547,8 +547,8 @@ Or fallback to:
 ### Database Location
 
 The SQLite database follows the same directory structure:
-- **macOS/Linux**: `~/.config/better-ccflare/better-ccflare.db`
-- **Windows**: `%LOCALAPPDATA%\better-ccflare\better-ccflare.db`
+- **macOS/Linux**: `~/.config/clankermux/clankermux.db`
+- **Windows**: `%LOCALAPPDATA%\clankermux\clankermux.db`
 
 ## Environment Variables
 
@@ -556,8 +556,8 @@ The SQLite database follows the same directory structure:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `better-ccflare_CONFIG_PATH` | Override config file location | Platform default |
-| `better-ccflare_DB_PATH` | Override database location | Platform default |
+| `CLANKERMUX_CONFIG_PATH` | Override config file location (legacy `BETTER_CCFLARE_CONFIG_PATH` still honored) | Platform default |
+| `CLANKERMUX_DB_PATH` | Override database location (legacy `BETTER_CCFLARE_DB_PATH` still honored) | Platform default |
 | `PORT` | Server port | 8080 |
 | `CLIENT_ID` | OAuth client ID | 9d1c250a-e61b-44d9-88ed-5944d1962f5e |
 
@@ -587,7 +587,7 @@ The SQLite database follows the same directory structure:
 |----------|-------------|---------|
 | `LOG_LEVEL` | Log verbosity (DEBUG/INFO/WARN/ERROR) | INFO |
 | `LOG_FORMAT` | Output format (pretty/json) | pretty |
-| `better-ccflare_DEBUG` | Enable debug mode (1/0) - enables console output | 0 |
+| `CLANKERMUX_DEBUG` | Enable debug mode (1/0) - enables console output (legacy `BETTER_CCFLARE_DEBUG` still honored) | 0 |
 
 ### Pricing and Features
 
@@ -634,12 +634,12 @@ The SQLite database follows the same directory structure:
 **Problem**: "Database is locked" or corruption errors
 
 **Solutions**:
-1. Stop all better-ccflare processes
+1. Stop all ClankerMux processes
 2. Check file permissions on database
 3. Backup and recreate if corrupted:
    ```bash
-   cp ~/.config/better-ccflare/better-ccflare.db ~/.config/better-ccflare/better-ccflare.db.backup
-   rm ~/.config/better-ccflare/better-ccflare.db
+   cp ~/.config/clankermux/clankermux.db ~/.config/clankermux/clankermux.db.backup
+   rm ~/.config/clankermux/clankermux.db
    ```
 
 ### Debug Mode
@@ -647,8 +647,8 @@ The SQLite database follows the same directory structure:
 Enable detailed logging for troubleshooting:
 
 ```bash
-# Enable debug logging
-export BETTER_CCFLARE_DEBUG=1
+# Enable debug logging (legacy BETTER_CCFLARE_DEBUG still honored)
+export CLANKERMUX_DEBUG=1
 export LOG_LEVEL=DEBUG
 
 # Run with verbose output

@@ -6,7 +6,7 @@
  *   orphan_pages, last_retention_sweep_at, null_account_rows_24h
  */
 import { describe, expect, it, mock } from "bun:test";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 import { createStorageHandler } from "../storage";
 
 // ---------------------------------------------------------------------------

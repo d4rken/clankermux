@@ -2,7 +2,7 @@ import {
 	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,
-} from "@better-ccflare/core";
+} from "@clankermux/core";
 import React, { useState } from "react";
 import type { Account } from "../../api";
 import { Button } from "../ui/button";

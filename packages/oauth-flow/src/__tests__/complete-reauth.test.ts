@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import type {
-	OAuthProviderConfig,
-	OAuthTokens,
-} from "@better-ccflare/providers";
+import type { Config } from "@clankermux/config";
+import type { DatabaseOperations } from "@clankermux/database";
+import type { OAuthProviderConfig, OAuthTokens } from "@clankermux/providers";
 import { OAuthFlow } from "../index";
 
 // ---------------------------------------------------------------------------
@@ -50,7 +47,7 @@ const testFlowData = {
 };
 
 // ---------------------------------------------------------------------------
-// Mock @better-ccflare/providers so no real OAuth calls go out.
+// Mock @clankermux/providers so no real OAuth calls go out.
 // The mock must be registered before the module under test is imported.
 // ---------------------------------------------------------------------------
 
@@ -66,7 +63,7 @@ const mockExchangeCode = mock(
 	}),
 );
 
-mock.module("@better-ccflare/providers", () => ({
+mock.module("@clankermux/providers", () => ({
 	getOAuthProvider: (_name: string) => ({
 		exchangeCode: mockExchangeCode,
 		getOAuthConfig: (_mode: string) => ({ ...testOauthConfig }),

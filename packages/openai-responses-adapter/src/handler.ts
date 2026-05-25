@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -106,7 +106,7 @@ export async function handleResponsesRequest(
 	}
 	// claude-oauth accounts use Claude's OAuth tokens — Anthropic bans them
 	// when used outside Claude CLI. Always exclude from Codex CLI traffic.
-	syntheticHeaders.set("x-better-ccflare-exclude-providers", "anthropic-oauth");
+	syntheticHeaders.set("x-clankermux-exclude-providers", "anthropic-oauth");
 	const syntheticReq = new Request(messagesUrl.toString(), {
 		method: "POST",
 		headers: syntheticHeaders,

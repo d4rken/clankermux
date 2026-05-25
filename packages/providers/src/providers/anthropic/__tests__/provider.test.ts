@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { AnthropicProvider } from "../provider";
 
 describe("AnthropicProvider", () => {

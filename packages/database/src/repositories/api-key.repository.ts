@@ -1,4 +1,4 @@
-import { type ApiKey, type ApiKeyRow, toApiKey } from "@better-ccflare/types";
+import { type ApiKey, type ApiKeyRow, toApiKey } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 export class ApiKeyRepository extends BaseRepository<ApiKey> {

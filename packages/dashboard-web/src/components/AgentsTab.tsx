@@ -1,5 +1,5 @@
-import { DEFAULT_AGENT_MODEL, getModelDisplayName } from "@better-ccflare/core";
-import { COMMON_MODELS } from "@better-ccflare/types";
+import { DEFAULT_AGENT_MODEL, getModelDisplayName } from "@clankermux/core";
+import { COMMON_MODELS } from "@clankermux/types";
 import {
 	AlertCircle,
 	Bot,

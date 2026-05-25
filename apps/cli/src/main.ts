@@ -52,21 +52,22 @@ import {
 	resumeAccount,
 	runDoctor,
 	setAccountPriority,
-} from "@better-ccflare/cli-commands";
-import { Config } from "@better-ccflare/config";
+} from "@clankermux/cli-commands";
+import { Config } from "@clankermux/config";
 import {
 	CLAUDE_MODEL_IDS,
 	getVersionSync,
 	levenshteinDistance,
 	NETWORK,
+	readEnv,
 	shutdown,
-} from "@better-ccflare/core";
-import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
-import { DatabaseFactory } from "@better-ccflare/database";
-import { Logger } from "@better-ccflare/logger";
-import { parseBedrockConfig } from "@better-ccflare/providers";
+} from "@clankermux/core";
+import { container, SERVICE_KEYS } from "@clankermux/core-di";
+import { DatabaseFactory } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
+import { parseBedrockConfig } from "@clankermux/providers";
 // Import server
-import startServer from "@better-ccflare/server";
+import startServer from "@clankermux/server";
 
 interface ParsedArgs {
 	version: boolean;
@@ -193,8 +194,8 @@ function getModeSuggestions(input: string, validModes: string[]): string[] {
  */
 function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 	const runtime = config.getRuntime();
-	const { getPlatformConfigDir } = require("@better-ccflare/config");
-	const { resolveDbPath } = require("@better-ccflare/database");
+	const { getPlatformConfigDir } = require("@clankermux/config");
+	const { resolveDbPath } = require("@clankermux/database");
 
 	interface ConfigItem {
 		name: string;
@@ -233,10 +234,8 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 
 	configItems.push({
 		name: "Host",
-		value: process.env.BETTER_CCFLARE_HOST || "0.0.0.0",
-		source: process.env.BETTER_CCFLARE_HOST
-			? "Environment (BETTER_CCFLARE_HOST)"
-			: "Default",
+		value: readEnv("HOST") || "0.0.0.0",
+		source: readEnv("HOST") ? "Environment (CLANKERMUX_HOST)" : "Default",
 		description: "Server binding host",
 	});
 
@@ -265,10 +264,8 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 	// Database Configuration
 	configItems.push({
 		name: "Database Path",
-		value: process.env.BETTER_CCFLARE_DB_PATH || resolveDbPath(),
-		source: process.env.BETTER_CCFLARE_DB_PATH
-			? "Environment (BETTER_CCFLARE_DB_PATH)"
-			: "Default",
+		value: readEnv("DB_PATH") || resolveDbPath(),
+		source: readEnv("DB_PATH") ? "Environment (CLANKERMUX_DB_PATH)" : "Default",
 		description: "SQLite database file path",
 	});
 
@@ -393,7 +390,7 @@ function displayConfigInfo(parsed: ParsedArgs, config: Config): void {
 	// Print configuration
 	const version = getVersionSync();
 	console.log(`
-⚙️  better-ccflare v${version} - Configuration
+⚙️  ClankerMux v${version} - Configuration
 
 Configuration Precedence: CLI arguments > Environment variables > Config file > Defaults
 
@@ -818,7 +815,7 @@ async function main() {
 	if (parsed.version) {
 		// Use sync version to avoid async overhead
 		const version = getVersionSync();
-		console.log(`better-ccflare v${version}`);
+		console.log(`ClankerMux v${version}`);
 		fastExit(0);
 		return;
 	}
@@ -836,9 +833,9 @@ async function main() {
 		// Use sync version to avoid async overhead
 		const version = getVersionSync();
 		console.log(`
-🎯 better-ccflare v${version} - Load Balancer for Claude
+🎯 ClankerMux v${version} - Load Balancer for Claude
 
-Usage: better-ccflare [options]
+Usage: clankermux [options]
 
 Options:
   --version, -v       Show version number
@@ -894,18 +891,18 @@ Debugging:
   --help, -h                 Show this help message
 
 Examples:
-  better-ccflare --serve                # Start server
-  better-ccflare --serve --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem  # Start server with HTTPS
-  better-ccflare --add-account work --mode claude-oauth --priority 0  # Add account
-  better-ccflare --add-account my-bedrock --mode bedrock --profile default  # Add Bedrock account
-  better-ccflare --reauthenticate work  # Re-authenticate account (preserves metadata)
-  better-ccflare --force-reset-rate-limit work  # Force-clear stale rate-limit lock
-  better-ccflare --pause work           # Pause account
-  better-ccflare --analyze              # Run performance analysis
-  better-ccflare --stats                # View stats
-  better-ccflare --generate-api-key "My App"   # Generate a new API key
-  better-ccflare --list-api-keys               # List all API keys
-  better-ccflare --disable-api-key "My App"    # Disable an API key
+  clankermux --serve                # Start server
+  clankermux --serve --ssl-key /path/to/key.pem --ssl-cert /path/to/cert.pem  # Start server with HTTPS
+  clankermux --add-account work --mode claude-oauth --priority 0  # Add account
+  clankermux --add-account my-bedrock --mode bedrock --profile default  # Add Bedrock account
+  clankermux --reauthenticate work  # Re-authenticate account (preserves metadata)
+  clankermux --force-reset-rate-limit work  # Force-clear stale rate-limit lock
+  clankermux --pause work           # Pause account
+  clankermux --analyze              # Run performance analysis
+  clankermux --stats                # View stats
+  clankermux --generate-api-key "My App"   # Generate a new API key
+  clankermux --list-api-keys               # List all API keys
+  clankermux --disable-api-key "My App"    # Disable an API key
 `);
 		fastExit(0);
 		return;
@@ -1021,7 +1018,7 @@ Examples:
 			);
 			console.error("\nExample:");
 			console.error(
-				"  better-ccflare --add-account work --mode claude-oauth --priority 0",
+				"  clankermux --add-account work --mode claude-oauth --priority 0",
 			);
 			await exitGracefully(1);
 		}
@@ -1037,9 +1034,7 @@ Examples:
 
 			if (needsInteractiveAuth) {
 				// Use real prompt adapter for OAuth - needs user to paste auth code
-				const { stdPromptAdapter } = await import(
-					"@better-ccflare/cli-commands"
-				);
+				const { stdPromptAdapter } = await import("@clankermux/cli-commands");
 				await addAccount(dbOps, new Config(), {
 					name: parsed.addAccount,
 					mode,
@@ -1075,9 +1070,7 @@ Examples:
 				mode === "openai-compatible"
 			) {
 				// These modes need interactive prompts for endpoint + API key
-				const { stdPromptAdapter } = await import(
-					"@better-ccflare/cli-commands"
-				);
+				const { stdPromptAdapter } = await import("@clankermux/cli-commands");
 				await addAccount(dbOps, new Config(), {
 					name: parsed.addAccount,
 					mode,
@@ -1088,17 +1081,13 @@ Examples:
 			} else {
 				// For API key accounts, get the API key from environment or prompt
 				let apiKey =
-					process.env[
-						`BETTER_CCFLARE_API_KEY_${parsed.addAccount.toUpperCase()}`
-					] ||
+					readEnv(`API_KEY_${parsed.addAccount.toUpperCase()}`) ||
 					process.env[`API_KEY_${parsed.addAccount.toUpperCase()}`] ||
 					"";
 
 				if (!apiKey) {
 					// Prompt for API key if not in environment
-					const { stdPromptAdapter } = await import(
-						"@better-ccflare/cli-commands"
-					);
+					const { stdPromptAdapter } = await import("@clankermux/cli-commands");
 					apiKey = await stdPromptAdapter.input(
 						`Enter API key for ${parsed.addAccount}: `,
 					);
@@ -1375,7 +1364,7 @@ Examples:
 	}
 
 	// Default: Start server if no command specified
-	console.log("Starting better-ccflare server...");
+	console.log("Starting ClankerMux server...");
 	const config = new Config();
 	startServerWithConfig(parsed, config);
 

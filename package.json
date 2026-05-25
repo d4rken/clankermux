@@ -1,13 +1,13 @@
 {
 	"private": true,
-	"name": "better-ccflare",
+	"name": "clankermux",
 	"description": "A load balancer proxy for Claude Code with intelligent load balancing across multiple accounts",
 	"workspaces": [
 		"apps/*",
 		"packages/*"
 	],
 	"scripts": {
-		"better-ccflare": "bun run build && bun run cli",
+		"clankermux": "bun run build && bun run cli",
 		"cli": "bun run apps/cli/src/main.ts",
 		"dev": "bun run cli",
 		"start": "bun run apps/server/src/server.ts",
@@ -17,7 +17,7 @@
 		"typecheck": "bunx tsc --noEmit",
 		"test": "bun test",
 		"test:cli": "bun test apps/cli/__tests__",
-		"build": "echo \"🏗️  Building better-ccflare v$(node -p \"require('./package.json').version\")\" && bun run build:dashboard && bun run build:cli",
+		"build": "echo \"🏗️  Building ClankerMux v$(node -p \"require('./package.json').version\")\" && bun run build:dashboard && bun run build:cli",
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
 		"build:cli": "bun run --cwd apps/cli build",
 		"build:lander": "bun run --cwd apps/lander build",

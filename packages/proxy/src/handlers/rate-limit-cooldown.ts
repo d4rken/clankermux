@@ -2,9 +2,9 @@ import {
 	computeRateLimitBackoffMs,
 	logError,
 	RateLimitError,
-} from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import type { Account, RateLimitReason } from "@better-ccflare/types";
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("RateLimitCooldown");
@@ -68,7 +68,7 @@ export function applyRateLimitCooldown(
 		// persisted counter — not the in-memory pre-write estimate (which may
 		// be one tier short under concurrent 429s for the same account).
 		log.warn(
-			`[ccflare] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()} consecutive=${persistedCount}`,
+			`[clankermux] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()} consecutive=${persistedCount}`,
 		);
 	});
 

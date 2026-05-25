@@ -1,6 +1,6 @@
 # Automated Deployment Pipeline
 
-This document explains the complete automated build and publish pipeline for better-ccflare.
+This document explains the complete automated build and publish pipeline for ClankerMux.
 
 ## Overview
 
@@ -139,7 +139,7 @@ When you push to the `main` branch, the following happens automatically:
 
 ## Installation Methods
 
-After the automated pipeline completes, users can install better-ccflare in multiple ways:
+After the automated pipeline completes, users can install ClankerMux in multiple ways:
 
 ### 1. NPM (Recommended)
 ```bash
@@ -256,7 +256,7 @@ bun run build:multi
 ### Docker (Local)
 ```bash
 # Single platform
-docker build -t better-ccflare:local .
+docker build -t clankermux:local .
 
 # Multi-platform (requires buildx)
 docker buildx build \

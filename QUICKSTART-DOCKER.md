@@ -49,10 +49,10 @@ git push origin main
 
 ```bash
 # Build for your current architecture only
-docker build -t better-ccflare:local .
+docker build -t clankermux:local .
 
 # Run it
-docker run -p 8080:8080 -v better-ccflare-data:/data better-ccflare:local
+docker run -p 8080:8080 -v clankermux-data:/data clankermux:local
 
 # Or use docker-compose
 docker-compose up
@@ -95,9 +95,9 @@ After the build completes (~5 minutes):
 # Pull and run
 docker pull ghcr.io/tombii/better-ccflare:latest
 docker run -d \
-  --name better-ccflare \
+  --name clankermux \
   -p 8080:8080 \
-  -v better-ccflare-data:/data \
+  -v clankermux-data:/data \
   ghcr.io/tombii/better-ccflare:latest
 
 # Or use docker-compose

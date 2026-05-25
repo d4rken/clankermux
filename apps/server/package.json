@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/server",
+	"name": "@clankermux/server",
 	"version": "0.1.0",
 	"type": "module",
 	"main": "./src/server.ts",
@@ -10,17 +10,17 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*",
-		"@better-ccflare/core-di": "workspace:*",
-		"@better-ccflare/database": "workspace:*",
-		"@better-ccflare/config": "workspace:*",
-		"@better-ccflare/logger": "workspace:*",
-		"@better-ccflare/load-balancer": "workspace:*",
-		"@better-ccflare/proxy": "workspace:*",
-		"@better-ccflare/openai-responses-adapter": "workspace:*",
-		"@better-ccflare/dashboard-web": "workspace:*",
-		"@better-ccflare/http-api": "workspace:*",
-		"@better-ccflare/security": "workspace:*",
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/core": "workspace:*",
+		"@clankermux/core-di": "workspace:*",
+		"@clankermux/database": "workspace:*",
+		"@clankermux/config": "workspace:*",
+		"@clankermux/logger": "workspace:*",
+		"@clankermux/load-balancer": "workspace:*",
+		"@clankermux/proxy": "workspace:*",
+		"@clankermux/openai-responses-adapter": "workspace:*",
+		"@clankermux/dashboard-web": "workspace:*",
+		"@clankermux/http-api": "workspace:*",
+		"@clankermux/security": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

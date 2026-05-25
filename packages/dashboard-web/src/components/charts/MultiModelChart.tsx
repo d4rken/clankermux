@@ -1,10 +1,10 @@
-import { getModelShortName } from "@better-ccflare/core";
+import { getModelShortName } from "@clankermux/core";
 import {
 	formatCost,
 	formatNumber,
 	formatTokens,
 	formatTokensPerSecond,
-} from "@better-ccflare/ui-common";
+} from "@clankermux/ui-common";
 import {
 	CartesianGrid,
 	Legend,

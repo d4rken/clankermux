@@ -1,6 +1,6 @@
 # CLI Tests
 
-Comprehensive test suite for the better-ccflare CLI application.
+Comprehensive test suite for the ClankerMux CLI application.
 
 ## Running Tests
 

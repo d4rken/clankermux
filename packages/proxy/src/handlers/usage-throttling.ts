@@ -1,9 +1,6 @@
-import {
-	computeWindowStartMs,
-	type SupportedWindow,
-} from "@better-ccflare/core";
-import type { AnyUsageData } from "@better-ccflare/providers";
-import type { Account } from "@better-ccflare/types";
+import { computeWindowStartMs, type SupportedWindow } from "@clankermux/core";
+import type { AnyUsageData } from "@clankermux/providers";
+import type { Account } from "@clankermux/types";
 
 const RETRY_AFTER_SECONDS = 60;
 

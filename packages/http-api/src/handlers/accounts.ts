@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import * as cliCommands from "@better-ccflare/cli-commands";
-import type { Config } from "@better-ccflare/config";
+import * as cliCommands from "@clankermux/cli-commands";
+import type { Config } from "@clankermux/config";
 import {
 	patterns,
 	sanitizers,
@@ -11,17 +11,17 @@ import {
 	validateNumber,
 	validatePriority,
 	validateString,
-} from "@better-ccflare/core";
-import type { DatabaseOperations } from "@better-ccflare/database";
-import { ValidationError } from "@better-ccflare/errors";
+} from "@clankermux/core";
+import type { DatabaseOperations } from "@clankermux/database";
+import { ValidationError } from "@clankermux/errors";
 import {
 	BadRequest,
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
 	NotFound,
-} from "@better-ccflare/http-common";
-import { Logger } from "@better-ccflare/logger";
+} from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
 	fetchUsageData,
@@ -30,20 +30,20 @@ import {
 	parseCodexUsageHeaders,
 	type UsageData,
 	usageCache,
-} from "@better-ccflare/providers";
+} from "@clankermux/providers";
 import {
 	clearAccountRefreshCache,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
-} from "@better-ccflare/proxy";
+} from "@clankermux/proxy";
 import type {
 	Account,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
-} from "@better-ccflare/types";
-import { requiresSessionDurationTracking } from "@better-ccflare/types";
+} from "@clankermux/types";
+import { requiresSessionDurationTracking } from "@clankermux/types";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
@@ -367,7 +367,7 @@ export function createAccountsListHandler(
 							const {
 								getRepresentativeNanoGPTUtilization,
 								getRepresentativeNanoGPTWindow,
-							} = require("@better-ccflare/providers");
+							} = require("@clankermux/providers");
 							usageUtilization = getRepresentativeNanoGPTUtilization(usageData);
 							usageWindow = getRepresentativeNanoGPTWindow(usageData);
 							fullUsageData = usageData as FullUsageData;
@@ -387,7 +387,7 @@ export function createAccountsListHandler(
 							const {
 								getRepresentativeZaiUtilization,
 								getRepresentativeZaiWindow,
-							} = require("@better-ccflare/providers");
+							} = require("@clankermux/providers");
 							usageUtilization = getRepresentativeZaiUtilization(usageData);
 							usageWindow = getRepresentativeZaiWindow(usageData);
 							fullUsageData = usageData as FullUsageData;
@@ -406,7 +406,7 @@ export function createAccountsListHandler(
 							const {
 								getRepresentativeKiloUtilization,
 								getRepresentativeKiloWindow,
-							} = require("@better-ccflare/providers");
+							} = require("@clankermux/providers");
 							usageUtilization = getRepresentativeKiloUtilization(usageData);
 							usageWindow = getRepresentativeKiloWindow(usageData);
 							fullUsageData = usageData as FullUsageData;
@@ -426,7 +426,7 @@ export function createAccountsListHandler(
 							const {
 								getRepresentativeAlibabaCodingPlanUtilization,
 								getRepresentativeAlibabaCodingPlanWindow,
-							} = require("@better-ccflare/providers");
+							} = require("@clankermux/providers");
 							usageUtilization =
 								getRepresentativeAlibabaCodingPlanUtilization(usageData);
 							usageWindow = getRepresentativeAlibabaCodingPlanWindow(usageData);

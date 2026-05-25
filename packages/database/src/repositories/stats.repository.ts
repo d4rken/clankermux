@@ -6,8 +6,8 @@ import type {
 	RateLimitReason,
 	RecentErrorGroup,
 	SessionStats,
-} from "@better-ccflare/types";
-import { NO_ACCOUNT_ID } from "@better-ccflare/types";
+} from "@clankermux/types";
+import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 
 export interface AccountStats {

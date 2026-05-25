@@ -2,13 +2,18 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { Logger } from "@better-ccflare/logger";
-import type { AgentWorkspace } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { AgentWorkspace } from "@clankermux/types";
 
 const log = new Logger("WorkspacePersistence");
 
-const WORKSPACES_FILE = join(homedir(), ".better-ccflare", "workspaces.json");
-const LEGACY_WORKSPACES_FILE = join(homedir(), ".ccflare", "workspaces.json");
+const WORKSPACES_FILE = join(homedir(), ".clankermux", "workspaces.json");
+// Legacy workspace files from prior names (ccflare → better-ccflare → ClankerMux),
+// ordered newest first. On first run we adopt the most recent one that exists.
+const LEGACY_WORKSPACES_FILES = [
+	join(homedir(), ".better-ccflare", "workspaces.json"),
+	join(homedir(), ".ccflare", "workspaces.json"),
+];
 
 interface WorkspacesData {
 	version: number;
@@ -27,8 +32,9 @@ export class WorkspacePersistence {
 			return;
 		}
 
-		// If legacy file doesn't exist, nothing to migrate
-		if (!existsSync(LEGACY_WORKSPACES_FILE)) {
+		// Find the newest legacy file that exists; nothing to migrate otherwise
+		const legacyFile = LEGACY_WORKSPACES_FILES.find((p) => existsSync(p));
+		if (!legacyFile) {
 			return;
 		}
 
@@ -40,9 +46,9 @@ export class WorkspacePersistence {
 			}
 
 			// Copy legacy file to new location
-			await copyFile(LEGACY_WORKSPACES_FILE, WORKSPACES_FILE);
+			await copyFile(legacyFile, WORKSPACES_FILE);
 			log.info(
-				`✅ Migrated workspaces from ${LEGACY_WORKSPACES_FILE} to ${WORKSPACES_FILE}`,
+				`✅ Migrated workspaces from ${legacyFile} to ${WORKSPACES_FILE}`,
 			);
 		} catch (error) {
 			log.error(`Failed to migrate workspaces file: ${error}`);

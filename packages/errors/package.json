@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/errors",
+	"name": "@clankermux/errors",
 	"version": "1.0.0",
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
@@ -8,7 +8,7 @@
 		"lint": "biome check --write --unsafe"
 	},
 	"dependencies": {
-		"@better-ccflare/core": "workspace:*"
+		"@clankermux/core": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/bun": "1.1.15",

@@ -1,5 +1,5 @@
-import { getModelShortName } from "@better-ccflare/core";
-import { formatTokensPerSecond } from "@better-ccflare/ui-common";
+import { getModelShortName } from "@clankermux/core";
+import { formatTokensPerSecond } from "@clankermux/ui-common";
 import {
 	Bar,
 	BarChart,

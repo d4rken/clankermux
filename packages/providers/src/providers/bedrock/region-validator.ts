@@ -2,7 +2,7 @@ import {
 	BedrockRuntimeClient,
 	InvokeModelCommand,
 } from "@aws-sdk/client-bedrock-runtime";
-import { Logger } from "@better-ccflare/logger";
+import { Logger } from "@clankermux/logger";
 import type { Provider } from "@smithy/types";
 
 const log = new Logger("BedrockRegionValidator");

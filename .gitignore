@@ -12,6 +12,9 @@ ccflare.db-shm
 better-ccflare.db
 better-ccflare.db-wal
 better-ccflare.db-shm
+clankermux.db
+clankermux.db-wal
+clankermux.db-shm
 apps/*/dist/
 packages/dashboard-web/dist/
 .DS_Store
@@ -30,6 +33,7 @@ AGENTS.md
 
 # Build artifacts and test files
 better-ccflare-*
+clankermux-*
 config.json
 ssl-cert-snakeoil.key
 ssl-cert-snakeoil.pem

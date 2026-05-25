@@ -6,7 +6,7 @@ import type {
 	RequestResponse,
 	StatsResponse,
 	StatsWithAccounts,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import {
 	formatCost,
 	formatDuration,

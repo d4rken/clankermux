@@ -1,6 +1,6 @@
 # Docker Deployment Guide
 
-This guide covers how to use better-ccflare with Docker for easy deployment across multiple architectures.
+This guide covers how to use ClankerMux with Docker for easy deployment across multiple architectures.
 
 ## Quick Start
 
@@ -25,9 +25,9 @@ docker pull ghcr.io/tombii/better-ccflare:latest
 
 # Run the container
 docker run -d \
-  --name better-ccflare \
+  --name clankermux \
   -p 8080:8080 \
-  -v better-ccflare-data:/data \
+  -v clankermux-data:/data \
   ghcr.io/tombii/better-ccflare:latest
 ```
 
@@ -43,7 +43,7 @@ Docker will automatically pull the correct image for your architecture.
 
 ### Environment Variables
 
-- `BETTER_CCFLARE_DB_PATH` - Database file path (default: `/data/better-ccflare.db`)
+- `CLANKERMUX_DB_PATH` - Database file path (default: `/data/clankermux.db`) (legacy `BETTER_CCFLARE_DB_PATH` still honored)
 - `XDG_CONFIG_HOME` - Directory for config file storage (default: `/data`, persists settings across restarts)
 - `NODE_ENV` - Environment mode (default: `production`)
 - `LOG_LEVEL` - Logging level (optional)
@@ -54,7 +54,7 @@ Docker will automatically pull the correct image for your architecture.
 
 ### Using .env Files
 
-better-ccflare Docker containers now support `.env` files for easy configuration management:
+ClankerMux Docker containers now support `.env` files for easy configuration management:
 
 #### Docker Compose (Recommended)
 
@@ -77,9 +77,9 @@ You can mount a `.env` file into the container:
 
 ```bash
 docker run -d \
-  --name better-ccflare \
+  --name clankermux \
   -p 8080:8080 \
-  -v better-ccflare-data:/data \
+  -v clankermux-data:/data \
   -v $(pwd)/.env:/app/.env:ro \
   ghcr.io/tombii/better-ccflare:latest
 ```
@@ -117,7 +117,7 @@ Or with docker-compose (already configured):
 
 ```yaml
 volumes:
-  - better-ccflare-data:/data
+  - clankermux-data:/data
 ```
 
 ## Managing Accounts
@@ -132,13 +132,13 @@ For providers that use API keys (e.g., `anthropic-api`, `openai-compatible`) you
 
 ```bash
 # List accounts
-docker exec -it better-ccflare better-ccflare --list
+docker exec -it clankermux clankermux --list
 
 # Remove an account
-docker exec -it better-ccflare better-ccflare --remove myaccount
+docker exec -it clankermux clankermux --remove myaccount
 
 # Set priority
-docker exec -it better-ccflare better-ccflare --set-priority myaccount 5
+docker exec -it clankermux clankermux --set-priority myaccount 5
 ```
 
 > **Note:** Do not use `docker exec` to add `claude-oauth` accounts. The OAuth flow requires a browser, which is not available inside the container. Use the Web UI at http://localhost:8080 instead.
@@ -148,7 +148,7 @@ docker exec -it better-ccflare better-ccflare --set-priority myaccount 5
 Alternatively, you can manage accounts by mounting your existing database:
 
 ```bash
-docker run -v ~/.config/better-ccflare:/data ghcr.io/tombii/better-ccflare:latest
+docker run -v ~/.config/clankermux:/data ghcr.io/tombii/better-ccflare:latest
 ```
 
 ## Building Your Own Images
@@ -157,10 +157,10 @@ docker run -v ~/.config/better-ccflare:/data ghcr.io/tombii/better-ccflare:lates
 
 ```bash
 # Build for your current architecture
-docker build -t better-ccflare:local .
+docker build -t clankermux:local .
 
 # Run your local build
-docker run -p 8080:8080 better-ccflare:local
+docker run -p 8080:8080 clankermux:local
 ```
 
 ### Multi-Architecture Build
@@ -214,7 +214,7 @@ The container includes a health check that runs every 30 seconds:
 docker ps
 
 # View health check logs
-docker inspect --format='{{json .State.Health}}' better-ccflare
+docker inspect --format='{{json .State.Health}}' clankermux
 ```
 
 ## Troubleshooting
@@ -223,14 +223,14 @@ docker inspect --format='{{json .State.Health}}' better-ccflare
 
 Check logs:
 ```bash
-docker logs better-ccflare
+docker logs clankermux
 ```
 
 ### Database permissions
 
 Ensure the volume has correct permissions:
 ```bash
-docker exec better-ccflare ls -la /data
+docker exec clankermux ls -la /data
 ```
 
 ### Port conflicts
@@ -283,7 +283,7 @@ docker-compose pull
 docker-compose up -d
 
 # Backup database
-docker cp better-ccflare:/data/better-ccflare.db ./backup-$(date +%Y%m%d).db
+docker cp clankermux:/data/clankermux.db ./backup-$(date +%Y%m%d).db
 ```
 
 ### Using Orchestration Tools

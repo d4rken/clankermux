@@ -3,9 +3,9 @@ import {
 	ConverseCommand,
 	ConverseStreamCommand,
 } from "@aws-sdk/client-bedrock-runtime";
-import { estimateCostUSD } from "@better-ccflare/core";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { estimateCostUSD } from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { Provider, RateLimitInfo, TokenRefreshResult } from "../../types";
 import {
@@ -37,9 +37,9 @@ import {
 const log = new Logger("BedrockProvider");
 
 /**
- * AWS Bedrock provider for better-ccflare
+ * AWS Bedrock provider for ClankerMux
  *
- * Integrates with better-ccflare's provider system to route /v1/messages requests
+ * Integrates with ClankerMux's provider system to route /v1/messages requests
  * to AWS Bedrock accounts. Uses Phase 1 utilities for credential management and
  * AWS SDK v3 for automatic SigV4 signing.
  *

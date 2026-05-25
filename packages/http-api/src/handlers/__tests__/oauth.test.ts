@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import type { DatabaseOperations } from "@clankermux/database";
 import {
 	DatabaseFactory,
 	DatabaseOperations as DirectDbOps,
-} from "@better-ccflare/database";
+} from "@clankermux/database";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -220,7 +220,7 @@ const mockInitiateCodexDeviceFlow = mock(async () => ({
 	interval: 5,
 }));
 
-mock.module("@better-ccflare/providers/codex", () => ({
+mock.module("@clankermux/providers/codex", () => ({
 	initiateCodexDeviceFlow: mockInitiateCodexDeviceFlow,
 	pollCodexForToken: mock(async () => ({
 		access_token: "at",
@@ -372,7 +372,7 @@ describe("createAnthropicReauthInitHandler", () => {
 	// Config is required by this handler — use a minimal stub
 	const stubConfig = {
 		getRuntime: () => ({ clientId: "test-client-id" }),
-	} as unknown as import("@better-ccflare/config").Config;
+	} as unknown as import("@clankermux/config").Config;
 
 	let handler: (req: Request) => Promise<Response>;
 
@@ -472,7 +472,7 @@ describe("createAnthropicReauthCallbackHandler", () => {
 	let dbOps: DatabaseOperations;
 	const stubConfig = {
 		getRuntime: () => ({ clientId: "test-client-id" }),
-	} as unknown as import("@better-ccflare/config").Config;
+	} as unknown as import("@clankermux/config").Config;
 
 	let handler: (req: Request) => Promise<Response>;
 

@@ -1,4 +1,4 @@
-import type { Account } from "@better-ccflare/types";
+import type { Account } from "@clankermux/types";
 import { OpenAICompatibleProvider } from "../openai/provider";
 
 const KILO_DEFAULT_ENDPOINT = "https://api.kilo.ai/api/gateway";

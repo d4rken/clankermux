@@ -2,9 +2,9 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { RuntimeConfig } from "@better-ccflare/config";
-import type { Disposable } from "@better-ccflare/core";
-import { TIME_CONSTANTS } from "@better-ccflare/core";
+import type { RuntimeConfig } from "@clankermux/config";
+import type { Disposable } from "@clankermux/core";
+import { TIME_CONSTANTS } from "@clankermux/core";
 import type {
 	Account,
 	Combo,
@@ -15,7 +15,7 @@ import type {
 	IntegrityStatus,
 	RateLimitReason,
 	StrategyStore,
-} from "@better-ccflare/types";
+} from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
@@ -583,8 +583,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * Generate manual recovery instructions for corrupted database
 	 */
 	generateRecoveryInstructions(): string {
-		const dbPath =
-			this.resolvedDbPath ?? "~/.config/better-ccflare/better-ccflare.db";
+		const dbPath = this.resolvedDbPath ?? "~/.config/clankermux/clankermux.db";
 		return `
 DATABASE RECOVERY INSTRUCTIONS
 

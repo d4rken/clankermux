@@ -17,9 +17,9 @@
 		"types": ["bun-types"],
 		"jsx": "react-jsx",
 		"paths": {
-			"@better-ccflare/*": ["./packages/*/src"],
-			"@better-ccflare/server": ["./apps/server/src/server.ts"],
-			"@better-ccflare/dashboard-web/dist/*": ["./packages/dashboard-web/dist/*"]
+			"@clankermux/*": ["./packages/*/src"],
+			"@clankermux/server": ["./apps/server/src/server.ts"],
+			"@clankermux/dashboard-web/dist/*": ["./packages/dashboard-web/dist/*"]
 		}
 	},
 	"include": ["packages/*/src/**/*", "apps/*/src/**/*"],

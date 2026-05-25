@@ -3,8 +3,8 @@ import {
 	type FoundationModelSummary,
 	ListFoundationModelsCommand,
 } from "@aws-sdk/client-bedrock";
-import { Logger } from "@better-ccflare/logger";
-import type { Account } from "@better-ccflare/types";
+import { Logger } from "@clankermux/logger";
+import type { Account } from "@clankermux/types";
 import { createBedrockCredentialChain, parseBedrockConfig } from "./index";
 
 const log = new Logger("BedrockModelDiscovery");

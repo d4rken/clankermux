@@ -1,5 +1,5 @@
 {
-	"name": "@better-ccflare/agents",
+	"name": "@clankermux/agents",
 	"version": "1.0.0",
 	"description": "Agent discovery and management for ccflare",
 	"main": "dist/index.js",
@@ -13,10 +13,10 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@better-ccflare/config": "workspace:*",
-		"@better-ccflare/logger": "workspace:*",
-		"@better-ccflare/security": "workspace:*",
-		"@better-ccflare/types": "workspace:*"
+		"@clankermux/config": "workspace:*",
+		"@clankermux/logger": "workspace:*",
+		"@clankermux/security": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.5.4",

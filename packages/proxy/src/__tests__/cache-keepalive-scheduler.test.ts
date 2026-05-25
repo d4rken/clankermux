@@ -2,7 +2,7 @@
  * Tests for CacheKeepaliveScheduler.
  *
  * Strategy:
- *   1. mock.module("@better-ccflare/core") intercepts registerHeartbeat so we
+ *   1. mock.module("@clankermux/core") intercepts registerHeartbeat so we
  *      can capture the registered callback and trigger sendKeepalives() without
  *      waiting for real timers.
  *   2. mock.module("../dispatch") intercepts dispatchProxyRequest so we can
@@ -10,7 +10,7 @@
  *      proxy pipeline (and assert on the synthetic Request it constructs).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Config } from "@better-ccflare/config";
+import type { Config } from "@clankermux/config";
 import type { ProxyContext } from "../proxy";
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ const mockRegisterHeartbeat = mock((opts: HeartbeatOpts) => {
 	return mockUnregister;
 });
 
-mock.module("@better-ccflare/core", () => ({
+mock.module("@clankermux/core", () => ({
 	registerHeartbeat: mockRegisterHeartbeat,
 	// Re-export other things that the proxy module tree may need (none required
 	// by the scheduler itself, but avoids any import-time crash).
@@ -393,9 +393,9 @@ describe("CacheKeepaliveScheduler", () => {
 			expect(url.pathname).toBe(path);
 
 			// Verify routing headers were injected.
-			expect(req.headers.get("x-better-ccflare-account-id")).toBe(accountId);
-			expect(req.headers.get("x-better-ccflare-bypass-session")).toBe("true");
-			expect(req.headers.get("x-better-ccflare-keepalive")).toBe("true");
+			expect(req.headers.get("x-clankermux-account-id")).toBe(accountId);
+			expect(req.headers.get("x-clankermux-bypass-session")).toBe("true");
+			expect(req.headers.get("x-clankermux-keepalive")).toBe("true");
 			expect(req.headers.get("content-type")).toBe("application/json");
 
 			scheduler.stop();

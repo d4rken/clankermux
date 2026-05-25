@@ -1,5 +1,5 @@
-import type { RecentErrorGroup } from "@better-ccflare/types";
-import { formatTimestamp } from "@better-ccflare/ui-common";
+import type { RecentErrorGroup } from "@clankermux/types";
+import { formatTimestamp } from "@clankermux/ui-common";
 import { formatDistanceToNow } from "date-fns";
 import { AlertTriangle, XCircle } from "lucide-react";
 import type { ReactNode } from "react";
