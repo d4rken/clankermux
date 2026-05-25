@@ -31,6 +31,7 @@ import {
 } from "../ui/dropdown-menu";
 import { Switch } from "../ui/switch";
 import { RateLimitProgress } from "./RateLimitProgress";
+import { RateLimitStatusChip } from "./RateLimitStatusChip";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -398,19 +399,7 @@ export function AccountListItem({
 					<span className="text-muted-foreground">Paused</span>
 				)}
 				{!presenter.isPaused && presenter.rateLimitStatus !== "OK" && (
-					<span
-						className={
-							presenter.rateLimitStatus
-								.toLowerCase()
-								.startsWith("allowed_warning")
-								? "text-amber-600"
-								: presenter.rateLimitStatus.toLowerCase().startsWith("allowed")
-									? "text-green-600"
-									: "text-destructive"
-						}
-					>
-						{presenter.rateLimitStatus}
-					</span>
+					<RateLimitStatusChip status={presenter.rateLimitStatus} />
 				)}
 				{staleLockDetected && (
 					<span
