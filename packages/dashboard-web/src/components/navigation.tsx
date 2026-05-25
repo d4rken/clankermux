@@ -368,9 +368,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 							</div>
 							<div>
 								<h1 className="font-semibold text-lg">ClankerMux</h1>
-								<p className="text-xs text-muted-foreground">
-									Powerful proxy for Claude Code
-								</p>
+								<p className="text-xs text-muted-foreground">Rate-Unlimiter</p>
 							</div>
 						</div>
 					</div>
