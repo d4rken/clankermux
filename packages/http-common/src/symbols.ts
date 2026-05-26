@@ -1,6 +1,9 @@
 /**
- * Shared symbols used across modules to ensure symbol equality
+ * Shared symbols used across modules to ensure symbol equality.
+ *
+ * (Previously held ANALYTICS_STREAM_SYMBOL, used to carry a pre-teed analytics
+ * stream across Response reconstruction. The tee-based analytics path was
+ * replaced by a single-reader pass-through, so the symbol is no longer needed.)
  */
 
-// Global symbol for analytics stream property - ensures same symbol across modules
-export const ANALYTICS_STREAM_SYMBOL = Symbol("__analyticsStream");
+export {};

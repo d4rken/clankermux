@@ -1,4 +1,3 @@
-import { ANALYTICS_STREAM_SYMBOL } from "@clankermux/http-common/symbols";
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
 import { repairTruncatedToolJson } from "./utils";
@@ -657,23 +656,13 @@ export function transformStreamingResponse(response: Response): Response {
 		}),
 	);
 
-	// Tee the transformed stream into two independent streams
-	const [clientStream, analyticsStream] = transformedBody.tee();
-
-	// Create the response that will be returned to the client
-	const clientResponse = new Response(clientStream, {
+	// Return the single transformed stream as the client body. The proxy's
+	// response-handler now uses a single-reader pass-through for analytics, so
+	// there's no need to pre-tee an analytics branch here (that split buffered
+	// the whole body off-heap — an unbounded RSS leak).
+	return new Response(transformedBody, {
 		status: response.status,
 		statusText: response.statusText,
 		headers: sanitizeHeaders(response.headers),
 	});
-
-	// Attach the analytics stream as a non-enumerable Symbol property
-	Object.defineProperty(clientResponse, ANALYTICS_STREAM_SYMBOL, {
-		value: analyticsStream,
-		writable: false,
-		enumerable: false,
-		configurable: false,
-	});
-
-	return clientResponse;
 }
