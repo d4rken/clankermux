@@ -36,6 +36,7 @@ const CLAUDE_REASONING_EFFORTS: Record<
 
 const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {
 	"gpt-5": ["minimal", "low", "medium", "high", "xhigh"],
+	"gpt-5.5": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.4-mini": ["low", "medium"],
 };

@@ -365,3 +365,69 @@ export function validateAndSanitizeModelMappings(
 		return null;
 	}
 }
+
+// ── Context-window-aware routing ─────────────────────────────────────────────
+
+/**
+ * Codex (ChatGPT-auth) context windows. These are the CODEX caps, not the
+ * API-key caps. gpt-5.5 is 1.05M via raw API-key but only 400K via
+ * Codex/ChatGPT-auth (confirmed documented hard cap, not a bug).
+ *
+ * Omitted models (gpt-5.4, gpt-5.2-codex, compaction models) are treated as
+ * "unknown → fits, never gated" — no false exclusion.
+ */
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+	"gpt-5.5": 400_000,
+	"gpt-5.3-codex": 200_000,
+	"gpt-5.4-mini": 200_000,
+	"gpt-5-codex": 400_000,
+};
+
+/** Fraction of window we actually admit — conservative guard band. */
+export const SAFETY_MARGIN = 0.85;
+
+/**
+ * Look up the context window for a Codex model.
+ * Returns undefined for unknown/compaction models.
+ */
+export function resolveModelContextWindow(model: string): number | undefined {
+	return MODEL_CONTEXT_WINDOWS[model];
+}
+
+/**
+ * Conservative token-count estimate for a request body.
+ * Uses char-count / 3.0 (deliberately over-counts) + max_tokens output reserve.
+ * No tiktoken — hot path, and we use a wide guard band anyway.
+ */
+export function estimateRequestTokens(
+	parsedBody: Record<string, unknown> | null | undefined,
+): number {
+	if (!parsedBody) return 0;
+	const inputTokens = Math.ceil(JSON.stringify(parsedBody).length / 3.0);
+	const maxTokens =
+		typeof parsedBody.max_tokens === "number" ? parsedBody.max_tokens : 0;
+	return inputTokens + maxTokens;
+}
+
+/**
+ * Check whether a Codex account can serve a request of the given estimated size.
+ *
+ * Resolves the target model via `mapModelName`, looks up `MODEL_CONTEXT_WINDOWS`,
+ * and returns true if the estimate fits within `floor(window * SAFETY_MARGIN)`.
+ * Unknown models (not in the table) always fit — no false exclusion.
+ *
+ * @param account      The Codex account to check
+ * @param effectiveModel  The Anthropic-side model name (e.g. "claude-opus-4-7")
+ *                        — will be mapped through the account's model_mappings.
+ * @param estimate     Token estimate from `estimateRequestTokens()`
+ */
+export function codexAccountFitsRequest(
+	account: Account,
+	effectiveModel: string,
+	estimate: number,
+): boolean {
+	const target = mapModelName(effectiveModel, account);
+	const window = MODEL_CONTEXT_WINDOWS[target];
+	if (window === undefined) return true; // unknown model → fits (no false exclusion)
+	return estimate <= Math.floor(window * SAFETY_MARGIN);
+}

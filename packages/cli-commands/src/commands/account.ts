@@ -1074,7 +1074,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 			{
-				opus: "gpt-5.3-codex",
+				opus: "gpt-5.5",
 				sonnet: "gpt-5.3-codex",
 				haiku: "gpt-5.4-mini",
 			},

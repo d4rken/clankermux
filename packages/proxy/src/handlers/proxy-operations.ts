@@ -1,7 +1,9 @@
 import {
 	getModelList,
 	logError,
+	mapModelName,
 	ProviderError,
+	resolveModelContextWindow,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
@@ -1052,6 +1054,70 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 				"Content-Type": "application/json",
 				"Retry-After": String(retryAfterSeconds),
 				"x-clankermux-pool-status": "exhausted",
+			},
+		},
+	);
+}
+
+/**
+ * Create a 400 response when a request is too large for every backend that
+ * would otherwise have served it. Returned (instead of the 503 pool_exhausted)
+ * when the candidate pool was emptied specifically by the context-window gate
+ * — i.e. the only reason there's nowhere to route is that the request exceeds
+ * the excluded backends' model context windows.
+ *
+ * @param estimatedTokens  Conservative token estimate for the request
+ * @param excludedAccounts Codex accounts dropped by the size gate
+ * @param requestModel     The Anthropic-side model name from the request
+ */
+export function createContextWindowExceededResponse(
+	estimatedTokens: number,
+	excludedAccounts: Account[],
+	requestModel: string,
+): Response {
+	const backendDescriptions = excludedAccounts.map((account) => {
+		const target = mapModelName(requestModel, account);
+		const window = resolveModelContextWindow(target);
+		return {
+			name: account.name,
+			model: target,
+			max_context_window: window ?? null,
+		};
+	});
+
+	const backendSummary =
+		backendDescriptions
+			.map(
+				(b) =>
+					`${b.name} (${b.model}${
+						b.max_context_window != null
+							? ` caps at ${b.max_context_window}`
+							: ""
+					})`,
+			)
+			.join(", ") || "no eligible backend";
+
+	const message =
+		`Request estimated at ~${estimatedTokens} tokens exceeds the context ` +
+		`window of every available backend: ${backendSummary}. ` +
+		`Larger-context accounts are currently unavailable (rate-limited or paused).`;
+
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "context_window_exceeded",
+				message,
+				estimated_tokens: estimatedTokens,
+				request_model: requestModel,
+				excluded_backends: backendDescriptions,
+			},
+		}),
+		{
+			status: 400,
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-pool-status": "context-window-exceeded",
 			},
 		},
 	);

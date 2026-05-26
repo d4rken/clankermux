@@ -38,7 +38,9 @@ export {
 	registerUIRefresh,
 } from "./interval-manager";
 export {
+	codexAccountFitsRequest,
 	createCustomEndpointData,
+	estimateRequestTokens,
 	getAllowedModelsMessage,
 	getEndpointUrl,
 	getModelFamily,
@@ -46,10 +48,13 @@ export {
 	getModelMappings,
 	isValidClaudeModel,
 	KNOWN_PATTERNS,
+	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	parseCustomEndpointData,
 	parseModelFallbacks,
 	parseModelMappings,
+	resolveModelContextWindow,
+	SAFETY_MARGIN,
 	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 } from "./model-mappings";

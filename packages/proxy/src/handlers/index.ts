@@ -12,6 +12,7 @@ export {
 	interceptAndModifyRequest,
 } from "./agent-interceptor";
 export {
+	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
 	proxyUnauthenticated,
 	proxyWithAccount,
