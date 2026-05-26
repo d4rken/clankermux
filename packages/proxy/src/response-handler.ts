@@ -3,17 +3,13 @@ import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
-import { ANALYTICS_STREAM_SYMBOL } from "@clankermux/http-common/symbols";
 import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
+import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import type { UsageWorkerController } from "./usage-worker-controller";
 import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
-
-type ResponseWithAnalyticsStream = Response & {
-	[ANALYTICS_STREAM_SYMBOL]?: ReadableStream<Uint8Array>;
-};
 
 // Default cooldown for rate-limit errors detected mid-stream. SSE error
 // frames don't carry reset headers (HTTP headers were sent before the
@@ -188,34 +184,15 @@ export async function forwardToClient(
 	}
 
 	/*********************************************************************
-	 *  STREAMING RESPONSES — tee the body and send analytics chunks
+	 *  STREAMING RESPONSES — single-reader pass-through with inline analytics
+	 *
+	 *  Replaces the old `response.body.tee()` split. Native tee() buffered the
+	 *  whole body in the slow (client) branch's queue while the fast analytics
+	 *  branch raced ahead — an unbounded off-heap leak. Here the client reads
+	 *  the wrapper stream directly; analytics side-effects run inline per chunk
+	 *  at client pace, so there is no second buffer.
 	 *********************************************************************/
 	if (isStream && response.body) {
-		let clientResponse = response;
-
-		// For OpenAI providers, use pre-teed analytics stream if available.
-		// Otherwise tee the sanitized response body to avoid Response.clone().
-		const preTeedStream = (response as ResponseWithAnalyticsStream)[
-			ANALYTICS_STREAM_SYMBOL
-		];
-		let analyticsStream: ReadableStream<Uint8Array>;
-		if (preTeedStream && preTeedStream instanceof ReadableStream) {
-			analyticsStream = preTeedStream;
-		} else {
-			const [clientStream, analyticsBranch] = response.body.tee();
-			clientResponse = new Response(clientStream, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: response.headers,
-			});
-			analyticsStream = analyticsBranch;
-		}
-		const analyticsResponse = new Response(analyticsStream, {
-			status: response.status,
-			statusText: response.statusText,
-			headers: response.headers,
-		});
-
 		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
 		// create a sniffer when we know which account to mark — anonymous
 		// or unauthenticated requests can't be failed over.
@@ -223,135 +200,84 @@ export async function forwardToClient(
 			? createSseRateLimitSniffer({ provider: account.provider })
 			: null;
 
-		(async () => {
-			// Configurable via env vars to support long agentic workloads where
-			// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
-			// the outer stream silent for extended periods (issue #84).
-			const STREAM_TIMEOUT_MS = Number(
-				process.env.CF_STREAM_TOTAL_TIMEOUT_MS ??
-					TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
-			);
-			const CHUNK_TIMEOUT_MS = Number(
-				process.env.CF_STREAM_CHUNK_TIMEOUT_MS ??
-					TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
-			);
+		// Configurable via env vars to support long agentic workloads where
+		// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
+		// the outer stream silent for extended periods (issue #84).
+		const STREAM_TIMEOUT_MS = Number(
+			process.env.CF_STREAM_TOTAL_TIMEOUT_MS ??
+				TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
+		);
+		const CHUNK_TIMEOUT_MS = Number(
+			process.env.CF_STREAM_CHUNK_TIMEOUT_MS ??
+				TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
+		);
 
-			try {
-				const reader = analyticsResponse.body?.getReader();
-				if (!reader) return; // Safety check
+		// Computed once upfront from path + status only (isExpectedResponse does
+		// NOT read the body), matching the old analyticsResponse status.
+		const success = isExpectedResponse(path, response);
 
-				const startTime = Date.now();
-				let lastChunkTime = Date.now();
-
-				// eslint-disable-next-line no-constant-condition
-				while (true) {
-					// Check for overall stream timeout
-					if (Date.now() - startTime > STREAM_TIMEOUT_MS) {
-						await reader.cancel();
-						throw new Error(
-							`Stream timeout: exceeded ${STREAM_TIMEOUT_MS}ms total duration`,
-						);
-					}
-
-					// Check for chunk timeout (no data received)
-					if (Date.now() - lastChunkTime > CHUNK_TIMEOUT_MS) {
-						await reader.cancel();
-						throw new Error(
-							`Stream timeout: no data received for ${CHUNK_TIMEOUT_MS}ms`,
-						);
-					}
-
-					// Read with a timeout wrapper that properly cleans up
-					const readPromise = reader.read();
-					let timeoutId: Timer | null = null;
-					const timeoutPromise = new Promise<{
-						value?: Uint8Array;
-						done: boolean;
-					}>((_, reject) => {
-						timeoutId = setTimeout(
-							() => reject(new Error("Read operation timeout")),
-							CHUNK_TIMEOUT_MS,
-						);
-					});
-
-					try {
-						const { value, done } = await Promise.race([
-							readPromise,
-							timeoutPromise,
-						]);
-
-						// Clear timeout if race completed successfully
-						if (timeoutId) {
-							clearTimeout(timeoutId);
-							timeoutId = null;
-						}
-
-						if (done) break;
-
-						if (value) {
-							lastChunkTime = Date.now();
-							if (shouldProcessRequest) {
-								const chunkMsg: ChunkMessage = {
-									type: "chunk",
-									requestId,
-									data: value,
-								};
-								safePostMessage(ctx.usageWorker, chunkMsg);
-							}
-
-							// Mid-stream rate-limit detection. The sniffer
-							// fires exactly once; after that feed() is a no-op.
-							if (account && rateLimitSniffer?.feed(value)) {
-								// Map firedReason to the correct RateLimitReason override:
-								//   "overloaded_error" → upstream_529_overloaded_with_reset
-								//   "rate_limit_error" → let applyRateLimitCooldown auto-derive (429)
-								const reason: RateLimitReason | undefined =
-									rateLimitSniffer.firedReason === "overloaded_error"
-										? "upstream_529_overloaded_with_reset"
-										: undefined;
-								applyRateLimitCooldown(
-									account,
-									{
-										resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
-										reason,
-									},
-									ctx,
-								);
-							}
-						}
-					} catch (error) {
-						// Ensure timeout is cleared on error
-						if (timeoutId) {
-							clearTimeout(timeoutId);
-							timeoutId = null;
-						}
-						throw error;
-					}
+		const clientStream = createStreamAnalyticsPassthrough(response.body, {
+			totalTimeoutMs: STREAM_TIMEOUT_MS,
+			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
+			onChunk: (value) => {
+				if (shouldProcessRequest) {
+					const chunkMsg: ChunkMessage = {
+						type: "chunk",
+						requestId,
+						data: value,
+					};
+					safePostMessage(ctx.usageWorker, chunkMsg);
 				}
-				// Finished without errors
+
+				// Mid-stream rate-limit detection. The sniffer
+				// fires exactly once; after that feed() is a no-op.
+				if (account && rateLimitSniffer?.feed(value)) {
+					// Map firedReason to the correct RateLimitReason override:
+					//   "overloaded_error" → upstream_529_overloaded_with_reset
+					//   "rate_limit_error" → let applyRateLimitCooldown auto-derive (429)
+					const reason: RateLimitReason | undefined =
+						rateLimitSniffer.firedReason === "overloaded_error"
+							? "upstream_529_overloaded_with_reset"
+							: undefined;
+					applyRateLimitCooldown(
+						account,
+						{
+							resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
+							reason,
+						},
+						ctx,
+					);
+				}
+			},
+			onEnd: () => {
 				if (shouldProcessRequest) {
 					const endMsg: EndMessage = {
 						type: "end",
 						requestId,
-						success: isExpectedResponse(path, analyticsResponse),
+						success,
 					};
 					safePostMessage(ctx.usageWorker, endMsg);
 				}
-			} catch (err) {
+			},
+			onError: (err) => {
 				if (shouldProcessRequest) {
 					const endMsg: EndMessage = {
 						type: "end",
 						requestId,
 						success: false,
-						error: (err as Error).message,
+						error: err.message,
 					};
 					safePostMessage(ctx.usageWorker, endMsg);
 				}
-			}
-		})();
+			},
+		});
 
-		// Return the sanitized response backed by the client stream branch.
-		return clientResponse;
+		// Return the sanitized response backed by the single-reader stream.
+		return new Response(clientStream, {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
 	}
 
 	/*********************************************************************
