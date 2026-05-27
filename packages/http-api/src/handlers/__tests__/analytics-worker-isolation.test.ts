@@ -5,13 +5,17 @@ import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
 import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics";
-import { clearAnalyticsCachesForTests } from "../analytics-runner";
+import {
+	clearAnalyticsCachesForTests,
+	getAnalyticsCacheStatsForTests,
+} from "../analytics-runner";
 
 let tmpDir: string;
 let dbOps: DatabaseOperations;
 
 beforeEach(() => {
 	process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS = "50";
+	process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES = "2";
 	clearAnalyticsCachesForTests();
 	tmpDir = mkdtempSync(join(tmpdir(), "clankermux-analytics-"));
 	dbOps = new DatabaseOperations(join(tmpDir, "test.db"));
@@ -20,6 +24,7 @@ beforeEach(() => {
 afterEach(async () => {
 	clearAnalyticsCachesForTests();
 	delete process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS;
+	delete process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES;
 	await dbOps.dispose();
 	rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -55,6 +60,7 @@ describe("analytics worker isolation", () => {
 		const data = await response.json();
 
 		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
 		expect(data.totals.requests).toBe(1);
 		expect(data.totals.totalTokens).toBe(10);
 	});
@@ -78,5 +84,18 @@ describe("analytics worker isolation", () => {
 		expect(first.totals.requests).toBe(1);
 		expect(cached.totals.requests).toBe(1);
 		expect(refreshed.totals.requests).toBe(2);
+	});
+
+	it("caps cached analytics responses across rotating filter combinations", async () => {
+		const handler = createAnalyticsHandler(context());
+		await insertRequest("req-1", Date.now());
+
+		await handler(new URLSearchParams({ range: "1h" }));
+		await handler(new URLSearchParams({ range: "6h" }));
+		await handler(new URLSearchParams({ range: "24h" }));
+
+		expect(
+			getAnalyticsCacheStatsForTests().responseCacheSize,
+		).toBeLessThanOrEqual(2);
 	});
 });

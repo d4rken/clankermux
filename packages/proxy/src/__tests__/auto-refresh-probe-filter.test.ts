@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
+import { isSyntheticInternalRequest } from "../handlers/proxy-operations";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -66,10 +67,7 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 			method: "POST",
 			headers: { "x-clankermux-auto-refresh": "true" },
 		});
-		const isSyntheticInternal =
-			!!req.headers.get("x-clankermux-keepalive") ||
-			!!req.headers.get("x-clankermux-auto-refresh");
-		expect(isSyntheticInternal).toBe(true);
+		expect(isSyntheticInternalRequest(req.headers)).toBe(true);
 	});
 
 	it("header x-clankermux-auto-refresh absent is falsy (normal request)", () => {
@@ -77,10 +75,7 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 		});
-		const isSyntheticInternal =
-			!!req.headers.get("x-clankermux-keepalive") ||
-			!!req.headers.get("x-clankermux-auto-refresh");
-		expect(isSyntheticInternal).toBe(false);
+		expect(isSyntheticInternalRequest(req.headers)).toBe(false);
 	});
 
 	it("keepalive header also triggers isSyntheticInternal (existing guard preserved)", () => {
@@ -88,20 +83,14 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 			method: "POST",
 			headers: { "x-clankermux-keepalive": "1" },
 		});
-		const isSyntheticInternal =
-			!!req.headers.get("x-clankermux-keepalive") ||
-			!!req.headers.get("x-clankermux-auto-refresh");
-		expect(isSyntheticInternal).toBe(true);
+		expect(isSyntheticInternalRequest(req.headers)).toBe(true);
 	});
 
 	it("neither header present produces false (real user traffic passes through)", () => {
 		const req = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
 		});
-		const isSyntheticInternal =
-			!!req.headers.get("x-clankermux-keepalive") ||
-			!!req.headers.get("x-clankermux-auto-refresh");
-		expect(isSyntheticInternal).toBe(false);
+		expect(isSyntheticInternalRequest(req.headers)).toBe(false);
 	});
 });
 

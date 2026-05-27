@@ -110,7 +110,7 @@ export function createAnalyticsHandler(context: APIContext) {
 		const statusFilter = params.get("status") || "all";
 
 		// Build filter conditions
-		const conditions: string[] = ["timestamp > ?"];
+		const conditions: string[] = ["r.timestamp > ?"];
 		const queryParams: (string | number)[] = [startMs];
 
 		if (accountsFilter.length > 0) {
@@ -130,20 +130,20 @@ export function createAnalyticsHandler(context: APIContext) {
 
 		if (modelsFilter.length > 0) {
 			const placeholders = modelsFilter.map(() => "?").join(",");
-			conditions.push(`model IN (${placeholders})`);
+			conditions.push(`r.model IN (${placeholders})`);
 			queryParams.push(...modelsFilter);
 		}
 
 		if (apiKeysFilter.length > 0) {
 			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(`api_key_name IN (${placeholders})`);
+			conditions.push(`r.api_key_name IN (${placeholders})`);
 			queryParams.push(...apiKeysFilter);
 		}
 
 		if (statusFilter === "success") {
-			conditions.push("success = TRUE");
+			conditions.push("r.success = TRUE");
 		} else if (statusFilter === "error") {
-			conditions.push("success = FALSE");
+			conditions.push("r.success = FALSE");
 		}
 
 		const whereClause = conditions.join(" AND ");
@@ -349,7 +349,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				SELECT * FROM (
 					SELECT
 						'account_performance' as data_type,
-						COALESCE(a.name, ?) as name,
+						COALESCE(a.name, r.account_used, ?) as name,
 						CAST(NULL AS TEXT) as secondary_name,
 						CAST(NULL AS BIGINT) as count,
 						COUNT(r.id) as requests,
@@ -362,7 +362,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					FROM requests r
 					LEFT JOIN accounts a ON a.id = r.account_used
 					WHERE ${whereClause}
-					GROUP BY name
+					GROUP BY r.account_used, a.name
 					HAVING COUNT(r.id) > 0
 					ORDER BY requests DESC
 					LIMIT 10

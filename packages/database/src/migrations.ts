@@ -198,6 +198,15 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
 	);
 
+	// Create strategies table for persisted operational metadata.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS strategies (
+			name TEXT PRIMARY KEY,
+			config TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`);
+
 	// Create request_payloads table for storing full request/response data
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (

@@ -27,14 +27,16 @@ function getRoutingAffinity(meta: RequestMeta): {
 	key: string | null;
 	scope: RequestMeta["affinityScope"] | null;
 } {
+	const partition = meta.affinityPartition?.trim();
+	const prefix = partition ? `partition:${partition}:` : "";
 	if (meta.affinityKey?.trim() && meta.affinityScope) {
 		return {
-			key: `${meta.affinityScope}:${meta.affinityKey.trim()}`,
+			key: `${prefix}${meta.affinityScope}:${meta.affinityKey.trim()}`,
 			scope: meta.affinityScope,
 		};
 	}
 	if (meta.project?.trim()) {
-		return { key: `project:${meta.project.trim()}`, scope: "project" };
+		return { key: `${prefix}project:${meta.project.trim()}`, scope: "project" };
 	}
 	return { key: null, scope: null };
 }

@@ -560,7 +560,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 				lastRetentionSweepAt = strategy.config.lastSweepAt as number;
 			}
 		} catch {
-			// strategies table may not exist in SQLite mode
+			// tolerate legacy databases created before the strategies table existed
 		}
 
 		// Null account rows (requests with account_used IS NULL in last 24h)

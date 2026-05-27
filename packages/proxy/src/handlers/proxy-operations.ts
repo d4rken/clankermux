@@ -21,6 +21,13 @@ import { getValidAccessToken } from "./token-manager";
 
 const log = new Logger("ProxyOperations");
 
+export function isSyntheticInternalRequest(headers: Headers): boolean {
+	return (
+		!!headers.get("x-clankermux-keepalive") ||
+		!!headers.get("x-clankermux-auto-refresh")
+	);
+}
+
 /**
  * Determines the absolute epoch timestamp (ms since epoch) until which an account
  * should be marked rate-limited after model exhaustion. Priority:
@@ -505,10 +512,7 @@ export async function proxyWithAccount(
 		// Both checks are truthy (not strict-equality) to preserve the original
 		// keepalive guard's behaviour: any non-empty header value triggers the
 		// skip, matching what `!req.headers.get(...)` returned before.
-		const isSyntheticInternal =
-			!!req.headers.get("x-clankermux-keepalive") ||
-			!!req.headers.get("x-clankermux-auto-refresh");
-		if (!isSyntheticInternal) {
+		if (!isSyntheticInternalRequest(req.headers)) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
 				account.id,

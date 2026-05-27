@@ -16,6 +16,8 @@ export interface RequestMeta {
 	affinityKey?: string | null;
 	/** Source of the affinity key; persisted separately for routing analysis */
 	affinityScope?: RequestAffinityScope | null;
+	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
+	affinityPartition?: string | null;
 	project?: string | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */

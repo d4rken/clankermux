@@ -31,6 +31,20 @@ describe("extractRequestAffinity", () => {
 		});
 	});
 
+	it("uses Codex thread id when Codex is identified by user-agent", () => {
+		const result = extractRequestAffinity(
+			new Headers({
+				"thread-id": "codex-thread-from-ua",
+				"user-agent": "codex_cli_rs/1.2.3",
+			}),
+		);
+
+		expect(result).toEqual({
+			key: "codex-thread-from-ua",
+			scope: "codex_thread",
+		});
+	});
+
 	it("does not use broader or per-turn Codex identifiers as affinity", () => {
 		const result = extractRequestAffinity(
 			new Headers({

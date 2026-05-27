@@ -16,6 +16,8 @@ const log = new Logger("AnalyticsRunner");
 const DEFAULT_CACHE_TTL_MS = 10_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
 const SQLITE_BUSY_TIMEOUT_MS = 2_000;
+const DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 128;
+const DEFAULT_MAX_IN_FLIGHT_ENTRIES = 64;
 
 type CachedAnalytics = {
 	expiresAt: number;
@@ -38,14 +40,24 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 
 		const key = `${dbPath}\0${canonicalAnalyticsKey(params)}`;
 		const now = Date.now();
+		pruneResponseCache(now);
 		const cached = responseCache.get(key);
 		if (cached && cached.expiresAt > now) {
+			responseCache.delete(key);
+			responseCache.set(key, cached);
 			return responseFromCached(cached);
 		}
 		if (cached) responseCache.delete(key);
 
 		const existing = inFlight.get(key);
 		if (existing) return cloneResponse(await existing);
+
+		if (inFlight.size >= resolveMaxInFlightEntries()) {
+			log.warn(
+				`Rejecting analytics request: ${inFlight.size} worker requests already in flight`,
+			);
+			return errorResponse(ServiceUnavailable("Too many analytics requests"));
+		}
 
 		const promise = runAnalytics(dbPath, params, key);
 		inFlight.set(key, promise);
@@ -123,7 +135,10 @@ function runAnalyticsWorker(
 			resolve(
 				new Response(data.body, {
 					status: data.status,
-					headers: { "Content-Type": "application/json" },
+					headers: {
+						"Content-Type": "application/json",
+						"X-ClankerMux-Analytics-Mode": "worker",
+					},
 				}),
 			);
 		};
@@ -132,6 +147,12 @@ function runAnalyticsWorker(
 			worker?.terminate();
 			worker = undefined;
 			reject(new Error(event.message || "analytics worker error"));
+		};
+		worker.onmessageerror = () => {
+			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+			worker?.terminate();
+			worker = undefined;
+			reject(new Error("analytics worker message deserialization failed"));
 		};
 		timeoutHandle = setTimeout(() => {
 			worker?.terminate();
@@ -160,15 +181,34 @@ async function cacheIfSuccessful(
 			status: response.status,
 			body,
 		});
+		pruneResponseCache(Date.now());
 	} catch (error) {
 		log.warn(`Failed to cache analytics response: ${String(error)}`);
+	}
+}
+
+function pruneResponseCache(now: number): void {
+	for (const [key, cached] of responseCache) {
+		if (cached.expiresAt <= now) {
+			responseCache.delete(key);
+		}
+	}
+
+	const maxEntries = resolveMaxResponseCacheEntries();
+	while (responseCache.size > maxEntries) {
+		const oldestKey = responseCache.keys().next().value;
+		if (typeof oldestKey !== "string") break;
+		responseCache.delete(oldestKey);
 	}
 }
 
 function responseFromCached(cached: CachedAnalytics): Response {
 	return new Response(cached.body, {
 		status: cached.status,
-		headers: { "Content-Type": "application/json" },
+		headers: {
+			"Content-Type": "application/json",
+			"X-ClankerMux-Analytics-Mode": "worker-cache",
+		},
 	});
 }
 
@@ -208,6 +248,20 @@ function resolveWorkerTimeoutMs(): number {
 	);
 }
 
+function resolveMaxResponseCacheEntries(): number {
+	return resolvePositiveInt(
+		process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES,
+		DEFAULT_MAX_RESPONSE_CACHE_ENTRIES,
+	);
+}
+
+function resolveMaxInFlightEntries(): number {
+	return resolvePositiveInt(
+		process.env.CLANKERMUX_ANALYTICS_INFLIGHT_MAX_ENTRIES,
+		DEFAULT_MAX_IN_FLIGHT_ENTRIES,
+	);
+}
+
 function resolvePositiveInt(raw: string | undefined, fallback: number): number {
 	if (!raw) return fallback;
 	const parsed = Number(raw);
@@ -217,4 +271,14 @@ function resolvePositiveInt(raw: string | undefined, fallback: number): number {
 export function clearAnalyticsCachesForTests(): void {
 	responseCache.clear();
 	inFlight.clear();
+}
+
+export function getAnalyticsCacheStatsForTests(): {
+	responseCacheSize: number;
+	inFlightSize: number;
+} {
+	return {
+		responseCacheSize: responseCache.size,
+		inFlightSize: inFlight.size,
+	};
 }

@@ -1047,6 +1047,7 @@ describe("SessionStrategy", () => {
 			affined.rate_limited_until = now + 60_000;
 			affined.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
 
 			// Cooldown lifts → the project snaps back to its warmed account.
 			affined.rate_limited_until = null;
@@ -1084,6 +1085,7 @@ describe("SessionStrategy", () => {
 			affined.rate_limited_until = now + 30 * 60 * 1000;
 			affined.rate_limited_reason = "upstream_529_overloaded_with_reset";
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
 
 			// Overload clears → snap back to the warmed account.
 			affined.rate_limited_until = null;
@@ -1127,6 +1129,119 @@ describe("SessionStrategy", () => {
 				accountA,
 			);
 			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+		});
+
+		it("lets higher-priority accounts override an affinity hit and re-pins", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "priority-project",
+			};
+			const lowerPriorityAffined = makeAccount({
+				id: "lower-priority-affined",
+				name: "lower-priority-affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+			});
+			const higherPriorityLater = makeAccount({
+				id: "higher-priority-later",
+				name: "higher-priority-later",
+				created_at: now,
+				expires_at: now + 3600_000,
+				paused: true,
+				pause_reason: "manual",
+				priority: 0,
+			});
+
+			expect(
+				strategy.select(
+					[lowerPriorityAffined, higherPriorityLater],
+					projectMeta,
+				)[0],
+			).toBe(lowerPriorityAffined);
+
+			higherPriorityLater.paused = false;
+			higherPriorityLater.pause_reason = null;
+			const result = strategy.select(
+				[lowerPriorityAffined, higherPriorityLater],
+				projectMeta,
+			);
+
+			expect(result[0]).toBe(higherPriorityLater);
+			expect(projectMeta.routing?.decision).toBe("affinity_reassigned");
+			expect(projectMeta.routing?.previousAccountId).toBe(
+				"lower-priority-affined",
+			);
+		});
+
+		it("partitions affinity by authenticated API key identity", () => {
+			const now = Date.now();
+			const apiKeyOneMeta: RequestMeta = {
+				...meta,
+				id: "api-key-one",
+				project: "shared-project",
+				affinityPartition: "api_key:key-one",
+			};
+			const apiKeyTwoMeta: RequestMeta = {
+				...meta,
+				id: "api-key-two",
+				project: "shared-project",
+				affinityPartition: "api_key:key-two",
+			};
+			const accountA = makeAccount({
+				id: "partition-a",
+				name: "partition-a",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+			const accountB = makeAccount({
+				id: "partition-b",
+				name: "partition-b",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			mockStore.setUtilization(accountA.id, 10);
+			mockStore.setUtilization(accountB.id, 80);
+			expect(strategy.select([accountA, accountB], apiKeyOneMeta)[0]).toBe(
+				accountA,
+			);
+
+			mockStore.setUtilization(accountA.id, 80);
+			mockStore.setUtilization(accountB.id, 10);
+			expect(strategy.select([accountA, accountB], apiKeyTwoMeta)[0]).toBe(
+				accountB,
+			);
+
+			expect(strategy.select([accountA, accountB], apiKeyOneMeta)[0]).toBe(
+				accountA,
+			);
+			expect(apiKeyOneMeta.routing?.affinityKey).toBe(
+				"partition:api_key:key-one:project:shared-project",
+			);
+		});
+
+		it("caps stored affinity entries", () => {
+			const account = makeAccount({
+				id: "cap-account",
+				name: "cap-account",
+			});
+
+			for (let i = 0; i < 10_001; i++) {
+				strategy.select([account], {
+					...meta,
+					id: `request-${i}`,
+					project: `project-${i}`,
+				});
+			}
+
+			const affinityByKey = (
+				strategy as unknown as {
+					affinityByKey: Map<string, unknown>;
+				}
+			).affinityByKey;
+			expect(affinityByKey.size).toBeLessThanOrEqual(10_000);
 		});
 	});
 

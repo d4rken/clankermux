@@ -40,6 +40,25 @@ describe("Database Migrations - Tier Column Removal", () => {
 		expect(columnNames).not.toContain("account_tier"); // Should not exist initially
 	});
 
+	it("should create strategies table for SQLite schema parity", () => {
+		ensureSchema(db);
+
+		const row = db
+			.prepare(
+				"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'strategies'",
+			)
+			.get() as { name: string } | null;
+		expect(row?.name).toBe("strategies");
+
+		db.prepare(
+			"INSERT INTO strategies (name, config, updated_at) VALUES (?, ?, ?)",
+		).run("test-strategy", "{}", Date.now());
+		const stored = db
+			.prepare("SELECT config FROM strategies WHERE name = ?")
+			.get("test-strategy") as { config: string } | null;
+		expect(stored?.config).toBe("{}");
+	});
+
 	it("should remove account_tier column from accounts table if it exists", () => {
 		// Create schema with tier column (simulate old schema)
 		db.exec(`

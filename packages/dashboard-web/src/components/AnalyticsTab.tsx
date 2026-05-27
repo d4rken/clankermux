@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { TimeRange } from "../constants";
 import { useAnalytics } from "../hooks/queries";
 import {
@@ -29,12 +29,11 @@ export const AnalyticsTab = React.memo(() => {
 	});
 
 	// Fetch analytics data with automatic refetch on dependency changes
-	const { data: analytics, isLoading: loading } = useAnalytics(
-		timeRange,
-		filters,
-		viewMode,
-		modelBreakdown,
-	);
+	const {
+		data: analytics,
+		isLoading: loading,
+		refetch,
+	} = useAnalytics(timeRange, filters, viewMode, modelBreakdown);
 
 	// Get unique accounts and models from analytics data
 	// Accumulate all seen accounts/models/apiKeys to maintain full list for filters
@@ -45,7 +44,7 @@ export const AnalyticsTab = React.memo(() => {
 	const [allSeenApiKeys, setAllSeenApiKeys] = useState<Set<string>>(new Set());
 
 	// Update seen values whenever analytics data changes
-	useMemo(() => {
+	useEffect(() => {
 		if (!analytics) return;
 
 		// Add new accounts
@@ -231,7 +230,9 @@ export const AnalyticsTab = React.memo(() => {
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}
 				loading={loading}
-				onRefresh={() => setTimeRange(timeRange)}
+				onRefresh={() => {
+					void refetch();
+				}}
 			/>
 
 			{/* Cumulative View - Show cumulative charts first */}

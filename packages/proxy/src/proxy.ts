@@ -66,9 +66,13 @@ function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 }
 
 function extractProjectFromRequest(
+	method: string,
+	path: string,
 	headers: Headers,
 	body: RequestJsonBody | null,
 ): string | null {
+	if (method !== "POST" || path !== "/v1/messages") return null;
+
 	const headerProject = headers.get("x-project");
 	const sanitizedHeader = sanitizeProjectName(headerProject);
 	if (sanitizedHeader) return sanitizedHeader;
@@ -205,7 +209,12 @@ export async function handleProxy(
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
-	const project = extractProjectFromRequest(req.headers, parsedBody);
+	const project = extractProjectFromRequest(
+		req.method,
+		url.pathname,
+		req.headers,
+		parsedBody,
+	);
 	const affinity = extractRequestAffinity(req.headers);
 
 	// Conservative token estimate for context-window-aware routing (B1).
@@ -271,6 +280,7 @@ export async function handleProxy(
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.affinityKey = affinity.key;
 	requestMeta.affinityScope = affinity.scope;
+	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
 
 	// 6. Select accounts

@@ -27,6 +27,7 @@ export { LeastUsedStrategy } from "./least-used";
  * catching genuine multi-hour window-reset cooldowns.
  */
 const AFFINITY_REASSIGN_MIN_COOLDOWN_MS = 15 * 60 * 1000;
+const MAX_AFFINITY_ENTRIES = 10_000;
 
 /**
  * Rate-limit reasons that indicate a server-wide or self-resolving condition
@@ -158,13 +159,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	}
 
 	private getAffinityKey(meta: RequestMeta): string | null {
+		const partition = meta.affinityPartition?.trim();
+		const prefix = partition ? `partition:${partition}:` : "";
 		const explicitKey = meta.affinityKey?.trim();
 		if (explicitKey && meta.affinityScope) {
-			return `${meta.affinityScope}:${explicitKey}`;
+			return `${prefix}${meta.affinityScope}:${explicitKey}`;
 		}
 		const project = meta.project?.trim();
 		if (!project) return null;
-		return `project:${project}`;
+		return `${prefix}project:${project}`;
 	}
 
 	private getAffinityScope(
@@ -210,6 +213,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	): void {
 		const key = this.getAffinityKey(meta);
 		if (!key) return;
+		this.affinityByKey.delete(key);
 		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: now });
 		this.pruneAffinity(now);
 	}
@@ -221,6 +225,19 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.affinityByKey.delete(key);
 			}
 		}
+
+		if (this.affinityByKey.size <= MAX_AFFINITY_ENTRIES) return;
+
+		const overflow = this.affinityByKey.size - MAX_AFFINITY_ENTRIES;
+		let removed = 0;
+		for (const key of this.affinityByKey.keys()) {
+			this.affinityByKey.delete(key);
+			removed++;
+			if (removed >= overflow) break;
+		}
+		this.log.warn(
+			`Pruned ${removed} cache affinity entr${removed === 1 ? "y" : "ies"} after reaching ${MAX_AFFINITY_ENTRIES} entries`,
+		);
 	}
 
 	/**
