@@ -9,8 +9,8 @@ import { format } from "date-fns";
 import {
 	Activity,
 	BarChart3,
-	CheckCircle,
 	Clock,
+	Database,
 	DollarSign,
 	Gauge,
 	Zap,
@@ -102,6 +102,7 @@ export const OverviewTab = React.memo(() => {
 			time: format(new Date(point.ts), "HH:mm"),
 			requests: point.requests,
 			successRate: point.successRate,
+			cacheHitRate: point.cacheHitRate,
 			responseTime: Math.round(point.avgResponseTime),
 			cost: point.costUsd.toFixed(2),
 			planCost: point.planCostUsd ?? 0,
@@ -118,11 +119,13 @@ export const OverviewTab = React.memo(() => {
 				deltaSuccessRate: null,
 				deltaResponseTime: null,
 				deltaCost: null,
+				deltaCacheHitRate: null,
 				deltaOutputSpeed: null,
 				trendRequests: "flat" as "up" | "down" | "flat",
 				trendSuccessRate: "flat" as "up" | "down" | "flat",
 				trendResponseTime: "flat" as "up" | "down" | "flat",
 				trendCost: "flat" as "up" | "down" | "flat",
+				trendCacheHitRate: "flat" as "up" | "down" | "flat",
 				trendOutputSpeed: "flat" as "up" | "down" | "flat",
 			};
 		}
@@ -144,6 +147,10 @@ export const OverviewTab = React.memo(() => {
 			parseFloat(lastBucket.cost),
 			parseFloat(prevBucket.cost),
 		);
+		const deltaCacheHitRate = pctChange(
+			lastBucket.cacheHitRate,
+			prevBucket.cacheHitRate,
+		);
 		const deltaOutputSpeed = pctChange(
 			lastBucket.tokensPerSecond,
 			prevBucket.tokensPerSecond,
@@ -164,11 +171,13 @@ export const OverviewTab = React.memo(() => {
 			deltaSuccessRate,
 			deltaResponseTime,
 			deltaCost,
+			deltaCacheHitRate,
 			deltaOutputSpeed,
 			trendRequests: getTrend(deltaRequests),
 			trendSuccessRate: getTrend(deltaSuccessRate),
 			trendResponseTime: getTrend(deltaResponseTime, true), // invert: higher response time is bad
 			trendCost: getTrend(deltaCost, true), // invert: higher cost is bad
+			trendCacheHitRate: getTrend(deltaCacheHitRate),
 			trendOutputSpeed: getTrend(deltaOutputSpeed),
 		};
 	}, [timeSeriesData, pctChange]);
@@ -214,30 +223,36 @@ export const OverviewTab = React.memo(() => {
 					trend={trends.trendRequests}
 					trendPeriod={trendPeriod}
 					icon={Activity}
+					subRows={[
+						{
+							label: "Success rate",
+							value: formatPercentage(analytics?.totals.successRate || 0, 0),
+						},
+					]}
 				/>
 				<MetricCard
-					title="Success Rate"
-					value={formatPercentage(analytics?.totals.successRate || 0, 0)}
+					title="Cache Hit Rate"
+					value={formatPercentage(analytics?.totals.cacheHitRate || 0, 0)}
 					change={
-						trends.deltaSuccessRate !== null
-							? trends.deltaSuccessRate
+						trends.deltaCacheHitRate !== null
+							? trends.deltaCacheHitRate
 							: undefined
 					}
-					trend={trends.trendSuccessRate}
+					trend={trends.trendCacheHitRate}
 					trendPeriod={trendPeriod}
-					icon={CheckCircle}
+					icon={Database}
 				/>
 				<MetricCard
-					title="Avg Response Time"
-					value={`${Math.round(analytics?.totals.avgResponseTime || 0)}ms`}
-					change={
-						trends.deltaResponseTime !== null
-							? trends.deltaResponseTime
-							: undefined
+					title="API Cost"
+					value={
+						analytics?.totals.apiCostUsd
+							? formatCost(analytics.totals.apiCostUsd)
+							: "$0.0000"
 					}
-					trend={trends.trendResponseTime}
+					change={trends.deltaCost !== null ? trends.deltaCost : undefined}
+					trend={trends.trendCost}
 					trendPeriod={trendPeriod}
-					icon={Clock}
+					icon={DollarSign}
 				/>
 				<MetricCard
 					title="Plan Value"
@@ -263,16 +278,16 @@ export const OverviewTab = React.memo(() => {
 					]}
 				/>
 				<MetricCard
-					title="API Cost"
-					value={
-						analytics?.totals.apiCostUsd
-							? formatCost(analytics.totals.apiCostUsd)
-							: "$0.0000"
+					title="Avg Response Time"
+					value={`${Math.round(analytics?.totals.avgResponseTime || 0)}ms`}
+					change={
+						trends.deltaResponseTime !== null
+							? trends.deltaResponseTime
+							: undefined
 					}
-					change={trends.deltaCost !== null ? trends.deltaCost : undefined}
-					trend={trends.trendCost}
+					trend={trends.trendResponseTime}
 					trendPeriod={trendPeriod}
-					icon={DollarSign}
+					icon={Clock}
 				/>
 				<MetricCard
 					title="Output Speed"

@@ -130,6 +130,7 @@ export interface AnalyticsResponse {
 	totals: {
 		requests: number;
 		successRate: number;
+		cacheHitRate: number;
 		activeAccounts: number;
 		avgResponseTime: number;
 		totalTokens: number;

@@ -138,6 +138,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				total_cost_usd: number;
 				plan_cost_usd: number;
 				api_cost_usd: number;
+				cache_hit_rate: number;
 				avg_tokens_per_second: number;
 				active_accounts: number;
 				input_tokens: number;
@@ -158,6 +159,8 @@ export function createAnalyticsHandler(context: APIContext) {
 					(SELECT SUM(COALESCE(cost_usd, 0)) FROM filtered_requests) as total_cost_usd,
 					(SELECT SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as plan_cost_usd,
 					(SELECT SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as api_cost_usd,
+					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
+						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) FROM filtered_requests) as cache_hit_rate,
 					(SELECT AVG(output_tokens_per_second) FROM filtered_requests) as avg_tokens_per_second,
 					(SELECT COUNT(DISTINCT COALESCE(account_used, ?)) FROM filtered_requests) as active_accounts,
 					(SELECT SUM(COALESCE(input_tokens, 0)) FROM filtered_requests) as input_tokens,
@@ -620,6 +623,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					totalCostUsd: Number(consolidatedResult?.total_cost_usd) || 0,
 					planCostUsd: Number(consolidatedResult?.plan_cost_usd) || 0,
 					apiCostUsd: Number(consolidatedResult?.api_cost_usd) || 0,
+					cacheHitRate: Number(consolidatedResult?.cache_hit_rate) || 0,
 					avgTokensPerSecond:
 						consolidatedResult?.avg_tokens_per_second != null
 							? Number(consolidatedResult.avg_tokens_per_second)
