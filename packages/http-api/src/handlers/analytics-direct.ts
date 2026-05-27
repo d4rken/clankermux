@@ -574,6 +574,194 @@ export function createAnalyticsHandler(context: APIContext) {
 						: null,
 			}));
 
+			// Routing analytics: "why did this account get selected?"
+			// Requests without request_routing rows predate telemetry and are
+			// labeled "untracked" so the overview still shows account flow.
+			phaseStartedAt = performance.now();
+			const routingFlowRows = await db.query<{
+				strategy: string;
+				decision: string;
+				account_id: string;
+				account_name: string;
+				outcome: "success" | "rate_limited" | "error";
+				requests: number;
+				success_rate: number;
+				failover_attempts: number;
+			}>(
+				`
+				SELECT
+					COALESCE(rr.strategy, 'untracked') as strategy,
+					COALESCE(rr.decision, 'untracked') as decision,
+					COALESCE(rr.selected_account_id, r.account_used, ?) as account_id,
+					COALESCE(sa.name, ua.name, rr.selected_account_id, r.account_used, ?) as account_name,
+					CASE
+						WHEN r.success = TRUE THEN 'success'
+						WHEN r.status_code = 429 THEN 'rate_limited'
+						ELSE 'error'
+					END as outcome,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					SUM(COALESCE(rr.failover_attempts, 0)) as failover_attempts
+				FROM requests r
+				LEFT JOIN request_routing rr ON rr.request_id = r.id
+				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
+				LEFT JOIN accounts ua ON ua.id = r.account_used
+				WHERE ${whereClause}
+				GROUP BY strategy, decision, account_id, account_name, outcome
+				ORDER BY requests DESC
+				LIMIT 120
+			`,
+				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+			);
+
+			const routingDecisionRows = await db.query<{
+				strategy: string;
+				decision: string;
+				requests: number;
+				success_rate: number;
+				failover_attempts: number;
+			}>(
+				`
+				SELECT
+					COALESCE(rr.strategy, 'untracked') as strategy,
+					COALESCE(rr.decision, 'untracked') as decision,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					SUM(COALESCE(rr.failover_attempts, 0)) as failover_attempts
+				FROM requests r
+				LEFT JOIN request_routing rr ON rr.request_id = r.id
+				WHERE ${whereClause}
+				GROUP BY strategy, decision
+				ORDER BY requests DESC
+				LIMIT 20
+			`,
+				queryParams,
+			);
+
+			const routingAccountRows = await db.query<{
+				account_id: string;
+				account_name: string;
+				requests: number;
+				success_rate: number;
+				failover_attempts: number;
+			}>(
+				`
+				SELECT
+					COALESCE(rr.selected_account_id, r.account_used, ?) as account_id,
+					COALESCE(sa.name, ua.name, rr.selected_account_id, r.account_used, ?) as account_name,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					SUM(COALESCE(rr.failover_attempts, 0)) as failover_attempts
+				FROM requests r
+				LEFT JOIN request_routing rr ON rr.request_id = r.id
+				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
+				LEFT JOIN accounts ua ON ua.id = r.account_used
+				WHERE ${whereClause}
+				GROUP BY account_id, account_name
+				ORDER BY requests DESC
+				LIMIT 12
+			`,
+				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+			);
+
+			const routingTimelineRows = await db.query<{
+				ts: number;
+				account_id: string;
+				account_name: string;
+				decision: string;
+				requests: number;
+				success_rate: number;
+			}>(
+				`
+				SELECT
+					(r.timestamp / ?) * ? as ts,
+					COALESCE(rr.selected_account_id, r.account_used, ?) as account_id,
+					COALESCE(sa.name, ua.name, rr.selected_account_id, r.account_used, ?) as account_name,
+					COALESCE(rr.decision, 'untracked') as decision,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate
+				FROM requests r
+				LEFT JOIN request_routing rr ON rr.request_id = r.id
+				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
+				LEFT JOIN accounts ua ON ua.id = r.account_used
+				WHERE ${whereClause}
+				GROUP BY ts, account_id, account_name, decision
+				ORDER BY ts ASC, requests DESC
+				LIMIT 1000
+			`,
+				[
+					bucket.bucketMs,
+					bucket.bucketMs,
+					NO_ACCOUNT_ID,
+					NO_ACCOUNT_ID,
+					...queryParams,
+				],
+			);
+			recordPhase(phaseTimings, "routing", phaseStartedAt);
+
+			const routingTotalRequests = routingDecisionRows.reduce(
+				(total, row) => total + (Number(row.requests) || 0),
+				0,
+			);
+
+			const topDecisionByAccount = new Map<string, string>();
+			for (const row of routingFlowRows) {
+				if (!topDecisionByAccount.has(row.account_id)) {
+					topDecisionByAccount.set(row.account_id, row.decision);
+				}
+			}
+
+			const routing = {
+				totalRequests: routingTotalRequests,
+				flow: routingFlowRows.map((row) => ({
+					strategy: row.strategy,
+					decision: row.decision,
+					accountId: row.account_id,
+					accountName: row.account_name,
+					outcome: row.outcome,
+					requests: Number(row.requests) || 0,
+					successRate: Number(row.success_rate) || 0,
+					failoverAttempts: Number(row.failover_attempts) || 0,
+				})),
+				timeline: routingTimelineRows.map((row) => ({
+					ts: Number(row.ts),
+					accountId: row.account_id,
+					accountName: row.account_name,
+					decision: row.decision,
+					requests: Number(row.requests) || 0,
+					successRate: Number(row.success_rate) || 0,
+				})),
+				decisionBreakdown: routingDecisionRows.map((row) => {
+					const requests = Number(row.requests) || 0;
+					return {
+						strategy: row.strategy,
+						decision: row.decision,
+						requests,
+						percentage:
+							routingTotalRequests > 0
+								? (requests / routingTotalRequests) * 100
+								: 0,
+						successRate: Number(row.success_rate) || 0,
+						failoverAttempts: Number(row.failover_attempts) || 0,
+					};
+				}),
+				accountSplit: routingAccountRows.map((row) => {
+					const requests = Number(row.requests) || 0;
+					return {
+						accountId: row.account_id,
+						accountName: row.account_name,
+						requests,
+						percentage:
+							routingTotalRequests > 0
+								? (requests / routingTotalRequests) * 100
+								: 0,
+						successRate: Number(row.success_rate) || 0,
+						failoverAttempts: Number(row.failover_attempts) || 0,
+						topDecision: topDecisionByAccount.get(row.account_id) ?? null,
+					};
+				}),
+			};
+
 			// Transform timeSeries data
 			let transformedTimeSeries = timeSeries.map((point) => ({
 				ts: Number(point.ts),
@@ -683,6 +871,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				costByModel,
 				accountModelUsage,
 				modelPerformance,
+				routing,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

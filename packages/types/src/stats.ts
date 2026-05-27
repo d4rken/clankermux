@@ -121,6 +121,53 @@ export interface ModelPerformance {
 	maxTokensPerSecond: number | null;
 }
 
+export interface RoutingFlowPoint {
+	strategy: string;
+	decision: string;
+	accountId: string;
+	accountName: string;
+	outcome: "success" | "rate_limited" | "error";
+	requests: number;
+	successRate: number;
+	failoverAttempts: number;
+}
+
+export interface RoutingTimelinePoint {
+	ts: number;
+	accountId: string;
+	accountName: string;
+	decision: string;
+	requests: number;
+	successRate: number;
+}
+
+export interface RoutingDecisionBreakdown {
+	strategy: string;
+	decision: string;
+	requests: number;
+	percentage: number;
+	successRate: number;
+	failoverAttempts: number;
+}
+
+export interface RoutingAccountSplit {
+	accountId: string;
+	accountName: string;
+	requests: number;
+	percentage: number;
+	successRate: number;
+	failoverAttempts: number;
+	topDecision: string | null;
+}
+
+export interface RoutingAnalytics {
+	totalRequests: number;
+	flow: RoutingFlowPoint[];
+	timeline: RoutingTimelinePoint[];
+	decisionBreakdown: RoutingDecisionBreakdown[];
+	accountSplit: RoutingAccountSplit[];
+}
+
 export interface AnalyticsResponse {
 	meta?: {
 		range: string;
@@ -172,6 +219,7 @@ export interface AnalyticsResponse {
 	}>;
 	accountModelUsage: Array<{ account: string; model: string; count: number }>;
 	modelPerformance: ModelPerformance[];
+	routing: RoutingAnalytics;
 }
 
 // Pool status for health check

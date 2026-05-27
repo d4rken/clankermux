@@ -24,6 +24,7 @@ import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
+import { RoutingSummaryCard } from "./overview/RoutingSummaryCard";
 import {
 	StorageIntegrityBanner,
 	StorageIntegrityCard,
@@ -314,6 +315,8 @@ export const OverviewTab = React.memo(() => {
 					window="seven_day"
 				/>
 			</div>
+
+			<RoutingSummaryCard routing={analytics?.routing} />
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}

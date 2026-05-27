@@ -10,6 +10,7 @@ import {
 	MainMetricsChart,
 	ModelAnalytics,
 	PerformanceIndicatorsChart,
+	RoutingAnalyticsPanel,
 	TokenSpeedAnalytics,
 	TokenUsageBreakdown,
 } from "./analytics";
@@ -289,6 +290,12 @@ export const AnalyticsTab = React.memo(() => {
 					<TokenSpeedAnalytics
 						timeSeriesData={data}
 						modelPerformance={analytics?.modelPerformance || []}
+						loading={loading}
+						timeRange={timeRange}
+					/>
+
+					<RoutingAnalyticsPanel
+						routing={analytics?.routing}
 						loading={loading}
 						timeRange={timeRange}
 					/>
