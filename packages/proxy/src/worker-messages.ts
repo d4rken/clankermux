@@ -49,6 +49,19 @@ export interface StartMessage {
 	// Retry info
 	retryAttempt: number;
 	failoverAttempts: number;
+
+	// Routing telemetry
+	routing: RequestRoutingMessage | null;
+}
+
+export interface RequestRoutingMessage {
+	strategy: string;
+	decision: string;
+	affinityKeyHash: string | null;
+	selectedAccountId: string | null;
+	previousAccountId: string | null;
+	candidatesCount: number | null;
+	failoverReason: string | null;
 }
 
 export interface ChunkMessage {

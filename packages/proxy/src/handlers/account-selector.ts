@@ -111,6 +111,15 @@ export async function selectAccountsForRequest(
 						available ||
 						(isAutoRefreshBypass && (isOveragePaused || isRateLimited));
 					if (allowThrough) {
+						meta.routing = {
+							strategy: "forced",
+							decision: "forced_account",
+							selectedAccountId: forcedAccount.id,
+							candidatesCount: 1,
+							affinityKey: meta.project ? `project:${meta.project}` : null,
+							previousAccountId: null,
+							failoverReason: null,
+						};
 						return [forcedAccount];
 					}
 				}
@@ -197,6 +206,15 @@ export async function selectAccountsForRequest(
 					meta.comboName = combo.name;
 
 					if (availableAccounts.length > 0) {
+						meta.routing = {
+							strategy: "combo",
+							decision: "combo",
+							selectedAccountId: availableAccounts[0].id,
+							candidatesCount: availableAccounts.length,
+							affinityKey: meta.project ? `project:${meta.project}` : null,
+							previousAccountId: null,
+							failoverReason: null,
+						};
 						return availableAccounts;
 					}
 

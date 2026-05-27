@@ -731,6 +731,115 @@ describe("SessionStrategy", () => {
 		});
 	});
 
+	describe("project affinity", () => {
+		it("continues a project's account even when another account has the newest global session", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "example-project",
+			};
+
+			const projectAccount = makeAccount({
+				id: "project-account",
+				name: "project-account",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 10 * 60 * 1000,
+				session_request_count: 10,
+				priority: 0,
+			});
+			const newerGlobalSession = makeAccount({
+				id: "newer-global-session",
+				name: "newer-global-session",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 2,
+				priority: 0,
+			});
+
+			// First request establishes the project affinity.
+			expect(
+				strategy.select([projectAccount, newerGlobalSession], projectMeta)[0],
+			).toBe(projectAccount);
+
+			// A later request from another project made this account the newest
+			// global session. The original project must still route to the account
+			// that warmed its prompt cache.
+			newerGlobalSession.session_start = now;
+
+			const result = strategy.select(
+				[projectAccount, newerGlobalSession],
+				projectMeta,
+			);
+
+			expect(result[0]).toBe(projectAccount);
+		});
+
+		it("assigns a new project by priority/utilization instead of inheriting an unrelated active session", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "new-project",
+			};
+
+			const unrelatedActive = makeAccount({
+				id: "unrelated-active",
+				name: "unrelated-active",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 20,
+				priority: 0,
+			});
+			const lowerUtil = makeAccount({
+				id: "lower-util",
+				name: "lower-util",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("unrelated-active", 80);
+			mockStore.setUtilization("lower-util", 10);
+
+			const result = strategy.select([unrelatedActive, lowerUtil], projectMeta);
+
+			expect(result[0]).toBe(lowerUtil);
+		});
+
+		it("drops project affinity when the affined account becomes rate-limited", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "rate-limited-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-after-affinity",
+				name: "healthy-after-affinity",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			affined.rate_limited_until = now + 30 * 60 * 1000;
+			const result = strategy.select([affined, healthy], projectMeta);
+
+			expect(result[0]).toBe(healthy);
+			expect(result).not.toContain(affined);
+		});
+	});
+
 	describe("peek auto-unpause parity with select", () => {
 		// These mirror the auto-unpause path inside select(): a paused
 		// auto-fallback account with safe pause_reason and an elapsed

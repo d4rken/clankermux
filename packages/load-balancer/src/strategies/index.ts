@@ -18,6 +18,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	private sessionDurationMs: number;
 	private store: StrategyStore | null = null;
 	private log = new Logger("SessionStrategy");
+	private affinityByKey = new Map<
+		string,
+		{ accountId: string; lastUsedAt: number }
+	>();
 
 	constructor(
 		sessionDurationMs: number = TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
@@ -101,6 +105,98 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			!!account.session_start &&
 			now - account.session_start < this.sessionDurationMs
 		);
+	}
+
+	private getAffinityKey(meta: RequestMeta): string | null {
+		const project = meta.project?.trim();
+		if (!project) return null;
+		return `project:${project}`;
+	}
+
+	private setRoutingMeta(
+		meta: RequestMeta,
+		decision: string,
+		selectedAccount: Account | null,
+		candidatesCount: number,
+		options: {
+			affinityKey?: string | null;
+			previousAccountId?: string | null;
+			failoverReason?: string | null;
+		} = {},
+	): void {
+		meta.routing = {
+			strategy: "session",
+			decision,
+			affinityKey: options.affinityKey ?? this.getAffinityKey(meta),
+			selectedAccountId: selectedAccount?.id ?? null,
+			previousAccountId: options.previousAccountId ?? null,
+			candidatesCount,
+			failoverReason: options.failoverReason ?? null,
+		};
+	}
+
+	private rememberAffinity(
+		meta: RequestMeta,
+		account: Account,
+		now: number,
+	): void {
+		const key = this.getAffinityKey(meta);
+		if (!key) return;
+		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: now });
+		this.pruneAffinity(now);
+	}
+
+	private pruneAffinity(now: number): void {
+		const staleBefore = now - this.sessionDurationMs;
+		for (const [key, entry] of this.affinityByKey) {
+			if (entry.lastUsedAt < staleBefore) {
+				this.affinityByKey.delete(key);
+			}
+		}
+	}
+
+	private getAffinedAccount(
+		accounts: Account[],
+		meta: RequestMeta,
+		now: number,
+		isAvailable: (account: Account) => boolean,
+	): Account | null {
+		const key = this.getAffinityKey(meta);
+		if (!key) return null;
+
+		const entry = this.affinityByKey.get(key);
+		if (!entry) return null;
+
+		const account = accounts.find((a) => a.id === entry.accountId);
+		if (
+			!account ||
+			!this.hasActiveSession(account, now) ||
+			!isAvailable(account)
+		) {
+			this.affinityByKey.delete(key);
+			return null;
+		}
+
+		return account;
+	}
+
+	private sortAvailableAccounts(
+		accounts: Account[],
+		isAvailable: (account: Account) => boolean,
+	): Account[] {
+		return accounts
+			.filter((a) => isAvailable(a))
+			.sort((a, b) => {
+				if (a.priority !== b.priority) return a.priority - b.priority;
+				// Treat null as 0: an account with no usage data is assumed fresh
+				// (maximum remaining capacity). This prevents newly-added accounts
+				// from being permanently sidelined until all others expire.
+				const utilA =
+					this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
+				const utilB =
+					this.store?.getAccountUtilization?.(b.id, b.provider) ?? 0;
+				return utilA - utilB;
+			});
 	}
 
 	peek(accounts: Account[]): string | null {
@@ -243,6 +339,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		if (chosenFallback !== null) {
 			if (!bypassSession) {
 				this.resetSessionIfExpired(chosenFallback);
+				this.rememberAffinity(meta, chosenFallback, now);
 			}
 			this.log.info(
 				`Auto-fallback triggered to account ${chosenFallback.name} (priority: ${chosenFallback.priority}, auto-fallback enabled)`,
@@ -250,9 +347,90 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			// Return all available accounts sorted by priority — chosenFallback will appear
 			// first naturally if it is the highest-priority available account, avoiding
 			// priority inversion when other accounts rank higher.
-			return accounts
+			const available = accounts
 				.filter((a) => getCachedAvailability(a))
 				.sort((a, b) => a.priority - b.priority);
+			this.setRoutingMeta(
+				meta,
+				"auto_fallback",
+				available[0] ?? chosenFallback,
+				available.length,
+			);
+			return available;
+		}
+
+		if (!bypassSession) {
+			const affinityKey = this.getAffinityKey(meta);
+			const previousAccountId = affinityKey
+				? (this.affinityByKey.get(affinityKey)?.accountId ?? null)
+				: null;
+			const affinedAccount = this.getAffinedAccount(
+				accounts,
+				meta,
+				now,
+				getCachedAvailability,
+			);
+			if (affinedAccount) {
+				const higherPriorityAccount = accounts
+					.filter(
+						(a) =>
+							a.id !== affinedAccount.id &&
+							getCachedAvailability(a) &&
+							a.priority < affinedAccount.priority,
+					)
+					.sort((a, b) => a.priority - b.priority)[0];
+
+				if (!higherPriorityAccount) {
+					this.resetSessionIfExpired(affinedAccount);
+					this.rememberAffinity(meta, affinedAccount, now);
+					this.log.info(
+						`Continuing project affinity for ${meta.project} on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
+					);
+					const others = accounts
+						.filter(
+							(a) => a.id !== affinedAccount.id && getCachedAvailability(a),
+						)
+						.sort((a, b) => a.priority - b.priority);
+					this.setRoutingMeta(
+						meta,
+						"project_affinity_hit",
+						affinedAccount,
+						others.length + 1,
+						{ affinityKey, previousAccountId },
+					);
+					return [affinedAccount, ...others];
+				}
+
+				this.log.info(
+					`Skipping project affinity on account ${affinedAccount.name} (priority: ${affinedAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
+				);
+			}
+
+			// For project-scoped requests without an existing affinity, choose a
+			// fresh candidate directly instead of inheriting some other project's
+			// most-recent global session. This keeps each warmed project cache
+			// stable once assigned while still honoring priority/utilization.
+			if (affinityKey) {
+				const available = this.sortAvailableAccounts(
+					accounts,
+					getCachedAvailability,
+				);
+				if (available.length === 0) return [];
+				const chosenAccount = available[0];
+				this.resetSessionIfExpired(chosenAccount);
+				this.rememberAffinity(meta, chosenAccount, now);
+				this.setRoutingMeta(
+					meta,
+					previousAccountId
+						? "project_affinity_reassigned"
+						: "project_affinity_miss",
+					chosenAccount,
+					available.length,
+					{ affinityKey, previousAccountId },
+				);
+				const others = available.filter((a) => a.id !== chosenAccount.id);
+				return [chosenAccount, ...others];
+			}
 		}
 
 		// Find account with active session (most recent session_start within window)
@@ -304,6 +482,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				// Reset session if expired (shouldn't happen but just in case)
 				if (!bypassSession) {
 					this.resetSessionIfExpired(activeAccount);
+					this.rememberAffinity(meta, activeAccount, now);
 				}
 				this.log.info(
 					`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
@@ -312,6 +491,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const others = accounts
 					.filter((a) => a.id !== activeAccount.id && getCachedAvailability(a))
 					.sort((a, b) => a.priority - b.priority);
+				this.setRoutingMeta(
+					meta,
+					"global_session",
+					activeAccount,
+					others.length + 1,
+				);
 				return [activeAccount, ...others];
 			}
 		}
@@ -320,19 +505,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// Filter available accounts and sort by priority (lower number = higher priority).
 		// Within the same priority, break ties by utilization (ascending) so that the
 		// account with the most remaining capacity is chosen first.
-		const available = accounts
-			.filter((a) => getCachedAvailability(a))
-			.sort((a, b) => {
-				if (a.priority !== b.priority) return a.priority - b.priority;
-				// Treat null as 0: an account with no usage data is assumed fresh
-				// (maximum remaining capacity). This prevents newly-added accounts
-				// from being permanently sidelined until all others expire.
-				const utilA =
-					this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
-				const utilB =
-					this.store?.getAccountUtilization?.(b.id, b.provider) ?? 0;
-				return utilA - utilB;
-			});
+		const available = this.sortAvailableAccounts(
+			accounts,
+			getCachedAvailability,
+		);
 
 		if (available.length === 0) return [];
 
@@ -340,7 +516,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const chosenAccount = available[0];
 		if (!bypassSession) {
 			this.resetSessionIfExpired(chosenAccount);
+			this.rememberAffinity(meta, chosenAccount, now);
 		}
+		this.setRoutingMeta(
+			meta,
+			"priority_utilization",
+			chosenAccount,
+			available.length,
+		);
 
 		// Return chosen account first, then others as fallback (already sorted by priority)
 		const others = available.filter((a) => a.id !== chosenAccount.id);

@@ -18,6 +18,18 @@ export interface RequestMeta {
 	comboName?: string | null;
 	/** Combo slot index being attempted (set per-iteration in proxy loop) */
 	comboSlotIndex?: number | null;
+	/** Internal routing telemetry persisted with the request for optimization analysis */
+	routing?: RequestRoutingMeta;
+}
+
+export interface RequestRoutingMeta {
+	strategy: string;
+	decision: string;
+	affinityKey?: string | null;
+	selectedAccountId?: string | null;
+	previousAccountId?: string | null;
+	candidatesCount?: number | null;
+	failoverReason?: string | null;
 }
 
 export interface AgentUpdatePayload {

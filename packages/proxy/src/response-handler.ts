@@ -1,10 +1,15 @@
+import { createHash } from "node:crypto";
 import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type { Account, RateLimitReason } from "@clankermux/types";
+import type {
+	Account,
+	RateLimitReason,
+	RequestRoutingMeta,
+} from "@clankermux/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
@@ -81,6 +86,14 @@ export interface ResponseHandlerOptions {
 	apiKeyId?: string | null;
 	apiKeyName?: string | null;
 	comboName?: string | null;
+	routing?: RequestRoutingMeta | null;
+}
+
+function hashRoutingAffinityKey(
+	value: string | null | undefined,
+): string | null {
+	if (!value) return null;
+	return createHash("sha256").update(value).digest("hex");
 }
 
 /**
@@ -108,6 +121,7 @@ export async function forwardToClient(
 		apiKeyId,
 		apiKeyName,
 		comboName,
+		routing,
 	} = options;
 
 	// Always strip compression headers *before* we do anything else
@@ -175,6 +189,17 @@ export async function forwardToClient(
 			apiKeyName: apiKeyName || null,
 			retryAttempt,
 			failoverAttempts,
+			routing: routing
+				? {
+						strategy: routing.strategy,
+						decision: routing.decision,
+						affinityKeyHash: hashRoutingAffinityKey(routing.affinityKey),
+						selectedAccountId: account?.id ?? routing.selectedAccountId ?? null,
+						previousAccountId: routing.previousAccountId ?? null,
+						candidatesCount: routing.candidatesCount ?? null,
+						failoverReason: routing.failoverReason ?? null,
+					}
+				: null,
 		};
 		// The transferable IS the requestBody field — move ownership to the
 		// worker (no structured-clone copy) instead of cloning the bytes.

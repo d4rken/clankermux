@@ -172,6 +172,31 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
 	);
 
+	// Create request_routing table for load-balancer decision telemetry.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS request_routing (
+			request_id TEXT PRIMARY KEY,
+			strategy TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			affinity_key_hash TEXT,
+			selected_account_id TEXT,
+			previous_account_id TEXT,
+			candidates_count INTEGER,
+			failover_attempts INTEGER DEFAULT 0,
+			failover_reason TEXT,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_decision ON request_routing(decision, created_at DESC)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
+	);
+
 	// Create request_payloads table for storing full request/response data
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
