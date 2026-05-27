@@ -69,7 +69,7 @@ log.info("Post-processor worker started");
 const MAX_REQUESTS_MAP_SIZE = 10000;
 const REQUEST_TTL_MS = 2 * 60 * 1000; // 2 minutes - hard limit for request lifecycle
 const MAX_RESPONSE_BODY_BYTES = 256 * 1024; // 256KB - cap stored response body
-const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024; // 4MB - afterburn needs full conversation history
+const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
 // Initialize tiktoken encoder (cl100k_base is used for Claude models)
 // Using embedded WASM to avoid "Missing tiktoken_bg.wasm" errors in bunx
@@ -824,8 +824,11 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		const estimatedRequestBytes = startMessage.requestBody
 			? Math.ceil(startMessage.requestBody.byteLength / 3) * 4
 			: 0;
+		// Non-streaming: msg.responseBody is already base64 (ASCII .length === byte count).
+		// Streaming: state.chunksBytes is raw bytes, stored as base64 — charge at base64 size.
 		const estimatedResponseBytes =
-			msg.responseBody?.length ?? state.chunksBytes ?? 0;
+			msg.responseBody?.length ??
+			(state.chunksBytes ? Math.ceil(state.chunksBytes / 3) * 4 : 0);
 		const estimatedPayloadBytes =
 			estimatedRequestBytes + estimatedResponseBytes + 2048;
 
@@ -860,6 +863,10 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 						: startMessage.requestBody;
 				requestBody = Buffer.from(raw).toString("base64");
 			}
+			// Release the up-to-4MB transferred ArrayBuffer now that we have the
+			// base64 string. freeRequestState would null it later, but doing it
+			// here reduces peak worker memory during JSON.stringify.
+			startMessage.requestBody = null;
 
 			const payloadJson = JSON.stringify({
 				request: {

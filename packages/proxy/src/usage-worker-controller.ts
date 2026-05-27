@@ -111,7 +111,11 @@ export class UsageWorkerController {
 		// Post first, then register the pending-ack. A bad transferable makes
 		// postMessage throw; posting first means a throw can't leave a dangling
 		// ack timer behind. Delivery/ack is async, so there's no race.
-		this.worker?.postMessage(msg, transfer ?? []);
+		if (transfer) {
+			this.worker?.postMessage(msg, transfer);
+		} else {
+			this.worker?.postMessage(msg);
+		}
 
 		if (msg.type === "start") {
 			const { messageId } = msg;

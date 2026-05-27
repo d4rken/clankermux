@@ -1,8 +1,9 @@
-import { requestEvents, TIME_CONSTANTS } from "@clankermux/core";
+import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
 import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
@@ -27,11 +28,8 @@ function getMidStreamRateLimitCooldownMs(): number {
 	);
 }
 
-// Must match MAX_REQUEST_BODY_BYTES in post-processor.worker.ts.
-// Bounds the fresh ArrayBuffer copy we transfer to the worker (the source
-// body is never transferred — see the start-message construction below).
-// 4MB so afterburn can see full conversation history for friction analysis.
-const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+const log = new Logger("ResponseHandler");
+const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
 function safePostMessage(
 	worker: UsageWorkerController,
@@ -40,8 +38,16 @@ function safePostMessage(
 ): void {
 	try {
 		worker.postMessage(message, transfer);
-	} catch (_error) {
-		// Worker not ready or terminated — silently ignore
+	} catch (error) {
+		// Worker "not ready" throws are expected during startup/shutdown —
+		// silently ignore those. Log anything else (e.g. DataCloneError from a
+		// bad transferable) at warn level for observability.
+		if (error instanceof Error && !error.message.includes("worker state is")) {
+			const { requestId } = message as { requestId?: string };
+			log.warn(
+				`Unexpected postMessage failure for ${requestId ?? "?"}: ${error.name}: ${error.message}`,
+			);
+		}
 	}
 }
 
