@@ -28,16 +28,18 @@ function getMidStreamRateLimitCooldownMs(): number {
 }
 
 // Must match MAX_REQUEST_BODY_BYTES in post-processor.worker.ts.
-// Cap applied before postMessage to avoid multi-MB structured clones.
+// Bounds the fresh ArrayBuffer copy we transfer to the worker (the source
+// body is never transferred — see the start-message construction below).
 // 4MB so afterburn can see full conversation history for friction analysis.
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
 function safePostMessage(
 	worker: UsageWorkerController,
 	message: StartMessage | ChunkMessage | EndMessage,
+	transfer?: Transferable[],
 ): void {
 	try {
-		worker.postMessage(message);
+		worker.postMessage(message, transfer);
 	} catch (_error) {
 		// Worker not ready or terminated — silently ignore
 	}
@@ -140,14 +142,16 @@ export async function forwardToClient(
 			path,
 			timestamp,
 			requestHeaders: requestHeadersObj,
+			// Fresh capped copy: .slice() returns a NEW ArrayBuffer, safe to
+			// transfer to the worker. Never transfer the caller's `requestBody`
+			// — it may be shared with the failover/replay RequestBodyContext, and
+			// transfer detaches the source buffer.
 			requestBody:
 				shouldStorePayloads && requestBody
-					? Buffer.from(
-							new Uint8Array(requestBody).subarray(
-								0,
-								Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
-							),
-						).toString("base64")
+					? requestBody.slice(
+							0,
+							Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
+						)
 					: null,
 			project: project ?? null,
 			responseStatus: response.status,
@@ -166,7 +170,12 @@ export async function forwardToClient(
 			retryAttempt,
 			failoverAttempts,
 		};
-		safePostMessage(ctx.usageWorker, startMessage);
+		// The transferable IS the requestBody field — move ownership to the
+		// worker (no structured-clone copy) instead of cloning the bytes.
+		const transfer = startMessage.requestBody
+			? [startMessage.requestBody]
+			: undefined;
+		safePostMessage(ctx.usageWorker, startMessage, transfer);
 	}
 
 	// Emit request start event for real-time dashboard

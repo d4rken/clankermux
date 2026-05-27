@@ -1,10 +1,10 @@
 /**
- * Memory leak reproduction test.
+ * Memory leak regression test.
  *
- * Sends concurrent large-body requests through the proxy and measures
- * RSS growth. Before the fix in this PR, RSS grew ~5MB per request due
- * to unsized requestBody in StartMessage + incomplete state cleanup.
- * After the fix, growth should be bounded by MAX_REQUEST_BODY_BYTES.
+ * Validates that the cap + transfer model bounds per-request memory:
+ *   - response-handler.ts caps the request body to MAX_REQUEST_BODY_BYTES
+ *     then transfers the ArrayBuffer to the worker (no structured-clone copy)
+ *   - freeRequestState nulls out the request body when done
  *
  * Run: bun test packages/proxy/src/__tests__/memory-leak.test.ts
  */
@@ -27,29 +27,33 @@ describe("memory leak regression", () => {
 		return JSON.stringify(message);
 	}
 
-	it("requestBody cap prevents multi-MB structured clones", () => {
+	it("requestBody cap prevents multi-MB allocations", () => {
 		// Simulate what response-handler.ts does before postMessage
 		const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 		const largeBody = new TextEncoder().encode(makeLargeRequestBody(2048)); // 2MB body
 
-		// Before fix: full body was base64-encoded (2MB * 1.33 = 2.66MB per message)
-		const uncappedSize = Buffer.from(largeBody).toString("base64").length;
+		// Old model (before transfer): base64-encode full body → structured clone
+		// = 2MB raw → ~2.66MB base64 string → worker clone → ~5.3MB total
+		const uncappedBase64Size = Buffer.from(largeBody).toString("base64").length;
 
-		// After fix: capped to 256KB before base64 encoding
-		const cappedSize = Buffer.from(
-			largeBody.byteLength <= MAX_REQUEST_BODY_BYTES
-				? largeBody
-				: largeBody.subarray(0, MAX_REQUEST_BODY_BYTES),
-		).toString("base64").length;
+		// New model: raw ArrayBuffer.slice(0, cap) → transfer (zero-copy move).
+		// Only one copy of the capped bytes exists at any time.
+		const cappedBuffer = largeBody.buffer.slice(
+			0,
+			Math.min(largeBody.byteLength, MAX_REQUEST_BODY_BYTES),
+		);
+		const cappedSize = cappedBuffer.byteLength;
 
-		// Uncapped would be ~2.7MB, capped should be ~341KB (256KB * 1.33)
-		expect(uncappedSize).toBeGreaterThan(2_000_000);
-		expect(cappedSize).toBeLessThan(350_000);
-		expect(cappedSize).toBeGreaterThan(300_000); // 256KB base64 = ~341KB
+		// Uncapped base64 would be ~2.7MB (before the structured clone doubles it)
+		expect(uncappedBase64Size).toBeGreaterThan(2_000_000);
+		// Capped transferred buffer: exactly 256KB raw bytes (no base64 inflation)
+		expect(cappedSize).toBe(MAX_REQUEST_BODY_BYTES);
+		expect(cappedSize).toBeLessThan(300_000);
 	});
 
 	it("freeRequestState releases startMessage fields", () => {
-		// Simulate RequestState with a large startMessage
+		// Simulate RequestState with a large startMessage.
+		// requestBody is now an ArrayBuffer (raw transferred bytes).
 		const state = {
 			chunks: [new Uint8Array(1024), new Uint8Array(1024)],
 			chunksBytes: 2048,
@@ -66,7 +70,7 @@ describe("memory leak regression", () => {
 					"content-type": "application/json",
 					"x-custom-header": "value",
 				},
-				requestBody: "x".repeat(256 * 1024), // 256KB base64 string
+				requestBody: new ArrayBuffer(256 * 1024) as ArrayBuffer | null,
 				responseStatus: 200,
 				responseHeaders: {
 					"content-type": "application/json",
@@ -111,14 +115,74 @@ describe("memory leak regression", () => {
 		const CONCURRENT_REQUESTS = 15; // Simulates a 15-agent wave
 		const BODY_SIZE_KB = 2048; // 2MB each (typical Claude Code conversation)
 
-		// Without cap: 15 * 2MB * 1.33 (base64) * 2 (structured clone) = ~80MB
+		// Old model: 15 * 2MB * 1.33 (base64 string) * 2 (structured clone) = ~80MB
 		const uncappedMemory = CONCURRENT_REQUESTS * BODY_SIZE_KB * 1024 * 1.33 * 2;
 
-		// With cap: 15 * 256KB * 1.33 (base64) = ~5MB
-		const cappedMemory = CONCURRENT_REQUESTS * MAX_REQUEST_BODY_BYTES * 1.33;
+		// New model (transfer): 15 * 256KB (one raw copy, transferred, no clone)
+		const cappedMemory = CONCURRENT_REQUESTS * MAX_REQUEST_BODY_BYTES;
 
 		expect(uncappedMemory).toBeGreaterThan(70_000_000); // ~80MB without cap
-		expect(cappedMemory).toBeLessThan(6_000_000); // ~5MB with cap
-		expect(uncappedMemory / cappedMemory).toBeGreaterThan(10); // >10x reduction
+		expect(cappedMemory).toBeLessThan(4_000_000); // ~3.75MB with transfer
+		expect(uncappedMemory / cappedMemory).toBeGreaterThan(15); // >15x reduction
+	});
+
+	it("backpressure estimate uses base64-size accounting for ArrayBuffer bodies", () => {
+		// The worker stores the request body as base64, so the preflight
+		// backpressure check must charge the base64 size (~4/3× raw byteLength),
+		// not the raw byte count. Using raw byteLength would let the writer
+		// admit ~33% more than the cap intends.
+		const rawBytes = 300_000; // 300KB raw body
+		const body = new ArrayBuffer(rawBytes);
+
+		// This mirrors the estimator in post-processor.worker.ts
+		const estimatedRequestBytes = Math.ceil(body.byteLength / 3) * 4;
+
+		// base64 of 300KB should be exactly 400KB
+		expect(estimatedRequestBytes).toBe(400_000);
+
+		// Sanity: the actual base64 output matches the estimate
+		const actualBase64Length = Buffer.from(body).toString("base64").length;
+		expect(estimatedRequestBytes).toBe(actualBase64Length);
+	});
+
+	it("system prompt extraction works from ArrayBuffer body", () => {
+		// Mirrors what post-processor.worker.ts _extractSystemPrompt does
+		// with the new ArrayBuffer input (TextDecoder instead of base64 decode)
+		const body = JSON.stringify({
+			system: "You are a helpful assistant in project clankermux",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		const buffer = new TextEncoder().encode(body).buffer;
+
+		// Same logic as _extractSystemPrompt
+		const decodedBody = new TextDecoder().decode(buffer);
+		const parsed = JSON.parse(decodedBody);
+
+		expect(parsed.system).toBe(
+			"You are a helpful assistant in project clankermux",
+		);
+	});
+
+	it("ArrayBuffer → base64 round-trip preserves data for payload storage", () => {
+		// The worker stores request bodies as base64 in the DB JSON. Verify
+		// that the ArrayBuffer → Buffer.from(ab).toString("base64") path
+		// produces the same result as the old Buffer.from(text).toString("base64").
+		const body = JSON.stringify({
+			model: "claude-sonnet-4-5-20250514",
+			messages: [{ role: "user", content: "test content for round-trip" }],
+		});
+
+		// Old model: text → base64 directly
+		const oldBase64 = Buffer.from(body).toString("base64");
+
+		// New model: text → ArrayBuffer → base64 (what the worker does now)
+		const buffer = new TextEncoder().encode(body).buffer;
+		const newBase64 = Buffer.from(buffer).toString("base64");
+
+		expect(newBase64).toBe(oldBase64);
+
+		// And decoding back works
+		const decoded = Buffer.from(newBase64, "base64").toString("utf-8");
+		expect(decoded).toBe(body);
 	});
 });

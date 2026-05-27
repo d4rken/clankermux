@@ -197,12 +197,14 @@ function extractProjectFromRequest(startMessage: StartMessage): string | null {
 }
 
 // Extract system prompt from request body
-function _extractSystemPrompt(requestBody: string | null): string | null {
+function _extractSystemPrompt(requestBody: ArrayBuffer | null): string | null {
 	if (!requestBody) return null;
 
 	try {
-		// Decode base64 request body
-		const decodedBody = Buffer.from(requestBody, "base64").toString("utf-8");
+		// requestBody arrives as raw transferred bytes (base64-encoded only at
+		// save time). Decode straight to text. A 4MB-capped body that splits
+		// mid-JSON fails JSON.parse below → returns null, same as before.
+		const decodedBody = new TextDecoder().decode(requestBody);
 		const parsed = JSON.parse(decodedBody);
 
 		// Check if there's a system property in the request
@@ -812,11 +814,16 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		//
 		// Use the same metric the cap tracks: `payloadBytesPending` charges
 		// `Buffer.byteLength(payloadJson)` (UTF-8 serialized bytes), so the
-		// preflight estimates the same. Request/response bodies are already
-		// base64 (ASCII) so `.length === byte count`; the JSON envelope plus
+		// preflight estimates the same. The response body is already base64
+		// (ASCII, `.length === byte count`); the request body arrives as raw
+		// transferred bytes but is stored as base64, so charge it at its base64
+		// size (~4/3× byteLength) — using raw byteLength would let the writer
+		// admit ~33% more than the cap intends. The JSON envelope plus
 		// headers/meta accounts for the remainder. No memory-cost multiplier
 		// here because the cap is a byte budget, not a memory bound.
-		const estimatedRequestBytes = startMessage.requestBody?.length ?? 0;
+		const estimatedRequestBytes = startMessage.requestBody
+			? Math.ceil(startMessage.requestBody.byteLength / 3) * 4
+			: 0;
 		const estimatedResponseBytes =
 			msg.responseBody?.length ?? state.chunksBytes ?? 0;
 		const estimatedPayloadBytes =
@@ -842,15 +849,16 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				}
 			}
 
-			// Cap request body to prevent unbounded payload storage
-			let requestBody = startMessage.requestBody;
-			if (requestBody) {
-				const rawBytes = Buffer.byteLength(requestBody, "base64");
-				if (rawBytes > MAX_REQUEST_BODY_BYTES) {
-					requestBody = Buffer.from(requestBody, "base64")
-						.subarray(0, MAX_REQUEST_BODY_BYTES)
-						.toString("base64");
-				}
+			// Cap the request body then base64-encode it for storage. The body
+			// arrives as raw transferred bytes; the DB payload JSON keeps the
+			// base64 string format so the request-history reader is unchanged.
+			let requestBody: string | null = null;
+			if (startMessage.requestBody) {
+				const raw =
+					startMessage.requestBody.byteLength > MAX_REQUEST_BODY_BYTES
+						? startMessage.requestBody.slice(0, MAX_REQUEST_BODY_BYTES)
+						: startMessage.requestBody;
+				requestBody = Buffer.from(raw).toString("base64");
 			}
 
 			const payloadJson = JSON.stringify({
