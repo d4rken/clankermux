@@ -7,6 +7,7 @@ import {
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@clankermux/core";
+import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
@@ -32,6 +33,7 @@ import {
 } from "./handlers";
 import { sanitizeProjectName } from "./project-name";
 import { extractRequestAffinity } from "./request-affinity";
+import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { UsageWorkerController } from "./usage-worker-controller";
 import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 
@@ -449,7 +451,9 @@ export async function handleProxy(
 				method: req.method,
 				path: url.pathname,
 				timestamp: requestMeta.timestamp,
-				requestHeaders: Object.fromEntries(req.headers.entries()),
+				requestHeaders: Object.fromEntries(
+					sanitizeRequestHeaders(req.headers).entries(),
+				),
 				requestBody: null,
 				project: project ?? null,
 				responseStatus: 503,
@@ -472,7 +476,9 @@ export async function handleProxy(
 							strategy: requestMeta.routing.strategy,
 							decision: requestMeta.routing.decision,
 							affinityScope: requestMeta.routing.affinityScope ?? null,
-							affinityKeyHash: null,
+							affinityKeyHash: hashRoutingAffinityKey(
+								requestMeta.routing.affinityKey,
+							),
 							selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
 							previousAccountId: requestMeta.routing.previousAccountId ?? null,
 							candidatesCount: requestMeta.routing.candidatesCount ?? null,

@@ -278,7 +278,22 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 
 		const ctx = {
 			strategy: {
-				select: () => [],
+				select: (
+					_accounts: unknown,
+					meta: { routing?: Record<string, unknown> },
+				) => {
+					meta.routing = {
+						strategy: "session",
+						decision: "affinity_pool_exhausted",
+						affinityScope: "claude_session",
+						affinityKey: "claude_session:claude-session-id",
+						selectedAccountId: null,
+						previousAccountId: "previous-account",
+						candidatesCount: 0,
+						failoverReason: "pool_exhausted",
+					};
+					return [];
+				},
 			} as never,
 			dbOps: {
 				getAllAccounts: mock(async () => []),
@@ -301,7 +316,11 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 
 		const normalRequest = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: {
+				"Content-Type": "application/json",
+				"x-claude-code-session-id": "claude-session-id",
+				"thread-id": "codex-thread-id",
+			},
 			body: JSON.stringify({
 				model: "claude-haiku-4-5",
 				messages: [{ role: "user", content: "hi" }],
@@ -319,5 +338,20 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 
 		// Normal requests MUST be logged
 		expect(usageWorkerPostMessage).toHaveBeenCalled();
+		const startMessage = usageWorkerPostMessage.mock.calls[0][0] as {
+			requestHeaders: Record<string, string>;
+			routing: { affinityKeyHash: string | null; affinityScope: string | null };
+		};
+		expect(startMessage.requestHeaders["content-type"]).toBe(
+			"application/json",
+		);
+		expect(startMessage.requestHeaders["x-claude-code-session-id"]).toBe(
+			undefined,
+		);
+		expect(startMessage.requestHeaders["thread-id"]).toBe(undefined);
+		expect(startMessage.routing.affinityScope).toBe("claude_session");
+		expect(startMessage.routing.affinityKeyHash).toBe(
+			"850fda028909f0c4cd88dd904a7d010898d21f96f75b3cc79c5721ce3c27d5fd",
+		);
 	});
 });

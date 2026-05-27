@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
@@ -13,6 +12,7 @@ import type {
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
+import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import type { UsageWorkerController } from "./usage-worker-controller";
 import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
@@ -87,13 +87,6 @@ export interface ResponseHandlerOptions {
 	apiKeyName?: string | null;
 	comboName?: string | null;
 	routing?: RequestRoutingMeta | null;
-}
-
-function hashRoutingAffinityKey(
-	value: string | null | undefined,
-): string | null {
-	if (!value) return null;
-	return createHash("sha256").update(value).digest("hex");
 }
 
 /**
