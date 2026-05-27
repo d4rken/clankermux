@@ -3,6 +3,7 @@ import { Logger } from "@clankermux/logger";
 import type {
 	Account,
 	LoadBalancingStrategy,
+	RateLimitReason,
 	RequestMeta,
 	StrategyStore,
 } from "@clankermux/types";
@@ -13,6 +14,38 @@ import {
 import { isPeekAvailable } from "./peek-availability";
 
 export { LeastUsedStrategy } from "./least-used";
+
+/**
+ * Minimum remaining cooldown duration before we consider a rate-limit "durable"
+ * (i.e. real 5h/7d usage-window exhaustion) and break project affinity to
+ * reassign to a healthy account.  Anything shorter is treated as a transient
+ * throttle worth waiting out so the warmed prompt cache on the original account
+ * is preserved.
+ *
+ * 15 minutes is comfortably above per-minute throttles (60s), brief 529
+ * Retry-After values (seconds – a few minutes), and probe cooldowns, while
+ * catching genuine multi-hour window-reset cooldowns.
+ */
+const AFFINITY_REASSIGN_MIN_COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * Rate-limit reasons that indicate a server-wide or self-resolving condition
+ * where switching to another account of the same provider would NOT help.
+ * Affinity is always preserved ("held") through these, regardless of cooldown
+ * duration — the original account's prompt cache is worth snapping back to.
+ */
+const TRANSIENT_RATE_LIMIT_REASONS: ReadonlySet<RateLimitReason> = new Set([
+	"upstream_529_overloaded_with_reset",
+	"upstream_529_overloaded_no_reset",
+	"upstream_429_no_reset_probe_cooldown",
+]);
+
+/** Discriminated result from resolveAffinity(). */
+type AffinityResolution =
+	| { kind: "hit"; account: Account }
+	| { kind: "hold"; heldAccountId: string }
+	| { kind: "miss" }
+	| { kind: "reassign"; previousAccountId: string };
 
 export class SessionStrategy implements LoadBalancingStrategy {
 	private sessionDurationMs: number;
@@ -107,6 +140,23 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		);
 	}
 
+	/**
+	 * Whether the account's session window is still valid, ignoring rate-limit
+	 * state. Used by resolveAffinity to distinguish "session genuinely expired"
+	 * (reassign) from "rate-limited but session conceptually alive" (hold/check).
+	 *
+	 * hasActiveSession() returns false for rate-limited accounts — correct for
+	 * routing, but it would short-circuit the hold/reassign decision in affinity
+	 * resolution. This helper separates the two concerns.
+	 */
+	private hasValidSessionWindow(account: Account, now: number): boolean {
+		if (!requiresSessionDurationTracking(account.provider)) return false;
+		return (
+			!!account.session_start &&
+			now - account.session_start < this.sessionDurationMs
+		);
+	}
+
 	private getAffinityKey(meta: RequestMeta): string | null {
 		const project = meta.project?.trim();
 		if (!project) return null;
@@ -155,29 +205,105 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 	}
 
-	private getAffinedAccount(
+	/**
+	 * Resolve the project-affinity map entry for the given request.
+	 *
+	 * Returns one of:
+	 *  - `hit`       — affined account is available; use it.
+	 *  - `hold`      — affined account is transiently unavailable (short 429,
+	 *                   529 overload, probe cooldown). Serve from the next best
+	 *                   candidate WITHOUT overwriting affinity, so it snaps back
+	 *                   when the original account recovers and its prompt cache
+	 *                   is still warm.
+	 *  - `reassign`  — affined account is durably gone (real 5h/7d exhaustion,
+	 *                   manual pause, session expired, removed). Delete the
+	 *                   affinity entry and pick a fresh account.
+	 *  - `miss`      — no affinity entry exists for this project yet.
+	 */
+	private resolveAffinity(
 		accounts: Account[],
 		meta: RequestMeta,
 		now: number,
 		isAvailable: (account: Account) => boolean,
-	): Account | null {
+	): AffinityResolution {
 		const key = this.getAffinityKey(meta);
-		if (!key) return null;
+		if (!key) return { kind: "miss" };
 
 		const entry = this.affinityByKey.get(key);
-		if (!entry) return null;
+		if (!entry) return { kind: "miss" };
 
 		const account = accounts.find((a) => a.id === entry.accountId);
-		if (
-			!account ||
-			!this.hasActiveSession(account, now) ||
-			!isAvailable(account)
-		) {
+
+		// Account removed or session window genuinely expired → reassign.
+		// Note: we check hasValidSessionWindow (ignores rate-limit state)
+		// rather than hasActiveSession (returns false for rate-limited
+		// accounts), because a rate-limited account with a valid session
+		// window should flow into the hold/reassign decision below — not
+		// be force-reassigned.
+		if (!account || !this.hasValidSessionWindow(account, now)) {
 			this.affinityByKey.delete(key);
-			return null;
+			return { kind: "reassign", previousAccountId: entry.accountId };
 		}
 
-		return account;
+		// Account is available → use it.
+		if (isAvailable(account)) {
+			return { kind: "hit", account };
+		}
+
+		// Account is unavailable — decide whether to hold or reassign based on
+		// the nature of the unavailability.
+		if (this.isAffinityBreakingUnavailability(account, now)) {
+			this.affinityByKey.delete(key);
+			return { kind: "reassign", previousAccountId: entry.accountId };
+		}
+
+		// Transient unavailability — keep the affinity slot reserved so the
+		// project snaps back to this account (and its warmed prompt cache)
+		// once the cooldown lifts.
+		return { kind: "hold", heldAccountId: entry.accountId };
+	}
+
+	/**
+	 * Determine whether the account's current unavailability justifies
+	 * permanently breaking project affinity (reassign) vs temporarily
+	 * serving elsewhere while holding the slot (hold).
+	 *
+	 * Affinity-breaking ("durable") conditions:
+	 *  - Manual or failure-threshold pause (operator intervention required).
+	 *  - Long rate-limit cooldown (>= AFFINITY_REASSIGN_MIN_COOLDOWN_MS) for a
+	 *    non-server-wide reason — indicates real 5h/7d usage-window exhaustion.
+	 *
+	 * Affinity-preserving ("transient") conditions:
+	 *  - 529 overload / probe cooldown — server-wide; switching doesn't help.
+	 *  - Short rate-limit cooldown — per-minute throttle; resolves in seconds.
+	 *  - Billing overage / peak-hours pause — auto-resumes on window reset.
+	 */
+	private isAffinityBreakingUnavailability(
+		account: Account,
+		now: number,
+	): boolean {
+		// Sticky pauses: operator must manually resume.
+		if (account.paused) {
+			const reason = (account as { pause_reason?: string | null }).pause_reason;
+			return reason === "manual" || reason === "failure_threshold";
+		}
+
+		const until = account.rate_limited_until;
+		if (!until || until <= now) return false;
+
+		// 529 overload and probe cooldowns are server-wide or self-healing;
+		// switching to a different account of the same provider does not help
+		// and wastes the warmed prompt cache. Always hold.
+		const rlReason = (account as { rate_limited_reason?: RateLimitReason })
+			.rate_limited_reason;
+		if (rlReason && TRANSIENT_RATE_LIMIT_REASONS.has(rlReason)) {
+			return false;
+		}
+
+		// A long remaining cooldown signals real 5h/7d usage-window exhaustion —
+		// the account is out for hours, the prompt cache will be cold, and the
+		// project benefits from being re-pinned to a healthy account.
+		return until - now > AFFINITY_REASSIGN_MIN_COOLDOWN_MS;
 	}
 
 	private sortAvailableAccounts(
@@ -364,13 +490,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			const previousAccountId = affinityKey
 				? (this.affinityByKey.get(affinityKey)?.accountId ?? null)
 				: null;
-			const affinedAccount = this.getAffinedAccount(
+			const resolution = this.resolveAffinity(
 				accounts,
 				meta,
 				now,
 				getCachedAvailability,
 			);
-			if (affinedAccount) {
+
+			if (resolution.kind === "hit") {
+				const affinedAccount = resolution.account;
 				const higherPriorityAccount = accounts
 					.filter(
 						(a) =>
@@ -401,16 +529,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					return [affinedAccount, ...others];
 				}
 
+				// Priority beats stickiness: route to the highest-priority
+				// available account and re-pin affinity there. (The user's
+				// explicit priority ranking takes precedence over cache warmth.)
 				this.log.info(
 					`Skipping project affinity on account ${affinedAccount.name} (priority: ${affinedAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
 				);
-			}
-
-			// For project-scoped requests without an existing affinity, choose a
-			// fresh candidate directly instead of inheriting some other project's
-			// most-recent global session. This keeps each warmed project cache
-			// stable once assigned while still honoring priority/utilization.
-			if (affinityKey) {
 				const available = this.sortAvailableAccounts(
 					accounts,
 					getCachedAvailability,
@@ -421,7 +545,64 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.rememberAffinity(meta, chosenAccount, now);
 				this.setRoutingMeta(
 					meta,
-					previousAccountId
+					"project_affinity_reassigned",
+					chosenAccount,
+					available.length,
+					{ affinityKey, previousAccountId },
+				);
+				const others = available.filter((a) => a.id !== chosenAccount.id);
+				return [chosenAccount, ...others];
+			}
+
+			// The affined account is transiently unavailable (short 429, 529
+			// overload, probe cooldown). Serve this request from the next best
+			// candidate WITHOUT overwriting affinity, so the project snaps back
+			// to its warmed account once the cooldown lifts. Switching providers
+			// here is futile for server-wide overloads anyway.
+			if (resolution.kind === "hold") {
+				const available = this.sortAvailableAccounts(
+					accounts,
+					getCachedAvailability,
+				);
+				if (available.length === 0) return [];
+				const chosenAccount = available[0];
+				this.resetSessionIfExpired(chosenAccount);
+				// NOTE: deliberately NOT calling rememberAffinity — the held
+				// account keeps its claim on this project.
+				this.log.info(
+					`Holding project affinity for ${meta.project} (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request`,
+				);
+				this.setRoutingMeta(
+					meta,
+					"project_affinity_hold",
+					chosenAccount,
+					available.length,
+					{ affinityKey, previousAccountId },
+				);
+				const others = available.filter((a) => a.id !== chosenAccount.id);
+				return [chosenAccount, ...others];
+			}
+
+			// No affinity yet (miss) or the affined account is durably gone
+			// (reassign). Choose a fresh candidate directly instead of inheriting
+			// some other project's most-recent global session, and pin it. This
+			// keeps each warmed project cache stable once assigned while still
+			// honoring priority/utilization.
+			if (
+				affinityKey &&
+				(resolution.kind === "miss" || resolution.kind === "reassign")
+			) {
+				const available = this.sortAvailableAccounts(
+					accounts,
+					getCachedAvailability,
+				);
+				if (available.length === 0) return [];
+				const chosenAccount = available[0];
+				this.resetSessionIfExpired(chosenAccount);
+				this.rememberAffinity(meta, chosenAccount, now);
+				this.setRoutingMeta(
+					meta,
+					resolution.kind === "reassign"
 						? "project_affinity_reassigned"
 						: "project_affinity_miss",
 					chosenAccount,
