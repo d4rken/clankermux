@@ -143,11 +143,7 @@ export function AccountListItem({
 
 	return (
 		<div
-			className={`p-4 border rounded-lg transition-colors space-y-3 ${
-				isPrimary
-					? "border-primary bg-primary/5 shadow-sm"
-					: "border-border hover:border-muted-foreground/50"
-			}`}
+			className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50"
 		>
 			<div className="flex items-center justify-between">
 				<div className="flex items-center gap-2 min-w-0">
