@@ -84,6 +84,56 @@ describe("forwardToClient worker protocol", () => {
 		expect((posted[0].messageId as string).length).toBeGreaterThan(0);
 	});
 
+	it("strips client identity headers from persisted request headers", async () => {
+		const posted: Array<Record<string, unknown>> = [];
+		const { ctx } = createCtx((msg) => posted.push(msg));
+
+		await forwardToClient(
+			{
+				requestId: "req-identity-headers",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-claude-code-session-id": "claude-session-id",
+					"thread-id": "codex-thread-id",
+					"session-id": "codex-session-id",
+					"x-client-request-id": "client-request-id",
+					"x-codex-installation-id": "codex-installation-id",
+					"x-codex-window-id": "codex-thread-id:1",
+					"x-codex-turn-state": "turn-state-token",
+					"chatgpt-account-id": "chatgpt-account-id",
+					traceparent:
+						"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+					tracestate: "vendor=value",
+				}),
+				requestBody: toArrayBuffer("{}"),
+				response: new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		const requestHeaders = posted[0].requestHeaders as Record<string, string>;
+		expect(requestHeaders["content-type"]).toBe("application/json");
+		expect(requestHeaders["x-claude-code-session-id"]).toBeUndefined();
+		expect(requestHeaders["thread-id"]).toBeUndefined();
+		expect(requestHeaders["session-id"]).toBeUndefined();
+		expect(requestHeaders["x-client-request-id"]).toBeUndefined();
+		expect(requestHeaders["x-codex-installation-id"]).toBeUndefined();
+		expect(requestHeaders["x-codex-window-id"]).toBeUndefined();
+		expect(requestHeaders["x-codex-turn-state"]).toBeUndefined();
+		expect(requestHeaders["chatgpt-account-id"]).toBeUndefined();
+		expect(requestHeaders.traceparent).toBeUndefined();
+		expect(requestHeaders.tracestate).toBeUndefined();
+	});
+
 	it("sends null requestBody when payload storage is disabled", async () => {
 		const posted: Array<Record<string, unknown>> = [];
 		const { ctx } = createCtx((msg) => posted.push(msg), false);
