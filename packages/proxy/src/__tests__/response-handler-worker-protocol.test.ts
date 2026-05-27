@@ -2,6 +2,17 @@ import { describe, expect, it, mock } from "bun:test";
 import { forwardToClient } from "../response-handler";
 
 describe("forwardToClient worker protocol", () => {
+	// Production passes requestBody as a real ArrayBuffer (RequestBodyContext
+	// .getBuffer() returns ArrayBuffer | null). Encode test bodies the same way
+	// so .slice() yields a transferable ArrayBuffer rather than a Uint8Array.
+	function toArrayBuffer(s: string): ArrayBuffer {
+		const bytes = new TextEncoder().encode(s);
+		return bytes.buffer.slice(
+			bytes.byteOffset,
+			bytes.byteOffset + bytes.byteLength,
+		) as ArrayBuffer;
+	}
+
 	async function waitFor(
 		predicate: () => boolean,
 		timeoutMs = 1000,
@@ -53,7 +64,7 @@ describe("forwardToClient worker protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode("{}"),
+				requestBody: toArrayBuffer("{}"),
 				response: new Response(JSON.stringify({ ok: true }), {
 					status: 200,
 					headers: { "content-type": "application/json" },
@@ -84,7 +95,7 @@ describe("forwardToClient worker protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode(
+				requestBody: toArrayBuffer(
 					JSON.stringify({ system: "test", messages: [] }),
 				),
 				project: "main-thread-project",
@@ -116,7 +127,7 @@ describe("forwardToClient worker protocol", () => {
 				path: "/v1/messages",
 				account: null,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
-				requestBody: new TextEncoder().encode(requestBody),
+				requestBody: toArrayBuffer(requestBody),
 				project: null,
 				response: new Response(JSON.stringify({ ok: true }), {
 					status: 200,
@@ -130,8 +141,14 @@ describe("forwardToClient worker protocol", () => {
 		);
 
 		expect(posted[0].type).toBe("start");
-		expect(posted[0].requestBody).toBe(
-			Buffer.from(requestBody).toString("base64"),
+		// requestBody is now a raw ArrayBuffer (transferred to the worker, then
+		// base64-encoded there at save time) rather than a base64 string. These
+		// are mock workers, so the buffer is not actually detached — we verify
+		// shape and content, not the transfer itself (see the real-Worker smoke
+		// test for that).
+		expect(posted[0].requestBody).toBeInstanceOf(ArrayBuffer);
+		expect(new TextDecoder().decode(posted[0].requestBody as ArrayBuffer)).toBe(
+			requestBody,
 		);
 		expect(posted[0].project).toBeNull();
 	});
@@ -165,7 +182,7 @@ describe("forwardToClient worker protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: toArrayBuffer("{}"),
 					response: new Response(JSON.stringify({ ok: true }), {
 						status: 200,
 						headers: { "content-type": "application/json" },
@@ -206,7 +223,7 @@ describe("forwardToClient worker protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: toArrayBuffer("{}"),
 					response: new Response(body, {
 						status: 200,
 						headers: { "content-type": "text/event-stream" },
@@ -251,7 +268,7 @@ describe("forwardToClient worker protocol", () => {
 					path: "/v1/messages",
 					account: null,
 					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: new TextEncoder().encode("{}"),
+					requestBody: toArrayBuffer("{}"),
 					response: new Response(responseBody, {
 						status: 200,
 						headers: { "content-type": "application/json" },

@@ -101,11 +101,20 @@ export class UsageWorkerController {
 		}, this.startupTimeoutMs);
 	}
 
-	postMessage(msg: WorkerMessage): void {
+	postMessage(msg: WorkerMessage, transfer?: Transferable[]): void {
 		if (this.state !== "ready") {
 			throw new Error(
 				`Cannot post message: worker state is "${this.state}", expected "ready"`,
 			);
+		}
+
+		// Post first, then register the pending-ack. A bad transferable makes
+		// postMessage throw; posting first means a throw can't leave a dangling
+		// ack timer behind. Delivery/ack is async, so there's no race.
+		if (transfer) {
+			this.worker?.postMessage(msg, transfer);
+		} else {
+			this.worker?.postMessage(msg);
 		}
 
 		if (msg.type === "start") {
@@ -119,8 +128,6 @@ export class UsageWorkerController {
 
 			this.pendingAcks.set(messageId, { timer });
 		}
-
-		this.worker?.postMessage(msg);
 	}
 
 	terminate(): Promise<void> {

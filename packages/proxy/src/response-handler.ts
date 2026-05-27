@@ -1,8 +1,9 @@
-import { requestEvents, TIME_CONSTANTS } from "@clankermux/core";
+import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
 import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
@@ -27,19 +28,26 @@ function getMidStreamRateLimitCooldownMs(): number {
 	);
 }
 
-// Must match MAX_REQUEST_BODY_BYTES in post-processor.worker.ts.
-// Cap applied before postMessage to avoid multi-MB structured clones.
-// 4MB so afterburn can see full conversation history for friction analysis.
-const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+const log = new Logger("ResponseHandler");
+const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
 function safePostMessage(
 	worker: UsageWorkerController,
 	message: StartMessage | ChunkMessage | EndMessage,
+	transfer?: Transferable[],
 ): void {
 	try {
-		worker.postMessage(message);
-	} catch (_error) {
-		// Worker not ready or terminated — silently ignore
+		worker.postMessage(message, transfer);
+	} catch (error) {
+		// Worker "not ready" throws are expected during startup/shutdown —
+		// silently ignore those. Log anything else (e.g. DataCloneError from a
+		// bad transferable) at warn level for observability.
+		if (error instanceof Error && !error.message.includes("worker state is")) {
+			const { requestId } = message as { requestId?: string };
+			log.warn(
+				`Unexpected postMessage failure for ${requestId ?? "?"}: ${error.name}: ${error.message}`,
+			);
+		}
 	}
 }
 
@@ -140,14 +148,16 @@ export async function forwardToClient(
 			path,
 			timestamp,
 			requestHeaders: requestHeadersObj,
+			// Fresh capped copy: .slice() returns a NEW ArrayBuffer, safe to
+			// transfer to the worker. Never transfer the caller's `requestBody`
+			// — it may be shared with the failover/replay RequestBodyContext, and
+			// transfer detaches the source buffer.
 			requestBody:
 				shouldStorePayloads && requestBody
-					? Buffer.from(
-							new Uint8Array(requestBody).subarray(
-								0,
-								Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
-							),
-						).toString("base64")
+					? requestBody.slice(
+							0,
+							Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
+						)
 					: null,
 			project: project ?? null,
 			responseStatus: response.status,
@@ -166,7 +176,12 @@ export async function forwardToClient(
 			retryAttempt,
 			failoverAttempts,
 		};
-		safePostMessage(ctx.usageWorker, startMessage);
+		// The transferable IS the requestBody field — move ownership to the
+		// worker (no structured-clone copy) instead of cloning the bytes.
+		const transfer = startMessage.requestBody
+			? [startMessage.requestBody]
+			: undefined;
+		safePostMessage(ctx.usageWorker, startMessage, transfer);
 	}
 
 	// Emit request start event for real-time dashboard

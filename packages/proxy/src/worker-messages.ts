@@ -16,7 +16,7 @@ export interface StartMessage {
 
 	// Request details
 	requestHeaders: Record<string, string>;
-	requestBody: string | null; // base64 encoded
+	requestBody: ArrayBuffer | null; // raw bytes, transferred (base64-encoded in the worker at save time)
 	project: string | null;
 
 	// Response details

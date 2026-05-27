@@ -144,6 +144,10 @@ export const BUFFER_SIZES = {
 
 	// Log file size
 	LOG_FILE_MAX_SIZE: 10 * 1024 * 1024, // 10MB
+
+	// Max request body bytes stored per request (response-handler cap + worker cap).
+	// 4MB so afterburn can see full conversation history for friction analysis.
+	MAX_REQUEST_BODY_BYTES: 4 * 1024 * 1024,
 } as const;
 
 // Network constants
