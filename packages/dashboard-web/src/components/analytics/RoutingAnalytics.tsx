@@ -233,13 +233,13 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="hsl(var(--card))"
-								stroke="hsl(var(--border))"
+								fill="var(--card)"
+								stroke="var(--border)"
 							/>
 							<text
 								x="12"
 								y="17"
-								fill="hsl(var(--foreground))"
+								fill="var(--foreground)"
 								fontSize="12"
 								fontWeight="600"
 							>
@@ -248,7 +248,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							<text
 								x="12"
 								y="31"
-								fill="hsl(var(--muted-foreground))"
+								fill="var(--muted-foreground)"
 								fontSize="11"
 							>
 								{formatNumber(requests)} req
@@ -265,13 +265,13 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="hsl(var(--card))"
-								stroke="hsl(var(--border))"
+								fill="var(--card)"
+								stroke="var(--border)"
 							/>
 							<text
 								x="12"
 								y="17"
-								fill="hsl(var(--foreground))"
+								fill="var(--foreground)"
 								fontSize="12"
 								fontWeight="600"
 							>
@@ -280,7 +280,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							<text
 								x="12"
 								y="31"
-								fill="hsl(var(--muted-foreground))"
+								fill="var(--muted-foreground)"
 								fontSize="11"
 							>
 								{formatNumber(requests)} req
@@ -298,13 +298,13 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width="160"
 								height="38"
 								rx="6"
-								fill="hsl(var(--card))"
-								stroke={OUTCOME_COLORS[outcome] ?? "hsl(var(--border))"}
+								fill="var(--card)"
+								stroke={OUTCOME_COLORS[outcome] ?? "var(--border)"}
 							/>
 							<text
 								x="12"
 								y="17"
-								fill="hsl(var(--foreground))"
+								fill="var(--foreground)"
 								fontSize="12"
 								fontWeight="600"
 							>
@@ -313,7 +313,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							<text
 								x="12"
 								y="31"
-								fill="hsl(var(--muted-foreground))"
+								fill="var(--muted-foreground)"
 								fontSize="11"
 							>
 								{formatNumber(requests)} req
