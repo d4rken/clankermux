@@ -1042,6 +1042,19 @@ const startCleanupInterval = () => {
 		// Run cleanup every 30 seconds
 		cleanupInterval = setInterval(() => {
 			cleanupStaleRequests();
+			// Force a synchronous GC in the worker thread. Bun 1.3.x does not
+			// reclaim the structured-clone backing stores of large postMessage
+			// payloads (request bodies, chunk Uint8Arrays) on its own under a
+			// steady message load — the worker's JSC heap never gets enough idle
+			// time to collect them, so process RSS climbs unbounded (~5 MB/min on
+			// this deployment) with a flat *main-thread* heap. See oven-sh/bun
+			// #5709; the documented workaround is an explicit Bun.gc(true) after
+			// processing. The worker is off the client request path, so the brief
+			// synchronous pause every 30 s is acceptable. Guarded for non-Bun
+			// test/runtime contexts.
+			if (typeof Bun !== "undefined" && typeof Bun.gc === "function") {
+				Bun.gc(true);
+			}
 		}, 30000);
 		// Allow worker to exit if no other work is pending
 		cleanupInterval.unref();
