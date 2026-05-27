@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Logger } from "@clankermux/logger";
 import { EMBEDDED_WORKER_CODE } from "./inline-worker";
 import type {
@@ -24,6 +26,55 @@ interface PendingAck {
 const MAX_RESTARTS = 3;
 const SHUTDOWN_GRACE_MS = 2_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
+
+type UsageWorkerSource =
+	| { kind: "source"; url: string }
+	| { kind: "embedded"; code: string };
+
+function sourceWorkerExists(workerUrl: URL): boolean {
+	if (workerUrl.protocol !== "file:") return false;
+	try {
+		return existsSync(fileURLToPath(workerUrl));
+	} catch {
+		return false;
+	}
+}
+
+export function resolveUsageWorkerSource(
+	options: {
+		embeddedCode?: string;
+		env?: Record<string, string | undefined>;
+		sourceExists?: (workerUrl: URL) => boolean;
+		workerUrl?: URL;
+	} = {},
+): UsageWorkerSource {
+	const embeddedCode = options.embeddedCode ?? EMBEDDED_WORKER_CODE;
+	const env = options.env ?? process.env;
+	const workerUrl =
+		options.workerUrl ?? new URL("./post-processor.worker.ts", import.meta.url);
+	const exists = options.sourceExists ?? sourceWorkerExists;
+
+	const override = env.CLANKERMUX_USE_EMBEDDED_WORKER;
+	if (override === "true") {
+		if (!embeddedCode) {
+			throw new Error(
+				"CLANKERMUX_USE_EMBEDDED_WORKER=true but no embedded worker code is available",
+			);
+		}
+		return { kind: "embedded", code: embeddedCode };
+	}
+	if (override === "false") {
+		return { kind: "source", url: workerUrl.href };
+	}
+
+	if (exists(workerUrl)) {
+		return { kind: "source", url: workerUrl.href };
+	}
+	if (embeddedCode) {
+		return { kind: "embedded", code: embeddedCode };
+	}
+	return { kind: "source", url: workerUrl.href };
+}
 
 /**
  * Resolve the worker startup timeout from `CF_WORKER_STARTUP_TIMEOUT_MS`,
@@ -245,18 +296,17 @@ export class UsageWorkerController {
 
 	private createWorker(): Worker {
 		let w: Worker;
+		const workerSource = resolveUsageWorkerSource();
 
-		if (EMBEDDED_WORKER_CODE) {
-			const workerCode = Buffer.from(EMBEDDED_WORKER_CODE, "base64").toString(
+		if (workerSource.kind === "embedded") {
+			const workerCode = Buffer.from(workerSource.code, "base64").toString(
 				"utf8",
 			);
 			const blob = new Blob([workerCode], { type: "text/javascript" });
 			const workerUrl = URL.createObjectURL(blob);
 			w = new Worker(workerUrl, { smol: true });
 		} else {
-			const workerPath = new URL("./post-processor.worker.ts", import.meta.url)
-				.href;
-			w = new Worker(workerPath, { smol: true });
+			w = new Worker(workerSource.url, { smol: true });
 		}
 
 		// Bun extension — don't keep the process alive for the worker alone
