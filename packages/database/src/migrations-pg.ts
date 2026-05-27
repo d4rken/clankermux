@@ -127,6 +127,7 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			request_id TEXT PRIMARY KEY,
 			strategy TEXT NOT NULL,
 			decision TEXT NOT NULL,
+			affinity_scope TEXT,
 			affinity_key_hash TEXT,
 			selected_account_id TEXT,
 			previous_account_id TEXT,
@@ -393,6 +394,11 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			table: "request_payloads",
 			column: "timestamp",
 			definition: "ALTER TABLE request_payloads ADD COLUMN timestamp BIGINT",
+		},
+		{
+			table: "request_routing",
+			column: "affinity_scope",
+			definition: "ALTER TABLE request_routing ADD COLUMN affinity_scope TEXT",
 		},
 		{
 			table: "oauth_sessions",

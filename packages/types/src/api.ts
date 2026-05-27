@@ -12,6 +12,10 @@ export interface RequestMeta {
 	path: string;
 	timestamp: number;
 	agentUsed?: string | null;
+	/** Stable client conversation/thread key used for cache-affinity routing */
+	affinityKey?: string | null;
+	/** Source of the affinity key; persisted separately for routing analysis */
+	affinityScope?: RequestAffinityScope | null;
 	project?: string | null;
 	headers?: Headers;
 	/** Active combo name (set when combo routing is used) */
@@ -22,9 +26,15 @@ export interface RequestMeta {
 	routing?: RequestRoutingMeta;
 }
 
+export type RequestAffinityScope =
+	| "claude_session"
+	| "codex_thread"
+	| "project";
+
 export interface RequestRoutingMeta {
 	strategy: string;
 	decision: string;
+	affinityScope?: RequestAffinityScope | null;
 	affinityKey?: string | null;
 	selectedAccountId?: string | null;
 	previousAccountId?: string | null;

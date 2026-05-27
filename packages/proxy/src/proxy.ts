@@ -31,6 +31,7 @@ import {
 	validateProviderPath,
 } from "./handlers";
 import { sanitizeProjectName } from "./project-name";
+import { extractRequestAffinity } from "./request-affinity";
 import { UsageWorkerController } from "./usage-worker-controller";
 import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 
@@ -74,7 +75,7 @@ function extractProjectFromRequest(
 	if (!systemPrompt) return null;
 
 	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
 	);
 	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
 	if (sanitizedPath) return sanitizedPath;
@@ -202,6 +203,7 @@ export async function handleProxy(
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
 	const project = extractProjectFromRequest(req.headers, parsedBody);
+	const affinity = extractRequestAffinity(req.headers);
 
 	// Conservative token estimate for context-window-aware routing (B1).
 	// Computed once; used to gate Codex accounts whose mapped model can't fit
@@ -263,6 +265,8 @@ export async function handleProxy(
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.agentUsed = agentUsed;
+	requestMeta.affinityKey = affinity.key;
+	requestMeta.affinityScope = affinity.scope;
 	requestMeta.project = project;
 
 	// 6. Select accounts
@@ -467,6 +471,7 @@ export async function handleProxy(
 					? {
 							strategy: requestMeta.routing.strategy,
 							decision: requestMeta.routing.decision,
+							affinityScope: requestMeta.routing.affinityScope ?? null,
 							affinityKeyHash: null,
 							selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
 							previousAccountId: requestMeta.routing.previousAccountId ?? null,

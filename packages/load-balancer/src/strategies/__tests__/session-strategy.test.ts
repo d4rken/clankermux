@@ -731,7 +731,7 @@ describe("SessionStrategy", () => {
 		});
 	});
 
-	describe("project affinity", () => {
+	describe("cache affinity", () => {
 		it("continues a project's account even when another account has the newest global session", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {
@@ -774,6 +774,104 @@ describe("SessionStrategy", () => {
 			);
 
 			expect(result[0]).toBe(projectAccount);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+			expect(projectMeta.routing?.affinityScope).toBe("project");
+		});
+
+		it("uses explicit Claude session affinity before project affinity", () => {
+			const now = Date.now();
+			const sharedProject = "shared-project";
+			const sessionOneMeta: RequestMeta = {
+				...meta,
+				id: "session-one",
+				affinityKey: "claude-session-one",
+				affinityScope: "claude_session",
+				project: sharedProject,
+			};
+			const sessionTwoMeta: RequestMeta = {
+				...meta,
+				id: "session-two",
+				affinityKey: "claude-session-two",
+				affinityScope: "claude_session",
+				project: sharedProject,
+			};
+
+			const accountA = makeAccount({
+				id: "account-a",
+				name: "account-a",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "account-b",
+				name: "account-b",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("account-a", 10);
+			mockStore.setUtilization("account-b", 80);
+			expect(strategy.select([accountA, accountB], sessionOneMeta)[0]).toBe(
+				accountA,
+			);
+
+			mockStore.setUtilization("account-a", 80);
+			mockStore.setUtilization("account-b", 10);
+			expect(strategy.select([accountA, accountB], sessionTwoMeta)[0]).toBe(
+				accountB,
+			);
+
+			accountB.session_start = now;
+			expect(strategy.select([accountA, accountB], sessionOneMeta)[0]).toBe(
+				accountA,
+			);
+			expect(sessionOneMeta.routing?.affinityScope).toBe("claude_session");
+			expect(sessionOneMeta.routing?.affinityKey).toBe(
+				"claude_session:claude-session-one",
+			);
+		});
+
+		it("uses Codex thread affinity before project affinity", () => {
+			const now = Date.now();
+			const codexMeta: RequestMeta = {
+				...meta,
+				affinityKey: "codex-thread-one",
+				affinityScope: "codex_thread",
+				project: "shared-project",
+			};
+			const accountA = makeAccount({
+				id: "codex-a",
+				name: "codex-a",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "codex-b",
+				name: "codex-b",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("codex-a", 10);
+			mockStore.setUtilization("codex-b", 80);
+			expect(strategy.select([accountA, accountB], codexMeta)[0]).toBe(
+				accountA,
+			);
+
+			accountB.session_start = now;
+			expect(strategy.select([accountA, accountB], codexMeta)[0]).toBe(
+				accountA,
+			);
+			expect(codexMeta.routing?.affinityScope).toBe("codex_thread");
+			expect(codexMeta.routing?.affinityKey).toBe(
+				"codex_thread:codex-thread-one",
+			);
 		});
 
 		it("assigns a new project by priority/utilization instead of inheriting an unrelated active session", () => {

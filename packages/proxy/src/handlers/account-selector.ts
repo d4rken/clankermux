@@ -23,6 +23,22 @@ export function getComboSlotInfo(meta: RequestMeta): ComboSlotInfo | null {
 	return comboSlotInfoMap.get(meta) ?? null;
 }
 
+function getRoutingAffinity(meta: RequestMeta): {
+	key: string | null;
+	scope: RequestMeta["affinityScope"] | null;
+} {
+	if (meta.affinityKey?.trim() && meta.affinityScope) {
+		return {
+			key: `${meta.affinityScope}:${meta.affinityKey.trim()}`,
+			scope: meta.affinityScope,
+		};
+	}
+	if (meta.project?.trim()) {
+		return { key: `project:${meta.project.trim()}`, scope: "project" };
+	}
+	return { key: null, scope: null };
+}
+
 /**
  * Gets accounts ordered by the load balancing strategy
  * @param meta - Request metadata
@@ -111,12 +127,14 @@ export async function selectAccountsForRequest(
 						available ||
 						(isAutoRefreshBypass && (isOveragePaused || isRateLimited));
 					if (allowThrough) {
+						const affinity = getRoutingAffinity(meta);
 						meta.routing = {
 							strategy: "forced",
 							decision: "forced_account",
 							selectedAccountId: forcedAccount.id,
 							candidatesCount: 1,
-							affinityKey: meta.project ? `project:${meta.project}` : null,
+							affinityScope: affinity.scope,
+							affinityKey: affinity.key,
 							previousAccountId: null,
 							failoverReason: null,
 						};
@@ -206,12 +224,14 @@ export async function selectAccountsForRequest(
 					meta.comboName = combo.name;
 
 					if (availableAccounts.length > 0) {
+						const affinity = getRoutingAffinity(meta);
 						meta.routing = {
 							strategy: "combo",
 							decision: "combo",
 							selectedAccountId: availableAccounts[0].id,
 							candidatesCount: availableAccounts.length,
-							affinityKey: meta.project ? `project:${meta.project}` : null,
+							affinityScope: affinity.scope,
+							affinityKey: affinity.key,
 							previousAccountId: null,
 							failoverReason: null,
 						};

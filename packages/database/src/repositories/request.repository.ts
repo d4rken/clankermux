@@ -60,6 +60,7 @@ export interface RequestRoutingData {
 	requestId: string;
 	strategy: string;
 	decision: string;
+	affinityScope?: string | null;
 	affinityKeyHash?: string | null;
 	selectedAccountId?: string | null;
 	previousAccountId?: string | null;
@@ -145,14 +146,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		await this.run(
 			`
 			INSERT INTO request_routing (
-				request_id, strategy, decision, affinity_key_hash,
+				request_id, strategy, decision, affinity_scope, affinity_key_hash,
 				selected_account_id, previous_account_id, candidates_count,
 				failover_attempts, failover_reason, created_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (request_id) DO UPDATE SET
 				strategy = EXCLUDED.strategy,
 				decision = EXCLUDED.decision,
+				affinity_scope = COALESCE(EXCLUDED.affinity_scope, request_routing.affinity_scope),
 				affinity_key_hash = COALESCE(EXCLUDED.affinity_key_hash, request_routing.affinity_key_hash),
 				selected_account_id = COALESCE(EXCLUDED.selected_account_id, request_routing.selected_account_id),
 				previous_account_id = COALESCE(EXCLUDED.previous_account_id, request_routing.previous_account_id),
@@ -165,6 +167,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.requestId,
 				data.strategy,
 				data.decision,
+				data.affinityScope ?? null,
 				data.affinityKeyHash ?? null,
 				data.selectedAccountId ?? null,
 				data.previousAccountId ?? null,

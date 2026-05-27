@@ -158,9 +158,26 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	}
 
 	private getAffinityKey(meta: RequestMeta): string | null {
+		const explicitKey = meta.affinityKey?.trim();
+		if (explicitKey && meta.affinityScope) {
+			return `${meta.affinityScope}:${explicitKey}`;
+		}
 		const project = meta.project?.trim();
 		if (!project) return null;
 		return `project:${project}`;
+	}
+
+	private getAffinityScope(
+		meta: RequestMeta,
+	): RequestMeta["affinityScope"] | null {
+		if (meta.affinityKey?.trim() && meta.affinityScope) {
+			return meta.affinityScope;
+		}
+		return meta.project?.trim() ? "project" : null;
+	}
+
+	private getAffinityLabel(meta: RequestMeta): string {
+		return this.getAffinityScope(meta) ?? "request";
 	}
 
 	private setRoutingMeta(
@@ -177,6 +194,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		meta.routing = {
 			strategy: "session",
 			decision,
+			affinityScope: this.getAffinityScope(meta),
 			affinityKey: options.affinityKey ?? this.getAffinityKey(meta),
 			selectedAccountId: selectedAccount?.id ?? null,
 			previousAccountId: options.previousAccountId ?? null,
@@ -206,7 +224,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	}
 
 	/**
-	 * Resolve the project-affinity map entry for the given request.
+	 * Resolve the cache-affinity map entry for the given request.
 	 *
 	 * Returns one of:
 	 *  - `hit`       — affined account is available; use it.
@@ -218,7 +236,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 *  - `reassign`  — affined account is durably gone (real 5h/7d exhaustion,
 	 *                   manual pause, session expired, removed). Delete the
 	 *                   affinity entry and pick a fresh account.
-	 *  - `miss`      — no affinity entry exists for this project yet.
+	 *  - `miss`      — no affinity entry exists for this key yet.
 	 */
 	private resolveAffinity(
 		accounts: Account[],
@@ -258,14 +276,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		// Transient unavailability — keep the affinity slot reserved so the
-		// project snaps back to this account (and its warmed prompt cache)
+		// affinity snaps back to this account (and its warmed prompt cache)
 		// once the cooldown lifts.
 		return { kind: "hold", heldAccountId: entry.accountId };
 	}
 
 	/**
 	 * Determine whether the account's current unavailability justifies
-	 * permanently breaking project affinity (reassign) vs temporarily
+	 * permanently breaking cache affinity (reassign) vs temporarily
 	 * serving elsewhere while holding the slot (hold).
 	 *
 	 * Affinity-breaking ("durable") conditions:
@@ -512,7 +530,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					this.resetSessionIfExpired(affinedAccount);
 					this.rememberAffinity(meta, affinedAccount, now);
 					this.log.info(
-						`Continuing project affinity for ${meta.project} on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
+						`Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
 					);
 					const others = accounts
 						.filter(
@@ -521,7 +539,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 						.sort((a, b) => a.priority - b.priority);
 					this.setRoutingMeta(
 						meta,
-						"project_affinity_hit",
+						"affinity_hit",
 						affinedAccount,
 						others.length + 1,
 						{ affinityKey, previousAccountId },
@@ -533,7 +551,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				// available account and re-pin affinity there. (The user's
 				// explicit priority ranking takes precedence over cache warmth.)
 				this.log.info(
-					`Skipping project affinity on account ${affinedAccount.name} (priority: ${affinedAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
+					`Skipping ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (priority: ${affinedAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
 				);
 				const available = this.sortAvailableAccounts(
 					accounts,
@@ -545,7 +563,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.rememberAffinity(meta, chosenAccount, now);
 				this.setRoutingMeta(
 					meta,
-					"project_affinity_reassigned",
+					"affinity_reassigned",
 					chosenAccount,
 					available.length,
 					{ affinityKey, previousAccountId },
@@ -556,7 +574,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 			// The affined account is transiently unavailable (short 429, 529
 			// overload, probe cooldown). Serve this request from the next best
-			// candidate WITHOUT overwriting affinity, so the project snaps back
+			// candidate WITHOUT overwriting affinity, so the key snaps back
 			// to its warmed account once the cooldown lifts. Switching providers
 			// here is futile for server-wide overloads anyway.
 			if (resolution.kind === "hold") {
@@ -568,13 +586,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const chosenAccount = available[0];
 				this.resetSessionIfExpired(chosenAccount);
 				// NOTE: deliberately NOT calling rememberAffinity — the held
-				// account keeps its claim on this project.
+				// account keeps its claim on this affinity key.
 				this.log.info(
-					`Holding project affinity for ${meta.project} (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request`,
+					`Holding ${this.getAffinityLabel(meta)} affinity (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request`,
 				);
 				this.setRoutingMeta(
 					meta,
-					"project_affinity_hold",
+					"affinity_hold",
 					chosenAccount,
 					available.length,
 					{ affinityKey, previousAccountId },
@@ -603,8 +621,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.setRoutingMeta(
 					meta,
 					resolution.kind === "reassign"
-						? "project_affinity_reassigned"
-						: "project_affinity_miss",
+						? "affinity_reassigned"
+						: "affinity_miss",
 					chosenAccount,
 					available.length,
 					{ affinityKey, previousAccountId },

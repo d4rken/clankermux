@@ -57,6 +57,7 @@ export interface StartMessage {
 export interface RequestRoutingMessage {
 	strategy: string;
 	decision: string;
+	affinityScope: import("@clankermux/types").RequestAffinityScope | null;
 	affinityKeyHash: string | null;
 	selectedAccountId: string | null;
 	previousAccountId: string | null;

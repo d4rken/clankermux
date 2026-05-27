@@ -193,6 +193,7 @@ export async function forwardToClient(
 				? {
 						strategy: routing.strategy,
 						decision: routing.decision,
+						affinityScope: routing.affinityScope ?? null,
 						affinityKeyHash: hashRoutingAffinityKey(routing.affinityKey),
 						selectedAccountId: account?.id ?? routing.selectedAccountId ?? null,
 						previousAccountId: routing.previousAccountId ?? null,

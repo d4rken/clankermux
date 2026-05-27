@@ -178,6 +178,7 @@ export function ensureSchema(db: Database): void {
 			request_id TEXT PRIMARY KEY,
 			strategy TEXT NOT NULL,
 			decision TEXT NOT NULL,
+			affinity_scope TEXT,
 			affinity_key_hash TEXT,
 			selected_account_id TEXT,
 			previous_account_id TEXT,
@@ -414,6 +415,11 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		.prepare("PRAGMA table_info(request_payloads)")
 		.all() as Array<{ name: string }>;
 	const requestPayloadsColumnNames = requestPayloadsInfo.map((col) => col.name);
+
+	const requestRoutingInfo = db
+		.prepare("PRAGMA table_info(request_routing)")
+		.all() as Array<{ name: string }>;
+	const requestRoutingColumnNames = requestRoutingInfo.map((col) => col.name);
 
 	const apiKeysInfo = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
 		name: string;
@@ -930,6 +936,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info(
 				"Added timestamp column to request_payloads table and backfilled from requests",
 			);
+		}
+
+		if (!requestRoutingColumnNames.includes("affinity_scope")) {
+			db.prepare(
+				"ALTER TABLE request_routing ADD COLUMN affinity_scope TEXT",
+			).run();
+			log.info("Added affinity_scope column to request_routing table");
 		}
 
 		// Drop role column from api_keys if it exists (cleanup migration).

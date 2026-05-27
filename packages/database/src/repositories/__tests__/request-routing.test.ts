@@ -41,7 +41,8 @@ describe("RequestRepository.saveRouting", () => {
 		await repo.saveRouting({
 			requestId: "req-routing",
 			strategy: "session",
-			decision: "project_affinity_hit",
+			decision: "affinity_hit",
+			affinityScope: "claude_session",
 			affinityKeyHash: "hash-1",
 			selectedAccountId: "account-a",
 			previousAccountId: "account-a",
@@ -57,6 +58,7 @@ describe("RequestRepository.saveRouting", () => {
 					request_id: string;
 					strategy: string;
 					decision: string;
+					affinity_scope: string | null;
 					affinity_key_hash: string | null;
 					selected_account_id: string | null;
 					previous_account_id: string | null;
@@ -72,7 +74,8 @@ describe("RequestRepository.saveRouting", () => {
 		expect(row).toEqual({
 			request_id: "req-routing",
 			strategy: "session",
-			decision: "project_affinity_hit",
+			decision: "affinity_hit",
+			affinity_scope: "claude_session",
 			affinity_key_hash: "hash-1",
 			selected_account_id: "account-a",
 			previous_account_id: "account-a",
@@ -88,7 +91,7 @@ describe("RequestRepository.saveRouting", () => {
 		await repo.saveRouting({
 			requestId: "req-delete",
 			strategy: "session",
-			decision: "project_affinity_miss",
+			decision: "affinity_miss",
 			createdAt: Date.now(),
 		});
 

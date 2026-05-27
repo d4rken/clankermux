@@ -164,7 +164,7 @@ function extractProjectFromRequest(startMessage: StartMessage): string | null {
 	if (!systemPrompt) return null;
 
 	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
 	);
 	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
 	if (sanitizedPath) return sanitizedPath;
@@ -790,6 +790,7 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 					requestId: startMessage.requestId,
 					strategy: startMessage.routing.strategy,
 					decision: startMessage.routing.decision,
+					affinityScope: startMessage.routing.affinityScope,
 					affinityKeyHash: startMessage.routing.affinityKeyHash,
 					selectedAccountId: startMessage.routing.selectedAccountId,
 					previousAccountId: startMessage.routing.previousAccountId,
