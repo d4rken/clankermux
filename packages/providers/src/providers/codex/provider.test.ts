@@ -578,7 +578,7 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).toContain('"context_window"');
 		expect(messageDeltaLine).toContain('"cache_read_input_tokens":25');
 		expect(messageDeltaLine).toContain('"cache_creation_input_tokens":10');
-		expect(messageDeltaLine).toContain('"context_window_size":272000');
+		expect(messageDeltaLine).toContain('"context_window_size":200000');
 	});
 
 	it("omits context_window when model metadata is unavailable", async () => {
@@ -662,11 +662,11 @@ describe("CodexProvider.processResponse", () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
 			...eventLine("response.created", {
-				response: { id: "resp_test", model: "gpt-5.4" },
+				response: { id: "resp_test", model: "gpt-5.5" },
 			}),
 			...eventLine("response.completed", {
 				response: {
-					model: "gpt-5.4",
+					model: "gpt-5.5",
 					usage: {
 						input_tokens: 42,
 						output_tokens: 7,
@@ -693,7 +693,7 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).not.toBeUndefined();
 		expect(messageDeltaLine).toContain('"cache_creation_input_tokens":9');
 		expect(messageDeltaLine).toContain('"context_window"');
-		expect(messageDeltaLine).toContain('"context_window_size":272000');
+		expect(messageDeltaLine).toContain('"context_window_size":400000');
 	});
 
 	it("treats successful missing-content-type SSE bodies as streams", async () => {

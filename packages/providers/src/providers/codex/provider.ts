@@ -1,4 +1,5 @@
 import {
+	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	ValidationError,
 	validateEndpointUrl,
@@ -54,16 +55,14 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 
 // Default model mapping: Anthropic model name prefixes → Codex model names
 const DEFAULT_MODEL_MAP: Record<string, string> = {
-	opus: "gpt-5.3-codex",
+	opus: "gpt-5.5",
 	sonnet: "gpt-5.3-codex",
 	haiku: "gpt-5.4-mini",
 };
 
-const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-	"gpt-5.3-codex": 272_000,
-	"gpt-5.4": 272_000,
-	"gpt-5.4-mini": 272_000,
-};
+// MODEL_CONTEXT_WINDOWS is the shared source of truth from @clankermux/core.
+// It feeds both routing-side context-window gating and the display-metadata
+// reuse in extractContextWindow() below.
 
 // ── Codex Responses API types ─────────────────────────────────────────────────
 

@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+	codexAccountFitsRequest,
+	estimateRequestTokens,
 	getAllowedModelsMessage,
 	getModelFamily,
 	isValidClaudeModel,
+	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	parseModelMappings,
+	resolveModelContextWindow,
+	SAFETY_MARGIN,
 } from "@clankermux/core";
 import type { Account } from "@clankermux/types";
 
@@ -260,5 +265,182 @@ describe("Model Validation Utilities", () => {
 		expect(message).toContain("opus");
 		expect(message).toContain("sonnet");
 		expect(message).toContain("haiku");
+	});
+});
+
+// ── Context-window-aware routing tests ───────────────────────────────────────
+
+function makeCodexAccount(overrides: Partial<Account> = {}): Account {
+	return {
+		id: "codex-1",
+		name: "codex-test",
+		provider: "codex",
+		api_key: null,
+		refresh_token: null,
+		access_token: null,
+		expires_at: null,
+		created_at: Date.now(),
+		request_count: 0,
+		total_requests: 0,
+		priority: 20,
+		model_mappings: null,
+		custom_endpoint: null,
+		...overrides,
+	};
+}
+
+describe("MODEL_CONTEXT_WINDOWS", () => {
+	test("contains expected models with positive window sizes", () => {
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.5"]).toBe(400_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex"]).toBe(200_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(200_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5-codex"]).toBe(400_000);
+	});
+
+	test("omits experimental/compaction models", () => {
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBeUndefined();
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.2-codex"]).toBeUndefined();
+	});
+});
+
+describe("resolveModelContextWindow", () => {
+	test("returns window for known model", () => {
+		expect(resolveModelContextWindow("gpt-5.5")).toBe(400_000);
+	});
+
+	test("returns undefined for unknown model", () => {
+		expect(resolveModelContextWindow("gpt-5.4")).toBeUndefined();
+		expect(resolveModelContextWindow("unknown-model")).toBeUndefined();
+	});
+});
+
+describe("estimateRequestTokens", () => {
+	test("returns 0 for null/undefined body", () => {
+		expect(estimateRequestTokens(null)).toBe(0);
+		expect(estimateRequestTokens(undefined)).toBe(0);
+	});
+
+	test("estimate is monotonically increasing with body size", () => {
+		const small = { messages: [{ role: "user", content: "hi" }] };
+		const medium = {
+			messages: [{ role: "user", content: "a".repeat(1000) }],
+		};
+		const large = {
+			messages: [{ role: "user", content: "a".repeat(100_000) }],
+		};
+
+		const estSmall = estimateRequestTokens(small);
+		const estMedium = estimateRequestTokens(medium);
+		const estLarge = estimateRequestTokens(large);
+
+		expect(estSmall).toBeGreaterThan(0);
+		expect(estMedium).toBeGreaterThan(estSmall);
+		expect(estLarge).toBeGreaterThan(estMedium);
+	});
+
+	test("includes max_tokens reserve", () => {
+		const body = { messages: [{ role: "user", content: "hello" }] };
+		const bodyWithMax = { ...body, max_tokens: 4096 };
+
+		const estWithout = estimateRequestTokens(body);
+		const estWith = estimateRequestTokens(bodyWithMax);
+
+		// Adding max_tokens reserves at least max_tokens extra (the serialized
+		// "max_tokens":4096 also adds a few input chars, so it's >= not ==).
+		expect(estWith).toBeGreaterThanOrEqual(estWithout + 4096);
+	});
+
+	test("ignores non-numeric max_tokens (no reserve added)", () => {
+		const bodyWithBadMax = {
+			messages: [{ role: "user", content: "hello" }],
+			max_tokens: "not a number",
+		};
+		// A non-numeric max_tokens contributes no output reserve; the estimate
+		// is purely the input-char estimate (no +Number jump).
+		const est = estimateRequestTokens(
+			bodyWithBadMax as unknown as Record<string, unknown>,
+		);
+		const inputOnly = Math.ceil(JSON.stringify(bodyWithBadMax).length / 3.0);
+		expect(est).toBe(inputOnly);
+	});
+});
+
+describe("codexAccountFitsRequest", () => {
+	test("returns true when estimate is under window * SAFETY_MARGIN", () => {
+		// gpt-5.5: 400K * 0.85 = 340K → floor = 340000
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 340_000)).toBe(
+			true,
+		);
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
+			true,
+		);
+	});
+
+	test("returns false when estimate exceeds window * SAFETY_MARGIN", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		// 400K * 0.85 = 340000
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 340_001)).toBe(
+			false,
+		);
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 500_000)).toBe(
+			false,
+		);
+	});
+
+	test("returns true for unknown model (no false exclusion)", () => {
+		// gpt-5.4 is intentionally omitted from the table
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.4" }),
+		});
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
+			true,
+		);
+	});
+
+	test("respects stored model mapping over defaults", () => {
+		// Stored mapping: opus→gpt-5.3-codex (200K window)
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex" }),
+		});
+		// 200K * 0.85 = 170000
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 170_000)).toBe(
+			true,
+		);
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 170_001)).toBe(
+			false,
+		);
+	});
+
+	test("uses default mapping when no stored mapping exists", () => {
+		// No mappings → mapModelName passes through unchanged
+		// "claude-opus-4-7" contains "opus" but without a codex mapping,
+		// it passes through unchanged → unknown model → fits
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
+			true,
+		);
+	});
+
+	test("SAFETY_MARGIN is 0.85", () => {
+		expect(SAFETY_MARGIN).toBe(0.85);
+	});
+
+	test("boundary: exactly at floor(window * SAFETY_MARGIN) is accepted", () => {
+		// gpt-5.3-codex: 200K * 0.85 = 170000 exactly
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+		});
+		const boundary = Math.floor(200_000 * SAFETY_MARGIN);
+		expect(
+			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary + 1),
+		).toBe(false);
 	});
 });

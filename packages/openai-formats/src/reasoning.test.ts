@@ -31,6 +31,13 @@ describe("reasoning effort support", () => {
 			"high",
 			"xhigh",
 		]);
+		expect(getSupportedReasoningEfforts("gpt-5.5")).toEqual([
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
 		expect(getSupportedReasoningEfforts("gpt-5.4-mini")).toEqual([
 			"low",
 			"medium",

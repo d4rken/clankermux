@@ -1,5 +1,9 @@
 import {
+	codexAccountFitsRequest,
+	estimateRequestTokens,
+	mapModelName,
 	requestEvents,
+	resolveModelContextWindow,
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@clankermux/core";
@@ -8,6 +12,7 @@ import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
 	createUsageThrottledResponse,
@@ -209,6 +214,11 @@ export async function handleProxy(
 	const requestModel = requestBodyContext.getModel();
 	const project = extractProjectFromRequest(req.headers, parsedBody);
 
+	// Conservative token estimate for context-window-aware routing (B1).
+	// Computed once; used to gate Codex accounts whose mapped model can't fit
+	// the request (B3) and to build the context_window_exceeded error (B4).
+	const requestTokenEstimate = estimateRequestTokens(parsedBody);
+
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
 		if (parsedBody) {
@@ -308,11 +318,89 @@ export async function handleProxy(
 		return { available, throttled };
 	};
 
-	const { available: accounts, throttled: throttledAccounts } =
+	const { available: postThrottleAccounts, throttled: throttledAccounts } =
 		applyUsageThrottling(selectedAccounts);
+
+	// 6b. Context-window gate — exclude Codex accounts whose mapped model
+	// can't fit the request (B3). Non-codex accounts always pass. When a combo
+	// slot is active for the account, the gate evaluates against the slot's
+	// model override instead of the request's family model (review C3). Force-
+	// routed requests are gated too — force-route bypasses account *selection*,
+	// not the size safety check.
+	const contextExcludedAccounts: Account[] = [];
+
+	/**
+	 * Apply context-window gate to a list of accounts.
+	 * @param candidates Candidate accounts to filter
+	 * @param comboInfo  Optional combo slot info for model override lookup
+	 * @returns Accounts that pass the gate
+	 */
+	const applyContextWindowGate = (
+		candidates: Account[],
+		comboInfo?: {
+			slots: Array<{ accountId: string; modelOverride: string }>;
+		} | null,
+	): Account[] => {
+		const passed: Account[] = [];
+		for (const account of candidates) {
+			if (account.provider !== "codex") {
+				passed.push(account);
+				continue;
+			}
+
+			// Determine the effective model for this account: combo slot
+			// override if available, otherwise the request model.
+			let modelForGate =
+				requestModel ?? "claude-sonnet-4-5"; /* safe fallback — family match */
+			if (comboInfo) {
+				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
+				if (slot?.modelOverride) {
+					modelForGate = slot.modelOverride;
+				}
+			}
+
+			if (
+				!codexAccountFitsRequest(account, modelForGate, requestTokenEstimate)
+			) {
+				const target = mapModelName(modelForGate, account);
+				const window = resolveModelContextWindow(target);
+				log.info(
+					`Context-window gate: excluding Codex account "${account.name}" ` +
+						`(model=${modelForGate}, target=${target}, window=${window ?? "unknown"}, ` +
+						`estimate=${requestTokenEstimate})`,
+				);
+				// Track for error-response purposes (deduplicate by id)
+				if (!contextExcludedAccounts.some((a) => a.id === account.id)) {
+					contextExcludedAccounts.push(account);
+				}
+				continue;
+			}
+			passed.push(account);
+		}
+		return passed;
+	};
+
+	// Combo slot info (if any) is populated by selectAccountsForRequest above,
+	// so it's available to the gate for combo-aware model override evaluation.
+	const initialComboInfo = getComboSlotInfo(requestMeta);
+	const accounts = applyContextWindowGate(
+		postThrottleAccounts,
+		initialComboInfo,
+	);
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
+		// If the pool was emptied specifically by the context-window gate
+		// (and there were Codex accounts that would have been available
+		// otherwise), return a 400 context_window_exceeded instead of 503.
+		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
+			return createContextWindowExceededResponse(
+				requestTokenEstimate,
+				contextExcludedAccounts,
+				requestModel ?? "unknown",
+			);
+		}
+
 		if (throttledAccounts.length > 0) {
 			return createUsageThrottledResponse(throttledAccounts);
 		}
@@ -483,7 +571,7 @@ export async function handleProxy(
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(selectedFallbackAccounts);
-		fallbackAccounts = filteredFallbackAccounts;
+		fallbackAccounts = applyContextWindowGate(filteredFallbackAccounts);
 
 		if (fallbackAccounts.length > 0) {
 			log.info(
