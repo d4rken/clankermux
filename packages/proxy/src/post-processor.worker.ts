@@ -16,6 +16,7 @@ import { formatCost } from "@clankermux/ui-common";
 import model from "@dqbd/tiktoken/encoders/cl100k_base.json";
 import { init, Tiktoken } from "@dqbd/tiktoken/lite/init";
 import { EMBEDDED_TIKTOKEN_WASM } from "./embedded-tiktoken-wasm";
+import { sanitizeProjectName } from "./project-name";
 import { combineChunks } from "./stream-tee";
 import type {
 	AckMessage,
@@ -133,23 +134,6 @@ function shouldLogRequest(path: string, status: number): boolean {
 	return true;
 }
 
-// Project names are persisted to a single TEXT column and surfaced in the UI.
-// Cap length and strip control chars so a hostile system prompt can't smuggle
-// newlines, ANSI escapes, or megabyte-long blobs into the database.
-const PROJECT_NAME_MAX_LEN = 64;
-
-function sanitizeProjectName(raw: string | undefined | null): string | null {
-	if (!raw) return null;
-	// Strip ASCII control chars (incl. newlines/tabs) — keep Unicode letters,
-	// dashes, dots, and spaces that real project directories use.
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
-	if (!cleaned) return null;
-	return cleaned.length > PROJECT_NAME_MAX_LEN
-		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
-		: cleaned;
-}
-
 /**
  * Extract a project name from a Claude API request.
  *
@@ -180,7 +164,7 @@ function extractProjectFromRequest(startMessage: StartMessage): string | null {
 	if (!systemPrompt) return null;
 
 	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
 	);
 	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
 	if (sanitizedPath) return sanitizedPath;
@@ -801,6 +785,21 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				state.billingType,
 				startMessage.comboName || null,
 			);
+			if (startMessage.routing) {
+				await dbOps.saveRequestRouting({
+					requestId: startMessage.requestId,
+					strategy: startMessage.routing.strategy,
+					decision: startMessage.routing.decision,
+					affinityScope: startMessage.routing.affinityScope,
+					affinityKeyHash: startMessage.routing.affinityKeyHash,
+					selectedAccountId: startMessage.routing.selectedAccountId,
+					previousAccountId: startMessage.routing.previousAccountId,
+					candidatesCount: startMessage.routing.candidatesCount,
+					failoverAttempts: startMessage.failoverAttempts,
+					failoverReason: startMessage.routing.failoverReason,
+					createdAt: startMessage.timestamp,
+				});
+			}
 		} catch (error) {
 			log.error(`Failed to save request for ${startMessage.requestId}:`, error);
 		}

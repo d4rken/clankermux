@@ -122,6 +122,29 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
 	);
 
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS request_routing (
+			request_id TEXT PRIMARY KEY,
+			strategy TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			affinity_scope TEXT,
+			affinity_key_hash TEXT,
+			selected_account_id TEXT,
+			previous_account_id TEXT,
+			candidates_count INTEGER,
+			failover_attempts INTEGER DEFAULT 0,
+			failover_reason TEXT,
+			created_at BIGINT NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_decision ON request_routing(decision, created_at DESC)`,
+	);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
+	);
+
 	// Create request_payloads table
 	await adapter.unsafe(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
@@ -371,6 +394,11 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			table: "request_payloads",
 			column: "timestamp",
 			definition: "ALTER TABLE request_payloads ADD COLUMN timestamp BIGINT",
+		},
+		{
+			table: "request_routing",
+			column: "affinity_scope",
+			definition: "ALTER TABLE request_routing ADD COLUMN affinity_scope TEXT",
 		},
 		{
 			table: "oauth_sessions",

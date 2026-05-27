@@ -21,7 +21,7 @@ export function sanitizeProxyHeaders(original: Headers): Headers {
  * analytics.
  *
  * Removes: accept-encoding, content-encoding, transfer-encoding, content-length,
- * authorization, x-api-key, cookie
+ * authorization, x-api-key, cookie, and stable client identity headers.
  */
 export function sanitizeRequestHeaders(original: Headers): Headers {
 	const h = new Headers(original);
@@ -33,6 +33,17 @@ export function sanitizeRequestHeaders(original: Headers): Headers {
 	h.delete("authorization");
 	h.delete("x-api-key");
 	h.delete("cookie");
+	// Strip stable client/session identifiers from persisted request payloads.
+	h.delete("x-claude-code-session-id");
+	h.delete("thread-id");
+	h.delete("session-id");
+	h.delete("x-client-request-id");
+	h.delete("x-codex-installation-id");
+	h.delete("x-codex-window-id");
+	h.delete("x-codex-turn-state");
+	h.delete("chatgpt-account-id");
+	h.delete("traceparent");
+	h.delete("tracestate");
 	return h;
 }
 

@@ -30,6 +30,7 @@ import { OAuthRepository } from "./repositories/oauth.repository";
 import {
 	type RequestData,
 	RequestRepository,
+	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
@@ -837,6 +838,14 @@ OAuth tokens will need to be re-authenticated.
 				}),
 			this.retryConfig,
 			"saveRequest",
+		);
+	}
+
+	async saveRequestRouting(data: RequestRoutingData): Promise<void> {
+		await withDatabaseRetry(
+			() => this.requests.saveRouting(data),
+			this.retryConfig,
+			"saveRequestRouting",
 		);
 	}
 

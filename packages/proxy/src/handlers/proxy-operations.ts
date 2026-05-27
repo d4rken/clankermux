@@ -408,6 +408,7 @@ export async function proxyUnauthenticated(
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
+				routing: requestMeta.routing ?? null,
 			},
 			ctx,
 		);
@@ -958,6 +959,7 @@ export async function proxyWithAccount(
 						comboName: requestMeta.comboName,
 						apiKeyId,
 						apiKeyName,
+						routing: requestMeta.routing ?? null,
 					},
 					{ ...ctx, provider },
 				);
@@ -983,6 +985,7 @@ export async function proxyWithAccount(
 				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
+				routing: requestMeta.routing ?? null,
 			},
 			{ ...ctx, provider },
 		);

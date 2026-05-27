@@ -135,6 +135,16 @@ export class LeastUsedStrategy implements LoadBalancingStrategy {
 			`Selected ${sorted.length} account(s) by least-used (primary ${primary.name}): ${sorted.map((a) => a.name).join(", ")}`,
 		);
 
+		_meta.routing = {
+			strategy: "least-used",
+			decision: "least_used",
+			selectedAccountId: primary.id,
+			candidatesCount: sorted.length,
+			affinityKey: null,
+			previousAccountId: null,
+			failoverReason: null,
+		};
+
 		return sorted;
 	}
 

@@ -731,6 +731,295 @@ describe("SessionStrategy", () => {
 		});
 	});
 
+	describe("cache affinity", () => {
+		it("continues a project's account even when another account has the newest global session", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "example-project",
+			};
+
+			const projectAccount = makeAccount({
+				id: "project-account",
+				name: "project-account",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 10 * 60 * 1000,
+				session_request_count: 10,
+				priority: 0,
+			});
+			const newerGlobalSession = makeAccount({
+				id: "newer-global-session",
+				name: "newer-global-session",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 2,
+				priority: 0,
+			});
+
+			// First request establishes the project affinity.
+			expect(
+				strategy.select([projectAccount, newerGlobalSession], projectMeta)[0],
+			).toBe(projectAccount);
+
+			// A later request from another project made this account the newest
+			// global session. The original project must still route to the account
+			// that warmed its prompt cache.
+			newerGlobalSession.session_start = now;
+
+			const result = strategy.select(
+				[projectAccount, newerGlobalSession],
+				projectMeta,
+			);
+
+			expect(result[0]).toBe(projectAccount);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+			expect(projectMeta.routing?.affinityScope).toBe("project");
+		});
+
+		it("uses explicit Claude session affinity before project affinity", () => {
+			const now = Date.now();
+			const sharedProject = "shared-project";
+			const sessionOneMeta: RequestMeta = {
+				...meta,
+				id: "session-one",
+				affinityKey: "claude-session-one",
+				affinityScope: "claude_session",
+				project: sharedProject,
+			};
+			const sessionTwoMeta: RequestMeta = {
+				...meta,
+				id: "session-two",
+				affinityKey: "claude-session-two",
+				affinityScope: "claude_session",
+				project: sharedProject,
+			};
+
+			const accountA = makeAccount({
+				id: "account-a",
+				name: "account-a",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "account-b",
+				name: "account-b",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("account-a", 10);
+			mockStore.setUtilization("account-b", 80);
+			expect(strategy.select([accountA, accountB], sessionOneMeta)[0]).toBe(
+				accountA,
+			);
+
+			mockStore.setUtilization("account-a", 80);
+			mockStore.setUtilization("account-b", 10);
+			expect(strategy.select([accountA, accountB], sessionTwoMeta)[0]).toBe(
+				accountB,
+			);
+
+			accountB.session_start = now;
+			expect(strategy.select([accountA, accountB], sessionOneMeta)[0]).toBe(
+				accountA,
+			);
+			expect(sessionOneMeta.routing?.affinityScope).toBe("claude_session");
+			expect(sessionOneMeta.routing?.affinityKey).toBe(
+				"claude_session:claude-session-one",
+			);
+		});
+
+		it("uses Codex thread affinity before project affinity", () => {
+			const now = Date.now();
+			const codexMeta: RequestMeta = {
+				...meta,
+				affinityKey: "codex-thread-one",
+				affinityScope: "codex_thread",
+				project: "shared-project",
+			};
+			const accountA = makeAccount({
+				id: "codex-a",
+				name: "codex-a",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "codex-b",
+				name: "codex-b",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("codex-a", 10);
+			mockStore.setUtilization("codex-b", 80);
+			expect(strategy.select([accountA, accountB], codexMeta)[0]).toBe(
+				accountA,
+			);
+
+			accountB.session_start = now;
+			expect(strategy.select([accountA, accountB], codexMeta)[0]).toBe(
+				accountA,
+			);
+			expect(codexMeta.routing?.affinityScope).toBe("codex_thread");
+			expect(codexMeta.routing?.affinityKey).toBe(
+				"codex_thread:codex-thread-one",
+			);
+		});
+
+		it("assigns a new project by priority/utilization instead of inheriting an unrelated active session", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "new-project",
+			};
+
+			const unrelatedActive = makeAccount({
+				id: "unrelated-active",
+				name: "unrelated-active",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 20,
+				priority: 0,
+			});
+			const lowerUtil = makeAccount({
+				id: "lower-util",
+				name: "lower-util",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+
+			mockStore.setUtilization("unrelated-active", 80);
+			mockStore.setUtilization("lower-util", 10);
+
+			const result = strategy.select([unrelatedActive, lowerUtil], projectMeta);
+
+			expect(result[0]).toBe(lowerUtil);
+		});
+
+		it("reassigns project affinity on a long (5h) rate-limit exhaustion and does not snap back", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "exhausted-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-after-affinity",
+				name: "healthy-after-affinity",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// Real 5h usage-window exhaustion — account parked for hours.
+			affined.rate_limited_until = now + 5 * 60 * 60 * 1000;
+			affined.rate_limited_reason = "upstream_429_with_reset";
+			const result = strategy.select([affined, healthy], projectMeta);
+
+			expect(result[0]).toBe(healthy);
+			expect(result).not.toContain(affined);
+
+			// The cooldown lifts, but affinity was permanently reassigned to
+			// healthy — the project must NOT snap back to the exhausted account.
+			affined.rate_limited_until = null;
+			affined.rate_limited_reason = null;
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+		});
+
+		it("holds project affinity through a short 429 cooldown and snaps back on recovery", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "throttled-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-after-affinity",
+				name: "healthy-after-affinity",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// Short per-minute throttle — resolves in seconds; switching wastes
+			// the warmed prompt cache. Serve elsewhere this request but hold the
+			// affinity slot.
+			affined.rate_limited_until = now + 60_000;
+			affined.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+
+			// Cooldown lifts → the project snaps back to its warmed account.
+			affined.rate_limited_until = null;
+			affined.rate_limited_reason = null;
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+		});
+
+		it("holds project affinity through a 529 overload regardless of cooldown length", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "overloaded-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-after-affinity",
+				name: "healthy-after-affinity",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// 529 overloaded is server-wide; switching to another account of the
+			// same provider doesn't help. Hold affinity even though the cooldown
+			// (30 min) exceeds the reassign threshold.
+			affined.rate_limited_until = now + 30 * 60 * 1000;
+			affined.rate_limited_reason = "upstream_529_overloaded_with_reset";
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+
+			// Overload clears → snap back to the warmed account.
+			affined.rate_limited_until = null;
+			affined.rate_limited_reason = null;
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+		});
+	});
+
 	describe("peek auto-unpause parity with select", () => {
 		// These mirror the auto-unpause path inside select(): a paused
 		// auto-fallback account with safe pause_reason and an elapsed

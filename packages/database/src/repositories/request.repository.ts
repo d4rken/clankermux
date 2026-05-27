@@ -56,6 +56,20 @@ export interface RequestData {
 	};
 }
 
+export interface RequestRoutingData {
+	requestId: string;
+	strategy: string;
+	decision: string;
+	affinityScope?: string | null;
+	affinityKeyHash?: string | null;
+	selectedAccountId?: string | null;
+	previousAccountId?: string | null;
+	candidatesCount?: number | null;
+	failoverAttempts?: number | null;
+	failoverReason?: string | null;
+	createdAt?: number;
+}
+
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
@@ -124,6 +138,43 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.project || null,
 				data.billingType || null,
 				data.comboName || null,
+			],
+		);
+	}
+
+	async saveRouting(data: RequestRoutingData): Promise<void> {
+		await this.run(
+			`
+			INSERT INTO request_routing (
+				request_id, strategy, decision, affinity_scope, affinity_key_hash,
+				selected_account_id, previous_account_id, candidates_count,
+				failover_attempts, failover_reason, created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (request_id) DO UPDATE SET
+				strategy = EXCLUDED.strategy,
+				decision = EXCLUDED.decision,
+				affinity_scope = COALESCE(EXCLUDED.affinity_scope, request_routing.affinity_scope),
+				affinity_key_hash = COALESCE(EXCLUDED.affinity_key_hash, request_routing.affinity_key_hash),
+				selected_account_id = COALESCE(EXCLUDED.selected_account_id, request_routing.selected_account_id),
+				previous_account_id = COALESCE(EXCLUDED.previous_account_id, request_routing.previous_account_id),
+				candidates_count = COALESCE(EXCLUDED.candidates_count, request_routing.candidates_count),
+				failover_attempts = EXCLUDED.failover_attempts,
+				failover_reason = COALESCE(EXCLUDED.failover_reason, request_routing.failover_reason),
+				created_at = COALESCE(request_routing.created_at, EXCLUDED.created_at)
+		`,
+			[
+				data.requestId,
+				data.strategy,
+				data.decision,
+				data.affinityScope ?? null,
+				data.affinityKeyHash ?? null,
+				data.selectedAccountId ?? null,
+				data.previousAccountId ?? null,
+				data.candidatesCount ?? null,
+				data.failoverAttempts ?? 0,
+				data.failoverReason ?? null,
+				data.createdAt ?? Date.now(),
 			],
 		);
 	}

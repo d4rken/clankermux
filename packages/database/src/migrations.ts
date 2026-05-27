@@ -172,6 +172,32 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
 	);
 
+	// Create request_routing table for load-balancer decision telemetry.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS request_routing (
+			request_id TEXT PRIMARY KEY,
+			strategy TEXT NOT NULL,
+			decision TEXT NOT NULL,
+			affinity_scope TEXT,
+			affinity_key_hash TEXT,
+			selected_account_id TEXT,
+			previous_account_id TEXT,
+			candidates_count INTEGER,
+			failover_attempts INTEGER DEFAULT 0,
+			failover_reason TEXT,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_decision ON request_routing(decision, created_at DESC)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
+	);
+
 	// Create request_payloads table for storing full request/response data
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
@@ -389,6 +415,11 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		.prepare("PRAGMA table_info(request_payloads)")
 		.all() as Array<{ name: string }>;
 	const requestPayloadsColumnNames = requestPayloadsInfo.map((col) => col.name);
+
+	const requestRoutingInfo = db
+		.prepare("PRAGMA table_info(request_routing)")
+		.all() as Array<{ name: string }>;
+	const requestRoutingColumnNames = requestRoutingInfo.map((col) => col.name);
 
 	const apiKeysInfo = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
 		name: string;
@@ -905,6 +936,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info(
 				"Added timestamp column to request_payloads table and backfilled from requests",
 			);
+		}
+
+		if (!requestRoutingColumnNames.includes("affinity_scope")) {
+			db.prepare(
+				"ALTER TABLE request_routing ADD COLUMN affinity_scope TEXT",
+			).run();
+			log.info("Added affinity_scope column to request_routing table");
 		}
 
 		// Drop role column from api_keys if it exists (cleanup migration).

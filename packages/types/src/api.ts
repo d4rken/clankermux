@@ -12,12 +12,34 @@ export interface RequestMeta {
 	path: string;
 	timestamp: number;
 	agentUsed?: string | null;
+	/** Stable client conversation/thread key used for cache-affinity routing */
+	affinityKey?: string | null;
+	/** Source of the affinity key; persisted separately for routing analysis */
+	affinityScope?: RequestAffinityScope | null;
 	project?: string | null;
 	headers?: Headers;
 	/** Active combo name (set when combo routing is used) */
 	comboName?: string | null;
 	/** Combo slot index being attempted (set per-iteration in proxy loop) */
 	comboSlotIndex?: number | null;
+	/** Internal routing telemetry persisted with the request for optimization analysis */
+	routing?: RequestRoutingMeta;
+}
+
+export type RequestAffinityScope =
+	| "claude_session"
+	| "codex_thread"
+	| "project";
+
+export interface RequestRoutingMeta {
+	strategy: string;
+	decision: string;
+	affinityScope?: RequestAffinityScope | null;
+	affinityKey?: string | null;
+	selectedAccountId?: string | null;
+	previousAccountId?: string | null;
+	candidatesCount?: number | null;
+	failoverReason?: string | null;
 }
 
 export interface AgentUpdatePayload {

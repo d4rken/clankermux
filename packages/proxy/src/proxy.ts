@@ -7,6 +7,7 @@ import {
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@clankermux/core";
+import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
@@ -30,24 +31,15 @@ import {
 	selectAccountsForRequest,
 	validateProviderPath,
 } from "./handlers";
+import { sanitizeProjectName } from "./project-name";
+import { extractRequestAffinity } from "./request-affinity";
+import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { UsageWorkerController } from "./usage-worker-controller";
 import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
 
 export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
-
-const PROJECT_NAME_MAX_LEN = 64;
-
-function sanitizeProjectName(raw: string | undefined | null): string | null {
-	if (!raw) return null;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
-	if (!cleaned) return null;
-	return cleaned.length > PROJECT_NAME_MAX_LEN
-		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
-		: cleaned;
-}
 
 function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 	if (!body) return null;
@@ -85,7 +77,7 @@ function extractProjectFromRequest(
 	if (!systemPrompt) return null;
 
 	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
 	);
 	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
 	if (sanitizedPath) return sanitizedPath;
@@ -213,6 +205,7 @@ export async function handleProxy(
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
 	const project = extractProjectFromRequest(req.headers, parsedBody);
+	const affinity = extractRequestAffinity(req.headers);
 
 	// Conservative token estimate for context-window-aware routing (B1).
 	// Computed once; used to gate Codex accounts whose mapped model can't fit
@@ -274,6 +267,8 @@ export async function handleProxy(
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.agentUsed = agentUsed;
+	requestMeta.affinityKey = affinity.key;
+	requestMeta.affinityScope = affinity.scope;
 	requestMeta.project = project;
 
 	// 6. Select accounts
@@ -387,6 +382,11 @@ export async function handleProxy(
 		postThrottleAccounts,
 		initialComboInfo,
 	);
+	if (requestMeta.routing) {
+		requestMeta.routing.selectedAccountId =
+			accounts[0]?.id ?? requestMeta.routing.selectedAccountId ?? null;
+		requestMeta.routing.candidatesCount = accounts.length;
+	}
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
@@ -451,7 +451,9 @@ export async function handleProxy(
 				method: req.method,
 				path: url.pathname,
 				timestamp: requestMeta.timestamp,
-				requestHeaders: Object.fromEntries(req.headers.entries()),
+				requestHeaders: Object.fromEntries(
+					sanitizeRequestHeaders(req.headers).entries(),
+				),
 				requestBody: null,
 				project: project ?? null,
 				responseStatus: 503,
@@ -469,6 +471,20 @@ export async function handleProxy(
 				apiKeyName: apiKeyName || null,
 				retryAttempt: 0,
 				failoverAttempts: 0,
+				routing: requestMeta.routing
+					? {
+							strategy: requestMeta.routing.strategy,
+							decision: requestMeta.routing.decision,
+							affinityScope: requestMeta.routing.affinityScope ?? null,
+							affinityKeyHash: hashRoutingAffinityKey(
+								requestMeta.routing.affinityKey,
+							),
+							selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
+							previousAccountId: requestMeta.routing.previousAccountId ?? null,
+							candidatesCount: requestMeta.routing.candidatesCount ?? null,
+							failoverReason: requestMeta.routing.failoverReason ?? null,
+						}
+					: null,
 			});
 
 			ctx.usageWorker.postMessage({
@@ -572,6 +588,14 @@ export async function handleProxy(
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(selectedFallbackAccounts);
 		fallbackAccounts = applyContextWindowGate(filteredFallbackAccounts);
+		if (requestMeta.routing) {
+			requestMeta.routing.selectedAccountId =
+				fallbackAccounts[0]?.id ??
+				requestMeta.routing.selectedAccountId ??
+				null;
+			requestMeta.routing.candidatesCount = fallbackAccounts.length;
+			requestMeta.routing.failoverReason = "combo_fallback";
+		}
 
 		if (fallbackAccounts.length > 0) {
 			log.info(
