@@ -24,7 +24,12 @@ export function extractRequestAffinity(headers: Headers): {
 		return { key: claudeSession, scope: "claude_session" };
 	}
 
-	const codexThread = sanitizeAffinityHeader(headers.get("thread-id"));
+	const isCodexClient =
+		headers.get("originator") === "codex_cli_rs" ||
+		headers.get("user-agent")?.startsWith("codex_cli_rs/") === true;
+	const codexThread = isCodexClient
+		? sanitizeAffinityHeader(headers.get("thread-id"))
+		: null;
 	if (codexThread) {
 		return { key: codexThread, scope: "codex_thread" };
 	}

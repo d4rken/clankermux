@@ -21,6 +21,9 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		last_used: null,
 		created_at: Date.now(),
 		rate_limited_until: null,
+		rate_limited_reason: null,
+		rate_limited_at: null,
+		consecutive_rate_limits: 0,
 		session_start: null,
 		session_request_count: 0,
 		paused: false,
@@ -30,10 +33,15 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		priority: 0,
 		auto_fallback_enabled: false,
 		auto_refresh_enabled: false,
+		auto_pause_on_overage_enabled: false,
+		peak_hours_pause_enabled: false,
 		custom_endpoint: null,
 		model_mappings: null,
 		cross_region_mode: null,
 		model_fallbacks: null,
+		billing_type: null,
+		pause_reason: null,
+		refresh_token_issued_at: null,
 		...overrides,
 	};
 }
@@ -414,6 +422,70 @@ describe("SessionStrategy", () => {
 		expect(account1.paused).toBe(false);
 		expect(mockStore.hasResumeCall(account1.id)).toBe(true);
 		expect(account2.paused).toBe(true);
+	});
+
+	it("pins auto-fallback affinity to the account that actually serves the request", () => {
+		const now = Date.now();
+		const projectMeta: RequestMeta = {
+			...meta,
+			project: "auto-fallback-project",
+		};
+		const higherPriorityAvailable = makeAccount({
+			id: "higher-priority-available",
+			name: "higher-priority-available",
+			priority: 0,
+		});
+		const lowerPriorityFallback = makeAccount({
+			id: "lower-priority-fallback",
+			name: "lower-priority-fallback",
+			priority: 1,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+
+		const first = strategy.select(
+			[higherPriorityAvailable, lowerPriorityFallback],
+			projectMeta,
+		);
+		const second = strategy.select(
+			[higherPriorityAvailable, lowerPriorityFallback],
+			projectMeta,
+		);
+
+		expect(first[0]).toBe(higherPriorityAvailable);
+		expect(second[0]).toBe(higherPriorityAvailable);
+		expect(projectMeta.routing?.selectedAccountId).toBe(
+			"higher-priority-available",
+		);
+	});
+
+	it("does not honor bypass-session from external client traffic", () => {
+		const projectMeta: RequestMeta = {
+			...meta,
+			project: "external-bypass-project",
+			headers: new Headers({ "x-clankermux-bypass-session": "true" }),
+		};
+		const accountA = makeAccount({
+			id: "external-bypass-a",
+			name: "external-bypass-a",
+		});
+		const accountB = makeAccount({
+			id: "external-bypass-b",
+			name: "external-bypass-b",
+		});
+
+		mockStore.setUtilization(accountA.id, 10);
+		mockStore.setUtilization(accountB.id, 80);
+		expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+			accountA,
+		);
+
+		mockStore.setUtilization(accountA.id, 80);
+		mockStore.setUtilization(accountB.id, 10);
+		expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+			accountA,
+		);
+		expect(projectMeta.routing?.decision).toBe("affinity_hit");
 	});
 
 	it("should handle unknown providers gracefully", () => {
@@ -1017,6 +1089,44 @@ describe("SessionStrategy", () => {
 			affined.rate_limited_until = null;
 			affined.rate_limited_reason = null;
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+		});
+
+		it("keeps affinity for non-session-tracking providers until TTL expiry", () => {
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "openai-compatible-project",
+			};
+			const accountA = makeAccount({
+				id: "openai-compatible-a",
+				name: "openai-compatible-a",
+				provider: "openai-compatible",
+				api_key: "test-key",
+				refresh_token: "",
+				access_token: null,
+				expires_at: null,
+			});
+			const accountB = makeAccount({
+				id: "openai-compatible-b",
+				name: "openai-compatible-b",
+				provider: "openai-compatible",
+				api_key: "test-key",
+				refresh_token: "",
+				access_token: null,
+				expires_at: null,
+			});
+
+			mockStore.setUtilization(accountA.id, 10);
+			mockStore.setUtilization(accountB.id, 80);
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountA,
+			);
+
+			mockStore.setUtilization(accountA.id, 80);
+			mockStore.setUtilization(accountB.id, 10);
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountA,
+			);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
 		});
 	});
 

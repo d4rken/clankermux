@@ -21,6 +21,7 @@ describe("extractRequestAffinity", () => {
 			new Headers({
 				"thread-id": "codex-thread",
 				"session-id": "codex-session",
+				originator: "codex_cli_rs",
 			}),
 		);
 
@@ -36,6 +37,16 @@ describe("extractRequestAffinity", () => {
 				"session-id": "codex-session",
 				"x-codex-window-id": "codex-thread:2",
 				"x-codex-turn-state": "turn-state",
+			}),
+		);
+
+		expect(result).toEqual({ key: null, scope: null });
+	});
+
+	it("ignores generic thread-id from non-Codex clients", () => {
+		const result = extractRequestAffinity(
+			new Headers({
+				"thread-id": "generic-thread",
 			}),
 		);
 

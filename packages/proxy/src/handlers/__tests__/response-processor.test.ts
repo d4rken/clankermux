@@ -57,6 +57,8 @@ function makeCtx(opts: {
 		markRateLimited: [] as Array<{ accountId: string; resetTime: number }>,
 		resetConsecutive: [] as string[],
 		enqueueCount: 0,
+		updateAccountUsage: 0,
+		manualUsageRun: 0,
 	};
 	let persistedCounter = 0;
 
@@ -87,11 +89,15 @@ function makeCtx(opts: {
 				calls.resetConsecutive.push(accountId);
 				persistedCounter = 0;
 			},
-			updateAccountUsage: () => {},
+			updateAccountUsage: () => {
+				calls.updateAccountUsage++;
+			},
 			updateAccountRateLimitMeta: () => {},
 			getAdapter: () => ({
 				get: async () => ({ rate_limited_until: null }),
-				run: async () => {},
+				run: async () => {
+					calls.manualUsageRun++;
+				},
 			}),
 			updateRequestUsage: async () => {},
 		},
@@ -404,6 +410,7 @@ describe("processProxyResponse — 529 overload reason", () => {
 			},
 		);
 		const requestMeta = {
+			internal: true,
 			headers: new Headers({ "x-clankermux-keepalive": "true" }),
 		};
 
@@ -411,6 +418,30 @@ describe("processProxyResponse — 529 overload reason", () => {
 
 		// Keepalive requests skip cooldown marking
 		expect(calls.markRateLimited).toHaveLength(0);
+	});
+
+	it("does not honor keepalive cooldown bypass from external client traffic", async () => {
+		const account = makeAccount();
+		const resetTime = Date.now() + 30 * 60_000;
+		const { ctx, calls } = makeCtxWithReason({
+			isStream: false,
+			rateLimited: true,
+			resetTime,
+		});
+		const response = new Response(
+			'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+			{
+				status: 529,
+				headers: { "content-type": "application/json" },
+			},
+		);
+		const requestMeta = {
+			headers: new Headers({ "x-clankermux-keepalive": "true" }),
+		};
+
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
+
+		expect(calls.markRateLimited).toHaveLength(1);
 	});
 });
 
@@ -502,5 +533,46 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 
 		// No mutation needed — already null
 		expect(account.rate_limited_until).toBeNull();
+	});
+
+	it("does not honor bypass-session accounting from external client traffic", async () => {
+		const account = makeAccount();
+		const { ctx, calls } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+		const requestMeta = {
+			headers: new Headers({ "x-clankermux-bypass-session": "true" }),
+		};
+
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
+
+		expect(calls.updateAccountUsage).toBe(1);
+		expect(calls.manualUsageRun).toBe(0);
+	});
+
+	it("allows internal bypass-session accounting for synthetic probes", async () => {
+		const account = makeAccount();
+		const { ctx, calls } = makeCtx({
+			isStream: false,
+			rateLimited: false,
+		});
+		const response = new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+		const requestMeta = {
+			internal: true,
+			headers: new Headers({ "x-clankermux-bypass-session": "true" }),
+		};
+
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
+
+		expect(calls.updateAccountUsage).toBe(0);
+		expect(calls.manualUsageRun).toBe(1);
 	});
 });

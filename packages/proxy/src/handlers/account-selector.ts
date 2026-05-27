@@ -112,6 +112,7 @@ export async function selectAccountsForRequest(
 					// This mirrors the scheduler eligibility query and the sendDummyMessage resume guard
 					// (auto_pause_on_overage_enabled=1 AND pause_reason IN (NULL,'overage')).
 					const isAutoRefreshBypass =
+						meta.internal === true &&
 						meta.headers.get("x-clankermux-bypass-session") === "true";
 					const available = isAccountAvailable(forcedAccount);
 					const isOveragePaused =

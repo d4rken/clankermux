@@ -150,7 +150,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 * resolution. This helper separates the two concerns.
 	 */
 	private hasValidSessionWindow(account: Account, now: number): boolean {
-		if (!requiresSessionDurationTracking(account.provider)) return false;
+		if (!requiresSessionDurationTracking(account.provider)) return true;
 		return (
 			!!account.session_start &&
 			now - account.session_start < this.sessionDurationMs
@@ -244,6 +244,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		now: number,
 		isAvailable: (account: Account) => boolean,
 	): AffinityResolution {
+		this.pruneAffinity(now);
 		const key = this.getAffinityKey(meta);
 		if (!key) return { kind: "miss" };
 
@@ -302,7 +303,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	): boolean {
 		// Sticky pauses: operator must manually resume.
 		if (account.paused) {
-			const reason = (account as { pause_reason?: string | null }).pause_reason;
+			const reason = account.pause_reason;
 			return reason === "manual" || reason === "failure_threshold";
 		}
 
@@ -312,8 +313,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// 529 overload and probe cooldowns are server-wide or self-healing;
 		// switching to a different account of the same provider does not help
 		// and wastes the warmed prompt cache. Always hold.
-		const rlReason = (account as { rate_limited_reason?: RateLimitReason })
-			.rate_limited_reason;
+		const rlReason = account.rate_limited_reason;
 		if (rlReason && TRANSIENT_RATE_LIMIT_REASONS.has(rlReason)) {
 			return false;
 		}
@@ -417,14 +417,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 		// Check if session tracking should be bypassed (for auto-refresh messages)
 		const bypassHeader = meta.headers?.get("x-clankermux-bypass-session");
-		const bypassSession = bypassHeader === "true";
-
-		this.log.info(
-			`Bypass header: ${bypassHeader}, bypassSession: ${bypassSession}`,
-		);
+		const bypassSession = meta.internal === true && bypassHeader === "true";
 
 		if (bypassSession) {
-			this.log.info("Session tracking bypassed due to bypass header");
+			this.log.debug("Session tracking bypassed due to bypass header");
 		}
 
 		// Cache availability checks within this request lifecycle
@@ -481,9 +477,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		if (chosenFallback !== null) {
+			const available = accounts
+				.filter((a) => getCachedAvailability(a))
+				.sort((a, b) => a.priority - b.priority);
+			const servingAccount = available[0] ?? chosenFallback;
+
 			if (!bypassSession) {
-				this.resetSessionIfExpired(chosenFallback);
-				this.rememberAffinity(meta, chosenFallback, now);
+				this.resetSessionIfExpired(servingAccount);
+				this.rememberAffinity(meta, servingAccount, now);
 			}
 			this.log.info(
 				`Auto-fallback triggered to account ${chosenFallback.name} (priority: ${chosenFallback.priority}, auto-fallback enabled)`,
@@ -491,13 +492,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			// Return all available accounts sorted by priority — chosenFallback will appear
 			// first naturally if it is the highest-priority available account, avoiding
 			// priority inversion when other accounts rank higher.
-			const available = accounts
-				.filter((a) => getCachedAvailability(a))
-				.sort((a, b) => a.priority - b.priority);
 			this.setRoutingMeta(
 				meta,
 				"auto_fallback",
-				available[0] ?? chosenFallback,
+				servingAccount,
 				available.length,
 			);
 			return available;
