@@ -3,9 +3,7 @@ import { sanitizeProjectName } from "../project-name";
 
 describe("sanitizeProjectName", () => {
 	it("keeps normal project names", () => {
-		expect(sanitizeProjectName("example-project")).toBe(
-			"example-project",
-		);
+		expect(sanitizeProjectName("example-project")).toBe("example-project");
 	});
 
 	it("strips Claude Code environment suffixes from heading-style keys", () => {

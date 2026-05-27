@@ -29,8 +29,8 @@ import { ComboRepository } from "./repositories/combo.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
 	type RequestData,
-	type RequestRoutingData,
 	RequestRepository,
+	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";

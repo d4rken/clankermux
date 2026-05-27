@@ -2,7 +2,13 @@ import type { RequestAffinityScope } from "@clankermux/types";
 
 function sanitizeAffinityHeader(value: string | null): string | null {
 	if (!value) return null;
-	const sanitized = value.replace(/[\x00-\x1F\x7F]/g, "").trim();
+	const sanitized = Array.from(value)
+		.filter((char) => {
+			const code = char.charCodeAt(0);
+			return code >= 0x20 && code !== 0x7f;
+		})
+		.join("")
+		.trim();
 	if (!sanitized) return null;
 	return sanitized.slice(0, 128);
 }
