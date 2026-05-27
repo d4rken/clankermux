@@ -403,7 +403,14 @@ export class AutoRefreshScheduler {
 						headers,
 						body: JSON.stringify(requestBody),
 					});
-					response = await dispatchProxyRequest(req, url, this.proxyContext);
+					response = await dispatchProxyRequest(
+						req,
+						url,
+						this.proxyContext,
+						null,
+						null,
+						true,
+					);
 
 					log.debug(
 						`Auto-refresh response status: ${response.status} ${response.statusText}`,

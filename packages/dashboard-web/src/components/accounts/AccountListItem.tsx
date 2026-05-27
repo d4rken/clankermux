@@ -142,9 +142,7 @@ export function AccountListItem({
 		(account.provider === "zai" && !!onPeakHoursPauseToggle);
 
 	return (
-		<div
-			className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50"
-		>
+		<div className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
 				<div className="flex items-center gap-2 min-w-0">
 					<p className="font-medium truncate">{account.name}</p>

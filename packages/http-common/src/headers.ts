@@ -44,6 +44,13 @@ export function sanitizeRequestHeaders(original: Headers): Headers {
 	h.delete("chatgpt-account-id");
 	h.delete("traceparent");
 	h.delete("tracestate");
+	// Strip internal routing/probe headers from persisted request payloads.
+	h.delete("x-clankermux-account-id");
+	h.delete("x-better-ccflare-account-id");
+	h.delete("x-clankermux-bypass-session");
+	h.delete("x-clankermux-keepalive");
+	h.delete("x-clankermux-auto-refresh");
+	h.delete("x-clankermux-skip-cache");
 	return h;
 }
 

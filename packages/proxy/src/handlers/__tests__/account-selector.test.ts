@@ -469,7 +469,40 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 	 * alongside x-clankermux-account-id. The selector must allow these through
 	 * so the scheduler can hit the real endpoint and trigger auto-resume.
 	 */
-	it("allows overage-paused account when bypass-session header is present", async () => {
+	it("allows overage-paused account when internal bypass-session header is present", async () => {
+		const overagePausedAcc = makeAccount({
+			id: "acc-overage",
+			name: "overage-paused",
+			paused: true,
+			auto_pause_on_overage_enabled: true,
+			pause_reason: "overage",
+		});
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [overagePausedAcc, activeAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+			usageWorker: { postMessage: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({
+				"x-clankermux-account-id": "acc-overage",
+				"x-clankermux-bypass-session": "true",
+			}),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		// Overage-paused account must be returned directly — bypass-session overrides the guard
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-overage");
+	});
+
+	it("does not honor bypass-session from external client traffic", async () => {
 		const overagePausedAcc = makeAccount({
 			id: "acc-overage",
 			name: "overage-paused",
@@ -496,9 +529,9 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
-		// Overage-paused account must be returned directly — bypass-session overrides the guard
+
 		expect(result).toHaveLength(1);
-		expect(result[0]?.id).toBe("acc-overage");
+		expect(result[0]?.id).toBe("acc-active");
 	});
 
 	it("still blocks overage-paused account without the bypass-session header", async () => {
@@ -556,6 +589,7 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
+			internal: true,
 			headers: new Headers({
 				"x-clankermux-account-id": "acc-manual",
 				"x-clankermux-bypass-session": "true",
@@ -590,6 +624,7 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
+			internal: true,
 			headers: new Headers({
 				"x-clankermux-account-id": "acc-rl",
 				"x-clankermux-bypass-session": "true",
@@ -622,6 +657,7 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
+			internal: true,
 			headers: new Headers({
 				"x-clankermux-account-id": "acc-broken",
 				"x-clankermux-bypass-session": "true",

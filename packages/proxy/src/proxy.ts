@@ -173,6 +173,7 @@ export async function handleProxy(
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	isInternal = false,
 ): Promise<Response> {
 	// 0. Silently ignore Claude Code internal endpoints (non-critical, not supported by all providers)
 	if (
@@ -266,6 +267,7 @@ export async function handleProxy(
 
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
+	requestMeta.internal = isInternal;
 	requestMeta.agentUsed = agentUsed;
 	requestMeta.affinityKey = affinity.key;
 	requestMeta.affinityScope = affinity.scope;

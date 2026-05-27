@@ -160,7 +160,14 @@ export class CacheKeepaliveScheduler {
 				headers: replayHeaders,
 				body: bodyToSend,
 			});
-			const response = await dispatchProxyRequest(req, url, this.proxyContext);
+			const response = await dispatchProxyRequest(
+				req,
+				url,
+				this.proxyContext,
+				null,
+				null,
+				true,
+			);
 
 			// Drain the response so the connection is released
 			await response.text().catch(() => {});

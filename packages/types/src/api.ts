@@ -18,6 +18,8 @@ export interface RequestMeta {
 	affinityScope?: RequestAffinityScope | null;
 	project?: string | null;
 	headers?: Headers;
+	/** True only for in-process scheduler/probe requests, never from client headers */
+	internal?: boolean;
 	/** Active combo name (set when combo routing is used) */
 	comboName?: string | null;
 	/** Combo slot index being attempted (set per-iteration in proxy loop) */

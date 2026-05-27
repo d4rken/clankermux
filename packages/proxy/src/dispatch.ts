@@ -22,9 +22,10 @@ export async function dispatchProxyRequest(
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+	isInternal = false,
 ): Promise<Response> {
 	try {
-		return await handleProxy(req, url, ctx, apiKeyId, apiKeyName);
+		return await handleProxy(req, url, ctx, apiKeyId, apiKeyName, isInternal);
 	} catch (proxyError) {
 		const statusCode =
 			typeof proxyError === "object" &&

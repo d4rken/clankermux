@@ -5,7 +5,7 @@ import {
 	parseCodexUsageHeaders,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account, RateLimitReason } from "@clankermux/types";
+import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 
@@ -190,7 +190,7 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestId?: string,
-	requestMeta?: { headers?: Headers },
+	requestMeta?: Pick<RequestMeta, "headers" | "internal">,
 ): Promise<boolean> {
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
 
@@ -247,6 +247,7 @@ export async function processProxyResponse(
 		// was actually exhausted. Loop-prevention header set by
 		// cache-keepalive-scheduler.ts; only synthetic replays carry it.
 		const isKeepalive =
+			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
 		if (isKeepalive) {
 			log.warn(
@@ -267,6 +268,7 @@ export async function processProxyResponse(
 		}
 		// Also update metadata for rate-limited responses
 		const bypassSession =
+			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 		return true; // Signal rate limit
@@ -274,6 +276,7 @@ export async function processProxyResponse(
 
 	// Update account metadata in background
 	const bypassSession =
+		requestMeta?.internal === true &&
 		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 
