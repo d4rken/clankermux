@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readEnv } from "@clankermux/core";
+import { readEnv } from "@clankermux/core/env";
 import type { LogEvent } from "@clankermux/types";
 
 // Local constants to avoid circular dependency with core

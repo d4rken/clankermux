@@ -17,6 +17,7 @@
 		"types": ["bun-types"],
 		"jsx": "react-jsx",
 		"paths": {
+			"@clankermux/core/env": ["./packages/core/src/env.ts"],
 			"@clankermux/*": ["./packages/*/src"],
 			"@clankermux/server": ["./apps/server/src/server.ts"],
 			"@clankermux/dashboard-web/dist/*": ["./packages/dashboard-web/dist/*"]
