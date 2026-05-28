@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
-import { readEnv } from "@clankermux/core";
+// Deep-import the leaf env module, NOT the @clankermux/core barrel: the barrel
+// re-exports modules (interval-manager, model-mappings) that construct a Logger
+// at import time, which would re-enter this module mid-evaluation and TDZ-crash
+// depending on test-file discovery order. See src/__guards__/*.test.ts.
+import { readEnv } from "@clankermux/core/env";
 import type { LogEvent } from "@clankermux/types";
 import { logFileWriter } from "./file-writer";
 
