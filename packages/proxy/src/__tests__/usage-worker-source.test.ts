@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { resolveUsageWorkerSource } from "../usage-worker-controller";
+import { resolveUsageWorkerSource } from "../usage-worker-source";
 
 const workerUrl = new URL("file:///tmp/post-processor.worker.ts");
 
