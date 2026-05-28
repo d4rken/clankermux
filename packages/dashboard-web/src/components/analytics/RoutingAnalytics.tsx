@@ -245,12 +245,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							>
 								{shortLabel(labelDecision(name), 22)}
 							</text>
-							<text
-								x="12"
-								y="31"
-								fill="var(--muted-foreground)"
-								fontSize="11"
-							>
+							<text x="12" y="31" fill="var(--muted-foreground)" fontSize="11">
 								{formatNumber(requests)} req
 							</text>
 						</g>
@@ -277,12 +272,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							>
 								{shortLabel(name, 22)}
 							</text>
-							<text
-								x="12"
-								y="31"
-								fill="var(--muted-foreground)"
-								fontSize="11"
-							>
+							<text x="12" y="31" fill="var(--muted-foreground)" fontSize="11">
 								{formatNumber(requests)} req
 							</text>
 						</g>
@@ -310,12 +300,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 							>
 								{name.replaceAll("_", " ")}
 							</text>
-							<text
-								x="12"
-								y="31"
-								fill="var(--muted-foreground)"
-								fontSize="11"
-							>
+							<text x="12" y="31" fill="var(--muted-foreground)" fontSize="11">
 								{formatNumber(requests)} req
 							</text>
 						</g>
