@@ -1,5 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { cacheBodyStore } from "../cache-body-store";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
+import {
+	cacheBodyStore,
+	MAX_STAGING_ENTRIES,
+	STAGING_MAX_AGE_MS,
+} from "../cache-body-store";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,6 +51,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	cacheBodyStore.setEnabled(false);
+	setSystemTime(); // reset any fake clock set by age-based tests
 });
 
 // ---------------------------------------------------------------------------
@@ -755,6 +767,217 @@ describe("CacheBodyStore", () => {
 			).toBe(
 				'{"model":"y","system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}]}',
 			);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// staging memory-safety: size cap, age sweep, discard, clearStaging
+	// (regression coverage for the cacheBodyStore.staging unbounded-growth leak)
+	// -----------------------------------------------------------------------
+
+	describe("getStagingSize", () => {
+		it("reflects in-flight staged entries and drops to 0 on promotion", () => {
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+			cacheBodyStore.stageRequest(
+				"req-size",
+				"account-a",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+			cacheBodyStore.onSummary("req-size", 1);
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+		});
+	});
+
+	describe("staging size cap", () => {
+		it("caps staging at MAX_STAGING_ENTRIES, evicting oldest-first", () => {
+			for (let i = 0; i < MAX_STAGING_ENTRIES + 5; i++) {
+				cacheBodyStore.stageRequest(
+					`req-cap-${i}`,
+					`account-cap-${i}`,
+					makeBody(),
+					makeHeaders(),
+					"/v1/messages",
+				);
+			}
+			expect(cacheBodyStore.getStagingSize()).toBe(MAX_STAGING_ENTRIES);
+
+			// The 5 oldest were evicted → they can no longer be promoted.
+			for (let i = 0; i < 5; i++) {
+				cacheBodyStore.onSummary(`req-cap-${i}`, 10);
+				expect(
+					cacheBodyStore.getLastCachedRequest(`account-cap-${i}`),
+				).toBeNull();
+			}
+			// The newest entry survived → it still promotes.
+			const newest = MAX_STAGING_ENTRIES + 4;
+			cacheBodyStore.onSummary(`req-cap-${newest}`, 10);
+			expect(
+				cacheBodyStore.getLastCachedRequest(`account-cap-${newest}`),
+			).not.toBeNull();
+		});
+	});
+
+	describe("staging age sweep", () => {
+		const t0 = new Date("2026-01-01T00:00:00.000Z").getTime();
+
+		it("sweeps entries older than STAGING_MAX_AGE_MS on the next stageRequest", () => {
+			setSystemTime(new Date(t0));
+			cacheBodyStore.stageRequest(
+				"req-aged",
+				"account-aged",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+
+			// Jump past the max age; a fresh stage triggers the inline sweep.
+			setSystemTime(new Date(t0 + STAGING_MAX_AGE_MS + 60_000));
+			cacheBodyStore.stageRequest(
+				"req-fresh",
+				"account-fresh2",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			// Old orphan swept, only the fresh one remains.
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+			// The swept entry can no longer be promoted.
+			cacheBodyStore.onSummary("req-aged", 10);
+			expect(cacheBodyStore.getLastCachedRequest("account-aged")).toBeNull();
+		});
+
+		it("retains entries younger than STAGING_MAX_AGE_MS (e.g. a long stream)", () => {
+			setSystemTime(new Date(t0));
+			cacheBodyStore.stageRequest(
+				"req-young",
+				"account-young",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			// Advance, but stay within the window.
+			setSystemTime(new Date(t0 + STAGING_MAX_AGE_MS - 60_000));
+			cacheBodyStore.stageRequest(
+				"req-trigger",
+				"account-trigger",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(2);
+		});
+
+		it("evictStaleEntries also reaps orphaned staged entries when idle", () => {
+			setSystemTime(new Date(t0));
+			cacheBodyStore.stageRequest(
+				"req-tick-aged",
+				"account-tick",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+
+			// No new stageRequest arrives (idle); the keepalive tick must sweep it.
+			setSystemTime(new Date(t0 + STAGING_MAX_AGE_MS + 60_000));
+			cacheBodyStore.evictStaleEntries(60);
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+		});
+	});
+
+	describe("discardStaged", () => {
+		it("removes a staged entry so it can never be promoted", () => {
+			cacheBodyStore.stageRequest(
+				"req-discard",
+				"account-discard",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+
+			cacheBodyStore.discardStaged("req-discard");
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+
+			cacheBodyStore.onSummary("req-discard", 10);
+			expect(cacheBodyStore.getLastCachedRequest("account-discard")).toBeNull();
+		});
+
+		it("is a no-op for an unknown requestId", () => {
+			expect(() => cacheBodyStore.discardStaged("nope")).not.toThrow();
+		});
+	});
+
+	describe("discardHandedOffStaged", () => {
+		it("discards entries handed to the dead worker, preserves pre-handoff ones", () => {
+			// Handed-off entry: its "start" went to the now-dead worker → orphan.
+			cacheBodyStore.stageRequest(
+				"req-handed",
+				"account-handed",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			cacheBodyStore.markStagedHandedOff("req-handed");
+			// Pre-handoff entry: still awaiting upstream, never sent to the worker.
+			cacheBodyStore.stageRequest(
+				"req-pre",
+				"account-pre",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(2);
+
+			cacheBodyStore.discardHandedOffStaged();
+
+			// Only the handed-off orphan is gone.
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+			cacheBodyStore.onSummary("req-handed", 10);
+			expect(cacheBodyStore.getLastCachedRequest("account-handed")).toBeNull();
+			// The pre-handoff entry survived → the replacement worker can still
+			// summarize and promote it.
+			cacheBodyStore.onSummary("req-pre", 10);
+			expect(cacheBodyStore.getLastCachedRequest("account-pre")).not.toBeNull();
+		});
+
+		it("preserves promoted per-account slots", () => {
+			cacheBodyStore.stageRequest(
+				"req-promoted",
+				"account-a",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			cacheBodyStore.onSummary("req-promoted", 5);
+			cacheBodyStore.stageRequest(
+				"req-h",
+				"account-h",
+				makeBody(),
+				makeHeaders(),
+				"/v1/messages",
+			);
+			cacheBodyStore.markStagedHandedOff("req-h");
+
+			cacheBodyStore.discardHandedOffStaged();
+
+			expect(cacheBodyStore.getLastCachedRequest("account-a")).not.toBeNull();
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+		});
+
+		it("is a no-op when staging is already empty", () => {
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
+			expect(() => cacheBodyStore.discardHandedOffStaged()).not.toThrow();
+		});
+	});
+
+	describe("markStagedHandedOff", () => {
+		it("is a no-op for an unknown requestId", () => {
+			expect(() => cacheBodyStore.markStagedHandedOff("nope")).not.toThrow();
 		});
 	});
 });

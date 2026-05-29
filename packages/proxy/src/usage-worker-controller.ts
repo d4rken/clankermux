@@ -61,6 +61,13 @@ export class UsageWorkerController {
 	private startupTimer: Timer | null = null;
 	private shutdownResolve: (() => void) | null = null;
 
+	/**
+	 * Optional hook fired when the worker is destroyed (restart or shutdown).
+	 * Lets callers drop per-request state the dead worker will never summarize —
+	 * the proxy wires this to cacheBodyStore.clearStaging().
+	 */
+	onWorkerGone?: () => void;
+
 	constructor(
 		private readonly onSummary: (msg: SummaryMessage) => void,
 		private readonly onReady?: () => void,
@@ -242,6 +249,17 @@ export class UsageWorkerController {
 			// Ignore
 		}
 		this.worker = null;
+
+		// Notify listeners that the worker is gone so they can drop per-request
+		// state that will never be summarized now. Guarded so a hook error can't
+		// break teardown/restart.
+		try {
+			this.onWorkerGone?.();
+		} catch (err) {
+			log.warn(
+				`onWorkerGone hook threw: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 	}
 
 	private createWorker(): Worker {

@@ -97,6 +97,12 @@ export class CacheKeepaliveScheduler {
 
 		const accounts = cacheBodyStore.getAllCachedAccounts();
 
+		// Observability: in-flight staged bodies should stay small and flat. A
+		// climbing number here means the staging leak has resurfaced.
+		log.debug(
+			`Cache body store: ${cacheBodyStore.getStagingSize()} in-flight staged, ${accounts.length} promoted`,
+		);
+
 		if (accounts.length === 0) {
 			log.debug(
 				"No accounts with cached requests in memory, skipping keepalive",
