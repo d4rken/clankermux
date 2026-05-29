@@ -9,6 +9,7 @@ import type {
 	RateLimitReason,
 	RequestRoutingMeta,
 } from "@clankermux/types";
+import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
@@ -201,6 +202,11 @@ export async function forwardToClient(
 			? [startMessage.requestBody]
 			: undefined;
 		safePostMessage(ctx.usageWorker, startMessage, transfer);
+
+		// The cache-keepalive staging entry (if any) has now been handed to the
+		// worker; mark it so a worker restart can reap it as a true orphan while
+		// preserving entries not yet handed off. No-op for non-staged requests.
+		cacheBodyStore.markStagedHandedOff(requestId);
 	}
 
 	// Emit request start event for real-time dashboard

@@ -122,6 +122,15 @@ const usageWorkerController = new UsageWorkerController(
 	},
 );
 
+// When the usage worker is destroyed (restart or shutdown), requests whose
+// "start" was already handed to that worker will never be summarized — drop
+// their staged bodies so they can't leak. Pre-handoff entries are preserved:
+// forwardToClient posts their start/end to the replacement worker, which can
+// still summarize and promote them. Promoted per-account slots are untouched.
+usageWorkerController.onWorkerGone = () => {
+	cacheBodyStore.discardHandedOffStaged();
+};
+
 export function getUsageWorker(): UsageWorkerController {
 	return usageWorkerController;
 }
@@ -635,11 +644,20 @@ export async function handleProxy(
 				}
 			}
 		} else if (throttledFallbackAccounts.length > 0) {
+			// Combo slots staged a body but all failed, and the fallback found only
+			// throttled accounts — this terminal return emits no worker summary, so
+			// drop the staged body now (mirrors the all-accounts-failed cleanup).
+			cacheBodyStore.discardStaged(requestMeta.id);
 			return createUsageThrottledResponse(throttledFallbackAccounts);
 		}
 	}
 
-	// 11. All accounts failed - check if OAuth token issues are the cause
+	// 11. All accounts failed. This request was staged for cache-keepalive in
+	// proxyWithAccount, but no worker "end"/summary is emitted on this throw
+	// path — drop its staged body now instead of waiting for the age sweep.
+	cacheBodyStore.discardStaged(requestMeta.id);
+
+	// Check if OAuth token issues are the cause
 	const allAttemptedAccounts = filteredComboInfo
 		? [...accounts, ...(fallbackAccounts ?? [])]
 		: accounts;
