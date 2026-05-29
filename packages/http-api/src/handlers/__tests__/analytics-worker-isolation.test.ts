@@ -1,5 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "bun:test";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
@@ -8,6 +15,7 @@ import { createAnalyticsHandler } from "../analytics";
 import {
 	clearAnalyticsCachesForTests,
 	getAnalyticsCacheStatsForTests,
+	terminateAnalyticsWorker,
 } from "../analytics-runner";
 
 let tmpDir: string;
@@ -29,6 +37,10 @@ afterEach(async () => {
 	rmSync(tmpDir, { recursive: true, force: true });
 });
 
+afterAll(() => {
+	terminateAnalyticsWorker();
+});
+
 function context(): APIContext {
 	return {
 		db: dbOps.getAdapter(),
@@ -48,6 +60,14 @@ async function insertRequest(id: string, timestamp: number): Promise<void> {
 			100, 0, 'claude-test', 10, 0.01, 5, 1, 7, 1, 1, 'plan')`,
 		[id, timestamp],
 	);
+}
+
+function countOpenFds(): number | null {
+	try {
+		return readdirSync("/proc/self/fd").length;
+	} catch {
+		return null;
+	}
 }
 
 describe("analytics worker isolation", () => {
@@ -97,5 +117,24 @@ describe("analytics worker isolation", () => {
 		expect(
 			getAnalyticsCacheStatsForTests().responseCacheSize,
 		).toBeLessThanOrEqual(2);
+	});
+
+	it("reuses the analytics worker across uncached requests", async () => {
+		const before = countOpenFds();
+		if (before === null) return;
+
+		const handler = createAnalyticsHandler(context());
+		await insertRequest("req-1", Date.now());
+
+		for (let i = 0; i < 4; i++) {
+			const response = await handler(
+				new URLSearchParams({ range: "1h", probe: `fd-${i}` }),
+			);
+			expect(response.status).toBe(200);
+			await response.text();
+		}
+
+		const after = countOpenFds();
+		expect(after === null ? 0 : after - before).toBeLessThanOrEqual(6);
 	});
 });

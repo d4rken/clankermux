@@ -21,7 +21,11 @@ import {
 	DatabaseFactory,
 	initPayloadEncryption,
 } from "@clankermux/database";
-import { APIRouter, AuthService } from "@clankermux/http-api";
+import {
+	APIRouter,
+	AuthService,
+	terminateAnalyticsWorker,
+} from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
 import { Logger } from "@clankermux/logger";
 import { handleResponsesRequest } from "@clankermux/openai-responses-adapter";
@@ -1538,6 +1542,10 @@ async function handleGracefulShutdown(signal: string) {
 			serverInstance = null;
 			console.log("HTTP drain complete");
 		}
+
+		// Stop dashboard analytics first; HTTP drain above guarantees no new
+		// analytics calls are being accepted.
+		terminateAnalyticsWorker();
 
 		// Now that streams have finished, the usage worker has received all
 		// end-of-stream analytics messages. Terminate it so its DB writes

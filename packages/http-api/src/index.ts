@@ -1,6 +1,7 @@
 // Export router - the main public API
 
 // Export handlers
+export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 export * from "./handlers/storage";
 export { APIRouter } from "./router";
 // Export services
