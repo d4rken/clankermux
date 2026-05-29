@@ -31,6 +31,7 @@ async function embedAssets() {
 		else if (file.endsWith(".html")) contentType = "text/html";
 		else if (file.endsWith(".json")) contentType = "application/json";
 		else if (file.endsWith(".svg")) contentType = "image/svg+xml";
+		else if (file.endsWith(".png")) contentType = "image/png";
 		else if (file.endsWith(".map")) contentType = "application/json";
 
 		assets[`/${file}`] = {

@@ -10,7 +10,6 @@ import {
 	Menu,
 	RefreshCw,
 	Settings,
-	Shield,
 	Users,
 	X,
 	Zap,
@@ -19,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
+import logoUrl from "../logo.png";
 import { CopyButton } from "./CopyButton";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
 import { ThemeToggle } from "./theme-toggle";
@@ -178,7 +178,11 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 			{/* Mobile header */}
 			<div className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b px-4 flex items-center justify-between">
 				<div className="flex items-center gap-3">
-					<Shield className="h-6 w-6 text-primary" />
+					<img
+						src={logoUrl}
+						alt="ClankerMux logo"
+						className="h-6 w-6 rounded"
+					/>
 					<span className="font-semibold text-lg">ClankerMux</span>
 				</div>
 				<div className="flex items-center gap-2">
@@ -220,9 +224,11 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 					{/* Logo */}
 					<div className="p-6 pb-4">
 						<div className="flex items-center gap-3">
-							<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-								<Shield className="h-6 w-6 text-primary" />
-							</div>
+							<img
+								src={logoUrl}
+								alt="ClankerMux logo"
+								className="h-10 w-10 rounded-lg"
+							/>
 							<div>
 								<h1 className="font-semibold text-lg">ClankerMux</h1>
 								<p className="text-xs text-muted-foreground">Rate-Unlimiter</p>
