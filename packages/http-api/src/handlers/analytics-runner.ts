@@ -28,6 +28,15 @@ type CachedAnalytics = {
 const responseCache = new Map<string, CachedAnalytics>();
 const inFlight = new Map<string, Promise<Response>>();
 
+type PendingAnalyticsRequest = {
+	resolve: (response: Response) => void;
+	reject: (error: Error) => void;
+	timeoutHandle: ReturnType<typeof setTimeout>;
+};
+
+let analyticsWorker: Worker | undefined;
+const pendingWorkerRequests = new Map<string, PendingAnalyticsRequest>();
+
 export function createIsolatedAnalyticsHandler(context: APIContext) {
 	const directHandler = createDirectAnalyticsHandler(context);
 
@@ -105,68 +114,123 @@ function runAnalyticsWorker(
 	params: URLSearchParams,
 ): Promise<Response> {
 	const id = crypto.randomUUID();
-	let worker: Worker | undefined;
-	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
 	return new Promise<Response>((resolve, reject) => {
-		worker = new Worker(
-			new URL("./analytics-worker.ts", import.meta.url).href,
-			{
-				smol: true,
-			},
-		);
-
-		worker.onmessage = (event: MessageEvent<AnalyticsWorkerResponse>) => {
-			const data = event.data;
-			if (data.id !== id) return;
-			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-			worker?.terminate();
-			worker = undefined;
-
-			if (data.timings && data.timings.totalMs > 500) {
-				log.warn(
-					`Analytics worker completed slowly in ${Math.round(data.timings.totalMs)}ms`,
-				);
-			}
-			if (!data.ok && data.error) {
-				log.warn(`Analytics worker returned error: ${data.error}`);
-			}
-
-			resolve(
-				new Response(data.body, {
-					status: data.status,
-					headers: {
-						"Content-Type": "application/json",
-						"X-ClankerMux-Analytics-Mode": "worker",
-					},
-				}),
-			);
-		};
-		worker.onerror = (event: ErrorEvent) => {
-			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-			worker?.terminate();
-			worker = undefined;
-			reject(new Error(event.message || "analytics worker error"));
-		};
-		worker.onmessageerror = () => {
-			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-			worker?.terminate();
-			worker = undefined;
-			reject(new Error("analytics worker message deserialization failed"));
-		};
-		timeoutHandle = setTimeout(() => {
-			worker?.terminate();
-			worker = undefined;
-			reject(new AnalyticsTimeoutError());
+		const timeoutHandle = setTimeout(() => {
+			resetAnalyticsWorker(new AnalyticsTimeoutError());
 		}, resolveWorkerTimeoutMs());
 
-		worker.postMessage({
-			id,
-			dbPath,
-			params: params.toString(),
-			busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
-		} satisfies AnalyticsWorkerRequest);
+		pendingWorkerRequests.set(id, {
+			resolve,
+			reject,
+			timeoutHandle,
+		});
+
+		try {
+			getAnalyticsWorker().postMessage({
+				id,
+				dbPath,
+				params: params.toString(),
+				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+			} satisfies AnalyticsWorkerRequest);
+		} catch (error) {
+			const pending = pendingWorkerRequests.get(id);
+			if (pending) {
+				clearTimeout(pending.timeoutHandle);
+				pendingWorkerRequests.delete(id);
+			}
+			const err =
+				error instanceof Error
+					? error
+					: new Error(`analytics worker postMessage failed: ${String(error)}`);
+			resetAnalyticsWorker(err);
+			reject(err);
+		}
 	});
+}
+
+function getAnalyticsWorker(): Worker {
+	if (analyticsWorker) return analyticsWorker;
+
+	analyticsWorker = new Worker(
+		new URL("./analytics-worker.ts", import.meta.url).href,
+		{
+			smol: true,
+		},
+	);
+
+	if (
+		"unref" in analyticsWorker &&
+		typeof (analyticsWorker as { unref?: () => void }).unref === "function"
+	) {
+		(analyticsWorker as { unref: () => void }).unref();
+	}
+
+	analyticsWorker.onmessage = (
+		event: MessageEvent<AnalyticsWorkerResponse>,
+	) => {
+		handleAnalyticsWorkerMessage(event.data);
+	};
+	analyticsWorker.onerror = (event: ErrorEvent) => {
+		resetAnalyticsWorker(new Error(event.message || "analytics worker error"));
+	};
+	analyticsWorker.onmessageerror = () => {
+		resetAnalyticsWorker(
+			new Error("analytics worker message deserialization failed"),
+		);
+	};
+
+	return analyticsWorker;
+}
+
+function handleAnalyticsWorkerMessage(data: AnalyticsWorkerResponse): void {
+	const pending = pendingWorkerRequests.get(data.id);
+	if (!pending) return;
+
+	clearTimeout(pending.timeoutHandle);
+	pendingWorkerRequests.delete(data.id);
+
+	if (data.timings && data.timings.totalMs > 500) {
+		log.warn(
+			`Analytics worker completed slowly in ${Math.round(data.timings.totalMs)}ms`,
+		);
+	}
+	if (!data.ok && data.error) {
+		log.warn(`Analytics worker returned error: ${data.error}`);
+	}
+
+	pending.resolve(
+		new Response(data.body, {
+			status: data.status,
+			headers: {
+				"Content-Type": "application/json",
+				"X-ClankerMux-Analytics-Mode": "worker",
+			},
+		}),
+	);
+}
+
+function resetAnalyticsWorker(error: Error): void {
+	const worker = analyticsWorker;
+	analyticsWorker = undefined;
+
+	if (worker) {
+		try {
+			worker.terminate();
+		} catch {
+			// Worker already gone.
+		}
+	}
+
+	for (const [id, pending] of pendingWorkerRequests) {
+		clearTimeout(pending.timeoutHandle);
+		pendingWorkerRequests.delete(id);
+		pending.reject(error);
+	}
+}
+
+export function terminateAnalyticsWorker(): void {
+	resetAnalyticsWorker(new Error("analytics worker terminated"));
 }
 
 async function cacheIfSuccessful(

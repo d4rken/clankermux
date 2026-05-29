@@ -170,10 +170,23 @@ const isNodeEnvironment =
 	process.versions != null &&
 	process.versions.node != null;
 
-// Singleton instance - only create in Node.js environments
-export const logFileWriter: LogFileWriter | null = isNodeEnvironment
-	? new LogFileWriter()
-	: null;
+function isMainThreadEnvironment(): boolean {
+	if (!isNodeEnvironment) return false;
+	try {
+		const workerThreads = require("node:worker_threads") as {
+			isMainThread?: boolean;
+		};
+		return workerThreads.isMainThread !== false;
+	} catch {
+		return true;
+	}
+}
+
+// Singleton instance - only create in the main Node/Bun thread. Bun Worker
+// termination currently leaves worker-side file streams/descriptors around, and
+// hot worker paths such as isolated analytics should not open app.log at all.
+export const logFileWriter: LogFileWriter | null =
+	isNodeEnvironment && isMainThreadEnvironment() ? new LogFileWriter() : null;
 
 // Register with lifecycle manager (only in Node.js)
 if (logFileWriter) {
