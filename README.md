@@ -1,4 +1,4 @@
-# ClankerMux <img src="packages/dashboard-web/src/logo.png" alt="ClankerMux logo" height="48" />
+# ClankerMux <img src="packages/dashboard-web/src/logo.png" alt="ClankerMux logo" height="32" />
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.2.8-000000?logo=bun&logoColor=white)](https://bun.sh)
