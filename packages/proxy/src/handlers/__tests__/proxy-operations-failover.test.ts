@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	clearProviderOverloadCooldown,
+	isProviderOverloaded,
+} from "../../provider-overload-cooldown";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -121,10 +125,12 @@ describe("proxyWithAccount — 429 failover", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
 	});
 
 	it("returns null (failover) when upstream returns 429 and no fallback is configured", async () => {
@@ -600,10 +606,12 @@ describe("proxyWithAccount — 529 failover", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
 	});
 
 	it("returns null (failover) when upstream returns 529 and provider parseRateLimit says isRateLimited:true", async () => {
@@ -650,6 +658,106 @@ describe("proxyWithAccount — 529 failover", () => {
 		);
 
 		expect(result).toBeNull();
+	});
+
+	it("marks provider overloaded without marking the individual account rate-limited", async () => {
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+					{
+						status: 529,
+						headers: {
+							"content-type": "application/json",
+							"retry-after": "45",
+						},
+					},
+				),
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const ctx = makeProxyContextWithAsyncExec();
+		const account = makeAccount({
+			provider: "anthropic",
+			api_key: "test-key",
+			access_token: null,
+		});
+
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		expect(result).toBeNull();
+		expect(isProviderOverloaded("anthropic")).toBe(true);
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.consecutive_rate_limits).toBe(0);
+		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
+			typeof mock
+		>;
+		expect(markMock.mock.calls).toHaveLength(0);
+	});
+
+	it("shares the official Anthropic overload group with Claude console API accounts", async () => {
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+					{
+						status: 529,
+						headers: {
+							"content-type": "application/json",
+							"retry-after": "45",
+						},
+					},
+				),
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const ctx = makeProxyContextWithAsyncExec();
+		(ctx as { provider: typeof ctx.provider }).provider = {
+			...ctx.provider,
+			name: "anthropic",
+			parseRateLimit: (r: Response) => ({
+				isRateLimited: r.status === 529 || r.status === 429,
+				resetTime: r.status === 529 ? Date.now() + 45_000 : undefined,
+				statusHeader: undefined,
+				remaining: undefined,
+			}),
+		} as typeof ctx.provider;
+		const account = makeAccount({
+			provider: "claude-console-api",
+			api_key: "test-key",
+			access_token: null,
+		});
+
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		expect(result).toBeNull();
+		expect(isProviderOverloaded("anthropic")).toBe(true);
+		expect(isProviderOverloaded("claude-console-api")).toBe(true);
+		expect(account.rate_limited_until).toBeNull();
+		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
+			typeof mock
+		>;
+		expect(markMock.mock.calls).toHaveLength(0);
 	});
 
 	it("returns upstream 529 on the final account attempt instead of pool exhaustion", async () => {

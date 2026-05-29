@@ -187,6 +187,8 @@ export interface AccountResponse {
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled
+	providerOverloadKey?: string | null; // Shared upstream overload group, e.g. "anthropic-upstream"
+	providerOverloadedUntil?: number | null; // In-memory provider overload cooldown; null if provider is routable
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
@@ -404,6 +406,8 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usageRateLimitedUntil: null, // Will be filled in by API handler from cache
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],
+		providerOverloadKey: null,
+		providerOverloadedUntil: null,
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
 		modelFallbacks,
 		billingType: account.billing_type,
