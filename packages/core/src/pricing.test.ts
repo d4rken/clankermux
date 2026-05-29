@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { estimateCostUSD, type TokenBreakdown } from "./pricing";
@@ -8,7 +8,25 @@ import { estimateCostUSD, type TokenBreakdown } from "./pricing";
 // at a fresh empty dir so a stale/remote models.dev cache can't leak in. This
 // forces the bundled fallback table to be the sole source of truth.
 process.env.CF_PRICING_OFFLINE = "1";
-process.env.TMPDIR = mkdtempSync(join(tmpdir(), "cmux-pricing-"));
+
+// The pricing disk cache is rooted at `tmpdir()`, so redirect the OS temp dir to
+// a throwaway location. `bun test` shares one process across all test files, so
+// this mutation must be restored in afterAll — leaking it makes `tmpdir()`
+// return the throwaway dir for every file that runs afterward, which broke
+// security/path-validator's "should include temp directory" assertion (its
+// cached allowlist held the real /tmp while tmpdir() returned cmux-pricing-*).
+const originalTmpdir = process.env.TMPDIR;
+const pricingTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-"));
+process.env.TMPDIR = pricingTmpdir;
+
+afterAll(() => {
+	if (originalTmpdir === undefined) {
+		delete process.env.TMPDIR;
+	} else {
+		process.env.TMPDIR = originalTmpdir;
+	}
+	rmSync(pricingTmpdir, { recursive: true, force: true });
+});
 
 describe("estimateCostUSD", () => {
 	it("returns 0 for an unknown model", async () => {
