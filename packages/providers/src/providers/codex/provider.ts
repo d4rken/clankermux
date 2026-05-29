@@ -517,12 +517,12 @@ export class CodexProvider extends BaseProvider {
 		// Codex API only accepts user/assistant/system roles.
 		// Map developer (Codex CLI system instructions sent as a message role) to system.
 		const role = (msg.role as string) === "developer" ? "system" : msg.role;
+		const textType = role === "assistant" ? "output_text" : "input_text";
 
 		if (typeof msg.content === "string") {
-			const contentType = role === "user" ? "input_text" : "output_text";
 			items.push({
 				role,
-				content: [{ type: contentType, text: msg.content } as CodexContentItem],
+				content: [{ type: textType, text: msg.content } as CodexContentItem],
 			} as CodexMessage);
 			return items;
 		}
@@ -534,9 +534,8 @@ export class CodexProvider extends BaseProvider {
 
 		for (const block of msg.content) {
 			if (block.type === "text") {
-				const contentType = role === "user" ? "input_text" : "output_text";
 				textBlocks.push({
-					type: contentType,
+					type: textType,
 					text: block.text,
 				} as CodexContentItem);
 			} else if (block.type === "tool_use") {

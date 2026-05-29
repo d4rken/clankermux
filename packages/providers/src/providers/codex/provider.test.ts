@@ -73,6 +73,39 @@ describe("CodexProvider request conversion", () => {
 		expect(body.reasoning).toEqual({ effort: "medium" });
 	});
 
+	it("uses role-specific text item types for multi-turn history", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 100,
+				messages: [
+					{ role: "user", content: "Question" },
+					{ role: "system", content: "Keep answers brief." },
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Previous answer" }],
+					},
+					{ role: "user", content: "Follow-up" },
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input[1].role).toBe("system");
+		expect(body.input[1].content).toEqual([
+			{ type: "input_text", text: "Keep answers brief." },
+		]);
+		expect(body.input[2].role).toBe("assistant");
+		expect(body.input[2].content).toEqual([
+			{ type: "output_text", text: "Previous answer" },
+		]);
+	});
+
 	it("rejects unsupported reasoning effort values", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
