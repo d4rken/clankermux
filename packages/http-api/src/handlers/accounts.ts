@@ -30,6 +30,7 @@ import {
 } from "@clankermux/providers";
 import {
 	clearAccountRefreshCache,
+	clearProviderOverloadCooldown,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
@@ -2379,7 +2380,8 @@ export function createAccountModelFallbacksUpdateHandler(
 
 /**
  * Create an account force-reset rate limit handler
- * Clears rate limit lock fields and triggers immediate usage refresh when possible.
+ * Clears account lock fields, provider overload cooldown, and triggers
+ * immediate usage refresh when possible.
  */
 export function createAccountForceResetRateLimitHandler(
 	dbOps: DatabaseOperations,
@@ -2390,7 +2392,7 @@ export function createAccountForceResetRateLimitHandler(
 			const account = await db.get<{
 				id: string;
 				name: string;
-				provider: string;
+				provider: string | null;
 				access_token: string | null;
 			}>("SELECT id, name, provider, access_token FROM accounts WHERE id = ?", [
 				accountId,
@@ -2400,7 +2402,7 @@ export function createAccountForceResetRateLimitHandler(
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const resetSuccess = dbOps.forceResetAccountRateLimit(accountId);
+			const resetSuccess = await dbOps.forceResetAccountRateLimit(accountId);
 			if (!resetSuccess) {
 				return errorResponse(
 					new Error(
@@ -2408,6 +2410,8 @@ export function createAccountForceResetRateLimitHandler(
 					),
 				);
 			}
+			const provider = account.provider || "anthropic";
+			clearProviderOverloadCooldown(provider);
 			clearAccountRefreshCache(accountId);
 
 			// Trigger immediate poll if this server has a polling token provider for the account.
@@ -2420,7 +2424,7 @@ export function createAccountForceResetRateLimitHandler(
 			// no active polling exists and the token is likely fresh from recent proxy requests.
 			if (
 				!usagePollTriggered &&
-				account.provider === "anthropic" &&
+				provider === "anthropic" &&
 				account.access_token
 			) {
 				const { data: usageData } = await fetchUsageData(account.access_token);

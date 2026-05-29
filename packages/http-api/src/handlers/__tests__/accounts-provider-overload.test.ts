@@ -5,9 +5,13 @@ import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
+	isProviderOverloaded,
 } from "@clankermux/proxy";
 import type { AccountResponse } from "@clankermux/types";
-import { createAccountsListHandler } from "../accounts";
+import {
+	createAccountForceResetRateLimitHandler,
+	createAccountsListHandler,
+} from "../accounts";
 
 interface AccountRow {
 	id: string;
@@ -82,7 +86,12 @@ function makeAccountRow(overrides: Partial<AccountRow>): AccountRow {
 	};
 }
 
-function makeDbOps(accounts: AccountRow[]): DatabaseOperations {
+function makeDbOps(
+	accounts: AccountRow[],
+	options: {
+		forceResetAccountRateLimit?: (accountId: string) => Promise<boolean>;
+	} = {},
+): DatabaseOperations {
 	return {
 		getAdapter: () => ({
 			query: async (sql: string) => {
@@ -91,10 +100,16 @@ function makeDbOps(accounts: AccountRow[]): DatabaseOperations {
 				}
 				return [];
 			},
+			get: async (_sql: string, params?: unknown[]) => {
+				const accountId = Array.isArray(params) ? params[0] : undefined;
+				return accounts.find((account) => account.id === accountId) ?? null;
+			},
 		}),
 		getStatsRepository: () => ({
 			getSessionStats: async () => new Map(),
 		}),
+		forceResetAccountRateLimit:
+			options.forceResetAccountRateLimit ?? (async () => true),
 	} as unknown as DatabaseOperations;
 }
 
@@ -158,5 +173,70 @@ describe("accounts list provider overload state", () => {
 		expect(consoleApi?.providerOverloadedUntil).toBe(overloadedUntil);
 		expect(codex?.providerOverloadKey).toBeNull();
 		expect(codex?.providerOverloadedUntil).toBeNull();
+	});
+
+	it("force reset clears the shared provider overload cooldown", async () => {
+		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
+		expect(isProviderOverloaded("anthropic")).toBe(true);
+		expect(isProviderOverloaded("claude-console-api")).toBe(true);
+
+		const resetCalls: string[] = [];
+		const handler = createAccountForceResetRateLimitHandler(
+			makeDbOps(
+				[
+					makeAccountRow({
+						id: "anthropic-oauth",
+						name: "Anthropic OAuth",
+						provider: "anthropic",
+						access_token: null,
+					}),
+				],
+				{
+					forceResetAccountRateLimit: async (accountId) => {
+						resetCalls.push(accountId);
+						return true;
+					},
+				},
+			),
+		);
+
+		const response = await handler({} as Request, "anthropic-oauth");
+		const body = (await response.json()) as { usagePollTriggered: boolean };
+
+		expect(response.status).toBe(200);
+		expect(resetCalls).toEqual(["anthropic-oauth"]);
+		expect(body.usagePollTriggered).toBe(false);
+		expect(isProviderOverloaded("anthropic")).toBe(false);
+		expect(isProviderOverloaded("claude-console-api")).toBe(false);
+	});
+
+	it("does not clear provider overload when the async reset fails", async () => {
+		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
+		const handler = createAccountForceResetRateLimitHandler(
+			makeDbOps(
+				[
+					makeAccountRow({
+						id: "anthropic-oauth",
+						name: "Anthropic OAuth",
+						provider: "anthropic",
+						access_token: null,
+					}),
+				],
+				{ forceResetAccountRateLimit: async () => false },
+			),
+		);
+
+		const originalConsoleError = console.error;
+		console.error = () => {};
+		let response: Response;
+		try {
+			response = await handler({} as Request, "anthropic-oauth");
+		} finally {
+			console.error = originalConsoleError;
+		}
+
+		expect(response.status).toBe(500);
+		expect(isProviderOverloaded("anthropic")).toBe(true);
+		expect(isProviderOverloaded("claude-console-api")).toBe(true);
 	});
 });

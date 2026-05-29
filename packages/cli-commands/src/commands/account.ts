@@ -1529,7 +1529,7 @@ export async function forceResetRateLimit(
 		};
 	}
 
-	const updated = dbOps.forceResetAccountRateLimit(account.id);
+	const updated = await dbOps.forceResetAccountRateLimit(account.id);
 	if (!updated) {
 		return {
 			success: false,
