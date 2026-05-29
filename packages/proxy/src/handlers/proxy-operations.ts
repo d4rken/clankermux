@@ -6,6 +6,7 @@ import {
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
+import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import { getProvider, usageCache } from "@clankermux/providers";
@@ -755,7 +756,12 @@ export async function proxyWithAccount(
 						);
 						return null;
 					}
-					return rawResponse;
+					// Model-not-found (404/400) is forwarded to the client so it can
+					// surface the real error. Strip content-encoding/content-length
+					// first: Bun's fetch already decompressed the body, so leaving the
+					// upstream `content-encoding: gzip` header makes the client try to
+					// gunzip plaintext → "Decompression error: ZlibError".
+					return withSanitizedProxyHeaders(rawResponse);
 				}
 
 				for (let i = 1; i < modelList.length; i++) {
