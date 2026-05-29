@@ -30,6 +30,8 @@ import {
 } from "@clankermux/providers";
 import {
 	clearAccountRefreshCache,
+	getProviderOverloadKey,
+	getProviderOverloadUntil,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
@@ -295,6 +297,11 @@ export function createAccountsListHandler(
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
 				let rateLimitStatus = "OK";
+				const provider = account.provider || "anthropic";
+				const providerOverloadedUntil = getProviderOverloadUntil(provider, now);
+				const providerOverloadKey = providerOverloadedUntil
+					? getProviderOverloadKey(provider)
+					: null;
 
 				// Use unified rate limit status if available
 				if (account.rate_limit_status) {
@@ -472,7 +479,7 @@ export function createAccountsListHandler(
 				return {
 					id: account.id,
 					name: account.name,
-					provider: account.provider || "anthropic",
+					provider,
 					requestCount: Number(account.request_count) || 0,
 					totalRequests: Number(account.total_requests) || 0,
 					lastUsed: account.last_used
@@ -515,6 +522,8 @@ export function createAccountsListHandler(
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,
 					usageThrottledWindows,
+					providerOverloadKey,
+					providerOverloadedUntil,
 					hasRefreshToken:
 						!!account.refresh_token &&
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields

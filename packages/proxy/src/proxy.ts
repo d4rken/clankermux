@@ -32,6 +32,12 @@ import {
 	validateProviderPath,
 } from "./handlers";
 import { sanitizeProjectName } from "./project-name";
+import {
+	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
+	getProviderOverloadKey,
+	getProviderOverloadUntil,
+	isProviderOverloaded,
+} from "./provider-overload-cooldown";
 import { extractRequestAffinity } from "./request-affinity";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { UsageWorkerController } from "./usage-worker-controller";
@@ -299,6 +305,167 @@ export async function handleProxy(
 		requestModel ?? undefined,
 	);
 
+	type ProviderOverloadedAccount = { account: Account; until: number };
+
+	const isAutoRefreshProbe =
+		req.headers.get("x-clankermux-auto-refresh") === "true";
+	const providerOverloadResponseLabel = (overloadKey: string): string =>
+		overloadKey === ANTHROPIC_UPSTREAM_OVERLOAD_KEY ? "anthropic" : overloadKey;
+
+	const recordSyntheticErrorResponse = (
+		response: Response,
+		error: string,
+	): void => {
+		if (isAutoRefreshProbe) return;
+
+		ctx.usageWorker.postMessage({
+			type: "start",
+			messageId: crypto.randomUUID(),
+			requestId: requestMeta.id,
+			accountId: null,
+			method: req.method,
+			path: url.pathname,
+			timestamp: requestMeta.timestamp,
+			requestHeaders: Object.fromEntries(
+				sanitizeRequestHeaders(req.headers).entries(),
+			),
+			requestBody: null,
+			project: project ?? null,
+			responseStatus: response.status,
+			responseHeaders: Object.fromEntries(response.headers.entries()),
+			isStream: false,
+			providerName: ctx.provider.name,
+			accountBillingType: null,
+			accountAutoPauseOnOverageEnabled: 0,
+			accountName: null,
+			agentUsed: agentUsed || null,
+			comboName: null,
+			apiKeyId: apiKeyId || null,
+			apiKeyName: apiKeyName || null,
+			retryAttempt: 0,
+			failoverAttempts: 0,
+			routing: requestMeta.routing
+				? {
+						strategy: requestMeta.routing.strategy,
+						decision: requestMeta.routing.decision,
+						affinityScope: requestMeta.routing.affinityScope ?? null,
+						affinityKeyHash: hashRoutingAffinityKey(
+							requestMeta.routing.affinityKey,
+						),
+						selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
+						previousAccountId: requestMeta.routing.previousAccountId ?? null,
+						candidatesCount: requestMeta.routing.candidatesCount ?? null,
+						failoverReason: requestMeta.routing.failoverReason ?? null,
+					}
+				: null,
+		});
+
+		ctx.usageWorker.postMessage({
+			type: "end",
+			requestId: requestMeta.id,
+			success: false,
+			error,
+		});
+	};
+
+	const createProviderOverloadedResponse = (
+		overloaded: ProviderOverloadedAccount[],
+	): Response => {
+		const now = Date.now();
+		const nextAvailableAt = Math.min(...overloaded.map(({ until }) => until));
+		const retryAfterSeconds = Math.max(
+			1,
+			Math.ceil((nextAvailableAt - now) / 1000),
+		);
+		const providers = Array.from(
+			new Set(
+				overloaded.map(({ account }) =>
+					providerOverloadResponseLabel(
+						getProviderOverloadKey(account.provider),
+					),
+				),
+			),
+		);
+		const response = new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "overloaded_error",
+					message: `Provider temporarily overloaded: ${providers.join(", ")}`,
+					providers,
+					next_available_at: new Date(nextAvailableAt).toISOString(),
+				},
+			}),
+			{
+				status: 529,
+				headers: {
+					"Content-Type": "application/json",
+					"Retry-After": String(retryAfterSeconds),
+				},
+			},
+		);
+		recordSyntheticErrorResponse(response, "provider_overloaded");
+		return response;
+	};
+
+	const applyProviderOverloadGate = (accounts: Account[]) => {
+		const now = Date.now();
+		const available: Account[] = [];
+		const overloaded: ProviderOverloadedAccount[] = [];
+
+		for (const account of accounts) {
+			const overloadedUntil = getProviderOverloadUntil(account.provider, now);
+			if (overloadedUntil) {
+				overloaded.push({ account, until: overloadedUntil });
+				continue;
+			}
+			available.push(account);
+		}
+
+		if (overloaded.length > 0) {
+			const providers = Array.from(
+				new Set(
+					overloaded.map(
+						({ account, until }) =>
+							`${getProviderOverloadKey(account.provider)} until ${new Date(until).toISOString()}`,
+					),
+				),
+			);
+			log.debug(
+				`Provider-overload gate excluded ${overloaded.length} account(s): ${providers.join(", ")}`,
+			);
+		}
+
+		return { available, overloaded };
+	};
+
+	const shouldForwardProviderOverloadIfNoCrossProviderFallback = (
+		candidates: Account[],
+		index: number,
+	): boolean => {
+		const current = candidates[index];
+		if (
+			!current ||
+			getProviderOverloadKey(current.provider) !==
+				ANTHROPIC_UPSTREAM_OVERLOAD_KEY
+		) {
+			return false;
+		}
+		const currentOverloadKey = getProviderOverloadKey(current.provider);
+		return !candidates
+			.slice(index + 1)
+			.some(
+				(account) =>
+					getProviderOverloadKey(account.provider) !== currentOverloadKey &&
+					!isProviderOverloaded(account.provider),
+			);
+	};
+
+	const {
+		available: providerAvailableAccounts,
+		overloaded: providerOverloadedAccounts,
+	} = applyProviderOverloadGate(selectedAccounts);
+
 	const applyUsageThrottling = (accounts: Account[]) => {
 		const settings = {
 			fiveHourEnabled: ctx.config.getUsageThrottlingFiveHourEnabled(),
@@ -335,7 +502,7 @@ export async function handleProxy(
 	};
 
 	const { available: postThrottleAccounts, throttled: throttledAccounts } =
-		applyUsageThrottling(selectedAccounts);
+		applyUsageThrottling(providerAvailableAccounts);
 
 	// 6b. Context-window gate — exclude Codex accounts whose mapped model
 	// can't fit the request (B3). Non-codex accounts always pass. When a combo
@@ -426,6 +593,14 @@ export async function handleProxy(
 			return createUsageThrottledResponse(throttledAccounts);
 		}
 
+		if (
+			selectedAccounts.length > 0 &&
+			providerAvailableAccounts.length === 0 &&
+			providerOverloadedAccounts.length > 0
+		) {
+			return createProviderOverloadedResponse(providerOverloadedAccounts);
+		}
+
 		// Check feature flag for backwards compatibility
 		if (process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL === "1") {
 			log.warn(ERROR_MESSAGES.NO_ACCOUNTS);
@@ -454,67 +629,13 @@ export async function handleProxy(
 
 		const poolExhaustedResponse = createPoolExhaustedResponse(allAccounts);
 
-		// Skip request-log staging for synthetic auto-refresh probes that
+		// Skip request-history logging for synthetic auto-refresh probes that
 		// 503 because their target account is on a known cooldown. Logging
 		// these as user-facing 503s inflates the dashboard fail-rate without
 		// reflecting any real client impact (issue #199, bug 2). The keepalive
 		// scheduler already gets the equivalent treatment via its loop-prevention
 		// header path; this brings auto-refresh in line.
-		const isAutoRefreshProbe =
-			req.headers.get("x-clankermux-auto-refresh") === "true";
-		if (!isAutoRefreshProbe) {
-			// Send error message to usage worker for request history logging
-			ctx.usageWorker.postMessage({
-				type: "start",
-				messageId: crypto.randomUUID(),
-				requestId: requestMeta.id,
-				accountId: null,
-				method: req.method,
-				path: url.pathname,
-				timestamp: requestMeta.timestamp,
-				requestHeaders: Object.fromEntries(
-					sanitizeRequestHeaders(req.headers).entries(),
-				),
-				requestBody: null,
-				project: project ?? null,
-				responseStatus: 503,
-				responseHeaders: Object.fromEntries(
-					poolExhaustedResponse.headers.entries(),
-				),
-				isStream: false,
-				providerName: ctx.provider.name,
-				accountBillingType: null,
-				accountAutoPauseOnOverageEnabled: 0,
-				accountName: null,
-				agentUsed: agentUsed || null,
-				comboName: null,
-				apiKeyId: apiKeyId || null,
-				apiKeyName: apiKeyName || null,
-				retryAttempt: 0,
-				failoverAttempts: 0,
-				routing: requestMeta.routing
-					? {
-							strategy: requestMeta.routing.strategy,
-							decision: requestMeta.routing.decision,
-							affinityScope: requestMeta.routing.affinityScope ?? null,
-							affinityKeyHash: hashRoutingAffinityKey(
-								requestMeta.routing.affinityKey,
-							),
-							selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
-							previousAccountId: requestMeta.routing.previousAccountId ?? null,
-							candidatesCount: requestMeta.routing.candidatesCount ?? null,
-							failoverReason: requestMeta.routing.failoverReason ?? null,
-						}
-					: null,
-			});
-
-			ctx.usageWorker.postMessage({
-				type: "end",
-				requestId: requestMeta.id,
-				success: false,
-				error: "pool_exhausted",
-			});
-		}
+		recordSyntheticErrorResponse(poolExhaustedResponse, "pool_exhausted");
 
 		return poolExhaustedResponse;
 	}
@@ -545,6 +666,14 @@ export async function handleProxy(
 	let response: Response | null = null;
 
 	for (let i = 0; i < accounts.length; i++) {
+		const overloadedUntil = getProviderOverloadUntil(accounts[i].provider);
+		if (overloadedUntil) {
+			log.debug(
+				`Skipping account ${accounts[i].name}; provider ${accounts[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
+			);
+			continue;
+		}
+
 		// For combo routing: enrich metadata with slot index and look up model override
 		let modelOverride: string | null = null;
 		if (filteredComboInfo?.slots[i]) {
@@ -575,7 +704,9 @@ export async function handleProxy(
 			apiKeyId,
 			apiKeyName,
 			requestBodyContext,
-			!filteredComboInfo?.comboName && i === accounts.length - 1,
+			!filteredComboInfo?.comboName &&
+				(i === accounts.length - 1 ||
+					shouldForwardProviderOverloadIfNoCrossProviderFallback(accounts, i)),
 		);
 
 		if (response) {
@@ -605,9 +736,13 @@ export async function handleProxy(
 			ctx,
 		);
 		const {
+			available: providerFallbackAccounts,
+			overloaded: providerFallbackOverloadedAccounts,
+		} = applyProviderOverloadGate(selectedFallbackAccounts);
+		const {
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
-		} = applyUsageThrottling(selectedFallbackAccounts);
+		} = applyUsageThrottling(providerFallbackAccounts);
 		fallbackAccounts = applyContextWindowGate(filteredFallbackAccounts);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =
@@ -623,6 +758,16 @@ export async function handleProxy(
 				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
 			);
 			for (let i = 0; i < fallbackAccounts.length; i++) {
+				const overloadedUntil = getProviderOverloadUntil(
+					fallbackAccounts[i].provider,
+				);
+				if (overloadedUntil) {
+					log.debug(
+						`Skipping fallback account ${fallbackAccounts[i].name}; provider ${fallbackAccounts[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
+					);
+					continue;
+				}
+
 				response = await proxyWithAccount(
 					req,
 					url,
@@ -636,7 +781,11 @@ export async function handleProxy(
 					apiKeyId,
 					apiKeyName,
 					requestBodyContext,
-					i === fallbackAccounts.length - 1,
+					i === fallbackAccounts.length - 1 ||
+						shouldForwardProviderOverloadIfNoCrossProviderFallback(
+							fallbackAccounts,
+							i,
+						),
 				);
 
 				if (response) {
@@ -649,6 +798,15 @@ export async function handleProxy(
 			// drop the staged body now (mirrors the all-accounts-failed cleanup).
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return createUsageThrottledResponse(throttledFallbackAccounts);
+		} else if (
+			selectedFallbackAccounts.length > 0 &&
+			providerFallbackAccounts.length === 0 &&
+			providerFallbackOverloadedAccounts.length > 0
+		) {
+			cacheBodyStore.discardStaged(requestMeta.id);
+			return createProviderOverloadedResponse(
+				providerFallbackOverloadedAccounts,
+			);
 		}
 	}
 

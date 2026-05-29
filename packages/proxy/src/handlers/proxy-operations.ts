@@ -10,8 +10,17 @@ import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import { getProvider, usageCache } from "@clankermux/providers";
-import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	PROVIDER_NAMES,
+	type RateLimitReason,
+	type RequestMeta,
+} from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
+import {
+	applyProviderOverloadCooldown,
+	isOfficialAnthropicProvider,
+} from "../provider-overload-cooldown";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
@@ -928,6 +937,47 @@ export async function proxyWithAccount(
 		if (response.status === 401) {
 			log.warn(
 				`Authentication failed (401) for account ${account.name}, failing over to next account`,
+			);
+			return null;
+		}
+
+		if (
+			isOfficialAnthropicProvider(account.provider) &&
+			provider.name === PROVIDER_NAMES.ANTHROPIC &&
+			response.status === 529
+		) {
+			const rateLimitInfo = provider.parseRateLimit(response);
+			applyProviderOverloadCooldown(account.provider, rateLimitInfo.resetTime);
+
+			if (returnRateLimitedResponseOnExhaustion) {
+				log.warn(
+					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
+				);
+				return forwardToClient(
+					{
+						requestId: requestMeta.id,
+						method: req.method,
+						path: url.pathname,
+						account,
+						requestHeaders: req.headers,
+						requestBody: effectiveBodyBuffer,
+						project: requestMeta.project,
+						response,
+						timestamp: requestMeta.timestamp,
+						retryAttempt: 0,
+						failoverAttempts,
+						agentUsed: requestMeta.agentUsed,
+						comboName: requestMeta.comboName,
+						apiKeyId,
+						apiKeyName,
+						routing: requestMeta.routing ?? null,
+					},
+					{ ...ctx, provider },
+				);
+			}
+
+			log.warn(
+				`Provider ${account.provider} overloaded on account ${account.name}; skipping same-provider accounts for this cooldown window`,
 			);
 			return null;
 		}

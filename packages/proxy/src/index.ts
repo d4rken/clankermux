@@ -41,6 +41,15 @@ export {
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
 export {
+	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+	getProviderOverloadKey,
+	getProviderOverloadUntil,
+	isOfficialAnthropicProvider,
+	isProviderOverloaded,
+} from "./provider-overload-cooldown";
+export {
 	getUsageWorker,
 	getUsageWorkerHealth,
 	handleProxy,

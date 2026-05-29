@@ -85,6 +85,7 @@ export function AccountListItem({
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const presenter = new AccountPresenter(account);
+	const now = Date.now();
 	// Only hard-limit statuses mean the account is actually blocked; soft warnings
 	// like "allowed_warning" / "queueing_soft" mean the account is still usable.
 	const HARD_LIMIT_PREFIXES = [
@@ -100,7 +101,7 @@ export function AccountListItem({
 	// rate_limit_status is soft/OK — the selector still skips the account.
 	const isBlockedByLegacyLock =
 		typeof account.rateLimitedUntil === "number" &&
-		account.rateLimitedUntil > Date.now();
+		account.rateLimitedUntil > now;
 	const showForceReset =
 		(isHardLimited || isBlockedByLegacyLock) && !presenter.isPaused;
 	// staleLockDetected only fires when numeric usage data exists (Anthropic accounts);
@@ -111,7 +112,15 @@ export function AccountListItem({
 		account.usageUtilization < 100;
 	const isUsageThrottled =
 		typeof account.usageThrottledUntil === "number" &&
-		account.usageThrottledUntil > Date.now();
+		account.usageThrottledUntil > now;
+	const providerOverloadedUntil =
+		typeof account.providerOverloadedUntil === "number" &&
+		account.providerOverloadedUntil > now
+			? account.providerOverloadedUntil
+			: null;
+	const providerOverloadMinutes = providerOverloadedUntil
+		? Math.max(1, Math.ceil((providerOverloadedUntil - now) / 60000))
+		: null;
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -121,7 +130,6 @@ export function AccountListItem({
 
 	// Peak/off-peak status chip (rendered inline in the status row to save a row).
 	// Only zai and anthropic have peak-hour windows.
-	const now = Date.now();
 	const isZaiPeak = account.provider === "zai" && isZaiPeakHour(now);
 	const isAnthropicPeak =
 		account.provider === "anthropic" && isAnthropicPeakHour(now);
@@ -387,6 +395,15 @@ export function AccountListItem({
 						title="Usage throttling is delaying requests for this account until pacing catches up"
 					>
 						Usage throttled
+					</span>
+				)}
+				{providerOverloadedUntil && (
+					<span
+						className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+						title={`Provider overload cooldown active until ${new Date(providerOverloadedUntil).toLocaleString()}`}
+					>
+						<AlertCircle className="h-3.5 w-3.5" />
+						Provider overloaded ({providerOverloadMinutes}m)
 					</span>
 				)}
 				{showPeakChip && (
