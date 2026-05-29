@@ -20,6 +20,8 @@ After many upstream PR's I decided to diverge further and tailor it even more to
 * Hosted locally or on local LAN, external access only via VPN.
 * API keys are for attribution, not access control ☝️.
 * Reduced provider support, smaller supply-chain attack surfaces.
+* Memory improvements
+* Improved cache-hit rates
 
 Feel free to use this fork.
 Bug reports are welcome, feature requests are not.
