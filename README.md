@@ -10,22 +10,27 @@ requests across multiple backend accounts through one local endpoint, so you sto
 hitting per-account rate limits. Point Claude Code at it with `ANTHROPIC_BASE_URL`,
 add your accounts in the dashboard, and it routes and falls back across them.
 
-## A fork, doing its own thing
+## An opinionated fork
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
 (itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)).
-After many upstream PR's I decided to diverge further and tailor it even more to my use-cases:
+After 30+ upstream PRs I just decided to just have my own bespoke solution.
+Fast iteration and tailored to my use-case, mostly Anthropic and OpenAI accounts.
 
-* Deployed always from source, low overhead updates.
-* Hosted locally or on local LAN, external access only via VPN.
-* API keys are for attribution, not access control ☝️.
-* Reduced provider support, smaller supply-chain attack surfaces.
-* Memory improvements
-* Improved cache-hit rates
+Changes:
 
-Feel free to use this fork.
-Bug reports are welcome, feature requests are not.
-I'm the target user, use it as is, or don't 🤷‍♂️.
+* Only one official deploy method: From source.
+* Strong stance that this should only be hosted locally, external access only via VPN.
+* API key system is sepperate from dashboard access.
+* Reduced provider support (no bedrock or vertex).
+* Smaller dependency trees to reduce supply-chain attack surface.
+* Lots of memory leak fixes and stability improvements.
+* Performance improvements so the proxy does not get lagged by other components.
+* Improved account selection algorithm + analytics and graps.
+* Improved fallover mechanims, per account, per provider.
+
+Feel free to use this fork, but it's not build for others to use, it is just what I use, made public.
+Bug reports are welcome, feature requests are not... 🤷‍♂️
 
 ## Build from source
 
