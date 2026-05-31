@@ -16,7 +16,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
-import { version } from "../lib/version";
+import { commitRelationshipLabel, version } from "../lib/version";
 import logoUrl from "../logo.png";
 import { CopyButton } from "./CopyButton";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
@@ -28,6 +28,10 @@ import { Separator } from "./ui/separator";
 // main and rebuilding — there is no npm/bun/binary install to detect.
 const UPDATE_COMMAND =
 	"git pull --ff-only && bun run build && sudo systemctl restart clankermux";
+
+// Fallback repo for the footer "open repository" link before/without a check.
+// Matches the backend's DEFAULT_REPO; the check response's `repo` overrides it.
+const DEFAULT_REPO = "d4rken/clankermux";
 
 interface NavItem {
 	label: string;
@@ -58,6 +62,8 @@ export function Navigation() {
 		latestUrl: string | null;
 		dirty: boolean;
 		behindBy: number | null;
+		aheadBy: number | null;
+		repo: string | null;
 	} | null>(null);
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
@@ -102,6 +108,8 @@ export function Navigation() {
 				latestUrl: data.latest?.url ?? null,
 				dirty: data.current?.dirty ?? false,
 				behindBy: typeof data.behindBy === "number" ? data.behindBy : null,
+				aheadBy: typeof data.aheadBy === "number" ? data.aheadBy : null,
+				repo: typeof data.repo === "string" ? data.repo : null,
 			});
 			setUpdateStatus(status);
 
@@ -141,6 +149,8 @@ export function Navigation() {
 			clearInterval(intervalId);
 		};
 	}, []);
+
+	const repoUrl = `https://github.com/${updateInfo?.repo ?? DEFAULT_REPO}`;
 
 	return (
 		<>
@@ -316,11 +326,22 @@ export function Navigation() {
 								</div>
 							)}
 							{updateStatus === "current" && (
-								<p className="mt-1 text-xs text-muted-foreground text-left font-mono">
-									{updateInfo?.currentSha
-										? `${updateInfo.currentSha}${updateInfo.dirty ? " (modified)" : ""}`
-										: version.replace(/^v/, "")}
-								</p>
+								<div className="mt-1 space-y-0.5 text-left">
+									<p className="text-xs text-muted-foreground font-mono">
+										{updateInfo?.currentSha ?? version.replace(/^v/, "")}
+									</p>
+									<p className="text-xs text-muted-foreground">
+										{commitRelationshipLabel(
+											updateInfo?.aheadBy ?? null,
+											updateInfo?.behindBy ?? null,
+										)}
+									</p>
+									{updateInfo?.dirty && (
+										<p className="text-xs italic text-muted-foreground/70">
+											local uncommitted changes
+										</p>
+									)}
+								</div>
 							)}
 							{updateStatus === "unknown" && (
 								<p className="mt-1 text-xs text-muted-foreground text-left">
@@ -335,10 +356,16 @@ export function Navigation() {
 						</div>
 
 						<div className="hidden lg:flex items-center justify-between">
-							<div className="flex items-center gap-2 text-xs text-muted-foreground">
+							<a
+								href={repoUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								title="Open GitHub repository"
+								className="flex items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+							>
 								<GitBranch className="h-3 w-3" />
 								<span>{version}</span>
-							</div>
+							</a>
 							<ThemeToggle />
 						</div>
 					</div>
