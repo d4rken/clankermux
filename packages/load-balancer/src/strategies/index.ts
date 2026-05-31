@@ -252,6 +252,29 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		this.pruneAffinity(now);
 	}
 
+	/**
+	 * Clear every affinity pin currently pointing at the given account, so the
+	 * projects/sessions that were stuck to it re-pick a fresh account on their
+	 * next request. Returns the number of pins removed.
+	 *
+	 * This is the manual lever behind the dashboard "Reset session stickiness"
+	 * action — used to migrate sessions off an account after a priority change.
+	 * Note this only clears the affinity map; the account's active-session
+	 * anchor (`session_start`) is cleared separately by the caller via the DB
+	 * op `clearAccountSessionAnchor`, because the no-affinity `global_session`
+	 * path re-sticks from `session_start`.
+	 */
+	clearAffinityForAccount(accountId: string): number {
+		let cleared = 0;
+		for (const [key, entry] of this.affinityByKey) {
+			if (entry.accountId === accountId) {
+				this.affinityByKey.delete(key);
+				cleared++;
+			}
+		}
+		return cleared;
+	}
+
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
 		for (const [key, entry] of this.affinityByKey) {

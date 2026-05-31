@@ -1871,3 +1871,100 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 		expect(recovered.routing?.decision).toBe("affinity_hit");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// clearAffinityForAccount — the manual "Reset session stickiness" lever.
+// Removes every affinity pin pointing at a given account so its sessions
+// re-pick on their next request, leaving pins for other accounts untouched.
+// Uses a non-session provider (openai-compatible) so affinity is the only
+// stickiness in play (no Anthropic session window).
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — clearAffinityForAccount", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function makeAcct(id: string): Account {
+		return makeAccount({
+			id,
+			name: id,
+			provider: "openai-compatible",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 0,
+		});
+	}
+
+	function metaForProject(project: string): RequestMeta {
+		return {
+			id: `req-${project}`,
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			project,
+		};
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("clears pins pointing at the target account and returns the count", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+
+		// Two projects pin to A (lower utilization → FEFO winner), one pins to B.
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		const projectOne = metaForProject("project-one");
+		const projectTwo = metaForProject("project-two");
+		expect(strategy.select([a, b], projectOne)[0].id).toBe(a.id);
+		expect(strategy.select([a, b], projectTwo)[0].id).toBe(a.id);
+
+		// A third project pins to B (now the FEFO winner).
+		mockStore.setUtilization(a.id, 80);
+		mockStore.setUtilization(b.id, 10);
+		const projectThree = metaForProject("project-three");
+		expect(strategy.select([a, b], projectThree)[0].id).toBe(b.id);
+
+		// Clear A's pins: both project-one and project-two pins removed.
+		expect(strategy.clearAffinityForAccount(a.id)).toBe(2);
+
+		// project-three (pinned to B) is untouched — it still continues on B
+		// even though A now has lower utilization (would-be FEFO winner).
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		const projectThreeAgain = metaForProject("project-three");
+		expect(strategy.select([a, b], projectThreeAgain)[0].id).toBe(b.id);
+		expect(projectThreeAgain.routing?.decision).toBe("affinity_hit");
+
+		// project-one had its pin cleared → it re-picks fresh (FEFO winner A).
+		const projectOneAgain = metaForProject("project-one");
+		expect(strategy.select([a, b], projectOneAgain)[0].id).toBe(a.id);
+		expect(projectOneAgain.routing?.decision).toBe("affinity_miss");
+	});
+
+	it("returns 0 when no pins point at the account", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		// Pin a project to A.
+		expect(strategy.select([a, b], metaForProject("only-project"))[0].id).toBe(
+			a.id,
+		);
+
+		// No project ever pinned to B → clearing B removes nothing.
+		expect(strategy.clearAffinityForAccount(b.id)).toBe(0);
+
+		// A's pin survives — the project still continues on A.
+		const again = metaForProject("only-project");
+		expect(strategy.select([a, b], again)[0].id).toBe(a.id);
+		expect(again.routing?.decision).toBe("affinity_hit");
+	});
+});

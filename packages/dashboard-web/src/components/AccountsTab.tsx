@@ -370,6 +370,16 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleResetStickiness = async (account: Account) => {
+		try {
+			await api.resetStickiness(account.id);
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handlePriorityChange = (account: Account) => {
 		setPriorityDialog({ isOpen: true, account });
 	};
@@ -565,6 +575,7 @@ export function AccountsTab() {
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
+						onResetStickiness={handleResetStickiness}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
 						onBillingTypeToggle={handleBillingTypeToggle}

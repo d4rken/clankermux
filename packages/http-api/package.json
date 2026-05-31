@@ -15,6 +15,7 @@
 		"@clankermux/config": "workspace:*",
 		"@clankermux/oauth-flow": "workspace:*",
 		"@clankermux/providers": "workspace:*",
+		"@clankermux/proxy": "workspace:*",
 		"@clankermux/types": "workspace:*"
 	}
 }

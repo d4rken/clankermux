@@ -10,6 +10,7 @@ import {
 	Play,
 	RefreshCw,
 	Trash2,
+	Unlink,
 	Zap,
 } from "lucide-react";
 import { useState } from "react";
@@ -51,6 +52,7 @@ interface AccountListItemProps {
 	onRemove: (name: string) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
+	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
 	onBillingTypeToggle: (account: Account) => void;
@@ -72,6 +74,7 @@ export function AccountListItem({
 	onRemove,
 	onRename,
 	onPriorityChange,
+	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
 	onBillingTypeToggle,
@@ -280,6 +283,15 @@ export function AccountListItem({
 								<Zap className="mr-2 h-4 w-4" />
 								Change Priority
 							</DropdownMenuItem>
+							{onResetStickiness && (
+								<DropdownMenuItem
+									onClick={() => onResetStickiness(account)}
+									title="Clear this account's session affinity pins and active-session anchor so its sessions re-pick on their next request"
+								>
+									<Unlink className="mr-2 h-4 w-4" />
+									Reset session stickiness
+								</DropdownMenuItem>
+							)}
 							{(onCustomEndpointChange || onModelMappingsChange) && (
 								<DropdownMenuSeparator />
 							)}

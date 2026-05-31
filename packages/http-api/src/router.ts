@@ -16,6 +16,7 @@ import {
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
+	createAccountResetStickinessHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
@@ -444,6 +445,16 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+
+			// Account reset session stickiness
+			if (path.endsWith("/reset-stickiness") && method === "POST") {
+				const resetStickinessHandler = createAccountResetStickinessHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					resetStickinessHandler(req, accountId),
+				)(req, url);
 			}
 
 			// Account refresh usage - force restart usage polling and token refresh

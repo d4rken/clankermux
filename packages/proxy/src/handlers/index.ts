@@ -37,9 +37,11 @@ export {
 } from "./token-health-service";
 export {
 	type CodexUsageRefreshOutcome,
+	clearAccountAffinity,
 	clearAccountRefreshCache,
 	getValidAccessToken,
 	refreshCodexUsageForAccount,
+	registerAffinityClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,

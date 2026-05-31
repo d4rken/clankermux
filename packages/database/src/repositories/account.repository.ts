@@ -185,6 +185,23 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
+	/**
+	 * Expire the account's active-session anchor so the no-affinity
+	 * `global_session` routing path stops re-sticking new requests to it.
+	 *
+	 * Distinct from `resetSession()`, which sets `session_start = now` and
+	 * thus makes the account MORE sticky. Here we null `session_start` so the
+	 * account is no longer a candidate for the active-session continue path.
+	 * Returns the number of rows changed. Plain UPDATE — valid on SQLite and
+	 * Postgres, no schema change.
+	 */
+	async clearSessionAnchor(accountId: string): Promise<number> {
+		return this.runWithChanges(
+			`UPDATE accounts SET session_start = NULL, session_request_count = 0 WHERE id = ?`,
+			[accountId],
+		);
+	}
+
 	async updateRequestCount(accountId: string, count: number): Promise<void> {
 		await this.run(
 			`UPDATE accounts SET session_request_count = ? WHERE id = ?`,

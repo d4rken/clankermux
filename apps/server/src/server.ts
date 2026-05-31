@@ -48,6 +48,7 @@ import {
 	handleProxy,
 	type ProxyContext,
 	RequestRecorder,
+	registerAffinityClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
@@ -1011,6 +1012,15 @@ export default async function startServer(options?: {
 			message,
 		};
 	});
+
+	// Register this server's session-affinity clearing capability, so the
+	// "Reset session stickiness" HTTP action can wipe the in-memory affinity
+	// pins held by this server's load-balancing strategy.
+	registerAffinityClearer(
+		serverId,
+		(accountId: string) =>
+			currentStrategy?.clearAffinityForAccount?.(accountId) ?? 0,
+	);
 
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
 	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);
