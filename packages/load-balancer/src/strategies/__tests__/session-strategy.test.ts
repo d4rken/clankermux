@@ -459,6 +459,53 @@ describe("SessionStrategy", () => {
 		);
 	});
 
+	it("uses utilization tie-breaking when auto-fallback is triggered", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		const result = strategy.select([fallbackHighUtil, lowUtil], meta);
+
+		expect(result[0]).toBe(lowUtil);
+		expect(result[1]).toBe(fallbackHighUtil);
+		expect(meta.routing?.decision).toBe("auto_fallback");
+		expect(meta.routing?.selectedAccountId).toBe("low-util");
+	});
+
+	it("peek uses utilization tie-breaking when auto-fallback would trigger", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		expect(strategy.peek([fallbackHighUtil, lowUtil])).toBe("low-util");
+	});
+
 	it("does not honor bypass-session from external client traffic", () => {
 		const projectMeta: RequestMeta = {
 			...meta,

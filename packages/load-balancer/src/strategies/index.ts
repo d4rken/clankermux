@@ -381,9 +381,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
 		const fallbackTriggered = fallbackCandidates.some((c) => isAvailable(c));
 		if (fallbackTriggered) {
-			const sorted = accounts
-				.filter((a) => isAvailable(a))
-				.sort((a, b) => a.priority - b.priority);
+			const sorted = this.sortAvailableAccounts(accounts, isAvailable);
 			return sorted[0]?.id ?? null;
 		}
 
@@ -494,9 +492,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		if (chosenFallback !== null) {
-			const available = accounts
-				.filter((a) => getCachedAvailability(a))
-				.sort((a, b) => a.priority - b.priority);
+			const available = this.sortAvailableAccounts(
+				accounts,
+				getCachedAvailability,
+			);
 			const servingAccount = available[0] ?? chosenFallback;
 
 			if (!bypassSession) {

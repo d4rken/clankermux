@@ -218,15 +218,17 @@ export async function selectAccountsForRequest(
 						});
 					}
 
-					// Store combo slot info for downstream consumption
-					const slotInfo: ComboSlotInfo = {
-						comboName: combo.name,
-						slots: slotEntries,
-					};
-					setComboSlotInfo(meta, slotInfo);
-					meta.comboName = combo.name;
-
 					if (availableAccounts.length > 0) {
+						// Store combo slot info only when combo routing actually wins.
+						// If all slots are unavailable, the normal strategy fallback must
+						// not be mislabeled as combo-routed downstream.
+						const slotInfo: ComboSlotInfo = {
+							comboName: combo.name,
+							slots: slotEntries,
+						};
+						setComboSlotInfo(meta, slotInfo);
+						meta.comboName = combo.name;
+
 						const affinity = getRoutingAffinity(meta);
 						meta.routing = {
 							strategy: "combo",

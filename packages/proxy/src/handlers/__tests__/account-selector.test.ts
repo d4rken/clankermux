@@ -383,6 +383,47 @@ describe("selectAccountsForRequest — combo routing", () => {
 		expect(result[0]?.id).toBe("acc-fallback");
 	});
 
+	it("does not leave combo metadata behind when all combo slots are unavailable", async () => {
+		const rateLimitedAcc = makeAccount({
+			id: "acc-1",
+			rate_limited_until: Date.now() + 3_600_000,
+		});
+		const fallbackAcc = makeAccount({ id: "acc-fallback" });
+		const combo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-1",
+				account_id: "acc-1",
+				model: "claude-sonnet-4-5",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+		const ctx = {
+			strategy: {
+				select: mock(() => [fallbackAcc]),
+			},
+			dbOps: {
+				getAllAccounts: mock(async () => [rateLimitedAcc, fallbackAcc]),
+				getActiveComboForFamily: mock(async () => combo),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+			usageWorker: { postMessage: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta();
+
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+
+		expect(result[0]?.id).toBe("acc-fallback");
+		expect(meta.comboName).toBeUndefined();
+		expect(getComboSlotInfo(meta)).toBeNull();
+	});
+
 	it("falls back to SessionStrategy when no combo is active for the model family", async () => {
 		const acc = makeAccount({ id: "acc-normal" });
 		const ctx = makeCtx({ accounts: [acc], activeCombo: null });
