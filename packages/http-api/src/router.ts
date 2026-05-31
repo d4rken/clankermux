@@ -126,7 +126,6 @@ export class APIRouter {
 			config,
 			dbOps,
 			getAsyncWriterHealth,
-			getUsageWorkerHealth,
 			getIntegrityStatus,
 			getStrategy,
 		} = this.context;
@@ -136,7 +135,6 @@ export class APIRouter {
 			dbOps,
 			config,
 			getAsyncWriterHealth,
-			getUsageWorkerHealth,
 			getIntegrityStatus,
 		);
 		const statsHandler = createStatsHandler(dbOps);
@@ -190,7 +188,6 @@ export class APIRouter {
 			dbOps,
 			config,
 			getAsyncWriterHealth,
-			getUsageWorkerHealth,
 			getIntegrityStatus,
 		);
 		const versionCheckHandler = createVersionCheckHandler();

@@ -24,7 +24,6 @@ export interface SystemStatusResponse {
 	/** Compact runtime signals used to explain a non-ok status. */
 	runtime: {
 		asyncWriterHealthy: boolean;
-		usageWorkerState: string;
 		integrityStatus: "ok" | "corrupt" | "unchecked" | "running";
 	};
 	strategy: string;

@@ -25,12 +25,6 @@ export interface APIContext {
 		recentDrops: number;
 		queuedJobs: number;
 	};
-	getUsageWorkerHealth?: () => {
-		state: string;
-		pendingAcks: number;
-		lastError: string | null;
-		startedAt: number | null;
-	};
 	getIntegrityStatus?: () => IntegrityStatus;
 	getStrategy?: () => LoadBalancingStrategy | null;
 }

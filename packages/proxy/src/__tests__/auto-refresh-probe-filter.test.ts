@@ -4,7 +4,8 @@
  * Three sites guard against auto-refresh probe pollution:
  *   1. proxy-operations.ts  — isSyntheticInternal skips cacheBodyStore.stageRequest
  *   2. response-handler.ts  — shouldRecordRequest is false for auto-refresh probes
- *   3. proxy.ts             — pool-exhausted path skips usageWorker.postMessage for probes
+ *      (so the inline usage collector + recorder.begin never run)
+ *   3. proxy.ts             — pool-exhausted path skips recordSynthetic for probes
  */
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
@@ -99,10 +100,10 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 // ---------------------------------------------------------------------------
 
 describe("response-handler — shouldRecordRequest suppresses auto-refresh probes", () => {
-	it("does not call usageWorker.postMessage for auto-refresh probe requests", async () => {
+	it("does not record (recorder.begin) for auto-refresh probe requests", async () => {
 		const { forwardToClient } = await import("../response-handler");
 
-		const usageWorkerPostMessage = mock(() => {});
+		const begin = mock(() => {});
 		const account = makeAccount();
 
 		const ctx = {
@@ -111,11 +112,12 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 				isStreamingResponse: () => false,
 			} as never,
 			config: { getStorePayloads: () => false } as never,
-			usageWorker: { postMessage: usageWorkerPostMessage } as never,
 			requestRecorder: {
-				begin: mock(() => {}),
+				begin,
 				captureResponseChunk: mock(() => {}),
 				finishTransport: mock(() => {}),
+				attachUsageSummary: mock(() => {}),
+				markUsageUnavailable: mock(() => {}),
 			} as never,
 		};
 
@@ -144,13 +146,15 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 			ctx as never,
 		);
 
-		expect(usageWorkerPostMessage).not.toHaveBeenCalled();
+		// Inline collection is gated by the same shouldRecordRequest predicate —
+		// a probe is filtered, so the recorder is never started.
+		expect(begin).not.toHaveBeenCalled();
 	});
 
-	it("calls usageWorker.postMessage for normal (non-probe) requests", async () => {
+	it("records (recorder.begin) for normal (non-probe) requests", async () => {
 		const { forwardToClient } = await import("../response-handler");
 
-		const usageWorkerPostMessage = mock(() => {});
+		const begin = mock(() => {});
 		const account = makeAccount();
 
 		const ctx = {
@@ -159,11 +163,12 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 				isStreamingResponse: () => false,
 			} as never,
 			config: { getStorePayloads: () => false } as never,
-			usageWorker: { postMessage: usageWorkerPostMessage } as never,
 			requestRecorder: {
-				begin: mock(() => {}),
+				begin,
 				captureResponseChunk: mock(() => {}),
 				finishTransport: mock(() => {}),
+				attachUsageSummary: mock(() => {}),
+				markUsageUnavailable: mock(() => {}),
 			} as never,
 		};
 
@@ -191,8 +196,8 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 			ctx as never,
 		);
 
-		// At minimum a "start" message should have been sent
-		expect(usageWorkerPostMessage).toHaveBeenCalled();
+		// A normal request begins recording on the main-thread recorder.
+		expect(begin).toHaveBeenCalled();
 	});
 });
 
@@ -201,10 +206,9 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 // ---------------------------------------------------------------------------
 
 describe("proxy.ts — pool-exhausted path skips recording for auto-refresh probes", () => {
-	it("does not record (worker or recorder) when pool is exhausted and request is an auto-refresh probe", async () => {
+	it("does not record (recorder) when pool is exhausted and request is an auto-refresh probe", async () => {
 		const { handleProxy } = await import("../proxy");
 
-		const usageWorkerPostMessage = mock(() => {});
 		const recordSynthetic = mock(() => {});
 
 		const ctx = {
@@ -227,7 +231,6 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			} as never,
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
-			usageWorker: { postMessage: usageWorkerPostMessage } as never,
 			requestRecorder: { recordSynthetic } as never,
 		};
 
@@ -253,15 +256,13 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 		// Should still return 503
 		expect(response.status).toBe(503);
 
-		// But must NOT record — neither to the worker nor the recorder.
-		expect(usageWorkerPostMessage).not.toHaveBeenCalled();
+		// But must NOT record the synthetic row for a probe.
 		expect(recordSynthetic).not.toHaveBeenCalled();
 	});
 
 	it("records via requestRecorder.recordSynthetic when pool is exhausted and request is NOT an auto-refresh probe", async () => {
 		const { handleProxy } = await import("../proxy");
 
-		const usageWorkerPostMessage = mock(() => {});
 		const recordSynthetic = mock(() => {});
 
 		const ctx = {
@@ -299,7 +300,6 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			} as never,
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
-			usageWorker: { postMessage: usageWorkerPostMessage } as never,
 			requestRecorder: { recordSynthetic } as never,
 		};
 

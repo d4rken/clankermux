@@ -772,6 +772,14 @@ export async function proxyWithAccount(
 					// first: Bun's fetch already decompressed the body, so leaving the
 					// upstream `content-encoding: gzip` header makes the client try to
 					// gunzip plaintext → "Decompression error: ZlibError".
+					//
+					// This is a DIRECT return that bypasses forwardToClient, so no
+					// onSummary/discardStaged staging signal would ever fire for this
+					// request id. Drop the staged body now or it leaks until the age
+					// sweep (B4) — every other return path either routes through
+					// forwardToClient (→ onSummary) or is a `return null` failover the
+					// proxy.ts caller cleans up via discardStaged.
+					cacheBodyStore.discardStaged(requestMeta.id);
 					return withSanitizedProxyHeaders(rawResponse);
 				}
 

@@ -78,8 +78,6 @@ export function statusSummary(data: SystemStatusResponse): {
 		description = "No accounts configured";
 	} else if (!runtime.asyncWriterHealthy) {
 		description = "Async DB writer is failing";
-	} else if (runtime.usageWorkerState === "error") {
-		description = "Usage worker error";
 	} else if (pool.routable === 0) {
 		description = "No routable accounts available";
 	}

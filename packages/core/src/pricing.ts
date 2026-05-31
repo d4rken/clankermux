@@ -206,12 +206,23 @@ interface Logger {
 	debug(message: string, ...args: unknown[]): void;
 }
 
+/** Default models.dev fetch timeout. Kept short so a hung remote never stalls
+ * the per-request usage finalizer (which awaits estimateCostUSD). Overridable
+ * via CF_PRICING_FETCH_TIMEOUT_MS. */
+const DEFAULT_PRICING_FETCH_TIMEOUT_MS = 4_000;
+
 class PriceCatalogue {
 	private static instance: PriceCatalogue;
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
 	private warnedModels = new Set<string>();
 	private logger: Logger | null = null;
+	/**
+	 * Single in-flight remote-load promise so concurrent getPricing() callers
+	 * (e.g. many requests finalizing at once on a cold catalogue) share ONE
+	 * models.dev fetch instead of each firing their own. Cleared when it settles.
+	 */
+	private inFlightLoad: Promise<ApiResponse> | null = null;
 
 	private constructor() {}
 
@@ -397,9 +408,30 @@ class PriceCatalogue {
 		}
 	}
 
+	private getFetchTimeoutMs(): number {
+		const raw = Number(process.env.CF_PRICING_FETCH_TIMEOUT_MS);
+		return Number.isFinite(raw) && raw > 0
+			? raw
+			: DEFAULT_PRICING_FETCH_TIMEOUT_MS;
+	}
+
 	private async fetchRemote(): Promise<ApiResponse | null> {
+		if (process.env.CF_PRICING_OFFLINE === "1") {
+			return null;
+		}
+
+		// Bound the fetch with an AbortController timeout so a hung models.dev
+		// connection can never stall the caller (estimateCostUSD must always
+		// resolve quickly — it's awaited on the per-request usage finalize path).
+		const controller = new AbortController();
+		const timer = setTimeout(
+			() => controller.abort(),
+			this.getFetchTimeoutMs(),
+		);
 		try {
-			const response = await fetch("https://models.dev/api.json");
+			const response = await fetch("https://models.dev/api.json", {
+				signal: controller.signal,
+			});
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 			}
@@ -409,11 +441,47 @@ class PriceCatalogue {
 		} catch (error) {
 			this.logger?.warn("Failed to fetch pricing data: %s", error);
 			return null;
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
+	/** Deep copy of the bundled fallback table (never mutate the shared const). */
+	private cloneBundled(): ApiResponse {
+		return structuredClone
+			? structuredClone(BUNDLED_PRICING)
+			: (JSON.parse(JSON.stringify(BUNDLED_PRICING)) as ApiResponse);
+	}
+
+	/**
+	 * Resolve the full pricing table from remote (bounded) or disk cache, merged
+	 * with bundled; falls back to bundled-only. De-duped behind a single
+	 * in-flight promise so concurrent cold callers share one fetch.
+	 */
+	private loadPricing(): Promise<ApiResponse> {
+		if (this.inFlightLoad) return this.inFlightLoad;
+		const load = (async () => {
+			let data = await this.fetchRemote();
+			if (!data) {
+				data = await this.loadFromCache();
+			}
+			if (data) {
+				data = this.mergePricingData(data, BUNDLED_PRICING);
+			} else {
+				data = this.cloneBundled();
+			}
+			this.priceData = data;
+			this.lastFetch = Date.now();
+			return data;
+		})().finally(() => {
+			this.inFlightLoad = null;
+		});
+		this.inFlightLoad = load;
+		return load;
+	}
+
 	async getPricing(): Promise<ApiResponse> {
-		// Return cached data if available
+		// Fresh cached data → return immediately.
 		if (
 			this.priceData &&
 			Date.now() - this.lastFetch < this.getCacheDurationMs()
@@ -421,27 +489,45 @@ class PriceCatalogue {
 			return this.priceData;
 		}
 
-		// Always attempt to fetch fresh pricing first (once per process start)
-		let data = await this.fetchRemote();
-
-		// If remote fetch failed (offline or error), fall back to disk cache
-		if (!data) {
-			data = await this.loadFromCache();
+		// Cold start: seed priceData synchronously with the bundled table and
+		// kick off the (de-duped, timeout-bounded) remote+disk load in the
+		// BACKGROUND. estimateCostUSD therefore always resolves immediately from
+		// at least the bundled prices and never hangs on a slow models.dev. The
+		// background load replaces priceData with the richer merged table when it
+		// lands, so subsequent calls get full coverage. Errors are swallowed
+		// (loadPricing already falls back to bundled).
+		if (!this.priceData) {
+			this.priceData = this.cloneBundled();
+			this.lastFetch = Date.now();
+			void this.loadPricing().catch(() => undefined);
+			return this.priceData;
 		}
 
-		// If we have remote data, merge it with bundled pricing to ensure we have all models
-		if (data) {
-			data = this.mergePricingData(data, BUNDLED_PRICING);
-		} else {
-			// Fall back to bundled pricing - create a deep copy to avoid mutation
-			data = structuredClone
-				? structuredClone(BUNDLED_PRICING)
-				: (JSON.parse(JSON.stringify(BUNDLED_PRICING)) as ApiResponse);
-		}
+		// Stale (TTL elapsed) but we still have a table: refresh in the background
+		// and return the existing data right away.
+		void this.loadPricing().catch(() => undefined);
+		return this.priceData;
+	}
 
-		this.priceData = data;
-		this.lastFetch = Date.now();
-		return data;
+	/**
+	 * Test-only: clear cached pricing + in-flight load so a test can exercise the
+	 * cold-start path deterministically. Not part of the public runtime surface.
+	 */
+	resetForTests(): void {
+		this.priceData = null;
+		this.lastFetch = 0;
+		this.inFlightLoad = null;
+		this.warnedModels.clear();
+	}
+
+	/** Test-only: is a background remote load currently in flight? */
+	hasInFlightLoadForTests(): boolean {
+		return this.inFlightLoad !== null;
+	}
+
+	/** Test-only: invoke the de-duped loader directly. */
+	loadPricingForTests(): Promise<ApiResponse> {
+		return this.loadPricing();
 	}
 
 	warnOnce(modelId: string, error?: Error | string): void {
@@ -469,6 +555,25 @@ class PriceCatalogue {
 export function setPricingLogger(logger: Logger): void {
 	PriceCatalogue.get().setLogger(logger);
 }
+
+/**
+ * Test-only handle onto the pricing singleton. Lets tests reset cached state and
+ * inspect the in-flight load. NOT for runtime use.
+ */
+export const __pricingTestHooks = {
+	reset(): void {
+		PriceCatalogue.get().resetForTests();
+	},
+	hasInFlightLoad(): boolean {
+		return PriceCatalogue.get().hasInFlightLoadForTests();
+	},
+	getPricing(): Promise<unknown> {
+		return PriceCatalogue.get().getPricing();
+	},
+	loadPricing(): Promise<unknown> {
+		return PriceCatalogue.get().loadPricingForTests();
+	},
+};
 
 /**
  * Get the cost rate for a specific model and token type

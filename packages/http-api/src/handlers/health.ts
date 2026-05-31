@@ -11,12 +11,6 @@ type AsyncWriterHealthFn = () => {
 	recentDrops: number;
 	queuedJobs: number;
 };
-type UsageWorkerHealthFn = () => {
-	state: string;
-	pendingAcks: number;
-	lastError: string | null;
-	startedAt: number | null;
-};
 type IntegrityStatusFn = () => IntegrityStatus;
 
 export function computePoolStatus(
@@ -84,7 +78,6 @@ export function createHealthHandler(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
-	getUsageWorkerHealth?: UsageWorkerHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
 ) {
 	const normalCache = new TtlCache<HealthResponse>(2000);
@@ -106,18 +99,12 @@ export function createHealthHandler(
 		const asyncWriterHealth = getAsyncWriterHealth
 			? getAsyncWriterHealth()
 			: null;
-		const usageWorkerHealth = getUsageWorkerHealth
-			? getUsageWorkerHealth()
-			: null;
 
 		// Determine runtime health from stored results
 		const asyncWriterHealthy = asyncWriterHealth
 			? asyncWriterHealth.healthy
 			: true;
-		const usageWorkerHealthy = usageWorkerHealth
-			? usageWorkerHealth.state !== "error"
-			: true;
-		const runtimeHealthy = asyncWriterHealthy && usageWorkerHealthy;
+		const runtimeHealthy = asyncWriterHealthy;
 
 		const status = computeHealthStatus(runtimeHealthy, pool);
 
@@ -130,14 +117,13 @@ export function createHealthHandler(
 		};
 
 		// Build runtime section from stored results
-		if (asyncWriterHealth && usageWorkerHealth) {
+		if (asyncWriterHealth) {
 			response.runtime = {
 				asyncWriter: asyncWriterHealth,
-				usageWorker: usageWorkerHealth,
 			};
 		}
 
-		// Add storage integrity independently — orthogonal to asyncWriter/usageWorker
+		// Add storage integrity independently — orthogonal to asyncWriter
 		if (getIntegrityStatus) {
 			if (!response.runtime) {
 				response.runtime = {};

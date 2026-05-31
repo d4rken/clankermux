@@ -748,6 +748,58 @@ describe("RequestRecorder — terminal paths", () => {
 	});
 });
 
+describe("RequestRecorder — markUsageUnavailable (finalize reject, B5)", () => {
+	it("persists immediately usage-waived without waiting for grace", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		// Within grace, nothing persisted yet.
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(0);
+		// Finalize rejected → mark unavailable. Must persist NOW (no timer advance).
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		// Persisted without usage (waived).
+		expect(h.dbOps.saveRequestCalls[0].usage).toBeUndefined();
+		// Waived records are dropped immediately (not kept for a patch), so a
+		// later dispose can't lose them and the map stays bounded.
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+
+	it("is a no-op for an unknown or already-persisted request", async () => {
+		const h = makeHarness();
+		// Unknown id — must not throw or persist.
+		expect(() => h.recorder.markUsageUnavailable("nope")).not.toThrow();
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(0);
+
+		// Already persisted with usage — a late reject must not double-persist.
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+	});
+
+	it("does not persist while transport is still open (invariant 5)", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ isStream: true }));
+		// Finalize reject before transport finished should not write a row.
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(0);
+		// Once transport finishes, the waived flag means it persists right away.
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].usage).toBeUndefined();
+	});
+});
+
 describe("RequestRecorder — late summary after grace persist", () => {
 	it("patches usage via updateRequestUsage AND re-emits a dashboard event", async () => {
 		const h = makeHarness();
@@ -770,67 +822,22 @@ describe("RequestRecorder — late summary after grace persist", () => {
 });
 
 describe("RequestRecorder — never finalize while transport open", () => {
-	it("begin without finishTransport never writes a row, even after onWorkerGone", async () => {
+	it("begin without finishTransport never writes a row until transport finishes", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta({ isStream: true }));
-		// Worker dies while still streaming.
-		h.recorder.onWorkerGone();
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(0);
 		// Even after the grace window — transport still open.
 		h.timers.advance(1000);
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(0);
-		// Once transport finishes, it persists (usage waived).
+		// Once transport finishes, the grace timer elapses (SUMMARY_GRACE_MS=100)
+		// and it persists usage-less (the inline finalize may never attach for a
+		// partial stream).
 		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(1);
-	});
-});
-
-describe("RequestRecorder — worker gone", () => {
-	it("finished records persist immediately; active records persist at their own finishTransport", async () => {
-		const h = makeHarness();
-		// Finished record (transport done, awaiting usage in grace).
-		h.recorder.begin(makeMeta({ requestId: "finished", isStream: true }));
-		h.recorder.finishTransport("finished", "success");
-		// Active record (still streaming).
-		h.recorder.begin(makeMeta({ requestId: "active", isStream: true }));
-
-		h.recorder.onWorkerGone();
-		await h.flush();
-
-		// Finished one persists now (usage waived) without waiting for grace.
-		const finishedRow = h.dbOps.saveRequestCalls.find(
-			(c) => c.id === "finished",
-		);
-		expect(finishedRow).toBeDefined();
-		expect(finishedRow?.usage).toBeUndefined();
-
-		// Active one not yet written.
-		expect(
-			h.dbOps.saveRequestCalls.find((c) => c.id === "active"),
-		).toBeUndefined();
-
-		// Active one persists at its own transport finish.
-		h.recorder.finishTransport("active", "success");
-		await h.flush();
-		expect(
-			h.dbOps.saveRequestCalls.find((c) => c.id === "active"),
-		).toBeDefined();
-	});
-
-	it("waived finished records are dropped from the map (no patch retained)", async () => {
-		const h = makeHarness();
-		h.recorder.begin(makeMeta({ requestId: "w" }));
-		h.recorder.finishTransport("w", "success");
-		h.recorder.onWorkerGone();
-		await h.flush();
-		expect(h.dbOps.saveRequestCalls.find((c) => c.id === "w")).toBeDefined();
-		// A late summary on a waived/dropped record does not patch.
-		h.recorder.attachUsageSummary("w", makeSummary({ requestId: "w" }));
-		await h.flush();
-		expect(h.dbOps.updateUsageCalls.length).toBe(0);
 	});
 });
 

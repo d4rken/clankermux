@@ -90,7 +90,6 @@ function makeCtx(
 		},
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) },
-		usageWorker: { postMessage: mock(() => {}) },
 	} as unknown as ProxyContext;
 }
 
@@ -197,7 +196,6 @@ describe("selectAccountsForRequest — x-clankermux-account-id header", () => {
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({ "x-clankermux-account-id": "acc-paused" }),
@@ -225,7 +223,6 @@ describe("selectAccountsForRequest — x-clankermux-account-id header", () => {
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({ "x-clankermux-account-id": "acc-rl" }),
@@ -381,7 +378,6 @@ describe("selectAccountsForRequest — combo routing", () => {
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 
 		const meta = makeRequestMeta();
@@ -421,7 +417,6 @@ describe("selectAccountsForRequest — combo routing", () => {
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta();
 
@@ -539,7 +534,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			internal: true,
@@ -572,7 +566,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
@@ -603,7 +596,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			headers: new Headers({
@@ -639,7 +631,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			internal: true,
@@ -674,7 +665,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			internal: true,
@@ -707,7 +697,6 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 			},
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) },
-			usageWorker: { postMessage: mock(() => {}) },
 		} as unknown as ProxyContext;
 		const meta = makeRequestMeta({
 			internal: true,

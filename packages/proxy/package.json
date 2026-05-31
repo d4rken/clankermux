@@ -15,7 +15,6 @@
 		"@clankermux/database": "workspace:*",
 		"@clankermux/logger": "workspace:*",
 		"@clankermux/providers": "workspace:*",
-		"@clankermux/ui-common": "workspace:*",
-		"@dqbd/tiktoken": "1.0.22"
+		"@clankermux/ui-common": "workspace:*"
 	}
 }

@@ -1,52 +1,69 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { cacheBodyStore } from "../cache-body-store";
 import { forwardToClient } from "../response-handler";
+// Captured at module-load time (BEFORE any mock.module) so the finalize-failure
+// test can restore the REAL usage-collector afterward — a dynamic import while
+// the mock is active would just return the mocked module again.
+import * as realUsageCollector from "../usage-collector";
 
-describe("forwardToClient worker protocol", () => {
-	// Production passes requestBody as a real ArrayBuffer (RequestBodyContext
-	// .getBuffer() returns ArrayBuffer | null). Encode test bodies the same way
-	// so .slice() yields a transferable ArrayBuffer rather than a Uint8Array.
-	function toArrayBuffer(s: string): ArrayBuffer {
-		const bytes = new TextEncoder().encode(s);
-		return bytes.buffer.slice(
-			bytes.byteOffset,
-			bytes.byteOffset + bytes.byteLength,
-		) as ArrayBuffer;
-	}
+/**
+ * Inline usage-collection contract (post worker-retirement).
+ *
+ * The post-processor worker is gone: forwardToClient now feeds a per-request
+ * UsageState inline and finalizes it AFTER transport finish. These tests assert
+ * that contract — there is no postMessage anywhere; the RequestRecorder.begin /
+ * captureResponseChunk / finishTransport / attachUsageSummary calls and the
+ * cacheBodyStore.onSummary / discardStaged staging signals are the observable
+ * surface now.
+ */
 
-	async function waitFor(
-		predicate: () => boolean,
-		timeoutMs = 1000,
-	): Promise<void> {
-		const start = Date.now();
-		while (!predicate()) {
-			if (Date.now() - start > timeoutMs) {
-				throw new Error("Timed out waiting for condition");
-			}
-			await new Promise((resolve) => setTimeout(resolve, 10));
+// Production passes requestBody as a real ArrayBuffer (RequestBodyContext
+// .getBuffer() returns ArrayBuffer | null). Encode test bodies the same way so
+// .slice() yields a transferable ArrayBuffer rather than a Uint8Array.
+function toArrayBuffer(s: string): ArrayBuffer {
+	const bytes = new TextEncoder().encode(s);
+	return bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength,
+	) as ArrayBuffer;
+}
+
+async function waitFor(
+	predicate: () => boolean,
+	timeoutMs = 1000,
+): Promise<void> {
+	const start = Date.now();
+	while (!predicate()) {
+		if (Date.now() - start > timeoutMs) {
+			throw new Error("Timed out waiting for condition");
 		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
+}
 
-	function createCtx(
-		postMessage: (msg: Record<string, unknown>) => void,
-		storePayloads = true,
-	) {
-		const usageWorker = {
-			postMessage: mock(postMessage),
-		} as unknown as import("../usage-worker-controller").UsageWorkerController;
-
-		// The request body + payload capture now lives on the main-thread
-		// RequestRecorder, not the worker StartMessage. Record begin() calls so
-		// tests can inspect the RecordMeta the handler builds.
+describe("forwardToClient inline usage collection", () => {
+	function createCtx(storePayloads = true) {
+		// Record the order of finishTransport vs attachUsageSummary so a test can
+		// assert R3 (finishTransport FIRST, finalize resolves AFTER).
+		const callOrder: string[] = [];
 		const recorderBeginMetas: Array<Record<string, unknown>> = [];
+		const attached: Array<Record<string, unknown>> = [];
 		const requestRecorder = {
 			begin: mock((meta: Record<string, unknown>) =>
 				recorderBeginMetas.push(meta),
 			),
 			captureResponseChunk: mock(() => {}),
-			finishTransport: mock(() => {}),
-			attachUsageSummary: mock(() => {}),
+			finishTransport: mock(() => {
+				callOrder.push("finishTransport");
+			}),
+			attachUsageSummary: mock(
+				(_id: string, summary: Record<string, unknown>) => {
+					callOrder.push("attachUsageSummary");
+					attached.push(summary);
+				},
+			),
+			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
-			onWorkerGone: mock(() => {}),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
 		};
@@ -64,16 +81,18 @@ describe("forwardToClient worker protocol", () => {
 			},
 			refreshInFlight: new Map<string, Promise<string>>(),
 			asyncWriter: {},
-			usageWorker,
 			requestRecorder,
 		} as unknown as import("../handlers").ProxyContext;
 
-		return { ctx, usageWorker, requestRecorder, recorderBeginMetas };
+		return { ctx, requestRecorder, recorderBeginMetas, attached, callOrder };
 	}
 
-	it("sends start message with messageId", async () => {
-		const posted: Array<Record<string, unknown>> = [];
-		const { ctx, usageWorker } = createCtx((msg) => posted.push(msg));
+	afterEach(() => {
+		mock.restore();
+	});
+
+	it("begins recording with a messageId-free RecordMeta (no worker postMessage)", async () => {
+		const { ctx, recorderBeginMetas } = createCtx();
 
 		const response = await forwardToClient(
 			{
@@ -95,16 +114,12 @@ describe("forwardToClient worker protocol", () => {
 		);
 
 		expect(response.status).toBe(200);
-		expect(usageWorker.postMessage).toHaveBeenCalled();
-		expect(posted.length).toBeGreaterThan(0);
-		expect(posted[0].type).toBe("start");
-		expect(typeof posted[0].messageId).toBe("string");
-		expect((posted[0].messageId as string).length).toBeGreaterThan(0);
+		expect(recorderBeginMetas.length).toBe(1);
+		expect(recorderBeginMetas[0].requestId).toBe("req-1");
 	});
 
-	it("strips client identity headers from persisted request headers", async () => {
-		const posted: Array<Record<string, unknown>> = [];
-		const { ctx } = createCtx((msg) => posted.push(msg));
+	it("strips client identity headers from the recorded request headers", async () => {
+		const { ctx, recorderBeginMetas } = createCtx();
 
 		await forwardToClient(
 			{
@@ -138,7 +153,10 @@ describe("forwardToClient worker protocol", () => {
 			ctx,
 		);
 
-		const requestHeaders = posted[0].requestHeaders as Record<string, string>;
+		const requestHeaders = recorderBeginMetas[0].requestHeaders as Record<
+			string,
+			string
+		>;
 		expect(requestHeaders["content-type"]).toBe("application/json");
 		expect(requestHeaders["x-claude-code-session-id"]).toBeUndefined();
 		expect(requestHeaders["thread-id"]).toBeUndefined();
@@ -152,12 +170,8 @@ describe("forwardToClient worker protocol", () => {
 		expect(requestHeaders.tracestate).toBeUndefined();
 	});
 
-	it("does not send the request body to the worker (it goes to the recorder)", async () => {
-		const posted: Array<Record<string, unknown>> = [];
-		const { ctx, recorderBeginMetas } = createCtx(
-			(msg) => posted.push(msg),
-			false,
-		);
+	it("passes a null request body to the recorder when payload storage is disabled", async () => {
+		const { ctx, recorderBeginMetas } = createCtx(false);
 
 		await forwardToClient(
 			{
@@ -181,22 +195,12 @@ describe("forwardToClient worker protocol", () => {
 			ctx,
 		);
 
-		// The worker StartMessage no longer carries a request body at all.
-		expect(posted[0].type).toBe("start");
-		expect(posted[0].requestBody).toBeUndefined();
-		// project is still passed to the worker (kept on StartMessage).
-		expect(posted[0].project).toBe("main-thread-project");
-		// With payload storage disabled, the recorder's RecordMeta gets null body.
 		expect(recorderBeginMetas[0].requestBody).toBeNull();
 		expect(recorderBeginMetas[0].project).toBe("main-thread-project");
 	});
 
 	it("passes the capped request body to the recorder when payload storage is enabled", async () => {
-		const posted: Array<Record<string, unknown>> = [];
-		const { ctx, recorderBeginMetas } = createCtx(
-			(msg) => posted.push(msg),
-			true,
-		);
+		const { ctx, recorderBeginMetas } = createCtx(true);
 		const requestBody = JSON.stringify({ system: "test", messages: [] });
 
 		await forwardToClient(
@@ -219,11 +223,6 @@ describe("forwardToClient worker protocol", () => {
 			ctx,
 		);
 
-		expect(posted[0].type).toBe("start");
-		// The worker never receives the body now.
-		expect(posted[0].requestBody).toBeUndefined();
-		expect(posted[0].project).toBeNull();
-		// The recorder receives the capped request body copy (raw ArrayBuffer).
 		expect(recorderBeginMetas[0].requestBody).toBeInstanceOf(ArrayBuffer);
 		expect(
 			new TextDecoder().decode(
@@ -233,149 +232,259 @@ describe("forwardToClient worker protocol", () => {
 		expect(recorderBeginMetas[0].project).toBeNull();
 	});
 
-	it("does not throw when worker is not ready", async () => {
-		const usageWorker = {
-			postMessage: mock(() => {
-				throw new Error("worker not ready");
-			}),
-		} as unknown as import("../usage-worker-controller").UsageWorkerController;
+	it("does not record (recorder.begin) when the request is filtered (.well-known 404)", async () => {
+		const { ctx, recorderBeginMetas } = createCtx();
 
-		const ctx = {
-			strategy: {},
-			dbOps: {},
-			runtime: { port: 8080, tlsEnabled: false },
-			config: {},
-			provider: {
-				name: "anthropic",
-				isStreamingResponse: () => false,
+		await forwardToClient(
+			{
+				requestId: "req-wellknown",
+				method: "GET",
+				path: "/.well-known/anything",
+				account: null,
+				requestHeaders: new Headers(),
+				requestBody: null,
+				response: new Response(null, { status: 404 }),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
 			},
+			ctx,
+		);
+
+		expect(recorderBeginMetas.length).toBe(0);
+	});
+
+	it("streaming: feeds chunks to the recorder, finishes transport, then attaches usage", async () => {
+		const { ctx, requestRecorder, attached } = createCtx();
+		ctx.provider.isStreamingResponse = () => true;
+
+		const enc = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					enc.encode(
+						`event: message_start\ndata: ${JSON.stringify({
+							type: "message_start",
+							message: {
+								model: "claude-opus-4-8",
+								usage: { input_tokens: 100, output_tokens: 1 },
+							},
+						})}\n\n`,
+					),
+				);
+				controller.enqueue(
+					enc.encode(
+						`event: content_block_delta\ndata: ${JSON.stringify({
+							type: "content_block_delta",
+							delta: { type: "text_delta", text: "hello world" },
+						})}\n\n`,
+					),
+				);
+				controller.enqueue(
+					enc.encode(
+						`event: message_delta\ndata: ${JSON.stringify({
+							type: "message_delta",
+							usage: { output_tokens: 42 },
+						})}\n\n`,
+					),
+				);
+				controller.close();
+			},
+		});
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-stream",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: toArrayBuffer("{}"),
+				response: new Response(body, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		// Drain the client stream (single-reader pass-through drives the analytics).
+		await response.text();
+		// The recorder captured each chunk for Request History.
+		expect(requestRecorder.captureResponseChunk).toHaveBeenCalled();
+		// finishTransport fires at stream end; usage attaches after the async finalize.
+		expect(requestRecorder.finishTransport).toHaveBeenCalled();
+		await waitFor(() => attached.length > 0);
+
+		const summary = attached[0] as {
+			requestId: string;
+			usage: { model?: string; inputTokens?: number; outputTokens?: number };
+		};
+		expect(summary.requestId).toBe("req-stream");
+		expect(summary.usage.model).toBe("claude-opus-4-8");
+		expect(summary.usage.inputTokens).toBe(100);
+		// message_delta count is authoritative (not the message_start placeholder).
+		expect(summary.usage.outputTokens).toBe(42);
+	});
+
+	it("R3: finishTransport is called BEFORE finalize resolves (attachUsageSummary)", async () => {
+		const { ctx, callOrder, attached } = createCtx();
+
+		await forwardToClient(
+			{
+				requestId: "req-order",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: toArrayBuffer("{}"),
+				response: new Response(
+					JSON.stringify({
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 5 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		await waitFor(() => attached.length > 0);
+		// finishTransport must be observed strictly before attachUsageSummary.
+		expect(callOrder[0]).toBe("finishTransport");
+		expect(callOrder).toContain("attachUsageSummary");
+		expect(callOrder.indexOf("finishTransport")).toBeLessThan(
+			callOrder.indexOf("attachUsageSummary"),
+		);
+	});
+
+	it("non-stream success drives cacheBodyStore.onSummary with the cacheCreation tokens", async () => {
+		const { ctx, attached } = createCtx();
+		const onSummary = spyOn(cacheBodyStore, "onSummary");
+
+		await forwardToClient(
+			{
+				requestId: "req-cache-summary",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: toArrayBuffer("{}"),
+				response: new Response(
+					JSON.stringify({
+						model: "claude-opus-4-8",
+						usage: {
+							input_tokens: 10,
+							cache_creation_input_tokens: 7,
+							output_tokens: 5,
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		await waitFor(() => attached.length > 0);
+		expect(onSummary).toHaveBeenCalledWith("req-cache-summary", 7);
+	});
+});
+
+/**
+ * Failure path: a rejected finalize must discard the staged body AND persist the
+ * row immediately usage-waived via markUsageUnavailable (B5 — not left for the
+ * grace timer, which a shutdown drain+dispose could lose). We force the
+ * rejection by mocking the usage-collector's finalizeUsage to throw, then assert
+ * discardStaged + markUsageUnavailable fired and attachUsageSummary did NOT.
+ */
+describe("forwardToClient finalize-failure path", () => {
+	afterEach(() => {
+		mock.restore();
+		// mock.restore() does NOT undo mock.module — restore the REAL usage-collector
+		// (captured at module load, above) so the finalize-reject mock can't leak
+		// into other test files in the shared `bun test` process (it would otherwise
+		// make finalizeUsage reject everywhere).
+		mock.module("../usage-collector", () => realUsageCollector);
+	});
+
+	it("rejected finalize discards staged body, persists usage-waived, skips attachUsageSummary", async () => {
+		// Mock the inline collector so finalize rejects. Re-import response-handler
+		// AFTER the mock so its module-scope import binds the mocked finalizeUsage.
+		mock.module("../usage-collector", () => ({
+			createUsageState: () => ({}),
+			feedChunk: () => {},
+			feedNonStreamBody: () => {},
+			finalizeUsage: () => Promise.reject(new Error("boom")),
+		}));
+
+		const { forwardToClient: forward } = await import("../response-handler");
+		const { cacheBodyStore: store } = await import("../cache-body-store");
+		const discardStaged = spyOn(store, "discardStaged");
+
+		const attachUsageSummary = mock(() => {});
+		const finishTransport = mock(() => {});
+		const markUsageUnavailable = mock(() => {});
+		const ctx = {
+			provider: { name: "anthropic", isStreamingResponse: () => true },
+			config: { getStorePayloads: () => true },
 			refreshInFlight: new Map<string, Promise<string>>(),
-			asyncWriter: {},
-			usageWorker,
 			requestRecorder: {
 				begin: mock(() => {}),
 				captureResponseChunk: mock(() => {}),
-				finishTransport: mock(() => {}),
+				finishTransport,
+				attachUsageSummary,
+				markUsageUnavailable,
+				recordSynthetic: mock(() => {}),
 			},
 		} as unknown as import("../handlers").ProxyContext;
 
-		await expect(
-			forwardToClient(
-				{
-					requestId: "req-2",
-					method: "POST",
-					path: "/v1/messages",
-					account: null,
-					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: toArrayBuffer("{}"),
-					response: new Response(JSON.stringify({ ok: true }), {
-						status: 200,
-						headers: { "content-type": "application/json" },
-					}),
-					timestamp: Date.now(),
-					retryAttempt: 0,
-					failoverAttempts: 0,
-				},
-				ctx,
-			),
-		).resolves.toBeInstanceOf(Response);
-	});
+		const enc = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(enc.encode("data: one\n\n"));
+				controller.close();
+			},
+		});
 
-	it("tees streaming responses instead of cloning when no analytics stream exists", async () => {
-		const originalClone = Response.prototype.clone;
-		Response.prototype.clone = mock(() => {
-			throw new Error("clone should not be called");
-		}) as unknown as typeof Response.prototype.clone;
+		const response = await forward(
+			{
+				requestId: "req-reject",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: enc.encode("{}").buffer as ArrayBuffer,
+				response: new Response(body, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
 
-		try {
-			const posted: Array<Record<string, unknown>> = [];
-			const { ctx } = createCtx((msg) => posted.push(msg));
-			ctx.provider.isStreamingResponse = () => true;
-
-			const body = new ReadableStream<Uint8Array>({
-				start(controller) {
-					const encoder = new TextEncoder();
-					controller.enqueue(encoder.encode("data: one\n\n"));
-					controller.enqueue(encoder.encode("data: two\n\n"));
-					controller.close();
-				},
-			});
-
-			const response = await forwardToClient(
-				{
-					requestId: "req-stream-tee",
-					method: "POST",
-					path: "/v1/messages",
-					account: null,
-					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: toArrayBuffer("{}"),
-					response: new Response(body, {
-						status: 200,
-						headers: { "content-type": "text/event-stream" },
-					}),
-					timestamp: Date.now(),
-					retryAttempt: 0,
-					failoverAttempts: 0,
-				},
-				ctx,
-			);
-
-			await expect(response.text()).resolves.toBe("data: one\n\ndata: two\n\n");
-			await waitFor(() => posted.some((msg) => msg.type === "end"));
-
-			const chunks = posted.filter((msg) => msg.type === "chunk");
-			expect(chunks.length).toBe(2);
-			expect(posted.at(-1)).toMatchObject({
-				type: "end",
-				requestId: "req-stream-tee",
-				success: true,
-			});
-		} finally {
-			Response.prototype.clone = originalClone;
-		}
-	});
-
-	it("tees non-streaming responses instead of cloning analytics body", async () => {
-		const originalClone = Response.prototype.clone;
-		Response.prototype.clone = mock(() => {
-			throw new Error("clone should not be called");
-		}) as unknown as typeof Response.prototype.clone;
-
-		try {
-			const posted: Array<Record<string, unknown>> = [];
-			const { ctx } = createCtx((msg) => posted.push(msg));
-			const responseBody = JSON.stringify({ ok: true });
-
-			const response = await forwardToClient(
-				{
-					requestId: "req-non-stream-tee",
-					method: "POST",
-					path: "/v1/messages",
-					account: null,
-					requestHeaders: new Headers({ "content-type": "application/json" }),
-					requestBody: toArrayBuffer("{}"),
-					response: new Response(responseBody, {
-						status: 200,
-						headers: { "content-type": "application/json" },
-					}),
-					timestamp: Date.now(),
-					retryAttempt: 0,
-					failoverAttempts: 0,
-				},
-				ctx,
-			);
-
-			await expect(response.text()).resolves.toBe(responseBody);
-			await waitFor(() => posted.some((msg) => msg.type === "end"));
-
-			expect(posted.at(-1)).toMatchObject({
-				type: "end",
-				requestId: "req-non-stream-tee",
-				responseBody: Buffer.from(responseBody).toString("base64"),
-				success: true,
-			});
-		} finally {
-			Response.prototype.clone = originalClone;
-		}
+		// Drain the client stream so onEnd → finishTransport + finalize fire.
+		await response.text();
+		// finishTransport always runs first (never gated behind finalize).
+		expect(finishTransport).toHaveBeenCalled();
+		// The rejected finalize discards the staged body...
+		await waitFor(() => discardStaged.mock.calls.length > 0);
+		expect(discardStaged).toHaveBeenCalledWith("req-reject");
+		// ...persists the row immediately usage-waived (B5)...
+		await waitFor(() => markUsageUnavailable.mock.calls.length > 0);
+		expect(markUsageUnavailable).toHaveBeenCalledWith("req-reject");
+		// ...and never attaches usage.
+		expect(attachUsageSummary).not.toHaveBeenCalled();
 	});
 });

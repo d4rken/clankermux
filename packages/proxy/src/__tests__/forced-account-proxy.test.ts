@@ -115,12 +115,12 @@ function makeContext(
 		} as never,
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) } as never,
-		usageWorker: { postMessage: mock(() => {}) } as never,
 		requestRecorder: {
 			begin: mock(() => {}),
 			captureResponseChunk: mock(() => {}),
 			finishTransport: mock(() => {}),
 			attachUsageSummary: mock(() => {}),
+			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
 			onWorkerGone: mock(() => {}),
 			sweep: mock(() => {}),
@@ -407,12 +407,5 @@ describe("force-account proxy override", () => {
 		};
 		expect(recordMeta.accountId).toBe("forced-oauth-rec");
 		expect(recordMeta.responseStatus).toBe(502);
-
-		// The worker also got a start message for the same request.
-		const postMock = ctx.usageWorker.postMessage as ReturnType<typeof mock>;
-		const startCalls = postMock.mock.calls.filter(
-			(c) => (c[0] as { type?: string }).type === "start",
-		);
-		expect(startCalls.length).toBeGreaterThan(0);
 	});
 });

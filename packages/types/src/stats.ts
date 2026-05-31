@@ -254,12 +254,6 @@ export interface HealthResponse {
 			failureCount: number;
 			queuedJobs: number;
 		};
-		usageWorker?: {
-			state: string;
-			pendingAcks: number;
-			lastError: string | null;
-			startedAt: number | null;
-		};
 		storage?: {
 			integrity: {
 				status: "ok" | "corrupt" | "unchecked" | "running";
