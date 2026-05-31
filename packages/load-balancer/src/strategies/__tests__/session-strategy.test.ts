@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
-import type { Account, RequestMeta, StrategyStore } from "@clankermux/types";
+import type {
+	Account,
+	CapacitySignal,
+	RequestMeta,
+	StrategyStore,
+} from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
 // Shared Account factory — keeps every test focused on the fields that
@@ -51,6 +56,7 @@ class MockStrategyStore implements StrategyStore {
 	resetCalls: Array<{ accountId: string; timestamp: number }> = [];
 	resumeCalls: string[] = [];
 	utilizationMap: Map<string, number | null> = new Map();
+	capacityMap: Map<string, CapacitySignal | null> = new Map();
 
 	resetAccountSession(accountId: string, timestamp: number): void {
 		this.resetCalls.push({ accountId, timestamp });
@@ -69,11 +75,24 @@ class MockStrategyStore implements StrategyStore {
 		this.utilizationMap.set(accountId, value);
 	}
 
+	getAccountCapacity(
+		accountId: string,
+		_provider: string,
+		_now: number,
+	): CapacitySignal | null {
+		return this.capacityMap.get(accountId) ?? null;
+	}
+
+	setCapacity(accountId: string, signal: CapacitySignal | null): void {
+		this.capacityMap.set(accountId, signal);
+	}
+
 	// Helper methods for testing
 	clear(): void {
 		this.resetCalls = [];
 		this.resumeCalls = [];
 		this.utilizationMap.clear();
+		this.capacityMap.clear();
 	}
 
 	getResetCall(
@@ -457,6 +476,53 @@ describe("SessionStrategy", () => {
 		expect(projectMeta.routing?.selectedAccountId).toBe(
 			"higher-priority-available",
 		);
+	});
+
+	it("uses utilization tie-breaking when auto-fallback is triggered", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		const result = strategy.select([fallbackHighUtil, lowUtil], meta);
+
+		expect(result[0]).toBe(lowUtil);
+		expect(result[1]).toBe(fallbackHighUtil);
+		expect(meta.routing?.decision).toBe("auto_fallback");
+		expect(meta.routing?.selectedAccountId).toBe("low-util");
+	});
+
+	it("peek uses utilization tie-breaking when auto-fallback would trigger", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		expect(strategy.peek([fallbackHighUtil, lowUtil])).toBe("low-util");
 	});
 
 	it("does not honor bypass-session from external client traffic", () => {
@@ -1295,5 +1361,305 @@ describe("SessionStrategy", () => {
 			expect(paused.paused).toBe(true);
 			expect(mockStore.resumeCalls).toEqual([]);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// FEFO (first-expire-first-out) capacity-aware tie-breaking.
+//
+// Within a priority tier, sortAvailableAccounts buckets accounts as
+// HARVEST (0) > UNKNOWN (1) > NEAR_LIMIT (2). HARVEST accounts are ordered by
+// soonest capacity reset (FEFO), then by most headroom, then least-recently
+// picked. Capacity signals are supplied through MockStrategyStore.setCapacity.
+// These accounts use a non-session provider (openai) so session stickiness
+// never short-circuits the capacity comparator.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+	const NOW = Date.now();
+
+	function makeMeta(): RequestMeta {
+		return {
+			id: "fefo-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: NOW,
+		};
+	}
+
+	// Non-session provider so no active-session path interferes with the
+	// capacity comparator (Anthropic would create sticky sessions). openrouter
+	// is a known, non-session-tracking provider — avoids the "unknown provider"
+	// warning while still skipping session stickiness.
+	function makeCapAccount(
+		id: string,
+		overrides: Partial<Account> = {},
+	): Account {
+		return makeAccount({ id, name: id, provider: "openrouter", ...overrides });
+	}
+
+	function harvest(
+		minHeadroom: number,
+		soonestResetMs: number | null,
+		bindingUtilization = 100 - minHeadroom,
+	): CapacitySignal {
+		return { minHeadroom, soonestResetMs, bindingUtilization };
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("HARVEST: equal headroom, picks the nearer-reset account first (FEFO)", () => {
+		const nearReset = makeCapAccount("near-reset");
+		const farReset = makeCapAccount("far-reset");
+		// Same headroom → reset deadline decides; nearer reset is served first.
+		mockStore.setCapacity(nearReset.id, harvest(40, 30 * 60_000));
+		mockStore.setCapacity(farReset.id, harvest(40, 4 * 60 * 60_000));
+
+		const meta = makeMeta();
+		const result = strategy.select([farReset, nearReset], meta);
+		expect(result[0].id).toBe(nearReset.id);
+		expect(meta.routing?.selectedAccountId).toBe(nearReset.id);
+	});
+
+	it("NEAR_LIMIT (low headroom) sorts after HARVEST even if HARVEST resets later", () => {
+		const harvestLate = makeCapAccount("harvest-late");
+		const nearLimit = makeCapAccount("near-limit");
+		// HARVEST account resets much later than the near-limit account, but the
+		// near-limit bucket still loses — buckets dominate FEFO ordering.
+		mockStore.setCapacity(harvestLate.id, harvest(40, 4 * 60 * 60_000));
+		mockStore.setCapacity(nearLimit.id, harvest(2, 60_000)); // minHeadroom < 5
+
+		const result = strategy.select([nearLimit, harvestLate], makeMeta());
+		expect(result[0].id).toBe(harvestLate.id);
+		expect(result[1].id).toBe(nearLimit.id);
+	});
+
+	it("high bindingUtilization (>95) is NEAR_LIMIT even with healthy headroom", () => {
+		const harvestAcct = makeCapAccount("harvest-ok");
+		const binding = makeCapAccount("binding-high");
+		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
+		// Healthy minHeadroom on the hard windows, but extra_usage pushes the
+		// binding utilization above 95 → NEAR_LIMIT bucket.
+		mockStore.setCapacity(binding.id, {
+			minHeadroom: 40,
+			soonestResetMs: 60_000,
+			bindingUtilization: 98,
+		});
+
+		const result = strategy.select([binding, harvestAcct], makeMeta());
+		expect(result[0].id).toBe(harvestAcct.id);
+		expect(result[1].id).toBe(binding.id);
+	});
+
+	it("soonestResetMs null with healthy headroom is UNKNOWN (between HARVEST and NEAR_LIMIT)", () => {
+		const harvestAcct = makeCapAccount("harvest");
+		const noDeadline = makeCapAccount("no-deadline");
+		const nearLimit = makeCapAccount("near-limit");
+		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
+		// Known utilization, healthy headroom, but no reset deadline → UNKNOWN.
+		mockStore.setCapacity(noDeadline.id, harvest(40, null));
+		mockStore.setCapacity(nearLimit.id, harvest(1, 60_000)); // NEAR_LIMIT
+
+		const result = strategy.select(
+			[nearLimit, noDeadline, harvestAcct],
+			makeMeta(),
+		);
+		expect(result.map((a) => a.id)).toEqual([
+			harvestAcct.id,
+			noDeadline.id,
+			nearLimit.id,
+		]);
+	});
+
+	it("bucket order overall: HARVEST > UNKNOWN > NEAR_LIMIT", () => {
+		const harvestAcct = makeCapAccount("h");
+		const unknownAcct = makeCapAccount("u"); // no capacity signal → UNKNOWN
+		const nearLimit = makeCapAccount("n");
+		mockStore.setCapacity(harvestAcct.id, harvest(50, 2 * 60 * 60_000));
+		// unknownAcct: deliberately no setCapacity → getAccountCapacity returns null.
+		mockStore.setCapacity(nearLimit.id, harvest(3, 60_000));
+
+		const result = strategy.select(
+			[nearLimit, unknownAcct, harvestAcct],
+			makeMeta(),
+		);
+		expect(result.map((a) => a.id)).toEqual([
+			harvestAcct.id,
+			unknownAcct.id,
+			nearLimit.id,
+		]);
+	});
+
+	it("recent-pick rotation: two equivalent HARVEST accounts alternate across selects", () => {
+		const a = makeCapAccount("rot-a");
+		const b = makeCapAccount("rot-b");
+		// Identical capacity → soonest + headroom ties → seq (least-recently-picked) breaks it.
+		const sig = harvest(40, 60 * 60_000);
+		mockStore.setCapacity(a.id, { ...sig });
+		mockStore.setCapacity(b.id, { ...sig });
+
+		const first = strategy.select([a, b], makeMeta())[0].id;
+		const second = strategy.select([a, b], makeMeta())[0].id;
+		expect(first).not.toBe(second);
+		expect(new Set([first, second])).toEqual(new Set([a.id, b.id]));
+	});
+
+	it("peek/select parity: HARVEST set and all-UNKNOWN set agree", () => {
+		// HARVEST set.
+		const near = makeCapAccount("p-near");
+		const far = makeCapAccount("p-far");
+		mockStore.setCapacity(near.id, harvest(40, 20 * 60_000));
+		mockStore.setCapacity(far.id, harvest(40, 3 * 60 * 60_000));
+		const harvestAccts = [far, near];
+		expect(strategy.peek(harvestAccts)).toBe(
+			strategy.select(harvestAccts, makeMeta())[0].id,
+		);
+
+		// All-UNKNOWN set (no capacity signals; utilization differentiates).
+		mockStore.clear();
+		const u1 = makeCapAccount("u1");
+		const u2 = makeCapAccount("u2");
+		mockStore.setUtilization(u1.id, 70);
+		mockStore.setUtilization(u2.id, 20);
+		const unknownAccts = [u1, u2];
+		expect(strategy.peek(unknownAccts)).toBe(
+			strategy.select(unknownAccts, makeMeta())[0].id,
+		);
+	});
+
+	it("priority dominates capacity: priority-0 NEAR_LIMIT beats priority-1 HARVEST", () => {
+		const nearLimitTop = makeCapAccount("near-top", { priority: 0 });
+		const harvestLow = makeCapAccount("harvest-low", { priority: 1 });
+		mockStore.setCapacity(nearLimitTop.id, harvest(1, 60_000)); // NEAR_LIMIT
+		mockStore.setCapacity(harvestLow.id, harvest(50, 2 * 60 * 60_000)); // HARVEST
+
+		const result = strategy.select([harvestLow, nearLimitTop], makeMeta());
+		expect(result[0].id).toBe(nearLimitTop.id);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Pinning survives FEFO.
+//
+// Once a project is pinned to an account (cache affinity), capacity signals
+// must NOT pull the request to a different account — the warmed prompt cache is
+// worth more than harvesting a soon-to-reset sibling. This is the invariant that
+// keeps FEFO from thrashing established sessions: FEFO only orders the *fallback
+// tail*, never overrides the sticky primary.
+//
+// Uses a non-session provider (openai-compatible) so the only stickiness in play
+// is cache affinity — there is no Anthropic session window to muddy the test.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — pinning survives FEFO", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function projectMeta(): RequestMeta {
+		return {
+			id: "pin-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			project: "pinned-project",
+		};
+	}
+
+	// Non-session provider: affinity is the only stickiness, capacity comparator
+	// is never short-circuited by an active Anthropic session.
+	function makeAcct(id: string, overrides: Partial<Account> = {}): Account {
+		return makeAccount({
+			id,
+			name: id,
+			provider: "openai-compatible",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 0,
+			...overrides,
+		});
+	}
+
+	function cap(
+		minHeadroom: number,
+		soonestResetMs: number | null,
+		bindingUtilization = 100 - minHeadroom,
+	): CapacitySignal {
+		return { minHeadroom, soonestResetMs, bindingUtilization };
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("a pinned account keeps the request even when FEFO would prefer a sibling", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+		const c = makeAcct("acct-C");
+
+		// First select establishes the pin on A by making it the FEFO winner
+		// (HARVEST, soonest reset). Same priority for all three.
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000)); // reset soonest → wins FEFO
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		mockStore.setCapacity(c.id, cap(40, 90 * 60_000));
+
+		const meta = projectMeta();
+		expect(strategy.select([a, b, c], meta)[0].id).toBe(a.id);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+
+		// Now flip the capacity signals so a FRESH FEFO pick would NOT choose A:
+		//  - A becomes UNKNOWN (no reset deadline) — the worst harvestable bucket.
+		//  - B and C become healthy HARVEST accounts with near resets.
+		// FEFO alone would now rank B (nearest reset) first, A last.
+		mockStore.setCapacity(a.id, cap(40, null)); // UNKNOWN
+		mockStore.setCapacity(b.id, cap(50, 15 * 60_000)); // HARVEST, sooner reset
+		mockStore.setCapacity(c.id, cap(45, 45 * 60_000)); // HARVEST, later reset
+
+		const second = projectMeta();
+		const result = strategy.select([a, b, c], second);
+
+		// Pin wins: A is served first despite worse capacity signals.
+		expect(result[0].id).toBe(a.id);
+		expect(second.routing?.decision).toBe("affinity_hit");
+
+		// The non-sticky fallback tail is FEFO-ordered: nearer-reset B before
+		// later-reset C.
+		expect(result.slice(1).map((x) => x.id)).toEqual([b.id, c.id]);
+	});
+
+	it("affinity_hold keeps the pin: substitute is served without re-pointing affinity", () => {
+		const now = Date.now();
+		const a = makeAcct("hold-A");
+		const b = makeAcct("hold-B");
+
+		// Pin A on the first select (best FEFO signal).
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000));
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		expect(strategy.select([a, b], projectMeta())[0].id).toBe(a.id);
+
+		// A hits a short, transient throttle — hold the pin, serve from B this
+		// request WITHOUT reassigning the affinity slot.
+		a.rate_limited_until = now + 60_000;
+		a.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+		const held = projectMeta();
+		expect(strategy.select([a, b], held)[0].id).toBe(b.id);
+		expect(held.routing?.decision).toBe("affinity_hold");
+
+		// Throttle lifts → the project snaps back to its warmed account A,
+		// proving the hold did not re-point affinity to B.
+		a.rate_limited_until = null;
+		a.rate_limited_reason = null;
+		const recovered = projectMeta();
+		expect(strategy.select([a, b], recovered)[0].id).toBe(a.id);
+		expect(recovered.routing?.decision).toBe("affinity_hit");
 	});
 });

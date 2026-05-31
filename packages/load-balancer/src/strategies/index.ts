@@ -1,5 +1,5 @@
 import { isAccountAvailable, TIME_CONSTANTS } from "@clankermux/core";
-import { Logger } from "@clankermux/logger";
+import { Logger, LogLevel } from "@clankermux/logger";
 import type {
 	Account,
 	LoadBalancingStrategy,
@@ -29,6 +29,38 @@ export { LeastUsedStrategy } from "./least-used";
 const AFFINITY_REASSIGN_MIN_COOLDOWN_MS = 15 * 60 * 1000;
 const MAX_AFFINITY_ENTRIES = 10_000;
 
+const HEADROOM_EPS = 5; // percent; min meaningful headroom
+
+/**
+ * Capacity buckets for FEFO ordering, shared between the comparator
+ * (sortAvailableAccounts) and the selection debug log (logSelection) so the two
+ * can never drift. Lower bucket = preferred. HARVEST accounts have a known reset
+ * deadline and healthy headroom (serve soonest-expiring first); UNKNOWN have no
+ * usable capacity model (or no deadline) and fall back to least-utilization;
+ * NEAR_LIMIT are nearly exhausted and serve last.
+ */
+const CAPACITY_BUCKET = {
+	HARVEST: 0,
+	UNKNOWN: 1,
+	NEAR_LIMIT: 2,
+} as const;
+
+/** Human-readable bucket names for the selection debug log. */
+const CAPACITY_BUCKET_LABEL: Record<number, string> = {
+	[CAPACITY_BUCKET.HARVEST]: "HARVEST",
+	[CAPACITY_BUCKET.UNKNOWN]: "UNKNOWN",
+	[CAPACITY_BUCKET.NEAR_LIMIT]: "NEAR_LIMIT",
+};
+
+/** Per-account capacity metric snapshot used by the comparator and the log. */
+interface CapacityMetric {
+	bucket: number;
+	soonest: number;
+	minHeadroom: number;
+	binding: number;
+	util: number;
+}
+
 /**
  * Rate-limit reasons that indicate a server-wide or self-resolving condition
  * where switching to another account of the same provider would NOT help.
@@ -52,6 +84,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	private sessionDurationMs: number;
 	private store: StrategyStore | null = null;
 	private log = new Logger("SessionStrategy");
+	private pickSeq = 0;
+	private lastPickedSeq = new Map<string, number>();
 	private affinityByKey = new Map<
 		string,
 		{ accountId: string; lastUsedAt: number }
@@ -341,23 +375,135 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		return until - now > AFFINITY_REASSIGN_MIN_COOLDOWN_MS;
 	}
 
+	/**
+	 * Compute the per-account capacity metric used for FEFO ordering. Shared by
+	 * the comparator (sortAvailableAccounts) and the selection debug log
+	 * (logSelection) so the ranking the operator reads always matches the
+	 * ranking traffic follows. Pure with respect to `account`/`now` — does not
+	 * read the recency sequence (that lives in the comparator's tie-break).
+	 */
+	private capacityMetricFor(account: Account, now: number): CapacityMetric {
+		const s =
+			this.store?.getAccountCapacity?.(account.id, account.provider, now) ??
+			null;
+		// Legacy representative utilization — kept so providers without a capacity
+		// model (Zai/Kilo/Alibaba) still balance least-used within the UNKNOWN bucket.
+		const util =
+			this.store?.getAccountUtilization?.(account.id, account.provider) ?? 0;
+		let bucket: number = CAPACITY_BUCKET.UNKNOWN;
+		let soonest = Number.POSITIVE_INFINITY;
+		let minHeadroom = 0;
+		let binding = 0;
+		if (s !== null) {
+			minHeadroom = s.minHeadroom;
+			binding = s.bindingUtilization;
+			soonest = s.soonestResetMs ?? Number.POSITIVE_INFINITY;
+			if (
+				s.minHeadroom < HEADROOM_EPS ||
+				s.bindingUtilization > 100 - HEADROOM_EPS
+			) {
+				bucket = CAPACITY_BUCKET.NEAR_LIMIT;
+			} else if (s.soonestResetMs === null) {
+				// Known utilization but no deadline → not harvestable; treat as unknown.
+				bucket = CAPACITY_BUCKET.UNKNOWN;
+			} else {
+				bucket = CAPACITY_BUCKET.HARVEST;
+			}
+		}
+		return { bucket, soonest, minHeadroom, binding, util };
+	}
+
 	private sortAvailableAccounts(
 		accounts: Account[],
 		isAvailable: (account: Account) => boolean,
+		now: number,
 	): Account[] {
-		return accounts
-			.filter((a) => isAvailable(a))
-			.sort((a, b) => {
-				if (a.priority !== b.priority) return a.priority - b.priority;
-				// Treat null as 0: an account with no usage data is assumed fresh
-				// (maximum remaining capacity). This prevents newly-added accounts
-				// from being permanently sidelined until all others expire.
-				const utilA =
-					this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
-				const utilB =
-					this.store?.getAccountUtilization?.(b.id, b.provider) ?? 0;
-				return utilA - utilB;
+		const avail = accounts.filter((a) => isAvailable(a));
+		// Snapshot per-account metrics once so the comparator stays pure/stable.
+		const info = new Map<string, CapacityMetric & { seq: number }>();
+		for (const a of avail) {
+			info.set(a.id, {
+				...this.capacityMetricFor(a, now),
+				seq: this.lastPickedSeq.get(a.id) ?? 0,
 			});
+		}
+		// Every account in `avail` was just inserted into `info`; the ?? fallback
+		// is unreachable but keeps the comparator total without a non-null assert.
+		const metricsFor = (id: string) =>
+			info.get(id) ?? {
+				bucket: CAPACITY_BUCKET.UNKNOWN,
+				soonest: Number.POSITIVE_INFINITY,
+				minHeadroom: 0,
+				binding: 0,
+				util: 0,
+				seq: 0,
+			};
+		return avail.sort((a, b) => {
+			if (a.priority !== b.priority) return a.priority - b.priority;
+			const x = metricsFor(a.id);
+			const y = metricsFor(b.id);
+			if (x.bucket !== y.bucket) return x.bucket - y.bucket;
+			if (x.bucket === CAPACITY_BUCKET.HARVEST) {
+				// FEFO: serve the account whose capacity expires soonest first.
+				if (x.soonest !== y.soonest) return x.soonest - y.soonest;
+				if (x.minHeadroom !== y.minHeadroom)
+					return y.minHeadroom - x.minHeadroom;
+				return x.seq - y.seq; // least-recently-picked
+			}
+			if (x.bucket === CAPACITY_BUCKET.UNKNOWN) {
+				// Preserve legacy least-used ordering for non-capacity providers;
+				// seq only breaks genuine ties (cold accounts with no usage data).
+				if (x.util !== y.util) return x.util - y.util;
+				return x.seq - y.seq;
+			}
+			// NEAR_LIMIT: least-utilized first, then least-recently-picked.
+			if (x.binding !== y.binding) return x.binding - y.binding;
+			return x.seq - y.seq;
+		});
+	}
+
+	/**
+	 * Emit a single compact DEBUG line explaining a select() decision. Filters
+	 * to available accounts and ranks them through sortAvailableAccounts so the
+	 * logged order is the real ranking — including when a sticky pick (affinity /
+	 * session) overrides what FEFO would have chosen, which is visible because the
+	 * chosen account (marked `*`) need not be first in the ranked list.
+	 *
+	 * Only constructs the string when DEBUG is actually enabled. Not called from
+	 * peek() (read-only) or from inside sortAvailableAccounts (used for fallback
+	 * tails too — would be noisy).
+	 */
+	private logSelection(
+		decision: string,
+		chosen: Account | null,
+		accounts: Account[],
+		isAvailable: (account: Account) => boolean,
+		now: number,
+	): void {
+		// Avoid building the (potentially long) line when DEBUG is off.
+		if (this.log.getLevel() > LogLevel.DEBUG) return;
+
+		const ranked = this.sortAvailableAccounts(accounts, isAvailable, now);
+		const MAX = 10;
+		const shown = ranked.slice(0, MAX);
+		const parts = shown.map((a) => {
+			const m = this.capacityMetricFor(a, now);
+			const bucketLabel = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
+			const reset =
+				m.soonest === Number.POSITIVE_INFINITY
+					? "none"
+					: `${Math.round((m.soonest - now) / 60000)}m`;
+			const mark = chosen && a.id === chosen.id ? "*" : "";
+			return `${a.name}${mark}[${bucketLabel} reset=${reset} headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%]`;
+		});
+		if (ranked.length > MAX) parts.push(`(+${ranked.length - MAX} more)`);
+		this.log.debug(
+			`Selection [${decision}] chose ${chosen?.name ?? "none"} (* marks chosen): ${parts.join(" ")}`,
+		);
+	}
+
+	private recordComparatorPick(account: Account): void {
+		this.lastPickedSeq.set(account.id, ++this.pickSeq);
 	}
 
 	peek(accounts: Account[]): string | null {
@@ -381,9 +527,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
 		const fallbackTriggered = fallbackCandidates.some((c) => isAvailable(c));
 		if (fallbackTriggered) {
-			const sorted = accounts
-				.filter((a) => isAvailable(a))
-				.sort((a, b) => a.priority - b.priority);
+			const sorted = this.sortAvailableAccounts(accounts, isAvailable, now);
 			return sorted[0]?.id ?? null;
 		}
 
@@ -415,16 +559,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			}
 		}
 
-		const available = accounts
-			.filter((a) => isAvailable(a))
-			.sort((a, b) => {
-				if (a.priority !== b.priority) return a.priority - b.priority;
-				const utilA =
-					this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
-				const utilB =
-					this.store?.getAccountUtilization?.(b.id, b.provider) ?? 0;
-				return utilA - utilB;
-			});
+		const available = this.sortAvailableAccounts(accounts, isAvailable, now);
 
 		return available[0]?.id ?? null;
 	}
@@ -494,9 +629,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		if (chosenFallback !== null) {
-			const available = accounts
-				.filter((a) => getCachedAvailability(a))
-				.sort((a, b) => a.priority - b.priority);
+			const available = this.sortAvailableAccounts(
+				accounts,
+				getCachedAvailability,
+				now,
+			);
 			const servingAccount = available[0] ?? chosenFallback;
 
 			if (!bypassSession) {
@@ -514,6 +651,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				"auto_fallback",
 				servingAccount,
 				available.length,
+			);
+			this.recordComparatorPick(servingAccount);
+			this.logSelection(
+				"auto_fallback",
+				servingAccount,
+				accounts,
+				getCachedAvailability,
+				now,
 			);
 			return available;
 		}
@@ -547,17 +692,27 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					this.log.info(
 						`Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
 					);
-					const others = accounts
-						.filter(
-							(a) => a.id !== affinedAccount.id && getCachedAvailability(a),
-						)
-						.sort((a, b) => a.priority - b.priority);
+					// FEFO-consistent fallback tail: order the non-sticky candidates
+					// through the capacity comparator, not bare priority. The sticky
+					// primary stays prepended.
+					const others = this.sortAvailableAccounts(
+						accounts.filter((a) => a.id !== affinedAccount.id),
+						getCachedAvailability,
+						now,
+					);
 					this.setRoutingMeta(
 						meta,
 						"affinity_hit",
 						affinedAccount,
 						others.length + 1,
 						{ affinityKey, previousAccountId },
+					);
+					this.logSelection(
+						"affinity_hit",
+						affinedAccount,
+						accounts,
+						getCachedAvailability,
+						now,
 					);
 					return [affinedAccount, ...others];
 				}
@@ -571,6 +726,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const available = this.sortAvailableAccounts(
 					accounts,
 					getCachedAvailability,
+					now,
 				);
 				if (available.length === 0) return [];
 				const chosenAccount = available[0];
@@ -582,6 +738,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					chosenAccount,
 					available.length,
 					{ affinityKey, previousAccountId },
+				);
+				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					"affinity_reassigned",
+					chosenAccount,
+					accounts,
+					getCachedAvailability,
+					now,
 				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
@@ -596,6 +760,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const available = this.sortAvailableAccounts(
 					accounts,
 					getCachedAvailability,
+					now,
 				);
 				if (available.length === 0) return [];
 				const chosenAccount = available[0];
@@ -611,6 +776,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					chosenAccount,
 					available.length,
 					{ affinityKey, previousAccountId },
+				);
+				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					"affinity_hold",
+					chosenAccount,
+					accounts,
+					getCachedAvailability,
+					now,
 				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
@@ -628,19 +801,27 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const available = this.sortAvailableAccounts(
 					accounts,
 					getCachedAvailability,
+					now,
 				);
 				if (available.length === 0) return [];
 				const chosenAccount = available[0];
 				this.resetSessionIfExpired(chosenAccount);
 				this.rememberAffinity(meta, chosenAccount, now);
-				this.setRoutingMeta(
-					meta,
+				const decision =
 					resolution.kind === "reassign"
 						? "affinity_reassigned"
-						: "affinity_miss",
+						: "affinity_miss";
+				this.setRoutingMeta(meta, decision, chosenAccount, available.length, {
+					affinityKey,
+					previousAccountId,
+				});
+				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					decision,
 					chosenAccount,
-					available.length,
-					{ affinityKey, previousAccountId },
+					accounts,
+					getCachedAvailability,
+					now,
 				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
@@ -701,27 +882,40 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.log.info(
 					`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
 				);
-				// Return active account first, then others as fallback (sorted by priority)
-				const others = accounts
-					.filter((a) => a.id !== activeAccount.id && getCachedAvailability(a))
-					.sort((a, b) => a.priority - b.priority);
+				// FEFO-consistent fallback tail: order the non-sticky candidates
+				// through the capacity comparator, not bare priority. The sticky
+				// primary stays prepended.
+				const others = this.sortAvailableAccounts(
+					accounts.filter((a) => a.id !== activeAccount.id),
+					getCachedAvailability,
+					now,
+				);
 				this.setRoutingMeta(
 					meta,
 					"global_session",
 					activeAccount,
 					others.length + 1,
 				);
+				this.logSelection(
+					"global_session",
+					activeAccount,
+					accounts,
+					getCachedAvailability,
+					now,
+				);
 				return [activeAccount, ...others];
 			}
 		}
 
-		// No active session or active account is rate limited
-		// Filter available accounts and sort by priority (lower number = higher priority).
-		// Within the same priority, break ties by utilization (ascending) so that the
-		// account with the most remaining capacity is chosen first.
+		// No active session or active account is rate limited.
+		// Filter available accounts and sort by priority (lower number = higher
+		// priority). Within the same priority tier, break ties via the FEFO
+		// capacity comparator (see sortAvailableAccounts) so the account whose
+		// capacity expires soonest is harvested first.
 		const available = this.sortAvailableAccounts(
 			accounts,
 			getCachedAvailability,
+			now,
 		);
 
 		if (available.length === 0) return [];
@@ -737,6 +931,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			"priority_utilization",
 			chosenAccount,
 			available.length,
+		);
+		this.recordComparatorPick(chosenAccount);
+		this.logSelection(
+			"priority_utilization",
+			chosenAccount,
+			accounts,
+			getCachedAvailability,
+			now,
 		);
 
 		// Return chosen account first, then others as fallback (already sorted by priority)

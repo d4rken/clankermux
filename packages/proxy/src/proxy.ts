@@ -12,6 +12,7 @@ import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
@@ -287,6 +288,8 @@ export async function handleProxy(
 			`Agent ${agentUsed} detected, model changed from ${originalModel} to ${appliedModel}`,
 		);
 	}
+	const effectiveRequestModel =
+		appliedModel ?? requestBodyContext.getModel() ?? requestModel;
 
 	// 5. Create request metadata with agent info
 	const requestMeta = createRequestMetadata(req, url);
@@ -301,7 +304,7 @@ export async function handleProxy(
 	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
-		requestModel ?? undefined,
+		effectiveRequestModel ?? undefined,
 	);
 
 	type ProviderOverloadedAccount = { account: Account; until: number };
@@ -516,7 +519,7 @@ export async function handleProxy(
 	// model override instead of the request's family model (review C3). Force-
 	// routed requests are gated too — force-route bypasses account *selection*,
 	// not the size safety check.
-	const contextExcludedAccounts: Account[] = [];
+	const contextExcludedAccounts: ContextWindowExcludedBackend[] = [];
 
 	/**
 	 * Apply context-window gate to a list of accounts.
@@ -540,7 +543,8 @@ export async function handleProxy(
 			// Determine the effective model for this account: combo slot
 			// override if available, otherwise the request model.
 			let modelForGate =
-				requestModel ?? "claude-sonnet-4-5"; /* safe fallback — family match */
+				effectiveRequestModel ??
+				"claude-sonnet-4-5"; /* safe fallback — family match */
 			if (comboInfo) {
 				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
 				if (slot?.modelOverride) {
@@ -559,8 +563,12 @@ export async function handleProxy(
 						`estimate=${requestTokenEstimate})`,
 				);
 				// Track for error-response purposes (deduplicate by id)
-				if (!contextExcludedAccounts.some((a) => a.id === account.id)) {
-					contextExcludedAccounts.push(account);
+				if (
+					!contextExcludedAccounts.some(
+						(excluded) => excluded.account.id === account.id,
+					)
+				) {
+					contextExcludedAccounts.push({ account, model: modelForGate });
 				}
 				continue;
 			}
@@ -591,7 +599,7 @@ export async function handleProxy(
 			return createContextWindowExceededResponse(
 				requestTokenEstimate,
 				contextExcludedAccounts,
-				requestModel ?? "unknown",
+				effectiveRequestModel ?? "unknown",
 			);
 		}
 

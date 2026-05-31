@@ -1,7 +1,16 @@
 import { describe, expect, it, mock } from "bun:test";
-import type { Account } from "@clankermux/types";
+import { agentRegistry } from "@clankermux/agents";
+import type { Account, Agent } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { handleProxy } from "../proxy";
+
+mock.module("../inline-worker", () => ({
+	EMBEDDED_WORKER_CODE: "",
+}));
+
+async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
+	const { handleProxy } = await import("../proxy");
+	return handleProxy(req, url, ctx);
+}
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -53,6 +62,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
+			getAgentPreference: mock(async () => null),
 		} as never,
 		runtime: { port: 8080, clientId: "test" } as never,
 		config: {
@@ -111,6 +121,61 @@ function makeSmallRequest(): Request {
 	});
 }
 
+function makeAgentRequest(targetEstimate: number): Request {
+	const systemPrompt = "You are the route-test agent.";
+	const overhead = JSON.stringify({
+		model: "claude-opus-4-7",
+		system: [{ type: "text", text: systemPrompt }],
+		messages: [{ role: "user", content: "" }],
+		max_tokens: 16,
+	}).length;
+	const neededChars = Math.ceil((targetEstimate - 16) * 3.0) - overhead + 10;
+	return new Request("https://proxy.local/v1/messages", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			model: "claude-opus-4-7",
+			system: [{ type: "text", text: systemPrompt }],
+			messages: [
+				{ role: "user", content: "x".repeat(Math.max(0, neededChars)) },
+			],
+			max_tokens: 16,
+		}),
+	});
+}
+
+async function withMockAgent<T>(fn: () => Promise<T>): Promise<T> {
+	const registry = agentRegistry as unknown as {
+		cache: { agents: Agent[]; timestamp: number } | null;
+		initialized: boolean;
+	};
+	const previousCache = registry.cache;
+	const previousInitialized = registry.initialized;
+	registry.initialized = true;
+	registry.cache = {
+		timestamp: Date.now(),
+		agents: [
+			{
+				id: "route-test-agent",
+				name: "Route Test Agent",
+				description: "Agent used by routing tests",
+				color: "gray",
+				model: "claude-sonnet-4-5",
+				systemPrompt: "You are the route-test agent.",
+				source: "global",
+				filePath: "/tmp/route-test-agent.md",
+			},
+		],
+	};
+
+	try {
+		return await fn();
+	} finally {
+		registry.cache = previousCache;
+		registry.initialized = previousInitialized;
+	}
+}
+
 describe("context-window gate", () => {
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
 		// gpt-5.5 window = 400K, threshold = floor(400K * 0.85) = 340000
@@ -124,7 +189,7 @@ describe("context-window gate", () => {
 		const ctx = makeContext([codexAccount]);
 		// Request estimated above 340K tokens
 		const req = makeLargeRequest(350_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -151,7 +216,7 @@ describe("context-window gate", () => {
 
 		const ctx = makeContext([codexAccount]);
 		const req = makeLargeRequest(350_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -176,7 +241,7 @@ describe("context-window gate", () => {
 
 		const ctx = makeContext([pausedAccount]);
 		const req = makeSmallRequest();
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -206,7 +271,7 @@ describe("context-window gate", () => {
 		let caughtError: unknown;
 		let response: Response | null = null;
 		try {
-			response = await handleProxy(
+			response = await callHandleProxy(
 				req,
 				new URL("https://proxy.local/v1/messages"),
 				ctx,
@@ -251,7 +316,7 @@ describe("context-window gate", () => {
 			}),
 		});
 
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			largeReq,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -296,7 +361,7 @@ describe("context-window gate", () => {
 		// Estimate ~250K (above 170K threshold for gpt-5.3-codex,
 		// below 340K threshold for gpt-5.5)
 		const req = makeLargeRequest(250_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -307,6 +372,97 @@ describe("context-window gate", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
+		expect(error.message as string).toContain("gpt-5.3-codex");
+		const excluded = error.excluded_backends as Array<Record<string, unknown>>;
+		expect(excluded[0]?.model).toBe("gpt-5.3-codex");
+	});
+
+	it("uses the agent-rewritten model for context-window routing", async () => {
+		// Original request model: opus -> gpt-5.5 (400K, threshold 340K).
+		// Agent rewrite: sonnet -> gpt-5.3-codex (200K, threshold 170K).
+		// A ~250K request only fails if routing uses the post-agent model.
+		const codexAccount = makeAccount({
+			id: "codex-agent",
+			name: "Codex-agent",
+			provider: "codex",
+			model_mappings: JSON.stringify({
+				opus: "gpt-5.5",
+				sonnet: "gpt-5.3-codex",
+			}),
+		});
+
+		await withMockAgent(async () => {
+			const ctx = makeContext([codexAccount]);
+			const req = makeAgentRequest(250_000);
+			const response = await callHandleProxy(
+				req,
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+
+			expect(response.status).toBe(400);
+			const body = (await response.json()) as Record<string, unknown>;
+			const error = body.error as Record<string, unknown>;
+			expect(error.type).toBe("context_window_exceeded");
+			expect(error.message as string).toContain("gpt-5.3-codex");
+		});
+	});
+
+	it("uses the agent-rewritten model for combo family selection", async () => {
+		const codexAccount = makeAccount({
+			id: "codex-agent-combo",
+			name: "Codex-agent-combo",
+			provider: "codex",
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
+		});
+
+		await withMockAgent(async () => {
+			const ctx = makeContext([codexAccount]);
+			const getActiveComboForFamily = mock(async (family: string) =>
+				family === "sonnet"
+					? {
+							id: "combo-sonnet",
+							name: "Agent Sonnet Combo",
+							description: null,
+							enabled: true,
+							created_at: Date.now(),
+							updated_at: Date.now(),
+							slots: [
+								{
+									id: "slot-agent-sonnet",
+									combo_id: "combo-sonnet",
+									account_id: "codex-agent-combo",
+									model: "claude-sonnet-4-5",
+									priority: 0,
+									enabled: true,
+								},
+							],
+						}
+					: null,
+			);
+			(
+				ctx.dbOps as unknown as {
+					getActiveComboForFamily: typeof getActiveComboForFamily;
+				}
+			).getActiveComboForFamily = getActiveComboForFamily;
+
+			let response: Response | null = null;
+			let caughtError: unknown;
+			try {
+				response = await callHandleProxy(
+					makeAgentRequest(1_000),
+					new URL("https://proxy.local/v1/messages"),
+					ctx,
+				);
+			} catch (err) {
+				caughtError = err;
+			}
+
+			expect(response?.status).not.toBe(400);
+			expect(caughtError).toBeDefined();
+			expect(getActiveComboForFamily).toHaveBeenCalledWith("sonnet");
+			expect(getActiveComboForFamily).not.toHaveBeenCalledWith("opus");
+		});
 	});
 
 	it("does not gate a codex account when request is small enough", async () => {
@@ -327,7 +483,7 @@ describe("context-window gate", () => {
 		let caughtError: unknown;
 		let response: Response | null = null;
 		try {
-			response = await handleProxy(
+			response = await callHandleProxy(
 				req,
 				new URL("https://proxy.local/v1/messages"),
 				ctx,

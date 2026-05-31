@@ -1138,16 +1138,21 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * the excluded backends' model context windows.
  *
  * @param estimatedTokens  Conservative token estimate for the request
- * @param excludedAccounts Codex accounts dropped by the size gate
+ * @param excludedBackends Codex backends dropped by the size gate
  * @param requestModel     The Anthropic-side model name from the request
  */
+export interface ContextWindowExcludedBackend {
+	account: Account;
+	model: string;
+}
+
 export function createContextWindowExceededResponse(
 	estimatedTokens: number,
-	excludedAccounts: Account[],
+	excludedBackends: ContextWindowExcludedBackend[],
 	requestModel: string,
 ): Response {
-	const backendDescriptions = excludedAccounts.map((account) => {
-		const target = mapModelName(requestModel, account);
+	const backendDescriptions = excludedBackends.map(({ account, model }) => {
+		const target = mapModelName(model, account);
 		const window = resolveModelContextWindow(target);
 		return {
 			name: account.name,

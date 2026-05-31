@@ -33,6 +33,7 @@ import { handleResponsesRequest } from "@clankermux/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	fetchCodexUsageOnDemand,
+	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
 	usageCache,
@@ -61,6 +62,7 @@ import {
 import { validatePathOrThrow } from "@clankermux/security";
 import {
 	type Account,
+	type CapacitySignal,
 	type LoadBalancingStrategy,
 	StrategyName,
 	type StrategyStore,
@@ -829,6 +831,19 @@ export default async function startServer(options?: {
 			const data = usageCache.get(accountId);
 			if (!data) return null;
 			return getRepresentativeUtilizationForProvider(data, provider);
+		},
+		getAccountCapacity(
+			accountId: string,
+			provider: string,
+			now: number,
+		): CapacitySignal | null {
+			return getFreshCapacity(
+				usageCache,
+				accountId,
+				provider,
+				now,
+				config.getUsagePollIntervalMs() * 2,
+			);
 		},
 	});
 
