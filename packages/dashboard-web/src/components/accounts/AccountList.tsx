@@ -3,6 +3,8 @@ import { AccountListItem } from "./AccountListItem";
 
 interface AccountListProps {
 	accounts: Account[] | undefined;
+	forcedAccountId?: string | null;
+	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -24,6 +26,8 @@ interface AccountListProps {
 
 export function AccountList({
 	accounts,
+	forcedAccountId,
+	onForceAccount,
 	onPauseToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
@@ -53,6 +57,8 @@ export function AccountList({
 					key={account.name}
 					account={account}
 					isPrimary={account.isPrimary}
+					isForced={account.id === forcedAccountId}
+					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
 					onForceResetRateLimit={onForceResetRateLimit}
 					onRefreshUsage={onRefreshUsage}

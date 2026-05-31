@@ -1,6 +1,7 @@
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
 	AlertCircle,
+	Crosshair,
 	Edit2,
 	Globe,
 	Hash,
@@ -46,6 +47,8 @@ function formatTokenCount(n: number): string {
 interface AccountListItemProps {
 	account: Account;
 	isPrimary?: boolean;
+	isForced?: boolean;
+	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -68,6 +71,8 @@ interface AccountListItemProps {
 export function AccountListItem({
 	account,
 	isPrimary = false,
+	isForced = false,
+	onForceAccount,
 	onPauseToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
@@ -209,6 +214,21 @@ export function AccountListItem({
 							<Pause className="h-4 w-4" />
 						)}
 					</Button>
+					{onForceAccount && (
+						<Button
+							variant="ghost"
+							size="sm"
+							className={isForced ? "text-destructive bg-destructive/10" : ""}
+							onClick={() => onForceAccount(account)}
+							title={
+								isForced
+									? "Forcing all traffic here — click to release"
+									: "Force all traffic to this account"
+							}
+						>
+							<Crosshair className="h-4 w-4" />
+						</Button>
+					)}
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<Button variant="ghost" size="sm" title="More actions">

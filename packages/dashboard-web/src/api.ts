@@ -867,6 +867,75 @@ class API extends HttpClient {
 		}
 	}
 
+	async setForcedAccount(accountId: string): Promise<{ success: boolean }> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/force`;
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{ success: boolean }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async clearForcedAccount(): Promise<{ success: boolean }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/force/clear";
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{ success: boolean }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async getForcedAccount(): Promise<{ accountId: string | null }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/force";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{ accountId: string | null }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
 	async forceResetRateLimit(accountId: string): Promise<{
 		success: boolean;
 		message: string;

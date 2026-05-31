@@ -1,6 +1,7 @@
 export const queryKeys = {
 	all: ["clankermux"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
+	forcedAccount: () => [...queryKeys.all, "forced-account"] as const,
 	stats: (errorsSinceHours?: number) =>
 		errorsSinceHours !== undefined
 			? ([...queryKeys.all, "stats", { errorsSinceHours }] as const)
