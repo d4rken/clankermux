@@ -300,6 +300,11 @@ export async function refreshAccessTokenSafe(
 // Global registry for account refresh clearing functions
 const refreshClearers: Map<string, (accountId: string) => void> = new Map();
 
+// Global registry for session-affinity clearing functions (one per server).
+// Each clearer wipes the affinity pins pointing at an account inside that
+// server's in-memory load-balancing strategy.
+const affinityClearers: Map<string, (accountId: string) => number> = new Map();
+
 // Global registry for usage polling restart functions
 const pollingRestarters: Map<string, (accountId: string) => Promise<boolean>> =
 	new Map();
@@ -467,6 +472,43 @@ export function clearAccountRefreshCache(accountId: string): void {
 			);
 		}
 	}
+}
+
+/**
+ * Register a function that clears session-affinity pins for a specific account.
+ * Used by the server to expose its load-balancing strategy's
+ * clearAffinityForAccount capability to HTTP handlers.
+ */
+export function registerAffinityClearer(
+	serverId: string,
+	fn: (accountId: string) => number,
+): void {
+	affinityClearers.set(serverId, fn);
+}
+
+/**
+ * Clear session-affinity pins for an account across all registered servers.
+ * Returns the total number of pins cleared (summed across servers).
+ */
+export function clearAccountAffinity(accountId: string): number {
+	let total = 0;
+	for (const [serverId, clearer] of affinityClearers) {
+		try {
+			const cleared = clearer(accountId);
+			total += cleared;
+			if (cleared > 0) {
+				log.info(
+					`Cleared ${cleared} affinity pin(s) for account ${accountId} on server ${serverId}`,
+				);
+			}
+		} catch (error) {
+			log.error(
+				`Failed to clear affinity pins for account ${accountId} on server ${serverId}:`,
+				error,
+			);
+		}
+	}
+	return total;
 }
 
 /**

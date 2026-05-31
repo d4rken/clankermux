@@ -7,10 +7,12 @@ export {
 	selectAccountsForRequest,
 	setComboSlotInfo,
 } from "./account-selector";
+export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
+	proxyForcedAccount,
 	proxyUnauthenticated,
 	proxyWithAccount,
 } from "./proxy-operations";
@@ -37,9 +39,11 @@ export {
 } from "./token-health-service";
 export {
 	type CodexUsageRefreshOutcome,
+	clearAccountAffinity,
 	clearAccountRefreshCache,
 	getValidAccessToken,
 	refreshCodexUsageForAccount,
+	registerAffinityClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,

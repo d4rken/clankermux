@@ -57,4 +57,11 @@ export interface LoadBalancingStrategy {
 	 * Used for strategies that need access to a StrategyStore
 	 */
 	initialize?(store: StrategyStore): void;
+
+	/**
+	 * Optional: clear all session-affinity pins pointing at the given account,
+	 * so its stuck sessions re-pick on their next request. Returns the number
+	 * of pins removed. Strategies without affinity (e.g. LeastUsed) omit this.
+	 */
+	clearAffinityForAccount?(accountId: string): number;
 }

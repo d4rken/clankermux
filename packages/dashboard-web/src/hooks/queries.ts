@@ -101,6 +101,23 @@ export const useAccounts = () => {
 	});
 };
 
+/**
+ * Global force-account override state (in-memory on the server, clears on
+ * restart). Kept on a short poll + invalidated after set/clear and on every
+ * account reload so the per-account toggle and global banner can't drift across
+ * tabs or actions (R7).
+ */
+export const useForcedAccount = () => {
+	return useQuery({
+		queryKey: queryKeys.forcedAccount(),
+		queryFn: () => api.getForcedAccount(),
+		staleTime: 10000,
+		refetchInterval: 30000,
+		refetchIntervalInBackground: false,
+		gcTime: 5 * 60 * 1000,
+	});
+};
+
 interface ApiKeyListItem {
 	id: string;
 	name: string;

@@ -1,8 +1,14 @@
-import { AlertCircle, Plus } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Crosshair, Plus } from "lucide-react";
 import { useState } from "react";
 import { type Account, api } from "../api";
-import { useAccounts, useRenameAccount } from "../hooks/queries";
+import {
+	useAccounts,
+	useForcedAccount,
+	useRenameAccount,
+} from "../hooks/queries";
 import { useApiError } from "../hooks/useApiError";
+import { queryKeys } from "../lib/query-keys";
 import {
 	AccountAddForm,
 	AccountCustomEndpointDialog,
@@ -26,13 +32,44 @@ import {
 
 export function AccountsTab() {
 	const { formatError } = useApiError();
+	const queryClient = useQueryClient();
 	const {
 		data: accounts,
 		isLoading: loading,
 		error,
-		refetch: loadAccounts,
+		refetch: loadAccountsQuery,
 	} = useAccounts();
+	const { data: forcedAccountData } = useForcedAccount();
+	const forcedAccountId = forcedAccountData?.accountId ?? null;
 	const renameAccount = useRenameAccount();
+
+	// Reload accounts AND refetch the global force-account state together, so the
+	// per-account toggle + banner can't go stale after any account-mutating
+	// action or background refresh (R7).
+	const loadAccounts = async () => {
+		await Promise.all([
+			loadAccountsQuery(),
+			queryClient.invalidateQueries({ queryKey: queryKeys.forcedAccount() }),
+		]);
+	};
+
+	const refetchForcedAccount = () =>
+		queryClient.invalidateQueries({ queryKey: queryKeys.forcedAccount() });
+
+	const handleForceAccount = async (account: Account) => {
+		try {
+			if (account.id === forcedAccountId) {
+				await api.clearForcedAccount();
+			} else {
+				await api.setForcedAccount(account.id);
+			}
+			await refetchForcedAccount();
+			await loadAccountsQuery();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
 
 	const [adding, setAdding] = useState(false);
 	const [confirmDelete, setConfirmDelete] = useState<{
@@ -370,6 +407,16 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleResetStickiness = async (account: Account) => {
+		try {
+			await api.resetStickiness(account.id);
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handlePriorityChange = (account: Account) => {
 		setPriorityDialog({ isOpen: true, account });
 	};
@@ -502,6 +549,11 @@ export function AccountsTab() {
 
 	const displayError = error ? formatError(error) : actionError;
 
+	const forcedAccount = forcedAccountId
+		? accounts?.find((a) => a.id === forcedAccountId)
+		: undefined;
+	const forcedAccountLabel = forcedAccount?.name ?? forcedAccountId;
+
 	return (
 		<div className="space-y-4">
 			{displayError && (
@@ -510,6 +562,23 @@ export function AccountsTab() {
 						<div className="flex items-center gap-2">
 							<AlertCircle className="h-4 w-4 text-destructive" />
 							<p className="text-destructive">{displayError}</p>
+						</div>
+					</CardContent>
+				</Card>
+			)}
+
+			{forcedAccountId && (
+				<Card className="border-destructive bg-destructive/10">
+					<CardContent className="pt-6">
+						<div className="flex items-start gap-2">
+							<Crosshair className="h-5 w-5 shrink-0 text-destructive" />
+							<p className="text-sm text-destructive">
+								<span className="font-semibold">Force mode:</span> ALL traffic
+								is routed to{" "}
+								<span className="font-semibold">{forcedAccountLabel}</span> —
+								selection, gating, and failover are bypassed. Click the force
+								button again to release.
+							</p>
 						</div>
 					</CardContent>
 				</Card>
@@ -559,12 +628,15 @@ export function AccountsTab() {
 
 					<AccountList
 						accounts={accounts}
+						forcedAccountId={forcedAccountId}
+						onForceAccount={handleForceAccount}
 						onPauseToggle={handlePauseToggle}
 						onForceResetRateLimit={handleForceResetRateLimit}
 						onRefreshUsage={handleRefreshUsage}
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
+						onResetStickiness={handleResetStickiness}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
 						onBillingTypeToggle={handleBillingTypeToggle}

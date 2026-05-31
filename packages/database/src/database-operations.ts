@@ -744,6 +744,21 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.resetSession(accountId, timestamp);
 	}
 
+	/**
+	 * Expire the account's active-session anchor (`session_start = NULL,
+	 * session_request_count = 0`) so the no-affinity `global_session` routing
+	 * path stops re-sticking traffic to it. Backs the "Reset session
+	 * stickiness" action together with the in-memory affinity-pin clear.
+	 * Returns the number of rows changed.
+	 */
+	async clearAccountSessionAnchor(accountId: string): Promise<number> {
+		return withDatabaseRetry(
+			() => this.accounts.clearSessionAnchor(accountId),
+			this.retryConfig,
+			"clearAccountSessionAnchor",
+		);
+	}
+
 	async setAccountBillingType(
 		accountId: string,
 		billingType: string | null,
