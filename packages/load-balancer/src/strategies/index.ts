@@ -1,5 +1,5 @@
 import { isAccountAvailable, TIME_CONSTANTS } from "@clankermux/core";
-import { Logger } from "@clankermux/logger";
+import { Logger, LogLevel } from "@clankermux/logger";
 import type {
 	Account,
 	LoadBalancingStrategy,
@@ -30,6 +30,36 @@ const AFFINITY_REASSIGN_MIN_COOLDOWN_MS = 15 * 60 * 1000;
 const MAX_AFFINITY_ENTRIES = 10_000;
 
 const HEADROOM_EPS = 5; // percent; min meaningful headroom
+
+/**
+ * Capacity buckets for FEFO ordering, shared between the comparator
+ * (sortAvailableAccounts) and the selection debug log (logSelection) so the two
+ * can never drift. Lower bucket = preferred. HARVEST accounts have a known reset
+ * deadline and healthy headroom (serve soonest-expiring first); UNKNOWN have no
+ * usable capacity model (or no deadline) and fall back to least-utilization;
+ * NEAR_LIMIT are nearly exhausted and serve last.
+ */
+const CAPACITY_BUCKET = {
+	HARVEST: 0,
+	UNKNOWN: 1,
+	NEAR_LIMIT: 2,
+} as const;
+
+/** Human-readable bucket names for the selection debug log. */
+const CAPACITY_BUCKET_LABEL: Record<number, string> = {
+	[CAPACITY_BUCKET.HARVEST]: "HARVEST",
+	[CAPACITY_BUCKET.UNKNOWN]: "UNKNOWN",
+	[CAPACITY_BUCKET.NEAR_LIMIT]: "NEAR_LIMIT",
+};
+
+/** Per-account capacity metric snapshot used by the comparator and the log. */
+interface CapacityMetric {
+	bucket: number;
+	soonest: number;
+	minHeadroom: number;
+	binding: number;
+	util: number;
+}
 
 /**
  * Rate-limit reasons that indicate a server-wide or self-resolving condition
@@ -345,58 +375,55 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		return until - now > AFFINITY_REASSIGN_MIN_COOLDOWN_MS;
 	}
 
+	/**
+	 * Compute the per-account capacity metric used for FEFO ordering. Shared by
+	 * the comparator (sortAvailableAccounts) and the selection debug log
+	 * (logSelection) so the ranking the operator reads always matches the
+	 * ranking traffic follows. Pure with respect to `account`/`now` — does not
+	 * read the recency sequence (that lives in the comparator's tie-break).
+	 */
+	private capacityMetricFor(account: Account, now: number): CapacityMetric {
+		const s =
+			this.store?.getAccountCapacity?.(account.id, account.provider, now) ??
+			null;
+		// Legacy representative utilization — kept so providers without a capacity
+		// model (Zai/Kilo/Alibaba) still balance least-used within the UNKNOWN bucket.
+		const util =
+			this.store?.getAccountUtilization?.(account.id, account.provider) ?? 0;
+		let bucket: number = CAPACITY_BUCKET.UNKNOWN;
+		let soonest = Number.POSITIVE_INFINITY;
+		let minHeadroom = 0;
+		let binding = 0;
+		if (s !== null) {
+			minHeadroom = s.minHeadroom;
+			binding = s.bindingUtilization;
+			soonest = s.soonestResetMs ?? Number.POSITIVE_INFINITY;
+			if (
+				s.minHeadroom < HEADROOM_EPS ||
+				s.bindingUtilization > 100 - HEADROOM_EPS
+			) {
+				bucket = CAPACITY_BUCKET.NEAR_LIMIT;
+			} else if (s.soonestResetMs === null) {
+				// Known utilization but no deadline → not harvestable; treat as unknown.
+				bucket = CAPACITY_BUCKET.UNKNOWN;
+			} else {
+				bucket = CAPACITY_BUCKET.HARVEST;
+			}
+		}
+		return { bucket, soonest, minHeadroom, binding, util };
+	}
+
 	private sortAvailableAccounts(
 		accounts: Account[],
 		isAvailable: (account: Account) => boolean,
 		now: number,
 	): Account[] {
-		const HARVEST = 0;
-		const UNKNOWN = 1;
-		const NEAR_LIMIT = 2;
 		const avail = accounts.filter((a) => isAvailable(a));
 		// Snapshot per-account metrics once so the comparator stays pure/stable.
-		const info = new Map<
-			string,
-			{
-				bucket: number;
-				soonest: number;
-				minHeadroom: number;
-				binding: number;
-				util: number;
-				seq: number;
-			}
-		>();
+		const info = new Map<string, CapacityMetric & { seq: number }>();
 		for (const a of avail) {
-			const s = this.store?.getAccountCapacity?.(a.id, a.provider, now) ?? null;
-			// Legacy representative utilization — kept so providers without a capacity
-			// model (Zai/Kilo/Alibaba) still balance least-used within the UNKNOWN bucket.
-			const util = this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
-			let bucket = UNKNOWN;
-			let soonest = Number.POSITIVE_INFINITY;
-			let minHeadroom = 0;
-			let binding = 0;
-			if (s !== null) {
-				minHeadroom = s.minHeadroom;
-				binding = s.bindingUtilization;
-				soonest = s.soonestResetMs ?? Number.POSITIVE_INFINITY;
-				if (
-					s.minHeadroom < HEADROOM_EPS ||
-					s.bindingUtilization > 100 - HEADROOM_EPS
-				) {
-					bucket = NEAR_LIMIT;
-				} else if (s.soonestResetMs === null) {
-					// Known utilization but no deadline → not harvestable; treat as unknown.
-					bucket = UNKNOWN;
-				} else {
-					bucket = HARVEST;
-				}
-			}
 			info.set(a.id, {
-				bucket,
-				soonest,
-				minHeadroom,
-				binding,
-				util,
+				...this.capacityMetricFor(a, now),
 				seq: this.lastPickedSeq.get(a.id) ?? 0,
 			});
 		}
@@ -404,7 +431,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// is unreachable but keeps the comparator total without a non-null assert.
 		const metricsFor = (id: string) =>
 			info.get(id) ?? {
-				bucket: UNKNOWN,
+				bucket: CAPACITY_BUCKET.UNKNOWN,
 				soonest: Number.POSITIVE_INFINITY,
 				minHeadroom: 0,
 				binding: 0,
@@ -416,14 +443,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			const x = metricsFor(a.id);
 			const y = metricsFor(b.id);
 			if (x.bucket !== y.bucket) return x.bucket - y.bucket;
-			if (x.bucket === HARVEST) {
+			if (x.bucket === CAPACITY_BUCKET.HARVEST) {
 				// FEFO: serve the account whose capacity expires soonest first.
 				if (x.soonest !== y.soonest) return x.soonest - y.soonest;
 				if (x.minHeadroom !== y.minHeadroom)
 					return y.minHeadroom - x.minHeadroom;
 				return x.seq - y.seq; // least-recently-picked
 			}
-			if (x.bucket === UNKNOWN) {
+			if (x.bucket === CAPACITY_BUCKET.UNKNOWN) {
 				// Preserve legacy least-used ordering for non-capacity providers;
 				// seq only breaks genuine ties (cold accounts with no usage data).
 				if (x.util !== y.util) return x.util - y.util;
@@ -433,6 +460,46 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			if (x.binding !== y.binding) return x.binding - y.binding;
 			return x.seq - y.seq;
 		});
+	}
+
+	/**
+	 * Emit a single compact DEBUG line explaining a select() decision. Filters
+	 * to available accounts and ranks them through sortAvailableAccounts so the
+	 * logged order is the real ranking — including when a sticky pick (affinity /
+	 * session) overrides what FEFO would have chosen, which is visible because the
+	 * chosen account (marked `*`) need not be first in the ranked list.
+	 *
+	 * Only constructs the string when DEBUG is actually enabled. Not called from
+	 * peek() (read-only) or from inside sortAvailableAccounts (used for fallback
+	 * tails too — would be noisy).
+	 */
+	private logSelection(
+		decision: string,
+		chosen: Account | null,
+		accounts: Account[],
+		isAvailable: (account: Account) => boolean,
+		now: number,
+	): void {
+		// Avoid building the (potentially long) line when DEBUG is off.
+		if (this.log.getLevel() > LogLevel.DEBUG) return;
+
+		const ranked = this.sortAvailableAccounts(accounts, isAvailable, now);
+		const MAX = 10;
+		const shown = ranked.slice(0, MAX);
+		const parts = shown.map((a) => {
+			const m = this.capacityMetricFor(a, now);
+			const bucketLabel = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
+			const reset =
+				m.soonest === Number.POSITIVE_INFINITY
+					? "none"
+					: `${Math.round((m.soonest - now) / 60000)}m`;
+			const mark = chosen && a.id === chosen.id ? "*" : "";
+			return `${a.name}${mark}[${bucketLabel} reset=${reset} headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%]`;
+		});
+		if (ranked.length > MAX) parts.push(`(+${ranked.length - MAX} more)`);
+		this.log.debug(
+			`Selection [${decision}] chose ${chosen?.name ?? "none"} (* marks chosen): ${parts.join(" ")}`,
+		);
 	}
 
 	private recordComparatorPick(account: Account): void {
@@ -586,6 +653,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				available.length,
 			);
 			this.recordComparatorPick(servingAccount);
+			this.logSelection(
+				"auto_fallback",
+				servingAccount,
+				accounts,
+				getCachedAvailability,
+				now,
+			);
 			return available;
 		}
 
@@ -633,6 +707,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 						others.length + 1,
 						{ affinityKey, previousAccountId },
 					);
+					this.logSelection(
+						"affinity_hit",
+						affinedAccount,
+						accounts,
+						getCachedAvailability,
+						now,
+					);
 					return [affinedAccount, ...others];
 				}
 
@@ -659,6 +740,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					{ affinityKey, previousAccountId },
 				);
 				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					"affinity_reassigned",
+					chosenAccount,
+					accounts,
+					getCachedAvailability,
+					now,
+				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
 			}
@@ -690,6 +778,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					{ affinityKey, previousAccountId },
 				);
 				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					"affinity_hold",
+					chosenAccount,
+					accounts,
+					getCachedAvailability,
+					now,
+				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
 			}
@@ -712,16 +807,22 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				const chosenAccount = available[0];
 				this.resetSessionIfExpired(chosenAccount);
 				this.rememberAffinity(meta, chosenAccount, now);
-				this.setRoutingMeta(
-					meta,
+				const decision =
 					resolution.kind === "reassign"
 						? "affinity_reassigned"
-						: "affinity_miss",
-					chosenAccount,
-					available.length,
-					{ affinityKey, previousAccountId },
-				);
+						: "affinity_miss";
+				this.setRoutingMeta(meta, decision, chosenAccount, available.length, {
+					affinityKey,
+					previousAccountId,
+				});
 				this.recordComparatorPick(chosenAccount);
+				this.logSelection(
+					decision,
+					chosenAccount,
+					accounts,
+					getCachedAvailability,
+					now,
+				);
 				const others = available.filter((a) => a.id !== chosenAccount.id);
 				return [chosenAccount, ...others];
 			}
@@ -795,6 +896,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					activeAccount,
 					others.length + 1,
 				);
+				this.logSelection(
+					"global_session",
+					activeAccount,
+					accounts,
+					getCachedAvailability,
+					now,
+				);
 				return [activeAccount, ...others];
 			}
 		}
@@ -825,6 +933,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			available.length,
 		);
 		this.recordComparatorPick(chosenAccount);
+		this.logSelection(
+			"priority_utilization",
+			chosenAccount,
+			accounts,
+			getCachedAvailability,
+			now,
+		);
 
 		// Return chosen account first, then others as fallback (already sorted by priority)
 		const others = available.filter((a) => a.id !== chosenAccount.id);

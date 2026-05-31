@@ -1543,3 +1543,123 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		expect(result[0].id).toBe(nearLimitTop.id);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Pinning survives FEFO.
+//
+// Once a project is pinned to an account (cache affinity), capacity signals
+// must NOT pull the request to a different account — the warmed prompt cache is
+// worth more than harvesting a soon-to-reset sibling. This is the invariant that
+// keeps FEFO from thrashing established sessions: FEFO only orders the *fallback
+// tail*, never overrides the sticky primary.
+//
+// Uses a non-session provider (openai-compatible) so the only stickiness in play
+// is cache affinity — there is no Anthropic session window to muddy the test.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — pinning survives FEFO", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function projectMeta(): RequestMeta {
+		return {
+			id: "pin-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			project: "pinned-project",
+		};
+	}
+
+	// Non-session provider: affinity is the only stickiness, capacity comparator
+	// is never short-circuited by an active Anthropic session.
+	function makeAcct(id: string, overrides: Partial<Account> = {}): Account {
+		return makeAccount({
+			id,
+			name: id,
+			provider: "openai-compatible",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 0,
+			...overrides,
+		});
+	}
+
+	function cap(
+		minHeadroom: number,
+		soonestResetMs: number | null,
+		bindingUtilization = 100 - minHeadroom,
+	): CapacitySignal {
+		return { minHeadroom, soonestResetMs, bindingUtilization };
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("a pinned account keeps the request even when FEFO would prefer a sibling", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+		const c = makeAcct("acct-C");
+
+		// First select establishes the pin on A by making it the FEFO winner
+		// (HARVEST, soonest reset). Same priority for all three.
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000)); // reset soonest → wins FEFO
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		mockStore.setCapacity(c.id, cap(40, 90 * 60_000));
+
+		const meta = projectMeta();
+		expect(strategy.select([a, b, c], meta)[0].id).toBe(a.id);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+
+		// Now flip the capacity signals so a FRESH FEFO pick would NOT choose A:
+		//  - A becomes UNKNOWN (no reset deadline) — the worst harvestable bucket.
+		//  - B and C become healthy HARVEST accounts with near resets.
+		// FEFO alone would now rank B (nearest reset) first, A last.
+		mockStore.setCapacity(a.id, cap(40, null)); // UNKNOWN
+		mockStore.setCapacity(b.id, cap(50, 15 * 60_000)); // HARVEST, sooner reset
+		mockStore.setCapacity(c.id, cap(45, 45 * 60_000)); // HARVEST, later reset
+
+		const second = projectMeta();
+		const result = strategy.select([a, b, c], second);
+
+		// Pin wins: A is served first despite worse capacity signals.
+		expect(result[0].id).toBe(a.id);
+		expect(second.routing?.decision).toBe("affinity_hit");
+
+		// The non-sticky fallback tail is FEFO-ordered: nearer-reset B before
+		// later-reset C.
+		expect(result.slice(1).map((x) => x.id)).toEqual([b.id, c.id]);
+	});
+
+	it("affinity_hold keeps the pin: substitute is served without re-pointing affinity", () => {
+		const now = Date.now();
+		const a = makeAcct("hold-A");
+		const b = makeAcct("hold-B");
+
+		// Pin A on the first select (best FEFO signal).
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000));
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		expect(strategy.select([a, b], projectMeta())[0].id).toBe(a.id);
+
+		// A hits a short, transient throttle — hold the pin, serve from B this
+		// request WITHOUT reassigning the affinity slot.
+		a.rate_limited_until = now + 60_000;
+		a.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+		const held = projectMeta();
+		expect(strategy.select([a, b], held)[0].id).toBe(b.id);
+		expect(held.routing?.decision).toBe("affinity_hold");
+
+		// Throttle lifts → the project snaps back to its warmed account A,
+		// proving the hold did not re-point affinity to B.
+		a.rate_limited_until = null;
+		a.rate_limited_reason = null;
+		const recovered = projectMeta();
+		expect(strategy.select([a, b], recovered)[0].id).toBe(a.id);
+		expect(recovered.routing?.decision).toBe("affinity_hit");
+	});
+});
