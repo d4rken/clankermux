@@ -29,13 +29,16 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import {
+	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearProviderOverloadCooldown,
+	getForcedAccount,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
+	setForcedAccount,
 } from "@clankermux/proxy";
 import type {
 	Account,
@@ -824,6 +827,119 @@ export function createAccountResumeHandler(dbOps: DatabaseOperations) {
 				error instanceof Error ? error : new Error("Failed to resume account"),
 			);
 		}
+	};
+}
+
+/**
+ * Create an account reset-session-stickiness handler.
+ *
+ * Clears BOTH layers of stickiness pointing at the account:
+ *  1. the in-memory affinity pins held by the load-balancing strategy
+ *     (via the registered affinity clearer), and
+ *  2. the account's persisted active-session anchor (`session_start`),
+ *     because the no-affinity `global_session` routing path re-sticks from
+ *     `session_start` alone.
+ *
+ * After this, the account's sessions re-pick on their next request — the
+ * manual lever for migrating sessions off an account after a priority change.
+ */
+export function createAccountResetStickinessHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			// Get account name by ID
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Clear in-memory affinity pins (across registered servers) and expire
+			// the persisted session anchor.
+			const cleared = clearAccountAffinity(accountId);
+			await dbOps.clearAccountSessionAnchor(accountId);
+
+			return jsonResponse({
+				success: true,
+				message: `Session stickiness reset for '${account.name}'`,
+				cleared,
+			});
+		} catch (error) {
+			log.error("Account reset-stickiness error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to reset session stickiness"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a force-account handler.
+ *
+ * Sets the GLOBAL force-account override (Feature 3): while set, every
+ * non-internal client request is routed straight to this account, bypassing
+ * selection, all gates, and all failover/retry. One account at a time (setting
+ * a new id replaces the old). Ephemeral — clears on server restart.
+ */
+export function createAccountForceHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			setForcedAccount(accountId);
+			log.warn(
+				`Force-account ENABLED: all traffic now routed to '${account.name}' (${accountId})`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: `All traffic now forced to '${account.name}'`,
+				accountId,
+			});
+		} catch (error) {
+			log.error("Account force error:", error);
+			return errorResponse(
+				error instanceof Error ? error : new Error("Failed to force account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a clear-force-account handler. Clears the global force-account
+ * override; subsequent requests route normally.
+ */
+export function createAccountForceClearHandler() {
+	return async (): Promise<Response> => {
+		const previous = getForcedAccount();
+		setForcedAccount(null);
+		if (previous) {
+			log.warn(`Force-account CLEARED (was '${previous}')`);
+		}
+		return jsonResponse({ success: true });
+	};
+}
+
+/**
+ * Create a get-force-account handler. Returns the currently forced account id
+ * (or null). Used by the dashboard to reflect/sync the current force state.
+ */
+export function createAccountForceGetHandler() {
+	return async (): Promise<Response> => {
+		return jsonResponse({ accountId: getForcedAccount() });
 	};
 }
 

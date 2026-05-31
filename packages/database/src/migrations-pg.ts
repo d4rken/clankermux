@@ -102,7 +102,6 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			cache_read_input_tokens INTEGER DEFAULT 0,
 			cache_creation_input_tokens INTEGER DEFAULT 0,
 			output_tokens INTEGER DEFAULT 0,
-			agent_used TEXT,
 			api_key_id TEXT,
 			api_key_name TEXT,
 			project TEXT,
@@ -175,15 +174,6 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 	await adapter.unsafe(
 		`CREATE INDEX IF NOT EXISTS idx_oauth_sessions_expires ON oauth_sessions(expires_at)`,
 	);
-
-	// Create agent_preferences table
-	await adapter.unsafe(`
-		CREATE TABLE IF NOT EXISTS agent_preferences (
-			agent_id TEXT PRIMARY KEY,
-			model TEXT NOT NULL,
-			updated_at BIGINT NOT NULL
-		)
-	`);
 
 	// Create api_keys table
 	await adapter.unsafe(`

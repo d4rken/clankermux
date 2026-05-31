@@ -43,20 +43,6 @@
         "@clankermux/types": "workspace:*",
       },
     },
-    "packages/agents": {
-      "name": "@clankermux/agents",
-      "version": "1.0.0",
-      "dependencies": {
-        "@clankermux/config": "workspace:*",
-        "@clankermux/logger": "workspace:*",
-        "@clankermux/security": "workspace:*",
-        "@clankermux/types": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/node": "22.17.0",
-        "typescript": "6.0.2",
-      },
-    },
     "packages/cli-commands": {
       "name": "@clankermux/cli-commands",
       "version": "0.1.0",
@@ -156,7 +142,6 @@
       "name": "@clankermux/http-api",
       "version": "0.1.0",
       "dependencies": {
-        "@clankermux/agents": "workspace:*",
         "@clankermux/config": "workspace:*",
         "@clankermux/core": "workspace:*",
         "@clankermux/database": "workspace:*",
@@ -234,13 +219,11 @@
       "name": "@clankermux/proxy",
       "version": "0.1.0",
       "dependencies": {
-        "@clankermux/agents": "workspace:*",
         "@clankermux/config": "workspace:*",
         "@clankermux/core": "workspace:*",
         "@clankermux/database": "workspace:*",
         "@clankermux/logger": "workspace:*",
         "@clankermux/providers": "workspace:*",
-        "@clankermux/security": "workspace:*",
         "@clankermux/ui-common": "workspace:*",
       },
     },
@@ -293,8 +276,6 @@
     "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.4.10", "", { "os": "win32", "cpu": "arm64" }, "sha512-umwQU6qPzH+ISTf/eHyJ/QoQnJs3V9Vpjz2OjZXe9MVBZ7prgGafMy7yYeRGnlmDAn87AKTF3Q6weLoMGpeqdQ=="],
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.4.10", "", { "os": "win32", "cpu": "x64" }, "sha512-aW/JU5GuyH4uxMrNYpoC2kjaHlyJGLgIa3XkhPEZI0uKhZhJZU8BuEyJmvgzSPQNGozBwWjC972RaNdcJ9KyJg=="],
-
-    "@clankermux/agents": ["@clankermux/agents@workspace:packages/agents"],
 
     "@clankermux/cli-commands": ["@clankermux/cli-commands@workspace:packages/cli-commands"],
 

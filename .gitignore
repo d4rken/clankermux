@@ -4,6 +4,7 @@ node_modules/
 .claude/settings.json
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 .planning/
 .codex
 ccflare.db

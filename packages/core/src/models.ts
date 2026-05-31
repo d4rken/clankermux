@@ -54,7 +54,6 @@ export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_4_5;
 
 // Default model for various contexts
 export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
-export const DEFAULT_AGENT_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
 
 // Type for all valid model IDs
 export type ClaudeModelId =

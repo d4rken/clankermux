@@ -1,7 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { handleProxy } from "../proxy";
+
+mock.module("../inline-worker", () => ({
+	EMBEDDED_WORKER_CODE: "",
+}));
+
+async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
+	const { handleProxy } = await import("../proxy");
+	return handleProxy(req, url, ctx);
+}
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -110,21 +118,6 @@ function makeSmallRequest(): Request {
 	});
 }
 
-let savedPassthrough: string | undefined;
-
-beforeEach(() => {
-	savedPassthrough = process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-});
-
-afterEach(() => {
-	if (savedPassthrough === undefined) {
-		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	} else {
-		process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = savedPassthrough;
-	}
-});
-
 describe("context-window gate", () => {
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
 		// gpt-5.5 window = 400K, threshold = floor(400K * 0.85) = 340000
@@ -138,7 +131,7 @@ describe("context-window gate", () => {
 		const ctx = makeContext([codexAccount]);
 		// Request estimated above 340K tokens
 		const req = makeLargeRequest(350_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -165,7 +158,7 @@ describe("context-window gate", () => {
 
 		const ctx = makeContext([codexAccount]);
 		const req = makeLargeRequest(350_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -190,7 +183,7 @@ describe("context-window gate", () => {
 
 		const ctx = makeContext([pausedAccount]);
 		const req = makeSmallRequest();
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -220,7 +213,7 @@ describe("context-window gate", () => {
 		let caughtError: unknown;
 		let response: Response | null = null;
 		try {
-			response = await handleProxy(
+			response = await callHandleProxy(
 				req,
 				new URL("https://proxy.local/v1/messages"),
 				ctx,
@@ -265,7 +258,7 @@ describe("context-window gate", () => {
 			}),
 		});
 
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			largeReq,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -310,7 +303,7 @@ describe("context-window gate", () => {
 		// Estimate ~250K (above 170K threshold for gpt-5.3-codex,
 		// below 340K threshold for gpt-5.5)
 		const req = makeLargeRequest(250_000);
-		const response = await handleProxy(
+		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
@@ -321,6 +314,9 @@ describe("context-window gate", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
+		expect(error.message as string).toContain("gpt-5.3-codex");
+		const excluded = error.excluded_backends as Array<Record<string, unknown>>;
+		expect(excluded[0]?.model).toBe("gpt-5.3-codex");
 	});
 
 	it("does not gate a codex account when request is small enough", async () => {
@@ -341,7 +337,7 @@ describe("context-window gate", () => {
 		let caughtError: unknown;
 		let response: Response | null = null;
 		try {
-			response = await handleProxy(
+			response = await callHandleProxy(
 				req,
 				new URL("https://proxy.local/v1/messages"),
 				ctx,

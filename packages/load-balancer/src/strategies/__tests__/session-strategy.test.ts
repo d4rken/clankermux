@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
-import type { Account, RequestMeta, StrategyStore } from "@clankermux/types";
+import type {
+	Account,
+	CapacitySignal,
+	RequestMeta,
+	StrategyStore,
+} from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
 // Shared Account factory — keeps every test focused on the fields that
@@ -51,6 +56,7 @@ class MockStrategyStore implements StrategyStore {
 	resetCalls: Array<{ accountId: string; timestamp: number }> = [];
 	resumeCalls: string[] = [];
 	utilizationMap: Map<string, number | null> = new Map();
+	capacityMap: Map<string, CapacitySignal | null> = new Map();
 
 	resetAccountSession(accountId: string, timestamp: number): void {
 		this.resetCalls.push({ accountId, timestamp });
@@ -69,11 +75,24 @@ class MockStrategyStore implements StrategyStore {
 		this.utilizationMap.set(accountId, value);
 	}
 
+	getAccountCapacity(
+		accountId: string,
+		_provider: string,
+		_now: number,
+	): CapacitySignal | null {
+		return this.capacityMap.get(accountId) ?? null;
+	}
+
+	setCapacity(accountId: string, signal: CapacitySignal | null): void {
+		this.capacityMap.set(accountId, signal);
+	}
+
 	// Helper methods for testing
 	clear(): void {
 		this.resetCalls = [];
 		this.resumeCalls = [];
 		this.utilizationMap.clear();
+		this.capacityMap.clear();
 	}
 
 	getResetCall(
@@ -457,6 +476,60 @@ describe("SessionStrategy", () => {
 		expect(projectMeta.routing?.selectedAccountId).toBe(
 			"higher-priority-available",
 		);
+	});
+
+	// Updated for affinity-first: the dedicated "auto_fallback" decision/early
+	// return was removed. A recovered auto-fallback account is now unpaused as a
+	// side-effect and re-enters the normal pool; for an UNPINNED request the
+	// fresh-pick path (priority_utilization) still routes to the best available
+	// account, so utilization tie-breaking continues to favor the low-util one —
+	// only the decision label changes from "auto_fallback" to
+	// "priority_utilization".
+	it("uses utilization tie-breaking after an auto-fallback account recovers", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		const result = strategy.select([fallbackHighUtil, lowUtil], meta);
+
+		expect(result[0]).toBe(lowUtil);
+		expect(result[1]).toBe(fallbackHighUtil);
+		expect(meta.routing?.decision).toBe("priority_utilization");
+		expect(meta.routing?.selectedAccountId).toBe("low-util");
+	});
+
+	it("peek uses utilization tie-breaking when auto-fallback would trigger", () => {
+		const now = Date.now();
+		const fallbackHighUtil = makeAccount({
+			id: "fallback-high-util",
+			name: "fallback-high-util",
+			priority: 0,
+			auto_fallback_enabled: true,
+			rate_limit_reset: now - 60_000,
+		});
+		const lowUtil = makeAccount({
+			id: "low-util",
+			name: "low-util",
+			priority: 0,
+		});
+
+		mockStore.setUtilization(fallbackHighUtil.id, 90);
+		mockStore.setUtilization(lowUtil.id, 10);
+
+		expect(strategy.peek([fallbackHighUtil, lowUtil])).toBe("low-util");
 	});
 
 	it("does not honor bypass-session from external client traffic", () => {
@@ -1131,7 +1204,11 @@ describe("SessionStrategy", () => {
 			expect(projectMeta.routing?.decision).toBe("affinity_hit");
 		});
 
-		it("lets higher-priority accounts override an affinity hit and re-pins", () => {
+		// Updated for affinity-first: priority no longer beats stickiness. A pinned
+		// session that is still available keeps its account even after a
+		// higher-priority account becomes available — the pin is immune to priority
+		// edits (the inverse of the pre-affinity-first reassignment behavior).
+		it("keeps a pinned account even when a higher-priority account becomes available", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {
 				...meta,
@@ -1168,11 +1245,208 @@ describe("SessionStrategy", () => {
 				projectMeta,
 			);
 
-			expect(result[0]).toBe(higherPriorityLater);
-			expect(projectMeta.routing?.decision).toBe("affinity_reassigned");
-			expect(projectMeta.routing?.previousAccountId).toBe(
-				"lower-priority-affined",
+			// Pin stays on the lower-priority account; the higher-priority account
+			// is only the FEFO-ordered fallback tail.
+			expect(result[0]).toBe(lowerPriorityAffined);
+			expect(result[1]).toBe(higherPriorityLater);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+		});
+
+		// -------------------------------------------------------------------------
+		// Feature 1 — affinity-first selection. A pinned session keeps its account
+		// whenever that account is available: immune to BOTH priority edits and
+		// auto-fallback (rate-limit recovery). Priority/FEFO govern only new picks.
+		// -------------------------------------------------------------------------
+
+		it("pinned session is immune to a higher-priority account being available", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "pinned-priority-project",
+			};
+
+			// A is lower priority (1); pin lands on A first because B is unavailable.
+			const accountA = makeAccount({
+				id: "pinned-A",
+				name: "pinned-A",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+			});
+			// B is higher priority (0) but starts unavailable so A wins the first pick.
+			const accountB = makeAccount({
+				id: "higher-priority-B",
+				name: "higher-priority-B",
+				created_at: now,
+				expires_at: now + 3600_000,
+				paused: true,
+				pause_reason: "manual",
+				priority: 0,
+			});
+
+			// First select establishes the affinity pin on A.
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountA,
 			);
+
+			// B (higher priority) becomes available. Pre-affinity-first this would
+			// have reassigned to B; now the pin stays on A.
+			accountB.paused = false;
+			accountB.pause_reason = null;
+			const result = strategy.select([accountA, accountB], projectMeta);
+
+			expect(result[0]).toBe(accountA);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+			// B is only the FEFO-ordered fallback tail.
+			expect(result[1]).toBe(accountB);
+		});
+
+		it("pinned session is immune to auto-fallback re-routing", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "pinned-autofallback-project",
+			};
+
+			// Pinned account A — plain, always available.
+			const accountA = makeAccount({
+				id: "pinned-affinity-A",
+				name: "pinned-affinity-A",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			// B is an auto_fallback_enabled account that has just recovered
+			// (rate_limit_reset in the past). Before affinity-first, the auto-fallback
+			// early-return would re-route to B; now the pin on A must survive.
+			const accountB = makeAccount({
+				id: "recovered-fallback-B",
+				name: "recovered-fallback-B",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+			});
+
+			// First select pins A (B is recovered but A wins on equal priority via
+			// least-recently-picked / stable order; we then assert the pin).
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountA,
+			);
+
+			const result = strategy.select([accountA, accountB], projectMeta);
+			expect(result[0]).toBe(accountA);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+		});
+
+		it("auto-unpause side-effect still runs for a new/unpinned session", () => {
+			const now = Date.now();
+			// An auto_fallback_enabled account paused for "overage" whose window has
+			// elapsed must be unpaused as a side-effect of select() and become
+			// selectable — even though the dedicated auto_fallback early-return is gone.
+			const recovered = makeAccount({
+				id: "recovered-overage",
+				name: "recovered-overage",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+			});
+
+			// New/unpinned request (no project/affinity key).
+			const result = strategy.select([recovered], meta);
+
+			// The unpause side-effect ran...
+			expect(mockStore.hasResumeCall(recovered.id)).toBe(true);
+			expect(recovered.paused).toBe(false);
+			// ...and the recovered account is selectable.
+			expect(result[0]).toBe(recovered);
+		});
+
+		it("failover still works when the pinned account becomes unavailable", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "failover-project",
+			};
+
+			const affined = makeAccount({
+				id: "failover-affined",
+				name: "failover-affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "failover-healthy",
+				name: "failover-healthy",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			// Pin lands on affined.
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// affined goes durably unavailable (long 5h exhaustion) — the pin must
+			// NOT stick to the unavailable account; failover serves healthy instead.
+			affined.rate_limited_until = now + 5 * 60 * 60 * 1000;
+			affined.rate_limited_reason = "upstream_429_with_reset";
+			const result = strategy.select([affined, healthy], projectMeta);
+
+			expect(result[0]).toBe(healthy);
+			expect(result).not.toContain(affined);
+		});
+
+		it("peek matches select primary for the higher-priority-pinned case", () => {
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "peek-parity-project",
+			};
+
+			// A is lower priority (1) but is the one we want pinned/active.
+			const accountA = makeAccount({
+				id: "peek-pinned-A",
+				name: "peek-pinned-A",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+			});
+			// B is higher priority (0); start it unavailable so the first pick (and
+			// the Anthropic active session) lands on A.
+			const accountB = makeAccount({
+				id: "peek-higher-B",
+				name: "peek-higher-B",
+				created_at: now,
+				expires_at: now + 3600_000,
+				paused: true,
+				pause_reason: "manual",
+				priority: 0,
+			});
+
+			// First select pins A and starts A's Anthropic session (session_start set
+			// via resetSessionIfExpired). B is unavailable so it can't win.
+			const first = strategy.select([accountA, accountB], projectMeta);
+			expect(first[0]).toBe(accountA);
+
+			// B (higher priority) becomes available.
+			accountB.paused = false;
+			accountB.pause_reason = null;
+
+			// select stays on A via affinity_hit (immune to B's higher priority).
+			const second = strategy.select([accountA, accountB], projectMeta);
+			expect(second[0]).toBe(accountA);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+
+			// peek has no affinity, but it honors the active-session window without
+			// the removed higher-priority override: A is the active session and is
+			// available, so peek returns A — matching select()'s primary.
+			expect(strategy.peek([accountA, accountB])).toBe(accountA.id);
 		});
 
 		it("partitions affinity by authenticated API key identity", () => {
@@ -1220,6 +1494,74 @@ describe("SessionStrategy", () => {
 			expect(apiKeyOneMeta.routing?.affinityKey).toBe(
 				"partition:api_key:key-one:project:shared-project",
 			);
+		});
+
+		it("auto-unpauses a lower-priority pinned candidate even when a higher-priority account is available first", () => {
+			// Regression for the auto-unpause early-break: the loop must run the
+			// unpause side-effect on EVERY eligible fallback candidate, not just up
+			// to the first available one. Here the pinned account (B, priority 1)
+			// sorts AFTER an available higher-priority account (A, priority 0). With
+			// the old `if (getCachedAvailability(candidate)) break;`, the loop stops
+			// at A and never unpauses B; resolveAffinity then sees B as unavailable
+			// and wrongly fails the session off its pinned account.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "autounpause-pinned-project",
+			};
+
+			// A — higher priority (0). Also an eligible auto-fallback candidate
+			// (window reset elapsed) so it appears in the priority-sorted candidate
+			// list AHEAD of B. A is never paused, so it is always available — which
+			// is exactly what tripped the old early-break.
+			const accountA = makeAccount({
+				id: "available-higher-A",
+				name: "available-higher-A",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+			});
+			// B — lower priority (1). We pin the session to B first (while A is
+			// unavailable), then pause B for "overage" with an elapsed
+			// rate_limit_reset window so it becomes an auto-unpause fallback
+			// candidate that sorts AFTER A.
+			const accountB = makeAccount({
+				id: "pinned-lower-B",
+				name: "pinned-lower-B",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+				auto_fallback_enabled: true,
+			});
+
+			// First select: A is temporarily unavailable (manual pause) so the pin
+			// lands on B and starts B's session window.
+			accountA.paused = true;
+			accountA.pause_reason = "manual";
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountB,
+			);
+
+			// A becomes available again; B is paused for "overage" with an elapsed
+			// reset window (eligible for auto-unpause, sorts AFTER A on priority).
+			// A sorts FIRST in the fallback-candidate list and is already available,
+			// so the old early-break would stop the loop at A and never reach B.
+			accountA.paused = false;
+			accountA.pause_reason = null;
+			accountB.paused = true;
+			accountB.pause_reason = "overage";
+			accountB.rate_limit_reset = now - 60_000;
+
+			const result = strategy.select([accountA, accountB], projectMeta);
+
+			// (a) B was auto-unpaused despite A being available and sorting first.
+			expect(mockStore.hasResumeCall(accountB.id)).toBe(true);
+			expect(accountB.paused).toBe(false);
+			// (b) The session stays on its pinned account B — NOT moved to A.
+			expect(result[0]).toBe(accountB);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
 		});
 
 		it("caps stored affinity entries", () => {
@@ -1295,5 +1637,402 @@ describe("SessionStrategy", () => {
 			expect(paused.paused).toBe(true);
 			expect(mockStore.resumeCalls).toEqual([]);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// FEFO (first-expire-first-out) capacity-aware tie-breaking.
+//
+// Within a priority tier, sortAvailableAccounts buckets accounts as
+// HARVEST (0) > UNKNOWN (1) > NEAR_LIMIT (2). HARVEST accounts are ordered by
+// soonest capacity reset (FEFO), then by most headroom, then least-recently
+// picked. Capacity signals are supplied through MockStrategyStore.setCapacity.
+// These accounts use a non-session provider (openai) so session stickiness
+// never short-circuits the capacity comparator.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+	const NOW = Date.now();
+
+	function makeMeta(): RequestMeta {
+		return {
+			id: "fefo-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: NOW,
+		};
+	}
+
+	// Non-session provider so no active-session path interferes with the
+	// capacity comparator (Anthropic would create sticky sessions). openrouter
+	// is a known, non-session-tracking provider — avoids the "unknown provider"
+	// warning while still skipping session stickiness.
+	function makeCapAccount(
+		id: string,
+		overrides: Partial<Account> = {},
+	): Account {
+		return makeAccount({ id, name: id, provider: "openrouter", ...overrides });
+	}
+
+	function harvest(
+		minHeadroom: number,
+		soonestResetMs: number | null,
+		bindingUtilization = 100 - minHeadroom,
+	): CapacitySignal {
+		return { minHeadroom, soonestResetMs, bindingUtilization };
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("HARVEST: equal headroom, picks the nearer-reset account first (FEFO)", () => {
+		const nearReset = makeCapAccount("near-reset");
+		const farReset = makeCapAccount("far-reset");
+		// Same headroom → reset deadline decides; nearer reset is served first.
+		mockStore.setCapacity(nearReset.id, harvest(40, 30 * 60_000));
+		mockStore.setCapacity(farReset.id, harvest(40, 4 * 60 * 60_000));
+
+		const meta = makeMeta();
+		const result = strategy.select([farReset, nearReset], meta);
+		expect(result[0].id).toBe(nearReset.id);
+		expect(meta.routing?.selectedAccountId).toBe(nearReset.id);
+	});
+
+	it("NEAR_LIMIT (low headroom) sorts after HARVEST even if HARVEST resets later", () => {
+		const harvestLate = makeCapAccount("harvest-late");
+		const nearLimit = makeCapAccount("near-limit");
+		// HARVEST account resets much later than the near-limit account, but the
+		// near-limit bucket still loses — buckets dominate FEFO ordering.
+		mockStore.setCapacity(harvestLate.id, harvest(40, 4 * 60 * 60_000));
+		mockStore.setCapacity(nearLimit.id, harvest(2, 60_000)); // minHeadroom < 5
+
+		const result = strategy.select([nearLimit, harvestLate], makeMeta());
+		expect(result[0].id).toBe(harvestLate.id);
+		expect(result[1].id).toBe(nearLimit.id);
+	});
+
+	it("high bindingUtilization (>95) is NEAR_LIMIT even with healthy headroom", () => {
+		const harvestAcct = makeCapAccount("harvest-ok");
+		const binding = makeCapAccount("binding-high");
+		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
+		// Healthy minHeadroom on the hard windows, but extra_usage pushes the
+		// binding utilization above 95 → NEAR_LIMIT bucket.
+		mockStore.setCapacity(binding.id, {
+			minHeadroom: 40,
+			soonestResetMs: 60_000,
+			bindingUtilization: 98,
+		});
+
+		const result = strategy.select([binding, harvestAcct], makeMeta());
+		expect(result[0].id).toBe(harvestAcct.id);
+		expect(result[1].id).toBe(binding.id);
+	});
+
+	it("soonestResetMs null with healthy headroom is UNKNOWN (between HARVEST and NEAR_LIMIT)", () => {
+		const harvestAcct = makeCapAccount("harvest");
+		const noDeadline = makeCapAccount("no-deadline");
+		const nearLimit = makeCapAccount("near-limit");
+		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
+		// Known utilization, healthy headroom, but no reset deadline → UNKNOWN.
+		mockStore.setCapacity(noDeadline.id, harvest(40, null));
+		mockStore.setCapacity(nearLimit.id, harvest(1, 60_000)); // NEAR_LIMIT
+
+		const result = strategy.select(
+			[nearLimit, noDeadline, harvestAcct],
+			makeMeta(),
+		);
+		expect(result.map((a) => a.id)).toEqual([
+			harvestAcct.id,
+			noDeadline.id,
+			nearLimit.id,
+		]);
+	});
+
+	it("bucket order overall: HARVEST > UNKNOWN > NEAR_LIMIT", () => {
+		const harvestAcct = makeCapAccount("h");
+		const unknownAcct = makeCapAccount("u"); // no capacity signal → UNKNOWN
+		const nearLimit = makeCapAccount("n");
+		mockStore.setCapacity(harvestAcct.id, harvest(50, 2 * 60 * 60_000));
+		// unknownAcct: deliberately no setCapacity → getAccountCapacity returns null.
+		mockStore.setCapacity(nearLimit.id, harvest(3, 60_000));
+
+		const result = strategy.select(
+			[nearLimit, unknownAcct, harvestAcct],
+			makeMeta(),
+		);
+		expect(result.map((a) => a.id)).toEqual([
+			harvestAcct.id,
+			unknownAcct.id,
+			nearLimit.id,
+		]);
+	});
+
+	it("recent-pick rotation: two equivalent HARVEST accounts alternate across selects", () => {
+		const a = makeCapAccount("rot-a");
+		const b = makeCapAccount("rot-b");
+		// Identical capacity → soonest + headroom ties → seq (least-recently-picked) breaks it.
+		const sig = harvest(40, 60 * 60_000);
+		mockStore.setCapacity(a.id, { ...sig });
+		mockStore.setCapacity(b.id, { ...sig });
+
+		const first = strategy.select([a, b], makeMeta())[0].id;
+		const second = strategy.select([a, b], makeMeta())[0].id;
+		expect(first).not.toBe(second);
+		expect(new Set([first, second])).toEqual(new Set([a.id, b.id]));
+	});
+
+	it("peek/select parity: HARVEST set and all-UNKNOWN set agree", () => {
+		// HARVEST set.
+		const near = makeCapAccount("p-near");
+		const far = makeCapAccount("p-far");
+		mockStore.setCapacity(near.id, harvest(40, 20 * 60_000));
+		mockStore.setCapacity(far.id, harvest(40, 3 * 60 * 60_000));
+		const harvestAccts = [far, near];
+		expect(strategy.peek(harvestAccts)).toBe(
+			strategy.select(harvestAccts, makeMeta())[0].id,
+		);
+
+		// All-UNKNOWN set (no capacity signals; utilization differentiates).
+		mockStore.clear();
+		const u1 = makeCapAccount("u1");
+		const u2 = makeCapAccount("u2");
+		mockStore.setUtilization(u1.id, 70);
+		mockStore.setUtilization(u2.id, 20);
+		const unknownAccts = [u1, u2];
+		expect(strategy.peek(unknownAccts)).toBe(
+			strategy.select(unknownAccts, makeMeta())[0].id,
+		);
+	});
+
+	it("priority dominates capacity: priority-0 NEAR_LIMIT beats priority-1 HARVEST", () => {
+		const nearLimitTop = makeCapAccount("near-top", { priority: 0 });
+		const harvestLow = makeCapAccount("harvest-low", { priority: 1 });
+		mockStore.setCapacity(nearLimitTop.id, harvest(1, 60_000)); // NEAR_LIMIT
+		mockStore.setCapacity(harvestLow.id, harvest(50, 2 * 60 * 60_000)); // HARVEST
+
+		const result = strategy.select([harvestLow, nearLimitTop], makeMeta());
+		expect(result[0].id).toBe(nearLimitTop.id);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Pinning survives FEFO.
+//
+// Once a project is pinned to an account (cache affinity), capacity signals
+// must NOT pull the request to a different account — the warmed prompt cache is
+// worth more than harvesting a soon-to-reset sibling. This is the invariant that
+// keeps FEFO from thrashing established sessions: FEFO only orders the *fallback
+// tail*, never overrides the sticky primary.
+//
+// Uses a non-session provider (openai-compatible) so the only stickiness in play
+// is cache affinity — there is no Anthropic session window to muddy the test.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — pinning survives FEFO", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function projectMeta(): RequestMeta {
+		return {
+			id: "pin-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			project: "pinned-project",
+		};
+	}
+
+	// Non-session provider: affinity is the only stickiness, capacity comparator
+	// is never short-circuited by an active Anthropic session.
+	function makeAcct(id: string, overrides: Partial<Account> = {}): Account {
+		return makeAccount({
+			id,
+			name: id,
+			provider: "openai-compatible",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 0,
+			...overrides,
+		});
+	}
+
+	function cap(
+		minHeadroom: number,
+		soonestResetMs: number | null,
+		bindingUtilization = 100 - minHeadroom,
+	): CapacitySignal {
+		return { minHeadroom, soonestResetMs, bindingUtilization };
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("a pinned account keeps the request even when FEFO would prefer a sibling", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+		const c = makeAcct("acct-C");
+
+		// First select establishes the pin on A by making it the FEFO winner
+		// (HARVEST, soonest reset). Same priority for all three.
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000)); // reset soonest → wins FEFO
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		mockStore.setCapacity(c.id, cap(40, 90 * 60_000));
+
+		const meta = projectMeta();
+		expect(strategy.select([a, b, c], meta)[0].id).toBe(a.id);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+
+		// Now flip the capacity signals so a FRESH FEFO pick would NOT choose A:
+		//  - A becomes UNKNOWN (no reset deadline) — the worst harvestable bucket.
+		//  - B and C become healthy HARVEST accounts with near resets.
+		// FEFO alone would now rank B (nearest reset) first, A last.
+		mockStore.setCapacity(a.id, cap(40, null)); // UNKNOWN
+		mockStore.setCapacity(b.id, cap(50, 15 * 60_000)); // HARVEST, sooner reset
+		mockStore.setCapacity(c.id, cap(45, 45 * 60_000)); // HARVEST, later reset
+
+		const second = projectMeta();
+		const result = strategy.select([a, b, c], second);
+
+		// Pin wins: A is served first despite worse capacity signals.
+		expect(result[0].id).toBe(a.id);
+		expect(second.routing?.decision).toBe("affinity_hit");
+
+		// The non-sticky fallback tail is FEFO-ordered: nearer-reset B before
+		// later-reset C.
+		expect(result.slice(1).map((x) => x.id)).toEqual([b.id, c.id]);
+	});
+
+	it("affinity_hold keeps the pin: substitute is served without re-pointing affinity", () => {
+		const now = Date.now();
+		const a = makeAcct("hold-A");
+		const b = makeAcct("hold-B");
+
+		// Pin A on the first select (best FEFO signal).
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000));
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		expect(strategy.select([a, b], projectMeta())[0].id).toBe(a.id);
+
+		// A hits a short, transient throttle — hold the pin, serve from B this
+		// request WITHOUT reassigning the affinity slot.
+		a.rate_limited_until = now + 60_000;
+		a.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+		const held = projectMeta();
+		expect(strategy.select([a, b], held)[0].id).toBe(b.id);
+		expect(held.routing?.decision).toBe("affinity_hold");
+
+		// Throttle lifts → the project snaps back to its warmed account A,
+		// proving the hold did not re-point affinity to B.
+		a.rate_limited_until = null;
+		a.rate_limited_reason = null;
+		const recovered = projectMeta();
+		expect(strategy.select([a, b], recovered)[0].id).toBe(a.id);
+		expect(recovered.routing?.decision).toBe("affinity_hit");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// clearAffinityForAccount — the manual "Reset session stickiness" lever.
+// Removes every affinity pin pointing at a given account so its sessions
+// re-pick on their next request, leaving pins for other accounts untouched.
+// Uses a non-session provider (openai-compatible) so affinity is the only
+// stickiness in play (no Anthropic session window).
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — clearAffinityForAccount", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function makeAcct(id: string): Account {
+		return makeAccount({
+			id,
+			name: id,
+			provider: "openai-compatible",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 0,
+		});
+	}
+
+	function metaForProject(project: string): RequestMeta {
+		return {
+			id: `req-${project}`,
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			project,
+		};
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("clears pins pointing at the target account and returns the count", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+
+		// Two projects pin to A (lower utilization → FEFO winner), one pins to B.
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		const projectOne = metaForProject("project-one");
+		const projectTwo = metaForProject("project-two");
+		expect(strategy.select([a, b], projectOne)[0].id).toBe(a.id);
+		expect(strategy.select([a, b], projectTwo)[0].id).toBe(a.id);
+
+		// A third project pins to B (now the FEFO winner).
+		mockStore.setUtilization(a.id, 80);
+		mockStore.setUtilization(b.id, 10);
+		const projectThree = metaForProject("project-three");
+		expect(strategy.select([a, b], projectThree)[0].id).toBe(b.id);
+
+		// Clear A's pins: both project-one and project-two pins removed.
+		expect(strategy.clearAffinityForAccount(a.id)).toBe(2);
+
+		// project-three (pinned to B) is untouched — it still continues on B
+		// even though A now has lower utilization (would-be FEFO winner).
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		const projectThreeAgain = metaForProject("project-three");
+		expect(strategy.select([a, b], projectThreeAgain)[0].id).toBe(b.id);
+		expect(projectThreeAgain.routing?.decision).toBe("affinity_hit");
+
+		// project-one had its pin cleared → it re-picks fresh (FEFO winner A).
+		const projectOneAgain = metaForProject("project-one");
+		expect(strategy.select([a, b], projectOneAgain)[0].id).toBe(a.id);
+		expect(projectOneAgain.routing?.decision).toBe("affinity_miss");
+	});
+
+	it("returns 0 when no pins point at the account", () => {
+		const a = makeAcct("acct-A");
+		const b = makeAcct("acct-B");
+
+		mockStore.setUtilization(a.id, 10);
+		mockStore.setUtilization(b.id, 80);
+		// Pin a project to A.
+		expect(strategy.select([a, b], metaForProject("only-project"))[0].id).toBe(
+			a.id,
+		);
+
+		// No project ever pinned to B → clearing B removes nothing.
+		expect(strategy.clearAffinityForAccount(b.id)).toBe(0);
+
+		// A's pin survives — the project still continues on A.
+		const again = metaForProject("only-project");
+		expect(strategy.select([a, b], again)[0].id).toBe(a.id);
+		expect(again.routing?.decision).toBe("affinity_hit");
 	});
 });

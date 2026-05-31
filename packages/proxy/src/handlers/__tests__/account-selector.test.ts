@@ -1,6 +1,18 @@
-import { describe, expect, it, type Mock, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	mock,
+	spyOn,
+} from "bun:test";
+import { usageCache } from "@clankermux/providers";
 import type { Account, ComboWithSlots, RequestMeta } from "@clankermux/types";
 import {
+	__resetColdRefreshState,
+	ensureUsageFreshForSelection,
 	getComboSlotInfo,
 	selectAccountsForRequest,
 	setComboSlotInfo,
@@ -379,6 +391,46 @@ describe("selectAccountsForRequest — combo routing", () => {
 		expect(result[0]?.id).toBe("acc-fallback");
 	});
 
+	it("does not leave combo metadata behind when all combo slots are unavailable", async () => {
+		const rateLimitedAcc = makeAccount({
+			id: "acc-1",
+			rate_limited_until: Date.now() + 3_600_000,
+		});
+		const fallbackAcc = makeAccount({ id: "acc-fallback" });
+		const combo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-1",
+				account_id: "acc-1",
+				model: "claude-sonnet-4-5",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+		const ctx = {
+			strategy: {
+				select: mock(() => [fallbackAcc]),
+			},
+			dbOps: {
+				getAllAccounts: mock(async () => [rateLimitedAcc, fallbackAcc]),
+				getActiveComboForFamily: mock(async () => combo),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta();
+
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+
+		expect(result[0]?.id).toBe("acc-fallback");
+		expect(meta.comboName).toBeUndefined();
+		expect(getComboSlotInfo(meta)).toBeNull();
+	});
+
 	it("falls back to SessionStrategy when no combo is active for the model family", async () => {
 		const acc = makeAccount({ id: "acc-normal" });
 		const ctx = makeCtx({ accounts: [acc], activeCombo: null });
@@ -699,5 +751,207 @@ describe("selectAccountsForRequest — paused accounts in combo", () => {
 			"claude-sonnet-4-5",
 		);
 		expect(result.map((a) => a.id)).toEqual(["acc-active"]);
+	});
+});
+
+// ── ensureUsageFreshForSelection — cold-start Anthropic usage refresh ─────────
+
+describe("ensureUsageFreshForSelection", () => {
+	const POLL_INTERVAL_MS = 90_000;
+
+	function makeUsageCtx(): ProxyContext {
+		return {
+			config: {
+				getUsagePollIntervalMs: () => POLL_INTERVAL_MS,
+			},
+		} as unknown as ProxyContext;
+	}
+
+	// Capacity datum with a future reset window — counts as "fresh/known".
+	function freshUsageData() {
+		return {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+			},
+		};
+	}
+
+	let getAgeSpy: ReturnType<typeof spyOn>;
+	let getSpy: ReturnType<typeof spyOn>;
+	let getRlSpy: ReturnType<typeof spyOn>;
+	let refreshSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		__resetColdRefreshState();
+		// Default: everything unknown, not rate-limited, refresh resolves true.
+		getAgeSpy = spyOn(usageCache, "getAge").mockReturnValue(null);
+		getSpy = spyOn(usageCache, "get").mockReturnValue(null);
+		getRlSpy = spyOn(usageCache, "getRateLimitedUntil").mockReturnValue(null);
+		refreshSpy = spyOn(usageCache, "refreshNow").mockResolvedValue(true);
+	});
+
+	afterEach(() => {
+		getAgeSpy.mockRestore();
+		getSpy.mockRestore();
+		getRlSpy.mockRestore();
+		refreshSpy.mockRestore();
+	});
+
+	it("refreshes an unknown Anthropic account", async () => {
+		const acc = makeAccount({ id: "acc-anthropic", provider: "anthropic" });
+		const ctx = makeUsageCtx();
+
+		await ensureUsageFreshForSelection([acc], ctx, Date.now());
+
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(refreshSpy).toHaveBeenCalledWith("acc-anthropic");
+	});
+
+	it("skips non-Anthropic providers (codex, zai) even when usage is unknown", async () => {
+		const codex = makeAccount({ id: "acc-codex", provider: "codex" });
+		const zai = makeAccount({ id: "acc-zai", provider: "zai" });
+		const ctx = makeUsageCtx();
+
+		await ensureUsageFreshForSelection([codex, zai], ctx, Date.now());
+
+		expect(refreshSpy).not.toHaveBeenCalled();
+	});
+
+	it("skips an Anthropic account that already has fresh capacity", async () => {
+		const acc = makeAccount({ id: "acc-fresh", provider: "anthropic" });
+		const ctx = makeUsageCtx();
+		// Fresh age (well under maxAge) + valid windowed data with a future reset.
+		getAgeSpy.mockReturnValue(1_000);
+		getSpy.mockReturnValue(freshUsageData());
+
+		await ensureUsageFreshForSelection([acc], ctx, Date.now());
+
+		expect(refreshSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not refresh the same account again within the cooldown window", async () => {
+		const acc = makeAccount({ id: "acc-cool", provider: "anthropic" });
+		const ctx = makeUsageCtx();
+		const now = Date.now();
+
+		await ensureUsageFreshForSelection([acc], ctx, now);
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+		// Second call 5s later (< COLD_REFRESH_COOLDOWN_MS=30s) → no new refresh.
+		await ensureUsageFreshForSelection([acc], ctx, now + 5_000);
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("refreshes again once the cooldown window has elapsed", async () => {
+		const acc = makeAccount({ id: "acc-cool2", provider: "anthropic" });
+		const ctx = makeUsageCtx();
+		const now = Date.now();
+
+		await ensureUsageFreshForSelection([acc], ctx, now);
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+		// 31s later (> 30s cooldown) → refreshes again.
+		await ensureUsageFreshForSelection([acc], ctx, now + 31_000);
+		expect(refreshSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("skips an account whose usage API is rate-limited (getRateLimitedUntil in the future)", async () => {
+		const acc = makeAccount({ id: "acc-rl-usage", provider: "anthropic" });
+		const ctx = makeUsageCtx();
+		const now = Date.now();
+		getRlSpy.mockReturnValue(now + 60_000);
+
+		await ensureUsageFreshForSelection([acc], ctx, now);
+
+		expect(refreshSpy).not.toHaveBeenCalled();
+	});
+
+	it("awaits the refresh when the only available top-tier account is unknown", async () => {
+		const acc = makeAccount({
+			id: "acc-solo",
+			provider: "anthropic",
+			priority: 0,
+		});
+		const ctx = makeUsageCtx();
+
+		let resolved = false;
+		refreshSpy.mockImplementation(
+			() =>
+				new Promise<boolean>((resolve) => {
+					setTimeout(() => {
+						resolved = true;
+						resolve(true);
+					}, 10);
+				}),
+		);
+
+		await ensureUsageFreshForSelection([acc], ctx, Date.now());
+
+		// The race resolves via the (fast) fetch, not the 300ms timeout, so by the
+		// time the call returns the refresh has completed.
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(resolved).toBe(true);
+	});
+
+	it("refreshes a stale lower-priority account in the background when a higher-priority account is already fresh", async () => {
+		const fresh = makeAccount({
+			id: "acc-top-fresh",
+			provider: "anthropic",
+			priority: 0,
+		});
+		const staleLow = makeAccount({
+			id: "acc-low-stale",
+			provider: "anthropic",
+			priority: 1,
+		});
+		const ctx = makeUsageCtx();
+
+		// Top-tier account (priority 0) is fresh; lower-priority is unknown.
+		getAgeSpy.mockImplementation((id: string) =>
+			id === "acc-top-fresh" ? 1_000 : null,
+		);
+		getSpy.mockImplementation((id: string) =>
+			id === "acc-top-fresh" ? freshUsageData() : null,
+		);
+
+		// Background refresh must NOT be awaited: make it never resolve and assert
+		// the call still returns promptly.
+		let settled = false;
+		refreshSpy.mockImplementation(
+			() =>
+				new Promise<boolean>((resolve) => {
+					setTimeout(() => {
+						settled = true;
+						resolve(true);
+					}, 5_000);
+				}),
+		);
+
+		await ensureUsageFreshForSelection([fresh, staleLow], ctx, Date.now());
+
+		// refreshNow was kicked off for the stale lower-priority account...
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(refreshSpy).toHaveBeenCalledWith("acc-low-stale");
+		// ...but the function returned without waiting for it (top tier was fresh).
+		expect(settled).toBe(false);
+	});
+
+	it("ignores unavailable Anthropic accounts (paused / rate_limited_until in the future)", async () => {
+		const paused = makeAccount({
+			id: "acc-paused",
+			provider: "anthropic",
+			paused: true,
+		});
+		const rateLimited = makeAccount({
+			id: "acc-rl-account",
+			provider: "anthropic",
+			rate_limited_until: Date.now() + 3_600_000,
+		});
+		const ctx = makeUsageCtx();
+
+		await ensureUsageFreshForSelection([paused, rateLimited], ctx, Date.now());
+
+		expect(refreshSpy).not.toHaveBeenCalled();
 	});
 });

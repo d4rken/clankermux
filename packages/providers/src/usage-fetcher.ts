@@ -1,6 +1,6 @@
 import { CLAUDE_CLI_VERSION } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { supportsUsageTracking } from "@clankermux/types";
+import { type CapacitySignal, supportsUsageTracking } from "@clankermux/types";
 import {
 	type AlibabaCodingPlanUsageData,
 	fetchAlibabaCodingPlanUsageData,
@@ -308,6 +308,65 @@ export function getRepresentativeUtilizationForProvider(
 		default:
 			return null;
 	}
+}
+
+export function getAccountCapacitySignal(
+	data: AnyUsageData | null,
+	provider: string,
+	now: number,
+): CapacitySignal | null {
+	if (!data) return null;
+	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
+	if (provider !== "anthropic" && provider !== "codex") return null;
+	const d = data as UsageData;
+	const hard: Array<{ util: number; resetMs: number | null }> = [];
+	for (const key of [
+		"five_hour",
+		"seven_day",
+		"seven_day_oauth_apps",
+	] as const) {
+		const w = d[key] as UsageWindow | undefined;
+		if (w && typeof w.utilization === "number") {
+			const ms = w.resets_at ? new Date(w.resets_at).getTime() : null;
+			hard.push({
+				util: w.utilization,
+				resetMs: ms !== null && Number.isFinite(ms) ? ms : null,
+			});
+		}
+	}
+	if (hard.length === 0) return null;
+	// Content-staleness: if any present hard window is already past its reset, the
+	// cached datum predates a window roll — treat as unknown so callers refresh.
+	for (const w of hard) {
+		if (w.resetMs !== null && w.resetMs <= now) return null;
+	}
+	let minHeadroom = 100;
+	let binding = 0;
+	let soonest: number | null = null;
+	for (const w of hard) {
+		minHeadroom = Math.min(minHeadroom, 100 - w.util);
+		binding = Math.max(binding, w.util);
+		if (w.resetMs !== null) {
+			soonest = soonest === null ? w.resetMs : Math.min(soonest, w.resetMs);
+		}
+	}
+	// extra_usage has no reset window: it bounds bindingUtilization only.
+	if (d.extra_usage?.utilization != null) {
+		binding = Math.max(binding, d.extra_usage.utilization);
+	}
+	return { minHeadroom, soonestResetMs: soonest, bindingUtilization: binding };
+}
+
+export function getFreshCapacity(
+	cache: Pick<UsageCache, "get" | "getAge">,
+	accountId: string,
+	provider: string,
+	now: number,
+	maxAgeMs: number,
+): CapacitySignal | null {
+	const age = cache.getAge(accountId);
+	if (age === null || age > maxAgeMs) return null; // age-stale → unknown
+	return getAccountCapacitySignal(cache.get(accountId), provider, now);
 }
 
 /**

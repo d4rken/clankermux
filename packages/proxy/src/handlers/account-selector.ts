@@ -1,5 +1,6 @@
 import { getModelFamily, isAccountAvailable } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type {
 	Account,
 	ComboFamily,
@@ -9,6 +10,73 @@ import type {
 import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("AccountSelector");
+
+// On-demand cold-start usage refresh tuning.
+const COLD_START_SOFT_WAIT_MS = 300;
+const COLD_REFRESH_COOLDOWN_MS = 30_000;
+const lastColdRefreshAttempt = new Map<string, number>();
+
+/** Test hook: reset the on-demand refresh cooldown state. */
+export function __resetColdRefreshState(): void {
+	lastColdRefreshAttempt.clear();
+}
+
+/**
+ * Refresh unknown Anthropic usage before a selection so the FEFO capacity
+ * comparator has real data on the first request(s) after a cold start —
+ * WITHOUT ever stalling a request.
+ *
+ * Anthropic only: it exposes a free usage endpoint. Codex usage refresh would
+ * burn real quota (no free usage endpoint), and Zai/others have no windowed
+ * capacity model used by the comparator here.
+ *
+ * Only blocks briefly (≤300ms) at a true cold start — when every account in the
+ * top available priority tier is unknown. Otherwise the refresh runs in the
+ * background and warms the cache for the next request.
+ */
+export async function ensureUsageFreshForSelection(
+	accounts: Account[],
+	ctx: ProxyContext,
+	now: number,
+): Promise<void> {
+	try {
+		const maxAge = ctx.config.getUsagePollIntervalMs() * 2;
+		// Anthropic only: it has a free usage endpoint. Codex usage refresh costs
+		// real quota; Zai/others have no capacity model here.
+		const anthropic = accounts.filter(
+			(a) => a.provider === "anthropic" && isAccountAvailable(a, now),
+		);
+		if (anthropic.length === 0) return;
+		const stale = anthropic.filter(
+			(a) =>
+				getFreshCapacity(usageCache, a.id, a.provider, now, maxAge) === null &&
+				(usageCache.getRateLimitedUntil(a.id) ?? 0) <= now &&
+				now - (lastColdRefreshAttempt.get(a.id) ?? 0) >
+					COLD_REFRESH_COOLDOWN_MS,
+		);
+		if (stale.length === 0) return;
+		for (const a of stale) lastColdRefreshAttempt.set(a.id, now);
+		const fetches = stale.map((a) =>
+			usageCache.refreshNow(a.id).catch(() => false),
+		);
+		// Only block (briefly) at a true cold start: every account in the top
+		// available priority tier is unknown. Otherwise refresh in the background
+		// and let the result warm the cache for the next request.
+		const top = Math.min(...anthropic.map((a) => a.priority));
+		const topTier = anthropic.filter((a) => a.priority === top);
+		const staleIds = new Set(stale.map((a) => a.id));
+		if (topTier.length > 0 && topTier.every((a) => staleIds.has(a.id))) {
+			await Promise.race([
+				Promise.allSettled(fetches),
+				new Promise<void>((resolve) =>
+					setTimeout(resolve, COLD_START_SOFT_WAIT_MS),
+				),
+			]);
+		}
+	} catch {
+		// Never let usage refresh failures break account selection.
+	}
+}
 
 // Module-level WeakMap to store combo slot info per RequestMeta
 const comboSlotInfoMap = new WeakMap<RequestMeta, ComboSlotInfo>();
@@ -53,6 +121,10 @@ export async function getOrderedAccounts(
 ): Promise<Account[]> {
 	try {
 		const allAccounts = await ctx.dbOps.getAllAccounts();
+		// Warm unknown Anthropic usage so the FEFO comparator has real capacity
+		// data on cold-start requests. Never stalls a request beyond a brief
+		// soft wait, and only at a true cold start (see helper).
+		await ensureUsageFreshForSelection(allAccounts, ctx, Date.now());
 		// Return all accounts - the provider will be determined dynamically per account
 		return ctx.strategy.select(allAccounts, meta);
 	} catch (error) {
@@ -218,15 +290,17 @@ export async function selectAccountsForRequest(
 						});
 					}
 
-					// Store combo slot info for downstream consumption
-					const slotInfo: ComboSlotInfo = {
-						comboName: combo.name,
-						slots: slotEntries,
-					};
-					setComboSlotInfo(meta, slotInfo);
-					meta.comboName = combo.name;
-
 					if (availableAccounts.length > 0) {
+						// Store combo slot info only when combo routing actually wins.
+						// If all slots are unavailable, the normal strategy fallback must
+						// not be mislabeled as combo-routed downstream.
+						const slotInfo: ComboSlotInfo = {
+							comboName: combo.name,
+							slots: slotEntries,
+						};
+						setComboSlotInfo(meta, slotInfo);
+						meta.comboName = combo.name;
+
 						const affinity = getRoutingAffinity(meta);
 						meta.routing = {
 							strategy: "combo",

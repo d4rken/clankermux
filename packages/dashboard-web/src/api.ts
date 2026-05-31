@@ -1,9 +1,6 @@
 import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
-	Agent,
-	AgentUpdatePayload,
-	AgentWorkspace,
 	AnalyticsResponse,
 	Combo,
 	ComboFamilyAssignment,
@@ -27,21 +24,7 @@ export type LogEntry = LogEvent;
 export type RequestSummary = RequestResponse;
 
 // Re-export types directly
-export type {
-	Agent,
-	AgentWorkspace,
-	RequestPayload,
-	RequestResponse,
-} from "@clankermux/types";
-
-// Agent response interface
-export interface AgentsResponse {
-	agents: Agent[];
-	globalAgents: Agent[];
-	workspaceAgents: Agent[];
-	pluginAgents: Agent[];
-	workspaces: AgentWorkspace[];
-}
+export type { RequestPayload, RequestResponse } from "@clankermux/types";
 
 export interface StorageInfoResponse {
 	db_bytes: number;
@@ -852,6 +835,107 @@ class API extends HttpClient {
 		}
 	}
 
+	async resetStickiness(accountId: string): Promise<{
+		success: boolean;
+		message: string;
+		cleared: number;
+	}> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/reset-stickiness`;
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{
+				success: boolean;
+				message: string;
+				cleared: number;
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async setForcedAccount(accountId: string): Promise<{ success: boolean }> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/force`;
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{ success: boolean }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async clearForcedAccount(): Promise<{ success: boolean }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/force/clear";
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{ success: boolean }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async getForcedAccount(): Promise<{ accountId: string | null }> {
+		const startTime = Date.now();
+		const url = "/api/accounts/force";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{ accountId: string | null }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
 	async forceResetRateLimit(accountId: string): Promise<{
 		success: boolean;
 		message: string;
@@ -1216,154 +1300,6 @@ class API extends HttpClient {
 			await this.post(url, { strategy });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async getAgents(): Promise<AgentsResponse> {
-		const startTime = Date.now();
-		const url = "/api/agents";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<AgentsResponse>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async updateAgentPreference(agentId: string, model: string): Promise<void> {
-		const startTime = Date.now();
-		const url = `/api/agents/${agentId}/preference`;
-
-		this.logger.debug(`→ POST ${url}`, { agentId, model });
-
-		try {
-			await this.post(url, { model });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async updateAgent(
-		agentId: string,
-		payload: AgentUpdatePayload,
-	): Promise<Agent> {
-		const startTime = Date.now();
-		const url = `/api/agents/${agentId}`;
-
-		this.logger.debug(`→ PATCH ${url}`, { agentId, payload });
-
-		try {
-			const response = await this.patch<{ success: boolean; agent: Agent }>(
-				url,
-				payload,
-			);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← PATCH ${url} - 200 (${duration}ms)`);
-			return response.agent;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ PATCH ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async getDefaultAgentModel(): Promise<string> {
-		const startTime = Date.now();
-		const url = "/api/config/model";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const data = await this.get<{ model: string }>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return data.model;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async setDefaultAgentModel(model: string): Promise<void> {
-		const startTime = Date.now();
-		const url = "/api/config/model";
-
-		this.logger.debug(`→ POST ${url}`, { model });
-
-		try {
-			await this.post(url, { model });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async setBulkAgentPreferences(
-		model: string,
-	): Promise<{ updatedCount: number }> {
-		const startTime = Date.now();
-		const url = "/api/agents/bulk-preference";
-
-		this.logger.debug(`→ POST ${url}`, { model });
-
-		try {
-			const response = await this.post<{
-				success: boolean;
-				updatedCount: number;
-				model: string;
-			}>(url, { model });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-			return { updatedCount: response.updatedCount };
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
@@ -1969,30 +1905,6 @@ class API extends HttpClient {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
 				error: error instanceof Error ? error.message : String(error),
-			});
-			throw error;
-		}
-	}
-
-	async getFeatures(): Promise<{ showCombos: boolean }> {
-		const startTime = Date.now();
-		const url = "/api/features";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<{
-				success: boolean;
-				data: { showCombos: boolean };
-			}>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response.data;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
 			});
 			throw error;
 		}

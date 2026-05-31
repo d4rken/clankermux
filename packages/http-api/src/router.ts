@@ -6,6 +6,9 @@ import {
 	createAccountAutoRefreshHandler,
 	createAccountBillingTypeHandler,
 	createAccountCustomEndpointUpdateHandler,
+	createAccountForceClearHandler,
+	createAccountForceGetHandler,
+	createAccountForceHandler,
 	createAccountForceResetRateLimitHandler,
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
@@ -16,6 +19,7 @@ import {
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
+	createAccountResetStickinessHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
@@ -28,13 +32,6 @@ import {
 	createOpenRouterAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
-import {
-	createAgentPreferenceUpdateHandler,
-	createAgentsListHandler,
-	createBulkAgentPreferenceUpdateHandler,
-	createWorkspacesListHandler,
-} from "./handlers/agents";
-import { createAgentUpdateHandler } from "./handlers/agents-update";
 import { createAnalyticsHandler } from "./handlers/analytics";
 import {
 	createApiKeyDeleteHandler,
@@ -64,7 +61,6 @@ import {
 	createHeapStatsHandler,
 	createRssHandler,
 } from "./handlers/debug";
-import { createFeaturesHandler } from "./handlers/features";
 import { createHealthHandler } from "./handlers/health";
 import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
@@ -185,8 +181,6 @@ export class APIRouter {
 			dbOps,
 			config,
 		);
-		const agentsHandler = createAgentsListHandler(dbOps);
-		const workspacesHandler = createWorkspacesListHandler();
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
@@ -197,7 +191,6 @@ export class APIRouter {
 			getIntegrityStatus,
 		);
 		const versionCheckHandler = createVersionCheckHandler();
-		const featuresHandler = createFeaturesHandler();
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
@@ -247,6 +240,20 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/openai-compatible", (req) =>
 			openaiAccountAddHandler(req),
+		);
+
+		// Global force-account override (Feature 3). Registered as EXACT-match
+		// routes so they take priority over the dynamic /api/accounts/:id/...
+		// dispatch below — otherwise "force" would be mistaken for an account id
+		// (parts[3]). The per-account POST /api/accounts/:id/force toggle is
+		// handled in the dynamic block.
+		const accountForceClearHandler = createAccountForceClearHandler();
+		const accountForceGetHandler = createAccountForceGetHandler();
+		this.handlers.set("POST:/api/accounts/force/clear", () =>
+			accountForceClearHandler(),
+		);
+		this.handlers.set("GET:/api/accounts/force", () =>
+			accountForceGetHandler(),
 		);
 
 		// Token health handlers
@@ -314,12 +321,6 @@ export class APIRouter {
 		this.handlers.set("GET:/api/strategies", () =>
 			configHandlers.getStrategies(),
 		);
-		this.handlers.set("GET:/api/config/model", () =>
-			configHandlers.getDefaultAgentModel(),
-		);
-		this.handlers.set("POST:/api/config/model", (req) =>
-			configHandlers.setDefaultAgentModel(req),
-		);
 		this.handlers.set("GET:/api/config/retention", () =>
 			configHandlers.getRetention(),
 		);
@@ -348,21 +349,11 @@ export class APIRouter {
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
-		this.handlers.set("GET:/api/features", () => featuresHandler());
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
-		this.handlers.set("GET:/api/agents", () => agentsHandler());
-		this.handlers.set("POST:/api/agents/bulk-preference", (req) => {
-			const bulkHandler = createBulkAgentPreferenceUpdateHandler(
-				this.context.dbOps,
-			);
-			return bulkHandler(req);
-		});
-		this.handlers.set("GET:/api/workspaces", () => workspacesHandler());
-
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());
 		this.handlers.set("GET:/api/debug/snapshot", () => heapSnapshotHandler());
@@ -468,6 +459,32 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+
+			// Per-account force toggle: POST /api/accounts/:id/force.
+			// Guard against accountId === "force" so this never collides with the
+			// exact-match force routes (/api/accounts/force[...]) registered above
+			// — those are GET /api/accounts/force and POST /api/accounts/force/clear.
+			if (
+				path.endsWith("/force") &&
+				method === "POST" &&
+				accountId !== "force"
+			) {
+				const forceHandler = createAccountForceHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => forceHandler(req, accountId))(
+					req,
+					url,
+				);
+			}
+
+			// Account reset session stickiness
+			if (path.endsWith("/reset-stickiness") && method === "POST") {
+				const resetStickinessHandler = createAccountResetStickinessHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					resetStickinessHandler(req, accountId),
+				)(req, url);
 			}
 
 			// Account refresh usage - force restart usage polling and token refresh
@@ -591,32 +608,6 @@ export class APIRouter {
 			if (parts.length === 4 && method === "DELETE") {
 				const removeHandler = createAccountRemoveHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => removeHandler(req, accountId))(
-					req,
-					url,
-				);
-			}
-		}
-
-		// Check for dynamic agent endpoints
-		if (path.startsWith("/api/agents/")) {
-			const parts = path.split("/");
-			const agentId = parts[3];
-
-			// Agent preference update
-			if (path.endsWith("/preference") && method === "POST") {
-				const preferenceHandler = createAgentPreferenceUpdateHandler(
-					this.context.dbOps,
-				);
-				return await this.wrapHandler((req) => preferenceHandler(req, agentId))(
-					req,
-					url,
-				);
-			}
-
-			// Agent update (PATCH /api/agents/:id)
-			if (parts.length === 4 && method === "PATCH") {
-				const updateHandler = createAgentUpdateHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => updateHandler(req, agentId))(
 					req,
 					url,
 				);

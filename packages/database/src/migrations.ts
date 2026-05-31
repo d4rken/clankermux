@@ -151,7 +151,6 @@ export function ensureSchema(db: Database): void {
 			cache_read_input_tokens INTEGER DEFAULT 0,
 			cache_creation_input_tokens INTEGER DEFAULT 0,
 			output_tokens INTEGER DEFAULT 0,
-			agent_used TEXT,
 			project TEXT,
 			billing_type TEXT DEFAULT 'api'
 		)
@@ -248,15 +247,6 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_oauth_sessions_expires ON oauth_sessions(expires_at)`,
 	);
-
-	// Create agent_preferences table for storing user-defined agent settings
-	db.run(`
-		CREATE TABLE IF NOT EXISTS agent_preferences (
-			agent_id TEXT PRIMARY KEY,
-			model TEXT NOT NULL,
-			updated_at INTEGER NOT NULL
-		)
-	`);
 
 	// Create api_keys table for optional API authentication
 	db.run(`
@@ -879,12 +869,6 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE requests ADD COLUMN output_tokens INTEGER DEFAULT 0",
 			).run();
 			log.info("Added output_tokens column to requests table");
-		}
-
-		// Add agent_used column if it doesn't exist
-		if (!requestsColumnNames.includes("agent_used")) {
-			db.prepare("ALTER TABLE requests ADD COLUMN agent_used TEXT").run();
-			log.info("Added agent_used column to requests table");
 		}
 
 		// Add output_tokens_per_second column if it doesn't exist

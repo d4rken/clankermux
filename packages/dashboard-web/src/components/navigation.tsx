@@ -2,7 +2,6 @@ import { parseHttpError } from "@clankermux/errors";
 import {
 	Activity,
 	BarChart3,
-	Bot,
 	FileText,
 	GitBranch,
 	Key,
@@ -14,10 +13,10 @@ import {
 	X,
 	Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
-import { version } from "../lib/version";
+import { commitRelationshipLabel, version } from "../lib/version";
 import logoUrl from "../logo.png";
 import { CopyButton } from "./CopyButton";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
@@ -30,6 +29,10 @@ import { Separator } from "./ui/separator";
 const UPDATE_COMMAND =
 	"git pull --ff-only && bun run build && sudo systemctl restart clankermux";
 
+// Fallback repo for the footer "open repository" link before/without a check.
+// Matches the backend's DEFAULT_REPO; the check response's `repo` overrides it.
+const DEFAULT_REPO = "d4rken/clankermux";
+
 interface NavItem {
 	label: string;
 	icon: React.ComponentType<{ className?: string }>;
@@ -37,23 +40,18 @@ interface NavItem {
 	badge?: string;
 }
 
-const _navItems: NavItem[] = [
+const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
-	// { label: "Combos", icon: Zap, path: "/combos" },
-	{ label: "Agents", icon: Bot, path: "/agents" },
+	{ label: "Combos", icon: Zap, path: "/combos" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
 ];
 
-interface NavigationProps {
-	showCombos?: boolean;
-}
-
-export function Navigation({ showCombos = false }: NavigationProps = {}) {
+export function Navigation() {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const [updateStatus, setUpdateStatus] = useState<
 		"idle" | "checking" | "available" | "current" | "unknown" | "error"
@@ -64,35 +62,12 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 		latestUrl: string | null;
 		dirty: boolean;
 		behindBy: number | null;
+		aheadBy: number | null;
+		repo: string | null;
 	} | null>(null);
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
-
-	// Build nav items dynamically based on feature flags
-	const navItems: NavItem[] = useMemo(() => {
-		const baseItems: NavItem[] = [
-			{ label: "Overview", icon: LayoutDashboard, path: "/" },
-			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
-			{ label: "Requests", icon: Activity, path: "/requests" },
-			{ label: "Accounts", icon: Users, path: "/accounts" },
-		];
-
-		// Add combos item if feature is enabled
-		if (showCombos) {
-			baseItems.push({ label: "Combos", icon: Zap, path: "/combos" });
-		}
-
-		// Add remaining items
-		baseItems.push(
-			{ label: "Agents", icon: Bot, path: "/agents" },
-			{ label: "API Keys", icon: Key, path: "/api-keys" },
-			{ label: "Logs", icon: FileText, path: "/logs" },
-			{ label: "Settings", icon: Settings, path: "/settings" },
-		);
-
-		return baseItems;
-	}, [showCombos]);
 
 	// Cleanup on unmount to prevent memory leaks
 	useEffect(() => {
@@ -133,6 +108,8 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 				latestUrl: data.latest?.url ?? null,
 				dirty: data.current?.dirty ?? false,
 				behindBy: typeof data.behindBy === "number" ? data.behindBy : null,
+				aheadBy: typeof data.aheadBy === "number" ? data.aheadBy : null,
+				repo: typeof data.repo === "string" ? data.repo : null,
 			});
 			setUpdateStatus(status);
 
@@ -172,6 +149,8 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 			clearInterval(intervalId);
 		};
 	}, []);
+
+	const repoUrl = `https://github.com/${updateInfo?.repo ?? DEFAULT_REPO}`;
 
 	return (
 		<>
@@ -240,7 +219,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 
 					{/* Navigation */}
 					<nav className="flex-1 space-y-1 p-4">
-						{navItems.map((item) => {
+						{NAV_ITEMS.map((item) => {
 							const Icon = item.icon;
 							const isActive = location.pathname === item.path;
 							return (
@@ -347,11 +326,22 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 								</div>
 							)}
 							{updateStatus === "current" && (
-								<p className="mt-1 text-xs text-muted-foreground text-left font-mono">
-									{updateInfo?.currentSha
-										? `${updateInfo.currentSha}${updateInfo.dirty ? " (modified)" : ""}`
-										: version.replace(/^v/, "")}
-								</p>
+								<div className="mt-1 space-y-0.5 text-left">
+									<p className="text-xs text-muted-foreground font-mono">
+										{updateInfo?.currentSha ?? version.replace(/^v/, "")}
+									</p>
+									<p className="text-xs text-muted-foreground">
+										{commitRelationshipLabel(
+											updateInfo?.aheadBy ?? null,
+											updateInfo?.behindBy ?? null,
+										)}
+									</p>
+									{updateInfo?.dirty && (
+										<p className="text-xs italic text-muted-foreground/70">
+											local uncommitted changes
+										</p>
+									)}
+								</div>
 							)}
 							{updateStatus === "unknown" && (
 								<p className="mt-1 text-xs text-muted-foreground text-left">
@@ -366,10 +356,16 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 						</div>
 
 						<div className="hidden lg:flex items-center justify-between">
-							<div className="flex items-center gap-2 text-xs text-muted-foreground">
+							<a
+								href={repoUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								title="Open GitHub repository"
+								className="flex items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+							>
 								<GitBranch className="h-3 w-3" />
 								<span>{version}</span>
-							</div>
+							</a>
 							<ThemeToggle />
 						</div>
 					</div>

@@ -33,6 +33,7 @@ import { handleResponsesRequest } from "@clankermux/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	fetchCodexUsageOnDemand,
+	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
 	usageCache,
@@ -46,6 +47,7 @@ import {
 	handleProxy,
 	type ProxyContext,
 	RequestRecorder,
+	registerAffinityClearer,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
@@ -58,6 +60,7 @@ import {
 import { validatePathOrThrow } from "@clankermux/security";
 import {
 	type Account,
+	type CapacitySignal,
 	type LoadBalancingStrategy,
 	StrategyName,
 	type StrategyStore,
@@ -258,14 +261,6 @@ async function runStartupMaintenance(
 		}
 	} catch (err) {
 		log.error(`Rate limit cleanup error: ${err}`);
-	}
-	try {
-		// Prune old agent workspaces (not seen in 7 days)
-		const { agentRegistry } = await import("@clankermux/agents");
-		await agentRegistry.pruneOldWorkspaces();
-		log.info("Pruned old agent workspaces");
-	} catch (err) {
-		log.error(`Agent workspace pruning error: ${err}`);
 	}
 	// Return a no-op stopper for compatibility
 	return () => {};
@@ -825,6 +820,19 @@ export default async function startServer(options?: {
 			if (!data) return null;
 			return getRepresentativeUtilizationForProvider(data, provider);
 		},
+		getAccountCapacity(
+			accountId: string,
+			provider: string,
+			now: number,
+		): CapacitySignal | null {
+			return getFreshCapacity(
+				usageCache,
+				accountId,
+				provider,
+				now,
+				config.getUsagePollIntervalMs() * 2,
+			);
+		},
 	});
 
 	strategy.initialize?.(strategyStore);
@@ -996,6 +1004,15 @@ export default async function startServer(options?: {
 			message,
 		};
 	});
+
+	// Register this server's session-affinity clearing capability, so the
+	// "Reset session stickiness" HTTP action can wipe the in-memory affinity
+	// pins held by this server's load-balancing strategy.
+	registerAffinityClearer(
+		serverId,
+		(accountId: string) =>
+			currentStrategy?.clearAffinityForAccount?.(accountId) ?? 0,
+	);
 
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
 	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);

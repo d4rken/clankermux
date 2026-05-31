@@ -167,11 +167,18 @@ export interface ResponseHandlerOptions {
 	timestamp: number;
 	retryAttempt: number;
 	failoverAttempts: number;
-	agentUsed?: string | null;
 	apiKeyId?: string | null;
 	apiKeyName?: string | null;
 	comboName?: string | null;
 	routing?: RequestRoutingMeta | null;
+	/**
+	 * When true, the mid-stream rate-limit cooldown sniffer is disabled: a
+	 * streamed 429/529 error is still streamed and recorded, but does NOT mutate
+	 * the account's rate-limit/provider-overload cooldown state. Used by the
+	 * force-account path, which returns the forced account's response (errors
+	 * included) as-is without touching cooldown state.
+	 */
+	disableCooldown?: boolean;
 }
 
 /**
@@ -196,11 +203,11 @@ export async function forwardToClient(
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
 		failoverAttempts,
-		agentUsed,
 		apiKeyId,
 		apiKeyName,
 		comboName,
 		routing,
+		disableCooldown,
 	} = options;
 
 	// Always strip compression headers *before* we do anything else
@@ -273,7 +280,6 @@ export async function forwardToClient(
 				? 1
 				: 0,
 			authed: !!account?.id && account.id !== NO_ACCOUNT_ID,
-			agentUsed: agentUsed || null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
 			comboName: comboName || null,
@@ -303,7 +309,6 @@ export async function forwardToClient(
 			path,
 			accountId: account?.id || null,
 			statusCode: response.status,
-			agentUsed: agentUsed || null,
 		});
 	}
 
@@ -319,10 +324,13 @@ export async function forwardToClient(
 	if (isStream && response.body) {
 		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
 		// create a sniffer when we know which account to mark — anonymous
-		// or unauthenticated requests can't be failed over.
-		const rateLimitSniffer = account
-			? createSseRateLimitSniffer({ provider: account.provider })
-			: null;
+		// or unauthenticated requests can't be failed over. The force-account
+		// path passes disableCooldown so a forced 429/529 streamed mid-response
+		// does not mutate cooldown state (errors are returned as-is).
+		const rateLimitSniffer =
+			account && !disableCooldown
+				? createSseRateLimitSniffer({ provider: account.provider })
+				: null;
 
 		// Configurable via env vars to support long agentic workloads where
 		// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave

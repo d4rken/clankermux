@@ -11,7 +11,6 @@ export interface RequestMeta {
 	method: string;
 	path: string;
 	timestamp: number;
-	agentUsed?: string | null;
 	/** Stable client conversation/thread key used for cache-affinity routing */
 	affinityKey?: string | null;
 	/** Source of the affinity key; persisted separately for routing analysis */
@@ -44,15 +43,6 @@ export interface RequestRoutingMeta {
 	previousAccountId?: string | null;
 	candidatesCount?: number | null;
 	failoverReason?: string | null;
-}
-
-export interface AgentUpdatePayload {
-	description?: string;
-	model?: string;
-	tools?: string[];
-	color?: string;
-	systemPrompt?: string;
-	mode?: "all" | "edit" | "read-only" | "execution" | "custom";
 }
 
 // Retention and maintenance API shapes

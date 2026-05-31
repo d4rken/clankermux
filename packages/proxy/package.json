@@ -10,13 +10,11 @@
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
-		"@clankermux/agents": "workspace:*",
 		"@clankermux/config": "workspace:*",
 		"@clankermux/core": "workspace:*",
 		"@clankermux/database": "workspace:*",
 		"@clankermux/logger": "workspace:*",
 		"@clankermux/providers": "workspace:*",
-		"@clankermux/security": "workspace:*",
 		"@clankermux/ui-common": "workspace:*"
 	}
 }

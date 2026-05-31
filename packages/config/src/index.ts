@@ -2,7 +2,6 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
-	DEFAULT_AGENT_MODEL,
 	DEFAULT_STRATEGY,
 	isValidStrategy,
 	NETWORK,
@@ -52,7 +51,6 @@ export interface ConfigData {
 	retry_backoff?: number;
 	session_duration_ms?: number;
 	port?: number;
-	default_agent_model?: string;
 	data_retention_days?: number;
 	request_retention_days?: number;
 	store_payloads?: boolean;
@@ -61,7 +59,6 @@ export interface ConfigData {
 	system_prompt_cache_ttl_1h?: boolean;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
-	health_detail_enabled?: boolean;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -256,27 +253,6 @@ export class Config extends EventEmitter {
 		this.set("lb_strategy", strategy);
 	}
 
-	getDefaultAgentModel(): string {
-		// First check environment variable
-		const envModel = process.env.DEFAULT_AGENT_MODEL;
-		if (envModel) {
-			return envModel;
-		}
-
-		// Then check config file
-		const configModel = this.data.default_agent_model;
-		if (configModel) {
-			return configModel;
-		}
-
-		// Default to the centralized default agent model
-		return DEFAULT_AGENT_MODEL;
-	}
-
-	setDefaultAgentModel(model: string): void {
-		this.set("default_agent_model", model);
-	}
-
 	private clamp(n: number, min: number, max: number): number {
 		return Math.max(min, Math.min(max, n));
 	}
@@ -406,22 +382,11 @@ export class Config extends EventEmitter {
 		this.set("usage_throttling_weekly_enabled", value);
 	}
 
-	getHealthDetailEnabled(): boolean {
-		const fromEnv = parseEnabledEnvFlag(process.env.HEALTH_DETAIL_ENABLED);
-		if (fromEnv !== undefined) {
-			return fromEnv;
-		}
-		const fromFile = this.data.health_detail_enabled;
-		if (typeof fromFile === "boolean") return fromFile;
-		return false;
-	}
-
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
 		// Include current strategy (which might come from env)
 		return {
 			...this.data,
 			lb_strategy: this.getStrategy(),
-			default_agent_model: this.getDefaultAgentModel(),
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
 			store_payloads: this.getStorePayloads(),
@@ -431,7 +396,6 @@ export class Config extends EventEmitter {
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
-			health_detail_enabled: this.getHealthDetailEnabled(),
 		};
 	}
 
