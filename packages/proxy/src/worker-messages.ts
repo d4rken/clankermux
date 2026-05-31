@@ -16,7 +16,11 @@ export interface StartMessage {
 
 	// Request details
 	requestHeaders: Record<string, string>;
-	requestBody: ArrayBuffer | null; // raw bytes, transferred (base64-encoded in the worker at save time)
+	// NOTE: requestBody is intentionally NOT carried to the worker anymore. The
+	// long-lived worker is a pure usage/cost computer; the up-to-4MB request body
+	// is captured + persisted by the main-thread RequestRecorder instead (Bun
+	// #5709: structured-clone backing stores transferred into the worker were
+	// never reclaimed). project extraction also moved to the main thread.
 	project: string | null;
 
 	// Response details
@@ -83,17 +87,11 @@ export interface ControlMessage {
 	type: "shutdown";
 }
 
-export interface ConfigUpdateMessage {
-	type: "config-update";
-	storePayloads: boolean;
-}
-
 export type WorkerMessage =
 	| StartMessage
 	| ChunkMessage
 	| EndMessage
-	| ControlMessage
-	| ConfigUpdateMessage;
+	| ControlMessage;
 
 // ===== WORKER → MAIN THREAD =====
 
@@ -113,9 +111,30 @@ export interface ShutdownCompleteMessage {
 	type: "shutdown-complete";
 }
 
+/**
+ * Slim usage summary posted by the pure usage worker. The worker no longer
+ * builds a full `RequestResponse` — it computes usage/cost/tokens only and
+ * hands them back; the main-thread RequestRecorder merges this with its own
+ * meta + billingType + outcome to build the dashboard RequestResponse and
+ * persist the row. Mirrors `SlimUsageSummary` in request-recorder.ts.
+ */
 export interface SummaryMessage {
 	type: "summary";
-	summary: import("@clankermux/types").RequestResponse;
+	summary: {
+		requestId: string;
+		usage: {
+			model?: string;
+			inputTokens?: number;
+			outputTokens?: number;
+			cacheReadInputTokens?: number;
+			cacheCreationInputTokens?: number;
+			totalTokens?: number;
+			costUsd?: number;
+		};
+		tokensPerSecond?: number;
+		responseTimeMs?: number;
+		cacheCreationInputTokens?: number;
+	};
 }
 
 export type OutgoingWorkerMessage =

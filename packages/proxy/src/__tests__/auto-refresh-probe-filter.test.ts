@@ -3,7 +3,7 @@
  *
  * Three sites guard against auto-refresh probe pollution:
  *   1. proxy-operations.ts  — isSyntheticInternal skips cacheBodyStore.stageRequest
- *   2. response-handler.ts  — shouldProcessRequest is false for auto-refresh probes
+ *   2. response-handler.ts  — shouldRecordRequest is false for auto-refresh probes
  *   3. proxy.ts             — pool-exhausted path skips usageWorker.postMessage for probes
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -95,10 +95,10 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Site 2: shouldProcessRequest in response-handler.ts
+// Site 2: shouldRecordRequest in response-handler.ts
 // ---------------------------------------------------------------------------
 
-describe("response-handler — shouldProcessRequest suppresses auto-refresh probes", () => {
+describe("response-handler — shouldRecordRequest suppresses auto-refresh probes", () => {
 	it("does not call usageWorker.postMessage for auto-refresh probe requests", async () => {
 		const { forwardToClient } = await import("../response-handler");
 
@@ -112,6 +112,11 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 			} as never,
 			config: { getStorePayloads: () => false } as never,
 			usageWorker: { postMessage: usageWorkerPostMessage } as never,
+			requestRecorder: {
+				begin: mock(() => {}),
+				captureResponseChunk: mock(() => {}),
+				finishTransport: mock(() => {}),
+			} as never,
 		};
 
 		const response = new Response(JSON.stringify({ type: "message" }), {
@@ -155,6 +160,11 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 			} as never,
 			config: { getStorePayloads: () => false } as never,
 			usageWorker: { postMessage: usageWorkerPostMessage } as never,
+			requestRecorder: {
+				begin: mock(() => {}),
+				captureResponseChunk: mock(() => {}),
+				finishTransport: mock(() => {}),
+			} as never,
 		};
 
 		const response = new Response(JSON.stringify({ type: "message" }), {
@@ -190,7 +200,7 @@ describe("response-handler — shouldProcessRequest suppresses auto-refresh prob
 // Site 3: pool-exhausted path in proxy.ts
 // ---------------------------------------------------------------------------
 
-describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh probes", () => {
+describe("proxy.ts — pool-exhausted path skips recording for auto-refresh probes", () => {
 	let savedPassthrough: string | undefined;
 
 	beforeEach(() => {
@@ -206,10 +216,11 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 		}
 	});
 
-	it("does not post to usageWorker when pool is exhausted and request is an auto-refresh probe", async () => {
+	it("does not record (worker or recorder) when pool is exhausted and request is an auto-refresh probe", async () => {
 		const { handleProxy } = await import("../proxy");
 
 		const usageWorkerPostMessage = mock(() => {});
+		const recordSynthetic = mock(() => {});
 
 		const ctx = {
 			strategy: {
@@ -232,6 +243,7 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
 			usageWorker: { postMessage: usageWorkerPostMessage } as never,
+			requestRecorder: { recordSynthetic } as never,
 		};
 
 		const probeRequest = new Request("https://proxy.local/v1/messages", {
@@ -256,14 +268,16 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 		// Should still return 503
 		expect(response.status).toBe(503);
 
-		// But must NOT post to usageWorker
+		// But must NOT record — neither to the worker nor the recorder.
 		expect(usageWorkerPostMessage).not.toHaveBeenCalled();
+		expect(recordSynthetic).not.toHaveBeenCalled();
 	});
 
-	it("posts to usageWorker when pool is exhausted and request is NOT an auto-refresh probe", async () => {
+	it("records via requestRecorder.recordSynthetic when pool is exhausted and request is NOT an auto-refresh probe", async () => {
 		const { handleProxy } = await import("../proxy");
 
 		const usageWorkerPostMessage = mock(() => {});
+		const recordSynthetic = mock(() => {});
 
 		const ctx = {
 			strategy: {
@@ -301,6 +315,7 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 			refreshInFlight: new Map(),
 			asyncWriter: { enqueue: mock(() => {}) } as never,
 			usageWorker: { postMessage: usageWorkerPostMessage } as never,
+			requestRecorder: { recordSynthetic } as never,
 		};
 
 		const normalRequest = new Request("https://proxy.local/v1/messages", {
@@ -325,21 +340,18 @@ describe("proxy.ts — pool-exhausted path skips usageWorker for auto-refresh pr
 
 		expect(response.status).toBe(503);
 
-		// Normal requests MUST be logged
-		expect(usageWorkerPostMessage).toHaveBeenCalled();
-		const startMessage = usageWorkerPostMessage.mock.calls[0][0] as {
+		// Normal requests MUST be logged — now via the main-thread recorder's
+		// recordSynthetic (the slim worker no longer persists synthetic rows).
+		expect(recordSynthetic).toHaveBeenCalled();
+		const meta = recordSynthetic.mock.calls[0][0] as {
 			requestHeaders: Record<string, string>;
 			routing: { affinityKeyHash: string | null; affinityScope: string | null };
 		};
-		expect(startMessage.requestHeaders["content-type"]).toBe(
-			"application/json",
-		);
-		expect(startMessage.requestHeaders["x-claude-code-session-id"]).toBe(
-			undefined,
-		);
-		expect(startMessage.requestHeaders["thread-id"]).toBe(undefined);
-		expect(startMessage.routing.affinityScope).toBe("claude_session");
-		expect(startMessage.routing.affinityKeyHash).toBe(
+		expect(meta.requestHeaders["content-type"]).toBe("application/json");
+		expect(meta.requestHeaders["x-claude-code-session-id"]).toBe(undefined);
+		expect(meta.requestHeaders["thread-id"]).toBe(undefined);
+		expect(meta.routing.affinityScope).toBe("claude_session");
+		expect(meta.routing.affinityKeyHash).toBe(
 			"850fda028909f0c4cd88dd904a7d010898d21f96f75b3cc79c5721ce3c27d5fd",
 		);
 	});

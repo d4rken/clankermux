@@ -5,23 +5,14 @@ import {
 	estimateCostUSD,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
-import {
-	AsyncDbWriter,
-	DatabaseOperations,
-	initPayloadEncryption,
-} from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
-import { NO_ACCOUNT_ID, type RequestResponse } from "@clankermux/types";
 import { formatCost } from "@clankermux/ui-common";
 import model from "@dqbd/tiktoken/encoders/cl100k_base.json";
 import { init, Tiktoken } from "@dqbd/tiktoken/lite/init";
 import { EMBEDDED_TIKTOKEN_WASM } from "./embedded-tiktoken-wasm";
-import { sanitizeProjectName } from "./project-name";
-import { combineChunks } from "./stream-tee";
 import type {
 	AckMessage,
 	ChunkMessage,
-	ConfigUpdateMessage,
 	EndMessage,
 	ReadyMessage,
 	ShutdownCompleteMessage,
@@ -30,13 +21,30 @@ import type {
 	WorkerMessage,
 } from "./worker-messages";
 
+/**
+ * Pure usage/cost computer.
+ *
+ * This worker used to own request persistence: it received the (up-to-4MB)
+ * request body via StartMessage transfer, accumulated the response body,
+ * derived billing type, fired account side-effects, and wrote requests /
+ * routing / payload rows to the DB. That made it the source of the proxy's
+ * memory leak — Bun #5709 never reclaims the structured-clone backing stores
+ * of large transferred payloads in a long-lived worker, even after deref +
+ * Bun.gc(true).
+ *
+ * All of that moved to the main-thread RequestRecorder. The worker now holds
+ * only tiny per-request usage counters: it parses SSE (streaming) or the
+ * 256KB-capped response body (non-stream) to extract token usage + cost +
+ * tokens/sec, then posts a SLIM SummaryMessage back. No request body, no
+ * response-body accumulation, no DB, no account side-effects, no project
+ * extraction. Response chunks are parsed transiently and dropped.
+ */
+
 interface RequestState {
-	startMessage: StartMessage;
+	requestId: string;
+	timestamp: number;
 	buffer: string;
 	streamDecoder: TextDecoder;
-	chunks: Uint8Array[];
-	chunksBytes: number;
-	chunksTruncated: boolean;
 	usage: {
 		model?: string;
 		inputTokens?: number;
@@ -50,13 +58,9 @@ interface RequestState {
 	};
 	lastActivity: number;
 	createdAt: number; // TTL tracking
-	agentUsed?: string;
-	project?: string | null;
-	billingType?: string;
 	firstTokenTimestamp?: number;
 	lastTokenTimestamp?: number;
 	providerFinalOutputTokens?: number;
-	shouldSkipLogging?: boolean;
 	currentEvent?: string; // Track SSE event type across chunks
 }
 
@@ -66,11 +70,16 @@ const requests = new Map<string, RequestState>();
 console.log("[WORKER] Post-processor worker started");
 log.info("Post-processor worker started");
 
-// Limits to prevent unbounded growth
+// Limits to prevent unbounded growth.
 const MAX_REQUESTS_MAP_SIZE = 10000;
-const REQUEST_TTL_MS = 2 * 60 * 1000; // 2 minutes - hard limit for request lifecycle
-const MAX_RESPONSE_BODY_BYTES = 256 * 1024; // 256KB - cap stored response body
-const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
+// Realigned to the stream's own total + inactivity windows (see B2). The old
+// 2-minute TTL deleted active per-request state before EndMessage on legitimate
+// long streams, losing usage entirely. The slim worker holds only tiny usage
+// counters, so this larger TTL costs nothing while it bounds genuinely-orphaned
+// state. ~35 minutes = total stream timeout (30m) + chunk timeout (5m).
+const REQUEST_TTL_MS =
+	TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS +
+	TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS;
 
 // Initialize tiktoken encoder (cl100k_base is used for Claude models)
 // Using embedded WASM to avoid "Missing tiktoken_bg.wasm" errors in bunx
@@ -99,19 +108,6 @@ let tokenEncoder: Tiktoken | null = null;
 	}
 })();
 
-// CRITICAL: Bun workers have isolated module scopes — encryption MUST be
-// initialized inside the worker, not just on the main thread.
-await initPayloadEncryption();
-
-// Initialize database connection for worker. The startup PRAGMA
-// integrity_check was removed entirely (see integrity-scheduler.ts), so
-// there's no longer a reason to opt out of it here.
-const dbOps = new DatabaseOperations();
-dbOps.initializeAsync().catch((err: unknown) => {
-	log.error("Failed to initialize database async connection:", err);
-});
-const asyncWriter = new AsyncDbWriter();
-
 // Environment variables
 const MAX_BUFFER_SIZE =
 	Number(
@@ -121,102 +117,6 @@ const MAX_BUFFER_SIZE =
 const TIMEOUT_MS = Number(
 	process.env.CF_STREAM_TIMEOUT_MS || TIME_CONSTANTS.STREAM_TIMEOUT_DEFAULT,
 );
-
-// Runtime config (can be updated via config-update message)
-let storePayloads = true;
-
-// Check if a request should be logged
-function shouldLogRequest(path: string, status: number): boolean {
-	// Skip logging .well-known 404s
-	if (path.startsWith("/.well-known/") && status === 404) {
-		return false;
-	}
-	return true;
-}
-
-/**
- * Extract a project name from a Claude API request.
- *
- * Resolution order:
- *  1. Case-insensitive `x-project` request header
- *  2. Workspace path embedded in the system prompt
- *     (e.g. /Users/me/Desktop/MyProj/...)
- *  3. First Markdown H1 heading in the system prompt (if reasonable)
- *
- * All return values are sanitized (control chars stripped, length-capped).
- * Returns null when no project can be inferred.
- */
-function extractProjectFromRequest(startMessage: StartMessage): string | null {
-	if (startMessage.method !== "POST" || startMessage.path !== "/v1/messages") {
-		return null;
-	}
-
-	const messageProject = sanitizeProjectName(startMessage.project);
-	if (messageProject) return messageProject;
-
-	if (startMessage.requestHeaders) {
-		// The Web Headers API normalizes keys to lowercase, but defensively
-		// match case-insensitively in case the worker receives a plain object.
-		const headerProject = Object.entries(startMessage.requestHeaders).find(
-			([k]) => k.toLowerCase() === "x-project",
-		)?.[1];
-		const sanitizedHeader = sanitizeProjectName(headerProject);
-		if (sanitizedHeader) return sanitizedHeader;
-	}
-
-	const systemPrompt = _extractSystemPrompt(startMessage.requestBody);
-	if (!systemPrompt) return null;
-
-	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
-	);
-	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
-	if (sanitizedPath) return sanitizedPath;
-
-	const headingMatch = systemPrompt.match(/^#\s+([^\n\r]{1,100})/m);
-	if (headingMatch) {
-		const heading = sanitizeProjectName(headingMatch[1]);
-		if (heading && !heading.toLowerCase().startsWith("claude")) {
-			return heading;
-		}
-	}
-
-	return null;
-}
-
-// Extract system prompt from request body
-function _extractSystemPrompt(requestBody: ArrayBuffer | null): string | null {
-	if (!requestBody) return null;
-
-	try {
-		// requestBody arrives as raw transferred bytes (base64-encoded only at
-		// save time). Decode straight to text. A 4MB-capped body that splits
-		// mid-JSON fails JSON.parse below → returns null, same as before.
-		const decodedBody = new TextDecoder().decode(requestBody);
-		const parsed = JSON.parse(decodedBody);
-
-		// Check if there's a system property in the request
-		if (parsed.system) {
-			// Handle both string and array formats
-			if (typeof parsed.system === "string") {
-				return parsed.system;
-			} else if (Array.isArray(parsed.system)) {
-				// Concatenate all text from system messages
-				return parsed.system
-					.filter(
-						(item: { type?: string; text?: string }) =>
-							item.type === "text" && item.text,
-					)
-					.map((item: { type?: string; text?: string }) => item.text)
-					.join("\n");
-			}
-		}
-	} catch (error) {
-		log.debug("Failed to extract system prompt:", error);
-	}
-
-	return null;
-}
 
 // Parse SSE lines to extract usage (reuse existing logic)
 function parseSSELine(line: string): { event?: string; data?: string } {
@@ -445,14 +345,11 @@ function processStreamChunk(chunk: Uint8Array, state: RequestState): void {
 	}
 }
 
-async function handleStart(msg: StartMessage): Promise<void> {
+function handleStart(msg: StartMessage): void {
 	self.postMessage({
 		type: "ack",
 		messageId: msg.messageId,
 	} satisfies AckMessage);
-
-	// Check if we should skip logging this request
-	const shouldSkip = !shouldLogRequest(msg.path, msg.responseStatus);
 
 	// Emergency cleanup if map is at capacity (shouldn't happen with periodic cleanup)
 	if (requests.size >= MAX_REQUESTS_MAP_SIZE) {
@@ -479,91 +376,20 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		}
 	}
 
-	// Create request state
+	// Create tiny request state — usage counters only. No body, no chunks, no
+	// DB, no account side-effects: those all moved to RequestRecorder.
 	const now = Date.now();
 	const state: RequestState = {
-		startMessage: msg,
+		requestId: msg.requestId,
+		timestamp: msg.timestamp,
 		buffer: "",
 		streamDecoder: new TextDecoder(),
-		chunks: [],
-		chunksBytes: 0,
-		chunksTruncated: false,
 		usage: {},
 		lastActivity: now,
 		createdAt: now,
-		shouldSkipLogging: shouldSkip,
 	};
 
-	// Use agent from message if provided
-	if (msg.agentUsed) {
-		state.agentUsed = msg.agentUsed;
-		log.debug(`Agent '${msg.agentUsed}' used for request ${msg.requestId}`);
-	}
-
-	// Extract project name (header or system prompt)
-	state.project = extractProjectFromRequest(msg);
-	if (state.project) {
-		log.debug(
-			`Project '${state.project}' extracted for request ${msg.requestId}`,
-		);
-	}
-
-	// Detect billing type from response headers
-	const overageInUse =
-		msg.responseHeaders["anthropic-ratelimit-unified-overage-in-use"];
-	const overageStatus =
-		msg.responseHeaders["anthropic-ratelimit-unified-overage-status"];
-	if (overageInUse === "true") {
-		state.billingType = "overage";
-		// Auto-pause on overage: if the account has auto_pause_on_overage enabled and we're
-		// in overage mode, pause the account so future requests route to other accounts
-		if (msg.accountAutoPauseOnOverageEnabled === 1 && msg.accountId) {
-			const accountId = msg.accountId;
-			const accountName = msg.accountName || "unknown";
-			log.info(
-				`Auto-pausing account '${accountName}' (${accountId}) due to overage detection (auto-pause-on-overage enabled)`,
-			);
-			// Note: dbOps may not be fully initialized in the worker yet; use the asyncWriter queue
-			asyncWriter.enqueue(async () => {
-				await dbOps.pauseAccount(accountId, "overage");
-			});
-		}
-	} else if (
-		overageStatus === "rejected" ||
-		overageStatus === "org_level_disabled"
-	) {
-		state.billingType = "plan";
-	} else if (msg.accountBillingType) {
-		// Account has explicit billing type override
-		state.billingType = msg.accountBillingType;
-	} else {
-		// Providers with subscription plans default to "plan" billing;
-		// all others (anthropic-compatible, openai-compatible, etc.) are API
-		const planProviders = new Set([
-			"anthropic",
-			"zai",
-			"alibaba-coding-plan",
-			"ollama",
-			"ollama-cloud",
-			"qwen",
-			"codex",
-		]);
-		state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
-	}
-
 	requests.set(msg.requestId, state);
-
-	// Skip all database operations for ignored requests
-	if (shouldSkip) {
-		log.debug(`Skipping logging for ${msg.path} (${msg.responseStatus})`);
-		return;
-	}
-
-	// Update account usage if authenticated
-	if (msg.accountId && msg.accountId !== NO_ACCOUNT_ID) {
-		const accountId = msg.accountId; // Capture for closure
-		asyncWriter.enqueue(async () => dbOps.updateAccountUsage(accountId));
-	}
 }
 
 function handleChunk(msg: ChunkMessage): void {
@@ -573,23 +399,10 @@ function handleChunk(msg: ChunkMessage): void {
 		return;
 	}
 
-	// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES)
-	if (storePayloads && !state.chunksTruncated) {
-		if (state.chunksBytes + msg.data.byteLength <= MAX_RESPONSE_BODY_BYTES) {
-			state.chunks.push(msg.data);
-			state.chunksBytes += msg.data.byteLength;
-		} else {
-			// Store partial chunk up to the limit
-			const remaining = MAX_RESPONSE_BODY_BYTES - state.chunksBytes;
-			if (remaining > 0) {
-				state.chunks.push(msg.data.slice(0, remaining));
-				state.chunksBytes += remaining;
-			}
-			state.chunksTruncated = true;
-		}
-	}
-
-	// Always process for usage extraction regardless of truncation
+	// Parse for usage extraction only. The chunk is NOT stored — the
+	// RequestRecorder on the main thread captures the (256KB-capped) response
+	// body for Request History. The worker's parse stream is UNCAPPED so
+	// tiktoken output-token counting matches the full output (N2).
 	processStreamChunk(msg.data, state);
 }
 
@@ -600,15 +413,7 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		return;
 	}
 
-	const { startMessage } = state;
-	const responseTime = Date.now() - startMessage.timestamp;
-
-	// Skip all database operations for ignored requests
-	if (state.shouldSkipLogging) {
-		// Clean up state without logging
-		requests.delete(msg.requestId);
-		return;
-	}
+	const responseTime = Date.now() - state.timestamp;
 
 	// Flush any incomplete multi-byte UTF-8 sequences held in the streaming decoder
 	const trailing = state.streamDecoder.decode();
@@ -740,223 +545,37 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				}
 			}
 		}
-	}
 
-	// Update request with final data
-	if (
-		process.env.DEBUG?.includes("worker") ||
-		process.env.DEBUG === "true" ||
-		process.env.NODE_ENV === "development"
-	) {
-		log.debug(`Saving final request data for ${startMessage.requestId}`);
-	}
-	const projectAtEnd = state.project ?? null;
-	// No preliminary INSERT needed — dashboard tracks pending requests via SSE events, not DB queries.
-	asyncWriter.enqueue(async () => {
-		try {
-			await dbOps.saveRequest(
-				startMessage.requestId,
-				startMessage.method,
-				startMessage.path,
-				startMessage.accountId,
-				startMessage.responseStatus,
-				msg.success,
-				msg.error || null,
-				responseTime,
-				startMessage.failoverAttempts,
-				state.usage.model
-					? {
-							model: state.usage.model,
-							promptTokens:
-								(state.usage.inputTokens || 0) +
-								(state.usage.cacheReadInputTokens || 0) +
-								(state.usage.cacheCreationInputTokens || 0),
-							completionTokens: state.usage.outputTokens,
-							totalTokens: state.usage.totalTokens,
-							costUsd: state.usage.costUsd,
-							// Keep original breakdown for payload
-							inputTokens: state.usage.inputTokens,
-							outputTokens: state.usage.outputTokens,
-							cacheReadInputTokens: state.usage.cacheReadInputTokens,
-							cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
-							tokensPerSecond: state.usage.tokensPerSecond,
-						}
-					: undefined,
-				state.agentUsed,
-				startMessage.apiKeyId || undefined,
-				startMessage.apiKeyName || undefined,
-				projectAtEnd,
-				state.billingType,
-				startMessage.comboName || null,
-			);
-			if (startMessage.routing) {
-				await dbOps.saveRequestRouting({
-					requestId: startMessage.requestId,
-					strategy: startMessage.routing.strategy,
-					decision: startMessage.routing.decision,
-					affinityScope: startMessage.routing.affinityScope,
-					affinityKeyHash: startMessage.routing.affinityKeyHash,
-					selectedAccountId: startMessage.routing.selectedAccountId,
-					previousAccountId: startMessage.routing.previousAccountId,
-					candidatesCount: startMessage.routing.candidatesCount,
-					failoverAttempts: startMessage.failoverAttempts,
-					failoverReason: startMessage.routing.failoverReason,
-					createdAt: startMessage.timestamp,
-				});
-			}
-		} catch (error) {
-			log.error(`Failed to save request for ${startMessage.requestId}:`, error);
-		}
-	});
-
-	const requestId = startMessage.requestId;
-	if (storePayloads) {
-		// Preflight backpressure check — skip serialization entirely if the
-		// writer is already overloaded. The metadata write above already
-		// captured the request; only the payload is dropped.
-		//
-		// Use the same metric the cap tracks: `payloadBytesPending` charges
-		// `Buffer.byteLength(payloadJson)` (UTF-8 serialized bytes), so the
-		// preflight estimates the same. The response body is already base64
-		// (ASCII, `.length === byte count`); the request body arrives as raw
-		// transferred bytes but is stored as base64, so charge it at its base64
-		// size (~4/3× byteLength) — using raw byteLength would let the writer
-		// admit ~33% more than the cap intends. The JSON envelope plus
-		// headers/meta accounts for the remainder. No memory-cost multiplier
-		// here because the cap is a byte budget, not a memory bound.
-		const estimatedRequestBytes = startMessage.requestBody
-			? Math.ceil(startMessage.requestBody.byteLength / 3) * 4
-			: 0;
-		// Non-streaming: msg.responseBody is already base64 (ASCII .length === byte count).
-		// Streaming: state.chunksBytes is raw bytes, stored as base64 — charge at base64 size.
-		const estimatedResponseBytes =
-			msg.responseBody?.length ??
-			(state.chunksBytes ? Math.ceil(state.chunksBytes / 3) * 4 : 0);
-		const estimatedPayloadBytes =
-			estimatedRequestBytes + estimatedResponseBytes + 2048;
-
-		if (!asyncWriter.canAcceptPayload(estimatedPayloadBytes)) {
-			asyncWriter.recordPayloadDrop(estimatedPayloadBytes);
-			log.warn(
-				`Backpressure: skipping payload persistence for ${requestId} (estimated_bytes=${estimatedPayloadBytes})`,
-			);
-		} else {
-			// Save payload - eagerly serialize to break closure references
-			let responseBody: string | null = null;
-
-			if (msg.responseBody) {
-				// Non-streaming response
-				responseBody = msg.responseBody;
-			} else if (state.chunks.length > 0) {
-				// Streaming response - combine chunks
-				const combined = combineChunks(state.chunks);
-				if (combined.length > 0) {
-					responseBody = combined.toString("base64");
-				}
-			}
-
-			// Cap the request body then base64-encode it for storage. The body
-			// arrives as raw transferred bytes; the DB payload JSON keeps the
-			// base64 string format so the request-history reader is unchanged.
-			let requestBody: string | null = null;
-			if (startMessage.requestBody) {
-				const raw =
-					startMessage.requestBody.byteLength > MAX_REQUEST_BODY_BYTES
-						? startMessage.requestBody.slice(0, MAX_REQUEST_BODY_BYTES)
-						: startMessage.requestBody;
-				requestBody = Buffer.from(raw).toString("base64");
-			}
-			// Release the up-to-4MB transferred ArrayBuffer now that we have the
-			// base64 string. freeRequestState would null it later, but doing it
-			// here reduces peak worker memory during JSON.stringify.
-			startMessage.requestBody = null;
-
-			const payloadJson = JSON.stringify({
-				request: {
-					headers: startMessage.requestHeaders,
-					body: requestBody,
-				},
-				response: {
-					status: startMessage.responseStatus,
-					headers: startMessage.responseHeaders,
-					body: responseBody,
-				},
-				meta: {
-					accountId: startMessage.accountId || NO_ACCOUNT_ID,
-					timestamp: startMessage.timestamp,
-					success: msg.success,
-					isStream: startMessage.isStream,
-					retry: startMessage.retryAttempt,
-					project: state.project ?? undefined,
-				},
-			});
-
-			// Null out large references now that we have the serialized JSON
-			responseBody = null;
-
-			const payloadBytes = Buffer.byteLength(payloadJson);
-			const accepted = asyncWriter.enqueuePayload(
-				requestId,
-				payloadBytes,
-				async () => {
-					try {
-						await dbOps.saveRequestPayloadRaw(requestId, payloadJson);
-					} catch (error) {
-						log.error(`Failed to save payload for ${requestId}:`, error);
-					}
-				},
-			);
-			if (!accepted) {
-				log.warn(
-					`Payload write rejected post-serialization for ${requestId} (bytes=${payloadBytes})`,
-				);
-			}
-		}
-	}
-	freeRequestState(state);
-
-	// Log if we have usage
-	if (state.usage.model && startMessage.accountId !== NO_ACCOUNT_ID) {
+		// Log if we have usage
 		if (
 			process.env.DEBUG?.includes("worker") ||
 			process.env.DEBUG === "true" ||
 			process.env.NODE_ENV === "development"
 		) {
 			log.debug(
-				`Usage for request ${startMessage.requestId}: Model: ${state.usage.model}, ` +
+				`Usage for request ${state.requestId}: Model: ${state.usage.model}, ` +
 					`Tokens: ${state.usage.totalTokens || 0}, Cost: ${formatCost(state.usage.costUsd)}`,
 			);
 		}
 	}
 
-	// Post summary to main thread for real-time updates
-	const summary: RequestResponse = {
-		id: startMessage.requestId,
-		timestamp: new Date(startMessage.timestamp).toISOString(),
-		method: startMessage.method,
-		path: startMessage.path,
-		accountUsed: startMessage.accountId,
-		statusCode: startMessage.responseStatus,
-		success: msg.success,
-		errorMessage: msg.error || null,
-		responseTimeMs: responseTime,
-		failoverAttempts: startMessage.failoverAttempts,
-		model: state.usage.model,
-		promptTokens: state.usage.inputTokens,
-		completionTokens: state.usage.outputTokens,
-		totalTokens: state.usage.totalTokens,
-		inputTokens: state.usage.inputTokens,
-		cacheReadInputTokens: state.usage.cacheReadInputTokens,
-		cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
-		outputTokens: state.usage.outputTokens,
-		costUsd: state.usage.costUsd,
-		agentUsed: state.agentUsed,
+	// Post a SLIM usage summary back to the main thread. The RequestRecorder
+	// merges this with its own meta + billingType + outcome to build the
+	// dashboard RequestResponse and persist the row. No DB write, no payload.
+	const summary: SummaryMessage["summary"] = {
+		requestId: state.requestId,
+		usage: {
+			model: state.usage.model,
+			inputTokens: state.usage.inputTokens,
+			outputTokens: state.usage.outputTokens,
+			cacheReadInputTokens: state.usage.cacheReadInputTokens,
+			cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
+			totalTokens: state.usage.totalTokens,
+			costUsd: state.usage.costUsd,
+		},
 		tokensPerSecond: state.usage.tokensPerSecond,
-		apiKeyId: startMessage.apiKeyId || undefined,
-		apiKeyName: startMessage.apiKeyName || undefined,
-		project: state.project ?? undefined,
-		billingType: state.billingType,
-		comboName: startMessage.comboName || undefined,
+		responseTimeMs: responseTime,
+		cacheCreationInputTokens: state.usage.cacheCreationInputTokens,
 	};
 
 	self.postMessage({
@@ -969,13 +588,12 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 }
 
 async function handleShutdown(): Promise<void> {
-	log.info("Worker shutting down, flushing async writer...");
+	log.info("Worker shutting down...");
 
 	// Stop cleanup interval
 	stopCleanupInterval();
 
-	await asyncWriter.dispose();
-	dbOps.close();
+	requests.clear();
 	self.postMessage({
 		type: "shutdown-complete",
 	} satisfies ShutdownCompleteMessage);
@@ -985,19 +603,6 @@ async function handleShutdown(): Promise<void> {
 // Periodic cleanup of stale requests (safety net for orphaned requests)
 // Enforces both TTL and size limits to prevent memory leaks
 let cleanupInterval: Timer | null = null;
-
-/** Free memory held by a request state before deletion */
-function freeRequestState(state: RequestState): void {
-	state.chunks.length = 0;
-	state.chunksBytes = 0;
-	state.buffer = "";
-	// Release request body and headers held in startMessage.
-	// Without this, orphaned requests retain full request bodies
-	// for the TTL duration (up to 2 minutes). See #67.
-	state.startMessage.requestBody = null;
-	state.startMessage.requestHeaders = {};
-	state.startMessage.responseHeaders = {};
-}
 
 const cleanupStaleRequests = () => {
 	const now = Date.now();
@@ -1010,7 +615,6 @@ const cleanupStaleRequests = () => {
 			log.warn(
 				`Request ${id} exceeded TTL (age: ${Math.round(age / 1000)}s, limit: ${REQUEST_TTL_MS / 1000}s), removing...`,
 			);
-			freeRequestState(state);
 			requests.delete(id);
 			removedCount++;
 		}
@@ -1023,7 +627,6 @@ const cleanupStaleRequests = () => {
 			log.warn(
 				`Request ${id} appears orphaned (no activity for ${Math.round(inactivity / 1000)}s), removing...`,
 			);
-			freeRequestState(state);
 			requests.delete(id);
 			removedCount++;
 		}
@@ -1041,8 +644,7 @@ const cleanupStaleRequests = () => {
 		);
 
 		for (let i = 0; i < excess; i++) {
-			const [id, state] = sortedByAge[i];
-			freeRequestState(state);
+			const [id] = sortedByAge[i];
 			requests.delete(id);
 			removedCount++;
 		}
@@ -1060,16 +662,13 @@ const startCleanupInterval = () => {
 		// Run cleanup every 30 seconds
 		cleanupInterval = setInterval(() => {
 			cleanupStaleRequests();
-			// Force a synchronous GC in the worker thread. Bun 1.3.x does not
-			// reclaim the structured-clone backing stores of large postMessage
-			// payloads (request bodies, chunk Uint8Arrays) on its own under a
-			// steady message load — the worker's JSC heap never gets enough idle
-			// time to collect them, so process RSS climbs unbounded (~5 MB/min on
-			// this deployment) with a flat *main-thread* heap. See oven-sh/bun
-			// #5709; the documented workaround is an explicit Bun.gc(true) after
-			// processing. The worker is off the client request path, so the brief
-			// synchronous pause every 30 s is acceptable. Guarded for non-Bun
-			// test/runtime contexts.
+			// Force a synchronous GC in the worker thread. The slim worker no
+			// longer retains large payloads, but transient SSE-parse strings /
+			// decoder buffers still churn the JSC heap; an explicit Bun.gc(true)
+			// every 30s keeps RSS from drifting under steady message load (the
+			// residual the leak fix explicitly chose to keep + measure). See
+			// oven-sh/bun #5709. Worker is off the client path, so the brief
+			// synchronous pause is acceptable. Guarded for non-Bun contexts.
 			if (typeof Bun !== "undefined" && typeof Bun.gc === "function") {
 				Bun.gc(true);
 			}
@@ -1095,7 +694,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 
 	switch (msg.type) {
 		case "start":
-			await handleStart(msg);
+			handleStart(msg);
 			break;
 		case "chunk":
 			handleChunk(msg);
@@ -1105,9 +704,6 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 			break;
 		case "shutdown":
 			await handleShutdown();
-			break;
-		case "config-update":
-			storePayloads = (msg as ConfigUpdateMessage).storePayloads;
 			break;
 		default:
 			log.warn(`Unknown message type: ${(msg as { type: string }).type}`);

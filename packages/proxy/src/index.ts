@@ -54,10 +54,19 @@ export {
 	getUsageWorkerHealth,
 	handleProxy,
 	type ProxyContext,
-	sendWorkerConfigUpdate,
+	setRequestRecorder,
 	startUsageWorker,
 	terminateUsageWorker,
 } from "./proxy";
+export {
+	type RecordMeta,
+	type RecordRouting,
+	RequestRecorder,
+	type RequestRecorderConfig,
+	type RequestRecorderDeps,
+	type SlimUsageSummary,
+	type TransportOutcome,
+} from "./request-recorder";
 export {
 	forwardToClient,
 	type ResponseHandlerOptions,

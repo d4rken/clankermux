@@ -743,6 +743,10 @@ export async function proxyWithAccount(
 							ctx,
 						);
 						const responseTime = Date.now() - requestMeta.timestamp;
+						// Deliberate direct audit row (one per failed attempted
+						// account, synthetic UUID id) — NOT owned by RequestRecorder
+						// (S2). The recorder records the single final outcome under
+						// requestMeta.id; these capture each individual failed attempt.
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
 								crypto.randomUUID(),
@@ -884,6 +888,10 @@ export async function proxyWithAccount(
 							ctx,
 						);
 						const responseTime = Date.now() - requestMeta.timestamp;
+						// Deliberate direct audit row (one per failed attempted
+						// account, synthetic UUID id) — NOT owned by RequestRecorder
+						// (S2). The recorder records the single final outcome under
+						// requestMeta.id; these capture each individual failed attempt.
 						ctx.asyncWriter.enqueue(() =>
 							ctx.dbOps.saveRequest(
 								crypto.randomUUID(),

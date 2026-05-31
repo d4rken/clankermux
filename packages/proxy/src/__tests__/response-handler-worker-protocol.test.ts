@@ -34,6 +34,23 @@ describe("forwardToClient worker protocol", () => {
 			postMessage: mock(postMessage),
 		} as unknown as import("../usage-worker-controller").UsageWorkerController;
 
+		// The request body + payload capture now lives on the main-thread
+		// RequestRecorder, not the worker StartMessage. Record begin() calls so
+		// tests can inspect the RecordMeta the handler builds.
+		const recorderBeginMetas: Array<Record<string, unknown>> = [];
+		const requestRecorder = {
+			begin: mock((meta: Record<string, unknown>) =>
+				recorderBeginMetas.push(meta),
+			),
+			captureResponseChunk: mock(() => {}),
+			finishTransport: mock(() => {}),
+			attachUsageSummary: mock(() => {}),
+			recordSynthetic: mock(() => {}),
+			onWorkerGone: mock(() => {}),
+			sweep: mock(() => {}),
+			dispose: mock(() => {}),
+		};
+
 		const ctx = {
 			strategy: {},
 			dbOps: {},
@@ -48,9 +65,10 @@ describe("forwardToClient worker protocol", () => {
 			refreshInFlight: new Map<string, Promise<string>>(),
 			asyncWriter: {},
 			usageWorker,
+			requestRecorder,
 		} as unknown as import("../handlers").ProxyContext;
 
-		return { ctx, usageWorker };
+		return { ctx, usageWorker, requestRecorder, recorderBeginMetas };
 	}
 
 	it("sends start message with messageId", async () => {
@@ -134,9 +152,12 @@ describe("forwardToClient worker protocol", () => {
 		expect(requestHeaders.tracestate).toBeUndefined();
 	});
 
-	it("sends null requestBody when payload storage is disabled", async () => {
+	it("does not send the request body to the worker (it goes to the recorder)", async () => {
 		const posted: Array<Record<string, unknown>> = [];
-		const { ctx } = createCtx((msg) => posted.push(msg), false);
+		const { ctx, recorderBeginMetas } = createCtx(
+			(msg) => posted.push(msg),
+			false,
+		);
 
 		await forwardToClient(
 			{
@@ -160,14 +181,22 @@ describe("forwardToClient worker protocol", () => {
 			ctx,
 		);
 
+		// The worker StartMessage no longer carries a request body at all.
 		expect(posted[0].type).toBe("start");
-		expect(posted[0].requestBody).toBeNull();
+		expect(posted[0].requestBody).toBeUndefined();
+		// project is still passed to the worker (kept on StartMessage).
 		expect(posted[0].project).toBe("main-thread-project");
+		// With payload storage disabled, the recorder's RecordMeta gets null body.
+		expect(recorderBeginMetas[0].requestBody).toBeNull();
+		expect(recorderBeginMetas[0].project).toBe("main-thread-project");
 	});
 
-	it("preserves requestBody when payload storage is enabled", async () => {
+	it("passes the capped request body to the recorder when payload storage is enabled", async () => {
 		const posted: Array<Record<string, unknown>> = [];
-		const { ctx } = createCtx((msg) => posted.push(msg), true);
+		const { ctx, recorderBeginMetas } = createCtx(
+			(msg) => posted.push(msg),
+			true,
+		);
 		const requestBody = JSON.stringify({ system: "test", messages: [] });
 
 		await forwardToClient(
@@ -191,16 +220,17 @@ describe("forwardToClient worker protocol", () => {
 		);
 
 		expect(posted[0].type).toBe("start");
-		// requestBody is now a raw ArrayBuffer (transferred to the worker, then
-		// base64-encoded there at save time) rather than a base64 string. These
-		// are mock workers, so the buffer is not actually detached — we verify
-		// shape and content, not the transfer itself (see the real-Worker smoke
-		// test for that).
-		expect(posted[0].requestBody).toBeInstanceOf(ArrayBuffer);
-		expect(new TextDecoder().decode(posted[0].requestBody as ArrayBuffer)).toBe(
-			requestBody,
-		);
+		// The worker never receives the body now.
+		expect(posted[0].requestBody).toBeUndefined();
 		expect(posted[0].project).toBeNull();
+		// The recorder receives the capped request body copy (raw ArrayBuffer).
+		expect(recorderBeginMetas[0].requestBody).toBeInstanceOf(ArrayBuffer);
+		expect(
+			new TextDecoder().decode(
+				recorderBeginMetas[0].requestBody as ArrayBuffer,
+			),
+		).toBe(requestBody);
+		expect(recorderBeginMetas[0].project).toBeNull();
 	});
 
 	it("does not throw when worker is not ready", async () => {
@@ -222,6 +252,11 @@ describe("forwardToClient worker protocol", () => {
 			refreshInFlight: new Map<string, Promise<string>>(),
 			asyncWriter: {},
 			usageWorker,
+			requestRecorder: {
+				begin: mock(() => {}),
+				captureResponseChunk: mock(() => {}),
+				finishTransport: mock(() => {}),
+			},
 		} as unknown as import("../handlers").ProxyContext;
 
 		await expect(
