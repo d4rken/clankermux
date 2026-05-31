@@ -7,7 +7,10 @@ import { estimateCostUSD, type TokenBreakdown } from "./pricing";
 // Make pricing deterministic: never hit the network, and point the disk cache
 // at a fresh empty dir so a stale/remote models.dev cache can't leak in. This
 // forces the bundled fallback table to be the sole source of truth.
-process.env.CF_PRICING_OFFLINE = "1";
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async () => {
+	throw new Error("pricing test network disabled");
+};
 
 // The pricing disk cache is rooted at `tmpdir()`, so redirect the OS temp dir to
 // a throwaway location. `bun test` shares one process across all test files, so
@@ -20,6 +23,7 @@ const pricingTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-"));
 process.env.TMPDIR = pricingTmpdir;
 
 afterAll(() => {
+	globalThis.fetch = originalFetch;
 	if (originalTmpdir === undefined) {
 		delete process.env.TMPDIR;
 	} else {

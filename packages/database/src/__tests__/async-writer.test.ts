@@ -99,6 +99,41 @@ describe("AsyncDbWriter", () => {
 		expect(h.metadataDropped).toBeGreaterThanOrEqual(99);
 	});
 
+	test("enqueue() returns true when accepted, false when dropped at cap", async () => {
+		writer = new AsyncDbWriter();
+
+		// Gate-block the first job so the drain can't make progress and the
+		// metadata queue stays full at the cap for the rest of the test.
+		const gate = makeGate();
+		releaseGate = gate.release;
+
+		const results: boolean[] = [];
+		// First job blocks the drain (it gets dequeued by the synchronous kick).
+		results.push(
+			writer.enqueue(async () => {
+				await gate.wait();
+			}),
+		);
+		// Fill exactly up to the cap with no-ops; these are accepted.
+		for (let i = 1; i < 2100; i++) {
+			results.push(writer.enqueue(() => {}));
+		}
+
+		// Every accepted enqueue returned true.
+		const acceptedCount = results.filter((r) => r === true).length;
+		// At least one enqueue past the cap returned false (dropped).
+		const droppedCount = results.filter((r) => r === false).length;
+		expect(droppedCount).toBeGreaterThanOrEqual(99);
+		// Accepted count tracks what is actually queued/in-flight (≤ cap + the
+		// one in-flight job that was shift()-ed by the synchronous kick).
+		expect(acceptedCount).toBeLessThanOrEqual(2001);
+
+		const h = writer.getHealth();
+		// Dropped count reported by enqueue() matches the health counter.
+		expect(h.metadataDropped).toBe(droppedCount);
+		expect(h.metadataDropped).toBeGreaterThanOrEqual(99);
+	});
+
 	test("enqueuePayload accepts up to byte cap, then rejects", async () => {
 		writer = new AsyncDbWriter();
 

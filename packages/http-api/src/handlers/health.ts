@@ -91,8 +91,7 @@ export function createHealthHandler(
 	const detailCache = new TtlCache<HealthResponse>(2000);
 
 	return async (url: URL): Promise<Response> => {
-		const withDetail =
-			url.searchParams.get("detail") === "1" && config.getHealthDetailEnabled();
+		const withDetail = url.searchParams.get("detail") === "1";
 		const cache = withDetail ? detailCache : normalCache;
 		const cached = cache.get();
 		if (cached) {
@@ -165,7 +164,7 @@ export function createHealthHandler(
 			};
 		}
 
-		// Support ?detail=1 for per-account details (requires HEALTH_DETAIL_ENABLED=true)
+		// Support ?detail=1 for per-account details.
 		if (withDetail) {
 			response.accounts_detail = accounts.map((a) => ({
 				name: a.name,

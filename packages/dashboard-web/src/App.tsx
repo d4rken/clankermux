@@ -1,7 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useMemo } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { api } from "./api";
 import { AccountsTab } from "./components/AccountsTab";
 import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeysTab } from "./components/ApiKeysTab";
@@ -46,11 +45,9 @@ const LoadingSkeleton = () => (
 
 export function App() {
 	const location = useLocation();
-	const [showCombos, setShowCombos] = useState(false);
 
-	// Build routes array dynamically based on feature flags
 	const routes = useMemo(() => {
-		const baseRoutes = [
+		return [
 			{
 				path: "/",
 				element: <OverviewTab />,
@@ -80,6 +77,12 @@ export function App() {
 				subtitle: "Manage your OAuth accounts and settings",
 			},
 			{
+				path: "/combos",
+				element: <CombosTab />,
+				title: "Combos Management",
+				subtitle: "Define fallback chains for model families",
+			},
+			{
 				path: "/agents",
 				element: <AgentsTab />,
 				title: "Agent Management",
@@ -104,19 +107,7 @@ export function App() {
 				subtitle: "Configure system behavior and data retention",
 			},
 		];
-
-		// Add combos route if feature is enabled
-		if (showCombos) {
-			baseRoutes.splice(4, 0, {
-				path: "/combos",
-				element: <CombosTab />,
-				title: "Combos Management",
-				subtitle: "Define fallback chains for model families",
-			});
-		}
-
-		return baseRoutes;
-	}, [showCombos]);
+	}, []);
 
 	const currentRoute =
 		routes.find((route) => route.path === location.pathname) || routes[0];
@@ -138,27 +129,11 @@ export function App() {
 		[],
 	);
 
-	// Fetch feature flags
-	useEffect(() => {
-		const fetchFeatures = async () => {
-			try {
-				const features = await api.getFeatures();
-				setShowCombos(features.showCombos);
-			} catch (error) {
-				// If features endpoint fails, default to hiding combos
-				console.error("Failed to fetch features:", error);
-				setShowCombos(false);
-			}
-		};
-
-		fetchFeatures();
-	}, []);
-
 	return (
 		<QueryClientProvider client={queryClient}>
 			<ThemeProvider>
 				<div className="min-h-screen bg-background">
-					<Navigation showCombos={showCombos} />
+					<Navigation />
 
 					{/* Main Content */}
 					<main className="lg:pl-64">

@@ -93,6 +93,16 @@ function makeContext(accounts: Account[]): ProxyContext {
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => undefined) } as never,
 		usageWorker: { postMessage: mock(() => undefined) } as never,
+		requestRecorder: {
+			begin: mock(() => undefined),
+			captureResponseChunk: mock(() => undefined),
+			finishTransport: mock(() => undefined),
+			attachUsageSummary: mock(() => undefined),
+			recordSynthetic: mock(() => undefined),
+			onWorkerGone: mock(() => undefined),
+			sweep: mock(() => undefined),
+			dispose: mock(() => undefined),
+		} as never,
 	};
 }
 
@@ -259,9 +269,9 @@ describe("provider overload cooldown", () => {
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
 				makeAccount({ id: "console-a", provider: "claude-console-api" }),
 			]);
-			const usageWorkerPostMessage = (
-				ctx.usageWorker as { postMessage: ReturnType<typeof mock> }
-			).postMessage;
+			const recordSynthetic = (
+				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
+			).recordSynthetic;
 			const { handleProxy } = await import("../proxy");
 			const response = await handleProxy(
 				makeRequest(),
@@ -277,18 +287,15 @@ describe("provider overload cooldown", () => {
 			expect(body.error.type).toBe("overloaded_error");
 			expect(body.error.providers).toEqual(["anthropic"]);
 			expect(calls).toHaveLength(0);
-			expect(usageWorkerPostMessage).toHaveBeenCalledTimes(2);
-			expect(usageWorkerPostMessage.mock.calls[0][0]).toMatchObject({
-				type: "start",
+			// Synthetic 529 rows are now persisted via the main-thread recorder
+			// (recordSynthetic), not by posting start/end to the slim worker (B1).
+			expect(recordSynthetic).toHaveBeenCalledTimes(1);
+			expect(recordSynthetic.mock.calls[0][0]).toMatchObject({
 				accountId: null,
 				responseStatus: 529,
 				providerName: "anthropic",
 			});
-			expect(usageWorkerPostMessage.mock.calls[1][0]).toMatchObject({
-				type: "end",
-				success: false,
-				error: "provider_overloaded",
-			});
+			expect(recordSynthetic.mock.calls[0][1]).toBe("error");
 		} finally {
 			Date.now = originalDateNow;
 		}
@@ -304,9 +311,9 @@ describe("provider overload cooldown", () => {
 			const ctx = makeContext([
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
 			]);
-			const usageWorkerPostMessage = (
-				ctx.usageWorker as { postMessage: ReturnType<typeof mock> }
-			).postMessage;
+			const recordSynthetic = (
+				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
+			).recordSynthetic;
 			const { handleProxy } = await import("../proxy");
 			const response = await handleProxy(
 				makeRequest({ "x-clankermux-auto-refresh": "true" }),
@@ -315,7 +322,7 @@ describe("provider overload cooldown", () => {
 			);
 
 			expect(response.status).toBe(529);
-			expect(usageWorkerPostMessage).not.toHaveBeenCalled();
+			expect(recordSynthetic).not.toHaveBeenCalled();
 		} finally {
 			Date.now = originalDateNow;
 		}

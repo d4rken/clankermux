@@ -2,7 +2,6 @@ import {
 	codexAccountFitsRequest,
 	estimateRequestTokens,
 	mapModelName,
-	requestEvents,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
 	trackClientVersion,
@@ -25,7 +24,6 @@ import {
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
-	proxyUnauthenticated,
 	proxyWithAccount,
 	RequestBodyContext,
 	type RequestJsonBody,
@@ -40,9 +38,11 @@ import {
 	isProviderOverloaded,
 } from "./provider-overload-cooldown";
 import { extractRequestAffinity } from "./request-affinity";
+import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
+import { shouldRecordRequest } from "./should-record-request";
 import { UsageWorkerController } from "./usage-worker-controller";
-import type { ConfigUpdateMessage, SummaryMessage } from "./worker-messages";
+import type { SummaryMessage } from "./worker-messages";
 
 export type { ProxyContext } from "./handlers";
 
@@ -106,36 +106,45 @@ function extractProjectFromRequest(
 
 // ===== WORKER MANAGEMENT =====
 
-let pendingStorePayloads: boolean | null = null;
+// The UsageWorkerController is module-scoped and constructed before any
+// ProxyContext exists, but its onSummary callback must route the worker's slim
+// usage summary into the main-thread RequestRecorder (which owns persistence +
+// the dashboard "summary" event). Wire the recorder via a module-level setter
+// that server.ts calls once it has instantiated the recorder.
+let requestRecorder: RequestRecorder | null = null;
+
+export function setRequestRecorder(recorder: RequestRecorder): void {
+	requestRecorder = recorder;
+}
 
 const usageWorkerController = new UsageWorkerController(
 	(msg: SummaryMessage) => {
+		// Both fields survive the slim summary shape (S4): cache-body-store needs
+		// cacheCreationInputTokens to promote staged bodies; the recorder merges
+		// the usage and emits the dashboard "summary" event itself.
 		cacheBodyStore.onSummary(
-			msg.summary.id,
+			msg.summary.requestId,
 			msg.summary.cacheCreationInputTokens,
 		);
-		requestEvents.emit("event", { type: "summary", payload: msg.summary });
+		requestRecorder?.attachUsageSummary(msg.summary.requestId, msg.summary);
 	},
 	() => {
-		// Apply deferred config update once worker is ready
-		if (pendingStorePayloads !== null) {
-			const msg: ConfigUpdateMessage = {
-				type: "config-update",
-				storePayloads: pendingStorePayloads,
-			};
-			usageWorkerController.postMessage(msg);
-			pendingStorePayloads = null;
-		}
+		// Worker ready — no deferred config to apply. The slim worker no longer
+		// stores payloads, so the storePayloads ConfigUpdate plumbing is gone
+		// (S3); the recorder reads ctx.config.getStorePayloads() live instead.
 	},
 );
 
 // When the usage worker is destroyed (restart or shutdown), requests whose
 // "start" was already handed to that worker will never be summarized — drop
-// their staged bodies so they can't leak. Pre-handoff entries are preserved:
+// their staged bodies so they can't leak, and waive usage on the recorder's
+// un-summarized records (finished ones persist now; still-streaming ones
+// persist at their own transport-finish). Pre-handoff entries are preserved:
 // forwardToClient posts their start/end to the replacement worker, which can
 // still summarize and promote them. Promoted per-account slots are untouched.
 usageWorkerController.onWorkerGone = () => {
 	cacheBodyStore.discardHandedOffStaged();
+	requestRecorder?.onWorkerGone();
 };
 
 export function getUsageWorker(): UsageWorkerController {
@@ -144,16 +153,6 @@ export function getUsageWorker(): UsageWorkerController {
 
 export function startUsageWorker(): void {
 	usageWorkerController.start();
-}
-
-export function sendWorkerConfigUpdate(storePayloads: boolean): void {
-	if (!usageWorkerController.isReady()) {
-		// Defer until worker is ready
-		pendingStorePayloads = storePayloads;
-		return;
-	}
-	const msg: ConfigUpdateMessage = { type: "config-update", storePayloads };
-	usageWorkerController.postMessage(msg);
 }
 
 export function terminateUsageWorker(): Promise<void> {
@@ -310,8 +309,6 @@ export async function handleProxy(
 
 	type ProviderOverloadedAccount = { account: Account; until: number };
 
-	const isAutoRefreshProbe =
-		req.headers.get("x-clankermux-auto-refresh") === "true";
 	const providerOverloadResponseLabel = (overloadKey: string): string =>
 		overloadKey === ANTHROPIC_UPSTREAM_OVERLOAD_KEY ? "anthropic" : overloadKey;
 
@@ -319,34 +316,45 @@ export async function handleProxy(
 		response: Response,
 		error: string,
 	): void => {
-		if (isAutoRefreshProbe) return;
+		// Same recordable-request predicate as forwardToClient (S1) — keeps
+		// synthetic pool/provider-exhaustion rows out of history for the same
+		// filtered set (auto-refresh probes, etc.).
+		if (
+			!shouldRecordRequest({
+				method: req.method,
+				path: url.pathname,
+				providerName: ctx.provider.name,
+				responseStatus: response.status,
+				getHeader: (name) => req.headers.get(name),
+			})
+		) {
+			return;
+		}
 
-		ctx.usageWorker.postMessage({
-			type: "start",
-			messageId: crypto.randomUUID(),
+		// Synthetic terminal responses (pool/provider-exhaustion) write a request
+		// row directly via the recorder — the slim worker no longer persists, so
+		// posting start/end to it would vanish (amendment B1). No body, no usage.
+		const meta: RecordMeta = {
 			requestId: requestMeta.id,
-			accountId: null,
 			method: req.method,
 			path: url.pathname,
-			timestamp: requestMeta.timestamp,
+			accountId: null,
+			accountName: null,
+			responseStatus: response.status,
+			responseHeaders: Object.fromEntries(response.headers.entries()),
 			requestHeaders: Object.fromEntries(
 				sanitizeRequestHeaders(req.headers).entries(),
 			),
-			requestBody: null,
-			project: project ?? null,
-			responseStatus: response.status,
-			responseHeaders: Object.fromEntries(response.headers.entries()),
 			isStream: false,
 			providerName: ctx.provider.name,
 			accountBillingType: null,
 			accountAutoPauseOnOverageEnabled: 0,
-			accountName: null,
+			authed: false,
 			agentUsed: agentUsed || null,
-			comboName: null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
-			retryAttempt: 0,
-			failoverAttempts: 0,
+			comboName: null,
+			project: project ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,
@@ -361,14 +369,12 @@ export async function handleProxy(
 						failoverReason: requestMeta.routing.failoverReason ?? null,
 					}
 				: null,
-		});
-
-		ctx.usageWorker.postMessage({
-			type: "end",
-			requestId: requestMeta.id,
-			success: false,
-			error,
-		});
+			timestamp: requestMeta.timestamp,
+			requestBody: null,
+			retryAttempt: 0,
+			failoverAttempts: 0,
+		};
+		ctx.requestRecorder.recordSynthetic(meta, "error", error);
 	};
 
 	const createProviderOverloadedResponse = (
@@ -609,22 +615,6 @@ export async function handleProxy(
 			return createProviderOverloadedResponse(providerOverloadedAccounts);
 		}
 
-		// Check feature flag for backwards compatibility
-		if (process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL === "1") {
-			log.warn(ERROR_MESSAGES.NO_ACCOUNTS);
-			return proxyUnauthenticated(
-				req,
-				url,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				ctx,
-				apiKeyId,
-				apiKeyName,
-			);
-		}
-
-		// Return 503 pool_exhausted response (default behavior)
 		log.error(ERROR_MESSAGES.POOL_EXHAUSTED);
 
 		// Log to request history via worker

@@ -13,10 +13,29 @@ import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
+import {
+	NO_ACCOUNT_ID,
+	type RecordMeta,
+	type TransportOutcome,
+} from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
+import { shouldRecordRequest } from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import type { UsageWorkerController } from "./usage-worker-controller";
 import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
+
+/**
+ * Map a stream-analytics error to a transport outcome for the recorder. The
+ * passthrough stream surfaces three distinct error shapes (see
+ * stream-analytics.ts): a total/chunk timeout ("Stream timeout: ..."), a client
+ * cancel ("client disconnected"), or any other read error.
+ */
+function streamErrorToOutcome(err: Error): TransportOutcome {
+	const message = err.message || "";
+	if (message.includes("client disconnected")) return "disconnect";
+	if (message.includes("Stream timeout")) return "timeout";
+	return "error";
+}
 
 // Default cooldown for rate-limit errors detected mid-stream. SSE error
 // frames don't carry reset headers (HTTP headers were sent before the
@@ -130,22 +149,33 @@ export async function forwardToClient(
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
 
-	// Filter out:
-	//   - count_tokens requests on OpenAI-compatible providers (existing
-	//     filter — these aren't billable user traffic).
-	//   - synthetic auto-refresh probes (issue #199, bug 2). Logging these
-	//     pollutes the user-visible 503/200 metrics on the dashboard with
-	//     internal scheduler activity. Header set by AutoRefreshScheduler
-	//     mirrors the existing keepalive pattern.
-	const isAutoRefreshProbe =
-		requestHeaders.get("x-clankermux-auto-refresh") === "true";
-	const shouldProcessRequest =
-		!(
-			ctx.provider.name === "openai-compatible" &&
-			path === "/v1/messages/count_tokens"
-		) && !isAutoRefreshProbe;
+	// Canonical recordable-request predicate (S1): the UNION of the historical
+	// response-handler filter (count_tokens-on-openai-compatible, auto-refresh
+	// probes) and the worker filter (.well-known 404s). Gates the worker post,
+	// the dashboard start event, AND recorder.begin so the three stay in sync.
+	const shouldProcessRequest = shouldRecordRequest({
+		method,
+		path,
+		providerName: ctx.provider.name,
+		responseStatus: response.status,
+		getHeader: (name) => requestHeaders.get(name),
+	});
 
-	// Send START message immediately if not filtered
+	const routingRecord = routing
+		? {
+				strategy: routing.strategy,
+				decision: routing.decision,
+				affinityScope: routing.affinityScope ?? null,
+				affinityKeyHash: hashRoutingAffinityKey(routing.affinityKey),
+				selectedAccountId: account?.id ?? routing.selectedAccountId ?? null,
+				previousAccountId: routing.previousAccountId ?? null,
+				candidatesCount: routing.candidatesCount ?? null,
+				failoverReason: routing.failoverReason ?? null,
+			}
+		: null;
+
+	// Send START message immediately if not filtered. The worker is now a pure
+	// usage computer — it no longer receives the request body (no transfer).
 	if (shouldProcessRequest) {
 		const startMessage: StartMessage = {
 			type: "start",
@@ -156,17 +186,6 @@ export async function forwardToClient(
 			path,
 			timestamp,
 			requestHeaders: requestHeadersObj,
-			// Fresh capped copy: .slice() returns a NEW ArrayBuffer, safe to
-			// transfer to the worker. Never transfer the caller's `requestBody`
-			// — it may be shared with the failover/replay RequestBodyContext, and
-			// transfer detaches the source buffer.
-			requestBody:
-				shouldStorePayloads && requestBody
-					? requestBody.slice(
-							0,
-							Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
-						)
-					: null,
 			project: project ?? null,
 			responseStatus: response.status,
 			responseHeaders: responseHeadersObj,
@@ -183,25 +202,50 @@ export async function forwardToClient(
 			apiKeyName: apiKeyName || null,
 			retryAttempt,
 			failoverAttempts,
-			routing: routing
-				? {
-						strategy: routing.strategy,
-						decision: routing.decision,
-						affinityScope: routing.affinityScope ?? null,
-						affinityKeyHash: hashRoutingAffinityKey(routing.affinityKey),
-						selectedAccountId: account?.id ?? routing.selectedAccountId ?? null,
-						previousAccountId: routing.previousAccountId ?? null,
-						candidatesCount: routing.candidatesCount ?? null,
-						failoverReason: routing.failoverReason ?? null,
-					}
-				: null,
+			routing: routingRecord,
 		};
-		// The transferable IS the requestBody field — move ownership to the
-		// worker (no structured-clone copy) instead of cloning the bytes.
-		const transfer = startMessage.requestBody
-			? [startMessage.requestBody]
-			: undefined;
-		safePostMessage(ctx.usageWorker, startMessage, transfer);
+		safePostMessage(ctx.usageWorker, startMessage);
+
+		// Begin recording on the main thread. The recorder fires account
+		// side-effects immediately (auto-pause-on-overage, updateAccountUsage),
+		// captures the (capped) request body within its byte budget, and owns
+		// persistence. The capped copy is independent of the caller's
+		// `requestBody` (which may be shared with the failover/replay
+		// RequestBodyContext) — slice() returns a NEW ArrayBuffer.
+		const recordMeta: RecordMeta = {
+			requestId,
+			method,
+			path,
+			accountId: account?.id || null,
+			accountName: account?.name ?? null,
+			responseStatus: response.status,
+			responseHeaders: responseHeadersObj,
+			requestHeaders: requestHeadersObj,
+			isStream,
+			providerName: ctx.provider.name,
+			accountBillingType: account?.billing_type ?? null,
+			accountAutoPauseOnOverageEnabled: account?.auto_pause_on_overage_enabled
+				? 1
+				: 0,
+			authed: !!account?.id && account.id !== NO_ACCOUNT_ID,
+			agentUsed: agentUsed || null,
+			apiKeyId: apiKeyId || null,
+			apiKeyName: apiKeyName || null,
+			comboName: comboName || null,
+			project: project ?? null,
+			routing: routingRecord,
+			timestamp,
+			requestBody:
+				shouldStorePayloads && requestBody
+					? requestBody.slice(
+							0,
+							Math.min(requestBody.byteLength, MAX_REQUEST_BODY_BYTES),
+						)
+					: null,
+			retryAttempt,
+			failoverAttempts,
+		};
+		ctx.requestRecorder.begin(recordMeta);
 
 		// The cache-keepalive staging entry (if any) has now been handed to the
 		// worker; mark it so a worker restart can reap it as a true orphan while
@@ -261,12 +305,17 @@ export async function forwardToClient(
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
 			onChunk: (value) => {
 				if (shouldProcessRequest) {
+					// Post every chunk to the worker UNCAPPED so tiktoken
+					// output-token counting matches the full output (N2).
 					const chunkMsg: ChunkMessage = {
 						type: "chunk",
 						requestId,
 						data: value,
 					};
 					safePostMessage(ctx.usageWorker, chunkMsg);
+					// The recorder captures the (256KB-capped) response body for
+					// Request History.
+					ctx.requestRecorder.captureResponseChunk(requestId, value);
 				}
 
 				// Mid-stream rate-limit detection. The sniffer
@@ -297,6 +346,10 @@ export async function forwardToClient(
 						success,
 					};
 					safePostMessage(ctx.usageWorker, endMsg);
+					ctx.requestRecorder.finishTransport(
+						requestId,
+						success ? "success" : "error",
+					);
 				}
 			},
 			onError: (err) => {
@@ -308,6 +361,10 @@ export async function forwardToClient(
 						error: err.message,
 					};
 					safePostMessage(ctx.usageWorker, endMsg);
+					ctx.requestRecorder.finishTransport(
+						requestId,
+						streamErrorToOutcome(err),
+					);
 				}
 			},
 		});
@@ -325,13 +382,18 @@ export async function forwardToClient(
 	 *********************************************************************/
 	if (!response.body) {
 		if (shouldProcessRequest) {
+			const success = isExpectedResponse(path, response);
 			const endMsg: EndMessage = {
 				type: "end",
 				requestId,
 				responseBody: null,
-				success: isExpectedResponse(path, response),
+				success,
 			};
 			safePostMessage(ctx.usageWorker, endMsg);
+			ctx.requestRecorder.finishTransport(
+				requestId,
+				success ? "success" : "error",
+			);
 		}
 
 		return response;
@@ -378,14 +440,25 @@ export async function forwardToClient(
 				cappedBuf = Buffer.concat(chunks);
 			}
 			if (shouldProcessRequest) {
+				const success = isExpectedResponse(path, analyticsResponse);
+				// Feed the captured (256KB-capped) body to the recorder, then
+				// finalize transport — INSIDE the IIFE, after cappedBuf is read
+				// (amendment B4: never after `})();`, which runs before the read).
+				if (cappedBuf.byteLength > 0) {
+					ctx.requestRecorder.captureResponseChunk(requestId, cappedBuf);
+				}
 				const endMsg: EndMessage = {
 					type: "end",
 					requestId,
 					responseBody:
 						cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
-					success: isExpectedResponse(path, analyticsResponse),
+					success,
 				};
 				safePostMessage(ctx.usageWorker, endMsg);
+				ctx.requestRecorder.finishTransport(
+					requestId,
+					success ? "success" : "error",
+				);
 			}
 		} catch (err) {
 			if (shouldProcessRequest) {
@@ -396,6 +469,7 @@ export async function forwardToClient(
 					error: (err as Error).message,
 				};
 				safePostMessage(ctx.usageWorker, endMsg);
+				ctx.requestRecorder.finishTransport(requestId, "error");
 			}
 		}
 	})();
