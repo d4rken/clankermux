@@ -14,7 +14,7 @@ import {
 	X,
 	Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
@@ -37,23 +37,19 @@ interface NavItem {
 	badge?: string;
 }
 
-const _navItems: NavItem[] = [
+const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
-	// { label: "Combos", icon: Zap, path: "/combos" },
+	{ label: "Combos", icon: Zap, path: "/combos" },
 	{ label: "Agents", icon: Bot, path: "/agents" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
 ];
 
-interface NavigationProps {
-	showCombos?: boolean;
-}
-
-export function Navigation({ showCombos = false }: NavigationProps = {}) {
+export function Navigation() {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const [updateStatus, setUpdateStatus] = useState<
 		"idle" | "checking" | "available" | "current" | "unknown" | "error"
@@ -68,31 +64,6 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
-
-	// Build nav items dynamically based on feature flags
-	const navItems: NavItem[] = useMemo(() => {
-		const baseItems: NavItem[] = [
-			{ label: "Overview", icon: LayoutDashboard, path: "/" },
-			{ label: "Analytics", icon: BarChart3, path: "/analytics" },
-			{ label: "Requests", icon: Activity, path: "/requests" },
-			{ label: "Accounts", icon: Users, path: "/accounts" },
-		];
-
-		// Add combos item if feature is enabled
-		if (showCombos) {
-			baseItems.push({ label: "Combos", icon: Zap, path: "/combos" });
-		}
-
-		// Add remaining items
-		baseItems.push(
-			{ label: "Agents", icon: Bot, path: "/agents" },
-			{ label: "API Keys", icon: Key, path: "/api-keys" },
-			{ label: "Logs", icon: FileText, path: "/logs" },
-			{ label: "Settings", icon: Settings, path: "/settings" },
-		);
-
-		return baseItems;
-	}, [showCombos]);
 
 	// Cleanup on unmount to prevent memory leaks
 	useEffect(() => {
@@ -240,7 +211,7 @@ export function Navigation({ showCombos = false }: NavigationProps = {}) {
 
 					{/* Navigation */}
 					<nav className="flex-1 space-y-1 p-4">
-						{navItems.map((item) => {
+						{NAV_ITEMS.map((item) => {
 							const Icon = item.icon;
 							const isActive = location.pathname === item.path;
 							return (

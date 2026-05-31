@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
@@ -83,21 +83,6 @@ function makeRequest(): Request {
 		}),
 	});
 }
-
-let savedPassthrough: string | undefined;
-
-beforeEach(() => {
-	savedPassthrough = process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-});
-
-afterEach(() => {
-	if (savedPassthrough === undefined) {
-		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	} else {
-		process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = savedPassthrough;
-	}
-});
 
 describe("pool exhausted — 503 response", () => {
 	it("returns 503 with pool_exhausted body when pool is empty", async () => {
@@ -295,33 +280,5 @@ describe("pool exhausted — 503 response", () => {
 		// Only codex account should appear
 		expect(accounts.length).toBe(1);
 		expect(accounts[0].name).toBe("codex-account");
-	});
-});
-
-describe("pool exhausted — CCFLARE_PASSTHROUGH_ON_EMPTY_POOL=1 escape hatch", () => {
-	it("does NOT return 503 when CCFLARE_PASSTHROUGH_ON_EMPTY_POOL=1 and pool is empty", async () => {
-		process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = "1";
-
-		const ctx = makeContext([]);
-		// proxyUnauthenticated will try to make a real request and fail —
-		// we just check it doesn't return 503 with our pool_exhausted body.
-		// It will throw or return a different status.
-		try {
-			const response = await handleProxy(
-				makeRequest(),
-				new URL("https://proxy.local/v1/messages"),
-				ctx,
-			);
-			// If it returns, it should NOT be our 503 pool_exhausted
-			if (response.status === 503) {
-				const body = (await response.json()) as Record<string, unknown>;
-				const error = body.error as Record<string, unknown> | undefined;
-				expect(error?.type).not.toBe("pool_exhausted");
-			}
-			// Any other status means passthrough was attempted
-		} catch {
-			// Expected: proxyUnauthenticated throws when no real provider configured
-			// This is fine — it means we went through the passthrough path
-		}
 	});
 });

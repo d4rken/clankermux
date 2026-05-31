@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "../proxy";
@@ -110,21 +110,6 @@ function makeSmallRequest(): Request {
 		}),
 	});
 }
-
-let savedPassthrough: string | undefined;
-
-beforeEach(() => {
-	savedPassthrough = process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-});
-
-afterEach(() => {
-	if (savedPassthrough === undefined) {
-		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	} else {
-		process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = savedPassthrough;
-	}
-});
 
 describe("context-window gate", () => {
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {

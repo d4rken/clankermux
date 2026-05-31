@@ -23,7 +23,6 @@ import {
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
-	proxyUnauthenticated,
 	proxyWithAccount,
 	RequestBodyContext,
 	type RequestJsonBody,
@@ -608,22 +607,6 @@ export async function handleProxy(
 			return createProviderOverloadedResponse(providerOverloadedAccounts);
 		}
 
-		// Check feature flag for backwards compatibility
-		if (process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL === "1") {
-			log.warn(ERROR_MESSAGES.NO_ACCOUNTS);
-			return proxyUnauthenticated(
-				req,
-				url,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				ctx,
-				apiKeyId,
-				apiKeyName,
-			);
-		}
-
-		// Return 503 pool_exhausted response (default behavior)
 		log.error(ERROR_MESSAGES.POOL_EXHAUSTED);
 
 		// Log to request history via worker

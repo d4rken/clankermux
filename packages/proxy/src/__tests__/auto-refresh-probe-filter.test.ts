@@ -6,7 +6,7 @@
  *   2. response-handler.ts  — shouldRecordRequest is false for auto-refresh probes
  *   3. proxy.ts             — pool-exhausted path skips usageWorker.postMessage for probes
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import { isSyntheticInternalRequest } from "../handlers/proxy-operations";
 
@@ -201,21 +201,6 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 // ---------------------------------------------------------------------------
 
 describe("proxy.ts — pool-exhausted path skips recording for auto-refresh probes", () => {
-	let savedPassthrough: string | undefined;
-
-	beforeEach(() => {
-		savedPassthrough = process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-		delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-	});
-
-	afterEach(() => {
-		if (savedPassthrough === undefined) {
-			delete process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL;
-		} else {
-			process.env.CCFLARE_PASSTHROUGH_ON_EMPTY_POOL = savedPassthrough;
-		}
-	});
-
 	it("does not record (worker or recorder) when pool is exhausted and request is an auto-refresh probe", async () => {
 		const { handleProxy } = await import("../proxy");
 
