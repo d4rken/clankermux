@@ -1496,6 +1496,74 @@ describe("SessionStrategy", () => {
 			);
 		});
 
+		it("auto-unpauses a lower-priority pinned candidate even when a higher-priority account is available first", () => {
+			// Regression for the auto-unpause early-break: the loop must run the
+			// unpause side-effect on EVERY eligible fallback candidate, not just up
+			// to the first available one. Here the pinned account (B, priority 1)
+			// sorts AFTER an available higher-priority account (A, priority 0). With
+			// the old `if (getCachedAvailability(candidate)) break;`, the loop stops
+			// at A and never unpauses B; resolveAffinity then sees B as unavailable
+			// and wrongly fails the session off its pinned account.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "autounpause-pinned-project",
+			};
+
+			// A — higher priority (0). Also an eligible auto-fallback candidate
+			// (window reset elapsed) so it appears in the priority-sorted candidate
+			// list AHEAD of B. A is never paused, so it is always available — which
+			// is exactly what tripped the old early-break.
+			const accountA = makeAccount({
+				id: "available-higher-A",
+				name: "available-higher-A",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+			});
+			// B — lower priority (1). We pin the session to B first (while A is
+			// unavailable), then pause B for "overage" with an elapsed
+			// rate_limit_reset window so it becomes an auto-unpause fallback
+			// candidate that sorts AFTER A.
+			const accountB = makeAccount({
+				id: "pinned-lower-B",
+				name: "pinned-lower-B",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+				auto_fallback_enabled: true,
+			});
+
+			// First select: A is temporarily unavailable (manual pause) so the pin
+			// lands on B and starts B's session window.
+			accountA.paused = true;
+			accountA.pause_reason = "manual";
+			expect(strategy.select([accountA, accountB], projectMeta)[0]).toBe(
+				accountB,
+			);
+
+			// A becomes available again; B is paused for "overage" with an elapsed
+			// reset window (eligible for auto-unpause, sorts AFTER A on priority).
+			// A sorts FIRST in the fallback-candidate list and is already available,
+			// so the old early-break would stop the loop at A and never reach B.
+			accountA.paused = false;
+			accountA.pause_reason = null;
+			accountB.paused = true;
+			accountB.pause_reason = "overage";
+			accountB.rate_limit_reset = now - 60_000;
+
+			const result = strategy.select([accountA, accountB], projectMeta);
+
+			// (a) B was auto-unpaused despite A being available and sorting first.
+			expect(mockStore.hasResumeCall(accountB.id)).toBe(true);
+			expect(accountB.paused).toBe(false);
+			// (b) The session stays on its pinned account B — NOT moved to A.
+			expect(result[0]).toBe(accountB);
+			expect(projectMeta.routing?.decision).toBe("affinity_hit");
+		});
+
 		it("caps stored affinity entries", () => {
 			const account = makeAccount({
 				id: "cap-account",

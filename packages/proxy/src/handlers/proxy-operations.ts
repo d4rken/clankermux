@@ -1131,6 +1131,48 @@ export async function proxyForcedAccount(
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
 ): Promise<Response> {
+	// Hoisted to function scope so the outer catch (which may fire before
+	// `provider` is assigned, e.g. a validateProviderPath throw) and the
+	// local-error recorder can reference them. effectiveBodyBuffer feeds the
+	// recorder's captured request body; provider drives forwardToClient's
+	// recordable-request predicate and stream detection.
+	let effectiveBodyBuffer: ArrayBuffer | null = null;
+	let provider = ctx.provider;
+
+	// Record a forced-mode LOCAL error (token-resolution throw / outer catch)
+	// under the forced account so it appears in Request History, exactly like
+	// the forced UPSTREAM response is recorded via the success-path
+	// forwardToClient. disableCooldown:true matches the success path — a forced
+	// account never mutates cooldown state. forwardToClient handles a synthetic
+	// small non-streaming JSON error Response via its tee() read path.
+	const recordLocalError = (reason: string): Promise<Response> => {
+		const errorResponse = createForcedAccountUnavailableResponse(
+			account,
+			reason,
+		);
+		return forwardToClient(
+			{
+				requestId: requestMeta.id,
+				method: req.method,
+				path: url.pathname,
+				account,
+				requestHeaders: req.headers,
+				requestBody: effectiveBodyBuffer,
+				project: requestMeta.project,
+				response: errorResponse,
+				timestamp: requestMeta.timestamp,
+				retryAttempt: 0,
+				failoverAttempts: 0,
+				comboName: requestMeta.comboName,
+				apiKeyId,
+				apiKeyName,
+				routing: requestMeta.routing ?? null,
+				disableCooldown: true,
+			},
+			{ ...ctx, provider },
+		);
+	};
+
 	try {
 		// Apply the account's model mapping exactly as the normal path does. The
 		// combo-style modelOverride patches the request body's `model` field;
@@ -1138,7 +1180,7 @@ export async function proxyForcedAccount(
 		const baseBodyContext =
 			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
 		let _effectiveBodyContext = baseBodyContext;
-		let effectiveBodyBuffer = baseBodyContext.getBuffer();
+		effectiveBodyBuffer = baseBodyContext.getBuffer();
 		if (modelOverride && effectiveBodyBuffer) {
 			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
 			if (overriddenContext) {
@@ -1148,14 +1190,15 @@ export async function proxyForcedAccount(
 		}
 
 		// Get the provider for this account
-		const provider = getProvider(account.provider) || ctx.provider;
+		provider = getProvider(account.provider) || ctx.provider;
 
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
 		// Resolve the access token via the same path the normal flow uses. If it
 		// throws (expired/unrefreshable token), map to a local error Response —
-		// NOT null/failover (R2).
+		// NOT null/failover (R2). Routed through forwardToClient so the local
+		// failure is recorded under the forced account (history intact).
 		let accessToken: string;
 		try {
 			accessToken = await getValidAccessToken(account, ctx);
@@ -1165,7 +1208,7 @@ export async function proxyForcedAccount(
 			log.warn(
 				`Forced account ${account.name}: token resolution failed — returning local error (no failover): ${reason}`,
 			);
-			return createForcedAccountUnavailableResponse(account, reason);
+			return await recordLocalError(reason);
 		}
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
@@ -1250,12 +1293,24 @@ export async function proxyForcedAccount(
 		);
 	} catch (err) {
 		// catch returns a local error Response, NEVER null — force forbids failover.
+		// Routed through forwardToClient so the local failure is recorded under the
+		// forced account (history intact). If recording itself throws (e.g. the
+		// error fired before `provider`/body were set up), fall back to the raw
+		// local error Response so the force contract's "never null" still holds.
 		const reason = err instanceof Error ? err.message : String(err);
 		log.error(
 			`Forced account ${account.name} forward failed (returning local error, no failover):`,
 			err,
 		);
-		return createForcedAccountUnavailableResponse(account, reason);
+		try {
+			return await recordLocalError(reason);
+		} catch (recordErr) {
+			log.error(
+				`Forced account ${account.name}: failed to record local error — returning raw error Response:`,
+				recordErr,
+			);
+			return createForcedAccountUnavailableResponse(account, reason);
+		}
 	}
 }
 

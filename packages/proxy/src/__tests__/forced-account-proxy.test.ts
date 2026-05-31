@@ -366,4 +366,53 @@ describe("force-account proxy override", () => {
 		expect(error.type).toBe("forced_account_unavailable");
 		expect(fetchCount).toBe(0);
 	});
+
+	it("records a forced-mode token-resolution failure in history (recorder begin fires)", async () => {
+		// The forced upstream response is recorded via forwardToClient; this
+		// asserts the forced LOCAL error (dead-token throw) is ALSO recorded so a
+		// forced account with an unrefreshable token still shows up in Request
+		// History rather than vanishing.
+		const forced = makeAccount({
+			id: "forced-oauth-rec",
+			name: "Forced-OAuth-Rec",
+			provider: "claude-oauth",
+			api_key: null,
+			refresh_token: "expired-refresh-token",
+			access_token: null,
+			expires_at: 1, // already expired → triggers refresh attempt → throw
+		});
+
+		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+
+		const { ctx } = makeContext([forced], { providerName: "anthropic" });
+		setForcedAccount("forced-oauth-rec");
+
+		const response = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Local error returned (token resolution failed pre-upstream).
+		expect(response.status).toBe(502);
+
+		// The local failure was recorded under the forced account: recorder.begin
+		// fired (forwardToClient's start/recorder path) AND it was attributed to
+		// the forced account, not NO_ACCOUNT/null.
+		const beginMock = ctx.requestRecorder.begin as ReturnType<typeof mock>;
+		expect(beginMock.mock.calls.length).toBeGreaterThan(0);
+		const recordMeta = beginMock.mock.calls[0][0] as {
+			accountId: string | null;
+			responseStatus: number;
+		};
+		expect(recordMeta.accountId).toBe("forced-oauth-rec");
+		expect(recordMeta.responseStatus).toBe(502);
+
+		// The worker also got a start message for the same request.
+		const postMock = ctx.usageWorker.postMessage as ReturnType<typeof mock>;
+		const startCalls = postMock.mock.calls.filter(
+			(c) => (c[0] as { type?: string }).type === "start",
+		);
+		expect(startCalls.length).toBeGreaterThan(0);
+	});
 });

@@ -305,6 +305,17 @@ export async function handleProxy(
 			// traffic. Clear the force so subsequent requests route normally, but
 			// return an explicit 503 for THIS request rather than silently falling
 			// back — that would violate the absolute-force contract (R2).
+			//
+			// NOTE: this rarest case (forced account deleted between selection and
+			// dispatch) is intentionally left UNRECORDED. recordSyntheticErrorResponse
+			// is defined further below; relocating this early-return past it would
+			// require splitting the forced block (the success path returns above,
+			// before that definition) and reordering it past account selection / the
+			// gate logic — an ordering hazard not worth taking for a case that fires
+			// only when an operator deletes the forced account in the request window.
+			// The high-value forced-mode local errors (dead-token throw, outer catch)
+			// ARE recorded under the forced account via forwardToClient in
+			// proxyForcedAccount.
 			log.error(
 				`Forced account ${forcedId} not found — clearing force and returning 503`,
 			);

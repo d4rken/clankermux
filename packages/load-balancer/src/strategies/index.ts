@@ -620,15 +620,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 						skippedByReason.set(reason, []);
 					}
 					skippedByReason.get(reason)?.push(candidate.name);
-					continue;
 				}
-			}
-
-			// Stop once a recovered candidate is available — the loop exists only
-			// to run the auto-unpause side-effect on candidates ahead of it; there
-			// is nothing left to do once we reach a usable one.
-			if (getCachedAvailability(candidate)) {
-				break;
 			}
 		}
 
