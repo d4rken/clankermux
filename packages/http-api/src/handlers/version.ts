@@ -149,26 +149,29 @@ async function getLatestCommit(
 	return { commit, htmlUrl, cached: false };
 }
 
-// Cache the commits-behind count keyed on the (current, latest) sha pair so a
+// Cache the commit-distance count keyed on the (base, head) sha pair so a
 // re-check with unchanged commits doesn't spend another GitHub compare request.
-interface BehindCacheEntry {
+interface DistanceCacheEntry {
 	base: string;
 	head: string;
 	behindBy: number;
 	timestamp: number;
 }
-let behindCache: BehindCacheEntry | null = null;
+let distanceCache: DistanceCacheEntry | null = null;
 
 /**
- * Count how many commits the local checkout is behind the remote HEAD.
+ * Count how many commits `head` has that `base` lacks (i.e. the number of
+ * commits reachable from `head` but not from `base` — `git rev-list --count
+ * base..head`). Used for both the "behind" and "ahead" directions depending on
+ * which sha is passed as base/head.
  *
- * Tries local git first (free, no rate limit) in case the remote commit object
- * is already present locally; otherwise falls back to GitHub's compare API,
- * whose `ahead_by` is the number of commits the remote `head` has that our
- * `base` lacks — i.e. how many we're behind. Returns null when the count can't
- * be determined (so the UI can simply omit it rather than show a wrong number).
+ * Tries local git first (free, no rate limit) in case both commit objects are
+ * already present locally; otherwise falls back to GitHub's compare API, whose
+ * `ahead_by` is the number of commits `head` has that `base` lacks. Returns null
+ * when the count can't be determined (so the UI can simply omit it rather than
+ * show a wrong number).
  */
-async function getCommitsBehind(
+async function getCommitDistance(
 	repo: string,
 	base: string,
 	head: string,
@@ -181,12 +184,12 @@ async function getCommitsBehind(
 
 	const now = Date.now();
 	if (
-		behindCache &&
-		behindCache.base === base &&
-		behindCache.head === head &&
-		now - behindCache.timestamp < CACHE_DURATION_MS
+		distanceCache &&
+		distanceCache.base === base &&
+		distanceCache.head === head &&
+		now - distanceCache.timestamp < CACHE_DURATION_MS
 	) {
-		return behindCache.behindBy;
+		return distanceCache.behindBy;
 	}
 
 	try {
@@ -202,7 +205,7 @@ async function getCommitsBehind(
 		if (!response.ok) return null;
 		const data = (await response.json()) as { ahead_by?: number };
 		if (typeof data.ahead_by !== "number") return null;
-		behindCache = { base, head, behindBy: data.ahead_by, timestamp: now };
+		distanceCache = { base, head, behindBy: data.ahead_by, timestamp: now };
 		return data.ahead_by;
 	} catch {
 		return null;
@@ -233,16 +236,28 @@ export function createVersionCheckHandler() {
 			// Only spend a compare request when there's actually a gap to measure.
 			const behindBy =
 				status === "available" && current
-					? await getCommitsBehind(repo, current.sha, latest.sha)
+					? await getCommitDistance(repo, current.sha, latest.sha)
 					: status === "current"
 						? 0
 						: null;
+
+			// How many commits the deployment is *ahead* of main (unpushed local
+			// commits). Only meaningful when we're current/ahead; computed local-first
+			// (cheap, since we contain the remote commit) and 0 when we're behind.
+			const aheadBy = !current
+				? null
+				: current.sha === latest.sha
+					? 0
+					: status === "current"
+						? await getCommitDistance(repo, latest.sha, current.sha)
+						: 0;
 
 			return jsonResponse({
 				status,
 				repo,
 				branch,
 				behindBy,
+				aheadBy,
 				current: current
 					? {
 							sha: current.sha,
