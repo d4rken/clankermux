@@ -8,7 +8,8 @@ const log = new Logger("CacheBodyStore");
  *
  * Flow:
  *  1. When a request body is buffered in the proxy, stageRequest() is called.
- *  2. When the post-processor emits a summary, onSummary() is called.
+ *  2. When the inline usage collector finalizes a request, onSummary() is
+ *     called (on every successful finalize, including zero-usage).
  *     - If cacheCreationInputTokens > 0, the staged entry is promoted to the
  *       per-account "last cached request" slot.
  *     - The staging entry is always deleted (request is complete).
@@ -17,12 +18,13 @@ const log = new Logger("CacheBodyStore");
  *
  * Memory bounds:
  *  - staging: one entry per in-flight request. Primarily cleared on completion
- *    (onSummary). Because a request can end WITHOUT a summary (worker restart,
- *    dropped postMessage, all-accounts-failed throw), staging is additionally
- *    bounded by an age sweep (STAGING_MAX_AGE_MS), a hard size cap
- *    (MAX_STAGING_ENTRIES), and discardHandedOffStaged() on worker teardown —
- *    otherwise orphaned ~0.5–1.5 MB bodies leak (cf. oven-sh/bun#5709: off-heap
- *    buffers the allocator never returns while still referenced).
+ *    via onSummary() (every successful finalize) or discardStaged() (finalize
+ *    failure / terminal-no-summary paths). Because a request can still end
+ *    WITHOUT either signal (an all-accounts-failed throw that never reaches
+ *    forwardToClient), staging is additionally bounded by an age sweep
+ *    (STAGING_MAX_AGE_MS) and a hard size cap (MAX_STAGING_ENTRIES) — otherwise
+ *    orphaned ~0.5–1.5 MB bodies leak (cf. oven-sh/bun#5709: off-heap buffers
+ *    the allocator never returns while still referenced).
  *  - lastCachedRequest: one entry per account → bounded by account count.
  *
  * Note: client headers ARE stored because some providers (e.g. Anthropic) copy
@@ -114,11 +116,10 @@ const STRIP_HEADERS = new Set([
 
 /**
  * Hard cap on concurrently-staged request bodies. A safety net: if orphaned
- * entries (requests that complete without a worker summary) ever accumulate
- * faster than the age sweep clears them, this bounds worst-case memory. Each
- * entry holds a full ~0.5–1.5 MB request-body copy, so the cap is sized for
- * realistic in-flight concurrency with generous headroom — not the 10k the
- * post-processor worker tolerates for its tiny per-request state.
+ * entries (requests that complete without onSummary/discardStaged) ever
+ * accumulate faster than the age sweep clears them, this bounds worst-case
+ * memory. Each entry holds a full ~0.5–1.5 MB request-body copy, so the cap is
+ * sized for realistic in-flight concurrency with generous headroom.
  */
 export const MAX_STAGING_ENTRIES = 500;
 
@@ -143,8 +144,8 @@ function resolveEnvMs(name: string, fallback: number): number {
  * The stream portions honor the same CF_STREAM_TOTAL_TIMEOUT_MS /
  * CF_STREAM_CHUNK_TIMEOUT_MS overrides forwardToClient uses, so raising them for
  * long agentic workloads (issue #84) widens this window in lockstep. Anything
- * older lost its worker summary (worker restart, dropped postMessage, or an
- * error before handoff) and would otherwise leak its off-heap body (bun#5709).
+ * older never got an onSummary/discardStaged signal (e.g. an error before the
+ * response handler ran) and would otherwise leak its off-heap body (bun#5709).
  */
 export const STAGING_MAX_AGE_MS =
 	TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS +
@@ -159,15 +160,13 @@ export const STAGING_MAX_AGE_MS =
 
 class CacheBodyStore {
 	/**
-	 * requestId → staged entry while the request is in-flight. `handedOff` flips
-	 * true once forwardToClient posts the worker "start" message; it lets the
-	 * worker-gone handler distinguish entries the dead worker received (true
-	 * orphans) from pre-handoff entries the replacement worker will still
-	 * summarize.
+	 * requestId → staged entry while the request is in-flight. Cleared by
+	 * onSummary() (successful finalize) or discardStaged() (finalize failure /
+	 * terminal-no-summary), with the age sweep + size cap as backstops.
 	 */
 	private staging = new Map<
 		string,
-		{ accountId: string; entry: CachedRequestEntry; handedOff: boolean }
+		{ accountId: string; entry: CachedRequestEntry }
 	>();
 
 	/** accountId → last request that created a cache entry. */
@@ -219,7 +218,6 @@ class CacheBodyStore {
 				path,
 				timestamp: Date.now(),
 			},
-			handedOff: false,
 		});
 
 		// Bound the staging map on the hot path: reap orphaned entries (requests
@@ -231,8 +229,9 @@ class CacheBodyStore {
 	}
 
 	/**
-	 * Called when the post-processor emits a summary for a completed request.
-	 * Promotes to per-account slot if caching was used; always cleans up staging.
+	 * Called when the inline usage collector finalizes a request (every
+	 * successful finalize, including zero-usage). Promotes to the per-account
+	 * slot if caching was used; always cleans up staging.
 	 */
 	onSummary(
 		requestId: string,
@@ -250,46 +249,11 @@ class CacheBodyStore {
 
 	/**
 	 * Remove a single in-flight staged entry without promoting it. For terminal
-	 * request paths that will never produce a worker summary (e.g. all accounts
-	 * failed). Idempotent — a no-op if the entry is already gone.
+	 * request paths that will never produce a summary (e.g. all accounts failed)
+	 * and on finalize failure. Idempotent — a no-op if the entry is already gone.
 	 */
 	discardStaged(requestId: string): void {
 		this.staging.delete(requestId);
-	}
-
-	/**
-	 * Mark a staged entry as handed off to the usage worker (its "start" message
-	 * has been posted). After this, if the worker dies the entry is a true orphan
-	 * — its summary will never arrive — so {@link discardHandedOffStaged} may reap
-	 * it. No-op if the request wasn't staged.
-	 */
-	markStagedHandedOff(requestId: string): void {
-		const staged = this.staging.get(requestId);
-		if (staged) staged.handedOff = true;
-	}
-
-	/**
-	 * Drop staged entries that were already handed to a now-dead usage worker:
-	 * their "start" went to that worker, so no summary will ever arrive and the
-	 * off-heap body would otherwise leak until the age sweep reaps it. Pre-handoff
-	 * entries are PRESERVED — forwardToClient will (re)post their start/end to the
-	 * replacement worker, which can still summarize and promote them. Called from
-	 * UsageWorkerController.onWorkerGone (restart/shutdown); promoted per-account
-	 * slots are untouched.
-	 */
-	discardHandedOffStaged(): void {
-		let discarded = 0;
-		for (const [requestId, staged] of this.staging) {
-			if (staged.handedOff) {
-				this.staging.delete(requestId);
-				discarded++;
-			}
-		}
-		if (discarded > 0) {
-			log.debug(
-				`Discarded ${discarded} staged request(s) handed to a now-gone usage worker`,
-			);
-		}
 	}
 
 	/** Number of in-flight staged request bodies (observability/tests). */

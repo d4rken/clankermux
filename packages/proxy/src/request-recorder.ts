@@ -15,25 +15,22 @@ export { NO_ACCOUNT_ID };
 /**
  * RequestRecorder — main-thread owner of request persistence.
  *
- * Extracted from the post-processor worker to stop transferring large request
- * bodies into the long-lived worker (Bun #5709: structured-clone backing stores
- * are never reclaimed). The worker is slimmed to a pure usage/cost computer;
- * this coordinator owns:
+ * Owns request persistence on the main thread so large request bodies are never
+ * transferred into a long-lived worker (Bun #5709: structured-clone backing
+ * stores are never reclaimed). This coordinator owns:
  *
  *   - the per-request lifecycle state machine + terminal outcomes,
  *   - billingType derivation + account side-effects (auto-pause-on-overage,
  *     updateAccountUsage) fired IMMEDIATELY in begin() (invariant 4),
- *   - the payload JSON envelope (byte-for-byte the worker's old shape so the
- *     Request History reader is unchanged),
+ *   - the payload JSON envelope (stable shape the Request History reader reads),
  *   - FK-ordered persistence (request row → routing row → payload),
  *   - payload-drop policy that never takes the metadata row with it,
  *   - dedupe (persist at most once per requestId),
- *   - a hard CAPTURE_BYTES_BUDGET + age sweep so live snapshots stay bounded
- *     independently of worker timing,
+ *   - a hard CAPTURE_BYTES_BUDGET + age sweep so live snapshots stay bounded,
  *   - emitting the dashboard "summary" RequestResponse event.
  *
  * All collaborators are dependency-injected so it is fully unit-testable without
- * a real worker / DB / timers.
+ * a real DB / timers.
  */
 
 // ---------------------------------------------------------------------------
@@ -85,7 +82,10 @@ export interface RecordMeta {
 	failoverAttempts: number;
 }
 
-/** Slim usage summary posted by the pure usage worker. */
+/**
+ * Slim usage summary produced by the inline usage-collector (see
+ * usage-collector.ts) and attached via {@link RequestRecorder.attachUsageSummary}.
+ */
 export interface SlimUsageSummary {
 	requestId: string;
 	usage: {
@@ -201,8 +201,9 @@ const DEFAULT_CONFIG: RequestRecorderConfig = {
 	// pile up. Sized for realistic in-flight concurrency.
 	CAPTURE_BYTES_BUDGET: 64 * 1024 * 1024,
 	MAX_RECORDS: 5000,
-	// Short grace: the worker computes usage right after the stream ends, so a
-	// couple seconds covers the postMessage round-trip without false-failing.
+	// Short grace: the inline collector finalizes usage right after the stream
+	// ends (an async cost lookup), so a couple seconds covers that gap without
+	// false-failing the record.
 	SUMMARY_GRACE_MS: 5_000,
 	// Backstop: any record older than this is freed/finalized. Aligns with the
 	// longest a live stream may run (cf. cache-body-store STAGING_MAX_AGE_MS).
@@ -453,19 +454,25 @@ export class RequestRecorder {
 	}
 
 	/**
-	 * The usage worker died — summaries for un-summarized records will never
-	 * arrive. Waive usage; finished records persist now, still-streaming records
-	 * keep capturing and persist at their own finishTransport (invariant 5, N1).
+	 * Usage can no longer arrive for this request (e.g. the inline usage finalize
+	 * rejected). Persist the row IMMEDIATELY usage-waived instead of relying on
+	 * the summary-grace timer.
+	 *
+	 * Why not lean on grace: graceful shutdown drains the in-flight finalizers
+	 * and THEN disposes the recorder. A finalize that rejects fast during
+	 * shutdown would otherwise leave the row pending until the grace timer fires
+	 * — but dispose() clears all timers and the map first, so the row is lost
+	 * (B5). Persisting on the reject path closes that window. If transport hasn't
+	 * finished yet (shouldn't happen — the finalize is launched after
+	 * finishTransport) this is a no-op until it does, matching persistWhenReady's
+	 * invariant 5 (never finalize an open transport). Idempotent: a no-op if the
+	 * record is gone or already persisted.
 	 */
-	onWorkerGone(): void {
-		for (const [id, record] of this.records) {
-			if (record.persisted || record.usage !== null) continue;
-			record.usageWaived = true;
-			if (record.transport !== null) {
-				this.persistWhenReady(id);
-			}
-			// else: still streaming → leave it; persists at its own finishTransport.
-		}
+	markUsageUnavailable(requestId: string): void {
+		const record = this.records.get(requestId);
+		if (!record || record.persisted) return;
+		record.usageWaived = true;
+		this.persistWhenReady(requestId);
 	}
 
 	/** Age/byte-pressure backstop — frees memory, never false-fails (invariant 5). */
@@ -551,7 +558,7 @@ export class RequestRecorder {
 	// Internal
 	// -------------------------------------------------------------------------
 
-	/** Port of the worker's billingType derivation (worker.ts:511-552). */
+	/** Derive the billingType from overage headers / provider / explicit override. */
 	private deriveBillingType(meta: RecordMeta): string {
 		const overageInUse =
 			meta.responseHeaders["anthropic-ratelimit-unified-overage-in-use"];
@@ -829,8 +836,8 @@ export class RequestRecorder {
 	}
 
 	/**
-	 * Reproduce worker.ts:874-892 envelope shape byte-for-byte: base64
-	 * request/response bodies + the meta block.
+	 * Build the payload envelope: base64 request/response bodies + the meta block.
+	 * Shape is stable so the Request History reader is unchanged.
 	 */
 	private buildEnvelope(record: InternalRecord, success: boolean): string {
 		const meta = record.meta;
@@ -865,7 +872,7 @@ export class RequestRecorder {
 		});
 	}
 
-	/** Estimate the serialized payload byte budget (cf. worker.ts:827-836). */
+	/** Estimate the serialized payload byte budget before building the envelope. */
 	private estimatePayloadBytes(record: InternalRecord): number {
 		// Request body stored as base64 (~4/3× raw bytes).
 		const reqLen = record.reqBytes?.byteLength ?? 0;
@@ -927,7 +934,7 @@ export class RequestRecorder {
 
 	/**
 	 * Build the RequestData usage shape from the slim summary. promptTokens
-	 * aggregates input + cacheRead + cacheCreation (ports worker.ts:770-783).
+	 * aggregates input + cacheRead + cacheCreation.
 	 */
 	private toRequestUsage(summary: SlimUsageSummary): unknown {
 		const u = summary.usage;

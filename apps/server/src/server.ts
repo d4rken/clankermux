@@ -41,8 +41,7 @@ import {
 	AutoRefreshScheduler,
 	CacheKeepaliveScheduler,
 	dispatchProxyRequest,
-	getUsageWorker,
-	getUsageWorkerHealth,
+	drainPendingUsageFinalizers,
 	getValidAccessToken,
 	handleProxy,
 	type ProxyContext,
@@ -53,9 +52,7 @@ import {
 	setRequestRecorder,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
-	startUsageWorker,
 	stopGlobalTokenHealthChecks,
-	terminateUsageWorker,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
 import { validatePathOrThrow } from "@clankermux/security";
@@ -565,9 +562,8 @@ export default async function startServer(options?: {
 
 	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
 	// This must run before any database operations that read/write payloads.
-	// NOTE: this only initializes the main thread; the post-processor worker
-	// runs `initPayloadEncryption()` itself at module load — Bun workers have
-	// isolated module scopes.
+	// The RequestRecorder writes payloads on this thread, so initializing the
+	// main thread here is sufficient (the DB workers don't touch payloads).
 	await initPayloadEncryption();
 
 	// Initialize components
@@ -676,7 +672,6 @@ export default async function startServer(options?: {
 			tlsEnabled,
 		},
 		getAsyncWriterHealth: () => asyncWriter.getHealth(),
-		getUsageWorkerHealth: () => getUsageWorkerHealth(),
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getStrategy: () => currentStrategy,
 	});
@@ -835,11 +830,9 @@ export default async function startServer(options?: {
 	strategy.initialize?.(strategyStore);
 	currentStrategy = strategy;
 
-	// Start usage worker eagerly (before first request)
-	startUsageWorker();
-
-	// Proxy context
-	const usageWorker = getUsageWorker();
+	// Proxy context. Usage is computed inline on the main thread (no worker):
+	// forwardToClient feeds the per-request UsageState and finalizes it after
+	// transport finish, attaching the summary to the RequestRecorder.
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -848,7 +841,6 @@ export default async function startServer(options?: {
 		provider,
 		refreshInFlight: new Map(),
 		asyncWriter,
-		usageWorker,
 		requestRecorder,
 	};
 
@@ -1567,12 +1559,14 @@ async function handleGracefulShutdown(signal: string) {
 		// analytics calls are being accepted.
 		terminateAnalyticsWorker();
 
-		// Now that streams have finished, the usage worker has received all
-		// end-of-stream analytics messages. Terminate it so its DB writes
-		// flush into the AsyncDbWriter queue before we dispose that.
-		await terminateUsageWorker();
+		// Usage is now finalized inline (no worker). The HTTP drain above means
+		// no new streams will start, but in-flight finalizers (the async cost
+		// lookup that runs after transport finish) may still be settling. Await
+		// them — bounded — so their attachUsageSummary/onSummary land BEFORE we
+		// dispose the RequestRecorder + AsyncDbWriter below (R6).
+		await drainPendingUsageFinalizers();
 
-		// Flush AsyncDbWriter and other Disposables.
+		// Flush AsyncDbWriter and other Disposables (recorder.dispose runs here).
 		await shutdown();
 
 		console.log("✅ Shutdown complete");

@@ -50,13 +50,10 @@ export {
 	isProviderOverloaded,
 } from "./provider-overload-cooldown";
 export {
-	getUsageWorker,
-	getUsageWorkerHealth,
+	getRequestRecorder,
 	handleProxy,
 	type ProxyContext,
 	setRequestRecorder,
-	startUsageWorker,
-	terminateUsageWorker,
 } from "./proxy";
 export {
 	type RecordMeta,
@@ -68,15 +65,8 @@ export {
 	type TransportOutcome,
 } from "./request-recorder";
 export {
+	drainPendingUsageFinalizers,
 	forwardToClient,
 	type ResponseHandlerOptions,
 } from "./response-handler";
 export type { ProxyRequest, ProxyResponse } from "./types";
-export type { UsageWorkerHealth } from "./usage-worker-controller";
-export type {
-	ChunkMessage,
-	ControlMessage,
-	EndMessage,
-	StartMessage,
-	WorkerMessage,
-} from "./worker-messages";

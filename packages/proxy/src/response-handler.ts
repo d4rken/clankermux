@@ -21,8 +21,13 @@ import {
 import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { shouldRecordRequest } from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
-import type { UsageWorkerController } from "./usage-worker-controller";
-import type { ChunkMessage, EndMessage, StartMessage } from "./worker-messages";
+import {
+	createUsageState,
+	feedChunk,
+	feedNonStreamBody,
+	finalizeUsage,
+	type UsageState,
+} from "./usage-collector";
 
 /**
  * Map a stream-analytics error to a transport outcome for the recorder. The
@@ -56,24 +61,84 @@ function getMidStreamRateLimitCooldownMs(): number {
 const log = new Logger("ResponseHandler");
 const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
-function safePostMessage(
-	worker: UsageWorkerController,
-	message: StartMessage | ChunkMessage | EndMessage,
-	transfer?: Transferable[],
+/**
+ * In-flight usage-finalize promises. The worker used to compute usage off the
+ * hot path; now `finalizeUsage` runs on the main thread as a tracked promise
+ * AFTER `recorder.finishTransport`. Each promise is added here on launch and
+ * removed on settle so graceful shutdown can await the stragglers via
+ * {@link drainPendingUsageFinalizers} before the recorder / async-writer are
+ * disposed (R6 — without this the in-flight finalizers would be lost, exactly
+ * as `terminateUsageWorker()` used to guard against).
+ */
+const pendingUsageFinalizers = new Set<Promise<void>>();
+
+/**
+ * Launch a usage finalize for `requestId` as a tracked promise. On resolve it
+ * drives `cacheBodyStore.onSummary` (staging promotion/cleanup) + the
+ * recorder's `attachUsageSummary`; on reject it discards the staged body and
+ * leaves the recorder's grace path to persist the row usage-less. The promise
+ * never rejects out of this helper (errors are swallowed after cleanup) so a
+ * finalize failure can't crash the stream callback or the drain.
+ */
+function trackFinalize(
+	state: UsageState,
+	requestId: string,
+	opts: {
+		responseTimeMs: number;
+		providerName: string;
+		isStream: boolean;
+		endedCleanly: boolean;
+	},
+	ctx: ProxyContext,
 ): void {
-	try {
-		worker.postMessage(message, transfer);
-	} catch (error) {
-		// Worker "not ready" throws are expected during startup/shutdown —
-		// silently ignore those. Log anything else (e.g. DataCloneError from a
-		// bad transferable) at warn level for observability.
-		if (error instanceof Error && !error.message.includes("worker state is")) {
-			const { requestId } = message as { requestId?: string };
-			log.warn(
-				`Unexpected postMessage failure for ${requestId ?? "?"}: ${error.name}: ${error.message}`,
+	const promise = finalizeUsage(state, opts)
+		.then((summary) => {
+			cacheBodyStore.onSummary(
+				requestId,
+				summary.usage.cacheCreationInputTokens ??
+					summary.cacheCreationInputTokens,
 			);
-		}
-	}
+			ctx.requestRecorder.attachUsageSummary(requestId, {
+				...summary,
+				requestId,
+			});
+		})
+		.catch((error) => {
+			// Finalize failed — no summary will ever arrive. Drop the staged body
+			// now and persist the row IMMEDIATELY usage-waived rather than waiting on
+			// the recorder's grace timer: during shutdown the finalizer drain runs
+			// THEN dispose() clears the recorder, so a fast reject that left the row
+			// for grace would lose it (B5). markUsageUnavailable closes that window.
+			cacheBodyStore.discardStaged(requestId);
+			ctx.requestRecorder.markUsageUnavailable(requestId);
+			log.warn(
+				`Usage finalize failed for ${requestId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		})
+		.finally(() => {
+			pendingUsageFinalizers.delete(promise);
+		});
+	pendingUsageFinalizers.add(promise);
+}
+
+/**
+ * Await all in-flight usage finalizers, bounded by `timeoutMs`. Called from the
+ * server's graceful shutdown BEFORE the recorder + async-writer are disposed so
+ * a finalize that lands during drain can still attach its usage and enqueue the
+ * patch write. Resolves on timeout regardless (best-effort) — shutdown must not
+ * hang on a stuck cost lookup.
+ */
+export async function drainPendingUsageFinalizers(
+	timeoutMs = 5_000,
+): Promise<void> {
+	if (pendingUsageFinalizers.size === 0) return;
+	const all = Promise.allSettled([...pendingUsageFinalizers]);
+	const timeout = new Promise<void>((resolve) => {
+		setTimeout(resolve, timeoutMs);
+	});
+	await Promise.race([all.then(() => undefined), timeout]);
 }
 
 /**
@@ -110,10 +175,11 @@ export interface ResponseHandlerOptions {
 }
 
 /**
- * Unified response handler that immediately streams responses
- * while forwarding data to worker for async processing
+ * Unified response handler that immediately streams the response to the client
+ * while computing usage inline (no worker). Per chunk: feed the UsageState +
+ * capture the (capped) body for Request History; at transport finish: finalize
+ * usage as a tracked async promise and attach it to the RequestRecorder.
  */
-// Forward response to client while streaming analytics to worker
 export async function forwardToClient(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
@@ -151,7 +217,7 @@ export async function forwardToClient(
 
 	// Canonical recordable-request predicate (S1): the UNION of the historical
 	// response-handler filter (count_tokens-on-openai-compatible, auto-refresh
-	// probes) and the worker filter (.well-known 404s). Gates the worker post,
+	// probes) and the .well-known-404 filter. Gates the inline usage collection,
 	// the dashboard start event, AND recorder.begin so the three stay in sync.
 	const shouldProcessRequest = shouldRecordRequest({
 		method,
@@ -174,38 +240,17 @@ export async function forwardToClient(
 			}
 		: null;
 
-	// Send START message immediately if not filtered. The worker is now a pure
-	// usage computer — it no longer receives the request body (no transfer).
-	if (shouldProcessRequest) {
-		const startMessage: StartMessage = {
-			type: "start",
-			messageId: crypto.randomUUID(),
-			requestId,
-			accountId: account?.id || null,
-			method,
-			path,
-			timestamp,
-			requestHeaders: requestHeadersObj,
-			project: project ?? null,
-			responseStatus: response.status,
-			responseHeaders: responseHeadersObj,
-			isStream,
-			providerName: ctx.provider.name,
-			accountBillingType: account?.billing_type ?? null,
-			accountAutoPauseOnOverageEnabled: account?.auto_pause_on_overage_enabled
-				? 1
-				: 0,
-			accountName: account?.name ?? null,
-			agentUsed: agentUsed || null,
-			comboName: comboName || null,
-			apiKeyId: apiKeyId || null,
-			apiKeyName: apiKeyName || null,
-			retryAttempt,
-			failoverAttempts,
-			routing: routingRecord,
-		};
-		safePostMessage(ctx.usageWorker, startMessage);
+	// Per-request usage accumulator. Created here when the request is recordable
+	// and held for the streaming callbacks / non-stream IIFE below, replacing the
+	// post-processor worker entirely: `feedChunk`/`feedNonStreamBody` accumulate
+	// counters + first/last timestamps inline, and `finalizeUsage` resolves the
+	// SlimUsageSummary AFTER transport finish (see trackFinalize). Null for
+	// filtered requests (no usage computed for them, same as before).
+	const usageState: UsageState | null = shouldProcessRequest
+		? createUsageState()
+		: null;
 
+	if (shouldProcessRequest) {
 		// Begin recording on the main thread. The recorder fires account
 		// side-effects immediately (auto-pause-on-overage, updateAccountUsage),
 		// captures the (capped) request body within its byte budget, and owns
@@ -246,11 +291,6 @@ export async function forwardToClient(
 			failoverAttempts,
 		};
 		ctx.requestRecorder.begin(recordMeta);
-
-		// The cache-keepalive staging entry (if any) has now been handed to the
-		// worker; mark it so a worker restart can reap it as a true orphan while
-		// preserving entries not yet handed off. No-op for non-staged requests.
-		cacheBodyStore.markStagedHandedOff(requestId);
 	}
 
 	// Emit request start event for real-time dashboard
@@ -304,15 +344,12 @@ export async function forwardToClient(
 			totalTimeoutMs: STREAM_TIMEOUT_MS,
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
 			onChunk: (value) => {
-				if (shouldProcessRequest) {
-					// Post every chunk to the worker UNCAPPED so tiktoken
-					// output-token counting matches the full output (N2).
-					const chunkMsg: ChunkMessage = {
-						type: "chunk",
-						requestId,
-						data: value,
-					};
-					safePostMessage(ctx.usageWorker, chunkMsg);
+				if (usageState) {
+					// Feed the chunk to the inline usage collector (decode + cheap
+					// substring guard; only message_start/message_delta are parsed).
+					// Nothing crosses a worker boundary, so there is no off-heap
+					// structured-clone retention (Bun #5709).
+					feedChunk(usageState, value, Date.now());
 					// The recorder captures the (256KB-capped) response body for
 					// Request History.
 					ctx.requestRecorder.captureResponseChunk(requestId, value);
@@ -339,31 +376,55 @@ export async function forwardToClient(
 				}
 			},
 			onEnd: () => {
-				if (shouldProcessRequest) {
-					const endMsg: EndMessage = {
-						type: "end",
-						requestId,
-						success,
-					};
-					safePostMessage(ctx.usageWorker, endMsg);
+				if (usageState) {
+					// R3: finish transport FIRST (terminal responseTimeMs computed
+					// here), then finalize usage as a tracked async promise. The stream
+					// drained to completion → endedCleanly so the provider's reported
+					// output count is trusted (R5).
+					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
 						success ? "success" : "error",
 					);
+					trackFinalize(
+						usageState,
+						requestId,
+						{
+							responseTimeMs,
+							providerName: ctx.provider.name,
+							isStream: true,
+							// onEnd fires when the upstream stream reaches its natural end
+							// (the reader saw `done`), so the body was NOT truncated →
+							// endedCleanly when the transport also succeeded. A seen
+							// `message_stop` further confirms it but is not required. Only
+							// onError (disconnect/timeout/read error) marks non-clean.
+							endedCleanly: success || usageState.sawMessageStop,
+						},
+						ctx,
+					);
 				}
 			},
 			onError: (err) => {
-				if (shouldProcessRequest) {
-					const endMsg: EndMessage = {
-						type: "end",
-						requestId,
-						success: false,
-						error: err.message,
-					};
-					safePostMessage(ctx.usageWorker, endMsg);
+				if (usageState) {
+					// R3: finish transport FIRST, then finalize on the partial stream.
+					// The stream was cut (disconnect/timeout/error) → NOT endedCleanly,
+					// so finalize takes max(providerCount, bytes/4) to avoid
+					// undercounting a truncated response (R5).
+					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
 						streamErrorToOutcome(err),
+					);
+					trackFinalize(
+						usageState,
+						requestId,
+						{
+							responseTimeMs,
+							providerName: ctx.provider.name,
+							isStream: true,
+							endedCleanly: false,
+						},
+						ctx,
 					);
 				}
 			},
@@ -378,21 +439,30 @@ export async function forwardToClient(
 	}
 
 	/*********************************************************************
-	 *  NON-STREAMING RESPONSES — read body in background, send END once
+	 *  NON-STREAMING RESPONSES — read body in background, finalize once
 	 *********************************************************************/
 	if (!response.body) {
-		if (shouldProcessRequest) {
+		if (usageState) {
+			// No body to parse — finish transport, then finalize (empty usage state
+			// → zero output, no provider count). Keeps the same record lifecycle as
+			// a body-carrying response without special-casing the recorder. A
+			// no-body response is a complete transport → endedCleanly.
 			const success = isExpectedResponse(path, response);
-			const endMsg: EndMessage = {
-				type: "end",
-				requestId,
-				responseBody: null,
-				success,
-			};
-			safePostMessage(ctx.usageWorker, endMsg);
+			const responseTimeMs = Math.max(0, Date.now() - timestamp);
 			ctx.requestRecorder.finishTransport(
 				requestId,
 				success ? "success" : "error",
+			);
+			trackFinalize(
+				usageState,
+				requestId,
+				{
+					responseTimeMs,
+					providerName: ctx.provider.name,
+					isStream: false,
+					endedCleanly: true,
+				},
+				ctx,
 			);
 		}
 
@@ -439,37 +509,58 @@ export async function forwardToClient(
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}
-			if (shouldProcessRequest) {
+			if (usageState) {
 				const success = isExpectedResponse(path, analyticsResponse);
-				// Feed the captured (256KB-capped) body to the recorder, then
-				// finalize transport — INSIDE the IIFE, after cappedBuf is read
-				// (amendment B4: never after `})();`, which runs before the read).
+				// Capture the (256KB-capped) body for Request History, then — INSIDE
+				// the IIFE, after cappedBuf is read (B4: never after `})();`, which
+				// runs before the read) — finish transport FIRST (R3), then feed the
+				// capped body to the inline collector and finalize as a tracked
+				// promise.
 				if (cappedBuf.byteLength > 0) {
 					ctx.requestRecorder.captureResponseChunk(requestId, cappedBuf);
 				}
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					responseBody:
-						cappedBuf.byteLength > 0 ? cappedBuf.toString("base64") : null,
-					success,
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
+				const responseTimeMs = Math.max(0, Date.now() - timestamp);
 				ctx.requestRecorder.finishTransport(
 					requestId,
 					success ? "success" : "error",
 				);
+				if (cappedBuf.byteLength > 0) {
+					feedNonStreamBody(usageState, cappedBuf.toString("utf8"));
+				}
+				trackFinalize(
+					usageState,
+					requestId,
+					{
+						responseTimeMs,
+						providerName: ctx.provider.name,
+						isStream: false,
+						// Body was fully read (capped) → complete transport, clean end.
+						endedCleanly: true,
+					},
+					ctx,
+				);
 			}
 		} catch (err) {
-			if (shouldProcessRequest) {
-				const endMsg: EndMessage = {
-					type: "end",
-					requestId,
-					success: false,
-					error: (err as Error).message,
-				};
-				safePostMessage(ctx.usageWorker, endMsg);
+			if (usageState) {
+				// Body read failed — finish transport as an error, then finalize on
+				// whatever (empty) state we have so the staging path is still driven.
+				// The read was interrupted → NOT endedCleanly.
+				const responseTimeMs = Math.max(0, Date.now() - timestamp);
 				ctx.requestRecorder.finishTransport(requestId, "error");
+				trackFinalize(
+					usageState,
+					requestId,
+					{
+						responseTimeMs,
+						providerName: ctx.provider.name,
+						isStream: false,
+						endedCleanly: false,
+					},
+					ctx,
+				);
+				log.debug(
+					`Non-stream body read failed for ${requestId}: ${(err as Error).message}`,
+				);
 			}
 		}
 	})();

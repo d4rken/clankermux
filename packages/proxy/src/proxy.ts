@@ -41,8 +41,6 @@ import { extractRequestAffinity } from "./request-affinity";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { shouldRecordRequest } from "./should-record-request";
-import { UsageWorkerController } from "./usage-worker-controller";
-import type { SummaryMessage } from "./worker-messages";
 
 export type { ProxyContext } from "./handlers";
 
@@ -104,63 +102,25 @@ function extractProjectFromRequest(
 	return null;
 }
 
-// ===== WORKER MANAGEMENT =====
+// ===== REQUEST RECORDER WIRING =====
 
-// The UsageWorkerController is module-scoped and constructed before any
-// ProxyContext exists, but its onSummary callback must route the worker's slim
-// usage summary into the main-thread RequestRecorder (which owns persistence +
-// the dashboard "summary" event). Wire the recorder via a module-level setter
-// that server.ts calls once it has instantiated the recorder.
+// The RequestRecorder owns request persistence + the dashboard "summary" event.
+// Usage is now computed inline on the main thread (see response-handler.ts +
+// usage-collector.ts) — the post-processor worker has been retired entirely, so
+// there is no module-scoped controller or onSummary callback to wire anymore.
+// server.ts still constructs the recorder and registers it here; the handler
+// reads ctx.requestRecorder directly, and the module-level reference is kept
+// only for symmetry with the previous wiring (currently unused at module scope).
 let requestRecorder: RequestRecorder | null = null;
 
 export function setRequestRecorder(recorder: RequestRecorder): void {
 	requestRecorder = recorder;
 }
 
-const usageWorkerController = new UsageWorkerController(
-	(msg: SummaryMessage) => {
-		// Both fields survive the slim summary shape (S4): cache-body-store needs
-		// cacheCreationInputTokens to promote staged bodies; the recorder merges
-		// the usage and emits the dashboard "summary" event itself.
-		cacheBodyStore.onSummary(
-			msg.summary.requestId,
-			msg.summary.cacheCreationInputTokens,
-		);
-		requestRecorder?.attachUsageSummary(msg.summary.requestId, msg.summary);
-	},
-	() => {
-		// Worker ready — no deferred config to apply. The slim worker no longer
-		// stores payloads, so the storePayloads ConfigUpdate plumbing is gone
-		// (S3); the recorder reads ctx.config.getStorePayloads() live instead.
-	},
-);
-
-// When the usage worker is destroyed (restart or shutdown), requests whose
-// "start" was already handed to that worker will never be summarized — drop
-// their staged bodies so they can't leak, and waive usage on the recorder's
-// un-summarized records (finished ones persist now; still-streaming ones
-// persist at their own transport-finish). Pre-handoff entries are preserved:
-// forwardToClient posts their start/end to the replacement worker, which can
-// still summarize and promote them. Promoted per-account slots are untouched.
-usageWorkerController.onWorkerGone = () => {
-	cacheBodyStore.discardHandedOffStaged();
-	requestRecorder?.onWorkerGone();
-};
-
-export function getUsageWorker(): UsageWorkerController {
-	return usageWorkerController;
-}
-
-export function startUsageWorker(): void {
-	usageWorkerController.start();
-}
-
-export function terminateUsageWorker(): Promise<void> {
-	return usageWorkerController.terminate();
-}
-
-export function getUsageWorkerHealth() {
-	return usageWorkerController.getHealth();
+// Read accessor kept so the reference isn't flagged unused; callers use
+// ctx.requestRecorder, not this.
+export function getRequestRecorder(): RequestRecorder | null {
+	return requestRecorder;
 }
 
 // ===== MAIN HANDLER =====

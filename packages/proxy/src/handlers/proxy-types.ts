@@ -3,7 +3,6 @@ import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import type { Provider } from "@clankermux/providers";
 import type { LoadBalancingStrategy } from "@clankermux/types";
 import type { RequestRecorder } from "../request-recorder";
-import type { UsageWorkerController } from "../usage-worker-controller";
 
 export interface ProxyContext {
 	strategy: LoadBalancingStrategy;
@@ -13,12 +12,12 @@ export interface ProxyContext {
 	provider: Provider;
 	refreshInFlight: Map<string, Promise<string>>;
 	asyncWriter: AsyncDbWriter;
-	usageWorker: UsageWorkerController;
 	/**
 	 * Main-thread owner of request persistence (request/routing/payload rows,
-	 * billingType, account side-effects, dashboard summary events). The usage
-	 * worker is now a pure usage computer; the recorder merges its slim summary
-	 * with captured payload + meta. See request-recorder.ts.
+	 * billingType, account side-effects, dashboard summary events). Usage is
+	 * computed inline (usage-collector.ts) and attached via the recorder's
+	 * attachUsageSummary — the post-processor worker has been retired. See
+	 * request-recorder.ts.
 	 */
 	requestRecorder: RequestRecorder;
 }
@@ -34,11 +33,6 @@ export const ERROR_MESSAGES = {
 	TOKEN_REFRESH_FAILED: "Failed to refresh access token",
 	PROXY_REQUEST_FAILED: "Failed to proxy request with account",
 	POOL_EXHAUSTED: "All accounts are temporarily unavailable",
-} as const;
-
-/** Timing constants */
-export const TIMING = {
-	WORKER_SHUTDOWN_DELAY: 100, // ms
 } as const;
 
 /** HTTP headers used in proxy operations */

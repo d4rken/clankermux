@@ -9,7 +9,6 @@ import {
 import { computeHealthStatus, computePoolStatus } from "./health";
 
 type AsyncWriterHealthFn = () => { healthy: boolean };
-type UsageWorkerHealthFn = () => { state: string };
 type IntegrityStatusFn = () => IntegrityStatus;
 
 /**
@@ -26,7 +25,6 @@ export function createSystemStatusHandler(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
-	getUsageWorkerHealth?: UsageWorkerHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
 ) {
 	return async (): Promise<Response> => {
@@ -38,14 +36,11 @@ export function createSystemStatusHandler(
 			const asyncWriterHealthy = getAsyncWriterHealth
 				? getAsyncWriterHealth().healthy
 				: true;
-			const usageWorkerState = getUsageWorkerHealth
-				? getUsageWorkerHealth().state
-				: "ok";
 			const integrityStatus = getIntegrityStatus
 				? getIntegrityStatus().status
 				: "unchecked";
 
-			const runtimeHealthy = asyncWriterHealthy && usageWorkerState !== "error";
+			const runtimeHealthy = asyncWriterHealthy;
 			const status = computeHealthStatus(runtimeHealthy, pool);
 
 			const rss = process.memoryUsage.rss();
@@ -59,7 +54,6 @@ export function createSystemStatusHandler(
 				pool,
 				runtime: {
 					asyncWriterHealthy,
-					usageWorkerState,
 					integrityStatus,
 				},
 				strategy: config.getStrategy(),

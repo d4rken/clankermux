@@ -9,10 +9,6 @@ import {
 	isProviderOverloaded,
 } from "../provider-overload-cooldown";
 
-mock.module("../inline-worker", () => ({
-	EMBEDDED_WORKER_CODE: "",
-}));
-
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
 		id: "acc-1",
@@ -92,14 +88,13 @@ function makeContext(accounts: Account[]): ProxyContext {
 		provider: getProvider("anthropic") as never,
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => undefined) } as never,
-		usageWorker: { postMessage: mock(() => undefined) } as never,
 		requestRecorder: {
 			begin: mock(() => undefined),
 			captureResponseChunk: mock(() => undefined),
 			finishTransport: mock(() => undefined),
 			attachUsageSummary: mock(() => undefined),
+			markUsageUnavailable: mock(() => undefined),
 			recordSynthetic: mock(() => undefined),
-			onWorkerGone: mock(() => undefined),
 			sweep: mock(() => undefined),
 			dispose: mock(() => undefined),
 		} as never,
@@ -151,6 +146,18 @@ describe("provider overload cooldown", () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
 			const request =
 				input instanceof Request ? input : new Request(String(input));
+
+			// Usage cost is now computed inline on the main thread (the worker was
+			// retired), so estimateCostUSD's pricing-catalogue fetch (models.dev)
+			// goes through this mock. Stub it WITHOUT counting it so `calls` still
+			// reflects only the proxied upstream-provider attempts.
+			if (request.url.includes("models.dev")) {
+				return new Response("{}", {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+
 			calls.push(request.url);
 
 			if (request.url.includes("api.anthropic.com")) {

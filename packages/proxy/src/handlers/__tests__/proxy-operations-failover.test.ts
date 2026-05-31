@@ -1,5 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import type { Account, RequestMeta } from "@clankermux/types";
+import { cacheBodyStore } from "../../cache-body-store";
 import {
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
@@ -100,15 +109,14 @@ function makeProxyContext(): ProxyContext {
 		} as never,
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => {}) } as never,
-		usageWorker: { postMessage: mock(() => {}) } as never,
 		config: { getStorePayloads: () => true } as never,
 		requestRecorder: {
 			begin: mock(() => {}),
 			captureResponseChunk: mock(() => {}),
 			finishTransport: mock(() => {}),
 			attachUsageSummary: mock(() => {}),
+			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
-			onWorkerGone: mock(() => {}),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
 		} as never,
@@ -890,5 +898,74 @@ describe("proxyWithAccount — 401 failover", () => {
 
 		expect(result).not.toBeNull();
 		expect(result?.status).toBe(200);
+	});
+});
+
+describe("proxyWithAccount — staged-body cleanup on direct model-not-found return (B4)", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		cacheBodyStore.setEnabled(true);
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		cacheBodyStore.setEnabled(false);
+		mock.restore();
+	});
+
+	// A cacheable body: /v1/messages + a cache_control hint so stageRequest stages it.
+	function makeCacheableBody() {
+		const body = JSON.stringify({
+			model: "claude-sonnet-4-5",
+			messages: [{ role: "user", content: "hello" }],
+			system: [
+				{ type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+			],
+			max_tokens: 10,
+		});
+		return new TextEncoder().encode(body).buffer;
+	}
+
+	it("discards the staged body before forwarding a model-not-found 404 directly", async () => {
+		// 404 model-not-found (not 429) with no model fallbacks → the direct
+		// withSanitizedProxyHeaders return path that bypasses forwardToClient.
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						type: "not_found_error",
+						code: "model_not_found",
+						message: "model not found: does not exist",
+					},
+				},
+				404,
+			),
+		);
+
+		const discardSpy = spyOn(cacheBodyStore, "discardStaged");
+
+		const bodyBuffer = makeCacheableBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount(), // no model_fallbacks → modelList length <= 1
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		// The model-not-found response is forwarded directly (not null/failover).
+		expect(result).not.toBeNull();
+		expect(result?.status).toBe(404);
+		// The staged body for this request id was discarded on the direct return,
+		// so it doesn't leak until the age sweep.
+		expect(discardSpy).toHaveBeenCalledWith("req-1");
+		// And nothing is left staged.
+		expect(cacheBodyStore.getStagingSize()).toBe(0);
 	});
 });

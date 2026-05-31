@@ -54,17 +54,12 @@ describe("health runtime payload", () => {
 			getStrategy: () => "session",
 		} as unknown as import("@clankermux/config").Config;
 
-		const handler = createHealthHandler(
-			db,
-			config,
-			() => ({ healthy: true, failureCount: 0, recentDrops: 0, queuedJobs: 2 }),
-			() => ({
-				state: "healthy",
-				pendingAcks: 1,
-				lastError: null,
-				startedAt: 123,
-			}),
-		);
+		const handler = createHealthHandler(db, config, () => ({
+			healthy: true,
+			failureCount: 0,
+			recentDrops: 0,
+			queuedJobs: 2,
+		}));
 
 		const url = new URL("http://localhost/health");
 		const response = await handler(url);
@@ -81,12 +76,8 @@ describe("health runtime payload", () => {
 			recentDrops: 0,
 			queuedJobs: 2,
 		});
-		expect(body.runtime.usageWorker).toEqual({
-			state: "healthy",
-			pendingAcks: 1,
-			lastError: null,
-			startedAt: 123,
-		});
+		// The usage worker has been retired — only asyncWriter (+ storage) remain.
+		expect(body.runtime.usageWorker).toBeUndefined();
 	});
 
 	it("omits runtime health when callbacks are not provided", async () => {
