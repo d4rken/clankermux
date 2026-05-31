@@ -517,20 +517,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const isAvailable = (account: Account): boolean =>
 			isPeekAvailable(account, now);
 
-		// Mirror the auto-fallback path from select(), but without unpausing.
-		// When fallback would trigger, select() re-evaluates the priority queue
-		// and returns the highest-priority available account — chosenFallback
-		// only ends up first if it happens to outrank everyone else. Peek must
-		// match that, otherwise a lower-priority fallback candidate gets
-		// flagged Primary while a higher-priority non-fallback account is the
-		// one that would actually be picked.
-		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
-		const fallbackTriggered = fallbackCandidates.some((c) => isAvailable(c));
-		if (fallbackTriggered) {
-			const sorted = this.sortAvailableAccounts(accounts, isAvailable, now);
-			return sorted[0]?.id ?? null;
-		}
-
+		// peek() has no RequestMeta, so it has no per-request affinity — it is the
+		// "would-be primary absent affinity" estimate. Mirroring select()'s
+		// affinity-first behavior: the auto-fallback re-route precedence and the
+		// global-session priority override are both gone. An active session keeps
+		// its account (immune to priority edits); otherwise FEFO/priority decides.
 		let activeAccount: Account | null = null;
 		let mostRecentSessionStart = 0;
 		for (const account of accounts) {
@@ -545,18 +536,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		}
 
 		if (activeAccount && isAvailable(activeAccount)) {
-			const higherPriorityAccount = accounts
-				.filter(
-					(a) =>
-						a.id !== activeAccount.id &&
-						isAvailable(a) &&
-						a.priority < activeAccount.priority,
-				)
-				.sort((a, b) => a.priority - b.priority)[0];
-
-			if (!higherPriorityAccount) {
-				return activeAccount.id;
-			}
+			return activeAccount.id;
 		}
 
 		const available = this.sortAvailableAccounts(accounts, isAvailable, now);
@@ -584,10 +564,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			return availabilityCache.get(account.id) || false;
 		};
 
-		// Check for higher priority accounts that have become available due to rate limit reset.
-		// Iterate through all candidates in priority order to find the first usable one.
+		// Auto-unpause side-effect: recovered auto_fallback_enabled accounts that
+		// were paused for a safe reason (overage / rate_limit_window) are returned
+		// to the pool here, BEFORE affinity/session resolution runs, so they are
+		// candidates for the affinity / fresh-pick paths below. We deliberately do
+		// NOT early-return a re-sorted pool from this loop: pinned sessions stay on
+		// their account (priority/FEFO govern only new/unpinned picks), and the
+		// normal selection path already routes new sessions to the best available
+		// account once the unpause has run.
 		const fallbackCandidates = this.checkForAutoFallbackAccounts(accounts, now);
-		let chosenFallback: Account | null = null;
 		const skippedByReason = new Map<string, string[]>();
 		for (const candidate of fallbackCandidates) {
 			// If the candidate is paused, only auto-unpause if it was paused due to
@@ -616,8 +601,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				}
 			}
 
+			// Stop once a recovered candidate is available — the loop exists only
+			// to run the auto-unpause side-effect on candidates ahead of it; there
+			// is nothing left to do once we reach a usable one.
 			if (getCachedAvailability(candidate)) {
-				chosenFallback = candidate;
 				break;
 			}
 		}
@@ -626,41 +613,6 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			this.log.info(
 				`Skipping auto-unpause of ${names.length} account(s) paused for '${reason}': ${names.join(", ")}`,
 			);
-		}
-
-		if (chosenFallback !== null) {
-			const available = this.sortAvailableAccounts(
-				accounts,
-				getCachedAvailability,
-				now,
-			);
-			const servingAccount = available[0] ?? chosenFallback;
-
-			if (!bypassSession) {
-				this.resetSessionIfExpired(servingAccount);
-				this.rememberAffinity(meta, servingAccount, now);
-			}
-			this.log.info(
-				`Auto-fallback triggered to account ${chosenFallback.name} (priority: ${chosenFallback.priority}, auto-fallback enabled)`,
-			);
-			// Return all available accounts sorted by priority — chosenFallback will appear
-			// first naturally if it is the highest-priority available account, avoiding
-			// priority inversion when other accounts rank higher.
-			this.setRoutingMeta(
-				meta,
-				"auto_fallback",
-				servingAccount,
-				available.length,
-			);
-			this.recordComparatorPick(servingAccount);
-			this.logSelection(
-				"auto_fallback",
-				servingAccount,
-				accounts,
-				getCachedAvailability,
-				now,
-			);
-			return available;
 		}
 
 		if (!bypassSession) {
@@ -677,78 +629,38 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 			if (resolution.kind === "hit") {
 				const affinedAccount = resolution.account;
-				const higherPriorityAccount = accounts
-					.filter(
-						(a) =>
-							a.id !== affinedAccount.id &&
-							getCachedAvailability(a) &&
-							a.priority < affinedAccount.priority,
-					)
-					.sort((a, b) => a.priority - b.priority)[0];
-
-				if (!higherPriorityAccount) {
-					this.resetSessionIfExpired(affinedAccount);
-					this.rememberAffinity(meta, affinedAccount, now);
-					this.log.info(
-						`Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
-					);
-					// FEFO-consistent fallback tail: order the non-sticky candidates
-					// through the capacity comparator, not bare priority. The sticky
-					// primary stays prepended.
-					const others = this.sortAvailableAccounts(
-						accounts.filter((a) => a.id !== affinedAccount.id),
-						getCachedAvailability,
-						now,
-					);
-					this.setRoutingMeta(
-						meta,
-						"affinity_hit",
-						affinedAccount,
-						others.length + 1,
-						{ affinityKey, previousAccountId },
-					);
-					this.logSelection(
-						"affinity_hit",
-						affinedAccount,
-						accounts,
-						getCachedAvailability,
-						now,
-					);
-					return [affinedAccount, ...others];
-				}
-
-				// Priority beats stickiness: route to the highest-priority
-				// available account and re-pin affinity there. (The user's
-				// explicit priority ranking takes precedence over cache warmth.)
+				// Affinity-first: a pinned session that is available ALWAYS keeps its
+				// account, immune to priority edits and auto-fallback recovery.
+				// Priority/FEFO govern only new/unpinned picks — never an established
+				// pin while its account is healthy.
+				this.resetSessionIfExpired(affinedAccount);
+				this.rememberAffinity(meta, affinedAccount, now);
 				this.log.info(
-					`Skipping ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (priority: ${affinedAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
+					`Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
 				);
-				const available = this.sortAvailableAccounts(
-					accounts,
+				// FEFO-consistent fallback tail: order the non-sticky candidates
+				// through the capacity comparator, not bare priority. The sticky
+				// primary stays prepended.
+				const others = this.sortAvailableAccounts(
+					accounts.filter((a) => a.id !== affinedAccount.id),
 					getCachedAvailability,
 					now,
 				);
-				if (available.length === 0) return [];
-				const chosenAccount = available[0];
-				this.resetSessionIfExpired(chosenAccount);
-				this.rememberAffinity(meta, chosenAccount, now);
 				this.setRoutingMeta(
 					meta,
-					"affinity_reassigned",
-					chosenAccount,
-					available.length,
+					"affinity_hit",
+					affinedAccount,
+					others.length + 1,
 					{ affinityKey, previousAccountId },
 				);
-				this.recordComparatorPick(chosenAccount);
 				this.logSelection(
-					"affinity_reassigned",
-					chosenAccount,
+					"affinity_hit",
+					affinedAccount,
 					accounts,
 					getCachedAvailability,
 					now,
 				);
-				const others = available.filter((a) => a.id !== chosenAccount.id);
-				return [chosenAccount, ...others];
+				return [affinedAccount, ...others];
 			}
 
 			// The affined account is transiently unavailable (short 429, 529
@@ -855,56 +767,40 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			);
 		}
 
-		// If we have an active account and it's available, use it — unless a higher-priority
-		// non-session account is available (priority is more important than stickiness).
+		// If we have an active account and it's available, use it. Affinity-first:
+		// an established session keeps its account, immune to priority edits —
+		// priority/FEFO govern only new/unpinned picks below.
 		if (activeAccount && getCachedAvailability(activeAccount)) {
-			// Check if any available account has strictly higher priority than the active session account
-			const higherPriorityAccount = accounts
-				.filter(
-					(a) =>
-						a.id !== activeAccount.id &&
-						getCachedAvailability(a) &&
-						a.priority < activeAccount.priority,
-				)
-				.sort((a, b) => a.priority - b.priority)[0];
-
-			if (higherPriorityAccount) {
-				this.log.info(
-					`Skipping session on account ${activeAccount.name} (priority: ${activeAccount.priority}) — higher-priority account ${higherPriorityAccount.name} (priority: ${higherPriorityAccount.priority}) is available`,
-				);
-				// Fall through to normal priority-based selection below by nulling activeAccount
-			} else {
-				// Reset session if expired (shouldn't happen but just in case)
-				if (!bypassSession) {
-					this.resetSessionIfExpired(activeAccount);
-					this.rememberAffinity(meta, activeAccount, now);
-				}
-				this.log.info(
-					`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
-				);
-				// FEFO-consistent fallback tail: order the non-sticky candidates
-				// through the capacity comparator, not bare priority. The sticky
-				// primary stays prepended.
-				const others = this.sortAvailableAccounts(
-					accounts.filter((a) => a.id !== activeAccount.id),
-					getCachedAvailability,
-					now,
-				);
-				this.setRoutingMeta(
-					meta,
-					"global_session",
-					activeAccount,
-					others.length + 1,
-				);
-				this.logSelection(
-					"global_session",
-					activeAccount,
-					accounts,
-					getCachedAvailability,
-					now,
-				);
-				return [activeAccount, ...others];
+			// Reset session if expired (shouldn't happen but just in case)
+			if (!bypassSession) {
+				this.resetSessionIfExpired(activeAccount);
+				this.rememberAffinity(meta, activeAccount, now);
 			}
+			this.log.info(
+				`Continuing session for account ${activeAccount.name} (${activeAccount.session_request_count} requests in session)`,
+			);
+			// FEFO-consistent fallback tail: order the non-sticky candidates
+			// through the capacity comparator, not bare priority. The sticky
+			// primary stays prepended.
+			const others = this.sortAvailableAccounts(
+				accounts.filter((a) => a.id !== activeAccount.id),
+				getCachedAvailability,
+				now,
+			);
+			this.setRoutingMeta(
+				meta,
+				"global_session",
+				activeAccount,
+				others.length + 1,
+			);
+			this.logSelection(
+				"global_session",
+				activeAccount,
+				accounts,
+				getCachedAvailability,
+				now,
+			);
+			return [activeAccount, ...others];
 		}
 
 		// No active session or active account is rate limited.
