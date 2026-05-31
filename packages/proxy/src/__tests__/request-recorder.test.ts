@@ -1192,6 +1192,86 @@ describe("RequestRecorder — dashboard event carries the error message", () => 
 	});
 });
 
+describe("RequestRecorder — enriched upstream error message", () => {
+	it("surfaces the captured upstream error in BOTH the DB row and the event", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ isStream: true, responseStatus: 400 }));
+		h.recorder.captureResponseChunk(
+			"req-1",
+			new TextEncoder().encode(
+				'{"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.130: thinking blocks cannot be modified"}}',
+			),
+		);
+		h.recorder.finishTransport("req-1", "error");
+		h.timers.advance(150); // grace → persist (no usage)
+		await h.flush();
+
+		const expected =
+			"400 invalid_request_error: messages.3.content.130: thinking blocks cannot be modified";
+		// Persisted DB row carries the enriched message.
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].errorMessage).toBe(expected);
+		// Live dashboard event carries the same enriched message.
+		expect(h.emitted.length).toBe(1);
+		expect(h.emitted[0].errorMessage).toBe(expected);
+	});
+
+	it("falls back to the generic label when no response body was captured", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ isStream: true, responseStatus: 500 }));
+		// No captureResponseChunk — nothing to parse.
+		h.recorder.finishTransport("req-1", "error");
+		h.timers.advance(150);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].errorMessage).toBe("stream error");
+		expect(h.emitted[0].errorMessage).toBe("stream error");
+	});
+
+	it("falls back to the generic label when the body has no recognizable error", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ isStream: true, responseStatus: 502 }));
+		h.recorder.captureResponseChunk(
+			"req-1",
+			new TextEncoder().encode("<html>502</html>"),
+		);
+		h.recorder.finishTransport("req-1", "error");
+		h.timers.advance(150);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].errorMessage).toBe("stream error");
+		expect(h.emitted[0].errorMessage).toBe("stream error");
+	});
+
+	it("leaves disconnect/timeout labels unchanged even with a captured body", async () => {
+		const hDisc = makeHarness();
+		hDisc.recorder.begin(makeMeta({ isStream: true, responseStatus: 200 }));
+		hDisc.recorder.captureResponseChunk(
+			"req-1",
+			new TextEncoder().encode('{"partial":"data"}'),
+		);
+		hDisc.recorder.finishTransport("req-1", "disconnect");
+		hDisc.timers.advance(150);
+		await hDisc.flush();
+		expect(hDisc.dbOps.saveRequestCalls[0].errorMessage).toBe(
+			"client disconnected",
+		);
+		expect(hDisc.emitted[0].errorMessage).toBe("client disconnected");
+
+		const hTo = makeHarness();
+		hTo.recorder.begin(makeMeta({ isStream: true, responseStatus: 200 }));
+		hTo.recorder.captureResponseChunk(
+			"req-1",
+			new TextEncoder().encode('{"partial":"data"}'),
+		);
+		hTo.recorder.finishTransport("req-1", "timeout");
+		hTo.timers.advance(150);
+		await hTo.flush();
+		expect(hTo.dbOps.saveRequestCalls[0].errorMessage).toBe(
+			"request timed out",
+		);
+		expect(hTo.emitted[0].errorMessage).toBe("request timed out");
+	});
+});
+
 describe("RequestRecorder — dispose", () => {
 	it("clears internal timers and drops all records", async () => {
 		const h = makeHarness();
