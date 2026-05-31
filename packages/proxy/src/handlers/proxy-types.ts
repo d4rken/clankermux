@@ -2,6 +2,7 @@ import type { Config, RuntimeConfig } from "@clankermux/config";
 import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import type { Provider } from "@clankermux/providers";
 import type { LoadBalancingStrategy } from "@clankermux/types";
+import type { RequestRecorder } from "../request-recorder";
 import type { UsageWorkerController } from "../usage-worker-controller";
 
 export interface ProxyContext {
@@ -13,6 +14,13 @@ export interface ProxyContext {
 	refreshInFlight: Map<string, Promise<string>>;
 	asyncWriter: AsyncDbWriter;
 	usageWorker: UsageWorkerController;
+	/**
+	 * Main-thread owner of request persistence (request/routing/payload rows,
+	 * billingType, account side-effects, dashboard summary events). The usage
+	 * worker is now a pure usage computer; the recorder merges its slim summary
+	 * with captured payload + meta. See request-recorder.ts.
+	 */
+	requestRecorder: RequestRecorder;
 }
 
 /** Error messages used throughout the proxy module */

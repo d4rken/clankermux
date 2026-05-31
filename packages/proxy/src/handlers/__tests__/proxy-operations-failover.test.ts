@@ -102,6 +102,16 @@ function makeProxyContext(): ProxyContext {
 		asyncWriter: { enqueue: mock(() => {}) } as never,
 		usageWorker: { postMessage: mock(() => {}) } as never,
 		config: { getStorePayloads: () => true } as never,
+		requestRecorder: {
+			begin: mock(() => {}),
+			captureResponseChunk: mock(() => {}),
+			finishTransport: mock(() => {}),
+			attachUsageSummary: mock(() => {}),
+			recordSynthetic: mock(() => {}),
+			onWorkerGone: mock(() => {}),
+			sweep: mock(() => {}),
+			dispose: mock(() => {}),
+		} as never,
 	};
 }
 

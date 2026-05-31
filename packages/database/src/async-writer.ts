@@ -91,7 +91,15 @@ export class AsyncDbWriter implements Disposable {
 		}, 30000);
 	}
 
-	enqueue(job: DbJob): void {
+	/**
+	 * Enqueue a metadata job. Returns `true` when the job was accepted onto the
+	 * queue, `false` when it was dropped because the metadata queue is at
+	 * `METADATA_QUEUE_CAP`. Callers that need to know a request-row write was lost
+	 * (e.g. the post-processor worker / RequestRecorder) can count or log the
+	 * drop instead of assuming the row persisted. Existing callers may ignore the
+	 * return value — a boolean is a valid drop-in where `void` was expected.
+	 */
+	enqueue(job: DbJob): boolean {
 		if (this.metadataQueue.length >= this.METADATA_QUEUE_CAP) {
 			this.metadataDropped++;
 			this.droppedJobsSinceLastLog++;
@@ -100,7 +108,7 @@ export class AsyncDbWriter implements Disposable {
 					`Metadata queue at capacity (${this.METADATA_QUEUE_CAP}), dropping jobs. Total dropped: ${this.metadataDropped}`,
 				);
 			}
-			return;
+			return false;
 		}
 
 		this.metadataQueue.push({
@@ -108,6 +116,7 @@ export class AsyncDbWriter implements Disposable {
 			run: job,
 		});
 		void this.processQueue();
+		return true;
 	}
 
 	canAcceptPayload(estimatedBytes: number): boolean {

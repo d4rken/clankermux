@@ -10,6 +10,7 @@ import {
 	readEnv,
 	registerCleanup,
 	registerDisposable,
+	requestEvents,
 	setPricingLogger,
 	shutdown,
 	TIME_CONSTANTS,
@@ -45,10 +46,11 @@ import {
 	getValidAccessToken,
 	handleProxy,
 	type ProxyContext,
+	RequestRecorder,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
-	sendWorkerConfigUpdate,
+	setRequestRecorder,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
 	startUsageWorker,
@@ -638,6 +640,24 @@ export default async function startServer(options?: {
 	container.registerInstance(SERVICE_KEYS.AsyncWriter, asyncWriter);
 	registerDisposable(asyncWriter);
 
+	// Initialize the main-thread request recorder. It owns all request
+	// persistence (request/routing/payload rows, billingType, account
+	// side-effects) — extracted from the post-processor worker to stop
+	// transferring large request bodies into the long-lived worker (Bun #5709).
+	// initPayloadEncryption() ran above (before any payload write); the recorder
+	// writes payloads via dbOps.saveRequestPayloadRaw on this thread.
+	const requestRecorder = new RequestRecorder({
+		dbOps,
+		asyncWriter,
+		getStorePayloads: () => config.getStorePayloads(),
+		emitSummaryEvent: (resp) =>
+			requestEvents.emit("event", { type: "summary", payload: resp }),
+	});
+	registerDisposable({ dispose: () => requestRecorder.dispose() });
+	// Wire the recorder into the usage worker's onSummary callback (module-scoped
+	// controller created before any context).
+	setRequestRecorder(requestRecorder);
+
 	// Initialize pricing logger
 	const pricingLogger = new Logger("Pricing");
 	container.registerInstance(SERVICE_KEYS.PricingLogger, pricingLogger);
@@ -820,7 +840,6 @@ export default async function startServer(options?: {
 
 	// Proxy context
 	const usageWorker = getUsageWorker();
-	sendWorkerConfigUpdate(config.getStorePayloads());
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -830,6 +849,7 @@ export default async function startServer(options?: {
 		refreshInFlight: new Map(),
 		asyncWriter,
 		usageWorker,
+		requestRecorder,
 	};
 
 	// Register this server's refresh clearing capability
@@ -1009,9 +1029,9 @@ export default async function startServer(options?: {
 			proxyContext.strategy = strategy;
 			currentStrategy = strategy;
 		}
-		if (key === "store_payloads") {
-			sendWorkerConfigUpdate(config.getStorePayloads());
-		}
+		// store_payloads needs no worker push anymore: the RequestRecorder reads
+		// config.getStorePayloads() live on every begin()/capture/persist, so a
+		// hot-reload of the flag takes effect on the next request automatically.
 	});
 
 	// Main server
