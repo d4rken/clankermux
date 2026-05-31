@@ -427,7 +427,6 @@ describe("?detail=1 parameter", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
@@ -469,7 +468,6 @@ describe("?detail=1 parameter", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
@@ -493,7 +491,6 @@ describe("?detail=1 parameter", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
@@ -503,29 +500,6 @@ describe("?detail=1 parameter", () => {
 
 		expect(body.accounts_detail[0].status).toBe("available");
 		expect(body.accounts_detail[0].rate_limited_until).toBeNull();
-	});
-
-	it("returns normal health response without accounts_detail when detail=1 but HEALTH_DETAIL_ENABLED is false", async () => {
-		const db = {
-			getAllAccounts: async () => [
-				{ name: "acc1", paused: false, rate_limited_until: null },
-			],
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-			getHealthDetailEnabled: () => false,
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health?detail=1");
-		const response = await handler(url);
-		const body = (await response.json()) as Record<string, unknown>;
-
-		expect(response.status).toBe(200);
-		expect(body.status).toBe("ok");
-		expect(body.pool).toBeDefined();
-		expect(body.accounts_detail).toBeUndefined();
 	});
 });
 
@@ -543,7 +517,6 @@ describe("cache isolation between detail and non-detail", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
@@ -577,7 +550,6 @@ describe("cache isolation between detail and non-detail", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
@@ -610,7 +582,6 @@ describe("cache isolation between detail and non-detail", () => {
 
 		const config = {
 			getStrategy: () => "session",
-			getHealthDetailEnabled: () => true,
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);

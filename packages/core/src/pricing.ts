@@ -398,10 +398,6 @@ class PriceCatalogue {
 	}
 
 	private async fetchRemote(): Promise<ApiResponse | null> {
-		if (process.env.CF_PRICING_OFFLINE === "1") {
-			return null;
-		}
-
 		try {
 			const response = await fetch("https://models.dev/api.json");
 			if (!response.ok) {
