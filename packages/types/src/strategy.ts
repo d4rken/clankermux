@@ -12,6 +12,10 @@ export interface CapacitySignal {
 	soonestResetMs: number | null;
 	/** max utilization across hard windows + extra_usage (used for NEAR_LIMIT ordering). */
 	bindingUtilization: number;
+	/** soonest reset (ms) among WEEKLY windows {seven_day, seven_day_oauth_apps}; null if none. HARVEST deadline. */
+	weeklyResetMs: number | null;
+	/** min(100 - util) over weekly windows; 100 if none present. HARVEST tie-break. */
+	weeklyHeadroom: number;
 }
 
 /**

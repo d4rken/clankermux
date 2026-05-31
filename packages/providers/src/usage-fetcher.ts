@@ -354,7 +354,29 @@ export function getAccountCapacitySignal(
 	if (d.extra_usage?.utilization != null) {
 		binding = Math.max(binding, d.extra_usage.utilization);
 	}
-	return { minHeadroom, soonestResetMs: soonest, bindingUtilization: binding };
+	// Second pass over WEEKLY windows only — these drive the HARVEST deadline.
+	// The 5-hour window always resets sooner than the 7-day, so ranking by the
+	// overall soonest reset never prioritizes the weekly quota (where unused
+	// budget is genuinely lost at the reset). Rank HARVEST by the weekly reset
+	// instead; the 5-hour stays as the NEAR_LIMIT safety gate (via minHeadroom).
+	let weeklyHeadroom = 100;
+	let weeklyReset: number | null = null;
+	for (const key of ["seven_day", "seven_day_oauth_apps"] as const) {
+		const w = d[key] as UsageWindow | undefined;
+		if (w && typeof w.utilization === "number") {
+			weeklyHeadroom = Math.min(weeklyHeadroom, 100 - w.utilization);
+			const ms = w.resets_at ? new Date(w.resets_at).getTime() : null;
+			if (ms !== null && Number.isFinite(ms))
+				weeklyReset = weeklyReset === null ? ms : Math.min(weeklyReset, ms);
+		}
+	}
+	return {
+		minHeadroom,
+		soonestResetMs: soonest,
+		bindingUtilization: binding,
+		weeklyResetMs: weeklyReset,
+		weeklyHeadroom,
+	};
 }
 
 export function getFreshCapacity(

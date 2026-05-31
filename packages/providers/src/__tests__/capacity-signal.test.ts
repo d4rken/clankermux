@@ -17,6 +17,9 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.minHeadroom).toBe(60);
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
 		expect(signal?.bindingUtilization).toBe(40);
+		// Weekly fields are driven by the seven_day window, not the sooner 5h.
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(60);
 	});
 
 	it("picks the soonest reset and the min headroom across windows", () => {
@@ -29,6 +32,9 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.minHeadroom).toBe(30); // 100 - 70 from the higher-util window
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000); // 5h sooner than 7d
 		expect(signal?.bindingUtilization).toBe(70);
+		// A SOONER five_hour reset does NOT change the weekly deadline.
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(70); // 100 - 30 (seven_day util)
 	});
 
 	it("returns null when a present hard window is already past its reset (content-stale)", () => {
@@ -70,6 +76,9 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.minHeadroom).toBe(60);
 		expect(signal?.soonestResetMs).toBeNull();
 		expect(signal?.bindingUtilization).toBe(40);
+		// seven_day present but no resets_at → weekly headroom set, weekly reset null.
+		expect(signal?.weeklyResetMs).toBeNull();
+		expect(signal?.weeklyHeadroom).toBe(60);
 	});
 
 	it("lets extra_usage raise bindingUtilization without affecting headroom or reset", () => {
@@ -87,6 +96,9 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.minHeadroom).toBe(60); // unchanged by extra_usage
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000); // unchanged
 		expect(signal?.bindingUtilization).toBe(90); // raised by extra_usage
+		// extra_usage is not a weekly window — weekly fields unaffected.
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(60);
 	});
 
 	it("produces a signal for codex with the windowed UsageData shape", () => {
@@ -99,11 +111,53 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.minHeadroom).toBe(50);
 		expect(signal?.bindingUtilization).toBe(50);
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
+		// Codex shares the windowed shape → weekly fields computed identically.
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(90); // 100 - 10 (seven_day util)
 	});
 
 	it("returns null when no hard windows are present", () => {
 		const data = {} as UsageData;
 		expect(getAccountCapacitySignal(data, "anthropic", NOW)).toBeNull();
+	});
+
+	it("takes the min reset and min headroom across both weekly windows", () => {
+		// seven_day_oauth_apps resets sooner and is more utilized (less headroom)
+		// than seven_day → it drives both weekly fields.
+		const data: UsageData = {
+			five_hour: { utilization: 10, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 30, resets_at: iso(600_000_000) },
+			seven_day_oauth_apps: { utilization: 55, resets_at: iso(400_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.weeklyResetMs).toBe(NOW + 400_000_000); // min weekly reset
+		expect(signal?.weeklyHeadroom).toBe(45); // min(70, 45) = 100 - 55
+	});
+
+	it("ignores a sooner five_hour reset when computing the weekly deadline", () => {
+		const data: UsageData = {
+			// five_hour resets in 1h — much sooner than the weekly window.
+			five_hour: { utilization: 5, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 60, resets_at: iso(9 * 3_600_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000); // 5h drives soonest
+		expect(signal?.weeklyResetMs).toBe(NOW + 9 * 3_600_000); // weekly unaffected
+		expect(signal?.weeklyHeadroom).toBe(40);
+	});
+
+	it("reports no weekly deadline and full weekly headroom when only five_hour is present", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 20, resets_at: iso(3_600_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.minHeadroom).toBe(80);
+		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
+		// No weekly window → null deadline, 100 headroom (the default).
+		expect(signal?.weeklyResetMs).toBeNull();
+		expect(signal?.weeklyHeadroom).toBe(100);
 	});
 });
 
@@ -145,5 +199,7 @@ describe("getFreshCapacity", () => {
 		expect(signal?.minHeadroom).toBe(60);
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
 		expect(signal?.bindingUtilization).toBe(40);
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(60);
 	});
 });

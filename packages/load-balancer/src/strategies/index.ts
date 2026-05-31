@@ -55,6 +55,11 @@ const CAPACITY_BUCKET_LABEL: Record<number, string> = {
 /** Per-account capacity metric snapshot used by the comparator and the log. */
 interface CapacityMetric {
 	bucket: number;
+	/** Weekly-window reset (ms) — the HARVEST ranking deadline (FEFO). */
+	harvestDeadline: number;
+	/** min(100 - util) over weekly windows — the HARVEST tie-break. */
+	weeklyHeadroom: number;
+	/** soonest reset over ALL hard windows (incl. 5h) — kept for the debug log only. */
 	soonest: number;
 	minHeadroom: number;
 	binding: number;
@@ -414,26 +419,42 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const util =
 			this.store?.getAccountUtilization?.(account.id, account.provider) ?? 0;
 		let bucket: number = CAPACITY_BUCKET.UNKNOWN;
+		let harvestDeadline = Number.POSITIVE_INFINITY;
+		let weeklyHeadroom = 100;
 		let soonest = Number.POSITIVE_INFINITY;
 		let minHeadroom = 0;
 		let binding = 0;
 		if (s !== null) {
 			minHeadroom = s.minHeadroom;
 			binding = s.bindingUtilization;
+			weeklyHeadroom = s.weeklyHeadroom;
+			// The HARVEST deadline is the WEEKLY reset, never the always-sooner 5h.
+			// No 5h fallback: an account without a weekly window is not harvestable.
+			harvestDeadline = s.weeklyResetMs ?? Number.POSITIVE_INFINITY;
+			// soonest is kept for the debug line only (5h context), not for ranking.
 			soonest = s.soonestResetMs ?? Number.POSITIVE_INFINITY;
 			if (
-				s.minHeadroom < HEADROOM_EPS ||
+				s.minHeadroom <= HEADROOM_EPS ||
 				s.bindingUtilization > 100 - HEADROOM_EPS
 			) {
+				// 5h safety gate: an account near any hard window's limit serves last.
 				bucket = CAPACITY_BUCKET.NEAR_LIMIT;
-			} else if (s.soonestResetMs === null) {
-				// Known utilization but no deadline → not harvestable; treat as unknown.
+			} else if (s.weeklyResetMs === null) {
+				// No weekly deadline → not harvestable; do NOT rank via the 5h reset.
 				bucket = CAPACITY_BUCKET.UNKNOWN;
 			} else {
 				bucket = CAPACITY_BUCKET.HARVEST;
 			}
 		}
-		return { bucket, soonest, minHeadroom, binding, util };
+		return {
+			bucket,
+			harvestDeadline,
+			weeklyHeadroom,
+			soonest,
+			minHeadroom,
+			binding,
+			util,
+		};
 	}
 
 	private sortAvailableAccounts(
@@ -455,6 +476,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const metricsFor = (id: string) =>
 			info.get(id) ?? {
 				bucket: CAPACITY_BUCKET.UNKNOWN,
+				harvestDeadline: Number.POSITIVE_INFINITY,
+				weeklyHeadroom: 100,
 				soonest: Number.POSITIVE_INFINITY,
 				minHeadroom: 0,
 				binding: 0,
@@ -467,10 +490,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			const y = metricsFor(b.id);
 			if (x.bucket !== y.bucket) return x.bucket - y.bucket;
 			if (x.bucket === CAPACITY_BUCKET.HARVEST) {
-				// FEFO: serve the account whose capacity expires soonest first.
-				if (x.soonest !== y.soonest) return x.soonest - y.soonest;
-				if (x.minHeadroom !== y.minHeadroom)
-					return y.minHeadroom - x.minHeadroom;
+				// FEFO on the WEEKLY window: serve the account whose weekly quota
+				// expires soonest first (that's where unused budget is truly lost).
+				if (x.harvestDeadline !== y.harvestDeadline)
+					return x.harvestDeadline - y.harvestDeadline;
+				// Tie on weekly reset → more weekly headroom to harvest wins.
+				if (x.weeklyHeadroom !== y.weeklyHeadroom)
+					return y.weeklyHeadroom - x.weeklyHeadroom;
 				return x.seq - y.seq; // least-recently-picked
 			}
 			if (x.bucket === CAPACITY_BUCKET.UNKNOWN) {
@@ -512,12 +538,18 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const parts = shown.map((a) => {
 			const m = this.capacityMetricFor(a, now);
 			const bucketLabel = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
+			// reset= reflects the weekly deadline that actually drives HARVEST
+			// ranking; the parenthesized 5h reset is shown for context only.
 			const reset =
+				m.harvestDeadline === Number.POSITIVE_INFINITY
+					? "none"
+					: `${Math.round((m.harvestDeadline - now) / 60000)}m`;
+			const fiveHour =
 				m.soonest === Number.POSITIVE_INFINITY
 					? "none"
 					: `${Math.round((m.soonest - now) / 60000)}m`;
 			const mark = chosen && a.id === chosen.id ? "*" : "";
-			return `${a.name}${mark}[${bucketLabel} reset=${reset} headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%]`;
+			return `${a.name}${mark}[${bucketLabel} reset=${reset}(5h=${fiveHour}) headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%]`;
 		});
 		if (ranked.length > MAX) parts.push(`(+${ranked.length - MAX} more)`);
 		this.log.debug(
