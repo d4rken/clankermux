@@ -4,6 +4,8 @@ import {
 	feedChunk,
 	feedNonStreamBody,
 	finalizeUsage,
+	getLineBufferLength,
+	MAX_SSE_LINE_BYTES,
 } from "../usage-collector";
 
 // ---------------------------------------------------------------------------
@@ -499,6 +501,68 @@ describe("usage-collector", () => {
 		});
 	});
 
+	describe("bounded SSE line buffer (overlong newline-free input)", () => {
+		it("keeps lineBuffer bounded when no newline ever arrives, and does not crash", () => {
+			const state = createUsageState();
+			// A 64KB newline-free chunk; feed it many times. Without a cap the
+			// lineBuffer would grow to MBs. With the cap it stays bounded.
+			const blob = enc.encode("x".repeat(64 * 1024));
+			for (let i = 0; i < 64; i++) {
+				expect(() => feedChunk(state, blob, 1000 + i)).not.toThrow();
+				// The retained buffer never exceeds the cap (the +blob headroom is the
+				// single chunk appended before the cap check trims it).
+				expect(getLineBufferLength(state)).toBeLessThanOrEqual(
+					MAX_SSE_LINE_BYTES,
+				);
+			}
+			// Bytes are still accounted even though the overlong line was discarded.
+			expect(state.streamedBytes).toBe(blob.byteLength * 64);
+			// Nothing was parsed (the garbage was never valid SSE).
+			expect(state.providerReportedOutput).toBe(false);
+		});
+
+		it("discards an overlong line, then resumes parsing the line after the next newline", () => {
+			const state = createUsageState();
+			// Garbage with NO newline that exceeds the cap → discarded + skip armed.
+			const overlong = enc.encode("g".repeat(MAX_SSE_LINE_BYTES + 100));
+			feedChunk(state, overlong, 1000);
+			expect(getLineBufferLength(state)).toBeLessThanOrEqual(
+				MAX_SSE_LINE_BYTES,
+			);
+			expect(state.providerReportedOutput).toBe(false);
+
+			// More garbage (still mid-overlong-line) before the terminating newline —
+			// this must also be skipped, not parsed.
+			feedChunk(state, enc.encode("g".repeat(1000)), 1010);
+			expect(state.providerReportedOutput).toBe(false);
+
+			// The newline that ends the discarded garbage line, immediately followed
+			// by a clean, complete message_delta line — that NEXT line must parse.
+			const recovery = enc.encode(
+				`\nevent: message_delta\ndata: ${JSON.stringify({
+					usage: { output_tokens: 321 },
+				})}\n\n`,
+			);
+			feedChunk(state, recovery, 1020);
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.providerFinalOutputTokens).toBe(321);
+		});
+
+		it("does not JSON.parse a truncated overlong line (no false usage applied)", () => {
+			const state = createUsageState();
+			// An overlong line that STARTS like a usage-bearing data line but is cut
+			// off — it must be discarded wholesale, never parsed as if complete.
+			const head = enc.encode(
+				'event: message_delta\ndata: {"usage":{"output_tokens":999,"junk":"',
+			);
+			const filler = enc.encode("z".repeat(MAX_SSE_LINE_BYTES));
+			feedChunk(state, new Uint8Array([...head, ...filler]), 1000);
+			// The truncated overlong line was discarded — no count applied.
+			expect(state.providerReportedOutput).toBe(false);
+			expect(state.providerFinalOutputTokens).toBeUndefined();
+		});
+	});
+
 	describe("top-level usage/model on message_start (S6)", () => {
 		it("reads input/cache/model from a top-level usage object", () => {
 			const state = createUsageState();
@@ -658,6 +722,106 @@ describe("usage-collector", () => {
 			// max(100000, tiny estimate) = 100000; still flagged approximate because
 			// the ending wasn't clean.
 			expect(summary.usage.outputTokens).toBe(100000);
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("natural EOF (onEnd, endedCleanly=true) uses the provider count even on a non-2xx/error response", async () => {
+			// BLOCKER B: a stream that reaches its natural end is NOT truncated, so
+			// finalize must trust the provider's reported output_tokens — regardless
+			// of the HTTP success/error outcome, which is recorded separately on the
+			// row. The bytes streamed dwarf the provider count; if onEnd wrongly
+			// reported endedCleanly=false (the old `success || sawMessageStop`
+			// behaviour on a non-2xx EOF), we'd take max(provider, bytes/4) instead.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 12 },
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "y".repeat(4000) },
+				}),
+				1200,
+			);
+			expect(Math.ceil(state.streamedBytes / 4)).toBeGreaterThan(12);
+			const cost = fakeCost();
+			// endedCleanly=true is what the streaming onEnd now ALWAYS passes.
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "anthropic",
+					isStream: true,
+					endedCleanly: true,
+				},
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.outputTokens).toBe(12);
+			expect(summary.outputApproximate).toBeUndefined();
+		});
+
+		it("disconnect/onError mid-stream (endedCleanly=false) still uses the max(provider, bytes/4) fallback", async () => {
+			// The truncation path: onError passes endedCleanly=false so a cut stream
+			// that kept emitting text after the last message_delta isn't undercounted.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 12 },
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "y".repeat(4000) },
+				}),
+				1200,
+			);
+			const expectedEstimate = Math.ceil(state.streamedBytes / 4);
+			expect(expectedEstimate).toBeGreaterThan(12);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "anthropic",
+					isStream: true,
+					endedCleanly: false,
+				},
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.outputTokens).toBe(expectedEstimate);
 			expect(summary.outputApproximate).toBe(true);
 		});
 

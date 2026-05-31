@@ -85,6 +85,32 @@ export interface UsageState {
 	currentEvent: string | undefined;
 	/** True once a `message_stop` event was seen (clean-ending signal). */
 	sawMessageStop: boolean;
+	/**
+	 * True while we're discarding an overlong, newline-free line (see
+	 * `MAX_SSE_LINE_BYTES`). Once the `lineBuffer` exceeds the cap without a
+	 * terminating `\n`, the buffered content is dropped and this flag is set so
+	 * every subsequent chunk is discarded UNTIL the next `\n` resyncs parsing on
+	 * the following line. Bounds main-thread memory against an upstream that
+	 * never emits a newline (small leak / DoS guard).
+	 */
+	skippingOverlongLine: boolean;
+}
+
+/**
+ * Cap on the decoded, not-yet-newline-terminated `lineBuffer`. A single SSE
+ * line should never approach this — a `message_start` carrying a large system
+ * prompt is the biggest legitimate line and stays well under 256KB. Anything
+ * larger is treated as a runaway/never-terminated line: it is discarded and
+ * skipped (not JSON-parsed) until the next newline resyncs the parser.
+ */
+export const MAX_SSE_LINE_BYTES = 256 * 1024;
+
+/**
+ * Test/diagnostic accessor for the retained partial-line buffer length, used to
+ * assert the buffer stays bounded under newline-free input.
+ */
+export function getLineBufferLength(state: UsageState): number {
+	return state.lineBuffer.length;
 }
 
 export function createUsageState(): UsageState {
@@ -102,6 +128,7 @@ export function createUsageState(): UsageState {
 		lineBuffer: "",
 		currentEvent: undefined,
 		sawMessageStop: false,
+		skippingOverlongLine: false,
 	};
 }
 
@@ -247,14 +274,36 @@ export function feedChunk(
 	// Streaming decode reassembles multi-byte sequences across boundaries.
 	state.lineBuffer += state.decoder.decode(chunk, { stream: true });
 
+	// Skip mode: we're inside an overlong, never-terminated line that was already
+	// discarded. Drop everything up to and including the next `\n` (which ends the
+	// runaway line) and resume normal parsing on the line after it. If no newline
+	// is in the buffer yet, discard it all and stay in skip mode.
+	if (state.skippingOverlongLine) {
+		const nl = state.lineBuffer.indexOf("\n");
+		if (nl === -1) {
+			state.lineBuffer = "";
+			return;
+		}
+		state.lineBuffer = state.lineBuffer.slice(nl + 1);
+		state.skippingOverlongLine = false;
+	}
+
 	// Process only complete lines; retain the trailing partial in lineBuffer.
 	let newlineIdx = state.lineBuffer.indexOf("\n");
-	if (newlineIdx === -1) return;
 	while (newlineIdx !== -1) {
 		const rawLine = state.lineBuffer.slice(0, newlineIdx);
 		state.lineBuffer = state.lineBuffer.slice(newlineIdx + 1);
 		processLine(state, rawLine);
 		newlineIdx = state.lineBuffer.indexOf("\n");
+	}
+
+	// Cap guard: the trailing partial (no newline yet) must never grow without
+	// bound. If it exceeds the cap, the line is runaway/never-terminated — discard
+	// the buffered content and arm skip mode so following chunks are dropped until
+	// the next `\n`. We never JSON-parse a truncated overlong line.
+	if (state.lineBuffer.length > MAX_SSE_LINE_BYTES) {
+		state.lineBuffer = "";
+		state.skippingOverlongLine = true;
 	}
 }
 
@@ -267,6 +316,12 @@ function flushLineBuffer(state: UsageState): void {
 	// Drain the streaming decoder (no-op if no bytes are pending).
 	const tail = state.decoder.decode();
 	if (tail) state.lineBuffer += tail;
+	// If we ended mid-discard of an overlong, never-terminated line, the buffered
+	// tail is part of that runaway line — drop it, never parse a truncated line.
+	if (state.skippingOverlongLine) {
+		state.lineBuffer = "";
+		return;
+	}
 	if (state.lineBuffer.length === 0) return;
 	const rawLine = state.lineBuffer;
 	state.lineBuffer = "";
@@ -339,11 +394,12 @@ export async function finalizeUsage(
 	// the stream right after the last data: byte with no trailing newline).
 	flushLineBuffer(state);
 
-	// Cleanliness: an explicit caller flag wins (the response-handler derives it
-	// from the terminal outcome). Absent that, default to clean for back-compat —
-	// trust the provider's reported count. Note `sawMessageStop` is tracked on
-	// state for the caller to fold into the flag it passes; absence of it does
-	// NOT by itself mark a stream truncated.
+	// Cleanliness: an explicit caller flag wins. The response-handler passes
+	// `true` whenever the stream reached natural EOF (onEnd) — truncation, NOT
+	// HTTP success, is what this flag tracks — and `false` only on a
+	// disconnect/timeout/read error (onError). `sawMessageStop` is still tracked
+	// on state as a diagnostic signal but no longer feeds this flag. Absent any
+	// caller flag, default to clean for back-compat (trust the provider's count).
 	const endedCleanly = opts.endedCleanly ?? true;
 
 	// PRECEDENCE + R5: trust the provider's count when it reported one AND the

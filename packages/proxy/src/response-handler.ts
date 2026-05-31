@@ -395,10 +395,15 @@ export async function forwardToClient(
 							isStream: true,
 							// onEnd fires when the upstream stream reaches its natural end
 							// (the reader saw `done`), so the body was NOT truncated →
-							// endedCleanly when the transport also succeeded. A seen
-							// `message_stop` further confirms it but is not required. Only
-							// onError (disconnect/timeout/read error) marks non-clean.
-							endedCleanly: success || usageState.sawMessageStop,
+							// endedCleanly is ALWAYS true here, independent of HTTP success.
+							// A non-2xx stream that drains to EOF still ended cleanly (it
+							// just carried an error/short body), so finalize must trust the
+							// provider's reported output count rather than the
+							// max(provider, bytes/4) truncation fallback. The row's
+							// success/error outcome is a SEPARATE signal recorded via
+							// finishTransport above. Only onError (disconnect/timeout/read
+							// error) marks the stream non-clean (truncated).
+							endedCleanly: true,
 						},
 						ctx,
 					);
