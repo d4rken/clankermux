@@ -1,6 +1,7 @@
 import { BUFFER_SIZES } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID, type RequestResponse } from "@clankermux/types";
+import { parseUpstreamError } from "./upstream-error";
 
 const log = new Logger("RequestRecorder");
 
@@ -235,6 +236,8 @@ interface InternalRecord {
 	/** Total bytes this record charges against the capture budget. */
 	chargedBytes: number;
 	transport: { outcome: TransportOutcome } | null;
+	/** Enriched error string computed at persist time; reused by a late patch re-emit. */
+	errorMessage: string | null;
 	usage: SlimUsageSummary | null;
 	usageWaived: boolean;
 	bodyDiscarded: boolean;
@@ -368,6 +371,7 @@ export class RequestRecorder {
 			respBytes: 0,
 			chargedBytes,
 			transport: null,
+			errorMessage: null,
 			usage: null,
 			usageWaived: false,
 			bodyDiscarded,
@@ -598,7 +602,8 @@ export class RequestRecorder {
 		const success = this.outcomeToSuccess(record);
 		const responseTime = this.computeResponseTime(record);
 		const usage = record.usage ? this.toRequestUsage(record.usage) : undefined;
-		const errorMessage = this.outcomeToError(record);
+		const errorMessage = this.buildErrorMessage(record);
+		record.errorMessage = errorMessage; // stash for a late patchUsage re-emit
 
 		// 1. metadata (request → routing) + 2. payload (ordered, droppable).
 		this.persistOrdered(record, success, responseTime, errorMessage, usage);
@@ -612,7 +617,7 @@ export class RequestRecorder {
 				success,
 				responseTime,
 				record.usage,
-				{ outcome: record.transport?.outcome },
+				{ outcome: record.transport?.outcome, errorMessage },
 			),
 		);
 
@@ -818,7 +823,10 @@ export class RequestRecorder {
 				success,
 				responseTime,
 				summary,
-				{ outcome: record.transport?.outcome },
+				{
+					outcome: record.transport?.outcome,
+					errorMessage: record.errorMessage ?? null,
+				},
 			),
 		);
 		// Stop the patch-TTL drop timer and drop now — usage is in.
@@ -890,7 +898,7 @@ export class RequestRecorder {
 		success: boolean,
 		responseTime: number,
 		summary: SlimUsageSummary | null,
-		errorSource?: { outcome?: TransportOutcome },
+		errorSource?: { outcome?: TransportOutcome; errorMessage?: string | null },
 	): RequestResponse {
 		const usage = summary?.usage;
 		return {
@@ -903,7 +911,8 @@ export class RequestRecorder {
 			success,
 			errorMessage: success
 				? null
-				: this.outcomeToErrorString(errorSource?.outcome),
+				: (errorSource?.errorMessage ??
+					this.outcomeToErrorString(errorSource?.outcome)),
 			responseTimeMs: responseTime,
 			failoverAttempts: meta.failoverAttempts,
 			model: usage?.model,
@@ -953,8 +962,26 @@ export class RequestRecorder {
 		return record.transport?.outcome === "success";
 	}
 
-	private outcomeToError(record: InternalRecord): string | null {
-		return this.outcomeToErrorString(record.transport?.outcome);
+	/**
+	 * Build the error string for a finished record. Prefer the upstream error
+	 * captured in the response body (e.g. Anthropic's invalid_request_error
+	 * message) over the generic transport-outcome label, prefixed with the HTTP
+	 * status — so Request History shows WHY a request failed, not just that the
+	 * stream ended in error. Falls back to the generic label when the body has no
+	 * recognizable error (disconnect/timeout/synthetic, HTML error pages, etc.).
+	 */
+	private buildErrorMessage(record: InternalRecord): string | null {
+		const generic = this.outcomeToErrorString(record.transport?.outcome);
+		if (generic === null) return null; // success
+		if (record.respBytes === 0) return generic; // no captured body
+		const body = this.combineChunks(
+			record.respChunks,
+			record.respBytes,
+		).toString("utf8");
+		const upstream = parseUpstreamError(body);
+		if (!upstream) return generic;
+		const status = record.meta.responseStatus;
+		return status ? `${status} ${upstream}` : upstream;
 	}
 
 	/** Map a terminal outcome to its human-readable error string (null on success). */
