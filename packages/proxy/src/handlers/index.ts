@@ -7,10 +7,12 @@ export {
 	selectAccountsForRequest,
 	setComboSlotInfo,
 } from "./account-selector";
+export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
+	proxyForcedAccount,
 	proxyUnauthenticated,
 	proxyWithAccount,
 } from "./proxy-operations";

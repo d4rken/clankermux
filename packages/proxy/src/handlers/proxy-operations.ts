@@ -1058,6 +1058,208 @@ export async function proxyWithAccount(
 }
 
 /**
+ * Build a local JSON error Response for the forced-account path. Used when the
+ * forced forward cannot reach upstream (token unrefreshable, network error,
+ * etc.). NEVER returns null — the force contract forbids failover, so a local
+ * error Response is the only acceptable failure mode.
+ */
+function createForcedAccountUnavailableResponse(
+	account: Account,
+	reason: string,
+): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "forced_account_unavailable",
+				message: `Forced account '${account.name}' could not serve the request: ${reason}`,
+			},
+		}),
+		{
+			status: 502,
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-forced-account": account.id,
+			},
+		},
+	);
+}
+
+/**
+ * Dedicated minimal forward for the global force-account override (Feature 3).
+ *
+ * Composes the SAME low-level upstream call + response recording the normal
+ * path uses, but HARD-BYPASSES every fallback/retry/cooldown/null branch that
+ * `proxyWithAccount` contains (thinking-signature + cache-control pre-retries,
+ * model-fallback cycling, 401→null, 529→null/cooldown, processProxyResponse
+ * rate-limit cooldown+failover, mid-stream cooldown sniffer). Invariants:
+ *
+ *   - Resolves the access token via the same `getValidAccessToken` path. If it
+ *     THROWS (expired/unrefreshable token), returns a local 502 error Response —
+ *     never null, never failover.
+ *   - Sends exactly ONE upstream request (applying the account's model mapping
+ *     exactly as the normal path does, via the combo-style model override).
+ *   - Returns the upstream Response AS-IS for ANY status (200/4xx/429/529/5xx).
+ *     Never converts a non-2xx into null. Never triggers cross-account failover.
+ *   - Does NOT mark rate_limited_until / provider-overload cooldown /
+ *     consecutive_rate_limits. forwardToClient is called with
+ *     disableCooldown:true so a streamed 429/529 does not mutate cooldown state.
+ *   - STILL emits the normal request-recorder / worker `start` analytics so the
+ *     request appears in history (requestMeta.routing is set by the caller).
+ *   - catch returns a local 502 error Response, NEVER null.
+ *
+ * @param req           The incoming client request
+ * @param url           The parsed URL
+ * @param account       The forced account
+ * @param requestMeta   Request metadata (routing already set by caller)
+ * @param requestBodyBuffer Buffered request body
+ * @param ctx           The proxy context
+ * @param modelOverride Optional model override (combo slot); usually null
+ * @param apiKeyId      Optional API key id for tracking
+ * @param apiKeyName    Optional API key name for tracking
+ * @param requestBodyContext Optional pre-parsed request body context
+ */
+export async function proxyForcedAccount(
+	req: Request,
+	url: URL,
+	account: Account,
+	requestMeta: RequestMeta,
+	requestBodyBuffer: ArrayBuffer | null,
+	ctx: ProxyContext,
+	modelOverride?: string | null,
+	apiKeyId?: string | null,
+	apiKeyName?: string | null,
+	requestBodyContext?: RequestBodyContext | null,
+): Promise<Response> {
+	try {
+		// Apply the account's model mapping exactly as the normal path does. The
+		// combo-style modelOverride patches the request body's `model` field;
+		// when absent, transformRequestBody's mapModelName does the family map.
+		const baseBodyContext =
+			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
+		let _effectiveBodyContext = baseBodyContext;
+		let effectiveBodyBuffer = baseBodyContext.getBuffer();
+		if (modelOverride && effectiveBodyBuffer) {
+			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
+			if (overriddenContext) {
+				_effectiveBodyContext = overriddenContext;
+				effectiveBodyBuffer = overriddenContext.getBuffer();
+			}
+		}
+
+		// Get the provider for this account
+		const provider = getProvider(account.provider) || ctx.provider;
+
+		// Validate that the account-specific provider can handle this path
+		validateProviderPath(provider, url.pathname);
+
+		// Resolve the access token via the same path the normal flow uses. If it
+		// throws (expired/unrefreshable token), map to a local error Response —
+		// NOT null/failover (R2).
+		let accessToken: string;
+		try {
+			accessToken = await getValidAccessToken(account, ctx);
+		} catch (tokenErr) {
+			const reason =
+				tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
+			log.warn(
+				`Forced account ${account.name}: token resolution failed — returning local error (no failover): ${reason}`,
+			);
+			return createForcedAccountUnavailableResponse(account, reason);
+		}
+
+		// Pre-process request if provider supports it (e.g., to extract model for URL)
+		if (provider.prepareRequest) {
+			provider.prepareRequest(req, effectiveBodyBuffer, account);
+		}
+
+		const headers = provider.prepareHeaders(
+			req.headers,
+			accessToken,
+			account.api_key || undefined,
+		);
+		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
+
+		const requestInit: RequestInit & { duplex?: "half" } = {
+			method: req.method,
+			headers,
+		};
+		if (effectiveBodyBuffer) {
+			requestInit.body = new Uint8Array(effectiveBodyBuffer);
+			requestInit.duplex = "half";
+		}
+
+		const providerRequest = new Request(targetUrl, requestInit);
+		const transformedRequest = provider.transformRequestBody
+			? await provider.transformRequestBody(providerRequest, account)
+			: providerRequest;
+
+		// Exactly ONE upstream request. No thinking-signature / cache-control
+		// pre-retries, no model-fallback cycling.
+		const rawResponse = await makeProxyRequest(transformedRequest);
+
+		// Inject request metadata into response headers so providers can read
+		// stream intent and request ID (mirrors the normal path).
+		const responseHeaders = new Headers(rawResponse.headers);
+		responseHeaders.set("x-clankermux-request-id", requestMeta.id);
+		const internalRequestStream = transformedRequest.headers.get(
+			"x-clankermux-request-stream",
+		);
+		if (internalRequestStream === "true" || internalRequestStream === "false") {
+			responseHeaders.set("x-clankermux-request-stream", internalRequestStream);
+		}
+		const taggedRawResponse = new Response(rawResponse.body, {
+			status: rawResponse.status,
+			statusText: rawResponse.statusText,
+			headers: responseHeaders,
+		});
+
+		// Process response (format transform, header sanitize) — but do NOT run
+		// processProxyResponse (which applies cooldowns + signals failover) and
+		// do NOT special-case 401/429/529. Whatever the forced account returns is
+		// forwarded as-is.
+		const response = await provider.processResponse(
+			taggedRawResponse,
+			account,
+			req.headers,
+		);
+
+		// Forward to client for recording + streaming. disableCooldown:true keeps
+		// the mid-stream rate-limit sniffer from mutating cooldown state on a
+		// forced 429/529.
+		return forwardToClient(
+			{
+				requestId: requestMeta.id,
+				method: req.method,
+				path: url.pathname,
+				account,
+				requestHeaders: req.headers,
+				requestBody: effectiveBodyBuffer,
+				project: requestMeta.project,
+				response,
+				timestamp: requestMeta.timestamp,
+				retryAttempt: 0,
+				failoverAttempts: 0,
+				comboName: requestMeta.comboName,
+				apiKeyId,
+				apiKeyName,
+				routing: requestMeta.routing ?? null,
+				disableCooldown: true,
+			},
+			{ ...ctx, provider },
+		);
+	} catch (err) {
+		// catch returns a local error Response, NEVER null — force forbids failover.
+		const reason = err instanceof Error ? err.message : String(err);
+		log.error(
+			`Forced account ${account.name} forward failed (returning local error, no failover):`,
+			err,
+		);
+		return createForcedAccountUnavailableResponse(account, reason);
+	}
+}
+
+/**
  * Create a 503 Service Unavailable response when the account pool is exhausted.
  * All accounts are paused, rate-limited, or filtered out.
  * @param accounts - All accounts that were considered but are unavailable

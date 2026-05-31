@@ -32,11 +32,13 @@ import {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearProviderOverloadCooldown,
+	getForcedAccount,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
+	setForcedAccount,
 } from "@clankermux/proxy";
 import type {
 	Account,
@@ -873,6 +875,71 @@ export function createAccountResetStickinessHandler(dbOps: DatabaseOperations) {
 					: new Error("Failed to reset session stickiness"),
 			);
 		}
+	};
+}
+
+/**
+ * Create a force-account handler.
+ *
+ * Sets the GLOBAL force-account override (Feature 3): while set, every
+ * non-internal client request is routed straight to this account, bypassing
+ * selection, all gates, and all failover/retry. One account at a time (setting
+ * a new id replaces the old). Ephemeral — clears on server restart.
+ */
+export function createAccountForceHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			setForcedAccount(accountId);
+			log.warn(
+				`Force-account ENABLED: all traffic now routed to '${account.name}' (${accountId})`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: `All traffic now forced to '${account.name}'`,
+				accountId,
+			});
+		} catch (error) {
+			log.error("Account force error:", error);
+			return errorResponse(
+				error instanceof Error ? error : new Error("Failed to force account"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a clear-force-account handler. Clears the global force-account
+ * override; subsequent requests route normally.
+ */
+export function createAccountForceClearHandler() {
+	return async (): Promise<Response> => {
+		const previous = getForcedAccount();
+		setForcedAccount(null);
+		if (previous) {
+			log.warn(`Force-account CLEARED (was '${previous}')`);
+		}
+		return jsonResponse({ success: true });
+	};
+}
+
+/**
+ * Create a get-force-account handler. Returns the currently forced account id
+ * (or null). Used by the dashboard to reflect/sync the current force state.
+ */
+export function createAccountForceGetHandler() {
+	return async (): Promise<Response> => {
+		return jsonResponse({ accountId: getForcedAccount() });
 	};
 }
 

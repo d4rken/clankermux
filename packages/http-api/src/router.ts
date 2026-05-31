@@ -6,6 +6,9 @@ import {
 	createAccountAutoRefreshHandler,
 	createAccountBillingTypeHandler,
 	createAccountCustomEndpointUpdateHandler,
+	createAccountForceClearHandler,
+	createAccountForceGetHandler,
+	createAccountForceHandler,
 	createAccountForceResetRateLimitHandler,
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
@@ -242,6 +245,20 @@ export class APIRouter {
 			openaiAccountAddHandler(req),
 		);
 
+		// Global force-account override (Feature 3). Registered as EXACT-match
+		// routes so they take priority over the dynamic /api/accounts/:id/...
+		// dispatch below — otherwise "force" would be mistaken for an account id
+		// (parts[3]). The per-account POST /api/accounts/:id/force toggle is
+		// handled in the dynamic block.
+		const accountForceClearHandler = createAccountForceClearHandler();
+		const accountForceGetHandler = createAccountForceGetHandler();
+		this.handlers.set("POST:/api/accounts/force/clear", () =>
+			accountForceClearHandler(),
+		);
+		this.handlers.set("GET:/api/accounts/force", () =>
+			accountForceGetHandler(),
+		);
+
 		// Token health handlers
 		const tokenHealthHandler = createTokenHealthHandler(dbOps);
 		const reauthNeededHandler = createReauthNeededHandler(dbOps);
@@ -442,6 +459,22 @@ export class APIRouter {
 			if (path.endsWith("/reload") && method === "POST") {
 				const reloadHandler = createAccountReloadHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => reloadHandler(req, accountId))(
+					req,
+					url,
+				);
+			}
+
+			// Per-account force toggle: POST /api/accounts/:id/force.
+			// Guard against accountId === "force" so this never collides with the
+			// exact-match force routes (/api/accounts/force[...]) registered above
+			// — those are GET /api/accounts/force and POST /api/accounts/force/clear.
+			if (
+				path.endsWith("/force") &&
+				method === "POST" &&
+				accountId !== "force"
+			) {
+				const forceHandler = createAccountForceHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => forceHandler(req, accountId))(
 					req,
 					url,
 				);

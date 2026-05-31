@@ -19,14 +19,17 @@ import {
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
 	getComboSlotInfo,
+	getForcedAccount,
 	getUsageThrottleUntil,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
+	proxyForcedAccount,
 	proxyWithAccount,
 	RequestBodyContext,
 	type RequestJsonBody,
 	selectAccountsForRequest,
+	setForcedAccount,
 	validateProviderPath,
 } from "./handlers";
 import { sanitizeProjectName } from "./project-name";
@@ -286,6 +289,69 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+
+	// 4b. Global force-account override (Feature 3). When a forced account is
+	// set, EVERY non-internal client request goes straight to that account:
+	// account selection, ALL gates (provider-overload / usage-throttle /
+	// context-window), and ALL failover/retry are skipped entirely. The forced
+	// account's response — including errors (429/529/5xx) — is returned as-is.
+	// Internal auto-refresh/probe requests bypass force so other accounts keep
+	// their tokens/usage warm (Q1).
+	const forcedId = getForcedAccount();
+	if (forcedId && !isInternal) {
+		const forcedAccount = await ctx.dbOps.getAccount(forcedId);
+		if (!forcedAccount) {
+			// Defensive: a forced account deleted mid-flight must not brick all
+			// traffic. Clear the force so subsequent requests route normally, but
+			// return an explicit 503 for THIS request rather than silently falling
+			// back — that would violate the absolute-force contract (R2).
+			log.error(
+				`Forced account ${forcedId} not found — clearing force and returning 503`,
+			);
+			setForcedAccount(null);
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: {
+						type: "forced_account_missing",
+						message: `The forced account (${forcedId}) no longer exists. Force has been cleared; retry the request.`,
+					},
+				}),
+				{
+					status: 503,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
+		}
+
+		requestMeta.routing = {
+			strategy: "forced",
+			decision: "force_account_global",
+			selectedAccountId: forcedAccount.id,
+			candidatesCount: 1,
+			affinityScope: null,
+			affinityKey: null,
+			previousAccountId: null,
+			failoverReason: null,
+		};
+
+		log.info(
+			`Force-account override active: routing to ${forcedAccount.name} (${forcedAccount.provider}) — bypassing selection, gates, and failover`,
+		);
+
+		return await proxyForcedAccount(
+			req,
+			url,
+			forcedAccount,
+			requestMeta,
+			finalBodyBuffer,
+			ctx,
+			null,
+			apiKeyId,
+			apiKeyName,
+			requestBodyContext,
+		);
+	}
 
 	// 5. Select accounts
 	const selectedAccounts = await selectAccountsForRequest(
