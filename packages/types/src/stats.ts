@@ -280,7 +280,6 @@ export interface ConfigResponse {
 	lb_strategy: string;
 	port: number;
 	sessionDurationMs: number;
-	default_agent_model: string;
 	tls_enabled: boolean;
 	system_prompt_cache_ttl_1h: boolean;
 	usage_throttling_five_hour_enabled: boolean;

@@ -2,7 +2,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense, useMemo } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AccountsTab } from "./components/AccountsTab";
-import { AgentsTab } from "./components/AgentsTab";
 import { ApiKeysTab } from "./components/ApiKeysTab";
 import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
@@ -81,12 +80,6 @@ export function App() {
 				element: <CombosTab />,
 				title: "Combos Management",
 				subtitle: "Define fallback chains for model families",
-			},
-			{
-				path: "/agents",
-				element: <AgentsTab />,
-				title: "Agent Management",
-				subtitle: "Discover and manage Claude Code agents",
 			},
 			{
 				path: "/api-keys",

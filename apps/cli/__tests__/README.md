@@ -89,7 +89,6 @@ These require a test database and more complex setup:
 - Account management commands (--add-account with valid flags, --list, --remove, --pause, --resume)
 - Statistics commands (--stats, --reset-stats, --clear-history)
 - Performance analysis (--analyze)
-- Model configuration (--get-model, --set-model)
 - Server startup with database initialization
 
 ## Notes

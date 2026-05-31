@@ -20,7 +20,6 @@ import {
 	ERROR_MESSAGES,
 	getComboSlotInfo,
 	getUsageThrottleUntil,
-	interceptAndModifyRequest,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
@@ -272,35 +271,23 @@ export async function handleProxy(
 		}
 	}
 
-	// 4. Intercept and modify request for agent model preferences
-	const { modifiedBody, agentUsed, originalModel, appliedModel } =
-		await interceptAndModifyRequest(requestBodyContext, ctx.dbOps);
-
-	// Use modified body if available
-	const finalBodyBuffer = modifiedBody || requestBodyContext.getBuffer();
+	const finalBodyBuffer = requestBodyContext.getBuffer();
 	const finalCreateBodyStream = () => {
 		if (!finalBodyBuffer) return undefined;
 		return new Response(finalBodyBuffer).body ?? undefined;
 	};
 
-	if (agentUsed && originalModel !== appliedModel) {
-		log.info(
-			`Agent ${agentUsed} detected, model changed from ${originalModel} to ${appliedModel}`,
-		);
-	}
-	const effectiveRequestModel =
-		appliedModel ?? requestBodyContext.getModel() ?? requestModel;
+	const effectiveRequestModel = requestBodyContext.getModel() ?? requestModel;
 
-	// 5. Create request metadata with agent info
+	// 4. Create request metadata
 	const requestMeta = createRequestMetadata(req, url);
 	requestMeta.internal = isInternal;
-	requestMeta.agentUsed = agentUsed;
 	requestMeta.affinityKey = affinity.key;
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
 
-	// 6. Select accounts
+	// 5. Select accounts
 	const selectedAccounts = await selectAccountsForRequest(
 		requestMeta,
 		ctx,
@@ -350,7 +337,6 @@ export async function handleProxy(
 			accountBillingType: null,
 			accountAutoPauseOnOverageEnabled: 0,
 			authed: false,
-			agentUsed: agentUsed || null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
 			comboName: null,

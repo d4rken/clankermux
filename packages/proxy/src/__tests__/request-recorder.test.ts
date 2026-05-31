@@ -27,7 +27,6 @@ interface SaveRequestCall {
 	responseTime: number;
 	failoverAttempts: number;
 	usage: unknown;
-	agentUsed: string | undefined;
 	apiKeyId: string | undefined;
 	apiKeyName: string | undefined;
 	project: string | null | undefined;
@@ -63,7 +62,6 @@ class FakeDbOps {
 		responseTime: number,
 		failoverAttempts: number,
 		usage?: unknown,
-		agentUsed?: string,
 		apiKeyId?: string,
 		apiKeyName?: string,
 		project?: string | null,
@@ -82,7 +80,6 @@ class FakeDbOps {
 			responseTime,
 			failoverAttempts,
 			usage,
-			agentUsed,
 			apiKeyId,
 			apiKeyName,
 			project,
@@ -249,7 +246,6 @@ function makeMeta(overrides: Partial<RecordMeta> = {}): RecordMeta {
 		accountBillingType: null,
 		accountAutoPauseOnOverageEnabled: 0,
 		authed: true,
-		agentUsed: null,
 		apiKeyId: null,
 		apiKeyName: null,
 		comboName: null,

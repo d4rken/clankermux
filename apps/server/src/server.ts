@@ -264,14 +264,6 @@ async function runStartupMaintenance(
 	} catch (err) {
 		log.error(`Rate limit cleanup error: ${err}`);
 	}
-	try {
-		// Prune old agent workspaces (not seen in 7 days)
-		const { agentRegistry } = await import("@clankermux/agents");
-		await agentRegistry.pruneOldWorkspaces();
-		log.info("Pruned old agent workspaces");
-	} catch (err) {
-		log.error(`Agent workspace pruning error: ${err}`);
-	}
 	// Return a no-op stopper for compatibility
 	return () => {};
 }

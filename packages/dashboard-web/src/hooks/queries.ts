@@ -1,4 +1,3 @@
-import type { AgentUpdatePayload } from "@clankermux/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { queryKeys } from "../lib/query-keys";
@@ -29,7 +28,6 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 			success: summary.success,
 			path: summary.path,
 			method: summary.method,
-			agentUsed: summary.agentUsed,
 			// Server derives this from statusCode === 429 so the list view can
 			// render the Rate Limited badge without lazy-loading the body.
 			rateLimited: summary.rateLimited,
@@ -100,17 +98,6 @@ export const useAccounts = () => {
 		refetchInterval: 60000, // Refresh every minute for usage data
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
-	});
-};
-
-export const useAgents = () => {
-	return useQuery({
-		queryKey: queryKeys.agents(),
-		queryFn: () => api.getAgents(),
-		staleTime: 60000, // Consider data fresh for 1 minute
-		refetchInterval: 60000, // Increase from 30 to 60 seconds
-		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
-		gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
 	});
 };
 
@@ -299,67 +286,6 @@ export const useResetStats = () => {
 		mutationFn: () => api.resetStats(),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: queryKeys.stats() });
-		},
-	});
-};
-
-export const useUpdateAgentPreference = () => {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: ({ agentId, model }: { agentId: string; model: string }) =>
-			api.updateAgentPreference(agentId, model),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
-		},
-	});
-};
-
-export const useDefaultAgentModel = () => {
-	return useQuery({
-		queryKey: queryKeys.defaultAgentModel(),
-		queryFn: () => api.getDefaultAgentModel(),
-		staleTime: 2 * 60 * 1000, // Consider data fresh for 2 minutes
-		refetchInterval: 5 * 60 * 1000, // Poll every 5 minutes instead of 1
-		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
-		gcTime: 30 * 60 * 1000, // Keep in cache for 30 minutes
-	});
-};
-
-export const useSetDefaultAgentModel = () => {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (model: string) => api.setDefaultAgentModel(model),
-		onSuccess: () => {
-			queryClient.invalidateQueries({
-				queryKey: queryKeys.defaultAgentModel(),
-			});
-			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
-		},
-	});
-};
-
-export const useBulkUpdateAgentPreferences = () => {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (model: string) => api.setBulkAgentPreferences(model),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
-		},
-	});
-};
-
-export const useUpdateAgent = () => {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: ({
-			id,
-			payload,
-		}: {
-			id: string;
-			payload: AgentUpdatePayload;
-		}) => api.updateAgent(id, payload),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.agents() });
 		},
 	});
 };

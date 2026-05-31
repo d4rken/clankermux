@@ -23,7 +23,6 @@ import { ensureSchema, runMigrations } from "./migrations";
 import { ensureSchemaPg, runMigrationsPg } from "./migrations-pg";
 import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
-import { AgentPreferenceRepository } from "./repositories/agent-preference.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
@@ -238,7 +237,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private oauth: OAuthRepository;
 	private strategy: StrategyRepository;
 	private stats: StatsRepository;
-	private agentPreferences: AgentPreferenceRepository;
 	private apiKeys: ApiKeyRepository;
 	private combo: ComboRepository;
 
@@ -319,7 +317,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.oauth = new OAuthRepository(this.adapter);
 		this.strategy = new StrategyRepository(this.adapter);
 		this.stats = new StatsRepository(this.adapter);
-		this.agentPreferences = new AgentPreferenceRepository(this.adapter);
 		this.apiKeys = new ApiKeyRepository(this.adapter);
 		this.combo = new ComboRepository(this.adapter);
 	}
@@ -809,7 +806,6 @@ OAuth tokens will need to be re-authenticated.
 		responseTime: number,
 		failoverAttempts: number,
 		usage?: RequestData["usage"],
-		agentUsed?: string,
 		apiKeyId?: string,
 		apiKeyName?: string,
 		project?: string | null,
@@ -829,7 +825,6 @@ OAuth tokens will need to be re-authenticated.
 					responseTime,
 					failoverAttempts,
 					usage,
-					agentUsed,
 					apiKeyId,
 					apiKeyName,
 					project,
@@ -1101,32 +1096,6 @@ OAuth tokens will need to be re-authenticated.
 			console.debug("[getDbSizeBytes] stat failed:", err);
 			return 0;
 		}
-	}
-
-	// Agent preference operations delegated to repository
-	async getAgentPreference(agentId: string): Promise<{ model: string } | null> {
-		return this.agentPreferences.getPreference(agentId);
-	}
-
-	async getAllAgentPreferences(): Promise<
-		Array<{ agent_id: string; model: string }>
-	> {
-		return this.agentPreferences.getAllPreferences();
-	}
-
-	async setAgentPreference(agentId: string, model: string): Promise<void> {
-		await this.agentPreferences.setPreference(agentId, model);
-	}
-
-	async deleteAgentPreference(agentId: string): Promise<boolean> {
-		return this.agentPreferences.deletePreference(agentId);
-	}
-
-	async setBulkAgentPreferences(
-		agentIds: string[],
-		model: string,
-	): Promise<void> {
-		await this.agentPreferences.setBulkPreferences(agentIds, model);
 	}
 
 	async close(): Promise<void> {

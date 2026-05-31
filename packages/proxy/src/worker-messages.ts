@@ -40,9 +40,6 @@ export interface StartMessage {
 	// Account name for logging
 	accountName: string | null;
 
-	// Agent info
-	agentUsed: string | null;
-
 	// Combo info
 	comboName: string | null;
 

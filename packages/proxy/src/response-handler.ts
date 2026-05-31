@@ -102,7 +102,6 @@ export interface ResponseHandlerOptions {
 	timestamp: number;
 	retryAttempt: number;
 	failoverAttempts: number;
-	agentUsed?: string | null;
 	apiKeyId?: string | null;
 	apiKeyName?: string | null;
 	comboName?: string | null;
@@ -130,7 +129,6 @@ export async function forwardToClient(
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
 		failoverAttempts,
-		agentUsed,
 		apiKeyId,
 		apiKeyName,
 		comboName,
@@ -196,7 +194,6 @@ export async function forwardToClient(
 				? 1
 				: 0,
 			accountName: account?.name ?? null,
-			agentUsed: agentUsed || null,
 			comboName: comboName || null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
@@ -228,7 +225,6 @@ export async function forwardToClient(
 				? 1
 				: 0,
 			authed: !!account?.id && account.id !== NO_ACCOUNT_ID,
-			agentUsed: agentUsed || null,
 			apiKeyId: apiKeyId || null,
 			apiKeyName: apiKeyName || null,
 			comboName: comboName || null,
@@ -263,7 +259,6 @@ export async function forwardToClient(
 			path,
 			accountId: account?.id || null,
 			statusCode: response.status,
-			agentUsed: agentUsed || null,
 		});
 	}
 

@@ -19,7 +19,6 @@ export interface RequestRow {
 	cache_read_input_tokens: number | null;
 	cache_creation_input_tokens: number | null;
 	output_tokens: number | null;
-	agent_used: string | null;
 	output_tokens_per_second: number | null;
 	api_key_id: string | null;
 	api_key_name: string | null;
@@ -49,7 +48,6 @@ export interface Request {
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
-	agentUsed?: string;
 	tokensPerSecond?: number;
 	apiKeyId?: string;
 	apiKeyName?: string;
@@ -79,7 +77,6 @@ export interface RequestResponse {
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
 	costUsd?: number;
-	agentUsed?: string;
 	tokensPerSecond?: number;
 	apiKeyId?: string;
 	apiKeyName?: string;
@@ -116,7 +113,6 @@ export interface RequestPayload {
 		pending?: boolean;
 		path?: string;
 		method?: string;
-		agentUsed?: string;
 		requestBodyTruncated?: boolean;
 		responseBodyTruncated?: boolean;
 		limitApplied?: number;
@@ -165,7 +161,6 @@ export function toRequest(row: RequestRow): Request {
 				: undefined,
 		outputTokens:
 			row.output_tokens != null ? Number(row.output_tokens) : undefined,
-		agentUsed: row.agent_used || undefined,
 		tokensPerSecond:
 			row.output_tokens_per_second != null
 				? Number(row.output_tokens_per_second)
@@ -199,7 +194,6 @@ export function toRequestResponse(request: Request): RequestResponse {
 		cacheCreationInputTokens: request.cacheCreationInputTokens,
 		outputTokens: request.outputTokens,
 		costUsd: request.costUsd,
-		agentUsed: request.agentUsed,
 		tokensPerSecond: request.tokensPerSecond,
 		apiKeyId: request.apiKeyId,
 		apiKeyName: request.apiKeyName,

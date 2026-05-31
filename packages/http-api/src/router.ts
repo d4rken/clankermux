@@ -28,13 +28,6 @@ import {
 	createOpenRouterAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
-import {
-	createAgentPreferenceUpdateHandler,
-	createAgentsListHandler,
-	createBulkAgentPreferenceUpdateHandler,
-	createWorkspacesListHandler,
-} from "./handlers/agents";
-import { createAgentUpdateHandler } from "./handlers/agents-update";
 import { createAnalyticsHandler } from "./handlers/analytics";
 import {
 	createApiKeyDeleteHandler,
@@ -186,8 +179,6 @@ export class APIRouter {
 			dbOps,
 			config,
 		);
-		const agentsHandler = createAgentsListHandler(dbOps);
-		const workspacesHandler = createWorkspacesListHandler();
 		const requestsStreamHandler = createRequestsStreamHandler();
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
@@ -315,12 +306,6 @@ export class APIRouter {
 		this.handlers.set("GET:/api/strategies", () =>
 			configHandlers.getStrategies(),
 		);
-		this.handlers.set("GET:/api/config/model", () =>
-			configHandlers.getDefaultAgentModel(),
-		);
-		this.handlers.set("POST:/api/config/model", (req) =>
-			configHandlers.setDefaultAgentModel(req),
-		);
 		this.handlers.set("GET:/api/config/retention", () =>
 			configHandlers.getRetention(),
 		);
@@ -354,15 +339,6 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
-		this.handlers.set("GET:/api/agents", () => agentsHandler());
-		this.handlers.set("POST:/api/agents/bulk-preference", (req) => {
-			const bulkHandler = createBulkAgentPreferenceUpdateHandler(
-				this.context.dbOps,
-			);
-			return bulkHandler(req);
-		});
-		this.handlers.set("GET:/api/workspaces", () => workspacesHandler());
-
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());
 		this.handlers.set("GET:/api/debug/snapshot", () => heapSnapshotHandler());
@@ -591,32 +567,6 @@ export class APIRouter {
 			if (parts.length === 4 && method === "DELETE") {
 				const removeHandler = createAccountRemoveHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => removeHandler(req, accountId))(
-					req,
-					url,
-				);
-			}
-		}
-
-		// Check for dynamic agent endpoints
-		if (path.startsWith("/api/agents/")) {
-			const parts = path.split("/");
-			const agentId = parts[3];
-
-			// Agent preference update
-			if (path.endsWith("/preference") && method === "POST") {
-				const preferenceHandler = createAgentPreferenceUpdateHandler(
-					this.context.dbOps,
-				);
-				return await this.wrapHandler((req) => preferenceHandler(req, agentId))(
-					req,
-					url,
-				);
-			}
-
-			// Agent update (PATCH /api/agents/:id)
-			if (parts.length === 4 && method === "PATCH") {
-				const updateHandler = createAgentUpdateHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => updateHandler(req, agentId))(
 					req,
 					url,
 				);

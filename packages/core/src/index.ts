@@ -61,7 +61,6 @@ export {
 export {
 	CLAUDE_MODEL_IDS,
 	type ClaudeModelId,
-	DEFAULT_AGENT_MODEL,
 	DEFAULT_MODEL,
 	getModelDisplayName,
 	getModelShortName,

@@ -5,7 +5,6 @@ import {
 	formatTokensPerSecond,
 } from "@clankermux/ui-common";
 import {
-	Bot,
 	Calendar,
 	ChevronDown,
 	ChevronRight,
@@ -57,7 +56,6 @@ export function RequestsTab() {
 	);
 	const [modalRequest, setModalRequest] = useState<RequestPayload | null>(null);
 	const [accountFilter, setAccountFilter] = useState<string>("all");
-	const [agentFilter, setAgentFilter] = useState<string>("all");
 	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
@@ -128,21 +126,6 @@ export function RequestsTab() {
 		).sort((a, b) => a - b);
 	}, [data]);
 
-	// Extract unique agents for filter - memoized
-	const uniqueAgents = useMemo(() => {
-		if (!data) return [];
-		return Array.from(
-			new Set(
-				data.requests
-					.map((r) => {
-						const summary = data.summaries.get(r.id);
-						return summary?.agentUsed || r.meta.agentUsed;
-					})
-					.filter(Boolean),
-			),
-		).sort();
-	}, [data]);
-
 	// API key filter: union of all configured keys (from /api/api-keys) and any
 	// keys observed in the loaded request slice (covers historical keys that
 	// were deleted but still appear on past requests).
@@ -165,13 +148,6 @@ export function RequestsTab() {
 				const requestAccount =
 					request.meta.accountName || request.meta.accountId;
 				if (requestAccount !== accountFilter) return false;
-			}
-
-			// Agent filter
-			if (agentFilter !== "all") {
-				const summary = data.summaries.get(request.id);
-				const requestAgent = summary?.agentUsed || request.meta.agentUsed;
-				if (requestAgent !== agentFilter) return false;
 			}
 
 			// API key filter
@@ -207,15 +183,7 @@ export function RequestsTab() {
 
 			return true;
 		});
-	}, [
-		data,
-		accountFilter,
-		agentFilter,
-		apiKeyFilter,
-		statusCodeFilters,
-		dateFrom,
-		dateTo,
-	]);
+	}, [data, accountFilter, apiKeyFilter, statusCodeFilters, dateFrom, dateTo]);
 
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
@@ -283,7 +251,6 @@ export function RequestsTab() {
 
 	const clearAllFilters = () => {
 		setAccountFilter("all");
-		setAgentFilter("all");
 		setApiKeyFilter("all");
 		setDateFrom("");
 		setDateTo("");
@@ -292,7 +259,6 @@ export function RequestsTab() {
 
 	const hasActiveFilters =
 		accountFilter !== "all" ||
-		agentFilter !== "all" ||
 		apiKeyFilter !== "all" ||
 		dateFrom ||
 		dateTo ||
@@ -391,19 +357,6 @@ export function RequestsTab() {
 									<button
 										type="button"
 										onClick={() => setAccountFilter("all")}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
-							)}
-							{agentFilter !== "all" && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
-									<Bot className="h-3 w-3" />
-									{agentFilter}
-									<button
-										type="button"
-										onClick={() => setAgentFilter("all")}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -584,27 +537,6 @@ export function RequestsTab() {
 									</Select>
 								</div>
 
-								{/* Agent Filter */}
-								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
-										<Bot className="h-3 w-3" />
-										Agent
-									</Label>
-									<Select value={agentFilter} onValueChange={setAgentFilter}>
-										<SelectTrigger className="h-9">
-											<SelectValue placeholder="All agents" />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectItem value="all">All agents</SelectItem>
-											{uniqueAgents.map((agent) => (
-												<SelectItem key={agent} value={agent || ""}>
-													{agent}
-												</SelectItem>
-											))}
-										</SelectContent>
-									</Select>
-								</div>
-
 								{/* API Key Filter */}
 								<div>
 									<Label className="text-xs flex items-center gap-1 mb-2">
@@ -718,7 +650,6 @@ export function RequestsTab() {
 								(request.meta.accountId
 									? `${request.meta.accountId.slice(0, 8)}...`
 									: null);
-							const agent = summary?.agentUsed || request.meta.agentUsed;
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
@@ -841,7 +772,6 @@ export function RequestsTab() {
 
 									{/* Badges row: wraps freely, holds all the non-essential context */}
 									{(summary?.model ||
-										agent ||
 										summary?.comboName ||
 										summary?.apiKeyName ||
 										summary?.totalTokens != null ||
@@ -856,12 +786,6 @@ export function RequestsTab() {
 											{summary?.model && (
 												<Badge variant="secondary" className="text-xs">
 													{summary.model}
-												</Badge>
-											)}
-											{agent && (
-												<Badge variant="secondary" className="text-xs">
-													<Bot className="h-3 w-3 mr-1" />
-													{agent}
 												</Badge>
 											)}
 											{summary?.comboName && (

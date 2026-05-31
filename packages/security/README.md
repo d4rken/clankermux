@@ -321,9 +321,6 @@ clearValidationCache();
 1. **Monitor Performance**: Use APM tools to track validation overhead
 2. **Benchmark**: Test with representative workloads
 3. **Adjust Cache Size**: Modify `maxSize` in ValidationCache for your use case
-
-See `packages/proxy/src/handlers/agent-interceptor.ts` for performance notes on per-request validation.
-
 ## Contributing
 
 When adding new validation layers:

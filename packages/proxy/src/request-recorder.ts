@@ -6,10 +6,8 @@ const log = new Logger("RequestRecorder");
 
 // Re-exported so consumers/tests of the recorder get the account-identity
 // sentinel without a separate value-import of the `@clankermux/types` barrel.
-// Importing that barrel as a *value* before `@clankermux/core` triggers a
-// latent module-eval cycle (types/agent.ts → core → core/strategy.ts reads
-// StrategyName before types finishes initializing it). The recorder imports
-// core first, so re-exporting from here keeps the load order safe.
+// The recorder imports core first, so re-exporting from here keeps consumers from
+// creating a separate value-import order dependency on the types barrel.
 export { NO_ACCOUNT_ID };
 
 /**
@@ -72,7 +70,6 @@ export interface RecordMeta {
 	accountAutoPauseOnOverageEnabled: number | null;
 	/** True when accountId is set and != NO_ACCOUNT_ID. */
 	authed: boolean;
-	agentUsed: string | null;
 	apiKeyId: string | null;
 	apiKeyName: string | null;
 	comboName: string | null;
@@ -154,7 +151,6 @@ interface DbOpsLike {
 		responseTime: number,
 		failoverAttempts: number,
 		usage?: unknown,
-		agentUsed?: string,
 		apiKeyId?: string,
 		apiKeyName?: string,
 		project?: string | null,
@@ -673,7 +669,6 @@ export class RequestRecorder {
 					responseTime,
 					meta.failoverAttempts,
 					usage as never,
-					meta.agentUsed ?? undefined,
 					meta.apiKeyId ?? undefined,
 					meta.apiKeyName ?? undefined,
 					meta.project ?? null,
@@ -760,7 +755,6 @@ export class RequestRecorder {
 					responseTime,
 					meta.failoverAttempts,
 					usage as never,
-					meta.agentUsed ?? undefined,
 					meta.apiKeyId ?? undefined,
 					meta.apiKeyName ?? undefined,
 					meta.project ?? null,
@@ -915,7 +909,6 @@ export class RequestRecorder {
 				usage?.cacheCreationInputTokens ?? summary?.cacheCreationInputTokens,
 			outputTokens: usage?.outputTokens,
 			costUsd: usage?.costUsd,
-			agentUsed: meta.agentUsed ?? undefined,
 			tokensPerSecond: summary?.tokensPerSecond,
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,

@@ -53,7 +53,6 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			cache_creation_input_tokens: number | null;
 			output_tokens: number | null;
 			cost_usd: number | null;
-			agent_used: string | null;
 			output_tokens_per_second: number | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
@@ -91,7 +90,6 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 				request.cache_creation_input_tokens || undefined,
 			outputTokens: request.output_tokens || undefined,
 			costUsd: request.cost_usd || undefined,
-			agentUsed: request.agent_used || undefined,
 			tokensPerSecond: request.output_tokens_per_second || undefined,
 			apiKeyId: request.api_key_id || undefined,
 			apiKeyName: request.api_key_name || undefined,

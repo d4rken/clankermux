@@ -1,6 +1,5 @@
 import type { Config } from "@clankermux/config";
 import {
-	DEFAULT_AGENT_MODEL,
 	NETWORK,
 	STRATEGIES,
 	type StrategyName,
@@ -38,8 +37,6 @@ export function createConfigHandlers(
 				sessionDurationMs:
 					(settings.sessionDurationMs as number) ||
 					TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_FALLBACK,
-				default_agent_model:
-					(settings.default_agent_model as string) || DEFAULT_AGENT_MODEL,
 				// Include actual TLS status
 				tls_enabled: runtime?.tlsEnabled || false,
 				system_prompt_cache_ttl_1h: config.getSystemPromptCacheTtl1h(),
@@ -86,34 +83,6 @@ export function createConfigHandlers(
 		 */
 		getStrategies: (): Response => {
 			return jsonResponse(STRATEGIES);
-		},
-
-		/**
-		 * Get default agent model
-		 */
-		getDefaultAgentModel: (): Response => {
-			const model = config.getDefaultAgentModel();
-			return jsonResponse({ model });
-		},
-
-		/**
-		 * Set default agent model
-		 */
-		setDefaultAgentModel: async (req: Request): Promise<Response> => {
-			const body = await req.json();
-
-			// Validate model input
-			const modelValidation = validateString(body.model, "model", {
-				required: true,
-			});
-
-			if (!modelValidation) {
-				return errorResponse(BadRequest("Model is required"));
-			}
-
-			config.setDefaultAgentModel(modelValidation);
-
-			return jsonResponse({ success: true, model: modelValidation });
 		},
 
 		/**

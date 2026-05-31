@@ -8,10 +8,6 @@ export {
 	setComboSlotInfo,
 } from "./account-selector";
 export {
-	type AgentInterceptResult,
-	interceptAndModifyRequest,
-} from "./agent-interceptor";
-export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
