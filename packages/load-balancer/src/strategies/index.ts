@@ -572,41 +572,21 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const isAvailable = (account: Account): boolean =>
 			isPeekAvailable(account, now);
 
-		// peek() has no RequestMeta, so it has no per-request affinity — it is the
-		// "would-be primary absent affinity" estimate. Mirroring select()'s
-		// affinity-first behavior: the auto-fallback re-route precedence and the
-		// global-session priority override are both gone. An active session keeps
-		// its account (immune to priority edits); otherwise FEFO/priority decides.
-		let activeAccount: Account | null = null;
-		let mostRecentSessionStart = 0;
-		for (const account of accounts) {
-			if (
-				this.hasActiveSession(account, now) &&
-				account.session_start &&
-				account.session_start > mostRecentSessionStart
-			) {
-				activeAccount = account;
-				mostRecentSessionStart = account.session_start;
-			}
-		}
+		// peek() has no RequestMeta, so it has no per-request affinity. The
+		// dashboard "Primary" badge it produces = where a FRESH request would
+		// harvest = the FEFO pick. We deliberately do NOT mirror select()'s
+		// global active-session stickiness here: real client traffic is
+		// affinity-keyed and routes via FEFO on a miss, and keying the badge off
+		// session_start made it stick to whichever account most recently STARTED a
+		// session — including a 0-request session opened on an idle account during
+		// post-restart warm-up — instead of the actual harvest target.
+		const available = this.sortAvailableAccounts(accounts, isAvailable, now);
+		const result = available[0]?.id ?? null;
 
-		let result: string | null;
-		let via: "active-session" | "fefo";
-		if (activeAccount && isAvailable(activeAccount)) {
-			result = activeAccount.id;
-			via = "active-session";
-		} else {
-			const available = this.sortAvailableAccounts(accounts, isAvailable, now);
-			result = available[0]?.id ?? null;
-			via = "fefo";
-		}
-
-		// Diagnostic: this value is the dashboard "Primary" badge. It has been
-		// observed to flap between requests; log full per-account state ONLY when
-		// the result changes, so we capture every transition without spamming on
-		// each dashboard poll. Reveals which stage drove it (active-session vs
-		// FEFO) and whether accounts read as UNKNOWN at peek time.
-		this.logPeekChange(result, via, accounts, isAvailable, now);
+		// Diagnostic: log the badge value ONLY when it changes (so we capture
+		// every transition without spamming on each dashboard poll), with the
+		// per-account buckets that drove it.
+		this.logPeekChange(result, accounts, isAvailable, now);
 
 		return result;
 	}
@@ -615,7 +595,6 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 	private logPeekChange(
 		result: string | null,
-		via: "active-session" | "fefo",
 		accounts: Account[],
 		isAvailable: (account: Account) => boolean,
 		now: number,
@@ -640,7 +619,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			return `${a.name}${mark}[${bucket} wk=${wk} util=${Math.round(m.util)}% ${sess}${avail}]`;
 		});
 		this.log.debug(
-			`Peek primary changed ${prev ?? "none"} -> ${result ?? "none"} via ${via} (* marks chosen): ${parts.join(" ")}`,
+			`Peek primary changed ${prev ?? "none"} -> ${result ?? "none"} (* marks chosen): ${parts.join(" ")}`,
 		);
 	}
 
