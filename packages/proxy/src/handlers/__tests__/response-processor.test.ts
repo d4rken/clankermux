@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import { processProxyResponse } from "../response-processor";
@@ -574,5 +575,128 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 
 		expect(calls.updateAccountUsage).toBe(0);
 		expect(calls.manualUsageRun).toBe(1);
+	});
+});
+
+// Spy context for the Codex window-roll path. Captures resetAccountSession
+// calls and every SQL statement run through the (synchronously executed)
+// asyncWriter so tests can assert on the rate_limit_reset write.
+function makeCodexCtx() {
+	const calls = {
+		resetAccountSession: [] as Array<{ accountId: string; now: number }>,
+		runSql: [] as Array<{ sql: string; params: unknown[] }>,
+	};
+
+	const ctx = {
+		provider: {
+			name: "codex",
+			isStreamingResponse: () => false,
+			parseRateLimit: () => ({
+				isRateLimited: false,
+				resetTime: undefined,
+				statusHeader: undefined,
+				remaining: undefined,
+			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
+		},
+		dbOps: {
+			updateAccountUsage: () => {},
+			updateAccountRateLimitMeta: () => {},
+			resetAccountSession: async (accountId: string, now: number) => {
+				calls.resetAccountSession.push({ accountId, now });
+			},
+			getAdapter: () => ({
+				get: async () => ({ rate_limited_until: null }),
+				run: async (sql: string, params: unknown[]) => {
+					calls.runSql.push({ sql, params });
+				},
+			}),
+			updateRequestUsage: async () => {},
+		},
+		asyncWriter: {
+			enqueue: (job: () => void | Promise<void>) => {
+				void job();
+			},
+		},
+	} as unknown as ProxyContext;
+
+	return { ctx, calls };
+}
+
+function codexResponse(fiveHourResetMs: number): Response {
+	// Legacy x-codex-5h-reset-at header carries seconds since epoch and maps to
+	// five_hour.resets_at. No 7d header → earliest reset is just the 5h value.
+	return new Response('{"id":"msg_1"}', {
+		status: 200,
+		headers: {
+			"content-type": "application/json",
+			"x-codex-5h-reset-at": String(Math.floor(fiveHourResetMs / 1000)),
+		},
+	});
+}
+
+function rateLimitResetWrites(
+	runSql: Array<{ sql: string; params: unknown[] }>,
+) {
+	return runSql.filter((c) => c.sql.includes("rate_limit_reset"));
+}
+
+describe("processProxyResponse — Codex window-roll detection (Primary badge flap fix)", () => {
+	it("does NOT reset the session or rewrite rate_limit_reset on sub-second drift of a still-future window", async () => {
+		const account = makeAccount({ id: "codex-drift", provider: "codex" });
+		// Prior usage: a still-future 5h reset, on a whole-second boundary so the
+		// legacy header re-reports the SAME second.
+		const futureResetMs =
+			Math.floor((Date.now() + 4 * 60 * 60 * 1000) / 1000) * 1000;
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 2,
+				resets_at: new Date(futureResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+
+		const { ctx, calls } = makeCodexCtx();
+		// Header reports the same future window (+200ms drift, but same second so
+		// the persisted earliest reset is byte-identical).
+		await processProxyResponse(
+			codexResponse(futureResetMs + 200),
+			account,
+			ctx,
+		);
+
+		expect(calls.resetAccountSession).toHaveLength(0);
+		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
+
+		usageCache.delete(account.id);
+	});
+
+	it("resets the session AND writes rate_limit_reset on a genuine roll (prior reset already passed)", async () => {
+		const account = makeAccount({ id: "codex-roll", provider: "codex" });
+		// Prior 5h reset already arrived (in the past).
+		const passedResetMs = Math.floor((Date.now() - 60 * 1000) / 1000) * 1000;
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 98,
+				resets_at: new Date(passedResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+
+		const { ctx, calls } = makeCodexCtx();
+		// New 5h reset is the next window, well in the future.
+		const nextResetMs =
+			Math.floor((Date.now() + 5 * 60 * 60 * 1000) / 1000) * 1000;
+		await processProxyResponse(codexResponse(nextResetMs), account, ctx);
+
+		expect(calls.resetAccountSession).toHaveLength(1);
+		expect(calls.resetAccountSession[0]?.accountId).toBe(account.id);
+
+		const writes = rateLimitResetWrites(calls.runSql);
+		expect(writes).toHaveLength(1);
+		expect(writes[0]?.params[0]).toBe(nextResetMs);
+
+		usageCache.delete(account.id);
 	});
 });
