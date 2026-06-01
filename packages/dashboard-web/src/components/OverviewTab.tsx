@@ -38,7 +38,7 @@ export const OverviewTab = React.memo(() => {
 		REFRESH_INTERVALS.default,
 		24,
 	);
-	const [timeRange, setTimeRange] = useState("24h");
+	const [timeRange, setTimeRange] = useState("6h");
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
 		timeRange,
 		{ accounts: [], models: [], status: "all" },
