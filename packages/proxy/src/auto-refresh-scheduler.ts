@@ -5,7 +5,12 @@ import {
 } from "@clankermux/core";
 import type { BunSqlAdapter } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
-import { fetchUsageData, getProvider } from "@clankermux/providers";
+import {
+	fetchUsageData,
+	getProvider,
+	toEpochMs,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
@@ -13,6 +18,25 @@ import { getValidAccessToken } from "./handlers";
 import type { ProxyContext } from "./proxy";
 
 const log = new Logger("AutoRefreshScheduler");
+
+/**
+ * The row shape selected by the auto-refresh eligibility query and consumed by
+ * sendDummyMessage. Kept as a single alias so the 5h and weekly selection passes
+ * share exactly the columns sendDummyMessage needs.
+ */
+type AutoRefreshAccountRow = {
+	id: string;
+	name: string;
+	provider: string;
+	refresh_token: string;
+	access_token: string | null;
+	expires_at: number | null;
+	rate_limit_reset: number | null;
+	custom_endpoint: string | null;
+	paused: number;
+	auto_pause_on_overage_enabled: number;
+	pause_reason: string | null;
+};
 
 function isZaiPeakHour(ts = Date.now()): boolean {
 	const d = new Date(ts);
@@ -39,6 +63,14 @@ export class AutoRefreshScheduler {
 	private consecutiveFailures: Map<string, number> = new Map();
 	// Threshold for marking an account as needing re-authentication
 	private readonly FAILURE_THRESHOLD = 5;
+	// Track the last time we primed an account's dormant WEEKLY (seven_day) window.
+	// A per-account cooldown prevents a retry-storm when a weekly prime keeps failing.
+	private lastWeeklyPrimeTime: Map<string, number> = new Map();
+	// Minimum gap between weekly-dormant primes for the same account.
+	private readonly WEEKLY_PRIME_COOLDOWN_MS = 15 * 60 * 1000;
+	// Maximum age of a cached usage datum we will trust when classifying a weekly
+	// window as dormant. Older than this → treat as unknown and skip (no prime).
+	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
 
 	constructor(db: BunSqlAdapter, proxyContext: ProxyContext) {
 		this.db = db;
@@ -78,6 +110,7 @@ export class AutoRefreshScheduler {
 		// Clear the tracking maps to free memory
 		this.lastRefreshResetTime.clear();
 		this.consecutiveFailures.clear();
+		this.lastWeeklyPrimeTime.clear();
 	}
 
 	/**
@@ -138,11 +171,12 @@ export class AutoRefreshScheduler {
 				WHERE
 					auto_refresh_enabled = 1
 					AND provider IN ('anthropic', 'codex', 'zai')
-					AND (
-						(rate_limit_reset IS NOT NULL AND rate_limit_reset <= ?)
-						OR rate_limit_reset IS NULL
-						OR rate_limit_reset < (? - 24 * 60 * 60 * 1000)
-					)
+					-- NOTE: the 5-hour reset predicate that used to live here has moved
+					-- into the per-account fiveHourWindowGate()/shouldRefreshAccount()
+					-- pass below. The base query now scans ALL eligible accounts so the
+					-- weekly-dormant priming pass can also see accounts whose 5h window
+					-- is still active (their 5h reset is in the future) — those would
+					-- have been filtered out by the old SQL.
 					-- Skip accounts that are still inside an active per-account cooldown.
 					-- ClankerMux already knows upstream will reject us until rate_limited_until,
 					-- so probing during that window is a guaranteed-fail call that wastes
@@ -169,7 +203,7 @@ export class AutoRefreshScheduler {
 						)
 					)
 			`,
-				[now, now, now],
+				[now],
 			);
 
 			log.debug(
@@ -187,24 +221,57 @@ export class AutoRefreshScheduler {
 				);
 			});
 
-			// Filter accounts: only refresh if this is a NEW window
-			// We detect a new window by comparing the current rate_limit_reset with the one we stored when we last refreshed
+			// Filter accounts for the FIVE-HOUR reason: only refresh if this is a NEW
+			// 5h window. The fiveHourWindowGate reproduces the predicate the base SQL
+			// used to enforce (we removed it from the query so the weekly pass can see
+			// all accounts). It is REQUIRED: without it, a never-refreshed account whose
+			// 5h reset is still in the FUTURE would hit shouldRefreshAccount's first-time
+			// `return true` branch and be primed on first sight — a regression. The gate
+			// gives shouldRefreshAccount exactly the rows the old SQL would have surfaced.
 			const accountsToRefresh = accounts.filter((account) =>
-				this.shouldRefreshAccount(account, now),
+				this.fiveHourDue(account, now),
 			);
 
-			if (accountsToRefresh.length === 0) {
-				return;
+			if (accountsToRefresh.length > 0) {
+				log.info(
+					`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
+				);
 			}
 
-			log.info(
-				`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
-			);
+			// Snapshot which accounts are due for a 5h prime BEFORE we send anything.
+			// The weekly pass uses this set to defer to the 5h reason — building it
+			// pre-send guarantees "5h wins" even if a 5h send fails (a failed send must
+			// not reclassify the account as weekly-only and prime it twice).
+			const fiveHourDueIds = new Set(accountsToRefresh.map((a) => a.id));
 
 			// Send dummy message to each account
 			// The sendDummyMessage method will update lastRefreshResetTime with the NEW rate_limit_reset from the API
 			for (const accountRow of accountsToRefresh) {
 				await this.sendDummyMessage(accountRow);
+			}
+
+			// WEEKLY-DORMANT priming: prime at most ONE account per cycle whose weekly
+			// (seven_day) window is dormant while its 5h window is still active. Scope
+			// is anthropic-OAuth only (provider==='anthropic' && refresh_token); the
+			// Haiku prime starts the AGGREGATE seven_day window. Model-specific
+			// seven_day_opus/seven_day_sonnet windows legitimately stay dormant until
+			// that model is used — that is expected and not handled here.
+			const weeklyAccount = this.selectWeeklyPrimeCandidate(
+				accounts,
+				fiveHourDueIds,
+				now,
+			);
+			if (weeklyAccount) {
+				log.info(
+					`Weekly-dormant prime: priming ${weeklyAccount.name} (weekly window dormant; 5h window still active)`,
+				);
+				try {
+					await this.sendDummyMessage(weeklyAccount);
+				} finally {
+					// Set the cooldown timestamp even on failure so a failing prime does
+					// not retry-storm every cycle (no retry-storm).
+					this.lastWeeklyPrimeTime.set(weeklyAccount.id, now);
+				}
 			}
 
 			// Proactively refresh Qwen OAuth tokens expiring within the safety window
@@ -968,6 +1035,16 @@ export class AutoRefreshScheduler {
 					);
 				}
 			}
+
+			// And the weekly-prime cooldown map for non-active accounts
+			for (const accountId of this.lastWeeklyPrimeTime.keys()) {
+				if (!activeAccountIdSet.has(accountId)) {
+					this.lastWeeklyPrimeTime.delete(accountId);
+					log.debug(
+						`Removed weekly-prime tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
+					);
+				}
+			}
 		} catch (error) {
 			if (error instanceof Error) {
 				const errorMessage = `Error cleaning up tracking map: ${error.name}: ${error.message}`;
@@ -1030,6 +1107,120 @@ export class AutoRefreshScheduler {
 				log.info(`Peak hours resume: resumed zai account '${account.name}'`);
 			}
 		}
+	}
+
+	/**
+	 * Gate reproducing the 5-hour reset predicate the base eligibility SQL used to
+	 * enforce (before it was broadened for weekly priming). An account is in scope
+	 * for the 5h reason only when it has no known reset (rate_limit_reset == null)
+	 * or its reset is already at/in the past. This excludes accounts whose 5h reset
+	 * is still in the FUTURE — exactly what the old `rate_limit_reset <= ?` SQL did.
+	 */
+	private fiveHourWindowGate(
+		account: { rate_limit_reset: number | null },
+		now: number,
+	): boolean {
+		return account.rate_limit_reset == null || account.rate_limit_reset <= now;
+	}
+
+	/**
+	 * True when an account is due for a FIVE-HOUR prime: it passes the window gate
+	 * AND shouldRefreshAccount's new-window detection. Composing the two reproduces
+	 * the old behaviour (SQL pre-filter + shouldRefreshAccount) exactly.
+	 */
+	private fiveHourDue(
+		account: {
+			id: string;
+			name: string;
+			provider: string;
+			refresh_token: string;
+			access_token: string | null;
+			expires_at: number | null;
+			rate_limit_reset: number | null;
+			custom_endpoint: string | null;
+		},
+		now: number,
+	): boolean {
+		return (
+			this.fiveHourWindowGate(account, now) &&
+			this.shouldRefreshAccount(account, now)
+		);
+	}
+
+	/**
+	 * Classify an account's WEEKLY (seven_day) window as dormant based on the cached
+	 * usage datum. Dormant means the weekly window has not started / has reset and
+	 * is sitting idle, so a prime would (re)start it.
+	 *
+	 * Returns true iff:
+	 *  - there is a fresh cached usage datum (age known and within
+	 *    WEEKLY_CACHE_MAX_AGE_MS), AND
+	 *  - it carries a seven_day window, AND
+	 *  - that window's resets_at is null (never started) OR parses to a timestamp
+	 *    that is at/before now (already reset and idle).
+	 *
+	 * A non-null but unparseable resets_at → toEpochMs returns null → NOT dormant
+	 * (unknown → skip). A future reset → NOT dormant (window still running).
+	 */
+	private isWeeklyDormant(accountId: string, now: number): boolean {
+		const entry = usageCache.get(accountId);
+		if (!entry) return false;
+
+		// Freshness: getAge returns ms-age, or null when there's no entry / it is
+		// older than the cache's own 10-min ceiling. We additionally require it to
+		// be within WEEKLY_CACHE_MAX_AGE_MS so we only prime on recent evidence.
+		const age = usageCache.getAge(accountId);
+		if (age === null || age > this.WEEKLY_CACHE_MAX_AGE_MS) return false;
+
+		const seven = (
+			entry as {
+				seven_day?: { utilization: number | null; resets_at: string | null };
+			}
+		).seven_day;
+		if (!seven) return false;
+
+		if (seven.resets_at == null) return true; // never started → dormant
+		const resetMs = toEpochMs(seven.resets_at);
+		if (resetMs === null) return false; // unparseable → unknown → skip
+		return resetMs <= now; // already reset and idle → dormant
+	}
+
+	/**
+	 * Pick at most ONE account to prime for the WEEKLY-dormant reason this cycle.
+	 * Candidates must:
+	 *  - NOT already be due for a 5h prime (5h reason takes precedence),
+	 *  - be anthropic-OAuth (provider==='anthropic' && refresh_token present),
+	 *  - have a dormant weekly window (isWeeklyDormant), and
+	 *  - be outside the per-account WEEKLY_PRIME_COOLDOWN_MS.
+	 * Survivors are sorted by id ascending for deterministic selection; the first
+	 * is returned, or null if none qualify.
+	 */
+	private selectWeeklyPrimeCandidate(
+		candidates: AutoRefreshAccountRow[],
+		fiveHourDueIds: Set<string>,
+		now: number,
+	): AutoRefreshAccountRow | null {
+		const eligible = candidates.filter(
+			(c) =>
+				!fiveHourDueIds.has(c.id) &&
+				c.provider === "anthropic" &&
+				!!c.refresh_token &&
+				this.isWeeklyDormant(c.id, now) &&
+				now - (this.lastWeeklyPrimeTime.get(c.id) ?? 0) >=
+					this.WEEKLY_PRIME_COOLDOWN_MS,
+		);
+
+		if (eligible.length === 0) return null;
+
+		eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+		if (eligible.length > 1) {
+			log.debug(
+				`Weekly-dormant prime: ${eligible.length} candidate(s) dormant; priming 1 (${eligible[0].name}), deferring ${eligible.length - 1} to later cycles`,
+			);
+		}
+
+		return eligible[0];
 	}
 
 	/**

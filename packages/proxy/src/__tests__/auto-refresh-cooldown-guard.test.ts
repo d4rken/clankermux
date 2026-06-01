@@ -64,7 +64,7 @@ describe("AutoRefreshScheduler — SQL cooldown guard (PR #200 bug 1)", () => {
 		);
 	});
 
-	it("eligibility query passes now as the third parameter (rate_limited_until guard)", async () => {
+	it("eligibility query passes now as its single parameter (rate_limited_until guard)", async () => {
 		const db = makeDb([]);
 		const scheduler = await makeScheduler(db);
 
@@ -81,23 +81,27 @@ describe("AutoRefreshScheduler — SQL cooldown guard (PR #200 bug 1)", () => {
 		);
 		expect(mainQuery).toBeDefined();
 
-		// Parameter array must have 3 elements: [now, now, now]
-		// position [2] is the third 'now' used by the rate_limited_until <= ? guard
+		// The base query was broadened for weekly-dormant priming: the two
+		// rate_limit_reset placeholders were removed and the 5h reset predicate
+		// moved into the per-account fiveHourWindowGate. The only remaining bind
+		// is the `now` used by the rate_limited_until <= ? cooldown guard.
 		expect(Array.isArray(mainQuery?.params)).toBe(true);
-		expect(mainQuery?.params.length).toBe(3);
+		expect(mainQuery?.params.length).toBe(1);
 
-		const thirdParam = mainQuery?.params[2] as number;
-		expect(thirdParam).toBeGreaterThanOrEqual(before);
-		expect(thirdParam).toBeLessThanOrEqual(after);
+		const onlyParam = mainQuery?.params[0] as number;
+		expect(onlyParam).toBeGreaterThanOrEqual(before);
+		expect(onlyParam).toBeLessThanOrEqual(after);
 	});
 
-	it("all three parameters are the same timestamp value", async () => {
+	it("the single parameter is a current timestamp value", async () => {
 		const db = makeDb([]);
 		const scheduler = await makeScheduler(db);
 
+		const before = Date.now();
 		await (
 			scheduler as never as { checkAndRefresh(): Promise<void> }
 		).checkAndRefresh();
+		const after = Date.now();
 
 		const mainQuery = db.queryCalls.find(
 			(c) =>
@@ -106,10 +110,9 @@ describe("AutoRefreshScheduler — SQL cooldown guard (PR #200 bug 1)", () => {
 		);
 		expect(mainQuery).toBeDefined();
 
-		const [p0, p1, p2] = mainQuery?.params as number[];
-		// All three bind values must be the same 'now' snapshot
-		expect(p0).toBe(p1);
-		expect(p1).toBe(p2);
+		const [p0] = mainQuery?.params as number[];
+		expect(p0).toBeGreaterThanOrEqual(before);
+		expect(p0).toBeLessThanOrEqual(after);
 	});
 });
 
