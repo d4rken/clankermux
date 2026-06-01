@@ -590,13 +590,58 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			}
 		}
 
+		let result: string | null;
+		let via: "active-session" | "fefo";
 		if (activeAccount && isAvailable(activeAccount)) {
-			return activeAccount.id;
+			result = activeAccount.id;
+			via = "active-session";
+		} else {
+			const available = this.sortAvailableAccounts(accounts, isAvailable, now);
+			result = available[0]?.id ?? null;
+			via = "fefo";
 		}
 
-		const available = this.sortAvailableAccounts(accounts, isAvailable, now);
+		// Diagnostic: this value is the dashboard "Primary" badge. It has been
+		// observed to flap between requests; log full per-account state ONLY when
+		// the result changes, so we capture every transition without spamming on
+		// each dashboard poll. Reveals which stage drove it (active-session vs
+		// FEFO) and whether accounts read as UNKNOWN at peek time.
+		this.logPeekChange(result, via, accounts, isAvailable, now);
 
-		return available[0]?.id ?? null;
+		return result;
+	}
+
+	private lastPeekPrimary: string | null | undefined = undefined;
+
+	private logPeekChange(
+		result: string | null,
+		via: "active-session" | "fefo",
+		accounts: Account[],
+		isAvailable: (account: Account) => boolean,
+		now: number,
+	): void {
+		if (result === this.lastPeekPrimary) return;
+		const prev = this.lastPeekPrimary;
+		this.lastPeekPrimary = result;
+		if (this.log.getLevel() > LogLevel.DEBUG) return;
+		const parts = accounts.map((a) => {
+			const m = this.capacityMetricFor(a, now);
+			const bucket = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
+			const wk =
+				m.harvestDeadline === Number.POSITIVE_INFINITY
+					? "none"
+					: `${Math.round((m.harvestDeadline - now) / 60000)}m`;
+			const sess =
+				this.hasActiveSession(a, now) && a.session_start
+					? `sess@${Math.round((now - a.session_start) / 60000)}m`
+					: "no-sess";
+			const avail = isAvailable(a) ? "" : " UNAVAIL";
+			const mark = a.id === result ? "*" : "";
+			return `${a.name}${mark}[${bucket} wk=${wk} util=${Math.round(m.util)}% ${sess}${avail}]`;
+		});
+		this.log.debug(
+			`Peek primary changed ${prev ?? "none"} -> ${result ?? "none"} via ${via} (* marks chosen): ${parts.join(" ")}`,
+		);
 	}
 
 	select(accounts: Account[], meta: RequestMeta): Account[] {

@@ -862,12 +862,22 @@ class UsageCache {
 	 * against the previously cached data, and fire the callback if it has advanced.
 	 * Should be called after successfully fetching new data, before updating the cache.
 	 * No-ops on the first poll (no previous data) to avoid spurious resets.
+	 *
+	 * A genuine window roll is detected only when the previously-tracked reset
+	 * time has actually ARRIVED (`prevResetAt <= now`) and a new, later reset is
+	 * reported. The provider returns a `resets_at` that drifts forward by a few
+	 * hundred ms on every poll while the SAME window is still in the future
+	 * (e.g. 10:40:00.641Z → 10:40:00.856Z); without the `prevResetAt <= now`
+	 * guard that sub-second drift was mis-detected as a reset on every poll,
+	 * firing the callback (which bumps `session_start` / resets session tracking)
+	 * ~once per poll and churning state continuously.
 	 */
 	notifyWindowReset(
 		accountId: string,
 		newData: AnyUsageData,
 		provider: string,
 		callback: (accountId: string) => void,
+		now: number = Date.now(),
 	): void {
 		const previous = this.cache.get(accountId);
 		if (!previous) return; // first poll — no baseline to compare against
@@ -878,7 +888,8 @@ class UsageCache {
 		if (
 			prevResetAt !== null &&
 			newResetAt !== null &&
-			newResetAt > prevResetAt
+			newResetAt > prevResetAt &&
+			prevResetAt <= now
 		) {
 			log.info(
 				`Usage window reset detected for account ${accountId} (${provider}): ` +
