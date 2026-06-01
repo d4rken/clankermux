@@ -132,4 +132,78 @@ describe("usageCache window-reset callback", () => {
 
 		expect(callback).not.toHaveBeenCalled();
 	});
+
+	it("does NOT fire on sub-second drift of a still-future reset (anthropic)", () => {
+		// Regression: the provider returns a resets_at that drifts forward by a
+		// few hundred ms on every poll while the SAME (future) window is active.
+		// That must not be mistaken for a window roll (which was bumping
+		// session_start ~every poll and flapping the dashboard Primary badge).
+		const accountId = "anthropic-drift-test";
+		const callback = mock(() => {});
+		const now = 1_000_000_000_000; // fixed reference
+		const futureReset = now + 4 * 60 * 60 * 1000; // 4h in the future
+
+		const oldData: UsageData = {
+			five_hour: {
+				utilization: 2,
+				resets_at: new Date(futureReset).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		};
+		const newData: UsageData = {
+			five_hour: {
+				utilization: 2,
+				resets_at: new Date(futureReset + 215).toISOString(), // +215ms drift
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		};
+
+		usageCache.set(accountId, oldData);
+		usageCache.notifyWindowReset(
+			accountId,
+			newData,
+			"anthropic",
+			callback,
+			now,
+		);
+
+		expect(callback).not.toHaveBeenCalled();
+		usageCache.delete(accountId);
+	});
+
+	it("fires on a genuine roll once the previous reset time has passed (anthropic)", () => {
+		const accountId = "anthropic-real-reset-test";
+		const callback = mock(() => {});
+		const now = 1_000_000_000_000;
+		const passedReset = now - 1_000; // previous window's reset just arrived
+		const nextReset = now + 5 * 60 * 60 * 1000; // next 5h window
+
+		const oldData: UsageData = {
+			five_hour: {
+				utilization: 95,
+				resets_at: new Date(passedReset).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		};
+		const newData: UsageData = {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(nextReset).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		};
+
+		usageCache.set(accountId, oldData);
+		usageCache.notifyWindowReset(
+			accountId,
+			newData,
+			"anthropic",
+			callback,
+			now,
+		);
+
+		expect(callback).toHaveBeenCalledTimes(1);
+		expect(callback).toHaveBeenCalledWith(accountId);
+		usageCache.delete(accountId);
+	});
 });
