@@ -1402,14 +1402,14 @@ describe("SessionStrategy", () => {
 			expect(result).not.toContain(affined);
 		});
 
-		it("peek matches select primary for the higher-priority-pinned case", () => {
+		it("peek shows the would-be fresh-pick, not the active per-session pin", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {
 				...meta,
 				project: "peek-parity-project",
 			};
 
-			// A is lower priority (1) but is the one we want pinned/active.
+			// A is lower priority (1) but is the one pinned/active for this project.
 			const accountA = makeAccount({
 				id: "peek-pinned-A",
 				name: "peek-pinned-A",
@@ -1438,15 +1438,18 @@ describe("SessionStrategy", () => {
 			accountB.paused = false;
 			accountB.pause_reason = null;
 
-			// select stays on A via affinity_hit (immune to B's higher priority).
+			// select stays on A via affinity_hit (the per-session pin is immune to
+			// B's higher priority).
 			const second = strategy.select([accountA, accountB], projectMeta);
 			expect(second[0]).toBe(accountA);
 			expect(projectMeta.routing?.decision).toBe("affinity_hit");
 
-			// peek has no affinity, but it honors the active-session window without
-			// the removed higher-priority override: A is the active session and is
-			// available, so peek returns A — matching select()'s primary.
-			expect(strategy.peek([accountA, accountB])).toBe(accountA.id);
+			// peek() is the dashboard "Primary" badge: it deliberately does NOT
+			// track A's per-session pin (peek has no affinity, and keying off an
+			// active session made the badge stick to idle/stale sessions). It shows
+			// where a FRESH request would go — the FEFO/priority pick — which is the
+			// now-available higher-priority B.
+			expect(strategy.peek([accountA, accountB])).toBe(accountB.id);
 		});
 
 		it("partitions affinity by authenticated API key identity", () => {
@@ -1879,6 +1882,40 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		const accts = [a, b];
 		expect(strategy.peek(accts)).toBe(b.id);
 		expect(strategy.peek(accts)).toBe(strategy.select(accts, makeMeta())[0].id);
+	});
+
+	// Reported-bug regression: the dashboard "Primary" badge must NOT stick to an
+	// idle account that merely STARTED a session most recently (e.g. a 0-request
+	// session opened during post-restart warm-up). It must follow the weekly-FEFO
+	// ranking. Uses Anthropic accounts so a session_start is actually meaningful.
+	it("peek ignores a recent-but-idle session_start and returns the weekly-FEFO target", () => {
+		const now = Date.now();
+		// The real harvest target: weekly resets soonest (~20h); its session began
+		// earlier (8 min ago — the busy account).
+		const soonWeekly = makeAccount({
+			id: "soon-weekly",
+			name: "soon-weekly",
+			provider: "anthropic",
+			priority: 10,
+			expires_at: now + 3_600_000,
+			session_start: now - 8 * 60_000,
+		});
+		// Idle account: weekly resets far away (~6 days) but it opened a session
+		// MORE recently (1 min ago) — what the old active-session stage latched onto.
+		const farWeeklyIdle = makeAccount({
+			id: "far-weekly-idle",
+			name: "far-weekly-idle",
+			provider: "anthropic",
+			priority: 10,
+			expires_at: now + 3_600_000,
+			session_start: now - 1 * 60_000,
+		});
+		mockStore.setCapacity(soonWeekly.id, harvest(40, 20 * 60 * 60_000));
+		mockStore.setCapacity(farWeeklyIdle.id, harvest(94, 6 * 24 * 60 * 60_000));
+
+		// Old behavior returned farWeeklyIdle (most-recent session_start). The badge
+		// now follows FEFO → the soonest-expiring weekly account.
+		expect(strategy.peek([farWeeklyIdle, soonWeekly])).toBe(soonWeekly.id);
 	});
 
 	// R5: an account with no weekly window (only 5h) is UNKNOWN, never HARVEST.
