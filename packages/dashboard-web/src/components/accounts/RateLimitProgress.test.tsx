@@ -35,6 +35,94 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain("Usage (5-hour)");
 	});
 
+	describe("weekly window with no reset timestamp", () => {
+		const futureFiveHour = () => ({
+			utilization: 10,
+			resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+		});
+
+		it("shows 'Not started yet' / 'No usage this week' when seven_day utilization is 0", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: futureFiveHour(),
+						seven_day: { utilization: 0, resets_at: null },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("Not started yet");
+			expect(html).toContain("No usage this week");
+			expect(html).not.toContain("Data unavailable");
+		});
+
+		it("shows 'Not started yet' / 'No usage this week' for seven_day_sonnet with utilization 0", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: futureFiveHour(),
+						seven_day: { utilization: 0, resets_at: null },
+						seven_day_sonnet: { utilization: 0, resets_at: null },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("Not started yet");
+			expect(html).toContain("No usage this week");
+			expect(html).not.toContain("Data unavailable");
+		});
+
+		it("shows 'Usage data unavailable' when seven_day utilization is null", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: futureFiveHour(),
+						seven_day: { utilization: null, resets_at: null },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("Usage data unavailable");
+			expect(html).not.toContain("Not started yet");
+			expect(html).not.toContain("Data unavailable");
+		});
+
+		it("shows neither primed-window phrase when seven_day utilization is positive but reset is missing", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: futureFiveHour(),
+						seven_day: { utilization: 42, resets_at: null },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).not.toContain("No usage this week");
+			expect(html).not.toContain("Not started yet");
+			expect(html).not.toContain("Data unavailable");
+		});
+	});
+
 	it("does not display a throttled-until time past reset for over-100% usage", () => {
 		const now = Date.now();
 		const resetAt = now + 30 * 1000;

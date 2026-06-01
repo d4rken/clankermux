@@ -28,6 +28,8 @@ export {
 export * from "./types";
 // Export usage fetcher
 export * from "./usage-fetcher";
+// Export window-reset timestamp helpers
+export * from "./window-reset";
 // Export Zai usage fetcher
 export * from "./zai-usage-fetcher";
 

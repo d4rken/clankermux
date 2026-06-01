@@ -13,6 +13,7 @@ import {
 	getRepresentativeKiloWindow,
 	type KiloUsageData,
 } from "./kilo-usage-fetcher";
+import { isGenuineWindowRoll } from "./window-reset";
 import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
@@ -885,15 +886,13 @@ class UsageCache {
 		const prevResetAt = extractWindowResetTime(previous.data, provider);
 		const newResetAt = extractWindowResetTime(newData, provider);
 
-		if (
-			prevResetAt !== null &&
-			newResetAt !== null &&
-			newResetAt > prevResetAt &&
-			prevResetAt <= now
-		) {
+		if (isGenuineWindowRoll(prevResetAt, newResetAt, now)) {
+			// isGenuineWindowRoll guarantees both are non-null here; the assertions
+			// keep the log line's ISO formatting identical to the prior inline guard.
 			log.info(
 				`Usage window reset detected for account ${accountId} (${provider}): ` +
-					`${new Date(prevResetAt).toISOString()} → ${new Date(newResetAt).toISOString()}`,
+					// biome-ignore lint/style/noNonNullAssertion: non-null guaranteed by isGenuineWindowRoll
+					`${new Date(prevResetAt!).toISOString()} → ${new Date(newResetAt!).toISOString()}`,
 			);
 			callback(accountId);
 		}

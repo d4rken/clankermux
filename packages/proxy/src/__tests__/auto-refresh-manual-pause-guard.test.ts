@@ -127,8 +127,13 @@ function selectedNames(query: QueryCall): Set<string> {
 	const db = seedDb();
 	try {
 		const now = Date.now();
-		// The query binds exactly three `now` placeholders ([now, now, now]).
-		const rows = db.query(query.sql).all(now, now, now) as Array<{
+		// The base query was broadened for weekly-dormant priming: the 5h
+		// rate_limit_reset predicate moved into the per-account fiveHourWindowGate,
+		// so the SQL now binds exactly ONE `now` placeholder (the rate_limited_until
+		// cooldown guard). The seeded rows all have rate_limit_reset = NULL, which
+		// the removed predicate matched anyway, so the pause/cooldown filtering
+		// intent under test is unchanged.
+		const rows = db.query(query.sql).all(now) as Array<{
 			name: string;
 		}>;
 		return new Set(rows.map((r) => r.name));

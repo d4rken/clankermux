@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import { processProxyResponse } from "../response-processor";
@@ -574,5 +575,140 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 
 		expect(calls.updateAccountUsage).toBe(0);
 		expect(calls.manualUsageRun).toBe(1);
+	});
+});
+
+// Spy context for the Codex window-roll path. Captures resetAccountSession
+// calls and every SQL statement run through the (synchronously executed)
+// asyncWriter so tests can assert on the rate_limit_reset write.
+function makeCodexCtx() {
+	const calls = {
+		resetAccountSession: [] as Array<{ accountId: string; now: number }>,
+		runSql: [] as Array<{ sql: string; params: unknown[] }>,
+	};
+
+	const ctx = {
+		provider: {
+			name: "codex",
+			isStreamingResponse: () => false,
+			parseRateLimit: () => ({
+				isRateLimited: false,
+				resetTime: undefined,
+				statusHeader: undefined,
+				remaining: undefined,
+			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
+		},
+		dbOps: {
+			updateAccountUsage: () => {},
+			updateAccountRateLimitMeta: () => {},
+			resetAccountSession: async (accountId: string, now: number) => {
+				calls.resetAccountSession.push({ accountId, now });
+			},
+			getAdapter: () => ({
+				get: async () => ({ rate_limited_until: null }),
+				run: async (sql: string, params: unknown[]) => {
+					calls.runSql.push({ sql, params });
+				},
+			}),
+			updateRequestUsage: async () => {},
+		},
+		asyncWriter: {
+			enqueue: (job: () => void | Promise<void>) => {
+				void job();
+			},
+		},
+	} as unknown as ProxyContext;
+
+	return { ctx, calls };
+}
+
+function codexResponse(fiveHourResetMs: number): Response {
+	// Use the PRIMARY window header (x-codex-primary-reset-at) paired with
+	// x-codex-primary-window-minutes=300 (≤ 5h ⇒ maps to five_hour). Unlike the
+	// legacy x-codex-5h-reset-at path, parseCodexUsageHeaders parses this value
+	// with parseFloat(...) * 1000, so a FRACTIONAL epoch-seconds value preserves
+	// millisecond precision in five_hour.resets_at — letting the drift test feed a
+	// reset that differs from the previous one by sub-second (and stays future).
+	// No 7d header → earliest reset is just the 5h value.
+	return new Response('{"id":"msg_1"}', {
+		status: 200,
+		headers: {
+			"content-type": "application/json",
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
+		},
+	});
+}
+
+function rateLimitResetWrites(
+	runSql: Array<{ sql: string; params: unknown[] }>,
+) {
+	return runSql.filter((c) => c.sql.includes("rate_limit_reset"));
+}
+
+describe("processProxyResponse — Codex window-roll detection (Primary badge flap fix)", () => {
+	it("does NOT reset the session or rewrite rate_limit_reset on genuine sub-second drift of a still-future window", async () => {
+		// futureResetMs carries an explicit sub-second component (…+641 ms) so the
+		// new reset (prev + 200 ms = …+841 ms) is a DIFFERENT millisecond value that
+		// is still strictly later AND still in the future. The primary-window header
+		// preserves that fractional precision (parseFloat * 1000), so prev≠new in
+		// five_hour.resets_at — unlike the old whole-second header which floored both
+		// to the same second and never exercised the prevResetMs<=now guard.
+		const account = makeAccount({ id: "codex-drift", provider: "codex" });
+		const futureResetMs = Date.now() + 4 * 60 * 60 * 1000 + 641; // future, sub-second
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 2,
+				resets_at: new Date(futureResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+		// Persisted reset already matches the prior future reset, so the >=1s
+		// write-gate (which now compares against account.rate_limit_reset) suppresses
+		// the rewrite for a 200 ms drift.
+		account.rate_limit_reset = futureResetMs;
+
+		const { ctx, calls } = makeCodexCtx();
+		// Header reports the same future window shifted forward by 200 ms — a genuine
+		// sub-second difference (prev ≠ new, new > prev), but the reset has NOT yet
+		// arrived. isGenuineWindowRoll must reject it via the prevResetMs<=now guard.
+		const newResetMs = futureResetMs + 200;
+		await processProxyResponse(codexResponse(newResetMs), account, ctx);
+
+		expect(calls.resetAccountSession).toHaveLength(0);
+		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
+
+		usageCache.delete(account.id);
+	});
+
+	it("resets the session AND writes rate_limit_reset on a genuine roll (prior reset already passed)", async () => {
+		const account = makeAccount({ id: "codex-roll", provider: "codex" });
+		// Prior 5h reset already arrived (in the past). Sub-second component carried
+		// through to prove the genuine-roll path is independent of second-flooring.
+		const passedResetMs = Date.now() - 60 * 1000 + 123;
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 98,
+				resets_at: new Date(passedResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+		// account.rate_limit_reset is null (default) so the write-gate fires.
+
+		const { ctx, calls } = makeCodexCtx();
+		// New 5h reset is the next window, well in the future.
+		const nextResetMs = Date.now() + 5 * 60 * 60 * 1000 + 456;
+		await processProxyResponse(codexResponse(nextResetMs), account, ctx);
+
+		expect(calls.resetAccountSession).toHaveLength(1);
+		expect(calls.resetAccountSession[0]?.accountId).toBe(account.id);
+
+		const writes = rateLimitResetWrites(calls.runSql);
+		expect(writes).toHaveLength(1);
+		expect(writes[0]?.params[0]).toBe(nextResetMs);
+
+		usageCache.delete(account.id);
 	});
 });

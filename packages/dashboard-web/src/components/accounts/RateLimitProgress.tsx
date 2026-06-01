@@ -425,15 +425,20 @@ export function RateLimitProgress({
 					} else {
 						windowTimeText = `${windowRemainingMinutes}m`;
 					}
-				} else if (usage.window === "seven_day") {
-					// Special handling for weekly data when reset time is not available
-					windowTimeText = "Data unavailable";
 				} else if (
+					usage.window === "seven_day" ||
 					usage.window === "seven_day_opus" ||
 					usage.window === "seven_day_sonnet"
 				) {
-					// Special handling for weekly opus/sonnet data when reset time is not available
-					windowTimeText = "Data unavailable";
+					// Weekly window with no reset timestamp — keyed on utilization so the
+					// copy is precise and non-alarming (0 = window hasn't started yet).
+					if (usage.utilization === 0) {
+						windowTimeText = "Not started yet";
+					} else if (usage.utilization === null) {
+						windowTimeText = "Usage data unavailable";
+					} else {
+						windowTimeText = "No reset data available";
+					}
 				} else if (usage.window === "daily" || usage.window === "monthly") {
 					// Special handling when no subscription is active (PayG mode)
 					windowTimeText = "No subscription (PayG mode)";
@@ -619,7 +624,9 @@ export function RateLimitProgress({
 									<span className="text-xs text-muted-foreground">
 										{usage.window === "daily" || usage.window === "monthly"
 											? "Using pay-as-you-go"
-											: "No reset data available"}
+											: usage.utilization === 0
+												? "No usage this week"
+												: "No reset data available"}
 									</span>
 								</div>
 							)}

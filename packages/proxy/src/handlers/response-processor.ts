@@ -1,8 +1,10 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	isGenuineWindowRoll,
 	type Provider,
 	parseCodexUsageHeaders,
+	toEpochMs,
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
@@ -70,31 +72,60 @@ export function updateAccountMetadata(
 				prevUsage as { five_hour?: { resets_at: string | null } } | null
 			)?.five_hour?.resets_at;
 			const newResetAt = codexUsage.five_hour?.resets_at;
-			const windowRolledOver =
-				prevResetAt != null &&
-				newResetAt != null &&
-				newResetAt !== prevResetAt &&
-				new Date(newResetAt).getTime() > new Date(prevResetAt).getTime();
+			// Detect a genuine 5h window roll using the shared guard: only when the
+			// previous reset has actually arrived (prevResetMs <= now) and the new
+			// reset is strictly later. This rejects sub-second forward drift of a
+			// still-future reset, which would otherwise churn session_start and flap
+			// the dashboard Primary badge (mirrors the Anthropic usage-fetcher fix).
+			const prevResetMs = toEpochMs(prevResetAt);
+			const newResetMs = toEpochMs(newResetAt);
+			const windowRolledOver = isGenuineWindowRoll(
+				prevResetMs,
+				newResetMs,
+				Date.now(),
+			);
 
 			usageCache.set(account.id, codexUsage);
 			log.debug(
 				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour.utilization}%, 7d=${codexUsage.seven_day.utilization}%`,
 			);
 
-			// Update rate_limit_reset from usage headers so auto-refresh can track windows
-			const resetTimes = [
-				codexUsage.five_hour?.resets_at,
-				codexUsage.seven_day?.resets_at,
-			]
-				.filter((t): t is string => t != null)
-				.map((t) => new Date(t).getTime());
-			if (resetTimes.length > 0) {
-				const earliestReset = Math.min(...resetTimes);
+			// Update rate_limit_reset from usage headers so auto-refresh can track
+			// windows. We persist the earliest of the 5h/7d resets.
+			const earliestResetOf = (
+				usage: {
+					five_hour?: { resets_at: string | null };
+					seven_day?: { resets_at: string | null };
+				} | null,
+			): number | null => {
+				const resetTimes = [
+					usage?.five_hour?.resets_at,
+					usage?.seven_day?.resets_at,
+				]
+					.map((t) => toEpochMs(t))
+					.filter((ms): ms is number => ms != null);
+				return resetTimes.length > 0 ? Math.min(...resetTimes) : null;
+			};
+			const newEarliestReset = earliestResetOf(codexUsage);
+			// Compare against the PERSISTED account value (rate_limit_reset, epoch ms),
+			// NOT the usageCache: usageCache.set(...) above has already overwritten the
+			// prior entry, and — more importantly — on a failed async DB write the cache
+			// would hold the new value, so comparing against it would suppress the retry
+			// and leave the DB permanently stale. Comparing against account.rate_limit_reset
+			// means a failed write is retried on the next response (the persisted value
+			// only advances on a real, committed write), while genuine sub-second forward
+			// drift of a still-future reset is still suppressed (the persisted value won't
+			// have moved, so |new - persisted| stays < 1s once it has been written once).
+			if (
+				newEarliestReset != null &&
+				(account.rate_limit_reset == null ||
+					Math.abs(newEarliestReset - account.rate_limit_reset) >= 1000)
+			) {
 				ctx.asyncWriter.enqueue(() =>
 					ctx.dbOps
 						.getAdapter()
 						.run("UPDATE accounts SET rate_limit_reset = ? WHERE id = ?", [
-							earliestReset,
+							newEarliestReset,
 							account.id,
 						]),
 				);
