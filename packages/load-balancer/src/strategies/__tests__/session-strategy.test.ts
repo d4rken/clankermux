@@ -1645,8 +1645,10 @@ describe("SessionStrategy", () => {
 //
 // Within a priority tier, sortAvailableAccounts buckets accounts as
 // HARVEST (0) > UNKNOWN (1) > NEAR_LIMIT (2). HARVEST accounts are ordered by
-// soonest capacity reset (FEFO), then by most headroom, then least-recently
-// picked. Capacity signals are supplied through MockStrategyStore.setCapacity.
+// soonest WEEKLY reset (FEFO on the seven_day window — where unused budget is
+// truly lost), then by most weekly headroom, then least-recently picked. The
+// 5-hour window is only the NEAR_LIMIT safety gate, never the ranking basis.
+// Capacity signals are supplied through MockStrategyStore.setCapacity.
 // These accounts use a non-session provider (openai) so session stickiness
 // never short-circuits the capacity comparator.
 // ---------------------------------------------------------------------------
@@ -1676,12 +1678,24 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		return makeAccount({ id, name: id, provider: "openrouter", ...overrides });
 	}
 
+	// HARVEST ranking is now driven by the WEEKLY window's reset, not the 5h.
+	// `weeklyResetMs` is the FEFO deadline; the 5h `soonestResetMs` is kept as a
+	// realistic (always-sooner) value that must NOT influence ranking. By default
+	// weekly headroom mirrors minHeadroom (the common single-binding-window case).
 	function harvest(
 		minHeadroom: number,
-		soonestResetMs: number | null,
+		weeklyResetMs: number | null,
 		bindingUtilization = 100 - minHeadroom,
+		weeklyHeadroom = minHeadroom,
+		soonestResetMs: number | null = 60_000, // 5h-ish, sooner than any weekly reset
 	): CapacitySignal {
-		return { minHeadroom, soonestResetMs, bindingUtilization };
+		return {
+			minHeadroom,
+			soonestResetMs,
+			bindingUtilization,
+			weeklyResetMs,
+			weeklyHeadroom,
+		};
 	}
 
 	beforeEach(() => {
@@ -1690,10 +1704,10 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		strategy.initialize(mockStore);
 	});
 
-	it("HARVEST: equal headroom, picks the nearer-reset account first (FEFO)", () => {
+	it("HARVEST: equal headroom, picks the nearer weekly-reset account first (FEFO)", () => {
 		const nearReset = makeCapAccount("near-reset");
 		const farReset = makeCapAccount("far-reset");
-		// Same headroom → reset deadline decides; nearer reset is served first.
+		// Same headroom → weekly reset deadline decides; nearer weekly reset first.
 		mockStore.setCapacity(nearReset.id, harvest(40, 30 * 60_000));
 		mockStore.setCapacity(farReset.id, harvest(40, 4 * 60 * 60_000));
 
@@ -1721,11 +1735,14 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		const binding = makeCapAccount("binding-high");
 		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
 		// Healthy minHeadroom on the hard windows, but extra_usage pushes the
-		// binding utilization above 95 → NEAR_LIMIT bucket.
+		// binding utilization above 95 → NEAR_LIMIT bucket. A present weekly
+		// window (would-be HARVEST) must not rescue it from the safety gate.
 		mockStore.setCapacity(binding.id, {
 			minHeadroom: 40,
 			soonestResetMs: 60_000,
 			bindingUtilization: 98,
+			weeklyResetMs: 30 * 60_000,
+			weeklyHeadroom: 40,
 		});
 
 		const result = strategy.select([binding, harvestAcct], makeMeta());
@@ -1733,12 +1750,12 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		expect(result[1].id).toBe(binding.id);
 	});
 
-	it("soonestResetMs null with healthy headroom is UNKNOWN (between HARVEST and NEAR_LIMIT)", () => {
+	it("weeklyResetMs null with healthy headroom is UNKNOWN (between HARVEST and NEAR_LIMIT)", () => {
 		const harvestAcct = makeCapAccount("harvest");
 		const noDeadline = makeCapAccount("no-deadline");
 		const nearLimit = makeCapAccount("near-limit");
 		mockStore.setCapacity(harvestAcct.id, harvest(40, 60 * 60_000));
-		// Known utilization, healthy headroom, but no reset deadline → UNKNOWN.
+		// Known utilization, healthy headroom, but no WEEKLY deadline → UNKNOWN.
 		mockStore.setCapacity(noDeadline.id, harvest(40, null));
 		mockStore.setCapacity(nearLimit.id, harvest(1, 60_000)); // NEAR_LIMIT
 
@@ -1775,7 +1792,8 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 	it("recent-pick rotation: two equivalent HARVEST accounts alternate across selects", () => {
 		const a = makeCapAccount("rot-a");
 		const b = makeCapAccount("rot-b");
-		// Identical capacity → soonest + headroom ties → seq (least-recently-picked) breaks it.
+		// Identical capacity → weekly reset + weekly headroom ties → seq
+		// (least-recently-picked) breaks it.
 		const sig = harvest(40, 60 * 60_000);
 		mockStore.setCapacity(a.id, { ...sig });
 		mockStore.setCapacity(b.id, { ...sig });
@@ -1817,6 +1835,106 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 
 		const result = strategy.select([harvestLow, nearLimitTop], makeMeta());
 		expect(result[0].id).toBe(nearLimitTop.id);
+	});
+
+	// Reported-bug regression: ranking must follow the WEEKLY reset, NOT the 5h.
+	// Account A has tons of weekly headroom and a distant weekly reset, but a
+	// SOONER 5-hour reset. Account B's weekly quota is half-spent and resets
+	// within the day. Old behavior ranked A first (5h soonest); the fix ranks B
+	// first because its weekly budget expires soonest — the operator's intent.
+	it("ranks the soon-expiring weekly account first even when the other's 5h resets sooner", () => {
+		const a = makeCapAccount("weekly-far-5h-soon");
+		const b = makeCapAccount("weekly-soon");
+		// A: weekly 98% free, weekly resets in 6 days, but 5h resets in just 3h.
+		//    args: minHeadroom, weeklyResetMs, binding, weeklyHeadroom, soonestResetMs(5h)
+		mockStore.setCapacity(
+			a.id,
+			harvest(90, 6 * 24 * 60 * 60_000, 10, 98, 3 * 60 * 60_000),
+		);
+		// B: weekly 47% free, weekly resets in 9h; its 5h is far (no influence).
+		mockStore.setCapacity(
+			b.id,
+			harvest(47, 9 * 60 * 60_000, 53, 47, 50 * 60 * 60_000),
+		);
+
+		const meta = makeMeta();
+		const result = strategy.select([a, b], meta);
+		// B wins on the weekly reset despite A's 5h resetting much sooner.
+		expect(result[0].id).toBe(b.id);
+		expect(result[1].id).toBe(a.id);
+		expect(meta.routing?.selectedAccountId).toBe(b.id);
+	});
+
+	it("peek matches select on the weekly-reset bug-regression scenario", () => {
+		const a = makeCapAccount("peek-weekly-far");
+		const b = makeCapAccount("peek-weekly-soon");
+		mockStore.setCapacity(
+			a.id,
+			harvest(90, 6 * 24 * 60 * 60_000, 10, 98, 3 * 60 * 60_000),
+		);
+		mockStore.setCapacity(
+			b.id,
+			harvest(47, 9 * 60 * 60_000, 53, 47, 50 * 60 * 60_000),
+		);
+		const accts = [a, b];
+		expect(strategy.peek(accts)).toBe(b.id);
+		expect(strategy.peek(accts)).toBe(strategy.select(accts, makeMeta())[0].id);
+	});
+
+	// R5: an account with no weekly window (only 5h) is UNKNOWN, never HARVEST.
+	// Even with a healthy minHeadroom and a near 5h reset, it must NOT rank ahead
+	// of a real weekly-HARVEST account — the 5h reset is not a harvest deadline.
+	it("no-weekly account is UNKNOWN and does not outrank a real weekly-HARVEST account", () => {
+		const weekly = makeCapAccount("weekly-harvest");
+		const noWeekly = makeCapAccount("no-weekly");
+		// weekly-HARVEST: weekly resets in 8h, healthy headroom.
+		mockStore.setCapacity(weekly.id, harvest(40, 8 * 60 * 60_000));
+		// no-weekly: healthy minHeadroom, a near 5h reset, but weeklyResetMs null.
+		mockStore.setCapacity(noWeekly.id, harvest(60, null, 40, 100, 30 * 60_000));
+
+		const result = strategy.select([noWeekly, weekly], makeMeta());
+		// HARVEST (0) beats UNKNOWN (1) — the no-weekly account serves second.
+		expect(result[0].id).toBe(weekly.id);
+		expect(result[1].id).toBe(noWeekly.id);
+	});
+
+	it("weekly tie → higher weeklyHeadroom wins, then seq rotation", () => {
+		const more = makeCapAccount("more-weekly-headroom");
+		const less = makeCapAccount("less-weekly-headroom");
+		// Identical weekly reset; `more` has more weekly headroom to harvest.
+		// args: minHeadroom, weeklyResetMs, binding, weeklyHeadroom
+		mockStore.setCapacity(more.id, harvest(40, 2 * 60 * 60_000, 60, 70));
+		mockStore.setCapacity(less.id, harvest(40, 2 * 60 * 60_000, 60, 30));
+
+		expect(strategy.select([less, more], makeMeta())[0].id).toBe(more.id);
+
+		// Full tie (same reset AND same weekly headroom) → seq alternation.
+		const t1 = makeCapAccount("tie-1");
+		const t2 = makeCapAccount("tie-2");
+		const sig = harvest(40, 2 * 60 * 60_000, 60, 50);
+		mockStore.setCapacity(t1.id, { ...sig });
+		mockStore.setCapacity(t2.id, { ...sig });
+		const first = strategy.select([t1, t2], makeMeta())[0].id;
+		const second = strategy.select([t1, t2], makeMeta())[0].id;
+		expect(first).not.toBe(second);
+	});
+
+	// 5h safety preserved: a low minHeadroom (driven by the 5-hour window) forces
+	// NEAR_LIMIT regardless of how soon/healthy the weekly window looks.
+	it("NEAR_LIMIT still triggered by low minHeadroom even with a healthy weekly window", () => {
+		const safe = makeCapAccount("weekly-safe");
+		const fiveHourTight = makeCapAccount("5h-tight");
+		mockStore.setCapacity(safe.id, harvest(40, 5 * 60 * 60_000));
+		// minHeadroom <= EPS (5h nearly exhausted) but the weekly window is wide
+		// open and resets soon — must still bucket NEAR_LIMIT (safety gate).
+		mockStore.setCapacity(
+			fiveHourTight.id,
+			harvest(3, 30 * 60_000, 97, 80, 30 * 60_000),
+		);
+
+		const result = strategy.select([fiveHourTight, safe], makeMeta());
+		expect(result[0].id).toBe(safe.id);
+		expect(result[1].id).toBe(fiveHourTight.id);
 	});
 });
 
@@ -1863,12 +1981,23 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 		});
 	}
 
+	// Like the FEFO helper: the second arg is the WEEKLY reset that drives HARVEST
+	// ranking. A null weekly reset → UNKNOWN bucket. The 5h reset is a fixed,
+	// always-sooner value that must not influence ordering.
 	function cap(
 		minHeadroom: number,
-		soonestResetMs: number | null,
+		weeklyResetMs: number | null,
 		bindingUtilization = 100 - minHeadroom,
+		weeklyHeadroom = minHeadroom,
+		soonestResetMs: number | null = 60_000,
 	): CapacitySignal {
-		return { minHeadroom, soonestResetMs, bindingUtilization };
+		return {
+			minHeadroom,
+			soonestResetMs,
+			bindingUtilization,
+			weeklyResetMs,
+			weeklyHeadroom,
+		};
 	}
 
 	beforeEach(() => {
