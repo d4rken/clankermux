@@ -625,13 +625,19 @@ function makeCodexCtx() {
 }
 
 function codexResponse(fiveHourResetMs: number): Response {
-	// Legacy x-codex-5h-reset-at header carries seconds since epoch and maps to
-	// five_hour.resets_at. No 7d header → earliest reset is just the 5h value.
+	// Use the PRIMARY window header (x-codex-primary-reset-at) paired with
+	// x-codex-primary-window-minutes=300 (≤ 5h ⇒ maps to five_hour). Unlike the
+	// legacy x-codex-5h-reset-at path, parseCodexUsageHeaders parses this value
+	// with parseFloat(...) * 1000, so a FRACTIONAL epoch-seconds value preserves
+	// millisecond precision in five_hour.resets_at — letting the drift test feed a
+	// reset that differs from the previous one by sub-second (and stays future).
+	// No 7d header → earliest reset is just the 5h value.
 	return new Response('{"id":"msg_1"}', {
 		status: 200,
 		headers: {
 			"content-type": "application/json",
-			"x-codex-5h-reset-at": String(Math.floor(fiveHourResetMs / 1000)),
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 		},
 	});
 }
@@ -643,12 +649,15 @@ function rateLimitResetWrites(
 }
 
 describe("processProxyResponse — Codex window-roll detection (Primary badge flap fix)", () => {
-	it("does NOT reset the session or rewrite rate_limit_reset on sub-second drift of a still-future window", async () => {
+	it("does NOT reset the session or rewrite rate_limit_reset on genuine sub-second drift of a still-future window", async () => {
+		// futureResetMs carries an explicit sub-second component (…+641 ms) so the
+		// new reset (prev + 200 ms = …+841 ms) is a DIFFERENT millisecond value that
+		// is still strictly later AND still in the future. The primary-window header
+		// preserves that fractional precision (parseFloat * 1000), so prev≠new in
+		// five_hour.resets_at — unlike the old whole-second header which floored both
+		// to the same second and never exercised the prevResetMs<=now guard.
 		const account = makeAccount({ id: "codex-drift", provider: "codex" });
-		// Prior usage: a still-future 5h reset, on a whole-second boundary so the
-		// legacy header re-reports the SAME second.
-		const futureResetMs =
-			Math.floor((Date.now() + 4 * 60 * 60 * 1000) / 1000) * 1000;
+		const futureResetMs = Date.now() + 4 * 60 * 60 * 1000 + 641; // future, sub-second
 		usageCache.set(account.id, {
 			five_hour: {
 				utilization: 2,
@@ -656,15 +665,17 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 			},
 			seven_day: { utilization: 50, resets_at: null },
 		});
+		// Persisted reset already matches the prior future reset, so the >=1s
+		// write-gate (which now compares against account.rate_limit_reset) suppresses
+		// the rewrite for a 200 ms drift.
+		account.rate_limit_reset = futureResetMs;
 
 		const { ctx, calls } = makeCodexCtx();
-		// Header reports the same future window (+200ms drift, but same second so
-		// the persisted earliest reset is byte-identical).
-		await processProxyResponse(
-			codexResponse(futureResetMs + 200),
-			account,
-			ctx,
-		);
+		// Header reports the same future window shifted forward by 200 ms — a genuine
+		// sub-second difference (prev ≠ new, new > prev), but the reset has NOT yet
+		// arrived. isGenuineWindowRoll must reject it via the prevResetMs<=now guard.
+		const newResetMs = futureResetMs + 200;
+		await processProxyResponse(codexResponse(newResetMs), account, ctx);
 
 		expect(calls.resetAccountSession).toHaveLength(0);
 		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
@@ -674,8 +685,9 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 
 	it("resets the session AND writes rate_limit_reset on a genuine roll (prior reset already passed)", async () => {
 		const account = makeAccount({ id: "codex-roll", provider: "codex" });
-		// Prior 5h reset already arrived (in the past).
-		const passedResetMs = Math.floor((Date.now() - 60 * 1000) / 1000) * 1000;
+		// Prior 5h reset already arrived (in the past). Sub-second component carried
+		// through to prove the genuine-roll path is independent of second-flooring.
+		const passedResetMs = Date.now() - 60 * 1000 + 123;
 		usageCache.set(account.id, {
 			five_hour: {
 				utilization: 98,
@@ -683,11 +695,11 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 			},
 			seven_day: { utilization: 50, resets_at: null },
 		});
+		// account.rate_limit_reset is null (default) so the write-gate fires.
 
 		const { ctx, calls } = makeCodexCtx();
 		// New 5h reset is the next window, well in the future.
-		const nextResetMs =
-			Math.floor((Date.now() + 5 * 60 * 60 * 1000) / 1000) * 1000;
+		const nextResetMs = Date.now() + 5 * 60 * 60 * 1000 + 456;
 		await processProxyResponse(codexResponse(nextResetMs), account, ctx);
 
 		expect(calls.resetAccountSession).toHaveLength(1);

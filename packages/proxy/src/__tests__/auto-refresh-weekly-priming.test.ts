@@ -87,15 +87,21 @@ function makeRow(overrides: Partial<WeeklyRow> = {}): WeeklyRow {
 	};
 }
 
-/** Seed usageCache with a usage datum carrying the given seven_day window. */
+/**
+ * Seed usageCache with a usage datum carrying the given seven_day window.
+ *
+ * utilization is widened to `number | null` here (the public UsageWindow type is
+ * `number`) so tests can exercise the anomalous "null reset + util null" runtime
+ * shape that isWeeklyDormant must classify as NOT dormant.
+ */
 function seedWeekly(
 	accountId: string,
-	seven_day: { utilization: number; resets_at: string | null },
+	seven_day: { utilization: number | null; resets_at: string | null },
 ): void {
-	const data: UsageData = {
+	const data = {
 		five_hour: { utilization: 0, resets_at: null },
 		seven_day,
-	};
+	} as unknown as UsageData;
 	usageCache.set(accountId, data);
 }
 
@@ -128,12 +134,28 @@ describe("toEpochMs", () => {
 // ── isWeeklyDormant ───────────────────────────────────────────────────────────
 
 describe("AutoRefreshScheduler — isWeeklyDormant", () => {
-	it("treats a fresh resets_at=null weekly window as dormant", async () => {
+	it("treats a fresh resets_at=null + utilization=0 weekly window as dormant (not started)", async () => {
 		const scheduler = await makeScheduler();
 		const id = track("w-null");
 		const now = Date.now();
 		seedWeekly(id, { utilization: 0, resets_at: null });
 		expect(scheduler.isWeeklyDormant(id, now)).toBe(true);
+	});
+
+	it("does NOT treat resets_at=null + utilization=null as dormant (no reset data → unknown)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-null-utilnull");
+		const now = Date.now();
+		seedWeekly(id, { utilization: null, resets_at: null });
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
+	});
+
+	it("does NOT treat resets_at=null + utilization>0 as dormant (no reset data → unknown)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-null-util5");
+		const now = Date.now();
+		seedWeekly(id, { utilization: 5, resets_at: null });
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
 	});
 
 	it("treats an already-reset (past) weekly window as dormant", async () => {
@@ -301,19 +323,43 @@ describe("AutoRefreshScheduler — selectWeeklyPrimeCandidate", () => {
 		).toBe(id);
 	});
 
-	it("caps at exactly ONE candidate per cycle, chosen deterministically by id", async () => {
+	it("caps at exactly ONE candidate per cycle; when BOTH never-primed, tie-breaks by id (lowest wins)", async () => {
 		const scheduler = await makeScheduler();
 		const now = Date.now();
 		const idB = track("bbb-account");
 		const idA = track("aaa-account");
 		seedWeekly(idA, { utilization: 0, resets_at: null });
 		seedWeekly(idB, { utilization: 0, resets_at: null });
-		// Pass them out of id order to prove the deterministic sort.
+		// Pass them out of id order to prove the deterministic sort. Neither has a
+		// lastWeeklyPrimeTime, so both sort to 0 and the id tie-break decides.
 		const rows = [makeRow({ id: idB }), makeRow({ id: idA })];
 
 		const picked = scheduler.selectWeeklyPrimeCandidate(rows, new Set(), now);
-		// Lowest id wins.
+		// Lowest id wins the tie-break.
 		expect(picked?.id).toBe(idA);
+	});
+
+	it("is FAIR: prefers the least-recently-primed account over a lower id that was primed recently", async () => {
+		const scheduler = await makeScheduler();
+		const now = Date.now();
+		// Lower id was primed recently (but cooldown has elapsed); higher id never
+		// primed. Oldest-prime-first must pick the higher id, NOT the lower id —
+		// otherwise the lowest id would starve the others (it would keep being
+		// re-primed every cooldown before they are ever chosen).
+		const idLow = track("aaa-low");
+		const idHigh = track("zzz-high");
+		seedWeekly(idLow, { utilization: 0, resets_at: null });
+		seedWeekly(idHigh, { utilization: 0, resets_at: null });
+		// Low id primed just outside the cooldown → eligible again, but recent.
+		scheduler.lastWeeklyPrimeTime.set(
+			idLow,
+			now - scheduler.WEEKLY_PRIME_COOLDOWN_MS - 1,
+		);
+		// High id never primed (absent → treated as 0 → sorts first).
+		const rows = [makeRow({ id: idLow }), makeRow({ id: idHigh })];
+
+		const picked = scheduler.selectWeeklyPrimeCandidate(rows, new Set(), now);
+		expect(picked?.id).toBe(idHigh);
 	});
 
 	it("excludes an account already in fiveHourDueIds (5h reason wins, even if its send fails)", async () => {

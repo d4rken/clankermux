@@ -146,6 +146,17 @@ export class AutoRefreshScheduler {
 
 			await this.checkPeakHoursPause();
 
+			// Proactively refresh OAuth tokens expiring within the safety window.
+			// These run EVERY cycle, BEFORE the eligibility query and its early
+			// `accounts.length === 0` return, so token refresh happens regardless of
+			// whether any anthropic/codex/zai account is due for a window prime. (A
+			// qwen-only — or otherwise prime-less — deployment must still get its
+			// tokens refreshed.) They take no args and query independently, so their
+			// order relative to each other and to the priming scan does not matter;
+			// nothing below depends on their result.
+			await this.checkAndRefreshQwenTokens();
+			await this.checkAndRefreshCodexTokens();
+
 			// Get all accounts with auto-refresh enabled that have reset windows OR need immediate refresh
 			const accounts = await this.db.query<{
 				id: string;
@@ -273,12 +284,6 @@ export class AutoRefreshScheduler {
 					this.lastWeeklyPrimeTime.set(weeklyAccount.id, now);
 				}
 			}
-
-			// Proactively refresh Qwen OAuth tokens expiring within the safety window
-			await this.checkAndRefreshQwenTokens();
-
-			// Proactively refresh Codex OAuth tokens expiring within the safety window
-			await this.checkAndRefreshCodexTokens();
 		} catch (error) {
 			if (error instanceof Error) {
 				const errorMessage = `Error in auto-refresh check: ${error.name}: ${error.message}`;
@@ -1156,8 +1161,16 @@ export class AutoRefreshScheduler {
 	 *  - there is a fresh cached usage datum (age known and within
 	 *    WEEKLY_CACHE_MAX_AGE_MS), AND
 	 *  - it carries a seven_day window, AND
-	 *  - that window's resets_at is null (never started) OR parses to a timestamp
-	 *    that is at/before now (already reset and idle).
+	 *  - that window's resets_at is null AND its utilization is exactly 0
+	 *    (never started), OR resets_at parses to a timestamp that is at/before now
+	 *    (already reset and idle).
+	 *
+	 * The null-reset case additionally requires utilization === 0. A null reset
+	 * with util > 0 (or util null) is anomalous/unknown — the dashboard labels it
+	 * "no reset data", NOT "not started" — so we treat it as NOT dormant and skip,
+	 * rather than priming it every cooldown indefinitely. This keeps the priming
+	 * decision consistent with the dashboard copy (util 0 + null reset = "not
+	 * started"; util>0/null + null reset = "no reset data").
 	 *
 	 * A non-null but unparseable resets_at → toEpochMs returns null → NOT dormant
 	 * (unknown → skip). A future reset → NOT dormant (window still running).
@@ -1179,7 +1192,9 @@ export class AutoRefreshScheduler {
 		).seven_day;
 		if (!seven) return false;
 
-		if (seven.resets_at == null) return true; // never started → dormant
+		// null reset + util 0 → never started → dormant.
+		// null reset + util null/>0 → "no reset data" → unknown → NOT dormant.
+		if (seven.resets_at == null) return seven.utilization === 0;
 		const resetMs = toEpochMs(seven.resets_at);
 		if (resetMs === null) return false; // unparseable → unknown → skip
 		return resetMs <= now; // already reset and idle → dormant
@@ -1192,8 +1207,14 @@ export class AutoRefreshScheduler {
 	 *  - be anthropic-OAuth (provider==='anthropic' && refresh_token present),
 	 *  - have a dormant weekly window (isWeeklyDormant), and
 	 *  - be outside the per-account WEEKLY_PRIME_COOLDOWN_MS.
-	 * Survivors are sorted by id ascending for deterministic selection; the first
-	 * is returned, or null if none qualify.
+	 * Survivors are sorted OLDEST-weekly-prime-first (a never-primed account, whose
+	 * lastWeeklyPrimeTime is absent → treated as 0, sorts ahead of any previously
+	 * primed account), tie-broken by id ascending for determinism. The first is
+	 * returned, or null if none qualify. Sorting by last-prime time (rather than by
+	 * id) is what prevents starvation: with the cap of 1-per-cycle and the 15-minute
+	 * cooldown, an id-ascending sort would let the lowest-id account become eligible
+	 * again (cooldown elapsed) and be re-primed before higher-id accounts are ever
+	 * chosen. Round-robining by least-recently-primed guarantees fairness.
 	 */
 	private selectWeeklyPrimeCandidate(
 		candidates: AutoRefreshAccountRow[],
@@ -1212,7 +1233,13 @@ export class AutoRefreshScheduler {
 
 		if (eligible.length === 0) return null;
 
-		eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+		// Oldest weekly-prime first (never-primed = 0 sorts first), tie-break by id.
+		eligible.sort((a, b) => {
+			const aLast = this.lastWeeklyPrimeTime.get(a.id) ?? 0;
+			const bLast = this.lastWeeklyPrimeTime.get(b.id) ?? 0;
+			if (aLast !== bLast) return aLast - bLast;
+			return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+		});
 
 		if (eligible.length > 1) {
 			log.debug(

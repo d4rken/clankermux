@@ -107,22 +107,19 @@ export function updateAccountMetadata(
 				return resetTimes.length > 0 ? Math.min(...resetTimes) : null;
 			};
 			const newEarliestReset = earliestResetOf(codexUsage);
-			const prevEarliestReset = earliestResetOf(
-				prevUsage as {
-					five_hour?: { resets_at: string | null };
-					seven_day?: { resets_at: string | null };
-				} | null,
-			);
-			// Suppress sub-second write amplification: the Codex usage endpoint
-			// re-reports a still-future reset with a few hundred ms of jitter on
-			// every response. Future-dated drift can't drive session churn (the
-			// scheduler/load-balancer gates require the reset to be in the past),
-			// but rewriting the same reset on every response is needless DB churn.
-			// Only write when the earliest reset changed by >= 1s.
+			// Compare against the PERSISTED account value (rate_limit_reset, epoch ms),
+			// NOT the usageCache: usageCache.set(...) above has already overwritten the
+			// prior entry, and — more importantly — on a failed async DB write the cache
+			// would hold the new value, so comparing against it would suppress the retry
+			// and leave the DB permanently stale. Comparing against account.rate_limit_reset
+			// means a failed write is retried on the next response (the persisted value
+			// only advances on a real, committed write), while genuine sub-second forward
+			// drift of a still-future reset is still suppressed (the persisted value won't
+			// have moved, so |new - persisted| stays < 1s once it has been written once).
 			if (
 				newEarliestReset != null &&
-				(prevEarliestReset == null ||
-					Math.abs(newEarliestReset - prevEarliestReset) >= 1000)
+				(account.rate_limit_reset == null ||
+					Math.abs(newEarliestReset - account.rate_limit_reset) >= 1000)
 			) {
 				ctx.asyncWriter.enqueue(() =>
 					ctx.dbOps
