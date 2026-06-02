@@ -14,6 +14,8 @@ export type {
 	RetentionGetResponse,
 	RetentionSetRequest,
 	StatsResponse,
+	StorageUsageResponse,
+	StorageUsageType,
 	StrategyUpdateRequest,
 	TimePoint,
 	TokenBreakdown,

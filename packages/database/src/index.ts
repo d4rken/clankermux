@@ -8,6 +8,7 @@ export { AsyncDbWriter } from "./async-writer";
 export type {
 	DatabaseConfig,
 	DatabaseRetryConfig,
+	RetentionStorageUsage,
 } from "./database-operations";
 export { DatabaseFactory } from "./factory";
 export type { IntegrityCheckKind } from "./integrity-check-runner";
