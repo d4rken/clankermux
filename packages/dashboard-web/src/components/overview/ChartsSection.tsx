@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { CHART_COLORS, COLORS } from "../../constants";
-import { BaseAreaChart, BaseLineChart, BasePieChart } from "../charts";
+import { CHART_COLORS } from "../../constants";
+import { BasePieChart, RequestVolumeSuccessChart } from "../charts";
 import {
 	Card,
 	CardContent,
@@ -73,43 +73,23 @@ export function ChartsSection({
 
 	return (
 		<>
-			{/* Charts Row 1 */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-				{/* Request Volume Chart */}
-				<Card>
-					<CardHeader>
-						<CardTitle>Request Volume</CardTitle>
-						<CardDescription>
-							Requests per hour over the last 24 hours
-						</CardDescription>
-					</CardHeader>
-					<CardContent>
-						<BaseAreaChart
-							data={timeSeriesData}
-							dataKey="requests"
-							loading={loading}
-							height="medium"
-						/>
-					</CardContent>
-				</Card>
-
-				{/* Success Rate Chart */}
-				<Card>
-					<CardHeader>
-						<CardTitle>Success Rate Trend</CardTitle>
-						<CardDescription>Success percentage over time</CardDescription>
-					</CardHeader>
-					<CardContent>
-						<BaseLineChart
-							data={timeSeriesData}
-							lines={{ dataKey: "successRate", stroke: COLORS.success }}
-							loading={loading}
-							height="medium"
-							yAxisDomain={[80, 100]}
-						/>
-					</CardContent>
-				</Card>
-			</div>
+			{/* Charts Row 1 — request volume + success rate, combined full width */}
+			<Card>
+				<CardHeader>
+					<CardTitle>Request Volume &amp; Success Rate</CardTitle>
+					<CardDescription>
+						Requests per bucket (left axis) and success percentage (right axis)
+						over time
+					</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<RequestVolumeSuccessChart
+						data={timeSeriesData}
+						loading={loading}
+						height="medium"
+					/>
+				</CardContent>
+			</Card>
 
 			{/* Charts Row 2 — three donut charts */}
 			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -2,9 +2,9 @@ import type {
 	RoutingAnalytics as RoutingAnalyticsData,
 	RoutingFlowPoint,
 } from "@clankermux/types";
-import { formatNumber, formatPercentage } from "@clankermux/ui-common";
+import { formatNumber } from "@clankermux/ui-common";
 import { format } from "date-fns";
-import { GitBranch, Route, Shuffle } from "lucide-react";
+import { GitBranch, Route } from "lucide-react";
 import { useMemo } from "react";
 import {
 	Area,
@@ -25,26 +25,13 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { RoutingSummaryCard } from "./RoutingSummaryCard";
+import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
 	success: COLORS.success,
 	rate_limited: COLORS.warning,
 	error: COLORS.error,
-};
-
-const DECISION_LABELS: Record<string, string> = {
-	affinity_hit: "Affinity hit",
-	affinity_hold: "Affinity hold",
-	affinity_miss: "Affinity miss",
-	affinity_reassigned: "Affinity reassigned",
-	auto_fallback: "Auto fallback",
-	combo: "Routing Chain",
-	force_account_global: "Forced (global)",
-	forced_account: "Forced account",
-	global_session: "Global session",
-	least_used: "Least used",
-	priority_utilization: "Priority + usage",
-	untracked: "Untracked",
 };
 
 const DECISION_EXPLANATIONS: Record<string, string> = {
@@ -66,17 +53,9 @@ const DECISION_EXPLANATIONS: Record<string, string> = {
 	untracked: "This request was logged before routing telemetry was recorded.",
 };
 
-function labelDecision(decision: string): string {
-	return DECISION_LABELS[decision] ?? decision.replaceAll("_", " ");
-}
-
 function shortLabel(value: string, max = 24): string {
 	if (value.length <= max) return value;
 	return `${value.slice(0, max - 1)}...`;
-}
-
-function percent(value: number): string {
-	return formatPercentage(value, 0);
 }
 
 function EmptyRoutingState({ loading }: { loading: boolean }) {
@@ -404,143 +383,53 @@ export function RoutingAnalyticsPanel({
 				</CardContent>
 			</Card>
 
-			<div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)] gap-6">
-				<Card>
-					<CardHeader>
-						<CardTitle className="flex items-center gap-2">
-							<GitBranch className="h-5 w-5" />
-							Account Routing Timeline
-						</CardTitle>
-						<CardDescription>
-							Request volume by selected account over time
-						</CardDescription>
-					</CardHeader>
-					<CardContent>
-						<div className="h-80">
-							<ResponsiveContainer width="100%" height="100%">
-								<AreaChart
-									data={timeline.data}
-									margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
-								>
-									<CartesianGrid
-										strokeDasharray="3 3"
-										className="stroke-muted"
-									/>
-									<XAxis dataKey="time" fontSize={12} tickLine={false} />
-									<YAxis fontSize={12} tickLine={false} allowDecimals={false} />
-									<Tooltip
-										content={
-											<ChartTooltip
-												formatters={{
-													default: (value) => formatNumber(Number(value)),
-												}}
-											/>
-										}
-									/>
-									{timeline.accounts.map((account, index) => (
-										<Area
-											key={account}
-											type="monotone"
-											dataKey={account}
-											stackId="accounts"
-											stroke={CHART_COLORS[index % CHART_COLORS.length]}
-											fill={CHART_COLORS[index % CHART_COLORS.length]}
-											fillOpacity={0.72}
-										/>
-									))}
-								</AreaChart>
-							</ResponsiveContainer>
-						</div>
-					</CardContent>
-				</Card>
+			<RoutingSummaryCard routing={routing} />
 
-				<Card>
-					<CardHeader>
-						<CardTitle className="flex items-center gap-2">
-							<Shuffle className="h-5 w-5" />
-							Selection Reasons
-						</CardTitle>
-						<CardDescription>Why accounts were selected</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-5">
-						<div className="space-y-3">
-							{routing.decisionBreakdown.slice(0, 7).map((row, index) => (
-								<div
-									key={`${row.strategy}-${row.decision}`}
-									className="space-y-1.5"
-								>
-									<div className="flex items-center justify-between gap-3 text-sm">
-										<div className="min-w-0">
-											<div className="truncate font-medium">
-												{labelDecision(row.decision)}
-											</div>
-											<div className="truncate text-xs text-muted-foreground">
-												{DECISION_EXPLANATIONS[row.decision] ?? row.strategy}
-											</div>
-										</div>
-										<div className="shrink-0 text-right">
-											<div className="font-medium">
-												{percent(row.percentage)}
-											</div>
-											<div className="text-xs text-muted-foreground">
-												{formatNumber(row.requests)}
-											</div>
-										</div>
-									</div>
-									<div className="h-2 rounded-full bg-muted">
-										<div
-											className="h-2 rounded-full"
-											style={{
-												width: `${Math.max(2, row.percentage)}%`,
-												backgroundColor:
-													CHART_COLORS[index % CHART_COLORS.length],
+			<Card>
+				<CardHeader>
+					<CardTitle className="flex items-center gap-2">
+						<GitBranch className="h-5 w-5" />
+						Account Routing Timeline
+					</CardTitle>
+					<CardDescription>
+						Request volume by selected account over time
+					</CardDescription>
+				</CardHeader>
+				<CardContent>
+					<div className="h-80">
+						<ResponsiveContainer width="100%" height="100%">
+							<AreaChart
+								data={timeline.data}
+								margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
+							>
+								<CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+								<XAxis dataKey="time" fontSize={12} tickLine={false} />
+								<YAxis fontSize={12} tickLine={false} allowDecimals={false} />
+								<Tooltip
+									content={
+										<ChartTooltip
+											formatters={{
+												default: (value) => formatNumber(Number(value)),
 											}}
 										/>
-									</div>
-								</div>
-							))}
-						</div>
-
-						<div className="space-y-3 border-t pt-4">
-							<div className="text-sm font-medium">Account Split</div>
-							{routing.accountSplit.slice(0, 5).map((account, index) => (
-								<div key={account.accountId} className="space-y-1.5">
-									<div className="flex items-center justify-between gap-3 text-sm">
-										<div className="min-w-0">
-											<div className="truncate font-medium">
-												{account.accountName}
-											</div>
-											<div className="text-xs text-muted-foreground">
-												{account.topDecision
-													? labelDecision(account.topDecision)
-													: "No dominant reason"}
-											</div>
-										</div>
-										<div className="shrink-0 text-right">
-											<div className="font-medium">
-												{percent(account.percentage)}
-											</div>
-											<div className="text-xs text-muted-foreground">
-												{formatNumber(account.requests)}
-											</div>
-										</div>
-									</div>
-									<div className="h-2 rounded-full bg-muted">
-										<div
-											className="h-2 rounded-full"
-											style={{
-												width: `${Math.max(2, account.percentage)}%`,
-												backgroundColor:
-													CHART_COLORS[(index + 3) % CHART_COLORS.length],
-											}}
-										/>
-									</div>
-								</div>
-							))}
-						</div>
-					</CardContent>
-				</Card>
-			</div>
+									}
+								/>
+								{timeline.accounts.map((account, index) => (
+									<Area
+										key={account}
+										type="monotone"
+										dataKey={account}
+										stackId="accounts"
+										stroke={CHART_COLORS[index % CHART_COLORS.length]}
+										fill={CHART_COLORS[index % CHART_COLORS.length]}
+										fillOpacity={0.72}
+									/>
+								))}
+							</AreaChart>
+						</ResponsiveContainer>
+					</div>
+				</CardContent>
+			</Card>
 		</div>
 	);
 }
