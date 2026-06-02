@@ -222,6 +222,48 @@ export interface AnalyticsResponse {
 	routing: RoutingAnalytics;
 }
 
+// Usage-history (Limits-tab sawtooth chart) types.
+//
+// Per-account utilization series + a pool aggregate, sampled at a regular
+// cadence and read back bucketed (last-value-per-bucket) over a range. Built
+// from RankedSnapshot rows (see usage-snapshot.ts) by the usage-history handler.
+
+/** One bucketed sample of an account's window utilization. */
+export interface UsageHistoryPoint {
+	ts: number; // bucket start (ms)
+	fiveHourPct: number | null;
+	sevenDayPct: number | null;
+}
+
+/** One account's full utilization series over the requested range. */
+export interface UsageHistorySeries {
+	accountId: string;
+	name: string;
+	provider: string;
+	points: UsageHistoryPoint[];
+}
+
+/**
+ * Pool-wide aggregate at a single timestamp, across all sampled accounts.
+ * Avg/max ignore nulls; both are null when no account reported a value at `ts`.
+ * `sampledCount` is the number of accounts contributing any non-null value.
+ */
+export interface UsageHistoryPoolPoint {
+	ts: number;
+	fiveHourAvg: number | null;
+	sevenDayAvg: number | null;
+	fiveHourMax: number | null;
+	sevenDayMax: number | null;
+	sampledCount: number;
+}
+
+export interface UsageHistoryResponse {
+	range: string;
+	bucketMs: number;
+	series: UsageHistorySeries[];
+	pool: UsageHistoryPoolPoint[];
+}
+
 // Pool status for health check
 export interface PoolStatus {
 	configured: number; // Total accounts in database

@@ -49,12 +49,14 @@ export interface RequestRoutingMeta {
 export interface RetentionGetResponse {
 	payloadDays: number;
 	requestDays: number;
+	usageSnapshotDays: number;
 	storePayloads: boolean;
 }
 
 export interface RetentionSetRequest {
 	payloadDays?: number;
 	requestDays?: number;
+	usageSnapshotDays?: number;
 	storePayloads?: boolean;
 }
 

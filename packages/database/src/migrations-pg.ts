@@ -274,6 +274,25 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 		)
 	`);
 
+	// Create usage_snapshots table — append-only per-account rate-limit
+	// utilization time-series (backs the dashboard "sawtooth" graph).
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS usage_snapshots (
+			account_id TEXT NOT NULL,
+			provider TEXT,
+			sampled_at BIGINT NOT NULL,
+			five_hour_pct DOUBLE PRECISION,
+			five_hour_reset BIGINT,
+			seven_day_pct DOUBLE PRECISION,
+			seven_day_reset BIGINT,
+			PRIMARY KEY (account_id, sampled_at),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+	await adapter.unsafe(
+		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
+	);
+
 	log.info("PostgreSQL schema ensured");
 }
 
@@ -503,6 +522,28 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		VALUES ('opus', NULL, 0), ('sonnet', NULL, 0), ('haiku', NULL, 0)
 		ON CONFLICT (family) DO NOTHING
 	`);
+
+	// Ensure usage_snapshots table exists (for upgrades from pre-snapshots installs)
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS usage_snapshots (
+			account_id TEXT NOT NULL,
+			provider TEXT,
+			sampled_at BIGINT NOT NULL,
+			five_hour_pct DOUBLE PRECISION,
+			five_hour_reset BIGINT,
+			seven_day_pct DOUBLE PRECISION,
+			seven_day_reset BIGINT,
+			PRIMARY KEY (account_id, sampled_at),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+	try {
+		await adapter.unsafe(
+			`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
+		);
+	} catch (_error) {
+		// Index may already exist
+	}
 
 	// Rename oauth_sessions.mode 'max' → 'claude-oauth'
 	try {

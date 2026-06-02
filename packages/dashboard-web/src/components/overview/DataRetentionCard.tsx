@@ -25,17 +25,26 @@ export function DataRetentionCard() {
 	const [requestDays, setRequestDays] = useState<number>(
 		data?.requestDays ?? 90,
 	);
+	const [usageSnapshotDays, setUsageSnapshotDays] = useState<number>(
+		data?.usageSnapshotDays ?? 90,
+	);
 
 	useEffect(() => {
 		if (typeof data?.payloadDays === "number") setPayloadDays(data.payloadDays);
 		if (typeof data?.requestDays === "number") setRequestDays(data.requestDays);
-	}, [data?.payloadDays, data?.requestDays]);
+		if (typeof data?.usageSnapshotDays === "number")
+			setUsageSnapshotDays(data.usageSnapshotDays);
+	}, [data?.payloadDays, data?.requestDays, data?.usageSnapshotDays]);
 
 	const disabled = isLoading || setRetention.isPending;
 	const validPayload =
 		Number.isFinite(payloadDays) && payloadDays >= 1 && payloadDays <= 365;
 	const validRequests =
 		Number.isFinite(requestDays) && requestDays >= 1 && requestDays <= 3650;
+	const validUsageSnapshots =
+		Number.isFinite(usageSnapshotDays) &&
+		usageSnapshotDays >= 1 &&
+		usageSnapshotDays <= 3650;
 
 	return (
 		<Card className="card-hover">
@@ -93,6 +102,36 @@ export function DataRetentionCard() {
 					>
 						Save
 					</Button>
+				</div>
+
+				<div className="pt-2">
+					<div className="flex items-center gap-2">
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">Usage snapshots</span>
+							<Input
+								type="number"
+								min={1}
+								max={3650}
+								value={usageSnapshotDays}
+								onChange={(e) =>
+									setUsageSnapshotDays(parseInt(e.target.value || "0", 10))
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">days</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validUsageSnapshots}
+							onClick={() => setRetention.mutate({ usageSnapshotDays })}
+						>
+							Save
+						</Button>
+					</div>
+					<p className="text-xs text-muted-foreground mt-1">
+						How long per-account limit-usage history is kept for the Limits
+						graph.
+					</p>
 				</div>
 
 				<div className="flex items-center justify-between pt-2 pb-1">

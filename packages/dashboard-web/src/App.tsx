@@ -20,6 +20,11 @@ const LazyAnalyticsTab = lazy(() =>
 		default: module.LazyAnalytics,
 	})),
 );
+const LazyLimitsTab = lazy(() =>
+	import("./components/LazyLimits").then((module) => ({
+		default: module.LazyLimits,
+	})),
+);
 const LoadingSkeleton = () => (
 	<div className="space-y-6 p-6">
 		<div className="animate-pulse">
@@ -62,6 +67,16 @@ export function App() {
 				),
 				title: "Analytics",
 				subtitle: "Deep dive into your usage patterns and trends",
+			},
+			{
+				path: "/limits",
+				element: (
+					<Suspense fallback={<LoadingSkeleton />}>
+						<LazyLimitsTab />
+					</Suspense>
+				),
+				title: "Limits",
+				subtitle: "Rate-limit usage over time and pool capacity",
 			},
 			{
 				path: "/requests",

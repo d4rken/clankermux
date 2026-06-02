@@ -1,20 +1,7 @@
 import { registerUIRefresh } from "@clankermux/core";
-import {
-	formatCost,
-	formatNumber,
-	formatPercentage,
-	formatTokensPerSecond,
-} from "@clankermux/ui-common";
+import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { format } from "date-fns";
-import {
-	Activity,
-	BarChart3,
-	Clock,
-	Database,
-	DollarSign,
-	Gauge,
-	Zap,
-} from "lucide-react";
+import { Activity, BarChart3, Database, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
@@ -117,17 +104,9 @@ export const OverviewTab = React.memo(() => {
 		if (timeSeriesData.length < 2) {
 			return {
 				deltaRequests: null,
-				deltaSuccessRate: null,
-				deltaResponseTime: null,
-				deltaCost: null,
 				deltaCacheHitRate: null,
-				deltaOutputSpeed: null,
 				trendRequests: "flat" as "up" | "down" | "flat",
-				trendSuccessRate: "flat" as "up" | "down" | "flat",
-				trendResponseTime: "flat" as "up" | "down" | "flat",
-				trendCost: "flat" as "up" | "down" | "flat",
 				trendCacheHitRate: "flat" as "up" | "down" | "flat",
-				trendOutputSpeed: "flat" as "up" | "down" | "flat",
 			};
 		}
 
@@ -136,50 +115,22 @@ export const OverviewTab = React.memo(() => {
 
 		// Calculate deltas
 		const deltaRequests = pctChange(lastBucket.requests, prevBucket.requests);
-		const deltaSuccessRate = pctChange(
-			lastBucket.successRate,
-			prevBucket.successRate,
-		);
-		const deltaResponseTime = pctChange(
-			lastBucket.responseTime,
-			prevBucket.responseTime,
-		);
-		const deltaCost = pctChange(
-			parseFloat(lastBucket.cost),
-			parseFloat(prevBucket.cost),
-		);
 		const deltaCacheHitRate = pctChange(
 			lastBucket.cacheHitRate,
 			prevBucket.cacheHitRate,
 		);
-		const deltaOutputSpeed = pctChange(
-			lastBucket.tokensPerSecond,
-			prevBucket.tokensPerSecond,
-		);
 
 		// Helper to determine trend
-		const getTrend = (
-			delta: number | null,
-			invert = false,
-		): "up" | "down" | "flat" => {
+		const getTrend = (delta: number | null): "up" | "down" | "flat" => {
 			if (delta === null) return "flat";
-			const isPositive = delta >= 0;
-			return invert ? (isPositive ? "down" : "up") : isPositive ? "up" : "down";
+			return delta >= 0 ? "up" : "down";
 		};
 
 		return {
 			deltaRequests,
-			deltaSuccessRate,
-			deltaResponseTime,
-			deltaCost,
 			deltaCacheHitRate,
-			deltaOutputSpeed,
 			trendRequests: getTrend(deltaRequests),
-			trendSuccessRate: getTrend(deltaSuccessRate),
-			trendResponseTime: getTrend(deltaResponseTime, true), // invert: higher response time is bad
-			trendCost: getTrend(deltaCost, true), // invert: higher cost is bad
 			trendCacheHitRate: getTrend(deltaCacheHitRate),
-			trendOutputSpeed: getTrend(deltaOutputSpeed),
 		};
 	}, [timeSeriesData, pctChange]);
 
@@ -196,9 +147,6 @@ export const OverviewTab = React.memo(() => {
 			value: model.count,
 		})) || [];
 
-	// Use analytics data for account health
-	const accountHealthData = analytics?.accountPerformance || [];
-
 	const accountModelUsageData = analytics?.accountModelUsage || [];
 	const apiKeyPerformanceData = analytics?.apiKeyPerformance || [];
 
@@ -214,7 +162,7 @@ export const OverviewTab = React.memo(() => {
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals.requests || 0)}
@@ -243,65 +191,6 @@ export const OverviewTab = React.memo(() => {
 					trendPeriod={trendPeriod}
 					icon={Database}
 				/>
-				<MetricCard
-					title="API Cost"
-					value={
-						analytics?.totals.apiCostUsd
-							? formatCost(analytics.totals.apiCostUsd)
-							: "$0.0000"
-					}
-					change={trends.deltaCost !== null ? trends.deltaCost : undefined}
-					trend={trends.trendCost}
-					trendPeriod={trendPeriod}
-					icon={DollarSign}
-				/>
-				<MetricCard
-					title="Plan Value"
-					value={
-						analytics?.totals.planCostUsd
-							? formatCost(analytics.totals.planCostUsd)
-							: "$0.0000"
-					}
-					trendPeriod={trendPeriod}
-					icon={DollarSign}
-					subRows={[
-						{
-							label: "Avg / day",
-							value: formatCost(analytics?.totals.avgDailyPlanCostUsd ?? 0),
-							tooltip: "Average daily plan value over the last 7 days",
-						},
-						{
-							label: "Avg / week",
-							value: formatCost(analytics?.totals.avgWeeklyPlanCostUsd ?? 0),
-							tooltip:
-								"Average weekly plan value, derived from the last 30 days",
-						},
-					]}
-				/>
-				<MetricCard
-					title="Avg Response Time"
-					value={`${Math.round(analytics?.totals.avgResponseTime || 0)}ms`}
-					change={
-						trends.deltaResponseTime !== null
-							? trends.deltaResponseTime
-							: undefined
-					}
-					trend={trends.trendResponseTime}
-					trendPeriod={trendPeriod}
-					icon={Clock}
-				/>
-				<MetricCard
-					title="Output Speed"
-					value={formatTokensPerSecond(analytics?.totals.avgTokensPerSecond)}
-					change={
-						trends.deltaOutputSpeed !== null
-							? trends.deltaOutputSpeed
-							: undefined
-					}
-					trend={trends.trendOutputSpeed}
-					trendPeriod={trendPeriod}
-					icon={Zap}
-				/>
 				<PoolMetricCard
 					title="5h Pool"
 					icon={Gauge}
@@ -321,7 +210,6 @@ export const OverviewTab = React.memo(() => {
 			<ChartsSection
 				timeSeriesData={timeSeriesData}
 				modelData={modelData}
-				accountHealthData={accountHealthData}
 				accountModelUsageData={accountModelUsageData}
 				apiKeyPerformanceData={apiKeyPerformanceData}
 				loading={loading}

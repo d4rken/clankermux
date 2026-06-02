@@ -1,5 +1,5 @@
 import { formatTokensPerSecond } from "@clankermux/ui-common";
-import { Activity, Zap } from "lucide-react";
+import { Activity, Clock, Zap } from "lucide-react";
 import type { TimeRange } from "../../constants";
 import { ModelTokenSpeedChart } from "../charts/ModelTokenSpeedChart";
 import { TokenSpeedChart } from "../charts/TokenSpeedChart";
@@ -37,6 +37,18 @@ export function TokenSpeedAnalytics({
 			? validSpeeds.reduce((sum, speed) => sum + speed, 0) / validSpeeds.length
 			: 0;
 
+	// Average response time across buckets (responseTime is carried on each
+	// timeSeriesData element via the index signature, set upstream in AnalyticsTab)
+	const validResponseTimes = timeSeriesData
+		.map((d) => Number(d.responseTime))
+		.filter((time) => time > 0);
+
+	const overallAvgResponseTime =
+		validResponseTimes.length > 0
+			? validResponseTimes.reduce((sum, time) => sum + time, 0) /
+				validResponseTimes.length
+			: 0;
+
 	// Get the true maximum speed from model performance data
 	const maxSpeed = Math.max(
 		...modelPerformance
@@ -55,7 +67,7 @@ export function TokenSpeedAnalytics({
 	return (
 		<div className="space-y-6">
 			{/* Statistics Cards */}
-			<div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-4 gap-4">
 				<Card>
 					<CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
 						<CardTitle className="text-sm font-medium">
@@ -66,6 +78,25 @@ export function TokenSpeedAnalytics({
 					<CardContent>
 						<div className="text-2xl font-bold">
 							{formatTokensPerSecond(overallAvgSpeed)}
+						</div>
+						<p className="text-xs text-muted-foreground">
+							Across all models and requests
+						</p>
+					</CardContent>
+				</Card>
+
+				<Card>
+					<CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+						<CardTitle className="text-sm font-medium">
+							Avg Response Time
+						</CardTitle>
+						<Clock className="h-4 w-4 text-muted-foreground" />
+					</CardHeader>
+					<CardContent>
+						<div className="text-2xl font-bold">
+							{overallAvgResponseTime > 0
+								? `${Math.round(overallAvgResponseTime)} ms`
+								: "—"}
 						</div>
 						<p className="text-xs text-muted-foreground">
 							Across all models and requests

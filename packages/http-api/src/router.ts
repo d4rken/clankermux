@@ -97,6 +97,7 @@ import {
 	createReauthNeededHandler,
 	createTokenHealthHandler,
 } from "./handlers/token-health";
+import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createVersionCheckHandler } from "./handlers/version";
 import type { APIContext } from "./types";
 import { errorResponse } from "./utils/http-error";
@@ -167,6 +168,7 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const usageHistoryHandler = createUsageHistoryHandler(dbOps);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);
@@ -353,6 +355,9 @@ export class APIRouter {
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
+		});
+		this.handlers.set("GET:/api/analytics/usage-history", (_req, url) => {
+			return usageHistoryHandler(url.searchParams);
 		});
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());
