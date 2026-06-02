@@ -1,4 +1,7 @@
-import { estimateCostUSD as realEstimateCostUSD } from "@clankermux/core";
+import {
+	isPlausibleSpeed,
+	estimateCostUSD as realEstimateCostUSD,
+} from "@clankermux/core";
 import type { SlimUsageSummary } from "./request-recorder";
 
 /**
@@ -466,7 +469,14 @@ export async function finalizeUsage(
  *   - zai (glm-*) → finalOutput / (responseTimeMs / 1000) [total time].
  *   - others → streaming duration (lastChunkTs - firstChunkTs)/1000 when both
  *     present and > 0, else fall back to total responseTimeMs / 1000.
- * Returns undefined when there's no output or no usable duration.
+ *
+ * Returns undefined when there's no output, no usable duration, or the result
+ * is implausibly large. The latter two cases used to divide by a 0.001s floor,
+ * which turned a sub-millisecond/zero measured duration into an astronomical
+ * tok/s artifact (e.g. 137 tokens → 137,000 tok/s) that then skewed every
+ * analytics average. We now record NULL instead: no measurable duration means
+ * we genuinely don't know the speed, and `isPlausibleSpeed` (shared with the
+ * analytics SQL filter) discards anything above MAX_PLAUSIBLE_TOKENS_PER_SECOND.
  */
 function computeTokensPerSecond(
 	state: UsageState,
@@ -478,18 +488,23 @@ function computeTokensPerSecond(
 	const totalDurationSec = opts.responseTimeMs / 1000;
 	const isZaiModel = state.model?.startsWith("glm-") ?? false;
 
+	let result: number | undefined;
 	if (isZaiModel) {
-		if (totalDurationSec > 0) return finalOutput / totalDurationSec;
-		return finalOutput / 0.001;
-	}
-
-	// Other providers: prefer streaming duration from first/last chunk ts.
-	if (state.firstChunkTs !== undefined && state.lastChunkTs !== undefined) {
-		const streamingDurationMs = state.lastChunkTs - state.firstChunkTs;
-		if (streamingDurationMs > 0) {
-			return finalOutput / (streamingDurationMs / 1000);
+		if (totalDurationSec > 0) result = finalOutput / totalDurationSec;
+	} else {
+		// Other providers: prefer streaming duration from first/last chunk ts.
+		if (state.firstChunkTs !== undefined && state.lastChunkTs !== undefined) {
+			const streamingDurationMs = state.lastChunkTs - state.firstChunkTs;
+			if (streamingDurationMs > 0) {
+				result = finalOutput / (streamingDurationMs / 1000);
+			}
+		}
+		if (result === undefined && totalDurationSec > 0) {
+			result = finalOutput / totalDurationSec;
 		}
 	}
-	if (totalDurationSec > 0) return finalOutput / totalDurationSec;
-	return finalOutput / 0.001;
+
+	// No usable duration, or a sub-ms-duration artifact: record nothing.
+	if (result === undefined || !isPlausibleSpeed(result)) return undefined;
+	return result;
 }

@@ -5,7 +5,9 @@ export {
 	computeRateLimitBackoffMs,
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
+	isPlausibleSpeed,
 	LIMITS,
+	MAX_PLAUSIBLE_TOKENS_PER_SECOND,
 	NETWORK,
 	TIME_CONSTANTS,
 } from "./constants";

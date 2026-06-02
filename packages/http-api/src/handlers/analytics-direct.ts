@@ -1,3 +1,4 @@
+import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
 import {
 	errorResponse,
 	InternalServerError,
@@ -5,9 +6,17 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
-import type { AnalyticsResponse, APIContext } from "../types";
+import type { AnalyticsResponse, APIContext, SpeedTimePoint } from "../types";
 
 const log = new Logger("AnalyticsHandler");
+
+// Plausible-speed predicate, shared across every output-speed aggregation so
+// the artifact ceiling is applied identically (drift between sites would let
+// 137k-tok/s artifacts back into one query but not another). A bare
+// `output_tokens_per_second > 0` already excludes NULLs in a WHERE/CASE, so no
+// separate IS NOT NULL is needed. MAX_PLAUSIBLE_TOKENS_PER_SECOND is a numeric
+// constant, not user input, so interpolating it is injection-safe.
+const SPEED_IN_RANGE_SQL = `output_tokens_per_second > 0 AND output_tokens_per_second <= ${MAX_PLAUSIBLE_TOKENS_PER_SECOND}`;
 
 type PhaseTiming = { phase: string; durationMs: number };
 
@@ -187,7 +196,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					(SELECT SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as api_cost_usd,
 					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
 						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) FROM filtered_requests) as cache_hit_rate,
-					(SELECT AVG(output_tokens_per_second) FROM filtered_requests) as avg_tokens_per_second,
+					(SELECT AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) FROM filtered_requests) as avg_tokens_per_second,
 					(SELECT COUNT(DISTINCT COALESCE(account_used, ?)) FROM filtered_requests) as active_accounts,
 					(SELECT SUM(COALESCE(input_tokens, 0)) FROM filtered_requests) as input_tokens,
 					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) FROM filtered_requests) as cache_read_input_tokens,
@@ -256,6 +265,44 @@ export function createAnalyticsHandler(context: APIContext) {
 					effectiveBurnRateDays(firstApiTs, thirtyDayStart, 30, nowMs)) *
 				7;
 
+			// Global output-speed percentiles for the headline tiles. Median (p50)
+			// is the robust "typical" speed; p95 is the honest fast end. Both are
+			// artifact-filtered via the sanity ceiling and computed with the same
+			// PERCENT_RANK ranked-CTE pattern used for p95 response time below
+			// (portable across bun:sqlite and Postgres — no PERCENTILE_CONT).
+			phaseStartedAt = performance.now();
+			const speedTotals = await db.get<{
+				median_tokens_per_second: number | null;
+				p95_tokens_per_second: number | null;
+			}>(
+				`
+				WITH filtered_speed AS (
+					SELECT output_tokens_per_second AS otps
+					FROM requests r
+					WHERE ${whereClause}
+						AND ${SPEED_IN_RANGE_SQL}
+				),
+				ranked_speed AS (
+					SELECT otps, PERCENT_RANK() OVER (ORDER BY otps) AS pr
+					FROM filtered_speed
+				)
+				SELECT
+					MIN(CASE WHEN pr >= 0.5 THEN otps END) as median_tokens_per_second,
+					MIN(CASE WHEN pr >= 0.95 THEN otps END) as p95_tokens_per_second
+				FROM ranked_speed
+			`,
+				queryParams,
+			);
+			recordPhase(phaseTimings, "speed_totals", phaseStartedAt);
+			const medianTokensPerSecond =
+				speedTotals?.median_tokens_per_second != null
+					? Number(speedTotals.median_tokens_per_second)
+					: null;
+			const p95TokensPerSecond =
+				speedTotals?.p95_tokens_per_second != null
+					? Number(speedTotals.p95_tokens_per_second)
+					: null;
+
 			// Get time series data
 			phaseStartedAt = performance.now();
 			const timeSeries = await db.query<{
@@ -286,7 +333,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
 						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) as cache_hit_rate,
 					AVG(response_time_ms) as avg_response_time,
-					AVG(output_tokens_per_second) as avg_tokens_per_second
+					AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) as avg_tokens_per_second
 				FROM requests r
 				WHERE ${whereClause} ${includeModelBreakdown ? "AND model IS NOT NULL" : ""}
 				GROUP BY ts${includeModelBreakdown ? ", model" : ""}
@@ -493,7 +540,11 @@ export function createAnalyticsHandler(context: APIContext) {
 					count: Number(row.count) || 0,
 				}));
 
-			// Get model performance metrics
+			// Get model performance metrics. Speed percentiles (median/p95) are
+			// computed over a separately-filtered row set (plausible speeds only)
+			// from the response-time percentiles, so artifact rows and rows
+			// missing a speed sample never pollute each other's PERCENT_RANK
+			// windows. The two aggregates are joined back per model.
 			phaseStartedAt = performance.now();
 			const modelPerfData = await db.query<{
 				model: string;
@@ -502,10 +553,10 @@ export function createAnalyticsHandler(context: APIContext) {
 				total_requests: number;
 				error_count: number;
 				error_rate: number;
-				avg_tokens_per_second: number | null;
 				p95_response_time: number | null;
-				min_tokens_per_second: number | null;
-				max_tokens_per_second: number | null;
+				speed_sample_count: number | null;
+				median_tokens_per_second: number | null;
+				p95_tokens_per_second: number | null;
 			}>(
 				`
 				WITH filtered AS (
@@ -519,32 +570,68 @@ export function createAnalyticsHandler(context: APIContext) {
 						AND model IS NOT NULL
 						AND response_time_ms IS NOT NULL
 				),
-				ranked AS (
+				resp_ranked AS (
 					SELECT
 						model,
 						response_time_ms,
-						output_tokens_per_second,
 						success,
 						PERCENT_RANK() OVER (
 							PARTITION BY model
 							ORDER BY response_time_ms
-						) AS pr
+						) AS pr_resp
 					FROM filtered
+				),
+				speed_ranked AS (
+					SELECT
+						model,
+						output_tokens_per_second,
+						PERCENT_RANK() OVER (
+							PARTITION BY model
+							ORDER BY output_tokens_per_second
+						) AS pr_speed
+					FROM filtered
+					WHERE ${SPEED_IN_RANGE_SQL}
+				),
+				resp_agg AS (
+					SELECT
+						model,
+						AVG(response_time_ms) as avg_response_time,
+						MAX(response_time_ms) as max_response_time,
+						COUNT(*) as total_requests,
+						SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as error_count,
+						SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as error_rate,
+						MIN(CASE WHEN pr_resp >= 0.95 THEN response_time_ms END) as p95_response_time
+					FROM resp_ranked
+					GROUP BY model
+				),
+				speed_agg AS (
+					SELECT
+						model,
+						COUNT(*) as speed_sample_count,
+						-- PERCENT_RANK is 0 for a single-row partition, so the
+						-- pr>=0.5 / pr>=0.95 selectors return NULL with <2 samples.
+						-- Fall back to the lone value (MIN/MAX over the 1 row) so a
+						-- model with a sample still shows a number, consistent with
+						-- speed_sample_count > 0.
+						COALESCE(MIN(CASE WHEN pr_speed >= 0.5 THEN output_tokens_per_second END), MIN(output_tokens_per_second)) as median_tokens_per_second,
+						COALESCE(MIN(CASE WHEN pr_speed >= 0.95 THEN output_tokens_per_second END), MAX(output_tokens_per_second)) as p95_tokens_per_second
+					FROM speed_ranked
+					GROUP BY model
 				)
 				SELECT
-					model,
-					AVG(response_time_ms) as avg_response_time,
-					MAX(response_time_ms) as max_response_time,
-					COUNT(*) as total_requests,
-					SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) as error_count,
-					SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as error_rate,
-					AVG(output_tokens_per_second) as avg_tokens_per_second,
-					MIN(CASE WHEN pr >= 0.95 THEN response_time_ms END) as p95_response_time,
-					MIN(CASE WHEN output_tokens_per_second > 0 THEN output_tokens_per_second ELSE NULL END) as min_tokens_per_second,
-					MAX(CASE WHEN output_tokens_per_second > 0 THEN output_tokens_per_second ELSE NULL END) as max_tokens_per_second
-				FROM ranked
-				GROUP BY model
-				ORDER BY total_requests DESC
+					ra.model,
+					ra.avg_response_time,
+					ra.max_response_time,
+					ra.total_requests,
+					ra.error_count,
+					ra.error_rate,
+					ra.p95_response_time,
+					sa.speed_sample_count,
+					sa.median_tokens_per_second,
+					sa.p95_tokens_per_second
+				FROM resp_agg ra
+				LEFT JOIN speed_agg sa ON sa.model = ra.model
+				ORDER BY ra.total_requests DESC
 				LIMIT 10
 			`,
 				queryParams,
@@ -560,19 +647,68 @@ export function createAnalyticsHandler(context: APIContext) {
 					Number(modelData.avg_response_time) ||
 					0,
 				errorRate: Number(modelData.error_rate) || 0,
-				avgTokensPerSecond:
-					modelData.avg_tokens_per_second != null
-						? Number(modelData.avg_tokens_per_second)
+				medianTokensPerSecond:
+					modelData.median_tokens_per_second != null
+						? Number(modelData.median_tokens_per_second)
 						: null,
-				minTokensPerSecond:
-					modelData.min_tokens_per_second != null
-						? Number(modelData.min_tokens_per_second)
+				p95TokensPerSecond:
+					modelData.p95_tokens_per_second != null
+						? Number(modelData.p95_tokens_per_second)
 						: null,
-				maxTokensPerSecond:
-					modelData.max_tokens_per_second != null
-						? Number(modelData.max_tokens_per_second)
-						: null,
+				speedSampleCount: Number(modelData.speed_sample_count) || 0,
 			}));
+
+			// Per-model output-speed-over-time: median (p50) tok/s per time bucket
+			// per model, artifact-filtered. Always per-model and independent of the
+			// main chart's modelBreakdown toggle. HAVING count >= 3 drops buckets
+			// too thin for a meaningful median (a 1-2 sample p50 is just noise).
+			phaseStartedAt = performance.now();
+			const speedTimeSeriesData = await db.query<{
+				ts: number;
+				model: string;
+				median_tps: number | null;
+				sample_count: number;
+			}>(
+				`
+				WITH bucketed AS (
+					SELECT
+						(timestamp / ?) * ? AS ts,
+						model,
+						output_tokens_per_second AS otps
+					FROM requests r
+					WHERE ${whereClause}
+						AND model IS NOT NULL
+						AND ${SPEED_IN_RANGE_SQL}
+				),
+				ranked AS (
+					SELECT
+						ts,
+						model,
+						otps,
+						PERCENT_RANK() OVER (PARTITION BY ts, model ORDER BY otps) AS pr
+					FROM bucketed
+				)
+				SELECT
+					ts,
+					model,
+					MIN(CASE WHEN pr >= 0.5 THEN otps END) as median_tps,
+					COUNT(*) as sample_count
+				FROM ranked
+				GROUP BY ts, model
+				HAVING COUNT(*) >= 3
+				ORDER BY ts, model
+			`,
+				[bucket.bucketMs, bucket.bucketMs, ...queryParams],
+			);
+			recordPhase(phaseTimings, "speed_time_series", phaseStartedAt);
+
+			const speedTimeSeries: SpeedTimePoint[] = speedTimeSeriesData
+				.filter((row) => row.median_tps != null)
+				.map((row) => ({
+					ts: Number(row.ts),
+					model: row.model,
+					medianTps: Number(row.median_tps),
+				}));
 
 			// Routing analytics: "why did this account get selected?"
 			// Requests without request_routing rows predate telemetry and are
@@ -851,6 +987,8 @@ export function createAnalyticsHandler(context: APIContext) {
 						consolidatedResult?.avg_tokens_per_second != null
 							? Number(consolidatedResult.avg_tokens_per_second)
 							: null,
+					medianTokensPerSecond,
+					p95TokensPerSecond,
 					avgDailyPlanCostUsd,
 					avgWeeklyPlanCostUsd,
 					avgDailyApiCostUsd,
@@ -871,6 +1009,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				costByModel,
 				accountModelUsage,
 				modelPerformance,
+				speedTimeSeries,
 				routing,
 			};
 

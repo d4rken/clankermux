@@ -13,6 +13,7 @@ export type {
 	RequestResponse,
 	RetentionGetResponse,
 	RetentionSetRequest,
+	SpeedTimePoint,
 	StatsResponse,
 	StrategyUpdateRequest,
 	TimePoint,

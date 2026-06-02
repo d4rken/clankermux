@@ -266,6 +266,104 @@ describe("usage-collector", () => {
 			// (streaming duration, NOT the 10s total response time)
 			expect(summary.tokensPerSecond).toBeCloseTo(50, 5);
 		});
+
+		it("records NULL (undefined) instead of an artifact when there is no usable duration", async () => {
+			// Single-chunk stream: firstChunkTs === lastChunkTs → no streaming
+			// duration. responseTimeMs is 0 → no total duration either. The old
+			// code divided by a 0.001s floor and produced 100/0.001 = 100,000
+			// tok/s; we now record nothing rather than poison the averages.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 100 },
+				}),
+				1000, // same ts → streamingDuration = 0
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 0, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeUndefined();
+		});
+
+		it("discards an implausibly fast result (above the sanity ceiling)", async () => {
+			// 100 output tokens over a 10ms total duration = 10,000 tok/s, far
+			// above MAX_PLAUSIBLE_TOKENS_PER_SECOND (1500) — a measurement
+			// artifact, so it is dropped rather than recorded.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "glm-4.5-air",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 100 },
+				}),
+				1010,
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 10, providerName: "zai", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeUndefined();
+		});
+
+		it("keeps a genuinely fast result that is still under the ceiling", async () => {
+			// 1000 tokens over 2s streaming = 500 tok/s — fast but plausible.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 1000 },
+				}),
+				3000, // streaming duration = 2000ms = 2s
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 5000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeCloseTo(500, 5);
+		});
 	});
 
 	describe("non-stream body", () => {
