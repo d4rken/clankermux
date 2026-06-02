@@ -13,8 +13,6 @@ import { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
 interface AnalyticsControlsProps {
 	timeRange: TimeRange;
 	setTimeRange: (range: TimeRange) => void;
-	viewMode: "normal" | "cumulative";
-	setViewMode: (mode: "normal" | "cumulative") => void;
 	filters: FilterState;
 	setFilters: (filters: FilterState) => void;
 	availableAccounts: string[];
@@ -30,8 +28,6 @@ interface AnalyticsControlsProps {
 export function AnalyticsControls({
 	timeRange,
 	setTimeRange,
-	viewMode,
-	setViewMode,
 	filters,
 	setFilters,
 	availableAccounts,
@@ -76,24 +72,6 @@ export function AnalyticsControls({
 			</div>
 
 			<div className="flex gap-2">
-				<div className="flex gap-1 bg-muted rounded-md p-1">
-					<Button
-						variant={viewMode === "normal" ? "default" : "ghost"}
-						size="sm"
-						className="h-8 px-3"
-						onClick={() => setViewMode("normal")}
-					>
-						Normal
-					</Button>
-					<Button
-						variant={viewMode === "cumulative" ? "default" : "ghost"}
-						size="sm"
-						className="h-8 px-3"
-						onClick={() => setViewMode("cumulative")}
-					>
-						Cumulative
-					</Button>
-				</div>
 				<Button
 					variant="outline"
 					size="sm"

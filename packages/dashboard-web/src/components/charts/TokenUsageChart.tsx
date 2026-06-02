@@ -1,7 +1,9 @@
 import { formatTokens } from "@clankermux/ui-common";
-import { COLORS } from "../../constants";
+import { COLORS, type TimeRange } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
+import { longRangeAxisProps } from "./chart-utils";
 
 interface TokenUsageChartProps {
 	data: Array<{
@@ -11,31 +13,19 @@ interface TokenUsageChartProps {
 	}>;
 	loading?: boolean;
 	height?: number;
-	viewMode?: "normal" | "cumulative";
-	timeRange?: string;
+	timeRange?: TimeRange;
 }
 
 export function TokenUsageChart({
 	data,
 	loading = false,
 	height = 400,
-	viewMode = "normal",
 	timeRange = "24h",
 }: TokenUsageChartProps) {
-	const isLongRange = timeRange === "7d" || timeRange === "30d";
-
 	const gradient = (
 		<linearGradient id="colorTokens" x1="0" y1="0" x2="0" y2="1">
-			<stop
-				offset="0%"
-				stopColor={viewMode === "cumulative" ? COLORS.blue : COLORS.primary}
-				stopOpacity={0.9}
-			/>
-			<stop
-				offset="100%"
-				stopColor={viewMode === "cumulative" ? COLORS.blue : COLORS.primary}
-				stopOpacity={0.1}
-			/>
+			<stop offset="0%" stopColor={COLORS.primary} stopOpacity={0.9} />
+			<stop offset="100%" stopColor={COLORS.primary} stopOpacity={0.1} />
 		</linearGradient>
 	);
 
@@ -45,18 +35,14 @@ export function TokenUsageChart({
 			dataKey="tokens"
 			loading={loading}
 			height={height}
-			color={viewMode === "cumulative" ? COLORS.blue : COLORS.primary}
+			color={COLORS.primary}
 			gradientId="colorTokens"
 			customGradient={gradient}
-			strokeWidth={viewMode === "cumulative" ? 3 : 2}
-			xAxisAngle={isLongRange ? -45 : 0}
-			xAxisTextAnchor={isLongRange ? "end" : "middle"}
-			xAxisHeight={isLongRange ? 60 : 30}
+			strokeWidth={2}
+			{...longRangeAxisProps(timeRange)}
 			yAxisTickFormatter={formatCompactNumber}
 			tooltipFormatter={(value) => [formatTokens(value as number), "Tokens"]}
-			tooltipLabelFormatter={(label) =>
-				viewMode === "cumulative" ? `Cumulative at ${label}` : label
-			}
+			tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 			animationDuration={1000}
 		/>
 	);

@@ -1,7 +1,9 @@
 import { formatTokensPerSecond } from "@clankermux/ui-common";
-import { COLORS } from "../../constants";
+import { COLORS, type TimeRange } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
+import { longRangeAxisProps } from "./chart-utils";
 
 interface TokenSpeedChartProps {
 	data: Array<{
@@ -11,7 +13,7 @@ interface TokenSpeedChartProps {
 	}>;
 	loading?: boolean;
 	height?: number;
-	timeRange?: string;
+	timeRange?: TimeRange;
 }
 
 export function TokenSpeedChart({
@@ -20,8 +22,6 @@ export function TokenSpeedChart({
 	height = 400,
 	timeRange = "24h",
 }: TokenSpeedChartProps) {
-	const isLongRange = timeRange === "7d" || timeRange === "30d";
-
 	// Filter out null values for better chart display
 	const filteredData = data.map((point) => ({
 		...point,
@@ -45,14 +45,13 @@ export function TokenSpeedChart({
 			gradientId="colorSpeed"
 			customGradient={gradient}
 			strokeWidth={2}
-			xAxisAngle={isLongRange ? -45 : 0}
-			xAxisTextAnchor={isLongRange ? "end" : "middle"}
-			xAxisHeight={isLongRange ? 60 : 30}
+			{...longRangeAxisProps(timeRange)}
 			yAxisTickFormatter={formatCompactNumber}
 			tooltipFormatter={(value) => [
 				formatTokensPerSecond(value as number),
 				"Output Speed",
 			]}
+			tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 			animationDuration={1000}
 		/>
 	);

@@ -1,5 +1,28 @@
-import { CHART_HEIGHTS, CHART_TOOLTIP_STYLE } from "../../constants";
+import {
+	CHART_HEIGHTS,
+	CHART_TOOLTIP_STYLE,
+	type TimeRange,
+} from "../../constants";
+import type { TooltipLabelFormatter } from "../../lib/chart-utils";
 import type { ChartClickHandler, ChartDataPoint } from "./types";
+
+/**
+ * X-axis layout props for time-series charts: multi-day ranges get angled,
+ * taller ticks so the longer date labels don't overlap. Returned in the shape
+ * `BaseAreaChart`/`BaseLineChart` expect, so callers can spread it directly.
+ */
+export function longRangeAxisProps(range: TimeRange): {
+	xAxisAngle: number;
+	xAxisTextAnchor: "start" | "middle" | "end";
+	xAxisHeight: number;
+} {
+	const isLong = range === "7d" || range === "30d";
+	return {
+		xAxisAngle: isLong ? -45 : 0,
+		xAxisTextAnchor: isLong ? "end" : "middle",
+		xAxisHeight: isLong ? 60 : 30,
+	};
+}
 
 /**
  * Calculate chart height from height prop
@@ -55,7 +78,7 @@ export interface CommonChartProps extends CommonAxisProps {
 	showLegend?: boolean;
 	legendHeight?: number;
 	tooltipFormatter?: (value: number, name: string) => [string, string];
-	tooltipLabelFormatter?: (label: string) => string;
+	tooltipLabelFormatter?: TooltipLabelFormatter;
 	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
 	animationDuration?: number;
 	onChartClick?: ChartClickHandler;

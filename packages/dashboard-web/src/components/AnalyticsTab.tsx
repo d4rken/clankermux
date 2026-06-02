@@ -1,7 +1,8 @@
-import { format } from "date-fns";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { TimeRange } from "../constants";
 import { useAnalytics } from "../hooks/queries";
+import { toCumulativeSeries } from "../lib/cumulative";
+import { formatAxisTime } from "../lib/time-format";
 import {
 	AnalyticsControls,
 	CumulativeGrowthChart,
@@ -19,7 +20,6 @@ export const AnalyticsTab = React.memo(() => {
 	const [timeRange, setTimeRange] = useState<TimeRange>("1h");
 	const [selectedMetric, setSelectedMetric] = useState("requests");
 	const [filterOpen, setFilterOpen] = useState(false);
-	const [viewMode, setViewMode] = useState<"normal" | "cumulative">("normal");
 	const [modelBreakdown, setModelBreakdown] = useState(false);
 	const [filters, setFilters] = useState<FilterState>({
 		accounts: [],
@@ -33,7 +33,7 @@ export const AnalyticsTab = React.memo(() => {
 		data: analytics,
 		isLoading: loading,
 		refetch,
-	} = useAnalytics(timeRange, filters, viewMode, modelBreakdown);
+	} = useAnalytics(timeRange, filters, "normal", modelBreakdown);
 
 	// Get unique accounts and models from analytics data
 	// Accumulate all seen accounts/models/apiKeys to maintain full list for filters
@@ -124,13 +124,12 @@ export const AnalyticsTab = React.memo(() => {
 		if (!analytics?.timeSeries) return [];
 
 		const timeSeries = filterData(analytics.timeSeries);
-		const formatter =
-			timeRange === "30d"
-				? (date: Date) => format(date, "MMM d")
-				: (date: Date) => format(date, "HH:mm");
 
 		return timeSeries.map((point) => ({
-			time: formatter(new Date(point.ts)),
+			// Compact label for the X-axis tick; the raw `ts` is carried alongside
+			// so tooltips can render a richer, day-aware label (see time-format.ts).
+			time: formatAxisTime(point.ts, timeRange),
+			ts: point.ts,
 			requests: point.requests,
 			tokens: point.tokens,
 			cost: parseFloat(point.costUsd.toFixed(2)),
@@ -142,6 +141,11 @@ export const AnalyticsTab = React.memo(() => {
 			avgTokensPerSecond: point.avgTokensPerSecond || 0,
 		}));
 	}, [analytics?.timeSeries, timeRange, filterData]);
+
+	// Cumulative running totals derived client-side from the normal series. This
+	// powers the "Cumulative Trends" section at the bottom of the page without a
+	// separate server round-trip (mirrors the backend's running-sum transform).
+	const cumulativeData = useMemo(() => toCumulativeSeries(data), [data]);
 
 	// Memoize token usage breakdown calculation
 	const tokenBreakdown = useMemo(() => {
@@ -199,14 +203,6 @@ export const AnalyticsTab = React.memo(() => {
 			<AnalyticsControls
 				timeRange={timeRange}
 				setTimeRange={setTimeRange}
-				viewMode={viewMode}
-				setViewMode={(mode) => {
-					setViewMode(mode);
-					// Disable per-model breakdown when switching to cumulative
-					if (mode === "cumulative") {
-						setModelBreakdown(false);
-					}
-				}}
 				filters={filters}
 				setFilters={setFilters}
 				availableAccounts={availableAccounts}
@@ -221,25 +217,11 @@ export const AnalyticsTab = React.memo(() => {
 				}}
 			/>
 
-			{/* Cumulative View - Show cumulative charts first */}
-			{viewMode === "cumulative" && analytics && (
-				<>
-					{/* Beautiful Cumulative Chart */}
-					<CumulativeGrowthChart data={data} />
-
-					{/* Cumulative Token Breakdown Ribbon Chart */}
-					{tokenBreakdown.length > 0 && (
-						<CumulativeTokenComposition tokenBreakdown={tokenBreakdown} />
-					)}
-				</>
-			)}
-
 			{/* Main Metrics Chart */}
 			<MainMetricsChart
 				data={data}
 				rawTimeSeries={analytics?.timeSeries}
 				loading={loading}
-				viewMode={viewMode}
 				timeRange={timeRange}
 				selectedMetric={selectedMetric}
 				setSelectedMetric={setSelectedMetric}
@@ -247,50 +229,59 @@ export const AnalyticsTab = React.memo(() => {
 				onModelBreakdownChange={setModelBreakdown}
 			/>
 
-			{/* Normal View Charts - Only show in normal mode */}
-			{viewMode === "normal" && (
-				<>
-					{/* Secondary Charts Row */}
-					<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-						<PerformanceIndicatorsChart
-							data={data}
-							loading={loading}
-							modelBreakdown={modelBreakdown}
-							rawTimeSeries={analytics?.timeSeries}
-							timeRange={timeRange}
-						/>
-						<TokenUsageBreakdown
-							tokenBreakdown={tokenBreakdown}
-							timeRange={timeRange}
-						/>
+			{/* Secondary Charts Row */}
+			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+				<PerformanceIndicatorsChart
+					data={data}
+					loading={loading}
+					modelBreakdown={modelBreakdown}
+					rawTimeSeries={analytics?.timeSeries}
+					timeRange={timeRange}
+				/>
+				<TokenUsageBreakdown
+					tokenBreakdown={tokenBreakdown}
+					timeRange={timeRange}
+				/>
+			</div>
+
+			{/* Enhanced Model Analytics */}
+			<ModelAnalytics
+				modelPerformance={analytics?.modelPerformance || []}
+				costByModel={costByModel}
+				loading={loading}
+			/>
+
+			{/* Token Speed Analytics */}
+			<TokenSpeedAnalytics
+				speedTimeSeries={analytics?.speedTimeSeries ?? []}
+				medianTokensPerSecond={analytics?.totals.medianTokensPerSecond ?? null}
+				p95TokensPerSecond={analytics?.totals.p95TokensPerSecond ?? null}
+				avgResponseTimeMs={analytics?.totals.avgResponseTime ?? 0}
+				modelPerformance={analytics?.modelPerformance || []}
+				loading={loading}
+				timeRange={timeRange}
+			/>
+
+			<RoutingAnalyticsPanel
+				routing={analytics?.routing}
+				loading={loading}
+				timeRange={timeRange}
+			/>
+
+			{/* Cumulative Trends - always shown at the bottom */}
+			{analytics && data.length > 0 && (
+				<section className="space-y-6">
+					<div className="border-t pt-6">
+						<h2 className="text-lg font-semibold">Cumulative Trends</h2>
+						<p className="text-sm text-muted-foreground">
+							Running totals across the selected time range
+						</p>
 					</div>
-
-					{/* Enhanced Model Analytics */}
-					<ModelAnalytics
-						modelPerformance={analytics?.modelPerformance || []}
-						costByModel={costByModel}
-						loading={loading}
-					/>
-
-					{/* Token Speed Analytics */}
-					<TokenSpeedAnalytics
-						speedTimeSeries={analytics?.speedTimeSeries ?? []}
-						medianTokensPerSecond={
-							analytics?.totals.medianTokensPerSecond ?? null
-						}
-						p95TokensPerSecond={analytics?.totals.p95TokensPerSecond ?? null}
-						avgResponseTimeMs={analytics?.totals.avgResponseTime ?? 0}
-						modelPerformance={analytics?.modelPerformance || []}
-						loading={loading}
-						timeRange={timeRange}
-					/>
-
-					<RoutingAnalyticsPanel
-						routing={analytics?.routing}
-						loading={loading}
-						timeRange={timeRange}
-					/>
-				</>
+					<CumulativeGrowthChart data={cumulativeData} timeRange={timeRange} />
+					{tokenBreakdown.length > 0 && (
+						<CumulativeTokenComposition tokenBreakdown={tokenBreakdown} />
+					)}
+				</section>
 			)}
 		</div>
 	);

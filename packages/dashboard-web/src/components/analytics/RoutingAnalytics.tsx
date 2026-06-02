@@ -3,7 +3,6 @@ import type {
 	RoutingFlowPoint,
 } from "@clankermux/types";
 import { formatNumber } from "@clankermux/ui-common";
-import { format } from "date-fns";
 import { GitBranch, Route } from "lucide-react";
 import { useMemo } from "react";
 import {
@@ -16,6 +15,10 @@ import {
 	YAxis,
 } from "recharts";
 import { CHART_COLORS, COLORS, type TimeRange } from "../../constants";
+import {
+	formatAxisTime,
+	makeTimeTooltipLabelFormatter,
+} from "../../lib/time-format";
 import { ChartTooltip } from "../charts";
 import { Badge } from "../ui/badge";
 import {
@@ -322,10 +325,7 @@ export function RoutingAnalyticsPanel({
 				rows.get(point.ts) ??
 				({
 					ts: point.ts,
-					time:
-						timeRange === "30d"
-							? format(new Date(point.ts), "MMM d")
-							: format(new Date(point.ts), "HH:mm"),
+					time: formatAxisTime(point.ts, timeRange),
 				} as Record<string, string | number>);
 			row[accountName] = Number(row[accountName] ?? 0) + point.requests;
 			rows.set(point.ts, row);
@@ -411,6 +411,7 @@ export function RoutingAnalyticsPanel({
 											formatters={{
 												default: (value) => formatNumber(Number(value)),
 											}}
+											labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 										/>
 									}
 								/>

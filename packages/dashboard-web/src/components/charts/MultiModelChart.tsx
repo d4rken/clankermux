@@ -21,18 +21,17 @@ import {
 	CHART_HEIGHTS,
 	CHART_PROPS,
 	COLORS,
+	type TimeRange,
 } from "../../constants";
 import {
 	formatCompactCurrency,
 	formatCompactNumber,
 } from "../../lib/chart-utils";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
 
 type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
-type TooltipLabelFormatterProp = ComponentProps<
-	typeof Tooltip
->["labelFormatter"];
 
 interface MultiModelChartProps {
 	data: Array<{
@@ -50,7 +49,7 @@ interface MultiModelChartProps {
 		| "cacheHitRate";
 	loading?: boolean;
 	height?: number;
-	viewMode?: "normal" | "cumulative";
+	timeRange?: TimeRange;
 }
 
 // Model-based color palette
@@ -147,7 +146,7 @@ export function MultiModelChart({
 	metric,
 	loading = false,
 	height = CHART_HEIGHTS.large,
-	viewMode = "normal",
+	timeRange = "24h",
 }: MultiModelChartProps) {
 	if (loading || !data || data.length === 0) {
 		return (
@@ -192,13 +191,6 @@ export function MultiModelChart({
 							/>
 						</linearGradient>
 					))}
-					<filter id="glow">
-						<feGaussianBlur stdDeviation="2" result="coloredBlur" />
-						<feMerge>
-							<feMergeNode in="coloredBlur" />
-							<feMergeNode in="SourceGraphic" />
-						</feMerge>
-					</filter>
 				</defs>
 				<CartesianGrid
 					strokeDasharray={CHART_PROPS.strokeDasharray}
@@ -227,12 +219,7 @@ export function MultiModelChart({
 						((value: number) =>
 							formatValue(value, metric)) as TooltipFormatterProp
 					}
-					labelFormatter={
-						((label: string) =>
-							viewMode === "cumulative"
-								? `Cumulative at ${label}`
-								: label) as TooltipLabelFormatterProp
-					}
+					labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 				/>
 				<Legend
 					verticalAlign="top"
@@ -246,10 +233,9 @@ export function MultiModelChart({
 						dataKey={model}
 						name={model}
 						stroke={getModelColor(model, index)}
-						strokeWidth={viewMode === "cumulative" ? 3 : 2}
+						strokeWidth={2}
 						dot={false}
 						activeDot={{ r: 6 }}
-						filter={viewMode === "cumulative" ? "url(#glow)" : undefined}
 						connectNulls={true}
 					/>
 				))}
