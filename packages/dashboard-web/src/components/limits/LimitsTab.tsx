@@ -1,6 +1,5 @@
 import { registerUIRefresh } from "@clankermux/core";
-import { formatCost } from "@clankermux/ui-common";
-import { BarChart3, DollarSign, Gauge } from "lucide-react";
+import { BarChart3, Gauge } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
@@ -9,24 +8,25 @@ import {
 } from "../../hooks/queries";
 import { computePoolUsage } from "../../lib/pool-usage";
 import { LoadingSkeleton } from "../overview/LoadingSkeleton";
-import { MetricCard } from "../overview/MetricCard";
 import { PoolMetricCard } from "../overview/PoolMetricCard";
-import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
 export const LimitsTab = React.memo(() => {
-	const [range, setRange] = useState("24h");
+	// Each time-ranged card owns its own range now (the live pool tiles and
+	// utilization card below are range-independent and get no selector).
+	const [usageRange, setUsageRange] = useState("7d");
+	const [perfRange, setPerfRange] = useState("7d");
 
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
-		range,
+		perfRange,
 		{ accounts: [], models: [], status: "all" },
 		"normal",
 	);
 	const { data: usageHistory, isLoading: usageHistoryLoading } =
-		useUsageHistory(range);
+		useUsageHistory(usageRange);
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -55,6 +55,12 @@ export const LimitsTab = React.memo(() => {
 
 	const totals = analytics?.totals;
 	const accountList = accounts ?? [];
+	const costSummary = {
+		planCostUsd: totals?.planCostUsd ?? 0,
+		apiCostUsd: totals?.apiCostUsd ?? 0,
+		avgDailyPlanCostUsd: totals?.avgDailyPlanCostUsd ?? 0,
+		avgWeeklyPlanCostUsd: totals?.avgWeeklyPlanCostUsd ?? 0,
+	};
 
 	return (
 		<div className="space-y-6">
@@ -83,55 +89,28 @@ export const LimitsTab = React.memo(() => {
 				windows aren't tracked here.
 			</p>
 
-			{/* Sawtooth charts (both windows) with a range selector. */}
-			<div className="space-y-3">
-				<div className="flex flex-wrap items-center justify-end gap-3">
-					<TimeRangeSelector value={range} onChange={setRange} />
-				</div>
-				<UsageSawtoothChart
-					usageHistory={usageHistory}
-					accounts={accountList}
-					now={now}
-					loading={usageHistoryLoading}
-				/>
-			</div>
-
-			{/* Per-account live utilization for both windows, with burn-rate projection. */}
+			{/* Per-account live utilization — grouped with the pool tiles above as the
+			    live, range-independent capacity view (no range selector). */}
 			<AccountUtilizationCard accounts={accountList} />
 
-			{/* Moved Plan Value + API Cost tiles. */}
-			<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-				<MetricCard
-					title="Plan Value"
-					value={
-						totals?.planCostUsd ? formatCost(totals.planCostUsd) : "$0.0000"
-					}
-					icon={DollarSign}
-					subRows={[
-						{
-							label: "Avg / day",
-							value: formatCost(totals?.avgDailyPlanCostUsd ?? 0),
-							inlineExplainer: "Average daily plan value over the last 7 days",
-						},
-						{
-							label: "Avg / week",
-							value: formatCost(totals?.avgWeeklyPlanCostUsd ?? 0),
-							inlineExplainer:
-								"Average weekly plan value, derived from the last 30 days",
-						},
-					]}
-				/>
-				<MetricCard
-					title="API Cost"
-					value={totals?.apiCostUsd ? formatCost(totals.apiCostUsd) : "$0.0000"}
-					icon={DollarSign}
-				/>
-			</div>
+			{/* Recorded usage history + forecast; range picker lives in the card header. */}
+			<UsageSawtoothChart
+				usageHistory={usageHistory}
+				accounts={accountList}
+				now={now}
+				loading={usageHistoryLoading}
+				range={usageRange}
+				onRangeChange={setUsageRange}
+			/>
 
-			{/* Account performance bar + cost-breakdown table. */}
+			{/* Account performance + folded-in Plan Value / API Cost summary; own range
+			    picker in the card header. */}
 			<AccountPerformanceSection
 				accountPerformance={analytics?.accountPerformance ?? []}
 				loading={loading}
+				range={perfRange}
+				onRangeChange={setPerfRange}
+				costSummary={costSummary}
 			/>
 		</div>
 	);

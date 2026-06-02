@@ -3,10 +3,12 @@ import { format } from "date-fns";
 import { useMemo } from "react";
 import { CHART_COLORS, COLORS } from "../../constants";
 import type { PoolWindow } from "../../lib/pool-usage";
+import { pickTimePattern } from "../../lib/usage-chart-format";
 import { computeWindowForecast } from "../../lib/usage-forecast";
 import { BaseLineChart } from "../charts";
 import type { LineConfig } from "../charts/BaseLineChart";
 import type { ChartDataPoint } from "../charts/types";
+import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import {
 	Card,
 	CardContent,
@@ -22,6 +24,9 @@ interface UsageSawtoothChartProps {
 	/** Current time (ms), ticked by the parent so the forecast anchor stays fresh. */
 	now: number;
 	loading: boolean;
+	/** Selected time range (controlled); also re-keys the parent's usage-history query. */
+	range: string;
+	onRangeChange: (range: string) => void;
 }
 
 /**
@@ -75,9 +80,8 @@ function buildWindowChart(
 	const bucketMs = usageHistory?.bucketMs ?? 0;
 	const rangeMs = rangeToMs(usageHistory?.range);
 
-	// Daily buckets (30d range) floor to midnight, so "HH:mm" would render the
-	// same "00:00" for every label — switch to a date label there.
-	const timePattern = bucketMs >= 86_400_000 ? "MMM d" : "HH:mm";
+	// Label format disambiguates the day once the span exceeds 24h (see helper).
+	const timePattern = pickTimePattern(bucketMs, rangeMs);
 
 	const rows = new Map<number, SawtoothRow>();
 	const rowFor = (ts: number): SawtoothRow => {
@@ -250,6 +254,8 @@ export function UsageSawtoothChart({
 	accounts,
 	now,
 	loading,
+	range,
+	onRangeChange,
 }: UsageSawtoothChartProps) {
 	const fiveHour = useMemo(
 		() => buildWindowChart(usageHistory, accounts, "five_hour", now),
@@ -263,12 +269,18 @@ export function UsageSawtoothChart({
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle>Usage Over Time</CardTitle>
-				<CardDescription>
-					Per-account utilization with the pool average. Solid lines are
-					recorded history (reset to zero when a window rolls over); dashed
-					lines project the current burn rate forward to each window's reset.
-				</CardDescription>
+				<div className="flex items-center justify-between gap-4">
+					<div>
+						<CardTitle>Usage Over Time</CardTitle>
+						<CardDescription>
+							Per-account utilization with the pool average. Solid lines are
+							recorded history (reset to zero when a window rolls over); dashed
+							lines project the current burn rate forward to each window's
+							reset.
+						</CardDescription>
+					</div>
+					<TimeRangeSelector value={range} onChange={onRangeChange} />
+				</div>
 			</CardHeader>
 			<CardContent className="space-y-6">
 				<WindowChartPanel
