@@ -101,12 +101,14 @@ export function isAnthropicStyleShape(
 	return "five_hour" in usageData && "seven_day" in usageData;
 }
 
-interface ExtractedValue {
+export interface ExtractedValue {
 	pct: number | null;
 	resetMs: number | null;
 }
 
-function extractFiveHour(usageData: FullUsageData): ExtractedValue | null {
+export function extractFiveHour(
+	usageData: FullUsageData,
+): ExtractedValue | null {
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			five_hour: { percentUsed: number | null; resetAt: number | null };
@@ -148,7 +150,9 @@ function extractFiveHour(usageData: FullUsageData): ExtractedValue | null {
 	return null;
 }
 
-function extractSevenDay(usageData: FullUsageData): ExtractedValue | null {
+export function extractSevenDay(
+	usageData: FullUsageData,
+): ExtractedValue | null {
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			weekly: { percentUsed: number | null; resetAt: number | null };

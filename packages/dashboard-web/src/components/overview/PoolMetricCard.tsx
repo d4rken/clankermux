@@ -14,6 +14,7 @@ interface PoolMetricCardProps {
 	icon: React.ComponentType<{ className?: string }>;
 	result: PoolUsageResult;
 	window: PoolWindow;
+	inlineDetails?: boolean;
 }
 
 const REASON_LABELS: Record<ExcludedReason, string> = {
@@ -118,14 +119,14 @@ function atRiskBadge(
 	};
 }
 
-export function PoolMetricCard({
-	title,
-	icon: Icon,
+function PoolDetailSection({
 	result,
 	window,
-}: PoolMetricCardProps) {
+}: {
+	result: PoolUsageResult;
+	window: PoolWindow;
+}) {
 	const {
-		average,
 		activeAverage,
 		contributing,
 		exhausted,
@@ -133,6 +134,167 @@ export function PoolMetricCard({
 		fallback,
 		earliestResetMs,
 		earliestResetAccountName,
+		atRisk,
+	} = result;
+
+	const sortedContributing = contributing.slice().sort((a, b) => b.pct - a.pct);
+	const sortedAtRisk = atRisk
+		.slice()
+		.sort((a, b) => a.exhaustsAtMs - b.exhaustsAtMs);
+	const exhaustedGroups = groupExcluded(exhausted);
+	const excludedGroups = groupExcluded(excluded);
+
+	const hasContributing = contributing.length > 0;
+	const hasExhausted = exhausted.length > 0;
+	const hasExcluded = excluded.length > 0;
+	const hasFallback = fallback.length > 0;
+	const hasAtRisk = atRisk.length > 0;
+
+	return (
+		<div className="space-y-3">
+			<div>
+				<div className="font-medium mb-1">Pool usage</div>
+				<div className="text-muted-foreground">
+					Headline counts unavailable eligible accounts as 100% used.
+				</div>
+				{activeAverage != null && (
+					<div className="mt-1">
+						Active accounts average: {activeAverage.toFixed(0)}%
+					</div>
+				)}
+			</div>
+			{hasContributing && (
+				<div>
+					<div className="font-medium mb-1">
+						Contributing ({contributing.length})
+					</div>
+					<ul className="space-y-0.5">
+						{sortedContributing.map((c) => (
+							<li
+								key={c.name}
+								className="flex items-center justify-between gap-2"
+							>
+								<span className="truncate" title={c.name}>
+									{c.name}
+								</span>
+								<span className="tabular-nums">{c.pct.toFixed(0)}%</span>
+							</li>
+						))}
+					</ul>
+				</div>
+			)}
+			{hasAtRisk && (
+				<div>
+					<div className="font-medium mb-1">At risk ({atRisk.length})</div>
+					<div className="text-muted-foreground mb-1">
+						Projected to exhaust before their window resets.
+					</div>
+					<ul className="space-y-0.5">
+						{sortedAtRisk.map((a) => (
+							<li
+								key={a.name}
+								className="flex items-center justify-between gap-2"
+							>
+								<span className="truncate" title={a.name}>
+									{a.name}
+								</span>
+								<span className="tabular-nums">
+									runs out in {formatShortDuration(a.timeToExhaustMs)}
+								</span>
+							</li>
+						))}
+					</ul>
+				</div>
+			)}
+			{hasExhausted && (
+				<div>
+					<div className="font-medium mb-1">
+						Unavailable ({exhausted.length})
+					</div>
+					<div className="space-y-2">
+						{exhaustedGroups.map(({ reason, items }) => (
+							<div key={reason}>
+								<div className="text-muted-foreground">
+									{REASON_LABELS[reason]} · counted as 100%
+								</div>
+								<ul className="ml-2 space-y-0.5">
+									{items.map((e) => (
+										<li key={e.name} className="truncate" title={e.name}>
+											{e.name}
+										</li>
+									))}
+								</ul>
+							</div>
+						))}
+					</div>
+				</div>
+			)}
+			{hasExcluded && (
+				<div>
+					<div className="font-medium mb-1">Unknown ({excluded.length})</div>
+					<div className="space-y-2">
+						{excludedGroups.map(({ reason, items }) => (
+							<div key={reason}>
+								<div className="text-muted-foreground">
+									{REASON_LABELS[reason]} · not counted
+								</div>
+								<ul className="ml-2 space-y-0.5">
+									{items.map((e) => (
+										<li key={e.name} className="truncate" title={e.name}>
+											{e.name}
+										</li>
+									))}
+								</ul>
+							</div>
+						))}
+					</div>
+				</div>
+			)}
+			{hasFallback && (
+				<div>
+					<div className="font-medium mb-1">Fallback ({fallback.length})</div>
+					<div className="text-muted-foreground mb-1">
+						Pay-as-you-go capacity, not counted in this pool.
+					</div>
+					<ul className="space-y-0.5">
+						{fallback.map((f) => (
+							<li
+								key={f.name}
+								className="truncate"
+								title={`${f.name} (${f.provider})`}
+							>
+								{f.name}{" "}
+								<span className="text-muted-foreground">({f.provider})</span>
+							</li>
+						))}
+					</ul>
+				</div>
+			)}
+			{earliestResetMs != null && (
+				<div>
+					<div className="font-medium mb-1">More quota</div>
+					<div>
+						{nextQuotaLabel(earliestResetMs, earliestResetAccountName, window)}
+					</div>
+				</div>
+			)}
+		</div>
+	);
+}
+
+export function PoolMetricCard({
+	title,
+	icon: Icon,
+	result,
+	window,
+	inlineDetails = false,
+}: PoolMetricCardProps) {
+	const {
+		average,
+		contributing,
+		exhausted,
+		excluded,
+		earliestResetMs,
 		atRisk,
 	} = result;
 
@@ -152,19 +314,6 @@ export function PoolMetricCard({
 			? null
 			: `more quota at ${nextQuotaTimeLabel(earliestResetMs, window)}`;
 
-	const sortedContributing = contributing.slice().sort((a, b) => b.pct - a.pct);
-	const sortedAtRisk = atRisk
-		.slice()
-		.sort((a, b) => a.exhaustsAtMs - b.exhaustsAtMs);
-	const exhaustedGroups = groupExcluded(exhausted);
-	const excludedGroups = groupExcluded(excluded);
-
-	const hasContributing = contributing.length > 0;
-	const hasExhausted = exhausted.length > 0;
-	const hasExcluded = excluded.length > 0;
-	const hasFallback = fallback.length > 0;
-	const hasAtRisk = atRisk.length > 0;
-
 	const triggerNode = showChip ? (
 		<Popover>
 			<PopoverTrigger asChild>
@@ -179,136 +328,7 @@ export function PoolMetricCard({
 				</button>
 			</PopoverTrigger>
 			<PopoverContent className="w-72 text-xs space-y-3">
-				<div>
-					<div className="font-medium mb-1">Pool usage</div>
-					<div className="text-muted-foreground">
-						Headline counts unavailable eligible accounts as 100% used.
-					</div>
-					{activeAverage != null && (
-						<div className="mt-1">
-							Active accounts average: {activeAverage.toFixed(0)}%
-						</div>
-					)}
-				</div>
-				{hasContributing && (
-					<div>
-						<div className="font-medium mb-1">
-							Contributing ({contributing.length})
-						</div>
-						<ul className="space-y-0.5">
-							{sortedContributing.map((c) => (
-								<li
-									key={c.name}
-									className="flex items-center justify-between gap-2"
-								>
-									<span className="truncate" title={c.name}>
-										{c.name}
-									</span>
-									<span className="tabular-nums">{c.pct.toFixed(0)}%</span>
-								</li>
-							))}
-						</ul>
-					</div>
-				)}
-				{hasAtRisk && (
-					<div>
-						<div className="font-medium mb-1">At risk ({atRisk.length})</div>
-						<div className="text-muted-foreground mb-1">
-							Projected to exhaust before their window resets.
-						</div>
-						<ul className="space-y-0.5">
-							{sortedAtRisk.map((a) => (
-								<li
-									key={a.name}
-									className="flex items-center justify-between gap-2"
-								>
-									<span className="truncate" title={a.name}>
-										{a.name}
-									</span>
-									<span className="tabular-nums">
-										runs out in {formatShortDuration(a.timeToExhaustMs)}
-									</span>
-								</li>
-							))}
-						</ul>
-					</div>
-				)}
-				{hasExhausted && (
-					<div>
-						<div className="font-medium mb-1">
-							Unavailable ({exhausted.length})
-						</div>
-						<div className="space-y-2">
-							{exhaustedGroups.map(({ reason, items }) => (
-								<div key={reason}>
-									<div className="text-muted-foreground">
-										{REASON_LABELS[reason]} · counted as 100%
-									</div>
-									<ul className="ml-2 space-y-0.5">
-										{items.map((e) => (
-											<li key={e.name} className="truncate" title={e.name}>
-												{e.name}
-											</li>
-										))}
-									</ul>
-								</div>
-							))}
-						</div>
-					</div>
-				)}
-				{hasExcluded && (
-					<div>
-						<div className="font-medium mb-1">Unknown ({excluded.length})</div>
-						<div className="space-y-2">
-							{excludedGroups.map(({ reason, items }) => (
-								<div key={reason}>
-									<div className="text-muted-foreground">
-										{REASON_LABELS[reason]} · not counted
-									</div>
-									<ul className="ml-2 space-y-0.5">
-										{items.map((e) => (
-											<li key={e.name} className="truncate" title={e.name}>
-												{e.name}
-											</li>
-										))}
-									</ul>
-								</div>
-							))}
-						</div>
-					</div>
-				)}
-				{hasFallback && (
-					<div>
-						<div className="font-medium mb-1">Fallback ({fallback.length})</div>
-						<div className="text-muted-foreground mb-1">
-							Pay-as-you-go capacity, not counted in this pool.
-						</div>
-						<ul className="space-y-0.5">
-							{fallback.map((f) => (
-								<li
-									key={f.name}
-									className="truncate"
-									title={`${f.name} (${f.provider})`}
-								>
-									{f.name}{" "}
-									<span className="text-muted-foreground">({f.provider})</span>
-								</li>
-							))}
-						</ul>
-					</div>
-				)}
-				{earliestResetMs != null && (
-					<div>
-						<div className="font-medium mb-1">More quota</div>
-						<div>
-							{nextQuotaLabel(
-								earliestResetMs,
-								earliestResetAccountName,
-								window,
-							)}
-						</div>
-					</div>
-				)}
+				<PoolDetailSection result={result} window={window} />
 			</PopoverContent>
 		</Popover>
 	) : null;
@@ -321,7 +341,15 @@ export function PoolMetricCard({
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						<p className="text-sm text-muted-foreground truncate">{title}</p>
 					</div>
-					{triggerNode}
+					{inlineDetails ? (
+						showChip ? (
+							<span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+								({contributing.length}/{eligibleTotal} active)
+							</span>
+						) : null
+					) : (
+						triggerNode
+					)}
 				</div>
 				<div className="space-y-1">
 					<p className={cn("text-2xl font-bold", colorClass)}>{headline}</p>
@@ -339,6 +367,11 @@ export function PoolMetricCard({
 						</p>
 					)}
 				</div>
+				{inlineDetails && showChip && (
+					<div className="mt-3 pt-3 border-t border-border/50 text-xs">
+						<PoolDetailSection result={result} window={window} />
+					</div>
+				)}
 			</CardContent>
 		</Card>
 	);

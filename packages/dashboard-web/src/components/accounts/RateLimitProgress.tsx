@@ -19,6 +19,7 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
+	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 }
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
@@ -194,6 +195,7 @@ export function RateLimitProgress({
 	provider,
 	className,
 	showWeekly = false,
+	inlineProjection = false,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -560,26 +562,28 @@ export function RateLimitProgress({
 
 				return (
 					<div key={usage.window || "default"} className="space-y-1.5">
-						<div className="group relative">
-							<div
-								className="pointer-events-none absolute bottom-full z-10 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover:block"
-								style={{ left: `clamp(10%, ${expectedPct ?? 50}%, 90%)` }}
-							>
-								<div className="mb-1 font-medium">{windowLabel} usage</div>
-								{projectedMessage && (
-									<div
-										className={
-											(percentage ?? 0) <= 0
-												? "text-muted-foreground"
-												: isOverPacing
-													? "text-red-400"
-													: "text-green-400"
-										}
-									>
-										{projectedMessage}
-									</div>
-								)}
-							</div>
+						<div className={cn(!inlineProjection && "group", "relative")}>
+							{!inlineProjection && (
+								<div
+									className="pointer-events-none absolute bottom-full z-10 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover:block"
+									style={{ left: `clamp(10%, ${expectedPct ?? 50}%, 90%)` }}
+								>
+									<div className="mb-1 font-medium">{windowLabel} usage</div>
+									{projectedMessage && (
+										<div
+											className={
+												(percentage ?? 0) <= 0
+													? "text-muted-foreground"
+													: isOverPacing
+														? "text-red-400"
+														: "text-green-400"
+											}
+										>
+											{projectedMessage}
+										</div>
+									)}
+								</div>
+							)}
 							<Progress
 								value={isAvailable ? percentage : 0}
 								className="h-2"
@@ -618,6 +622,20 @@ export function RateLimitProgress({
 								{rightStatus}
 							</span>
 						</div>
+						{inlineProjection && projectedMessage && (
+							<p
+								className={cn(
+									"text-xs",
+									(percentage ?? 0) <= 0
+										? "text-muted-foreground"
+										: isOverPacing
+											? "text-destructive"
+											: "text-success",
+								)}
+							>
+								{projectedMessage}
+							</p>
+						)}
 						{isWindowThrottled && throttleDisplayUntil && (
 							<div className="flex items-center justify-between gap-2 text-xs">
 								<span className="text-amber-600 dark:text-amber-400">

@@ -7,6 +7,7 @@ export interface MetricCardSubRow {
 	label: string;
 	value: string | number;
 	tooltip?: string;
+	inlineExplainer?: string; // when set, render as muted text below the value instead of a click-popover
 }
 
 export interface MetricCardProps {
@@ -70,28 +71,47 @@ export function MetricCard({
 				<p className="text-2xl font-bold">{value}</p>
 				{subRows && subRows.length > 0 && (
 					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
-						{subRows.map((row) => (
-							<div
-								key={row.label}
-								className="flex items-baseline justify-between text-xs"
-							>
-								<span className="text-muted-foreground">{row.label}</span>
-								{row.tooltip ? (
-									<Popover>
-										<PopoverTrigger asChild>
-											<span className="font-medium tabular-nums cursor-help">
+						{subRows.map((row) => {
+							if (row.inlineExplainer) {
+								return (
+									<div key={row.label} className="text-xs">
+										<div className="flex items-baseline justify-between">
+											<span className="text-muted-foreground">{row.label}</span>
+											<span className="font-medium tabular-nums">
 												{row.value}
 											</span>
-										</PopoverTrigger>
-										<PopoverContent className="w-auto p-2 text-xs">
-											<p>{row.tooltip}</p>
-										</PopoverContent>
-									</Popover>
-								) : (
-									<span className="font-medium tabular-nums">{row.value}</span>
-								)}
-							</div>
-						))}
+										</div>
+										<p className="mt-0.5 text-muted-foreground/70">
+											{row.inlineExplainer}
+										</p>
+									</div>
+								);
+							}
+							return (
+								<div
+									key={row.label}
+									className="flex items-baseline justify-between text-xs"
+								>
+									<span className="text-muted-foreground">{row.label}</span>
+									{row.tooltip ? (
+										<Popover>
+											<PopoverTrigger asChild>
+												<span className="font-medium tabular-nums cursor-help">
+													{row.value}
+												</span>
+											</PopoverTrigger>
+											<PopoverContent className="w-auto p-2 text-xs">
+												<p>{row.tooltip}</p>
+											</PopoverContent>
+										</Popover>
+									) : (
+										<span className="font-medium tabular-nums">
+											{row.value}
+										</span>
+									)}
+								</div>
+							);
+						})}
 					</div>
 				)}
 			</CardContent>
