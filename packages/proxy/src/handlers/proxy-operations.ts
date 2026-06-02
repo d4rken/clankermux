@@ -249,10 +249,13 @@ async function isInvalidThinkingSignatureError(
 	if (response.status !== 400) return false;
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 
 		if (!contentType?.includes("application/json")) return false;
+
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		const clone = response.clone();
 
 		const json = await clone.json();
 
@@ -299,9 +302,11 @@ async function isCacheControlRejectionError(
 	if (response.status !== 400) return false;
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 		if (!contentType?.includes("application/json")) return false;
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		const clone = response.clone();
 
 		const json = await clone.json();
 		const message: string = json.error?.message ?? json.message ?? "";
@@ -341,9 +346,11 @@ export async function isModelUnavailableError(
 	}
 
 	try {
-		const clone = response.clone();
 		const contentType = response.headers.get("content-type");
 		if (!contentType?.includes("application/json")) return false;
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		const clone = response.clone();
 
 		const json = await clone.json();
 
@@ -367,6 +374,34 @@ export async function isModelUnavailableError(
 	}
 
 	return false;
+}
+
+/**
+ * Cancel an abandoned upstream response body so Bun releases its socket and the
+ * ~512 KB native read buffer immediately.
+ *
+ * A `fetch()` Response body that is neither read to EOF nor cancelled keeps that
+ * memory committed indefinitely (Bun 1.3.x). On the proxy's failover/retry paths
+ * we obtain an upstream Response and then discard it — return `null` to try the
+ * next account, or overwrite `rawResponse` with a retry — without ever consuming
+ * its body. Each dropped body is a ~512 KB off-heap leak that ratchets up with
+ * every 429/401/529 failover under load (observed live: ~1.6 GB/h). Calling this
+ * before every such drop releases the buffer.
+ *
+ * Safe to call with any Response/null: skips a `null`/locked body (locked means
+ * a reader already owns it — it will be drained or was cloned) and swallows the
+ * harmless error from a body that is already cancelled/errored.
+ */
+async function discardUpstreamBody(
+	response: Response | null | undefined,
+): Promise<void> {
+	const body = response?.body;
+	if (!body || body.locked) return;
+	try {
+		await body.cancel();
+	} catch {
+		// Body already cancelled/errored — nothing left to release.
+	}
 }
 
 /**
@@ -468,6 +503,15 @@ export async function proxyWithAccount(
 	requestBodyContext?: RequestBodyContext | null,
 	returnRateLimitedResponseOnExhaustion = false,
 ): Promise<Response | null> {
+	// Tracks the live, uncancelled upstream response body at each stage so the
+	// catch below can release it on a thrown error (e.g. a provider
+	// processResponse / processProxyResponse failure after the fetch succeeded)
+	// instead of leaking its socket + ~512 KB native read buffer. Updated as
+	// rawResponse → taggedRawResponse → response take ownership. The explicit
+	// failover return-null paths cancel directly and return before the catch, and
+	// the forwardToClient returns transfer ownership (so the catch is unreached on
+	// success; if forwardToClient itself throws, discard's locked-guard no-ops).
+	let liveUpstream: Response | null = null;
 	try {
 		if (
 			process.env.DEBUG?.includes("proxy") ||
@@ -602,6 +646,7 @@ export async function proxyWithAccount(
 
 		// Make the request
 		let rawResponse = await makeProxyRequest(transformedRequest);
+		liveUpstream = rawResponse;
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
 		const isClaudeProvider =
@@ -632,8 +677,14 @@ export async function proxyWithAccount(
 					? await provider.transformRequestBody(retryProviderRequest, account)
 					: retryProviderRequest;
 
-				// Make the retry request
-				rawResponse = await makeProxyRequest(retryTransformedRequest);
+				// Acquire the retry FIRST, then cancel the original body so its
+				// socket + ~512 KB read buffer is released. Acquiring first means a
+				// throw here leaves the original intact for the outer catch/failover
+				// instead of proceeding with an already-cancelled body.
+				const retryResponse = await makeProxyRequest(retryTransformedRequest);
+				await discardUpstreamBody(rawResponse);
+				rawResponse = retryResponse;
+				liveUpstream = rawResponse;
 			} else {
 				log.warn(
 					"Failed to filter thinking blocks or no changes made, proceeding with original error response",
@@ -663,7 +714,14 @@ export async function proxyWithAccount(
 					headers: transformedRequest.headers,
 					body: JSON.stringify(retryBodyJson),
 				});
-				rawResponse = await makeProxyRequest(retryRequest);
+				// Acquire the retry FIRST: if makeProxyRequest throws, the local
+				// catch below continues with the original 400 still intact (its body
+				// not yet cancelled), preserving the "forward the original 400 on
+				// retry failure" contract.
+				const retryResponse = await makeProxyRequest(retryRequest);
+				await discardUpstreamBody(rawResponse);
+				rawResponse = retryResponse;
+				liveUpstream = rawResponse;
 			} catch (err) {
 				log.warn("Failed to retry without cache_control:", err);
 			}
@@ -718,6 +776,7 @@ export async function proxyWithAccount(
 							log.warn(
 								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 							);
+							await discardUpstreamBody(rawResponse);
 							return null;
 						}
 
@@ -765,6 +824,7 @@ export async function proxyWithAccount(
 								requestMeta.comboName ?? null,
 							),
 						);
+						await discardUpstreamBody(rawResponse);
 						return null;
 					}
 					// Model-not-found (404/400) is forwarded to the client so it can
@@ -843,9 +903,18 @@ export async function proxyWithAccount(
 						// If re-patching fails, proceed with the transformed request as-is
 					}
 
-					rawResponse = await makeProxyRequest(retryTransformedRequest);
+					// Acquire the retry first, then cancel the previous attempt's
+					// body — a throw here leaves the prior body for the outer catch.
+					const retryResponse = await makeProxyRequest(retryTransformedRequest);
+					await discardUpstreamBody(rawResponse);
+					rawResponse = retryResponse;
+					liveUpstream = rawResponse;
 
-					if (!(await isModelUnavailableError(rawResponse.clone()))) {
+					// Pass rawResponse directly (not a .clone()): the helper clones
+					// internally only when it must parse a 400/404 JSON body, and
+					// returns early for 429 without touching the body. An outer
+					// .clone() here would orphan an unconsumed tee branch on 429.
+					if (!(await isModelUnavailableError(rawResponse))) {
 						break; // Success — stop cycling
 					}
 				}
@@ -919,6 +988,7 @@ export async function proxyWithAccount(
 						);
 					}
 				}
+				await discardUpstreamBody(rawResponse);
 				return null;
 			}
 		}
@@ -938,6 +1008,9 @@ export async function proxyWithAccount(
 			statusText: rawResponse.statusText,
 			headers: responseHeaders,
 		});
+		// rawResponse.body is now transferred into taggedRawResponse; track the
+		// new owner so a processResponse throw releases it.
+		liveUpstream = taggedRawResponse;
 
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
 		const response = await provider.processResponse(
@@ -945,12 +1018,14 @@ export async function proxyWithAccount(
 			account,
 			req.headers,
 		);
+		liveUpstream = response;
 
 		// Failover to next account on upstream 401 — credentials are invalid/expired
 		if (response.status === 401) {
 			log.warn(
 				`Authentication failed (401) for account ${account.name}, failing over to next account`,
 			);
+			await discardUpstreamBody(response);
 			return null;
 		}
 
@@ -991,6 +1066,7 @@ export async function proxyWithAccount(
 			log.warn(
 				`Provider ${account.provider} overloaded on account ${account.name}; skipping same-provider accounts for this cooldown window`,
 			);
+			await discardUpstreamBody(response);
 			return null;
 		}
 
@@ -1009,6 +1085,13 @@ export async function proxyWithAccount(
 			requestMeta.id,
 			requestMeta,
 		);
+		// processProxyResponse only needed the rate-limit view (headers, or a
+		// provider body-parse that consumes it). When it was a distinct clone
+		// (final-529 path), release its possibly tee-buffered branch now — the
+		// original `response` is what gets forwarded/returned below.
+		if (responseForRateLimitCheck !== response) {
+			await discardUpstreamBody(responseForRateLimitCheck);
+		}
 		if (isRateLimited) {
 			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
 				log.warn(
@@ -1035,6 +1118,7 @@ export async function proxyWithAccount(
 					{ ...ctx, provider },
 				);
 			}
+			await discardUpstreamBody(response);
 			return null; // Signal to try next account
 		}
 
@@ -1061,6 +1145,9 @@ export async function proxyWithAccount(
 		);
 	} catch (err) {
 		handleProxyError(err, account, log);
+		// Release any upstream body owned at the point of failure so a thrown
+		// error (e.g. mid-processResponse) doesn't leak its socket/read buffer.
+		await discardUpstreamBody(liveUpstream);
 		return null;
 	}
 }
