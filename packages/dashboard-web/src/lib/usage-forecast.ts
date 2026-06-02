@@ -119,7 +119,12 @@ function projectAt(state: LiveWindowState, ts: number): number {
 
 /** Where a single account's forecast line stops, capped at the chart horizon. */
 function stateEndMs(state: LiveWindowState, horizonMs: number): number {
-	const natural = state.isSafe ? state.resetMs : (state.exhaustsAtMs as number);
+	// exhaustsAtMs is non-null whenever isSafe is false (both set together in
+	// deriveLiveState); the null check narrows the type without a cast.
+	const natural =
+		state.isSafe || state.exhaustsAtMs == null
+			? state.resetMs
+			: state.exhaustsAtMs;
 	return Math.min(natural, horizonMs);
 }
 

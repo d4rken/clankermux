@@ -5,6 +5,7 @@ import { CHART_COLORS, COLORS } from "../../constants";
 import type { PoolWindow } from "../../lib/pool-usage";
 import { computeWindowForecast } from "../../lib/usage-forecast";
 import { BaseLineChart } from "../charts";
+import type { LineConfig } from "../charts/BaseLineChart";
 import type { ChartDataPoint } from "../charts/types";
 import {
 	Card,
@@ -35,16 +36,6 @@ interface SawtoothRow {
 	time: string;
 	pool: number | null;
 	[key: string]: number | string | null;
-}
-
-interface LineConfig {
-	dataKey: string;
-	name: string;
-	stroke: string;
-	strokeWidth?: number;
-	strokeDasharray?: string;
-	connectNulls?: boolean;
-	legendType?: "line" | "none";
 }
 
 interface WindowChart {
@@ -109,6 +100,14 @@ function buildWindowChart(
 		}
 	}
 
+	// Color per account: history series first (so an account's solid and dashed
+	// lines share a color), then any forecast-only account (live usage but no
+	// history rows yet) continues the palette.
+	const colorByAccount = new Map<string, string>(
+		series.map((s, i) => [s.accountId, CHART_COLORS[i % CHART_COLORS.length]]),
+	);
+	const nameById = new Map<string, string>(accounts.map((a) => [a.id, a.name]));
+
 	// Forward projection. Cadence follows the history bucket size (with a sane
 	// fallback before any history exists); horizon is capped to the selected
 	// range so a 7-day projection can't dwarf a short history window.
@@ -121,21 +120,26 @@ function buildWindowChart(
 		cadenceMs,
 		horizonMs,
 	);
-	const accountForecastIds = new Set<string>();
-	let hasPoolForecast = false;
+	let nextColor = series.length;
 	for (const f of forecast) {
 		const solidKey = f.accountId ?? POOL_KEY;
 		const forecastKey = `${solidKey}__fc`;
-		// Anchor at "now": plotting bridgePct on both keys joins the solid
-		// history line to the dashed forecast line.
+		// Anchor at "now": plot bridgePct on both keys so the solid history line
+		// joins the dashed forecast. Don't clobber a real historical sample that
+		// happens to land in this exact bucket.
 		const bridge = rowFor(now);
-		bridge[solidKey] = f.bridgePct;
+		if (bridge[solidKey] == null) bridge[solidKey] = f.bridgePct;
 		bridge[forecastKey] = f.bridgePct;
 		for (const point of f.points) {
 			rowFor(point.ts)[forecastKey] = point.pct;
 		}
-		if (f.accountId === null) hasPoolForecast = true;
-		else accountForecastIds.add(f.accountId);
+		if (f.accountId && !colorByAccount.has(f.accountId)) {
+			colorByAccount.set(
+				f.accountId,
+				CHART_COLORS[nextColor % CHART_COLORS.length],
+			);
+			nextColor++;
+		}
 	}
 
 	const data = Array.from(rows.values()).sort((a, b) => a.ts - b.ts);
@@ -148,36 +152,37 @@ function buildWindowChart(
 			strokeWidth: 3,
 			stroke: COLORS.primary,
 		},
-		...series.map((s, i) => ({
+		...series.map((s) => ({
 			dataKey: s.accountId,
 			name: s.name,
-			stroke: CHART_COLORS[i % CHART_COLORS.length],
+			stroke: colorByAccount.get(s.accountId) ?? COLORS.primary,
 		})),
 	];
-	// Dashed forecast twins, matching each solid line's color, hidden from the
-	// legend so it doesn't double up.
-	if (hasPoolForecast) {
+	// Dashed forecast twins (hidden from the legend so it doesn't double up):
+	// one per projectable account plus the pool — including live accounts that
+	// have no history rows yet.
+	for (const f of forecast) {
+		if (f.accountId === null) {
+			lines.push({
+				dataKey: `${POOL_KEY}__fc`,
+				name: "Pool (projected)",
+				strokeWidth: 3,
+				stroke: COLORS.primary,
+				strokeDasharray: FORECAST_DASH,
+				connectNulls: true,
+				legendType: "none",
+			});
+			continue;
+		}
 		lines.push({
-			dataKey: `${POOL_KEY}__fc`,
-			name: "Pool (projected)",
-			strokeWidth: 3,
-			stroke: COLORS.primary,
+			dataKey: `${f.accountId}__fc`,
+			name: `${nameById.get(f.accountId) ?? f.accountId} (projected)`,
+			stroke: colorByAccount.get(f.accountId) ?? COLORS.primary,
 			strokeDasharray: FORECAST_DASH,
 			connectNulls: true,
 			legendType: "none",
 		});
 	}
-	series.forEach((s, i) => {
-		if (!accountForecastIds.has(s.accountId)) return;
-		lines.push({
-			dataKey: `${s.accountId}__fc`,
-			name: `${s.name} (projected)`,
-			stroke: CHART_COLORS[i % CHART_COLORS.length],
-			strokeDasharray: FORECAST_DASH,
-			connectNulls: true,
-			legendType: "none",
-		});
-	});
 
 	const isEmpty =
 		data.length === 0 ||

@@ -30,7 +30,7 @@ type LineCurveType =
 	| "natural"
 	| "basis";
 
-interface LineConfig {
+export interface LineConfig {
 	dataKey: string;
 	stroke?: string;
 	strokeWidth?: number;
