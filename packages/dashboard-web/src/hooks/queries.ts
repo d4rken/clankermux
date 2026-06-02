@@ -184,6 +184,7 @@ export const useAnalytics = (
 	},
 	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
+	options?: { enabled?: boolean },
 ) => {
 	const logger = {
 		debug: (message: string, ...args: unknown[]) => {
@@ -238,7 +239,7 @@ export const useAnalytics = (
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
 		gcTime: 15 * 60 * 1000,
-		enabled: !!timeRange,
+		enabled: !!timeRange && (options?.enabled ?? true),
 		retry: (failureCount, error) => {
 			logger.debug(`Analytics query retry attempt ${failureCount + 1}`, {
 				error: error instanceof Error ? error.message : String(error),
