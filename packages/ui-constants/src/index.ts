@@ -33,6 +33,7 @@ export const TIME_RANGES: Record<TimeRange, string> = {
 
 // Chart dimensions
 export const CHART_HEIGHTS = {
+	compact: 180,
 	small: 250,
 	medium: 300,
 	large: 400,

@@ -6,6 +6,9 @@ interface PayloadItem {
 	value: TooltipFormatterValue;
 	name?: string;
 	color?: string;
+	// The full data row recharts attaches to each series entry — lets a
+	// labelFormatter derive a richer header (e.g. a full date) than the axis tick.
+	payload?: Record<string, unknown>;
 }
 
 interface ChartTooltipProps {
@@ -13,7 +16,7 @@ interface ChartTooltipProps {
 	payload?: PayloadItem[];
 	label?: string;
 	formatters?: Record<string, (value: TooltipFormatterValue) => string>;
-	labelFormatter?: (label: string) => string;
+	labelFormatter?: (label: string, payload?: PayloadItem[]) => string;
 	style?: keyof typeof CHART_TOOLTIP_STYLE | object;
 }
 
@@ -32,8 +35,9 @@ export function ChartTooltip({
 	const tooltipStyle =
 		typeof style === "string" ? CHART_TOOLTIP_STYLE[style] : style;
 
-	const formattedLabel =
-		labelFormatter && label ? labelFormatter(label) : label;
+	const formattedLabel = labelFormatter
+		? labelFormatter(label ?? "", payload)
+		: label;
 
 	return (
 		<div className="p-3 rounded-md shadow-lg" style={tooltipStyle}>

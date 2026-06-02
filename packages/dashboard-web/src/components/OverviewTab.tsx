@@ -1,6 +1,5 @@
 import { registerUIRefresh } from "@clankermux/core";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { format } from "date-fns";
 import { Activity, BarChart3, Database, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
@@ -83,7 +82,7 @@ export const OverviewTab = React.memo(() => {
 	const timeSeriesData = useMemo(() => {
 		if (!analytics) return [];
 		return analytics.timeSeries.map((point) => ({
-			time: format(new Date(point.ts), "HH:mm"),
+			ts: point.ts,
 			requests: point.requests,
 			successRate: point.successRate,
 			cacheHitRate: point.cacheHitRate,
@@ -203,6 +202,7 @@ export const OverviewTab = React.memo(() => {
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}
+				timeRange={timeRange}
 				modelData={modelData}
 				accountModelUsageData={accountModelUsageData}
 				apiKeyPerformanceData={apiKeyPerformanceData}
