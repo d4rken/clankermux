@@ -56,6 +56,20 @@ export const useStorageInfo = (refetchInterval?: number) => {
 	});
 };
 
+/**
+ * Per-data-type storage usage for the retention settings card. The server
+ * caches the (scan-backed) measurement for a few minutes, so we mirror that
+ * with a 5-minute staleTime and don't poll — it refetches on mount and is
+ * invalidated explicitly after "Clean up now".
+ */
+export const useStorageUsage = () => {
+	return useQuery({
+		queryKey: queryKeys.storageUsage(),
+		queryFn: () => api.getStorageUsage(),
+		staleTime: 5 * 60_000,
+	});
+};
+
 export const useSystemStatus = (refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.systemStatus(),
@@ -404,8 +418,13 @@ export const useSetUsageThrottling = () => {
 };
 
 export const useCleanupNow = () => {
+	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: () => api.cleanupNow(),
+		onSuccess: () => {
+			// Sizes/row counts changed — refresh the standing per-type display.
+			queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+		},
 	});
 };
 

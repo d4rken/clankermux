@@ -6,8 +6,11 @@
  *   orphan_pages, last_retention_sweep_at, null_account_rows_24h
  */
 import { describe, expect, it, mock } from "bun:test";
-import type { DatabaseOperations } from "@clankermux/database";
-import { createStorageHandler } from "../storage";
+import type {
+	DatabaseOperations,
+	RetentionStorageUsage,
+} from "@clankermux/database";
+import { createStorageHandler, createStorageUsageHandler } from "../storage";
 
 // ---------------------------------------------------------------------------
 // Stubs
@@ -237,5 +240,97 @@ describe("createStorageHandler", () => {
 			const response = await handler();
 			expect(response.headers.get("content-type")).toMatch(/application\/json/);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// createStorageUsageHandler (GET /api/storage/usage)
+// ---------------------------------------------------------------------------
+
+function makeUsageDbOps(
+	usage: Partial<RetentionStorageUsage> = {},
+): DatabaseOperations {
+	const resolved: RetentionStorageUsage = {
+		available: true,
+		measuredAt: new Date("2025-06-01T00:00:00.000Z").getTime(),
+		dbBytes: 5_000_000,
+		walBytes: 65536,
+		types: [
+			{
+				key: "payloads",
+				table: "request_payloads",
+				rowCount: 10,
+				approxBytes: 4_000_000,
+			},
+			{ key: "requests", table: "requests", rowCount: 20, approxBytes: 80_000 },
+			{
+				key: "usage_snapshots",
+				table: "usage_snapshots",
+				rowCount: 5,
+				approxBytes: 200,
+			},
+		],
+		...usage,
+	};
+	return {
+		getRetentionStorageUsage: mock(async () => resolved),
+	} as unknown as DatabaseOperations;
+}
+
+describe("createStorageUsageHandler", () => {
+	it("returns HTTP 200 with application/json", async () => {
+		const response = await createStorageUsageHandler(makeUsageDbOps())();
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toMatch(/application\/json/);
+	});
+
+	it("serializes measuredAt as an ISO string and passes sizes through", async () => {
+		const body = (await (
+			await createStorageUsageHandler(makeUsageDbOps())()
+		).json()) as Record<string, unknown>;
+
+		expect(body.available).toBe(true);
+		expect(body.measuredAt).toBe("2025-06-01T00:00:00.000Z");
+		expect(body.dbBytes).toBe(5_000_000);
+		expect(body.walBytes).toBe(65536);
+	});
+
+	it("returns the three retention types in order with their keys", async () => {
+		const body = (await (
+			await createStorageUsageHandler(makeUsageDbOps())()
+		).json()) as { types: Array<{ key: string; table: string }> };
+
+		expect(body.types.map((t) => t.key)).toEqual([
+			"payloads",
+			"requests",
+			"usage_snapshots",
+		]);
+		expect(body.types.map((t) => t.table)).toEqual([
+			"request_payloads",
+			"requests",
+			"usage_snapshots",
+		]);
+	});
+
+	it("reports available=false (PostgreSQL) with empty types", async () => {
+		const body = (await (
+			await createStorageUsageHandler(
+				makeUsageDbOps({
+					available: false,
+					dbBytes: 0,
+					walBytes: 0,
+					types: [],
+				}),
+			)()
+		).json()) as Record<string, unknown>;
+
+		expect(body.available).toBe(false);
+		expect(body.types).toEqual([]);
+	});
+
+	it("calls getRetentionStorageUsage exactly once", async () => {
+		const dbOps = makeUsageDbOps();
+		await createStorageUsageHandler(dbOps)();
+		expect(dbOps.getRetentionStorageUsage).toHaveBeenCalledTimes(1);
 	});
 });

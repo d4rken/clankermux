@@ -87,6 +87,7 @@ import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import {
 	createIntegrityCheckHandler,
 	createStorageHandler,
+	createStorageUsageHandler,
 } from "./handlers/storage";
 import {
 	createSystemInfoHandler,
@@ -141,6 +142,7 @@ export class APIRouter {
 		const statsHandler = createStatsHandler(dbOps);
 		const statsResetHandler = createStatsResetHandler(dbOps);
 		const storageHandler = createStorageHandler(dbOps);
+		const storageUsageHandler = createStorageUsageHandler(dbOps);
 		const integrityCheckHandler = createIntegrityCheckHandler(dbOps);
 		const accountsHandler = createAccountsListHandler(
 			dbOps,
@@ -209,6 +211,7 @@ export class APIRouter {
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
 		this.handlers.set("GET:/api/storage", (_req, _url) => storageHandler());
+		this.handlers.set("GET:/api/storage/usage", () => storageUsageHandler());
 		this.handlers.set("POST:/api/storage/integrity/check", (req) =>
 			integrityCheckHandler(req),
 		);

@@ -19,10 +19,6 @@ export function createCleanupHandler(
 			payloadMs,
 			requestMs,
 		);
-		const [tableRowCounts, dbSizeBytes] = await Promise.all([
-			dbOps.getTableRowCounts(),
-			dbOps.getDbSizeBytes(),
-		]);
 		const now = Date.now();
 		const payload: CleanupResponse = {
 			removedRequests,
@@ -33,8 +29,6 @@ export function createCleanupHandler(
 				? new Date(now - payloadMs).toISOString()
 				: null,
 			requestCutoffIso: new Date(now - requestMs).toISOString(),
-			dbSizeBytes,
-			tableRowCounts,
 		};
 		return jsonResponse(payload);
 	};

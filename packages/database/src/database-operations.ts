@@ -15,6 +15,7 @@ import type {
 	IntegrityStatus,
 	RankedSnapshot,
 	RateLimitReason,
+	StorageUsageType,
 	StrategyStore,
 	UsageSnapshotRow,
 } from "@clankermux/types";
@@ -190,6 +191,42 @@ const INC_VAC_SKIP_ESCALATE_AT = 3;
 const DEFAULT_USAGE_SNAPSHOT_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 
 /**
+ * How long a per-data-type storage-usage measurement is reused before the next
+ * dashboard read triggers a fresh scan. The byte sums require a full-table
+ * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
+ * enough to feel live while bounding scan frequency on a multi-GB DB.
+ */
+const RETENTION_STORAGE_USAGE_TTL_MS = 5 * TIME_CONSTANTS.MINUTE;
+
+/**
+ * The retention-governed tables measured for the per-type storage breakdown,
+ * each tied to a dashboard retention control via a stable `key`. Order matches
+ * the controls (payloads, requests, usage snapshots).
+ */
+const RETENTION_USAGE_TABLES: ReadonlyArray<{
+	key: "payloads" | "requests" | "usage_snapshots";
+	table: string;
+}> = [
+	{ key: "payloads", table: "request_payloads" },
+	{ key: "requests", table: "requests" },
+	{ key: "usage_snapshots", table: "usage_snapshots" },
+];
+
+/**
+ * Approximate per-data-type storage usage. `measuredAt` is epoch ms (the
+ * http-api handler converts to ISO for the wire). See `StorageUsageResponse`
+ * for the meaning of `approxBytes` (logical content bytes, not on-disk pages).
+ */
+export interface RetentionStorageUsage {
+	available: boolean;
+	/** Epoch ms — the http-api handler converts to ISO for the wire. */
+	measuredAt: number;
+	dbBytes: number;
+	walBytes: number;
+	types: StorageUsageType[];
+}
+
+/**
  * DatabaseOperations using Repository Pattern
  * Provides a clean, organized interface for database operations
  *
@@ -242,6 +279,17 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		lastFullResult: null,
 		lastFullError: null,
 	};
+	/**
+	 * Cached per-data-type storage-usage measurement, with the epoch ms it was
+	 * computed. Reused for {@link RETENTION_STORAGE_USAGE_TTL_MS}; invalidated by
+	 * `cleanupOldRequests()` so a manual "Clean up now" reflects immediately.
+	 */
+	private retentionUsageCache: {
+		value: RetentionStorageUsage;
+		computedAt: number;
+	} | null = null;
+	/** Dedups concurrent storage-usage computations so a slow scan runs once. */
+	private retentionUsageInFlight: Promise<RetentionStorageUsage> | null = null;
 
 	// Repositories
 	private accounts: AccountRepository;
@@ -543,16 +591,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		const dbBytes = await this.getDbSizeBytes();
 
 		// WAL file size (if exists)
-		let walBytes = 0;
-		if (this.resolvedDbPath) {
-			const walPath = `${this.resolvedDbPath}-wal`;
-			try {
-				const { size } = await stat(walPath);
-				walBytes = size;
-			} catch {
-				// WAL file doesn't exist or can't be accessed
-			}
-		}
+		const walBytes = await this.getWalSizeBytes();
 
 		// Orphan pages (freelist count) - only in SQLite mode
 		let orphanPages = 0;
@@ -589,6 +628,108 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			lastRetentionSweepAt,
 			nullAccountRows,
 		};
+	}
+
+	/**
+	 * Approximate per-data-type storage usage for the retention settings card.
+	 *
+	 * Returns logical content bytes (`SUM(LENGTH(col))`) + row counts for the
+	 * three retention-governed tables (payloads, requests, usage snapshots),
+	 * plus the exact whole-file and WAL sizes. The result is cached for
+	 * {@link RETENTION_STORAGE_USAGE_TTL_MS}; concurrent callers share one
+	 * in-flight computation, and `cleanupOldRequests()` clears the cache so a
+	 * manual "Clean up now" is reflected on the next read.
+	 *
+	 * SQLite-only: returns `available: false` with empty `types` on PostgreSQL,
+	 * mirroring `getTableRowCounts`. A full-table scan is unavoidable for the
+	 * byte sums, but WAL readers don't block the proxy's writer and the TTL
+	 * keeps scans rare.
+	 */
+	async getRetentionStorageUsage(opts?: {
+		maxAgeMs?: number;
+	}): Promise<RetentionStorageUsage> {
+		const ttl = opts?.maxAgeMs ?? RETENTION_STORAGE_USAGE_TTL_MS;
+		const cached = this.retentionUsageCache;
+		if (cached && Date.now() - cached.computedAt < ttl) {
+			return cached.value;
+		}
+		if (this.retentionUsageInFlight) {
+			return this.retentionUsageInFlight;
+		}
+		const inFlight = this.computeRetentionStorageUsage()
+			.then((value) => {
+				this.retentionUsageCache = { value, computedAt: Date.now() };
+				return value;
+			})
+			.finally(() => {
+				this.retentionUsageInFlight = null;
+			});
+		this.retentionUsageInFlight = inFlight;
+		return inFlight;
+	}
+
+	private async computeRetentionStorageUsage(): Promise<RetentionStorageUsage> {
+		const measuredAt = Date.now();
+		if (!this.adapter.isSQLite) {
+			return {
+				available: false,
+				measuredAt,
+				dbBytes: 0,
+				walBytes: 0,
+				types: [],
+			};
+		}
+
+		const dbBytes = await this.getDbSizeBytes();
+		const walBytes = await this.getWalSizeBytes();
+
+		const types = await Promise.all(
+			RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
+				const { rowCount, approxBytes } =
+					await this.measureTableLogicalSize(table);
+				return { key, table, rowCount, approxBytes };
+			}),
+		);
+
+		return { available: true, measuredAt, dbBytes, walBytes, types };
+	}
+
+	/**
+	 * Approximate logical byte size + row count of a single SQLite table,
+	 * computed as `SUM(LENGTH(col))` over every column (discovered via
+	 * `PRAGMA table_info`). LENGTH counts the text representation of values
+	 * (raw bytes for BLOBs), so this undercounts SQLite's varint integer
+	 * encoding and ignores index/page overhead — an intentional "content
+	 * bytes" approximation, labeled as such in the UI. Returns zeros (never
+	 * throws) so one bad table can't sink the whole measurement.
+	 */
+	private async measureTableLogicalSize(
+		table: string,
+	): Promise<{ rowCount: number; approxBytes: number }> {
+		try {
+			// `table` and the column names come from a hardcoded constant list and
+			// the table's own schema (PRAGMA), never user input — safe to inline.
+			const cols = await this.adapter.query<{ name: string }>(
+				`PRAGMA table_info("${table}")`,
+			);
+			if (cols.length === 0) return { rowCount: 0, approxBytes: 0 };
+			const lengthExpr = cols
+				.map((c) => `COALESCE(LENGTH("${c.name}"), 0)`)
+				.join(" + ");
+			const row = await this.adapter.get<{
+				rowCount: number;
+				approxBytes: number | null;
+			}>(
+				`SELECT COUNT(*) AS rowCount, SUM(${lengthExpr}) AS approxBytes FROM "${table}"`,
+			);
+			return {
+				rowCount: row?.rowCount ?? 0,
+				approxBytes: row?.approxBytes ?? 0,
+			};
+		} catch (err) {
+			console.debug(`[measureTableLogicalSize] ${table} failed:`, err);
+			return { rowCount: 0, approxBytes: 0 };
+		}
 	}
 
 	/**
@@ -1096,6 +1237,11 @@ OAuth tokens will need to be re-authenticated.
 			);
 		}
 
+		// Row counts and sizes just changed — drop the cached storage-usage
+		// measurement so the next dashboard read recomputes (the standing
+		// per-type display refreshes right after a manual cleanup).
+		this.retentionUsageCache = null;
+
 		return {
 			removedRequests,
 			removedPayloads: removedPayloadsByAge + removedOrphans,
@@ -1152,6 +1298,22 @@ OAuth tokens will need to be re-authenticated.
 			return size;
 		} catch (err) {
 			console.debug("[getDbSizeBytes] stat failed:", err);
+			return 0;
+		}
+	}
+
+	/**
+	 * Size of the WAL sidecar file in bytes, or 0 when there is no resolved DB
+	 * path (PostgreSQL/uninitialized) or no `-wal` file (non-WAL journal mode,
+	 * or it hasn't been created yet).
+	 */
+	async getWalSizeBytes(): Promise<number> {
+		if (!this.resolvedDbPath) return 0;
+		try {
+			const { size } = await stat(`${this.resolvedDbPath}-wal`);
+			return size;
+		} catch {
+			// WAL file doesn't exist or can't be accessed.
 			return 0;
 		}
 	}

@@ -1,8 +1,10 @@
+import { formatBytes } from "@clankermux/ui-common";
 import { useEffect, useState } from "react";
 import {
 	useCleanupNow,
 	useRetention,
 	useSetRetention,
+	useStorageUsage,
 } from "../../hooks/queries";
 import { Button } from "../ui/button";
 import {
@@ -19,6 +21,7 @@ export function DataRetentionCard() {
 	const { data, isLoading } = useRetention();
 	const setRetention = useSetRetention();
 	const cleanupNow = useCleanupNow();
+	const { data: usage } = useStorageUsage();
 	const [payloadDays, setPayloadDays] = useState<number>(
 		data?.payloadDays ?? 3,
 	);
@@ -46,6 +49,19 @@ export function DataRetentionCard() {
 		usageSnapshotDays >= 1 &&
 		usageSnapshotDays <= 3650;
 
+	// Per-data-type storage usage, keyed for inline lookup next to each control.
+	const usageByKey = new Map((usage?.types ?? []).map((t) => [t.key, t]));
+	const usageHint = (key: "payloads" | "requests" | "usage_snapshots") => {
+		if (!usage?.available) return null;
+		const t = usageByKey.get(key);
+		if (!t) return null;
+		return (
+			<p className="text-xs text-muted-foreground tabular-nums mt-1">
+				~{formatBytes(t.approxBytes)} · {t.rowCount.toLocaleString()} rows
+			</p>
+		);
+	};
+
 	return (
 		<Card className="card-hover">
 			<CardHeader>
@@ -56,52 +72,58 @@ export function DataRetentionCard() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-3">
-				<div className="flex items-center gap-2">
+				<div>
 					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium w-28">Payloads</span>
-						<Input
-							type="number"
-							min={1}
-							max={365}
-							value={payloadDays}
-							onChange={(e) =>
-								setPayloadDays(parseInt(e.target.value || "0", 10))
-							}
-							className="w-24"
-						/>
-						<span className="text-sm text-muted-foreground">days</span>
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">Payloads</span>
+							<Input
+								type="number"
+								min={1}
+								max={365}
+								value={payloadDays}
+								onChange={(e) =>
+									setPayloadDays(parseInt(e.target.value || "0", 10))
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">days</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validPayload}
+							onClick={() => setRetention.mutate({ payloadDays })}
+						>
+							Save
+						</Button>
 					</div>
-					<Button
-						size="sm"
-						disabled={disabled || !validPayload}
-						onClick={() => setRetention.mutate({ payloadDays })}
-					>
-						Save
-					</Button>
+					{usageHint("payloads")}
 				</div>
 
-				<div className="flex items-center gap-2 pt-2">
+				<div className="pt-2">
 					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium w-28">Requests</span>
-						<Input
-							type="number"
-							min={1}
-							max={3650}
-							value={requestDays}
-							onChange={(e) =>
-								setRequestDays(parseInt(e.target.value || "0", 10))
-							}
-							className="w-24"
-						/>
-						<span className="text-sm text-muted-foreground">days</span>
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">Requests</span>
+							<Input
+								type="number"
+								min={1}
+								max={3650}
+								value={requestDays}
+								onChange={(e) =>
+									setRequestDays(parseInt(e.target.value || "0", 10))
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">days</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validRequests}
+							onClick={() => setRetention.mutate({ requestDays })}
+						>
+							Save
+						</Button>
 					</div>
-					<Button
-						size="sm"
-						disabled={disabled || !validRequests}
-						onClick={() => setRetention.mutate({ requestDays })}
-					>
-						Save
-					</Button>
+					{usageHint("requests")}
 				</div>
 
 				<div className="pt-2">
@@ -128,11 +150,23 @@ export function DataRetentionCard() {
 							Save
 						</Button>
 					</div>
+					{usageHint("usage_snapshots")}
 					<p className="text-xs text-muted-foreground mt-1">
 						How long per-account limit-usage history is kept for the Limits
 						graph.
 					</p>
 				</div>
+
+				{usage?.available && (
+					<p className="text-xs text-muted-foreground pt-1">
+						Sizes are approximate (stored content, excluding index/page
+						overhead) and won't sum to the file size. Database file is{" "}
+						{formatBytes(usage.dbBytes)}
+						{usage.walBytes > 0 ? ` (+${formatBytes(usage.walBytes)} WAL)` : ""}{" "}
+						on disk · measured {new Date(usage.measuredAt).toLocaleTimeString()}
+						.
+					</p>
+				)}
 
 				<div className="flex items-center justify-between pt-2 pb-1">
 					<div>
@@ -176,52 +210,20 @@ export function DataRetentionCard() {
 				)}
 
 				{cleanupNow.data && (
-					<div className="text-xs text-muted-foreground space-y-1">
-						<p>
-							Removed {cleanupNow.data.removedPayloads} payloads (
-							{cleanupNow.data.payloadCutoffIso ? (
-								<>
-									older than{" "}
-									{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}
-								</>
-							) : (
-								<>all — storage disabled</>
-							)}
-							) and {cleanupNow.data.removedRequests} requests (older than{" "}
-							{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}).
-						</p>
-						{(cleanupNow.data.dbSizeBytes > 0 ||
-							cleanupNow.data.tableRowCounts.length > 0) && (
-							<details>
-								<summary className="cursor-pointer select-none">
-									Space usage
-									{cleanupNow.data.dbSizeBytes > 0 && (
-										<>
-											{" "}
-											— {(cleanupNow.data.dbSizeBytes / 1024 / 1024).toFixed(1)}{" "}
-											MB on disk
-										</>
-									)}
-								</summary>
-								{cleanupNow.data.tableRowCounts.length > 0 && (
-									<table className="mt-1 w-full text-left">
-										<tbody>
-											{cleanupNow.data.tableRowCounts.map((row) => (
-												<tr key={row.name}>
-													<td className="pr-4 font-mono">{row.name}</td>
-													<td className="text-right">
-														{row.dataBytes !== undefined
-															? `${(row.dataBytes / 1024 / 1024).toFixed(1)} MB`
-															: `${row.rowCount.toLocaleString()} rows`}
-													</td>
-												</tr>
-											))}
-										</tbody>
-									</table>
-								)}
-							</details>
+					<p className="text-xs text-muted-foreground">
+						Removed {cleanupNow.data.removedPayloads} payloads (
+						{cleanupNow.data.payloadCutoffIso ? (
+							<>
+								older than{" "}
+								{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}
+							</>
+						) : (
+							<>all — storage disabled</>
 						)}
-					</div>
+						) and {cleanupNow.data.removedRequests} requests (older than{" "}
+						{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}). The
+						sizes above refresh automatically.
+					</p>
 				)}
 			</CardContent>
 		</Card>

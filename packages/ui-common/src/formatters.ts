@@ -43,6 +43,22 @@ export function formatNumber(value: number): string {
 }
 
 /**
+ * Format a byte count as a human-readable string using binary (1024) units:
+ * "0 B", "512 B", "4.0 KB", "1.5 MB", "2.3 GB", … Whole bytes get no decimals;
+ * larger units use `decimals` (default 1). Negative/zero/undefined → "0 B".
+ */
+export function formatBytes(bytes?: number, decimals = 1): string {
+	if (!bytes || bytes <= 0) return "0 B";
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	const exponent = Math.min(
+		units.length - 1,
+		Math.floor(Math.log(bytes) / Math.log(1024)),
+	);
+	const value = bytes / 1024 ** exponent;
+	return `${exponent === 0 ? value : value.toFixed(decimals)} ${units[exponent]}`;
+}
+
+/**
  * Format timestamp to locale string
  */
 export function formatTimestamp(timestamp: number | string): string {
