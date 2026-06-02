@@ -21,8 +21,11 @@ import {
 	formatCompactCurrency,
 	formatCompactNumber,
 	type TooltipFormatter,
-	type TooltipLabelFormatter,
 } from "../../lib/chart-utils";
+import {
+	formatAxisTime,
+	makeTimeTooltipLabelFormatter,
+} from "../../lib/time-format";
 import {
 	BaseAreaChart,
 	BaseBarChart,
@@ -34,6 +37,7 @@ import {
 	TokenSpeedChart,
 	TokenUsageChart,
 } from "../charts";
+import { longRangeAxisProps } from "../charts/chart-utils";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -56,6 +60,7 @@ type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
 interface ChartData {
 	time: string;
+	ts: number;
 	requests: number;
 	tokens: number;
 	cost: number;
@@ -72,7 +77,6 @@ interface MainMetricsChartProps {
 	data: ChartData[];
 	rawTimeSeries?: TimePoint[];
 	loading: boolean;
-	viewMode: "normal" | "cumulative";
 	timeRange: TimeRange;
 	selectedMetric: string;
 	setSelectedMetric: (metric: string) => void;
@@ -84,75 +88,54 @@ export function MainMetricsChart({
 	data,
 	rawTimeSeries,
 	loading,
-	viewMode,
 	timeRange,
 	selectedMetric,
 	setSelectedMetric,
 	modelBreakdown = false,
 	onModelBreakdownChange,
 }: MainMetricsChartProps) {
-	// Process data for multi-model chart if model breakdown is enabled (not in cumulative mode)
+	// Process data for multi-model chart if model breakdown is enabled
 	const processedMultiModelData =
-		rawTimeSeries && modelBreakdown && viewMode !== "cumulative"
+		rawTimeSeries && modelBreakdown
 			? (() => {
-					// Group by timestamp and pivot models
+					// Group by timestamp and pivot models. Rows are keyed by the raw
+					// timestamp so the compact axis label and the rich tooltip stay in
+					// sync (see time-format.ts); `ts` rides along for the tooltip.
 					const grouped: Record<
-						string,
-						{ time: string; [model: string]: string | number }
+						number,
+						{ time: string; ts: number; [model: string]: string | number }
 					> = {};
 					const models = new Set<string>();
+					const timestamps = new Set<number>();
 
 					// First pass: collect all time points and models
-					const timePoints = new Set<string>();
-					const timeToTimestamp = new Map<string, number>();
-
 					rawTimeSeries.forEach((point) => {
 						if (point.model) {
 							models.add(point.model);
-							const time =
-								timeRange === "30d"
-									? new Date(point.ts).toLocaleDateString()
-									: new Date(point.ts).toLocaleTimeString([], {
-											hour: "2-digit",
-											minute: "2-digit",
-										});
-							timePoints.add(time);
-							timeToTimestamp.set(time, point.ts);
+							timestamps.add(point.ts);
 						}
 					});
 
-					// Sort time points chronologically using the original timestamps
-					const sortedTimes = Array.from(timePoints).sort((a, b) => {
-						const tsA = timeToTimestamp.get(a) || 0;
-						const tsB = timeToTimestamp.get(b) || 0;
-						return tsA - tsB;
-					});
+					// Sort time points chronologically
+					const sortedTs = Array.from(timestamps).sort((a, b) => a - b);
 
 					// Initialize data structure
 					const modelArrays = Array.from(models).sort();
 
 					// Process time points in order
-					sortedTimes.forEach((time) => {
-						grouped[time] = { time };
+					sortedTs.forEach((ts) => {
+						grouped[ts] = { time: formatAxisTime(ts, timeRange), ts };
 
 						// Initialize all models for this time point
 						modelArrays.forEach((model) => {
 							// Default to 0 for missing data points
-							grouped[time][model] = 0;
+							grouped[ts][model] = 0;
 						});
 					});
 
 					// Fill in actual values
 					rawTimeSeries.forEach((point) => {
 						if (point.model) {
-							const time =
-								timeRange === "30d"
-									? new Date(point.ts).toLocaleDateString()
-									: new Date(point.ts).toLocaleTimeString([], {
-											hour: "2-digit",
-											minute: "2-digit",
-										});
-
 							// Map the metric value
 							let value = 0;
 							switch (selectedMetric) {
@@ -173,12 +156,12 @@ export function MainMetricsChart({
 									break;
 							}
 
-							grouped[time][point.model] = value;
+							grouped[point.ts][point.model] = value;
 						}
 					});
 
 					// Sort and return the data
-					const finalData = sortedTimes.map((time) => grouped[time]);
+					const finalData = sortedTs.map((ts) => grouped[ts]);
 
 					return {
 						data: finalData,
@@ -194,26 +177,22 @@ export function MainMetricsChart({
 					<div>
 						<CardTitle>Traffic Analytics</CardTitle>
 						<CardDescription>
-							{viewMode === "cumulative"
-								? "Cumulative totals showing growth over time"
-								: modelBreakdown
-									? "Per-model breakdown over time"
-									: "Request volume and performance metrics over time"}
+							{modelBreakdown
+								? "Per-model breakdown over time"
+								: "Request volume and performance metrics over time"}
 						</CardDescription>
 					</div>
 					<div className="flex items-center gap-4">
-						{viewMode !== "cumulative" && (
-							<div className="flex items-center gap-2">
-								<Switch
-									id="model-breakdown"
-									checked={modelBreakdown}
-									onCheckedChange={onModelBreakdownChange}
-								/>
-								<Label htmlFor="model-breakdown" className="text-sm">
-									Per Model
-								</Label>
-							</div>
-						)}
+						<div className="flex items-center gap-2">
+							<Switch
+								id="model-breakdown"
+								checked={modelBreakdown}
+								onCheckedChange={onModelBreakdownChange}
+							/>
+							<Label htmlFor="model-breakdown" className="text-sm">
+								Per Model
+							</Label>
+						</div>
 						<Select value={selectedMetric} onValueChange={setSelectedMetric}>
 							<SelectTrigger className="w-40">
 								<SelectValue />
@@ -247,7 +226,7 @@ export function MainMetricsChart({
 								}
 								loading={loading}
 								height={CHART_HEIGHTS.large}
-								viewMode={viewMode}
+								timeRange={timeRange}
 							/>
 						);
 					}
@@ -257,7 +236,6 @@ export function MainMetricsChart({
 						data,
 						loading,
 						height: CHART_HEIGHTS.large,
-						viewMode,
 						timeRange,
 					};
 
@@ -266,7 +244,7 @@ export function MainMetricsChart({
 							return <TokenUsageChart {...commonProps} />;
 						case "cost": {
 							const isLongRange = timeRange === "7d" || timeRange === "30d";
-							const strokeW = viewMode === "cumulative" ? 3 : 2;
+							const strokeW = 2;
 							return (
 								<ResponsiveContainer width="100%" height={CHART_HEIGHTS.large}>
 									<AreaChart
@@ -340,12 +318,7 @@ export function MainMetricsChart({
 														: "API/Overage Cost",
 												]) as TooltipFormatter
 											}
-											labelFormatter={
-												((label: string) =>
-													viewMode === "cumulative"
-														? `Cumulative at ${label}`
-														: label) as TooltipLabelFormatter
-											}
+											labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 										/>
 										<Legend height={36} />
 										<Area
@@ -387,22 +360,12 @@ export function MainMetricsChart({
 									dataKey={selectedMetric}
 									loading={loading}
 									height="large"
-									color={
-										viewMode === "cumulative" ? COLORS.purple : COLORS.primary
-									}
-									strokeWidth={viewMode === "cumulative" ? 3 : 2}
-									xAxisAngle={
-										timeRange === "7d" || timeRange === "30d" ? -45 : 0
-									}
-									xAxisTextAnchor={
-										timeRange === "7d" || timeRange === "30d" ? "end" : "middle"
-									}
-									xAxisHeight={
-										timeRange === "7d" || timeRange === "30d" ? 60 : 30
-									}
-									tooltipLabelFormatter={(label) =>
-										viewMode === "cumulative" ? `Cumulative at ${label}` : label
-									}
+									color={COLORS.primary}
+									strokeWidth={2}
+									{...longRangeAxisProps(timeRange)}
+									tooltipLabelFormatter={makeTimeTooltipLabelFormatter(
+										timeRange,
+									)}
 								/>
 							);
 					}
@@ -435,69 +398,50 @@ export function PerformanceIndicatorsChart({
 	const processedMultiModelData =
 		rawTimeSeries && modelBreakdown
 			? (() => {
-					// Group by timestamp and pivot models
+					// Group by timestamp and pivot models. Rows are keyed by the raw
+					// timestamp so the compact axis label and rich tooltip stay in sync;
+					// `ts` rides along for the tooltip (see time-format.ts).
 					const grouped: Record<
-						string,
-						{ time: string; [model: string]: string | number }
+						number,
+						{ time: string; ts: number; [model: string]: string | number }
 					> = {};
 					const models = new Set<string>();
-					const timeToTimestamp = new Map<string, number>();
+					const timestamps = new Set<number>();
 
 					rawTimeSeries.forEach((point) => {
 						if (point.model) {
 							models.add(point.model);
-							const time =
-								timeRange === "30d"
-									? new Date(point.ts).toLocaleDateString()
-									: new Date(point.ts).toLocaleTimeString([], {
-											hour: "2-digit",
-											minute: "2-digit",
-										});
-							timeToTimestamp.set(time, point.ts);
+							timestamps.add(point.ts);
 						}
 					});
 
 					// Sort time points chronologically
-					const sortedTimes = Array.from(new Set(timeToTimestamp.keys())).sort(
-						(a, b) => {
-							const tsA = timeToTimestamp.get(a) || 0;
-							const tsB = timeToTimestamp.get(b) || 0;
-							return tsA - tsB;
-						},
-					);
+					const sortedTs = Array.from(timestamps).sort((a, b) => a - b);
 
 					const modelArrays = Array.from(models).sort();
 
 					// Initialize all time points with all models
-					sortedTimes.forEach((time) => {
-						grouped[time] = { time };
+					sortedTs.forEach((ts) => {
+						grouped[ts] = { time: formatAxisTime(ts, timeRange), ts };
 						modelArrays.forEach((model) => {
-							grouped[time][model] = 0;
+							grouped[ts][model] = 0;
 						});
 					});
 
 					// Fill in actual values
 					rawTimeSeries.forEach((point) => {
 						if (point.model) {
-							const time =
-								timeRange === "30d"
-									? new Date(point.ts).toLocaleDateString()
-									: new Date(point.ts).toLocaleTimeString([], {
-											hour: "2-digit",
-											minute: "2-digit",
-										});
-
 							// Map the metric value
 							const value =
 								currentMetric === "errorRate"
 									? point.errorRate
 									: point.cacheHitRate;
 
-							grouped[time][point.model] = value;
+							grouped[point.ts][point.model] = value;
 						}
 					});
 
-					const finalData = sortedTimes.map((time) => grouped[time]);
+					const finalData = sortedTs.map((ts) => grouped[ts]);
 
 					return {
 						data: finalData,
@@ -544,6 +488,7 @@ export function PerformanceIndicatorsChart({
 						metric={currentMetric}
 						loading={loading}
 						height={CHART_HEIGHTS.medium}
+						timeRange={timeRange}
 					/>
 				) : (
 					<BaseLineChart
@@ -563,6 +508,7 @@ export function PerformanceIndicatorsChart({
 						loading={loading}
 						height="medium"
 						showLegend={true}
+						tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 						referenceLines={[
 							{ y: 90, stroke: COLORS.success },
 							{ y: 5, stroke: COLORS.error },
@@ -712,9 +658,13 @@ export function ModelComparisonCharts({
 
 interface CumulativeGrowthChartProps {
 	data: ChartData[];
+	timeRange: TimeRange;
 }
 
-export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
+export function CumulativeGrowthChart({
+	data,
+	timeRange,
+}: CumulativeGrowthChartProps) {
 	return (
 		<Card className="bg-gradient-to-br from-background to-muted/10 border-muted">
 			<CardHeader>
@@ -731,12 +681,15 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 						data={data}
 						margin={{ top: 20, right: 30, left: 20, bottom: 20 }}
 					>
+						{/* Unique ids: this chart is always mounted alongside the main
+						    metric charts, so generic ids like "colorTokens" would collide
+						    with TokenUsageChart's gradient and swap fills. */}
 						<defs>
-							<linearGradient id="colorTokens" x1="0" y1="0" x2="0" y2="1">
+							<linearGradient id="cumulativeTokens" x1="0" y1="0" x2="0" y2="1">
 								<stop offset="0%" stopColor={COLORS.blue} stopOpacity={0.9} />
 								<stop offset="100%" stopColor={COLORS.blue} stopOpacity={0.1} />
 							</linearGradient>
-							<linearGradient id="colorCost" x1="0" y1="0" x2="0" y2="1">
+							<linearGradient id="cumulativeCost" x1="0" y1="0" x2="0" y2="1">
 								<stop
 									offset="0%"
 									stopColor={COLORS.warning}
@@ -748,7 +701,7 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 									stopOpacity={0.1}
 								/>
 							</linearGradient>
-							<filter id="glow">
+							<filter id="cumulativeGlow">
 								<feGaussianBlur stdDeviation="4" result="coloredBlur" />
 								<feMerge>
 									<feMergeNode in="coloredBlur" />
@@ -786,6 +739,7 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 								borderRadius: "8px",
 								backdropFilter: "blur(8px)",
 							}}
+							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 							formatter={
 								((value: number | string, name: string) => {
 									if (name === "Total Cost")
@@ -809,8 +763,8 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 							stroke={COLORS.blue}
 							strokeWidth={3}
 							fillOpacity={1}
-							fill="url(#colorTokens)"
-							filter="url(#glow)"
+							fill="url(#cumulativeTokens)"
+							filter="url(#cumulativeGlow)"
 							name="Total Tokens"
 						/>
 						<Area
@@ -820,8 +774,8 @@ export function CumulativeGrowthChart({ data }: CumulativeGrowthChartProps) {
 							stroke={COLORS.warning}
 							strokeWidth={3}
 							fillOpacity={1}
-							fill="url(#colorCost)"
-							filter="url(#glow)"
+							fill="url(#cumulativeCost)"
+							filter="url(#cumulativeGlow)"
 							name="Total Cost"
 						/>
 					</AreaChart>

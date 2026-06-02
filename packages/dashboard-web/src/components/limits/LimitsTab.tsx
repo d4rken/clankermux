@@ -59,11 +59,11 @@ export const LimitsTab = React.memo(() => {
 	const [window, setWindow] = useState<PoolWindow>("five_hour");
 
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
-	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
-		range,
-		{ accounts: [], models: [], status: "all" },
-		"normal",
-	);
+	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(range, {
+		accounts: [],
+		models: [],
+		status: "all",
+	});
 	const { data: usageHistory, isLoading: usageHistoryLoading } =
 		useUsageHistory(range);
 

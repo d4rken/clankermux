@@ -1,5 +1,7 @@
-import { COLORS } from "../../constants";
+import { COLORS, type TimeRange } from "../../constants";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
+import { longRangeAxisProps } from "./chart-utils";
 
 interface ResponseTimeChartProps {
 	data: Array<{
@@ -9,34 +11,26 @@ interface ResponseTimeChartProps {
 	}>;
 	loading?: boolean;
 	height?: number;
-	viewMode?: "normal" | "cumulative";
-	timeRange?: string;
+	timeRange?: TimeRange;
 }
 
 export function ResponseTimeChart({
 	data,
 	loading = false,
 	height = 400,
-	viewMode = "normal",
 	timeRange = "24h",
 }: ResponseTimeChartProps) {
-	const isLongRange = timeRange === "7d" || timeRange === "30d";
-
 	return (
 		<BaseAreaChart
 			data={data}
 			dataKey="responseTime"
 			loading={loading}
 			height={height}
-			color={viewMode === "cumulative" ? COLORS.purple : COLORS.primary}
-			strokeWidth={viewMode === "cumulative" ? 3 : 2}
-			xAxisAngle={isLongRange ? -45 : 0}
-			xAxisTextAnchor={isLongRange ? "end" : "middle"}
-			xAxisHeight={isLongRange ? 60 : 30}
+			color={COLORS.primary}
+			strokeWidth={2}
+			{...longRangeAxisProps(timeRange)}
 			tooltipFormatter={(value) => [`${value}ms`, "Response Time"]}
-			tooltipLabelFormatter={(label) =>
-				viewMode === "cumulative" ? `Cumulative at ${label}` : label
-			}
+			tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 			animationDuration={1000}
 		/>
 	);

@@ -168,7 +168,6 @@ export const useAnalytics = (
 		apiKeys?: string[];
 		status?: "all" | "success" | "error";
 	},
-	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
 ) => {
 	const logger = {
@@ -181,12 +180,11 @@ export const useAnalytics = (
 	};
 
 	return useQuery({
-		queryKey: queryKeys.analytics(timeRange, filters, viewMode, modelBreakdown),
+		queryKey: queryKeys.analytics(timeRange, filters, modelBreakdown),
 		queryFn: async () => {
 			logger.debug(`Starting analytics query`, {
 				timeRange,
 				filters,
-				viewMode,
 				modelBreakdown,
 				timestamp: new Date().toISOString(),
 			});
@@ -195,13 +193,11 @@ export const useAnalytics = (
 				const result = await api.getAnalytics(
 					timeRange,
 					filters,
-					viewMode,
 					modelBreakdown,
 				);
 				logger.debug(`Analytics query completed successfully`, {
 					timeRange,
 					filters,
-					viewMode,
 					modelBreakdown,
 					resultType: Array.isArray(result) ? "array" : "object",
 					timestamp: new Date().toISOString(),
@@ -211,7 +207,6 @@ export const useAnalytics = (
 				logger.error(`Analytics query failed`, {
 					timeRange,
 					filters,
-					viewMode,
 					modelBreakdown,
 					error: error instanceof Error ? error.message : String(error),
 					errorStack: error instanceof Error ? error.stack : undefined,

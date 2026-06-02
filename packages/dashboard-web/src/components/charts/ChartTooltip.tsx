@@ -1,4 +1,5 @@
 import { CHART_TOOLTIP_STYLE } from "../../constants";
+import type { TooltipLabelFormatter } from "../../lib/chart-utils";
 import type { TooltipFormatterValue } from "./types";
 
 interface PayloadItem {
@@ -6,6 +7,9 @@ interface PayloadItem {
 	value: TooltipFormatterValue;
 	name?: string;
 	color?: string;
+	// The full data row recharts attaches to each payload entry; lets a
+	// labelFormatter derive a rich label from raw fields (e.g. `ts`).
+	payload?: Record<string, unknown>;
 }
 
 interface ChartTooltipProps {
@@ -13,7 +17,8 @@ interface ChartTooltipProps {
 	payload?: PayloadItem[];
 	label?: string;
 	formatters?: Record<string, (value: TooltipFormatterValue) => string>;
-	labelFormatter?: (label: string) => string;
+	/** Recharts-style label formatter; receives the label and payload rows. */
+	labelFormatter?: TooltipLabelFormatter;
 	style?: keyof typeof CHART_TOOLTIP_STYLE | object;
 }
 
@@ -32,8 +37,12 @@ export function ChartTooltip({
 	const tooltipStyle =
 		typeof style === "string" ? CHART_TOOLTIP_STYLE[style] : style;
 
-	const formattedLabel =
-		labelFormatter && label ? labelFormatter(label) : label;
+	const formattedLabel = labelFormatter
+		? labelFormatter(
+				label,
+				payload as unknown as Parameters<TooltipLabelFormatter>[1],
+			)
+		: label;
 
 	return (
 		<div className="p-3 rounded-md shadow-lg" style={tooltipStyle}>

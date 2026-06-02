@@ -678,7 +678,6 @@ class API extends HttpClient {
 			apiKeys?: string[];
 			status?: "all" | "success" | "error";
 		},
-		mode: "normal" | "cumulative" = "normal",
 		modelBreakdown?: boolean,
 	): Promise<AnalyticsResponse> {
 		const params = new URLSearchParams({ range });
@@ -695,9 +694,6 @@ class API extends HttpClient {
 		if (filters?.status && filters.status !== "all") {
 			params.append("status", filters.status);
 		}
-		if (mode === "cumulative") {
-			params.append("mode", "cumulative");
-		}
 		if (modelBreakdown) {
 			params.append("modelBreakdown", "true");
 		}
@@ -708,7 +704,6 @@ class API extends HttpClient {
 		this.logger.info(`Fetching analytics data: ${url}`, {
 			range,
 			filters,
-			mode,
 			modelBreakdown,
 			timestamp: new Date().toISOString(),
 		});
@@ -734,7 +729,6 @@ class API extends HttpClient {
 					url,
 					range,
 					filters,
-					mode,
 					modelBreakdown,
 					errorDetails: error,
 					timestamp: new Date().toISOString(),

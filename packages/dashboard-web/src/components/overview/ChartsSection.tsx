@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { CHART_COLORS } from "../../constants";
+import { CHART_COLORS, type TimeRange } from "../../constants";
 import { BasePieChart, RequestVolumeSuccessChart } from "../charts";
 import {
 	Card,
@@ -12,6 +12,7 @@ import {
 interface ChartsSectionProps {
 	timeSeriesData: Array<{
 		time: string;
+		ts: number;
 		requests: number;
 		successRate: number;
 		responseTime: number;
@@ -31,6 +32,7 @@ interface ChartsSectionProps {
 		successRate: number;
 	}>;
 	loading: boolean;
+	timeRange: TimeRange;
 }
 
 export function ChartsSection({
@@ -39,6 +41,7 @@ export function ChartsSection({
 	accountModelUsageData,
 	apiKeyPerformanceData,
 	loading,
+	timeRange,
 }: ChartsSectionProps) {
 	// Aggregate account-model usage into per-account totals for the donut chart
 	const accountUsageDonutData = useMemo(() => {
@@ -87,6 +90,7 @@ export function ChartsSection({
 						data={timeSeriesData}
 						loading={loading}
 						height="medium"
+						timeRange={timeRange}
 					/>
 				</CardContent>
 			</Card>

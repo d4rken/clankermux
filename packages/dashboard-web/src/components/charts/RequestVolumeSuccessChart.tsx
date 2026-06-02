@@ -10,8 +10,9 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS } from "../../constants";
+import { CHART_PROPS, COLORS, type TimeRange } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartContainer } from "./ChartContainer";
 import { ChartTooltip } from "./ChartTooltip";
 import { getChartHeight } from "./chart-utils";
@@ -19,11 +20,13 @@ import { getChartHeight } from "./chart-utils";
 interface RequestVolumeSuccessChartProps {
 	data: Array<{
 		time: string;
+		ts: number;
 		requests: number;
 		successRate: number;
 	}>;
 	loading?: boolean;
 	height?: "small" | "medium" | "large" | number;
+	timeRange?: TimeRange;
 }
 
 const GRADIENT_ID = "requestVolumeGradient";
@@ -39,6 +42,7 @@ export function RequestVolumeSuccessChart({
 	data,
 	loading = false,
 	height = "medium",
+	timeRange = "6h",
 }: RequestVolumeSuccessChartProps) {
 	const chartHeight = getChartHeight(height);
 	const isEmpty = !data || data.length === 0;
@@ -86,6 +90,7 @@ export function RequestVolumeSuccessChart({
 									requests: (value) => formatNumber(Number(value)),
 									successRate: (value) => `${Number(value).toFixed(1)}%`,
 								}}
+								labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 							/>
 						}
 					/>

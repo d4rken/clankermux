@@ -10,7 +10,6 @@ interface AnalyticsParams {
 		models?: string[];
 		status?: "all" | "success" | "error";
 	};
-	viewMode: "normal" | "cumulative";
 	modelBreakdown?: boolean;
 }
 
@@ -25,7 +24,6 @@ export function useDeduplicatedAnalytics() {
 				api.getAnalytics(
 					params.timeRange,
 					params.filters,
-					params.viewMode,
 					params.modelBreakdown,
 				),
 			);
@@ -71,12 +69,7 @@ export function useBatchedAnalytics() {
 				},
 			]) => {
 				api
-					.getAnalytics(
-						params.timeRange,
-						params.filters,
-						params.viewMode,
-						params.modelBreakdown,
-					)
+					.getAnalytics(params.timeRange, params.filters, params.modelBreakdown)
 					.then((result) => {
 						for (const resolve of resolves) resolve(result);
 					})

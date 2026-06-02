@@ -9,13 +9,12 @@ export const queryKeys = {
 	analytics: (
 		timeRange?: string,
 		filters?: unknown,
-		viewMode?: string,
 		modelBreakdown?: boolean,
 	) =>
 		[
 			...queryKeys.all,
 			"analytics",
-			{ timeRange, filters, viewMode, modelBreakdown },
+			{ timeRange, filters, modelBreakdown },
 		] as const,
 	usageHistory: (range?: string) =>
 		[...queryKeys.all, "usage-history", { range }] as const,

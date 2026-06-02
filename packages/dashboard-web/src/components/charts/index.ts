@@ -5,7 +5,6 @@ export { BasePieChart } from "./BasePieChart";
 export { BaseScatterChart } from "./BaseScatterChart";
 export { ChartContainer } from "./ChartContainer";
 export { ChartTooltip } from "./ChartTooltip";
-export { CostChart } from "./CostChart";
 export { ModelPerformanceChart } from "./ModelPerformanceChart";
 export { ModelPerformanceComparison } from "./ModelPerformanceComparison";
 export { ModelTokenSpeedChart } from "./ModelTokenSpeedChart";
