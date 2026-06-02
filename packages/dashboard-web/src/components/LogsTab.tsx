@@ -1,5 +1,11 @@
 import { Pause, Play, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import { api, type LogEntry } from "../api";
 import { useLogHistory } from "../hooks/queries";
 import { Button } from "./ui/button";
@@ -18,6 +24,35 @@ export function LogsTab() {
 	const eventSourceRef = useRef<EventSource | null>(null);
 	const logsEndRef = useRef<HTMLDivElement>(null);
 	const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+	const cardRef = useRef<HTMLDivElement>(null);
+	const [availableHeight, setAvailableHeight] = useState<number | undefined>(
+		undefined,
+	);
+
+	// Size the log card to fill the remaining viewport height below its top edge,
+	// so the log list uses all available vertical space and resizes with the
+	// window. We only need to anchor the card's outer height; flexbox handles the
+	// card header/footer chrome, and the log list (flex-1) absorbs the rest.
+	// 32px matches the page wrapper's largest bottom padding (lg:p-8) so the card
+	// sits flush with the viewport edge on desktop without introducing page scroll.
+	useLayoutEffect(() => {
+		const BOTTOM_GAP_PX = 32;
+		const measure = () => {
+			const card = cardRef.current;
+			if (!card) return;
+			// Add scrollY so the measurement is scroll-invariant: we want the
+			// card's layout offset (its position with the page at scroll-top),
+			// not its current viewport-relative position, which would drift if a
+			// resize fires while the page happens to be scrolled.
+			const top = card.getBoundingClientRect().top + window.scrollY;
+			setAvailableHeight(
+				Math.max(300, window.innerHeight - top - BOTTOM_GAP_PX),
+			);
+		};
+		measure();
+		window.addEventListener("resize", measure);
+		return () => window.removeEventListener("resize", measure);
+	}, []);
 
 	const startStreaming = useCallback(() => {
 		eventSourceRef.current = api.streamLogs((log: LogEntry) => {
@@ -118,8 +153,12 @@ export function LogsTab() {
 	};
 
 	return (
-		<Card>
-			<CardHeader>
+		<Card
+			ref={cardRef}
+			style={{ height: availableHeight }}
+			className="flex flex-col min-h-[300px]"
+		>
+			<CardHeader className="shrink-0">
 				<div className="flex items-center justify-between">
 					<div>
 						<CardTitle>Live Logs</CardTitle>
@@ -148,8 +187,8 @@ export function LogsTab() {
 					</div>
 				</div>
 			</CardHeader>
-			<CardContent>
-				<div className="space-y-1 max-h-[500px] overflow-y-auto font-mono text-sm">
+			<CardContent className="flex flex-1 flex-col min-h-0">
+				<div className="space-y-1 flex-1 min-h-0 overflow-y-auto font-mono text-sm">
 					{loading ? (
 						<p className="text-muted-foreground">Loading logs...</p>
 					) : error ? (
@@ -179,7 +218,7 @@ export function LogsTab() {
 					)}
 					<div ref={logsEndRef} />
 				</div>
-				<div className="mt-4 flex items-center gap-2">
+				<div className="mt-4 flex shrink-0 items-center gap-2">
 					<input
 						type="checkbox"
 						id="autoscroll"
