@@ -65,11 +65,11 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 			<DialogContent className="flex max-h-[90vh] max-w-lg flex-col overflow-hidden">
 				<DialogHeader>
 					<DialogTitle>
-						{isEditMode ? "Edit Combo" : "Create Combo"}
+						{isEditMode ? "Edit Routing Chain" : "Create Routing Chain"}
 					</DialogTitle>
 					<DialogDescription>
 						{isEditMode
-							? "Manage slots and settings for this combo"
+							? "Manage slots and settings for this routing chain"
 							: "Define a new fallback chain for model families"}
 					</DialogDescription>
 				</DialogHeader>
@@ -77,7 +77,9 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 				{isEditMode ? (
 					<div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2">
 						{comboQuery.isLoading && (
-							<p className="text-sm text-muted-foreground">Loading combo...</p>
+							<p className="text-sm text-muted-foreground">
+								Loading routing chain...
+							</p>
 						)}
 						{combo && <ComboSlotBuilder combo={combo} />}
 					</div>
@@ -89,7 +91,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 								id="combo-name"
 								value={name}
 								onChange={(e) => setName(e.target.value)}
-								placeholder="My Combo"
+								placeholder="My Routing Chain"
 								maxLength={100}
 							/>
 						</div>
@@ -123,7 +125,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 
 				{createCombo.isError && (
 					<p className="text-sm text-destructive">
-						Failed to create combo. Please try again.
+						Failed to create routing chain. Please try again.
 					</p>
 				)}
 

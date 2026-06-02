@@ -17,7 +17,7 @@ const DECISION_LABELS: Record<string, string> = {
 	affinity_miss: "Affinity miss",
 	affinity_reassigned: "Affinity reassigned",
 	auto_fallback: "Auto fallback",
-	combo: "Combo",
+	combo: "Routing Chain",
 	force_account_global: "Forced (global)",
 	forced_account: "Forced account",
 	global_session: "Global session",
