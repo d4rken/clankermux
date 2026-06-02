@@ -37,7 +37,7 @@ import {
 	TokenSpeedChart,
 	TokenUsageChart,
 } from "../charts";
-import { longRangeAxisProps } from "../charts/chart-utils";
+import { getTooltipStyles, longRangeAxisProps } from "../charts/chart-utils";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -711,13 +711,9 @@ export function CumulativeGrowthChart({
 						</defs>
 						<CartesianGrid
 							strokeDasharray={CHART_PROPS.strokeDasharray}
-							stroke="rgba(255,255,255,0.1)"
+							className={CHART_PROPS.gridClassName}
 						/>
-						<XAxis
-							dataKey="time"
-							className="text-xs"
-							stroke="rgba(255,255,255,0.5)"
-						/>
+						<XAxis dataKey="time" className="text-xs" />
 						<YAxis
 							yAxisId="tokens"
 							className="text-xs"
@@ -733,12 +729,7 @@ export function CumulativeGrowthChart({
 						/>
 						<Tooltip
 							labelClassName="font-bold"
-							contentStyle={{
-								backgroundColor: "rgba(0,0,0,0.8)",
-								border: "1px solid rgba(255,255,255,0.2)",
-								borderRadius: "8px",
-								backdropFilter: "blur(8px)",
-							}}
+							contentStyle={getTooltipStyles("default")}
 							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 							formatter={
 								((value: number | string, name: string) => {
