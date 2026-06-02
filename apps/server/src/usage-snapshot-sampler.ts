@@ -25,7 +25,10 @@ import type {
 	UsageData,
 	UsageWindow,
 } from "@clankermux/providers";
-import { refreshCodexUsageForAccount } from "@clankermux/proxy";
+import {
+	type CodexUsageRefreshOutcome,
+	refreshCodexUsageForAccount,
+} from "@clankermux/proxy";
 import type { Account, UsageSnapshotRow } from "@clankermux/types";
 
 const log = new Logger("UsageSnapshotSampler");
@@ -36,6 +39,15 @@ export const SAMPLE_INTERVAL_MS = 120_000;
 const SAMPLE_INTERVAL_FLOOR_MS = 30_000;
 /** Per-account timeout for the bounded Codex probe so one hang can't stall a tick. */
 const CODEX_PROBE_TIMEOUT_MS = 8_000;
+/**
+ * How many times to attempt the Codex probe per tick. The at-rest probe
+ * intermittently comes back without the `x-codex-*` usage headers; a single
+ * retry meaningfully tightens an otherwise-gappy Codex line at the cost of one
+ * extra bounded request on a miss.
+ */
+const CODEX_PROBE_ATTEMPTS = 2;
+/** Delay between Codex probe attempts (lets the per-account in-flight dedup clear). */
+const CODEX_PROBE_RETRY_DELAY_MS = 1_500;
 
 /** Minimal cache surface the pure projection needs (matches `usageCache`). */
 export interface SamplerCache {
@@ -146,7 +158,9 @@ export interface UsageSnapshotSamplerDeps {
 	/** The shared in-memory usage cache. */
 	cache: SamplerCache;
 	/** Trigger the bounded Codex usage probe for one account. */
-	refreshCodex?: (accountId: string) => Promise<unknown>;
+	refreshCodex?: (accountId: string) => Promise<CodexUsageRefreshOutcome>;
+	/** Delay between Codex probe retries (ms). Overridable for fast tests. */
+	codexProbeRetryDelayMs?: number;
 	/** Resolve the freshness window in ms (`max(2*pollInterval, 150_000)`). */
 	getFreshnessMs: () => number;
 	/**
@@ -180,6 +194,7 @@ export class UsageSnapshotSampler {
 		// (a test suppressing the probe relies on this).
 		this.deps = { ...deps };
 		this.deps.refreshCodex ??= refreshCodexUsageForAccount;
+		this.deps.codexProbeRetryDelayMs ??= CODEX_PROBE_RETRY_DELAY_MS;
 	}
 
 	/**
@@ -272,29 +287,58 @@ export class UsageSnapshotSampler {
 	}
 
 	/**
-	 * Trigger the bounded Codex probe for one account with a per-account timeout
-	 * and try/catch so a single hang or failure can't stall or abort the tick.
+	 * Trigger the bounded Codex probe for one account, inspecting the outcome so
+	 * the otherwise-silent "no usage headers" case is surfaced, and retrying once
+	 * on a non-success result to tighten the gappy Codex line. Each attempt has a
+	 * per-attempt timeout + try/catch so a hang or failure can't stall or abort
+	 * the tick. A throw/timeout is NOT retried — the underlying request may still
+	 * be in flight and would be deduped by the refresher's in-flight tracker.
 	 */
 	private async probeCodex(accountId: string): Promise<void> {
 		const refresh = this.deps.refreshCodex;
 		if (!refresh) return;
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		try {
-			await Promise.race([
-				refresh(accountId),
-				new Promise((_, reject) => {
-					timer = setTimeout(
-						() => reject(new Error("codex probe timeout")),
-						CODEX_PROBE_TIMEOUT_MS,
+		const retryDelayMs =
+			this.deps.codexProbeRetryDelayMs ?? CODEX_PROBE_RETRY_DELAY_MS;
+
+		for (let attempt = 1; attempt <= CODEX_PROBE_ATTEMPTS; attempt++) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const outcome = await Promise.race([
+					refresh(accountId),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error("codex probe timeout")),
+							CODEX_PROBE_TIMEOUT_MS,
+						);
+					}),
+				]);
+				if (outcome.success) return; // fresh usage cached — done
+
+				// Resolved but no usage data (e.g. response lacked x-codex-* headers).
+				// This used to be swallowed silently; surface it and retry once.
+				if (attempt < CODEX_PROBE_ATTEMPTS) {
+					log.debug(
+						`Snapshot sampler: Codex probe for ${accountId} returned no usage (${outcome.message}); retrying`,
 					);
-				}),
-			]);
-		} catch (err) {
-			log.warn(`Snapshot sampler: Codex probe failed for ${accountId}: ${err}`);
-		} finally {
-			// Clear the timeout so it can't keep the event loop alive after the
-			// probe settled (or fire a no-op rejection on an already-settled race).
-			if (timer) clearTimeout(timer);
+					await new Promise<void>((resolve) =>
+						setTimeout(resolve, retryDelayMs),
+					);
+					continue;
+				}
+				log.debug(
+					`Snapshot sampler: Codex probe for ${accountId} returned no usage after ${attempt} attempts (${outcome.message}); skipping this tick`,
+				);
+				return;
+			} catch (err) {
+				log.warn(
+					`Snapshot sampler: Codex probe failed for ${accountId}: ${err}`,
+				);
+				return;
+			} finally {
+				// Clear the timeout so it can't keep the event loop alive after the
+				// probe settled (or fire a no-op rejection on an already-settled race).
+				if (timer) clearTimeout(timer);
+			}
 		}
 	}
 }
