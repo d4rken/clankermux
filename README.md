@@ -19,18 +19,13 @@ Fast iteration and tailored to my use-case, mostly Anthropic and OpenAI accounts
 
 Changes:
 
-* Only one official deploy method: From source.
-* Strong stance that this should only be hosted locally, external access only via VPN.
 * API key system is sepperate from dashboard access.
-* Reduced provider support (no bedrock or vertex).
 * Smaller dependency trees to reduce supply-chain attack surface.
-* Lots of memory leak fixes and stability improvements.
-* Performance improvements so the proxy does not get lagged by other components.
-* Improved account selection algorithm + analytics and graps.
-* Improved fallover mechanims, per account, per provider.
-
-Feel free to use this fork, but it's not build for others to use, it is just what I use, made public.
-Bug reports are welcome, feature requests are not... 🤷‍♂️
+* Memory leak fixes, stability improvements, performance improvements.
+* Improved account selection algorithm, maximized token availability.
+* Improved session routing, increased cache hit rate.
+* Improved fallover mechanims, reduced token churn.
+* Additional analytics: Usage windows, cache hit rate, model performance and system status
 
 ## Build from source
 
