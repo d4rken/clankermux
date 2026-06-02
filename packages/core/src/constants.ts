@@ -191,6 +191,30 @@ export const LIMITS = {
 	},
 } as const;
 
+/**
+ * Sanity ceiling for recorded output speed (tokens/sec). Values at or above
+ * this threshold are measurement artifacts, not real inference rates — they
+ * come from dividing the output-token count by a sub-millisecond duration
+ * (e.g. a cached/single-chunk response whose measured elapsed time rounds to
+ * ~0). No real LLM inference path through this proxy sustains tokens faster
+ * than this, so anything above it is dropped rather than allowed to skew the
+ * analytics averages (a single 137,000 tok/s artifact poisons a whole bucket).
+ *
+ * Used in TWO places — keep them consistent:
+ *   1. usage-collector.ts (`computeTokensPerSecond`) — discards artifacts at
+ *      record time, so they never enter the DB going forward.
+ *   2. analytics-direct.ts — filters pre-existing artifact rows out of every
+ *      speed aggregation (median/p95/avg) at query time.
+ *
+ * Tunable: raise it if a genuinely faster provider is ever routed through here.
+ */
+export const MAX_PLAUSIBLE_TOKENS_PER_SECOND = 1500;
+
+/** True when `tps` is a physically plausible output speed (0 < tps <= ceiling). */
+export function isPlausibleSpeed(tps: number): boolean {
+	return tps > 0 && tps <= MAX_PLAUSIBLE_TOKENS_PER_SECOND;
+}
+
 // HTTP status codes
 export const HTTP_STATUS = {
 	OK: 200,

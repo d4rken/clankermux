@@ -1,67 +1,49 @@
+import { getModelShortName } from "@clankermux/core";
+import type { SpeedTimePoint } from "@clankermux/types";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
-import { Activity, Clock, Zap } from "lucide-react";
+import { Activity, Clock, Gauge, Zap } from "lucide-react";
 import type { TimeRange } from "../../constants";
-import { ModelTokenSpeedChart } from "../charts/ModelTokenSpeedChart";
-import { TokenSpeedChart } from "../charts/TokenSpeedChart";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { SpeedOverTimeChart } from "./SpeedOverTimeChart";
 
 interface TokenSpeedAnalyticsProps {
-	timeSeriesData: Array<{
-		time: string;
-		avgTokensPerSecond: number;
-		[key: string]: string | number;
-	}>;
+	/** Per-model median output-speed time series (artifact-filtered upstream). */
+	speedTimeSeries: SpeedTimePoint[];
+	/** Global median (p50) output speed across all in-range requests. */
+	medianTokensPerSecond: number | null;
+	/** Global p95 output speed across all in-range requests. */
+	p95TokensPerSecond: number | null;
+	/** Avg response time (ms) across all in-range requests. */
+	avgResponseTimeMs: number;
 	modelPerformance: Array<{
 		model: string;
-		avgTokensPerSecond: number | null;
-		minTokensPerSecond: number | null;
-		maxTokensPerSecond: number | null;
+		medianTokensPerSecond: number | null;
 	}>;
 	loading?: boolean;
 	timeRange: TimeRange;
 }
 
+function formatSpeed(value: number | null): string {
+	return value != null && value > 0 ? formatTokensPerSecond(value) : "—";
+}
+
 export function TokenSpeedAnalytics({
-	timeSeriesData,
+	speedTimeSeries,
+	medianTokensPerSecond,
+	p95TokensPerSecond,
+	avgResponseTimeMs,
 	modelPerformance,
 	loading = false,
 	timeRange,
 }: TokenSpeedAnalyticsProps) {
-	// Calculate overall statistics
-	const validSpeeds = timeSeriesData
-		.map((d) => d.avgTokensPerSecond)
-		.filter((speed) => speed > 0);
-
-	const overallAvgSpeed =
-		validSpeeds.length > 0
-			? validSpeeds.reduce((sum, speed) => sum + speed, 0) / validSpeeds.length
-			: 0;
-
-	// Average response time across buckets (responseTime is carried on each
-	// timeSeriesData element via the index signature, set upstream in AnalyticsTab)
-	const validResponseTimes = timeSeriesData
-		.map((d) => Number(d.responseTime))
-		.filter((time) => time > 0);
-
-	const overallAvgResponseTime =
-		validResponseTimes.length > 0
-			? validResponseTimes.reduce((sum, time) => sum + time, 0) /
-				validResponseTimes.length
-			: 0;
-
-	// Get the true maximum speed from model performance data
-	const maxSpeed = Math.max(
-		...modelPerformance
-			.map((m) => m.maxTokensPerSecond || 0)
-			.filter((speed) => speed > 0),
-		0,
-	);
-
-	// Find fastest model by peak speed
+	// Fastest model by median (p50) speed — robust to the artifacts that used to
+	// make a near-cached request look like "the fastest model".
 	const fastestModel = modelPerformance
-		.filter((m) => m.maxTokensPerSecond !== null && m.maxTokensPerSecond > 0)
+		.filter(
+			(m) => m.medianTokensPerSecond != null && m.medianTokensPerSecond > 0,
+		)
 		.sort(
-			(a, b) => (b.maxTokensPerSecond || 0) - (a.maxTokensPerSecond || 0),
+			(a, b) => (b.medianTokensPerSecond || 0) - (a.medianTokensPerSecond || 0),
 		)[0];
 
 	return (
@@ -71,16 +53,33 @@ export function TokenSpeedAnalytics({
 				<Card>
 					<CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
 						<CardTitle className="text-sm font-medium">
-							Average Output Speed
+							Typical Output Speed
 						</CardTitle>
 						<Activity className="h-4 w-4 text-muted-foreground" />
 					</CardHeader>
 					<CardContent>
 						<div className="text-2xl font-bold">
-							{formatTokensPerSecond(overallAvgSpeed)}
+							{formatSpeed(medianTokensPerSecond)}
 						</div>
 						<p className="text-xs text-muted-foreground">
-							Across all models and requests
+							Median (p50) across requests
+						</p>
+					</CardContent>
+				</Card>
+
+				<Card>
+					<CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+						<CardTitle className="text-sm font-medium">
+							Peak Output Speed
+						</CardTitle>
+						<Gauge className="h-4 w-4 text-muted-foreground" />
+					</CardHeader>
+					<CardContent>
+						<div className="text-2xl font-bold">
+							{formatSpeed(p95TokensPerSecond)}
+						</div>
+						<p className="text-xs text-muted-foreground">
+							p95 across requests in {timeRange}
 						</p>
 					</CardContent>
 				</Card>
@@ -94,27 +93,12 @@ export function TokenSpeedAnalytics({
 					</CardHeader>
 					<CardContent>
 						<div className="text-2xl font-bold">
-							{overallAvgResponseTime > 0
-								? `${Math.round(overallAvgResponseTime)} ms`
+							{avgResponseTimeMs > 0
+								? `${Math.round(avgResponseTimeMs)} ms`
 								: "—"}
 						</div>
 						<p className="text-xs text-muted-foreground">
 							Across all models and requests
-						</p>
-					</CardContent>
-				</Card>
-
-				<Card>
-					<CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle className="text-sm font-medium">Peak Speed</CardTitle>
-						<Zap className="h-4 w-4 text-muted-foreground" />
-					</CardHeader>
-					<CardContent>
-						<div className="text-2xl font-bold">
-							{formatTokensPerSecond(maxSpeed)}
-						</div>
-						<p className="text-xs text-muted-foreground">
-							Maximum observed in {timeRange}
 						</p>
 					</CardContent>
 				</Card>
@@ -126,52 +110,34 @@ export function TokenSpeedAnalytics({
 					</CardHeader>
 					<CardContent>
 						<div className="text-2xl font-bold">
-							{fastestModel?.model || "N/A"}
+							{fastestModel ? getModelShortName(fastestModel.model) : "N/A"}
 						</div>
 						<p className="text-xs text-muted-foreground">
 							{fastestModel
-								? `Peak: ${formatTokensPerSecond(fastestModel.maxTokensPerSecond || 0)}`
+								? `Median: ${formatSpeed(fastestModel.medianTokensPerSecond)}`
 								: "No data"}
 						</p>
 					</CardContent>
 				</Card>
 			</div>
 
-			{/* Charts */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-				<Card>
-					<CardHeader>
-						<CardTitle className="flex items-center gap-2">
-							<Activity className="h-5 w-5" />
-							Output Speed Over Time
-						</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<TokenSpeedChart
-							data={timeSeriesData}
-							loading={loading}
-							height={300}
-							timeRange={timeRange}
-						/>
-					</CardContent>
-				</Card>
-
-				<Card>
-					<CardHeader>
-						<CardTitle className="flex items-center gap-2">
-							<Zap className="h-5 w-5" />
-							Speed by Model
-						</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<ModelTokenSpeedChart
-							data={modelPerformance}
-							loading={loading}
-							height={300}
-						/>
-					</CardContent>
-				</Card>
-			</div>
+			{/* Output Speed Over Time — per-model trend lines */}
+			<Card>
+				<CardHeader>
+					<CardTitle className="flex items-center gap-2">
+						<Activity className="h-5 w-5" />
+						Output Speed Over Time
+					</CardTitle>
+				</CardHeader>
+				<CardContent>
+					<SpeedOverTimeChart
+						speedTimeSeries={speedTimeSeries}
+						loading={loading}
+						timeRange={timeRange}
+						height={340}
+					/>
+				</CardContent>
+			</Card>
 		</div>
 	);
 }
