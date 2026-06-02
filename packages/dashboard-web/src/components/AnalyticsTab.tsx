@@ -28,12 +28,27 @@ export const AnalyticsTab = React.memo(() => {
 		status: "all",
 	});
 
-	// Fetch analytics data with automatic refetch on dependency changes
+	// Aggregate analytics — always fetched WITHOUT per-model breakdown so every
+	// chart that derives from `analytics.timeSeries` (Performance Indicators,
+	// Cumulative Trends, the totals/seen-model effects) keeps a stable, one-row-
+	// per-timestamp series regardless of the "Per Model" toggle.
 	const {
 		data: analytics,
 		isLoading: loading,
 		refetch,
-	} = useAnalytics(timeRange, filters, "normal", modelBreakdown);
+	} = useAnalytics(timeRange, filters, "normal");
+
+	// Per-model breakdown — fetched only while the toggle is on, and consumed only
+	// by the Traffic Analytics chart. Keeping it as a separate query is what stops
+	// the toggle from bleeding into the other charts: the server returns per-model
+	// rows that REPLACE the aggregate series, so it must not back the shared data.
+	const {
+		data: perModelAnalytics,
+		isLoading: perModelLoading,
+		refetch: refetchPerModel,
+	} = useAnalytics(timeRange, filters, "normal", true, {
+		enabled: modelBreakdown,
+	});
 
 	// Get unique accounts and models from analytics data
 	// Accumulate all seen accounts/models/apiKeys to maintain full list for filters
@@ -214,14 +229,15 @@ export const AnalyticsTab = React.memo(() => {
 				loading={loading}
 				onRefresh={() => {
 					void refetch();
+					if (modelBreakdown) void refetchPerModel();
 				}}
 			/>
 
 			{/* Main Metrics Chart */}
 			<MainMetricsChart
 				data={data}
-				rawTimeSeries={analytics?.timeSeries}
-				loading={loading}
+				rawTimeSeries={perModelAnalytics?.timeSeries}
+				loading={modelBreakdown ? loading || perModelLoading : loading}
 				timeRange={timeRange}
 				selectedMetric={selectedMetric}
 				setSelectedMetric={setSelectedMetric}
@@ -234,8 +250,6 @@ export const AnalyticsTab = React.memo(() => {
 				<PerformanceIndicatorsChart
 					data={data}
 					loading={loading}
-					modelBreakdown={modelBreakdown}
-					rawTimeSeries={analytics?.timeSeries}
 					timeRange={timeRange}
 				/>
 				<TokenUsageBreakdown

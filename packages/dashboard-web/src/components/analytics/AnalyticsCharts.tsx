@@ -1,6 +1,6 @@
 import type { TimePoint } from "@clankermux/types";
 import { formatCost, formatNumber, formatTokens } from "@clankermux/ui-common";
-import { type ComponentProps, useState } from "react";
+import type { ComponentProps } from "react";
 import {
 	Area,
 	AreaChart,
@@ -378,143 +378,44 @@ export function MainMetricsChart({
 interface PerformanceIndicatorsChartProps {
 	data: ChartData[];
 	loading: boolean;
-	modelBreakdown?: boolean;
-	rawTimeSeries?: TimePoint[];
-	selectedMetric?: "errorRate" | "cacheHitRate";
 	timeRange?: TimeRange;
 }
 
 export function PerformanceIndicatorsChart({
 	data,
 	loading,
-	modelBreakdown = false,
-	rawTimeSeries,
-	selectedMetric = "cacheHitRate",
 	timeRange = "24h",
 }: PerformanceIndicatorsChartProps) {
-	const [currentMetric, setCurrentMetric] = useState(selectedMetric);
-
-	// Process data for multi-model chart if model breakdown is enabled
-	const processedMultiModelData =
-		rawTimeSeries && modelBreakdown
-			? (() => {
-					// Group by timestamp and pivot models. Rows are keyed by the raw
-					// timestamp so the compact axis label and rich tooltip stay in sync;
-					// `ts` rides along for the tooltip (see time-format.ts).
-					const grouped: Record<
-						number,
-						{ time: string; ts: number; [model: string]: string | number }
-					> = {};
-					const models = new Set<string>();
-					const timestamps = new Set<number>();
-
-					rawTimeSeries.forEach((point) => {
-						if (point.model) {
-							models.add(point.model);
-							timestamps.add(point.ts);
-						}
-					});
-
-					// Sort time points chronologically
-					const sortedTs = Array.from(timestamps).sort((a, b) => a - b);
-
-					const modelArrays = Array.from(models).sort();
-
-					// Initialize all time points with all models
-					sortedTs.forEach((ts) => {
-						grouped[ts] = { time: formatAxisTime(ts, timeRange), ts };
-						modelArrays.forEach((model) => {
-							grouped[ts][model] = 0;
-						});
-					});
-
-					// Fill in actual values
-					rawTimeSeries.forEach((point) => {
-						if (point.model) {
-							// Map the metric value
-							const value =
-								currentMetric === "errorRate"
-									? point.errorRate
-									: point.cacheHitRate;
-
-							grouped[point.ts][point.model] = value;
-						}
-					});
-
-					const finalData = sortedTs.map((ts) => grouped[ts]);
-
-					return {
-						data: finalData,
-						models: modelArrays,
-					};
-				})()
-			: null;
-
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between">
-					<div>
-						<CardTitle>Performance Indicators</CardTitle>
-						<CardDescription>
-							{modelBreakdown
-								? "Per-model error rate and cache hit rate trends"
-								: "Error rate and cache hit rate trends"}
-						</CardDescription>
-					</div>
-					{modelBreakdown && (
-						<Select
-							value={currentMetric}
-							onValueChange={(value) =>
-								setCurrentMetric(value as "errorRate" | "cacheHitRate")
-							}
-						>
-							<SelectTrigger className="w-36">
-								<SelectValue />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="cacheHitRate">Cache Hit Rate</SelectItem>
-								<SelectItem value="errorRate">Error Rate</SelectItem>
-							</SelectContent>
-						</Select>
-					)}
-				</div>
+				<CardTitle>Performance Indicators</CardTitle>
+				<CardDescription>Error rate and cache hit rate trends</CardDescription>
 			</CardHeader>
 			<CardContent>
-				{modelBreakdown && processedMultiModelData ? (
-					<MultiModelChart
-						data={processedMultiModelData.data}
-						models={processedMultiModelData.models}
-						metric={currentMetric}
-						loading={loading}
-						height={CHART_HEIGHTS.medium}
-						timeRange={timeRange}
-					/>
-				) : (
-					<BaseLineChart
-						data={data}
-						lines={[
-							{
-								dataKey: "errorRate",
-								stroke: COLORS.error,
-								name: "Error Rate %",
-							},
-							{
-								dataKey: "cacheHitRate",
-								stroke: COLORS.success,
-								name: "Cache Hit %",
-							},
-						]}
-						loading={loading}
-						height="medium"
-						showLegend={true}
-						tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
-						referenceLines={[
-							{ y: 90, stroke: COLORS.success },
-							{ y: 5, stroke: COLORS.error },
-						]}
-					/>
-				)}
+				<BaseLineChart
+					data={data}
+					lines={[
+						{
+							dataKey: "errorRate",
+							stroke: COLORS.error,
+							name: "Error Rate %",
+						},
+						{
+							dataKey: "cacheHitRate",
+							stroke: COLORS.success,
+							name: "Cache Hit %",
+						},
+					]}
+					loading={loading}
+					height="medium"
+					showLegend={true}
+					tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
+					referenceLines={[
+						{ y: 90, stroke: COLORS.success },
+						{ y: 5, stroke: COLORS.error },
+					]}
+				/>
 			</CardContent>
 		</Card>
 	);
