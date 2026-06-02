@@ -10,13 +10,6 @@ import { useState } from "react";
 import { useStorageInfo, useTriggerIntegrityCheck } from "../../hooks/queries";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "../ui/card";
 
 function formatRelative(iso: string | null): string {
 	if (!iso) return "never";
@@ -29,7 +22,13 @@ function formatRelative(iso: string | null): string {
 	return `${Math.floor(deltaSec / 86400)}d ago`;
 }
 
-export function StorageIntegrityCard() {
+/**
+ * Storage-integrity status block (status panel, last-check timestamps, manual
+ * check buttons) without a surrounding Card — designed to be embedded as a
+ * sub-section of the System Status card. The sticky corruption banner lives in
+ * {@link StorageIntegrityBanner}.
+ */
+export function StorageIntegritySection() {
 	const { data, isLoading, error } = useStorageInfo();
 	const triggerCheck = useTriggerIntegrityCheck();
 	const [lastTriggeredKind, setLastTriggeredKind] = useState<
@@ -96,90 +95,78 @@ export function StorageIntegrityCard() {
 					? "bg-warning/10"
 					: "bg-muted/50";
 
-	return (
-		<Card>
-			<CardHeader>
-				<CardTitle>Storage Integrity</CardTitle>
-				<CardDescription>
-					Periodic SQLite integrity check (quick + full).
-				</CardDescription>
-			</CardHeader>
-			<CardContent>
-				{isLoading ? (
-					<div className="text-sm text-muted-foreground">Loading…</div>
-				) : error ? (
-					<div className="text-sm text-destructive">
-						Failed to load storage status.
+	return isLoading ? (
+		<div className="text-sm text-muted-foreground">Loading…</div>
+	) : error ? (
+		<div className="text-sm text-destructive">
+			Failed to load storage status.
+		</div>
+	) : (
+		<div className="space-y-4">
+			<div
+				className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
+			>
+				<div className="flex items-center gap-3">
+					{icon}
+					<div>
+						<p className="font-medium">{label}</p>
+						<p className="text-sm text-muted-foreground">{description}</p>
 					</div>
-				) : (
-					<div className="space-y-4">
-						<div
-							className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
-						>
-							<div className="flex items-center gap-3">
-								{icon}
-								<div>
-									<p className="font-medium">{label}</p>
-									<p className="text-sm text-muted-foreground">{description}</p>
-								</div>
-							</div>
-							{badgeNode}
-						</div>
+				</div>
+				{badgeNode}
+			</div>
 
-						<dl className="grid grid-cols-2 gap-3 text-sm">
-							<div>
-								<dt className="text-muted-foreground">Last quick check</dt>
-								<dd>
-									{formatRelative(data?.last_quick_check_at ?? null)}
-									{data?.last_quick_result === "corrupt" ? (
-										<span className="text-destructive"> (corrupt)</span>
-									) : null}
-								</dd>
-							</div>
-							<div>
-								<dt className="text-muted-foreground">Last full check</dt>
-								<dd>
-									{formatRelative(data?.last_full_check_at ?? null)}
-									{data?.last_full_result === "corrupt" ? (
-										<span className="text-destructive"> (corrupt)</span>
-									) : null}
-								</dd>
-							</div>
-						</dl>
-
-						<div className="flex gap-2">
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={isRunning}
-								onClick={() => onClick("quick")}
-							>
-								<RefreshCw className="h-4 w-4 mr-2" />
-								Run quick check
-							</Button>
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={isRunning}
-								onClick={() => onClick("full")}
-							>
-								<RefreshCw className="h-4 w-4 mr-2" />
-								Run full check
-							</Button>
-						</div>
-
-						{triggerCheck.isError ? (
-							<p role="alert" className="text-sm text-destructive">
-								Could not trigger check:{" "}
-								{triggerCheck.error instanceof Error
-									? triggerCheck.error.message
-									: String(triggerCheck.error)}
-							</p>
+			<dl className="grid grid-cols-2 gap-3 text-sm">
+				<div>
+					<dt className="text-muted-foreground">Last quick check</dt>
+					<dd>
+						{formatRelative(data?.last_quick_check_at ?? null)}
+						{data?.last_quick_result === "corrupt" ? (
+							<span className="text-destructive"> (corrupt)</span>
 						) : null}
-					</div>
-				)}
-			</CardContent>
-		</Card>
+					</dd>
+				</div>
+				<div>
+					<dt className="text-muted-foreground">Last full check</dt>
+					<dd>
+						{formatRelative(data?.last_full_check_at ?? null)}
+						{data?.last_full_result === "corrupt" ? (
+							<span className="text-destructive"> (corrupt)</span>
+						) : null}
+					</dd>
+				</div>
+			</dl>
+
+			<div className="flex gap-2">
+				<Button
+					variant="outline"
+					size="sm"
+					disabled={isRunning}
+					onClick={() => onClick("quick")}
+				>
+					<RefreshCw className="h-4 w-4 mr-2" />
+					Run quick check
+				</Button>
+				<Button
+					variant="outline"
+					size="sm"
+					disabled={isRunning}
+					onClick={() => onClick("full")}
+				>
+					<RefreshCw className="h-4 w-4 mr-2" />
+					Run full check
+				</Button>
+			</div>
+
+			{triggerCheck.isError ? (
+				<p role="alert" className="text-sm text-destructive">
+					Could not trigger check:{" "}
+					{triggerCheck.error instanceof Error
+						? triggerCheck.error.message
+						: String(triggerCheck.error)}
+				</p>
+			) : null}
+		</div>
 	);
 }
 

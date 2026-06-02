@@ -80,7 +80,7 @@ export const useTriggerIntegrityCheck = () => {
 			// 409 (scheduler already running), network errors, etc. — surface
 			// via console so a misbehaving on-demand trigger is visible in
 			// devtools. The mutation's `error` field is also exposed by
-			// useMutation, so the calling component (StorageIntegrityCard)
+			// useMutation, so the calling component (StorageIntegritySection)
 			// renders the message inline next to the buttons.
 			console.error("Integrity check trigger failed:", error);
 		},

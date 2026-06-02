@@ -10,25 +10,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-
-const DECISION_LABELS: Record<string, string> = {
-	affinity_hit: "Affinity hit",
-	affinity_hold: "Affinity hold",
-	affinity_miss: "Affinity miss",
-	affinity_reassigned: "Affinity reassigned",
-	auto_fallback: "Auto fallback",
-	combo: "Routing Chain",
-	force_account_global: "Forced (global)",
-	forced_account: "Forced account",
-	global_session: "Global session",
-	least_used: "Least used",
-	priority_utilization: "Priority + usage",
-	untracked: "Untracked",
-};
-
-function labelDecision(decision: string): string {
-	return DECISION_LABELS[decision] ?? decision.replaceAll("_", " ");
-}
+import { labelDecision } from "./routing-labels";
 
 interface RoutingSummaryCardProps {
 	routing?: RoutingAnalytics;

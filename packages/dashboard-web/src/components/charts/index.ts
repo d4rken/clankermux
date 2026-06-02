@@ -11,6 +11,7 @@ export { ModelPerformanceComparison } from "./ModelPerformanceComparison";
 export { ModelTokenSpeedChart } from "./ModelTokenSpeedChart";
 export { MultiModelChart } from "./MultiModelChart";
 export { RequestVolumeChart } from "./RequestVolumeChart";
+export { RequestVolumeSuccessChart } from "./RequestVolumeSuccessChart";
 export { ResponseTimeChart } from "./ResponseTimeChart";
 export { TokenSpeedChart } from "./TokenSpeedChart";
 export { TokenUsageChart } from "./TokenUsageChart";
