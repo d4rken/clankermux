@@ -106,7 +106,7 @@ Always run: `bun run lint && bun run typecheck && bun run format`
 - First run: `bun run build` (builds dashboard/CLI)
 - Start: `bun start` (port 8080) or `bun start --serve --port 8081` (testing)
 - Startup: Takes ~15 seconds, wait before testing with curl
-- Production: runs on port 8082. Test local changes on port 8081.
+- Production: runs on port 8080 (`PORT=8080` in the systemd unit). Test local changes on port 8081.
 
 ### Account Management
 - Add: `bun run cli --add-account <name> --mode <claude-oauth|console|zai|minimax|anthropic-compatible|openai-compatible> --priority <number>`
