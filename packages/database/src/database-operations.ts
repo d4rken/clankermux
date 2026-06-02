@@ -13,8 +13,10 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	IntegrityStatus,
+	RankedSnapshot,
 	RateLimitReason,
 	StrategyStore,
+	UsageSnapshotRow,
 } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
@@ -33,6 +35,7 @@ import {
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withDatabaseRetry } from "./retry";
 
 export interface DatabaseConfig {
@@ -178,6 +181,15 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 const INC_VAC_SKIP_ESCALATE_AT = 3;
 
 /**
+ * Fallback retention for the usage_snapshots time-series when a caller of
+ * cleanupOldRequests() doesn't pass an explicit snapshotRetentionMs (e.g. the
+ * http-api "Clean up now" handler). 90 days mirrors the default returned by
+ * config.getUsageSnapshotRetentionDays(); the server's hourly/startup cleanup
+ * passes the configured value explicitly so a non-default is honored there.
+ */
+const DEFAULT_USAGE_SNAPSHOT_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * DatabaseOperations using Repository Pattern
  * Provides a clean, organized interface for database operations
  *
@@ -239,6 +251,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private stats: StatsRepository;
 	private apiKeys: ApiKeyRepository;
 	private combo: ComboRepository;
+	private usageSnapshots: UsageSnapshotRepository;
 
 	constructor(
 		dbPath?: string,
@@ -319,6 +332,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.stats = new StatsRepository(this.adapter);
 		this.apiKeys = new ApiKeyRepository(this.adapter);
 		this.combo = new ComboRepository(this.adapter);
+		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
 	}
 
 	/**
@@ -1026,15 +1040,25 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — two explicit passes:
+	// Cleanup operations — three explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
+	// Pass 3: delete usage snapshots older than snapshotRetentionMs
+	//
+	// `snapshotRetentionMs` is optional so existing callers (including the
+	// http-api "Clean up now" handler) prune snapshots for free without being
+	// changed: when omitted it falls back to DEFAULT_USAGE_SNAPSHOT_RETENTION_MS
+	// (90 days), matching config.getUsageSnapshotRetentionDays()'s default. The
+	// server's hourly + startup jobs pass the configured value explicitly so a
+	// non-default retention is honored there.
 	async cleanupOldRequests(
 		payloadRetentionMs: number,
 		requestRetentionMs?: number,
+		snapshotRetentionMs?: number,
 	): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
+		removedSnapshots: number;
 	}> {
 		const now = Date.now();
 
@@ -1054,9 +1078,28 @@ OAuth tokens will need to be re-authenticated.
 			removedRequests = await this.requests.deleteOlderThan(requestCutoff);
 		}
 
+		// Pass 3 — usage snapshots (time-series for the Limits sawtooth graph)
+		const effectiveSnapshotRetentionMs =
+			typeof snapshotRetentionMs === "number" &&
+			Number.isFinite(snapshotRetentionMs)
+				? snapshotRetentionMs
+				: DEFAULT_USAGE_SNAPSHOT_RETENTION_MS;
+		let removedSnapshots = 0;
+		try {
+			const snapshotCutoff = now - effectiveSnapshotRetentionMs;
+			removedSnapshots =
+				await this.usageSnapshots.deleteOlderThan(snapshotCutoff);
+		} catch (err) {
+			// Snapshot pruning is best-effort: never let it sink the whole cleanup.
+			console.warn(
+				`[cleanupOldRequests] usage snapshot pruning failed: ${err}`,
+			);
+		}
+
 		return {
 			removedRequests,
 			removedPayloads: removedPayloadsByAge + removedOrphans,
+			removedSnapshots,
 		};
 	}
 
@@ -1676,5 +1719,34 @@ OAuth tokens will need to be re-authenticated.
 		family: ComboFamily,
 	): Promise<ComboWithSlots | null> {
 		return this.combo.getActiveComboForFamily(family);
+	}
+
+	// ── Usage snapshot operations delegated to repository ─────────────────────
+
+	async insertUsageSnapshots(rows: UsageSnapshotRow[]): Promise<void> {
+		await withDatabaseRetry(
+			() => this.usageSnapshots.insertSnapshots(rows),
+			this.retryConfig,
+			"insertUsageSnapshots",
+		);
+	}
+
+	async getUsageSnapshots(opts: {
+		sinceMs: number;
+		bucketMs: number;
+	}): Promise<RankedSnapshot[]> {
+		return withDatabaseRetry(
+			() => this.usageSnapshots.getSnapshots(opts),
+			this.retryConfig,
+			"getUsageSnapshots",
+		);
+	}
+
+	async deleteUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
+		return withDatabaseRetry(
+			() => this.usageSnapshots.deleteOlderThan(cutoffMs),
+			this.retryConfig,
+			"deleteUsageSnapshotsOlderThan",
+		);
 	}
 }

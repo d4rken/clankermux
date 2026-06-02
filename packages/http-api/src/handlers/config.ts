@@ -92,6 +92,7 @@ export function createConfigHandlers(
 			return jsonResponse({
 				payloadDays: config.getDataRetentionDays(),
 				requestDays: config.getRequestRetentionDays(),
+				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
 				storePayloads: config.getStorePayloads(),
 			});
 		},
@@ -124,6 +125,22 @@ export function createConfigHandlers(
 					return errorResponse(BadRequest("Invalid 'requestDays'"));
 				}
 				config.setRequestRetentionDays(requestDays);
+				updated = true;
+			}
+			if (body.usageSnapshotDays !== undefined) {
+				const usageSnapshotDays = validateNumber(
+					body.usageSnapshotDays,
+					"usageSnapshotDays",
+					{
+						min: 1,
+						max: 3650,
+						integer: true,
+					},
+				);
+				if (typeof usageSnapshotDays !== "number") {
+					return errorResponse(BadRequest("Invalid 'usageSnapshotDays'"));
+				}
+				config.setUsageSnapshotRetentionDays(usageSnapshotDays);
 				updated = true;
 			}
 			if (body.storePayloads !== undefined) {

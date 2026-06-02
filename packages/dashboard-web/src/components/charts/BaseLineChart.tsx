@@ -18,12 +18,26 @@ import {
 	isChartEmpty,
 } from "./chart-utils";
 
+// Recharts' string curve types. `CurveType` is not re-exported from the
+// "recharts" package root (only `Curve`/`CurveProps` are), so we mirror the
+// string members of recharts' own `CurveType` union here.
+type LineCurveType =
+	| "monotone"
+	| "linear"
+	| "step"
+	| "stepAfter"
+	| "stepBefore"
+	| "natural"
+	| "basis";
+
 interface LineConfig {
 	dataKey: string;
 	stroke?: string;
 	strokeWidth?: number;
 	dot?: boolean;
 	name?: string;
+	/** Per-line override for the curve type. Falls back to the chart-level `lineType`. */
+	type?: LineCurveType;
 }
 
 interface ReferenceLineConfig {
@@ -36,6 +50,12 @@ interface ReferenceLineConfig {
 interface BaseLineChartProps extends CommonChartProps {
 	lines: LineConfig | LineConfig[];
 	referenceLines?: ReferenceLineConfig[];
+	/**
+	 * Curve interpolation for all lines. Defaults to "monotone" (smoothed).
+	 * Use "linear" (or a "step*" variant) to keep reset drops sharp, e.g. for
+	 * sawtooth graphs. Overridable per line via `LineConfig.type`.
+	 */
+	lineType?: LineCurveType;
 }
 
 export function BaseLineChart({
@@ -57,6 +77,7 @@ export function BaseLineChart({
 	showLegend = false,
 	legendHeight = 36,
 	referenceLines = [],
+	lineType = "monotone",
 	margin,
 	className = "",
 	error = null,
@@ -107,7 +128,7 @@ export function BaseLineChart({
 					{lineConfigs.map((lineConfig, _index) => (
 						<Line
 							key={lineConfig.dataKey}
-							type="monotone"
+							type={lineConfig.type ?? lineType}
 							dataKey={lineConfig.dataKey}
 							stroke={lineConfig.stroke || COLORS.primary}
 							strokeWidth={lineConfig.strokeWidth || 2}

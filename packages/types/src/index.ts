@@ -12,3 +12,4 @@ export * from "./request";
 export * from "./stats";
 export * from "./strategy";
 export * from "./system";
+export * from "./usage-snapshot";

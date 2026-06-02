@@ -11,6 +11,7 @@ import type {
 	RequestResponse,
 	StatsWithAccounts,
 	SystemStatusResponse,
+	UsageHistoryResponse,
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 
@@ -789,6 +790,26 @@ class API extends HttpClient {
 		}
 	}
 
+	// Per-account utilization series + pool aggregate for the Limits-tab
+	// sawtooth chart. Backed by the direct (non-worker) usage-history handler.
+	async getUsageHistory(range: string): Promise<UsageHistoryResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/usage-history?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<UsageHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
 	async pauseAccount(accountId: string): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/pause`;
@@ -1317,6 +1338,7 @@ class API extends HttpClient {
 	async getRetention(): Promise<{
 		payloadDays: number;
 		requestDays: number;
+		usageSnapshotDays: number;
 		storePayloads: boolean;
 	}> {
 		const startTime = Date.now();
@@ -1328,6 +1350,7 @@ class API extends HttpClient {
 			const response = await this.get<{
 				payloadDays: number;
 				requestDays: number;
+				usageSnapshotDays: number;
 				storePayloads: boolean;
 			}>(url);
 			const duration = Date.now() - startTime;
@@ -1346,6 +1369,7 @@ class API extends HttpClient {
 	async setRetention(partial: {
 		payloadDays?: number;
 		requestDays?: number;
+		usageSnapshotDays?: number;
 		storePayloads?: boolean;
 	}): Promise<void> {
 		const startTime = Date.now();

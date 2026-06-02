@@ -351,6 +351,29 @@ export function ensureSchema(db: Database): void {
 		       ('sonnet', NULL, 0),
 		       ('haiku',  NULL, 0);
 	`);
+
+	// Create usage_snapshots table — append-only time-series of per-account
+	// rate-limit utilization. Backs the dashboard "sawtooth" graph.
+	// account_id CASCADE: deleting an account removes its history.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS usage_snapshots (
+			account_id TEXT NOT NULL,
+			provider TEXT,
+			sampled_at INTEGER NOT NULL,
+			five_hour_pct REAL,
+			five_hour_reset INTEGER,
+			seven_day_pct REAL,
+			seven_day_reset INTEGER,
+			PRIMARY KEY (account_id, sampled_at),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Index on sampled_at for retention pruning; (account_id, sampled_at)
+	// lookups are served by the primary key.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
+	);
 }
 
 export function runMigrations(db: Database, dbPath?: string): void {

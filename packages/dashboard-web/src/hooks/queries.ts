@@ -236,6 +236,21 @@ export const useAnalytics = (
 	});
 };
 
+/**
+ * Per-account utilization series + pool aggregate for the Limits-tab sawtooth
+ * chart. Mirrors useAnalytics' polling cadence (45s stale, 60s refetch, paused
+ * in the background) since both feed time-series charts.
+ */
+export const useUsageHistory = (range: string) => {
+	return useQuery({
+		queryKey: queryKeys.usageHistory(range),
+		queryFn: () => api.getUsageHistory(range),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useRequests = (limit: number, _refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.requests(limit),
@@ -323,6 +338,7 @@ export const useSetRetention = () => {
 		mutationFn: (partial: {
 			payloadDays?: number;
 			requestDays?: number;
+			usageSnapshotDays?: number;
 			storePayloads?: boolean;
 		}) => api.setRetention(partial),
 		onSuccess: () => {

@@ -3,6 +3,7 @@ import {
 	Activity,
 	BarChart3,
 	FileText,
+	Gauge,
 	GitBranch,
 	Key,
 	LayoutDashboard,
@@ -43,6 +44,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
+	{ label: "Limits", icon: Gauge, path: "/limits" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	{ label: "Combos", icon: Zap, path: "/combos" },

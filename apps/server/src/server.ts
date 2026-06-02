@@ -66,6 +66,7 @@ import {
 	type StrategyStore,
 } from "@clankermux/types";
 import { serve } from "bun";
+import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
 
 /**
  * Build a load-balancing strategy from its enum name. Add new strategies here
@@ -213,6 +214,7 @@ let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
+let usageSnapshotSampler: UsageSnapshotSampler | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -229,12 +231,15 @@ async function runStartupMaintenance(
 	try {
 		const payloadDays = config.getDataRetentionDays();
 		const requestDays = config.getRequestRetentionDays();
-		const { removedRequests, removedPayloads } = await dbOps.cleanupOldRequests(
-			payloadDays * 24 * 60 * 60 * 1000,
-			requestDays * 24 * 60 * 60 * 1000,
-		);
+		const snapshotDays = config.getUsageSnapshotRetentionDays();
+		const { removedRequests, removedPayloads, removedSnapshots } =
+			await dbOps.cleanupOldRequests(
+				payloadDays * 24 * 60 * 60 * 1000,
+				requestDays * 24 * 60 * 60 * 1000,
+				snapshotDays * 24 * 60 * 60 * 1000,
+			);
 		log.info(
-			`Startup cleanup removed ${removedRequests} requests and ${removedPayloads} payloads (payload=${payloadDays}d, requests=${requestDays}d)`,
+			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, and ${removedSnapshots} usage snapshots (payload=${payloadDays}d, requests=${requestDays}d, snapshots=${snapshotDays}d)`,
 		);
 	} catch (err) {
 		log.error(`Startup cleanup error: ${err}`);
@@ -727,14 +732,16 @@ export default async function startServer(options?: {
 		try {
 			const payloadDays = config.getDataRetentionDays();
 			const requestDays = config.getRequestRetentionDays();
-			const { removedRequests, removedPayloads } =
+			const snapshotDays = config.getUsageSnapshotRetentionDays();
+			const { removedRequests, removedPayloads, removedSnapshots } =
 				await dbOps.cleanupOldRequests(
 					payloadDays * TIME_CONSTANTS.DAY,
 					requestDays * TIME_CONSTANTS.DAY,
+					snapshotDays * TIME_CONSTANTS.DAY,
 				);
-			if (removedRequests > 0 || removedPayloads > 0) {
+			if (removedRequests > 0 || removedPayloads > 0 || removedSnapshots > 0) {
 				log.info(
-					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads in ${Date.now() - startTime}ms`,
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots in ${Date.now() - startTime}ms`,
 				);
 				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
 				// per tick, off-thread via the incremental-vacuum worker. Small N
@@ -1439,6 +1446,24 @@ Available endpoints:
 		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
 	}
 
+	// Start the usage-snapshot sampler: a periodic job that records per-account
+	// rate-limit utilization into the usage_snapshots time-series (the Limits
+	// "sawtooth" graph). It reads the warm usage cache (Anthropic kept warm by
+	// the pollers above; Codex primed via its bounded on-demand probe each tick)
+	// and defers its first sample until after the startup poll-stagger wave.
+	usageSnapshotSampler = new UsageSnapshotSampler({
+		getAccounts: () => dbOps.getAllAccounts(),
+		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
+		cache: usageCache,
+		// freshness = max(2 * pollInterval, 150s): two missed polls before a gap.
+		getFreshnessMs: () =>
+			Math.max(2 * config.getUsagePollIntervalMs(), 150_000),
+		getPollIntervalMs: () => config.getUsagePollIntervalMs(),
+	});
+	usageSnapshotSampler.start().catch((err) => {
+		log.error(`Failed to start usage snapshot sampler: ${err}`);
+	});
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -1523,6 +1548,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (cacheKeepaliveScheduler) {
 			cacheKeepaliveScheduler.stop();
 			cacheKeepaliveScheduler = null;
+		}
+		if (usageSnapshotSampler) {
+			usageSnapshotSampler.stop();
+			usageSnapshotSampler = null;
 		}
 
 		// Stop memory monitoring
