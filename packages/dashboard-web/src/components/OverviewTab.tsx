@@ -2,10 +2,9 @@ import { registerUIRefresh } from "@clankermux/core";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Database, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { REFRESH_INTERVALS, type TimeRange } from "../constants";
+import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
 import { computePoolUsage } from "../lib/pool-usage";
-import { formatAxisTime } from "../lib/time-format";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
@@ -21,10 +20,11 @@ export const OverviewTab = React.memo(() => {
 		REFRESH_INTERVALS.default,
 		24,
 	);
-	const [timeRange, setTimeRange] = useState<TimeRange>("6h");
+	const [timeRange, setTimeRange] = useState("6h");
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
 		timeRange,
 		{ accounts: [], models: [], status: "all" },
+		"normal",
 	);
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
 
@@ -82,7 +82,6 @@ export const OverviewTab = React.memo(() => {
 	const timeSeriesData = useMemo(() => {
 		if (!analytics) return [];
 		return analytics.timeSeries.map((point) => ({
-			time: formatAxisTime(point.ts, timeRange),
 			ts: point.ts,
 			requests: point.requests,
 			successRate: point.successRate,
@@ -93,7 +92,7 @@ export const OverviewTab = React.memo(() => {
 			apiCost: point.apiCostUsd ?? 0,
 			tokensPerSecond: point.avgTokensPerSecond || 0,
 		}));
-	}, [analytics, timeRange]);
+	}, [analytics]);
 
 	// Memoize percentage changes calculation
 	const trends = useMemo(() => {
@@ -154,10 +153,7 @@ export const OverviewTab = React.memo(() => {
 			{/* Header with Time Range Selector */}
 			<div className="flex justify-between items-center">
 				<h2 className="text-2xl font-semibold">Overview</h2>
-				<TimeRangeSelector
-					value={timeRange}
-					onChange={(v) => setTimeRange(v as TimeRange)}
-				/>
+				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
 
 			{/* Metrics Grid */}
@@ -206,11 +202,11 @@ export const OverviewTab = React.memo(() => {
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}
+				timeRange={timeRange}
 				modelData={modelData}
 				accountModelUsageData={accountModelUsageData}
 				apiKeyPerformanceData={apiKeyPerformanceData}
 				loading={loading}
-				timeRange={timeRange}
 			/>
 
 			<SystemStatus />

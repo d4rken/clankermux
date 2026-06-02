@@ -33,7 +33,7 @@ export const AnalyticsTab = React.memo(() => {
 		data: analytics,
 		isLoading: loading,
 		refetch,
-	} = useAnalytics(timeRange, filters, modelBreakdown);
+	} = useAnalytics(timeRange, filters, "normal", modelBreakdown);
 
 	// Get unique accounts and models from analytics data
 	// Accumulate all seen accounts/models/apiKeys to maintain full list for filters
@@ -181,28 +181,14 @@ export const AnalyticsTab = React.memo(() => {
 		}));
 	}, [analytics?.tokenBreakdown, analytics?.totals.totalTokens]);
 
-	// Use real model performance data from backend with filters
-	const _modelPerformance =
-		analytics?.modelPerformance
-			?.filter(
-				(perf) =>
-					filters.models.length === 0 || filters.models.includes(perf.model),
-			)
-			?.map((perf) => ({
-				model: perf.model,
-				avgTime: Math.round(perf.avgResponseTime),
-				p95Time: Math.round(perf.p95ResponseTime),
-				errorRate: parseFloat(perf.errorRate.toFixed(1)),
-			})) || [];
-
-	// Use real cost by model data with filters
+	// Use real cost by model data with filters. No slice cap: ModelAnalytics
+	// joins this per model against the (up to 10) modelPerformance rows, so
+	// capping here would silently null out cost for the lower-ranked models.
 	const costByModel =
-		analytics?.costByModel
-			?.filter(
-				(model) =>
-					filters.models.length === 0 || filters.models.includes(model.model),
-			)
-			?.slice(0, 4) || [];
+		analytics?.costByModel?.filter(
+			(model) =>
+				filters.models.length === 0 || filters.models.includes(model.model),
+		) || [];
 
 	// Count active filters
 	const activeFilterCount =
@@ -263,12 +249,14 @@ export const AnalyticsTab = React.memo(() => {
 				modelPerformance={analytics?.modelPerformance || []}
 				costByModel={costByModel}
 				loading={loading}
-				timeRange={timeRange}
 			/>
 
 			{/* Token Speed Analytics */}
 			<TokenSpeedAnalytics
-				timeSeriesData={data}
+				speedTimeSeries={analytics?.speedTimeSeries ?? []}
+				medianTokensPerSecond={analytics?.totals.medianTokensPerSecond ?? null}
+				p95TokensPerSecond={analytics?.totals.p95TokensPerSecond ?? null}
+				avgResponseTimeMs={analytics?.totals.avgResponseTime ?? 0}
 				modelPerformance={analytics?.modelPerformance || []}
 				loading={loading}
 				timeRange={timeRange}

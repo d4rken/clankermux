@@ -4,6 +4,7 @@ import {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,
 } from "@clankermux/proxy";
+import type { StorageUsageResponse } from "../types";
 
 export function createStorageHandler(dbOps: DatabaseOperations) {
 	return async (): Promise<Response> => {
@@ -34,6 +35,30 @@ export function createStorageHandler(dbOps: DatabaseOperations) {
 			null_account_rows_24h: metrics.nullAccountRows,
 		};
 
+		return jsonResponse(response);
+	};
+}
+
+/**
+ * `GET /api/storage/usage` — per-data-type storage breakdown for the retention
+ * settings card (payloads / requests / usage snapshots), plus the whole-file
+ * and WAL sizes.
+ *
+ * Kept off the frequently-polled `/api/storage` endpoint because the byte sums
+ * require full-table scans; the DB layer caches the measurement for a few
+ * minutes (`getRetentionStorageUsage`), so repeated Settings opens are cheap.
+ * Sits behind the same `/api/*` API-key auth as the other storage routes.
+ */
+export function createStorageUsageHandler(dbOps: DatabaseOperations) {
+	return async (): Promise<Response> => {
+		const usage = await dbOps.getRetentionStorageUsage();
+		const response: StorageUsageResponse = {
+			available: usage.available,
+			measuredAt: new Date(usage.measuredAt).toISOString(),
+			dbBytes: usage.dbBytes,
+			walBytes: usage.walBytes,
+			types: usage.types,
+		};
 		return jsonResponse(response);
 	};
 }

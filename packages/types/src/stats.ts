@@ -116,9 +116,29 @@ export interface ModelPerformance {
 	avgResponseTime: number;
 	p95ResponseTime: number;
 	errorRate: number;
-	avgTokensPerSecond: number | null;
-	minTokensPerSecond: number | null;
-	maxTokensPerSecond: number | null;
+	// Output-speed stats are percentile-based and artifact-filtered (see
+	// MAX_PLAUSIBLE_TOKENS_PER_SECOND). Median (p50) is the headline "typical"
+	// speed — robust to the few legitimately-fast requests that pull a mean
+	// around; p95 is the honest fast end (replaces the old raw MAX, which
+	// surfaced measurement artifacts directly). Null when a model has no
+	// requests with a usable speed sample in range.
+	medianTokensPerSecond: number | null;
+	p95TokensPerSecond: number | null;
+	// Number of in-range requests with a plausible recorded speed that feed the
+	// percentiles above (a p50/p95 over 1-2 samples is noise — the UI can warn).
+	speedSampleCount: number;
+}
+
+/**
+ * One per-model point in the output-speed-over-time series. Median (p50) tok/s
+ * per time bucket, artifact-filtered. Separate from {@link TimePoint} because
+ * it is always per-model and percentile-based, independent of the main chart's
+ * model-breakdown toggle.
+ */
+export interface SpeedTimePoint {
+	ts: number; // bucket start (ms)
+	model: string;
+	medianTps: number; // p50 tokens/sec in this bucket for this model
 }
 
 export interface RoutingFlowPoint {
@@ -185,6 +205,12 @@ export interface AnalyticsResponse {
 		planCostUsd: number;
 		apiCostUsd: number;
 		avgTokensPerSecond: number | null;
+		// Median (p50) and p95 output speed across all in-range requests,
+		// artifact-filtered. Drive the "Typical Output Speed" / "Peak Output
+		// Speed" tiles. Optional because an older server may not populate them —
+		// consumers should treat absence as null.
+		medianTokensPerSecond?: number | null;
+		p95TokensPerSecond?: number | null;
 		// Fixed-window burn-rate KPIs, independent of the active range/filters.
 		// Daily: sum(last 7d) / effectiveDays(≤7). Weekly: sum(last 30d) × 7 / effectiveDays(≤30).
 		// effectiveDays is clamped to the actual age of data so thin history doesn't inflate the average.
@@ -219,6 +245,9 @@ export interface AnalyticsResponse {
 	}>;
 	accountModelUsage: Array<{ account: string; model: string; count: number }>;
 	modelPerformance: ModelPerformance[];
+	// Per-model median output-speed time series (artifact-filtered). Optional
+	// because an older server may not populate it; consumers should `?? []`.
+	speedTimeSeries?: SpeedTimePoint[];
 	routing: RoutingAnalytics;
 }
 

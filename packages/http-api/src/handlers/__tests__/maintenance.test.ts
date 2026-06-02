@@ -33,14 +33,10 @@ function makeDbOps(
 		vacuumed: true,
 		error: undefined as string | undefined,
 	},
-	tableRowCounts?: Array<{ name: string; rowCount: number }>,
-	dbSizeBytes?: number,
 ) {
 	return {
 		cleanupOldRequests: mock(async () => cleanupResult),
 		compact: mock(async () => compactResult),
-		getTableRowCounts: mock(async () => tableRowCounts ?? []),
-		getDbSizeBytes: mock(async () => dbSizeBytes ?? 0),
 	} as unknown as import("@clankermux/database").DatabaseOperations;
 }
 
@@ -166,42 +162,7 @@ describe("createCleanupHandler", () => {
 		});
 	});
 
-	describe("PR-149 additions", () => {
-		it("dbSizeBytes appears in response body as a number", async () => {
-			const dbOps = makeDbOps(
-				{ removedRequests: 0, removedPayloads: 0 },
-				undefined,
-				[],
-				12345,
-			);
-			const handler = createCleanupHandler(dbOps, makeConfig());
-			const response = await handler();
-			const body = (await response.json()) as Record<string, unknown>;
-
-			expect(body).toHaveProperty("dbSizeBytes");
-			expect(typeof body.dbSizeBytes).toBe("number");
-			expect(body.dbSizeBytes).toBe(12345);
-		});
-
-		it("tableRowCounts appears in response body as an array", async () => {
-			const counts = [
-				{ name: "requests", rowCount: 42 },
-				{ name: "accounts", rowCount: 3 },
-			];
-			const dbOps = makeDbOps(
-				{ removedRequests: 0, removedPayloads: 0 },
-				undefined,
-				counts,
-				0,
-			);
-			const handler = createCleanupHandler(dbOps, makeConfig());
-			const response = await handler();
-			const body = (await response.json()) as Record<string, unknown>;
-
-			expect(Array.isArray(body.tableRowCounts)).toBe(true);
-			expect(body.tableRowCounts).toEqual(counts);
-		});
-
+	describe("payload storage handling", () => {
 		it("payloadCutoffIso is null when storePayloads=false", async () => {
 			const dbOps = makeDbOps();
 			const handler = createCleanupHandler(dbOps, makeConfig(3, 90, false));
@@ -232,15 +193,6 @@ describe("createCleanupHandler", () => {
 			expect(Number.isNaN(Date.parse(body.payloadCutoffIso as string))).toBe(
 				false,
 			);
-		});
-
-		it("getTableRowCounts and getDbSizeBytes are each called once per cleanup", async () => {
-			const dbOps = makeDbOps();
-			const handler = createCleanupHandler(dbOps, makeConfig());
-			await handler();
-
-			expect(dbOps.getTableRowCounts).toHaveBeenCalledTimes(1);
-			expect(dbOps.getDbSizeBytes).toHaveBeenCalledTimes(1);
 		});
 	});
 });

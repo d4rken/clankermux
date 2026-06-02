@@ -9,6 +9,7 @@ import {
 	getSortedAccountCostRows,
 	hasAnyAccountCostData,
 } from "../overview/account-cost-table-utils";
+import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import {
 	Card,
 	CardContent,
@@ -24,20 +25,39 @@ export type AccountPerformanceRow = AccountCostRow & {
 	successRate: number;
 };
 
+/**
+ * Range-scoped cost headlines shown atop the card (formerly the standalone Plan
+ * Value / API Cost tiles). `planCostUsd`/`apiCostUsd` follow this card's range;
+ * the two averages are server-computed over fixed 7-day / 30-day windows and do
+ * NOT move with the selector.
+ */
+export interface AccountPerformanceCostSummary {
+	planCostUsd: number;
+	apiCostUsd: number;
+	avgDailyPlanCostUsd: number;
+	avgWeeklyPlanCostUsd: number;
+}
+
 interface AccountPerformanceSectionProps {
 	accountPerformance: AccountPerformanceRow[];
 	loading: boolean;
+	/** Selected time range (controlled); re-keys the parent's analytics query. */
+	range: string;
+	onRangeChange: (range: string) => void;
+	costSummary: AccountPerformanceCostSummary;
 }
 
 /**
- * Account Performance bar chart + cost-breakdown table. Extracted verbatim from
- * the former Overview ChartsSection "Account Performance" block so it can live on
- * the Limits tab. Self-contained: derives the sorted cost rows and totals from
- * its own props.
+ * Account Performance card: a range-controlled bar chart, the per-account
+ * cost-breakdown table, and the folded-in Plan Value / API Cost summary band.
+ * Presentational — range state and the cost totals are supplied by the parent.
  */
 export function AccountPerformanceSection({
 	accountPerformance,
 	loading,
+	range,
+	onRangeChange,
+	costSummary,
 }: AccountPerformanceSectionProps) {
 	const sortedAccountCostRows = useMemo(
 		() => getSortedAccountCostRows(accountPerformance),
@@ -48,15 +68,69 @@ export function AccountPerformanceSection({
 		[sortedAccountCostRows],
 	);
 
+	// Fixed-window plan-value averages (7d / 30d) shown under the Plan Value
+	// headline — these don't move with the range selector above.
+	const planAvgRows = [
+		{
+			label: "Avg / day",
+			title:
+				"Average daily plan value over the last 7 days (fixed window, independent of the range above)",
+			value: costSummary.avgDailyPlanCostUsd,
+		},
+		{
+			label: "Avg / week",
+			title:
+				"Average weekly plan value, derived from the last 30 days (fixed window, independent of the range above)",
+			value: costSummary.avgWeeklyPlanCostUsd,
+		},
+	];
+
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle>Account Performance</CardTitle>
-				<CardDescription>
-					Request distribution and success rates by account
-				</CardDescription>
+				<div className="flex items-center justify-between gap-4">
+					<div>
+						<CardTitle>Account Performance</CardTitle>
+						<CardDescription>
+							Request distribution, success rates, and cost by account
+						</CardDescription>
+					</div>
+					<TimeRangeSelector value={range} onChange={onRangeChange} />
+				</div>
 			</CardHeader>
 			<CardContent>
+				{/* Range-scoped Plan Value / API Cost headlines (formerly standalone
+				    tiles). The two averages below Plan Value are fixed 7d/30d windows
+				    and stay put when the range above changes. */}
+				<div className="mb-4 grid grid-cols-2 gap-4 border-b pb-4">
+					<div>
+						<p className="text-sm text-muted-foreground">Plan Value</p>
+						<p className="text-2xl font-bold">
+							{formatCost(costSummary.planCostUsd)}
+						</p>
+						<div className="mt-2 space-y-1 text-xs">
+							{planAvgRows.map((row) => (
+								<div
+									key={row.label}
+									className="flex items-baseline justify-between"
+								>
+									<span className="text-muted-foreground" title={row.title}>
+										{row.label}
+									</span>
+									<span className="font-medium tabular-nums">
+										{formatCost(row.value)}
+									</span>
+								</div>
+							))}
+						</div>
+					</div>
+					<div>
+						<p className="text-sm text-muted-foreground">API Cost</p>
+						<p className="text-2xl font-bold">
+							{formatCost(costSummary.apiCostUsd)}
+						</p>
+					</div>
+				</div>
 				<BaseBarChart
 					data={accountPerformance as unknown as ChartDataPoint[]}
 					bars={[

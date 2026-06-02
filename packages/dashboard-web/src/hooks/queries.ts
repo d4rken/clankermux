@@ -56,6 +56,20 @@ export const useStorageInfo = (refetchInterval?: number) => {
 	});
 };
 
+/**
+ * Per-data-type storage usage for the retention settings card. The server
+ * caches the (scan-backed) measurement for a few minutes, so we mirror that
+ * with a 5-minute staleTime and don't poll — it refetches on mount and is
+ * invalidated explicitly after "Clean up now".
+ */
+export const useStorageUsage = () => {
+	return useQuery({
+		queryKey: queryKeys.storageUsage(),
+		queryFn: () => api.getStorageUsage(),
+		staleTime: 5 * 60_000,
+	});
+};
+
 export const useSystemStatus = (refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.systemStatus(),
@@ -168,6 +182,7 @@ export const useAnalytics = (
 		apiKeys?: string[];
 		status?: "all" | "success" | "error";
 	},
+	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
 ) => {
 	const logger = {
@@ -180,11 +195,12 @@ export const useAnalytics = (
 	};
 
 	return useQuery({
-		queryKey: queryKeys.analytics(timeRange, filters, modelBreakdown),
+		queryKey: queryKeys.analytics(timeRange, filters, viewMode, modelBreakdown),
 		queryFn: async () => {
 			logger.debug(`Starting analytics query`, {
 				timeRange,
 				filters,
+				viewMode,
 				modelBreakdown,
 				timestamp: new Date().toISOString(),
 			});
@@ -193,11 +209,13 @@ export const useAnalytics = (
 				const result = await api.getAnalytics(
 					timeRange,
 					filters,
+					viewMode,
 					modelBreakdown,
 				);
 				logger.debug(`Analytics query completed successfully`, {
 					timeRange,
 					filters,
+					viewMode,
 					modelBreakdown,
 					resultType: Array.isArray(result) ? "array" : "object",
 					timestamp: new Date().toISOString(),
@@ -207,6 +225,7 @@ export const useAnalytics = (
 				logger.error(`Analytics query failed`, {
 					timeRange,
 					filters,
+					viewMode,
 					modelBreakdown,
 					error: error instanceof Error ? error.message : String(error),
 					errorStack: error instanceof Error ? error.stack : undefined,
@@ -399,8 +418,13 @@ export const useSetUsageThrottling = () => {
 };
 
 export const useCleanupNow = () => {
+	const queryClient = useQueryClient();
 	return useMutation({
 		mutationFn: () => api.cleanupNow(),
+		onSuccess: () => {
+			// Sizes/row counts changed — refresh the standing per-type display.
+			queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+		},
 	});
 };
 

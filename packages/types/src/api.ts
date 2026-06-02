@@ -65,6 +65,44 @@ export interface CleanupResponse {
 	removedPayloads: number;
 	payloadCutoffIso: string | null;
 	requestCutoffIso: string;
-	dbSizeBytes: number;
-	tableRowCounts: Array<{ name: string; rowCount: number; dataBytes?: number }>;
+}
+
+/**
+ * One row of the per-data-type storage breakdown shown beside the retention
+ * controls. `key` ties the figure to a control (Payloads / Requests / Usage
+ * snapshots).
+ *
+ * `approxBytes` is *logical content bytes* — `SUM(LENGTH(col))` across the
+ * table's columns — not a true on-disk page size. The `dbstat` virtual table
+ * (which would give page-accurate per-table figures including indexes) is not
+ * compiled into the bundled bun:sqlite build, so per-row index/page overhead
+ * is not attributable here. The per-type figures therefore deliberately
+ * undercount and will NOT sum to `dbBytes`; the UI labels them approximate.
+ */
+export interface StorageUsageType {
+	key: "payloads" | "requests" | "usage_snapshots";
+	/** Underlying SQLite table that was measured. */
+	table: string;
+	rowCount: number;
+	approxBytes: number;
+}
+
+/**
+ * Response from `GET /api/storage/usage` — backs the standing "space used per
+ * retained data type" display in the retention settings card. Measured on the
+ * server and cached briefly (a full-table scan is needed for the byte sums).
+ */
+export interface StorageUsageResponse {
+	/**
+	 * False when running against PostgreSQL — per-table logical sizing is
+	 * SQLite-only (mirrors getTableRowCounts). The card hides sizes then.
+	 */
+	available: boolean;
+	/** ISO timestamp of when these figures were measured (possibly cached). */
+	measuredAt: string;
+	/** Whole SQLite file size on disk, bytes — exact (includes indexes/free pages). */
+	dbBytes: number;
+	/** WAL sidecar size, bytes. */
+	walBytes: number;
+	types: StorageUsageType[];
 }

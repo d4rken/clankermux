@@ -6,8 +6,6 @@ export { BaseScatterChart } from "./BaseScatterChart";
 export { ChartContainer } from "./ChartContainer";
 export { ChartTooltip } from "./ChartTooltip";
 export { ModelPerformanceChart } from "./ModelPerformanceChart";
-export { ModelPerformanceComparison } from "./ModelPerformanceComparison";
-export { ModelTokenSpeedChart } from "./ModelTokenSpeedChart";
 export { MultiModelChart } from "./MultiModelChart";
 export { RequestVolumeChart } from "./RequestVolumeChart";
 export { RequestVolumeSuccessChart } from "./RequestVolumeSuccessChart";

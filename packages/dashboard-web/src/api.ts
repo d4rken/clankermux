@@ -10,6 +10,7 @@ import type {
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
+	StorageUsageResponse,
 	SystemStatusResponse,
 	UsageHistoryResponse,
 } from "@clankermux/types";
@@ -678,6 +679,7 @@ class API extends HttpClient {
 			apiKeys?: string[];
 			status?: "all" | "success" | "error";
 		},
+		mode: "normal" | "cumulative" = "normal",
 		modelBreakdown?: boolean,
 	): Promise<AnalyticsResponse> {
 		const params = new URLSearchParams({ range });
@@ -694,6 +696,9 @@ class API extends HttpClient {
 		if (filters?.status && filters.status !== "all") {
 			params.append("status", filters.status);
 		}
+		if (mode === "cumulative") {
+			params.append("mode", "cumulative");
+		}
 		if (modelBreakdown) {
 			params.append("modelBreakdown", "true");
 		}
@@ -704,6 +709,7 @@ class API extends HttpClient {
 		this.logger.info(`Fetching analytics data: ${url}`, {
 			range,
 			filters,
+			mode,
 			modelBreakdown,
 			timestamp: new Date().toISOString(),
 		});
@@ -729,6 +735,7 @@ class API extends HttpClient {
 					url,
 					range,
 					filters,
+					mode,
 					modelBreakdown,
 					errorDetails: error,
 					timestamp: new Date().toISOString(),
@@ -1524,12 +1531,6 @@ class API extends HttpClient {
 		removedPayloads: number;
 		payloadCutoffIso: string | null;
 		requestCutoffIso: string;
-		dbSizeBytes: number;
-		tableRowCounts: Array<{
-			name: string;
-			rowCount: number;
-			dataBytes?: number;
-		}>;
 	}> {
 		const startTime = Date.now();
 		const url = "/api/maintenance/cleanup";
@@ -1542,12 +1543,6 @@ class API extends HttpClient {
 				removedPayloads: number;
 				payloadCutoffIso: string | null;
 				requestCutoffIso: string;
-				dbSizeBytes: number;
-				tableRowCounts: Array<{
-					name: string;
-					rowCount: number;
-					dataBytes?: number;
-				}>;
 			}>(url, undefined, { timeout: 10 * 60 * 1000 });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
@@ -1878,6 +1873,29 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<StorageInfoResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	async getStorageUsage(): Promise<StorageUsageResponse> {
+		const startTime = Date.now();
+		const url = "/api/storage/usage";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			// The server computes per-table byte sums via full-table scans (then
+			// caches for a few minutes), so allow a generous timeout on the first,
+			// uncached read of a large database.
+			const response = await this.get<StorageUsageResponse>(url, {
+				timeout: 60_000,
+			});
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
