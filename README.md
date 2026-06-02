@@ -27,9 +27,6 @@ Changes:
 * Improved fallover mechanims, reduced token churn.
 * Additional analytics: Usage windows, cache hit rate, model performance and system status
 
-Feel free to use this fork, but it's not build for others to use, it is just what I use, made public.
-Bug reports are welcome, feature requests are not... 🤷‍♂️
-
 ## Build from source
 
 Requires [Bun](https://bun.sh).
