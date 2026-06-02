@@ -11,11 +11,7 @@ import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
-import { RoutingSummaryCard } from "./overview/RoutingSummaryCard";
-import {
-	StorageIntegrityBanner,
-	StorageIntegrityCard,
-} from "./overview/StorageIntegrityCard";
+import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemStatus } from "./overview/SystemStatus";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
 
@@ -205,8 +201,6 @@ export const OverviewTab = React.memo(() => {
 				/>
 			</div>
 
-			<RoutingSummaryCard routing={analytics?.routing} />
-
 			<ChartsSection
 				timeSeriesData={timeSeriesData}
 				modelData={modelData}
@@ -215,10 +209,7 @@ export const OverviewTab = React.memo(() => {
 				loading={loading}
 			/>
 
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-				<SystemStatus />
-				<StorageIntegrityCard />
-			</div>
+			<SystemStatus />
 
 			{accounts && <RateLimitInfo accounts={accounts} />}
 		</div>
