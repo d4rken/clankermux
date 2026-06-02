@@ -1,4 +1,5 @@
 import { formatNumber } from "@clankermux/ui-common";
+import { format } from "date-fns";
 import {
 	Area,
 	CartesianGrid,
@@ -18,15 +19,39 @@ import { getChartHeight } from "./chart-utils";
 
 interface RequestVolumeSuccessChartProps {
 	data: Array<{
-		time: string;
+		ts: number;
 		requests: number;
 		successRate: number;
 	}>;
+	/** Selected dashboard range; controls how bucket timestamps are labelled. */
+	timeRange: string;
 	loading?: boolean;
 	height?: "small" | "medium" | "large" | number;
 }
 
 const GRADIENT_ID = "requestVolumeGradient";
+
+const isMultiDayRange = (range: string) => range === "7d" || range === "30d";
+
+/**
+ * Compact X-axis tick: just the time within a day, but the date once the range
+ * spans more than 24h (where bare "HH:mm" ticks would be ambiguous across days).
+ */
+function formatAxisLabel(ts: number, range: string): string {
+	const date = new Date(ts);
+	return isMultiDayRange(range) ? format(date, "MMM d") : format(date, "HH:mm");
+}
+
+/**
+ * Unambiguous tooltip header — always carries the date. 30d uses daily buckets,
+ * so the (meaningless) 00:00 time is dropped in favour of a year for clarity.
+ */
+function formatTooltipLabel(ts: number, range: string): string {
+	const date = new Date(ts);
+	return range === "30d"
+		? format(date, "MMM d, yyyy")
+		: format(date, "MMM d, HH:mm");
+}
 
 /**
  * Combined Overview chart: request volume (filled area, left axis) and success
@@ -37,6 +62,7 @@ const GRADIENT_ID = "requestVolumeGradient";
  */
 export function RequestVolumeSuccessChart({
 	data,
+	timeRange,
 	loading = false,
 	height = "medium",
 }: RequestVolumeSuccessChartProps) {
@@ -66,7 +92,12 @@ export function RequestVolumeSuccessChart({
 						strokeDasharray={CHART_PROPS.strokeDasharray}
 						className={CHART_PROPS.gridClassName}
 					/>
-					<XAxis dataKey="time" className="text-xs" height={30} />
+					<XAxis
+						dataKey="ts"
+						className="text-xs"
+						height={30}
+						tickFormatter={(value) => formatAxisLabel(Number(value), timeRange)}
+					/>
 					<YAxis
 						yAxisId="requests"
 						className="text-xs"
@@ -85,6 +116,15 @@ export function RequestVolumeSuccessChart({
 								formatters={{
 									requests: (value) => formatNumber(Number(value)),
 									successRate: (value) => `${Number(value).toFixed(1)}%`,
+								}}
+								labelFormatter={(label, payload) => {
+									// Resolve the header from the hovered bucket's unique `ts`
+									// (the axis key) so it always shows the correct date+time —
+									// the compact axis tick omits the date on short ranges.
+									const ts = payload?.[0]?.payload?.ts;
+									return typeof ts === "number"
+										? formatTooltipLabel(ts, timeRange)
+										: label;
 								}}
 							/>
 						}

@@ -11,7 +11,7 @@ import {
 
 interface ChartsSectionProps {
 	timeSeriesData: Array<{
-		time: string;
+		ts: number;
 		requests: number;
 		successRate: number;
 		responseTime: number;
@@ -19,6 +19,8 @@ interface ChartsSectionProps {
 		planCost: number;
 		apiCost: number;
 	}>;
+	/** Selected dashboard range — forwarded to the time-series chart for labelling. */
+	timeRange: string;
 	modelData: Array<{ name: string; value: number }>;
 	accountModelUsageData: Array<{
 		account: string;
@@ -35,6 +37,7 @@ interface ChartsSectionProps {
 
 export function ChartsSection({
 	timeSeriesData,
+	timeRange,
 	modelData,
 	accountModelUsageData,
 	apiKeyPerformanceData,
@@ -85,6 +88,7 @@ export function ChartsSection({
 				<CardContent>
 					<RequestVolumeSuccessChart
 						data={timeSeriesData}
+						timeRange={timeRange}
 						loading={loading}
 						height="medium"
 					/>
@@ -92,26 +96,26 @@ export function ChartsSection({
 			</Card>
 
 			{/* Charts Row 2 — three donut charts */}
-			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+			<div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 				{/* Model Distribution */}
 				<Card>
-					<CardHeader>
+					<CardHeader className="p-4">
 						<CardTitle>Model Usage</CardTitle>
 						<CardDescription>
 							Distribution of API calls by model
 						</CardDescription>
 					</CardHeader>
-					<CardContent>
+					<CardContent className="p-4 pt-0">
 						<BasePieChart
 							data={modelData}
 							loading={loading}
-							height="small"
-							innerRadius={60}
-							outerRadius={80}
+							height="compact"
+							innerRadius={48}
+							outerRadius={72}
 							paddingAngle={5}
 							tooltipStyle="success"
 						/>
-						<div className="mt-4 space-y-2">
+						<div className="mt-3 space-y-2">
 							{modelData.map((model, index) => (
 								<div
 									key={model.name}
@@ -136,23 +140,23 @@ export function ChartsSection({
 
 				{/* Usage by Account */}
 				<Card>
-					<CardHeader>
+					<CardHeader className="p-4">
 						<CardTitle>Usage by Account</CardTitle>
 						<CardDescription>
 							Request distribution across accounts
 						</CardDescription>
 					</CardHeader>
-					<CardContent>
+					<CardContent className="p-4 pt-0">
 						<BasePieChart
 							data={accountUsageDonutData}
 							loading={loading}
-							height="small"
-							innerRadius={60}
-							outerRadius={80}
+							height="compact"
+							innerRadius={48}
+							outerRadius={72}
 							paddingAngle={5}
 							tooltipStyle="success"
 						/>
-						<div className="mt-4 space-y-2">
+						<div className="mt-3 space-y-2">
 							{accountUsageDonutData.map((account, index) => {
 								const models = accountModelBreakdown.get(account.name) ?? [];
 								return (
@@ -194,23 +198,23 @@ export function ChartsSection({
 
 				{/* Usage by Client API Key */}
 				<Card>
-					<CardHeader>
+					<CardHeader className="p-4">
 						<CardTitle>Usage by API Key</CardTitle>
 						<CardDescription>
 							Request distribution across your client API keys
 						</CardDescription>
 					</CardHeader>
-					<CardContent>
+					<CardContent className="p-4 pt-0">
 						<BasePieChart
 							data={apiKeyDonutData}
 							loading={loading}
-							height="small"
-							innerRadius={60}
-							outerRadius={80}
+							height="compact"
+							innerRadius={48}
+							outerRadius={72}
 							paddingAngle={5}
 							tooltipStyle="success"
 						/>
-						<div className="mt-4 space-y-2">
+						<div className="mt-3 space-y-2">
 							{apiKeyDonutData.map((key, index) => (
 								<div
 									key={key.name}
