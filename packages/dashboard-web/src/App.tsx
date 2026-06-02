@@ -93,7 +93,7 @@ export function App() {
 			{
 				path: "/combos",
 				element: <CombosTab />,
-				title: "Combos Management",
+				title: "Routing Chains",
 				subtitle: "Define fallback chains for model families",
 			},
 			{

@@ -47,7 +47,7 @@ const NAV_ITEMS: NavItem[] = [
 	{ label: "Limits", icon: Gauge, path: "/limits" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
-	{ label: "Combos", icon: Zap, path: "/combos" },
+	{ label: "Routing Chains", icon: Zap, path: "/combos" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "Settings", icon: Settings, path: "/settings" },

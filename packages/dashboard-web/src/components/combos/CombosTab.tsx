@@ -40,19 +40,23 @@ export function CombosTab() {
 
 			<div className="space-y-4">
 				<div className="flex items-center justify-between">
-					<h2 className="text-lg font-semibold">Combos</h2>
+					<h2 className="text-lg font-semibold">Routing Chains</h2>
 					<Button onClick={() => setIsCreateDialogOpen(true)}>
 						<Plus className="mr-2 h-4 w-4" />
-						Create Combo
+						Create Routing Chain
 					</Button>
 				</div>
 
 				{combosQuery.isLoading && (
-					<p className="text-sm text-muted-foreground">Loading combos...</p>
+					<p className="text-sm text-muted-foreground">
+						Loading routing chains...
+					</p>
 				)}
 
 				{combosQuery.isError && (
-					<p className="text-sm text-destructive">Failed to load combos.</p>
+					<p className="text-sm text-destructive">
+						Failed to load routing chains.
+					</p>
 				)}
 
 				{!combosQuery.isLoading &&
@@ -60,11 +64,11 @@ export function CombosTab() {
 					combos.length === 0 && (
 						<div className="flex flex-col items-center gap-3 rounded-lg border border-dashed px-8 py-12 text-center">
 							<p className="text-sm text-muted-foreground">
-								No combos yet. Create one to define a fallback chain.
+								No routing chains yet. Create one to define a fallback chain.
 							</p>
 							<Button size="sm" onClick={() => setIsCreateDialogOpen(true)}>
 								<Plus className="mr-2 h-4 w-4" />
-								Create Combo
+								Create Routing Chain
 							</Button>
 						</div>
 					)}

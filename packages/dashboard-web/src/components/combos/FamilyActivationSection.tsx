@@ -61,7 +61,9 @@ export function FamilyActivationSection() {
 			<Card>
 				<CardHeader>
 					<CardTitle>Family Activation</CardTitle>
-					<CardDescription>Assign combos to model families</CardDescription>
+					<CardDescription>
+						Assign routing chains to model families
+					</CardDescription>
 				</CardHeader>
 				<CardContent>
 					<p className="text-sm text-muted-foreground">Loading...</p>
@@ -75,7 +77,9 @@ export function FamilyActivationSection() {
 			<Card>
 				<CardHeader>
 					<CardTitle>Family Activation</CardTitle>
-					<CardDescription>Assign combos to model families</CardDescription>
+					<CardDescription>
+						Assign routing chains to model families
+					</CardDescription>
 				</CardHeader>
 				<CardContent>
 					<p className="text-sm text-destructive">
@@ -90,7 +94,9 @@ export function FamilyActivationSection() {
 		<Card>
 			<CardHeader>
 				<CardTitle>Family Activation</CardTitle>
-				<CardDescription>Assign combos to model families</CardDescription>
+				<CardDescription>
+					Assign routing chains to model families
+				</CardDescription>
 			</CardHeader>
 			<CardContent>
 				<div className="space-y-3">
@@ -116,7 +122,7 @@ export function FamilyActivationSection() {
 									disabled={!isEnabled || assignFamily.isPending}
 								>
 									<SelectTrigger className={!isEnabled ? "opacity-40" : ""}>
-										<SelectValue placeholder="Select combo..." />
+										<SelectValue placeholder="Select routing chain..." />
 									</SelectTrigger>
 									<SelectContent>
 										<SelectItem value="none">None</SelectItem>

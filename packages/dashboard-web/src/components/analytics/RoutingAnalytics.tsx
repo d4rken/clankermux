@@ -38,7 +38,7 @@ const DECISION_LABELS: Record<string, string> = {
 	affinity_miss: "Affinity miss",
 	affinity_reassigned: "Affinity reassigned",
 	auto_fallback: "Auto fallback",
-	combo: "Combo",
+	combo: "Routing Chain",
 	force_account_global: "Forced (global)",
 	forced_account: "Forced account",
 	global_session: "Global session",
@@ -55,7 +55,7 @@ const DECISION_EXPLANATIONS: Record<string, string> = {
 		"Affinity moved because priority changed or the prior account was durably unavailable.",
 	auto_fallback:
 		"A higher-priority fallback account became usable after its window reset.",
-	combo: "An active model-family combo selected the account slot.",
+	combo: "An active model-family routing chain selected the account slot.",
 	force_account_global:
 		"The global force-account override routed all traffic to this account, bypassing selection, gating, and failover.",
 	forced_account: "A request header explicitly selected this account.",
