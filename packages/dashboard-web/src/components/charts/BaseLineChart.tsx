@@ -38,6 +38,12 @@ interface LineConfig {
 	name?: string;
 	/** Per-line override for the curve type. Falls back to the chart-level `lineType`. */
 	type?: LineCurveType;
+	/** Dash pattern, e.g. "5 3" for a dashed (forecast) line. Solid when omitted. */
+	strokeDasharray?: string;
+	/** Draw across null gaps. Defaults to false (nulls render as gaps). */
+	connectNulls?: boolean;
+	/** Legend marker. Set "none" to hide a line from the legend (e.g. forecast twins). */
+	legendType?: "line" | "none";
 }
 
 interface ReferenceLineConfig {
@@ -132,6 +138,9 @@ export function BaseLineChart({
 							dataKey={lineConfig.dataKey}
 							stroke={lineConfig.stroke || COLORS.primary}
 							strokeWidth={lineConfig.strokeWidth || 2}
+							strokeDasharray={lineConfig.strokeDasharray}
+							connectNulls={lineConfig.connectNulls ?? false}
+							legendType={lineConfig.legendType}
 							dot={lineConfig.dot ?? false}
 							name={lineConfig.name || lineConfig.dataKey}
 							animationDuration={animationDuration}
