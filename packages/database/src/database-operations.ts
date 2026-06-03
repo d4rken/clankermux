@@ -13,6 +13,8 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	IntegrityStatus,
+	MemoryHistoryPoint,
+	MemorySnapshotRow,
 	RankedSnapshot,
 	RateLimitReason,
 	StorageUsageType,
@@ -28,6 +30,7 @@ import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { ComboRepository } from "./repositories/combo.repository";
+import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
 	type RequestData,
@@ -191,6 +194,14 @@ const INC_VAC_SKIP_ESCALATE_AT = 3;
 const DEFAULT_USAGE_SNAPSHOT_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 
 /**
+ * Fallback retention for the memory_snapshots time-series when a caller of
+ * cleanupOldRequests() doesn't pass an explicit memorySnapshotRetentionMs.
+ * 14 days mirrors the default returned by config.getMemorySnapshotRetentionDays();
+ * the server's hourly/startup cleanup passes the configured value explicitly.
+ */
+const DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS = 14 * TIME_CONSTANTS.DAY;
+
+/**
  * How long a per-data-type storage-usage measurement is reused before the next
  * dashboard read triggers a fresh scan. The byte sums require a full-table
  * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
@@ -204,12 +215,13 @@ const RETENTION_STORAGE_USAGE_TTL_MS = 5 * TIME_CONSTANTS.MINUTE;
  * the controls (payloads, requests, usage snapshots).
  */
 const RETENTION_USAGE_TABLES: ReadonlyArray<{
-	key: "payloads" | "requests" | "usage_snapshots";
+	key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots";
 	table: string;
 }> = [
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
+	{ key: "memory_snapshots", table: "memory_snapshots" },
 ];
 
 /**
@@ -300,6 +312,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private apiKeys: ApiKeyRepository;
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
+	private memorySnapshots: MemorySnapshotRepository;
 
 	constructor(
 		dbPath?: string,
@@ -381,6 +394,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.apiKeys = new ApiKeyRepository(this.adapter);
 		this.combo = new ComboRepository(this.adapter);
 		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
+		this.memorySnapshots = new MemorySnapshotRepository(this.adapter);
 	}
 
 	/**
@@ -1181,25 +1195,28 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — three explicit passes:
+	// Cleanup operations — four explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
 	// Pass 3: delete usage snapshots older than snapshotRetentionMs
+	// Pass 4: delete memory snapshots older than memorySnapshotRetentionMs
 	//
-	// `snapshotRetentionMs` is optional so existing callers (including the
-	// http-api "Clean up now" handler) prune snapshots for free without being
-	// changed: when omitted it falls back to DEFAULT_USAGE_SNAPSHOT_RETENTION_MS
-	// (90 days), matching config.getUsageSnapshotRetentionDays()'s default. The
-	// server's hourly + startup jobs pass the configured value explicitly so a
-	// non-default retention is honored there.
+	// `snapshotRetentionMs` and `memorySnapshotRetentionMs` are optional so
+	// existing callers (including the http-api "Clean up now" handler) prune
+	// snapshots for free without being changed: when omitted each falls back to
+	// its DEFAULT_*_RETENTION_MS, matching the corresponding config getter's
+	// default. The server's hourly + startup jobs pass the configured values
+	// explicitly so a non-default retention is honored there.
 	async cleanupOldRequests(
 		payloadRetentionMs: number,
 		requestRetentionMs?: number,
 		snapshotRetentionMs?: number,
+		memorySnapshotRetentionMs?: number,
 	): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
 		removedSnapshots: number;
+		removedMemorySnapshots: number;
 	}> {
 		const now = Date.now();
 
@@ -1237,6 +1254,24 @@ OAuth tokens will need to be re-authenticated.
 			);
 		}
 
+		// Pass 4 — memory snapshots (time-series for the Memory Usage graph)
+		const effectiveMemorySnapshotRetentionMs =
+			typeof memorySnapshotRetentionMs === "number" &&
+			Number.isFinite(memorySnapshotRetentionMs)
+				? memorySnapshotRetentionMs
+				: DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS;
+		let removedMemorySnapshots = 0;
+		try {
+			const memorySnapshotCutoff = now - effectiveMemorySnapshotRetentionMs;
+			removedMemorySnapshots =
+				await this.memorySnapshots.deleteOlderThan(memorySnapshotCutoff);
+		} catch (err) {
+			// Best-effort, like the usage-snapshot pass above.
+			console.warn(
+				`[cleanupOldRequests] memory snapshot pruning failed: ${err}`,
+			);
+		}
+
 		// Row counts and sizes just changed — drop the cached storage-usage
 		// measurement so the next dashboard read recomputes (the standing
 		// per-type display refreshes right after a manual cleanup).
@@ -1246,6 +1281,7 @@ OAuth tokens will need to be re-authenticated.
 			removedRequests,
 			removedPayloads: removedPayloadsByAge + removedOrphans,
 			removedSnapshots,
+			removedMemorySnapshots,
 		};
 	}
 
@@ -1909,6 +1945,35 @@ OAuth tokens will need to be re-authenticated.
 			() => this.usageSnapshots.deleteOlderThan(cutoffMs),
 			this.retryConfig,
 			"deleteUsageSnapshotsOlderThan",
+		);
+	}
+
+	// ── Memory snapshot operations delegated to repository ─────────────────────
+
+	async insertMemorySnapshot(row: MemorySnapshotRow): Promise<void> {
+		await withDatabaseRetry(
+			() => this.memorySnapshots.insert(row),
+			this.retryConfig,
+			"insertMemorySnapshot",
+		);
+	}
+
+	async getMemorySnapshots(opts: {
+		sinceMs: number;
+		bucketMs: number;
+	}): Promise<MemoryHistoryPoint[]> {
+		return withDatabaseRetry(
+			() => this.memorySnapshots.getSnapshots(opts),
+			this.retryConfig,
+			"getMemorySnapshots",
+		);
+	}
+
+	async deleteMemorySnapshotsOlderThan(cutoffMs: number): Promise<number> {
+		return withDatabaseRetry(
+			() => this.memorySnapshots.deleteOlderThan(cutoffMs),
+			this.retryConfig,
+			"deleteMemorySnapshotsOlderThan",
 		);
 	}
 }

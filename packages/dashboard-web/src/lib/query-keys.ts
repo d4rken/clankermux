@@ -19,6 +19,8 @@ export const queryKeys = {
 		] as const,
 	usageHistory: (range?: string) =>
 		[...queryKeys.all, "usage-history", { range }] as const,
+	memoryHistory: (range?: string) =>
+		[...queryKeys.all, "memory-history", { range }] as const,
 	requests: (limit?: number) =>
 		[...queryKeys.all, "requests", { limit }] as const,
 	logs: () => [...queryKeys.all, "logs"] as const,

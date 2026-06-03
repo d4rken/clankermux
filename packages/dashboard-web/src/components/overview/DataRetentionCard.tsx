@@ -31,13 +31,23 @@ export function DataRetentionCard() {
 	const [usageSnapshotDays, setUsageSnapshotDays] = useState<number>(
 		data?.usageSnapshotDays ?? 90,
 	);
+	const [memorySnapshotDays, setMemorySnapshotDays] = useState<number>(
+		data?.memorySnapshotDays ?? 14,
+	);
 
 	useEffect(() => {
 		if (typeof data?.payloadDays === "number") setPayloadDays(data.payloadDays);
 		if (typeof data?.requestDays === "number") setRequestDays(data.requestDays);
 		if (typeof data?.usageSnapshotDays === "number")
 			setUsageSnapshotDays(data.usageSnapshotDays);
-	}, [data?.payloadDays, data?.requestDays, data?.usageSnapshotDays]);
+		if (typeof data?.memorySnapshotDays === "number")
+			setMemorySnapshotDays(data.memorySnapshotDays);
+	}, [
+		data?.payloadDays,
+		data?.requestDays,
+		data?.usageSnapshotDays,
+		data?.memorySnapshotDays,
+	]);
 
 	const disabled = isLoading || setRetention.isPending;
 	const validPayload =
@@ -48,10 +58,16 @@ export function DataRetentionCard() {
 		Number.isFinite(usageSnapshotDays) &&
 		usageSnapshotDays >= 1 &&
 		usageSnapshotDays <= 3650;
+	const validMemorySnapshots =
+		Number.isFinite(memorySnapshotDays) &&
+		memorySnapshotDays >= 1 &&
+		memorySnapshotDays <= 3650;
 
 	// Per-data-type storage usage, keyed for inline lookup next to each control.
 	const usageByKey = new Map((usage?.types ?? []).map((t) => [t.key, t]));
-	const usageHint = (key: "payloads" | "requests" | "usage_snapshots") => {
+	const usageHint = (
+		key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots",
+	) => {
 		if (!usage?.available) return null;
 		const t = usageByKey.get(key);
 		if (!t) return null;
@@ -154,6 +170,37 @@ export function DataRetentionCard() {
 					<p className="text-xs text-muted-foreground mt-1">
 						How long per-account limit-usage history is kept for the Limits
 						graph.
+					</p>
+				</div>
+
+				<div className="pt-2">
+					<div className="flex items-center gap-2">
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">Memory history</span>
+							<Input
+								type="number"
+								min={1}
+								max={3650}
+								value={memorySnapshotDays}
+								onChange={(e) =>
+									setMemorySnapshotDays(parseInt(e.target.value || "0", 10))
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">days</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validMemorySnapshots}
+							onClick={() => setRetention.mutate({ memorySnapshotDays })}
+						>
+							Save
+						</Button>
+					</div>
+					{usageHint("memory_snapshots")}
+					<p className="text-xs text-muted-foreground mt-1">
+						How long process memory history (RSS + heap) is kept for the
+						Overview Memory Usage graph.
 					</p>
 				</div>
 

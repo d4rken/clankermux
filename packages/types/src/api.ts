@@ -50,6 +50,7 @@ export interface RetentionGetResponse {
 	payloadDays: number;
 	requestDays: number;
 	usageSnapshotDays: number;
+	memorySnapshotDays: number;
 	storePayloads: boolean;
 }
 
@@ -57,6 +58,7 @@ export interface RetentionSetRequest {
 	payloadDays?: number;
 	requestDays?: number;
 	usageSnapshotDays?: number;
+	memorySnapshotDays?: number;
 	storePayloads?: boolean;
 }
 
@@ -80,7 +82,7 @@ export interface CleanupResponse {
  * undercount and will NOT sum to `dbBytes`; the UI labels them approximate.
  */
 export interface StorageUsageType {
-	key: "payloads" | "requests" | "usage_snapshots";
+	key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots";
 	/** Underlying SQLite table that was measured. */
 	table: string;
 	rowCount: number;

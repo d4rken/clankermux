@@ -7,6 +7,7 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	LogEvent,
+	MemoryHistoryResponse,
 	RequestPayload,
 	RequestResponse,
 	StatsWithAccounts,
@@ -811,6 +812,26 @@ class API extends HttpClient {
 		}
 	}
 
+	// Process memory footprint (RSS + JS heap) time-series for the Overview-tab
+	// "Memory Usage" chart. Backed by the direct (non-worker) memory-history handler.
+	async getMemoryHistory(range: string): Promise<MemoryHistoryResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/memory-history?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<MemoryHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
 	async pauseAccount(accountId: string): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/pause`;
@@ -1340,6 +1361,7 @@ class API extends HttpClient {
 		payloadDays: number;
 		requestDays: number;
 		usageSnapshotDays: number;
+		memorySnapshotDays: number;
 		storePayloads: boolean;
 	}> {
 		const startTime = Date.now();
@@ -1352,6 +1374,7 @@ class API extends HttpClient {
 				payloadDays: number;
 				requestDays: number;
 				usageSnapshotDays: number;
+				memorySnapshotDays: number;
 				storePayloads: boolean;
 			}>(url);
 			const duration = Date.now() - startTime;
@@ -1371,6 +1394,7 @@ class API extends HttpClient {
 		payloadDays?: number;
 		requestDays?: number;
 		usageSnapshotDays?: number;
+		memorySnapshotDays?: number;
 		storePayloads?: boolean;
 	}): Promise<void> {
 		const startTime = Date.now();

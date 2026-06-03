@@ -93,6 +93,7 @@ export function createConfigHandlers(
 				payloadDays: config.getDataRetentionDays(),
 				requestDays: config.getRequestRetentionDays(),
 				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
+				memorySnapshotDays: config.getMemorySnapshotRetentionDays(),
 				storePayloads: config.getStorePayloads(),
 			});
 		},
@@ -141,6 +142,22 @@ export function createConfigHandlers(
 					return errorResponse(BadRequest("Invalid 'usageSnapshotDays'"));
 				}
 				config.setUsageSnapshotRetentionDays(usageSnapshotDays);
+				updated = true;
+			}
+			if (body.memorySnapshotDays !== undefined) {
+				const memorySnapshotDays = validateNumber(
+					body.memorySnapshotDays,
+					"memorySnapshotDays",
+					{
+						min: 1,
+						max: 3650,
+						integer: true,
+					},
+				);
+				if (typeof memorySnapshotDays !== "number") {
+					return errorResponse(BadRequest("Invalid 'memorySnapshotDays'"));
+				}
+				config.setMemorySnapshotRetentionDays(memorySnapshotDays);
 				updated = true;
 			}
 			if (body.storePayloads !== undefined) {

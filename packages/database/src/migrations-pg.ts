@@ -293,6 +293,16 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
 	);
 
+	// Create memory_snapshots table — append-only process memory footprint
+	// time-series (RSS + JS heap) backing the dashboard "Memory Usage" graph.
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS memory_snapshots (
+			sampled_at BIGINT PRIMARY KEY,
+			rss_bytes BIGINT NOT NULL,
+			heap_used_bytes BIGINT NOT NULL
+		)
+	`);
+
 	log.info("PostgreSQL schema ensured");
 }
 
@@ -544,6 +554,15 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 	} catch (_error) {
 		// Index may already exist
 	}
+
+	// Ensure memory_snapshots table exists (for upgrades from pre-memory-graph installs)
+	await adapter.unsafe(`
+		CREATE TABLE IF NOT EXISTS memory_snapshots (
+			sampled_at BIGINT PRIMARY KEY,
+			rss_bytes BIGINT NOT NULL,
+			heap_used_bytes BIGINT NOT NULL
+		)
+	`);
 
 	// Rename oauth_sessions.mode 'max' → 'claude-oauth'
 	try {
