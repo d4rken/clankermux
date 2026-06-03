@@ -384,7 +384,8 @@ export function ensureSchema(db: Database): void {
 		CREATE TABLE IF NOT EXISTS memory_snapshots (
 			sampled_at INTEGER PRIMARY KEY,
 			rss_bytes INTEGER NOT NULL,
-			heap_used_bytes INTEGER NOT NULL
+			heap_used_bytes INTEGER NOT NULL,
+			heap_total_bytes INTEGER
 		)
 	`);
 }
@@ -455,6 +456,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 		.prepare("PRAGMA table_info(request_routing)")
 		.all() as Array<{ name: string }>;
 	const requestRoutingColumnNames = requestRoutingInfo.map((col) => col.name);
+
+	// memory_snapshots exists by now (ensureSchema ran above); this read feeds the
+	// additive heap_total_bytes migration for DBs created before that column.
+	const memorySnapshotsInfo = db
+		.prepare("PRAGMA table_info(memory_snapshots)")
+		.all() as Array<{ name: string }>;
+	const memorySnapshotsColumnNames = memorySnapshotsInfo.map((col) => col.name);
 
 	const apiKeysInfo = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{
 		name: string;
@@ -972,6 +980,15 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE request_routing ADD COLUMN affinity_scope TEXT",
 			).run();
 			log.info("Added affinity_scope column to request_routing table");
+		}
+
+		// heap_total_bytes (committed heap) was added after memory_snapshots
+		// first shipped with just rss/heap_used; backfill it for existing DBs.
+		if (!memorySnapshotsColumnNames.includes("heap_total_bytes")) {
+			db.prepare(
+				"ALTER TABLE memory_snapshots ADD COLUMN heap_total_bytes INTEGER",
+			).run();
+			log.info("Added heap_total_bytes column to memory_snapshots table");
 		}
 
 		// Drop role column from api_keys if it exists (cleanup migration).

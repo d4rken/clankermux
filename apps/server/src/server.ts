@@ -1271,6 +1271,7 @@ export default async function startServer(options?: {
 				sampledAt: Date.now(),
 				rssBytes: mem.rss,
 				heapUsedBytes: mem.heapUsed,
+				heapTotalBytes: mem.heapTotal,
 			})
 			.catch((err) => memLog.debug(`memory snapshot insert failed: ${err}`));
 

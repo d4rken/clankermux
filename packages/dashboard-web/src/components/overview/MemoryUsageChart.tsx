@@ -41,6 +41,8 @@ interface MemoryRow {
 	ts: number;
 	rssMb: number;
 	heapMb: number;
+	/** Committed heap; null for buckets sampled before the column existed. */
+	heapTotalMb: number | null;
 }
 
 const BYTES_PER_MB = 1024 * 1024;
@@ -49,11 +51,12 @@ const EMPTY_MESSAGE =
 	"Collecting data — this graph fills in as memory samples accumulate (one per minute). History starts at deploy; a full 7-day view needs about a week of uptime.";
 
 /**
- * Overview "Memory Usage" chart: the proxy process's own RSS (filled area) and
- * JS heap-used (line) over a configurable range. RSS climbing while heap stays
- * flat is the classic native-leak signal — the band between the two lines is
- * non-heap (native) memory. Built directly on recharts primitives (like
- * RequestVolumeSuccessChart) since the Area + Line composition can't be
+ * Overview "Memory Usage" chart: the proxy process's own RSS (filled area),
+ * committed JS heap, and used JS heap (lines) over a configurable range. RSS
+ * climbing while heap stays flat is the classic native-leak signal — the band
+ * between RSS and heap-committed is non-heap (native) memory, while the
+ * committed-vs-used gap is GC headroom. Built directly on recharts primitives
+ * (like RequestVolumeSuccessChart) since the Area + Line composition can't be
  * expressed through the single-series Base* chart wrappers.
  */
 export function MemoryUsageChart({
@@ -68,6 +71,10 @@ export function MemoryUsageChart({
 			ts: p.ts,
 			rssMb: Math.round(p.rssBytes / BYTES_PER_MB),
 			heapMb: Math.round(p.heapUsedBytes / BYTES_PER_MB),
+			heapTotalMb:
+				p.heapTotalBytes == null
+					? null
+					: Math.round(p.heapTotalBytes / BYTES_PER_MB),
 		}));
 	}, [memoryHistory]);
 
@@ -82,9 +89,9 @@ export function MemoryUsageChart({
 					<div>
 						<CardTitle>Memory Usage</CardTitle>
 						<CardDescription>
-							Proxy process memory over time (MB). RSS is the filled area; JS
-							heap-used is the line — a widening gap between them is native
-							(non-heap) memory.
+							Proxy process memory over time (MB). RSS is the filled area;
+							committed and used JS heap are the lines — a widening RSS-vs-heap
+							gap is native (non-heap) memory.
 						</CardDescription>
 					</div>
 					<TimeRangeSelector value={range} onChange={onRangeChange} />
@@ -137,6 +144,10 @@ export function MemoryUsageChart({
 									<ChartTooltip
 										formatters={{
 											rssMb: (value) => `${formatNumber(Number(value))} MB`,
+											heapTotalMb: (value) =>
+												typeof value === "number"
+													? `${formatNumber(value)} MB`
+													: "n/a",
 											heapMb: (value) => `${formatNumber(Number(value))} MB`,
 										}}
 										labelFormatter={(label, payload) => {
@@ -160,6 +171,16 @@ export function MemoryUsageChart({
 								strokeWidth={2}
 								fillOpacity={1}
 								fill={`url(#${GRADIENT_ID})`}
+								isAnimationActive={false}
+							/>
+							<Line
+								type="monotone"
+								dataKey="heapTotalMb"
+								name="Heap (committed)"
+								stroke={COLORS.purple}
+								strokeWidth={2}
+								dot={false}
+								connectNulls
 								isAnimationActive={false}
 							/>
 							<Line
