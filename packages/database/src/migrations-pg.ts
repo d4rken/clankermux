@@ -299,7 +299,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 		CREATE TABLE IF NOT EXISTS memory_snapshots (
 			sampled_at BIGINT PRIMARY KEY,
 			rss_bytes BIGINT NOT NULL,
-			heap_used_bytes BIGINT NOT NULL
+			heap_used_bytes BIGINT NOT NULL,
+			heap_total_bytes BIGINT
 		)
 	`);
 
@@ -429,6 +430,12 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "priority",
 			definition:
 				"ALTER TABLE oauth_sessions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			table: "memory_snapshots",
+			column: "heap_total_bytes",
+			definition:
+				"ALTER TABLE memory_snapshots ADD COLUMN heap_total_bytes BIGINT",
 		},
 	];
 
@@ -560,7 +567,8 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 		CREATE TABLE IF NOT EXISTS memory_snapshots (
 			sampled_at BIGINT PRIMARY KEY,
 			rss_bytes BIGINT NOT NULL,
-			heap_used_bytes BIGINT NOT NULL
+			heap_used_bytes BIGINT NOT NULL,
+			heap_total_bytes BIGINT
 		)
 	`);
 

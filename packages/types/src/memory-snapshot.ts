@@ -8,7 +8,12 @@
 // visible instead of being smoothed away, which is the signal that matters for
 // leak-spotting (RSS climbing while heap stays flat ⇒ native leak).
 
-/** Write shape for a single memory sample (one tick). All sizes are bytes. */
+/**
+ * Write shape for a single memory sample (one tick). All sizes are bytes.
+ * `heapTotalBytes` is nullable so rows written before the column existed (a
+ * deployment that ran the pre-heap-committed schema) read back as null rather
+ * than breaking the series.
+ */
 export interface MemorySnapshotRow {
 	/** Sample time, ms since epoch. */
 	sampledAt: number;
@@ -16,6 +21,8 @@ export interface MemorySnapshotRow {
 	rssBytes: number;
 	/** JS heap used in bytes. */
 	heapUsedBytes: number;
+	/** JS heap total (committed) in bytes, or null when not recorded. */
+	heapTotalBytes: number | null;
 }
 
 /**
@@ -30,6 +37,8 @@ export interface MemoryHistoryPoint {
 	rssBytes: number;
 	/** Peak heap-used in the bucket, bytes. */
 	heapUsedBytes: number;
+	/** Peak heap-total (committed) in the bucket, bytes, or null when unrecorded. */
+	heapTotalBytes: number | null;
 }
 
 /** Wire response for `GET /api/analytics/memory-history?range=…`. */

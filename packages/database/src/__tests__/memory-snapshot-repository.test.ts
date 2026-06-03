@@ -3,7 +3,8 @@
  * time-series (RSS + JS heap) that backs the dashboard "Memory Usage" graph.
  *
  * Covers round-trip + MAX-per-bucket reads (column-wise, NOT last-value),
- * idempotent upserts, sinceMs filtering, and retention pruning.
+ * nullable heap_total handling, idempotent upserts, sinceMs filtering, and
+ * retention pruning.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -28,6 +29,7 @@ function row(overrides: Partial<MemorySnapshotRow>): MemorySnapshotRow {
 		sampledAt: 1_000,
 		rssBytes: 100,
 		heapUsedBytes: 50,
+		heapTotalBytes: 80,
 		...overrides,
 	};
 }
@@ -48,13 +50,19 @@ describe("MemorySnapshotRepository", () => {
 	describe("insert", () => {
 		it("round-trips a single row", async () => {
 			await repo.insert(
-				row({ sampledAt: 1_000, rssBytes: 123, heapUsedBytes: 45 }),
+				row({
+					sampledAt: 1_000,
+					rssBytes: 123,
+					heapUsedBytes: 45,
+					heapTotalBytes: 67,
+				}),
 			);
 			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
 			expect(result).toHaveLength(1);
 			expect(result[0].ts).toBe(1_000);
 			expect(result[0].rssBytes).toBe(123);
 			expect(result[0].heapUsedBytes).toBe(45);
+			expect(result[0].heapTotalBytes).toBe(67);
 		});
 	});
 
@@ -64,10 +72,20 @@ describe("MemorySnapshotRepository", () => {
 			// Bucket 0 = [0, 1000). Two samples whose maxima come from DIFFERENT
 			// samples — proves the aggregate is per-column MAX, not last-value.
 			await repo.insert(
-				row({ sampledAt: 100, rssBytes: 100, heapUsedBytes: 10 }),
+				row({
+					sampledAt: 100,
+					rssBytes: 100,
+					heapUsedBytes: 10,
+					heapTotalBytes: 20,
+				}),
 			);
 			await repo.insert(
-				row({ sampledAt: 900, rssBytes: 80, heapUsedBytes: 55 }),
+				row({
+					sampledAt: 900,
+					rssBytes: 80,
+					heapUsedBytes: 55,
+					heapTotalBytes: 90,
+				}),
 			);
 
 			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs });
@@ -75,6 +93,7 @@ describe("MemorySnapshotRepository", () => {
 			expect(result[0].ts).toBe(0);
 			expect(result[0].rssBytes).toBe(100); // from the 100-sample
 			expect(result[0].heapUsedBytes).toBe(55); // from the 900-sample
+			expect(result[0].heapTotalBytes).toBe(90); // from the 900-sample
 		});
 
 		it("floors ts to the bucket start", async () => {
@@ -100,6 +119,21 @@ describe("MemorySnapshotRepository", () => {
 			});
 			expect(result).toHaveLength(1);
 			expect(result[0].ts).toBe(5_000);
+		});
+	});
+
+	describe("nullable heap_total handling", () => {
+		it("round-trips a null heap_total as null", async () => {
+			await repo.insert(row({ sampledAt: 1_000, heapTotalBytes: null }));
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result[0].heapTotalBytes).toBeNull();
+		});
+
+		it("MAX ignores a null heap_total within a bucket", async () => {
+			await repo.insert(row({ sampledAt: 100, heapTotalBytes: null }));
+			await repo.insert(row({ sampledAt: 900, heapTotalBytes: 200 }));
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result[0].heapTotalBytes).toBe(200);
 		});
 	});
 

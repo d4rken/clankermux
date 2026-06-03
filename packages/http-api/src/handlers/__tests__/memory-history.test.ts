@@ -114,15 +114,27 @@ describe("memory-history handler", () => {
 		it("returns the bucketed points from the repository unchanged", async () => {
 			const t1 = 1_700_000_000_000;
 			const points: MemoryHistoryPoint[] = [
-				{ ts: t1, rssBytes: 500_000_000, heapUsedBytes: 120_000_000 },
-				{ ts: t1 + HOUR, rssBytes: 520_000_000, heapUsedBytes: 118_000_000 },
+				{
+					ts: t1,
+					rssBytes: 500_000_000,
+					heapUsedBytes: 120_000_000,
+					heapTotalBytes: 180_000_000,
+				},
+				{
+					ts: t1 + HOUR,
+					rssBytes: 520_000_000,
+					heapUsedBytes: 118_000_000,
+					heapTotalBytes: null,
+				},
 			];
 			const dbOps = createDbOps({ points });
 			const { body } = await callHandler(dbOps, "24h");
 			expect(body.points).toHaveLength(2);
 			expect(body.points[0].rssBytes).toBe(500_000_000);
 			expect(body.points[0].heapUsedBytes).toBe(120_000_000);
+			expect(body.points[0].heapTotalBytes).toBe(180_000_000);
 			expect(body.points[1].rssBytes).toBe(520_000_000);
+			expect(body.points[1].heapTotalBytes).toBeNull();
 		});
 
 		it("returns an empty points array when there is no history", async () => {

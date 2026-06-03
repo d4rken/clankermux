@@ -22,14 +22,20 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 		await this.run(
 			`
 			INSERT INTO memory_snapshots (
-				sampled_at, rss_bytes, heap_used_bytes
+				sampled_at, rss_bytes, heap_used_bytes, heap_total_bytes
 			)
-			VALUES (?, ?, ?)
+			VALUES (?, ?, ?, ?)
 			ON CONFLICT (sampled_at) DO UPDATE SET
 				rss_bytes = EXCLUDED.rss_bytes,
-				heap_used_bytes = EXCLUDED.heap_used_bytes
+				heap_used_bytes = EXCLUDED.heap_used_bytes,
+				heap_total_bytes = EXCLUDED.heap_total_bytes
 		`,
-			[row.sampledAt, row.rssBytes, row.heapUsedBytes],
+			[
+				row.sampledAt,
+				row.rssBytes,
+				row.heapUsedBytes,
+				row.heapTotalBytes ?? null,
+			],
 		);
 	}
 
@@ -37,7 +43,8 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 	 * Read the peak (max) sample per time bucket since `sinceMs`. Buckets are
 	 * `bucketMs`-wide windows aligned to the epoch; within each bucket the
 	 * column-wise MAX of each metric wins (so rss/heap peaks survive even if they
-	 * occurred in different samples).
+	 * occurred in different samples). SQL `MAX` ignores nulls, so a bucket's
+	 * heap_total is null only when every sample in it predates that column.
 	 */
 	async getSnapshots(opts: {
 		sinceMs: number;
@@ -48,17 +55,19 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 			ts: number;
 			rss_bytes: number;
 			heap_used_bytes: number;
+			heap_total_bytes: number | null;
 		}>(
 			`
 			WITH bucketed AS (
 				SELECT (sampled_at / ?) * ? AS ts,
-				       rss_bytes, heap_used_bytes
+				       rss_bytes, heap_used_bytes, heap_total_bytes
 				FROM memory_snapshots
 				WHERE sampled_at >= ?
 			)
 			SELECT ts,
 			       MAX(rss_bytes) AS rss_bytes,
-			       MAX(heap_used_bytes) AS heap_used_bytes
+			       MAX(heap_used_bytes) AS heap_used_bytes,
+			       MAX(heap_total_bytes) AS heap_total_bytes
 			FROM bucketed
 			GROUP BY ts
 			ORDER BY ts;
@@ -70,6 +79,8 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 			ts: Number(row.ts),
 			rssBytes: Number(row.rss_bytes),
 			heapUsedBytes: Number(row.heap_used_bytes),
+			heapTotalBytes:
+				row.heap_total_bytes == null ? null : Number(row.heap_total_bytes),
 		}));
 	}
 
