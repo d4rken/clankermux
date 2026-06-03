@@ -54,7 +54,7 @@ describe("DatabaseOperations.getRetentionStorageUsage", () => {
 		dbOps.dispose?.();
 	});
 
-	it("returns the expected shape with the three retention types in order", async () => {
+	it("returns the expected shape with the four retention types in order", async () => {
 		const u = await dbOps.getRetentionStorageUsage();
 		expect(u.available).toBe(true);
 		expect(typeof u.measuredAt).toBe("number");
@@ -66,11 +66,13 @@ describe("DatabaseOperations.getRetentionStorageUsage", () => {
 			"payloads",
 			"requests",
 			"usage_snapshots",
+			"memory_snapshots",
 		]);
 		expect(u.types.map((t) => t.table)).toEqual([
 			"request_payloads",
 			"requests",
 			"usage_snapshots",
+			"memory_snapshots",
 		]);
 	});
 

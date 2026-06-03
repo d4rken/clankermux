@@ -3,10 +3,16 @@ import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Database, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
-import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
+import {
+	useAccounts,
+	useAnalytics,
+	useMemoryHistory,
+	useStats,
+} from "../hooks/queries";
 import { computePoolUsage } from "../lib/pool-usage";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
+import { MemoryUsageChart } from "./overview/MemoryUsageChart";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
@@ -27,6 +33,12 @@ export const OverviewTab = React.memo(() => {
 		"normal",
 	);
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
+
+	// Memory chart has its own range, independent of the analytics range above;
+	// 7d by default so the leak-trend view is the landing state.
+	const [memoryRange, setMemoryRange] = useState("7d");
+	const { data: memoryHistory, isLoading: memoryLoading } =
+		useMemoryHistory(memoryRange);
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -210,6 +222,13 @@ export const OverviewTab = React.memo(() => {
 			/>
 
 			<SystemStatus />
+
+			<MemoryUsageChart
+				memoryHistory={memoryHistory}
+				loading={memoryLoading}
+				range={memoryRange}
+				onRangeChange={setMemoryRange}
+			/>
 
 			{accounts && <RateLimitInfo accounts={accounts} />}
 		</div>

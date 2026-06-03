@@ -266,6 +266,21 @@ export const useUsageHistory = (range: string) => {
 	});
 };
 
+/**
+ * Process memory footprint (RSS + JS heap) time-series for the Overview-tab
+ * "Memory Usage" chart. Same polling cadence as useUsageHistory (45s stale, 60s
+ * refetch, paused in the background) since both feed time-series charts.
+ */
+export const useMemoryHistory = (range: string) => {
+	return useQuery({
+		queryKey: queryKeys.memoryHistory(range),
+		queryFn: () => api.getMemoryHistory(range),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useRequests = (limit: number, _refetchInterval?: number) => {
 	return useQuery({
 		queryKey: queryKeys.requests(limit),
@@ -354,6 +369,7 @@ export const useSetRetention = () => {
 			payloadDays?: number;
 			requestDays?: number;
 			usageSnapshotDays?: number;
+			memorySnapshotDays?: number;
 			storePayloads?: boolean;
 		}) => api.setRetention(partial),
 		onSuccess: () => {

@@ -232,14 +232,20 @@ async function runStartupMaintenance(
 		const payloadDays = config.getDataRetentionDays();
 		const requestDays = config.getRequestRetentionDays();
 		const snapshotDays = config.getUsageSnapshotRetentionDays();
-		const { removedRequests, removedPayloads, removedSnapshots } =
-			await dbOps.cleanupOldRequests(
-				payloadDays * 24 * 60 * 60 * 1000,
-				requestDays * 24 * 60 * 60 * 1000,
-				snapshotDays * 24 * 60 * 60 * 1000,
-			);
+		const memorySnapshotDays = config.getMemorySnapshotRetentionDays();
+		const {
+			removedRequests,
+			removedPayloads,
+			removedSnapshots,
+			removedMemorySnapshots,
+		} = await dbOps.cleanupOldRequests(
+			payloadDays * 24 * 60 * 60 * 1000,
+			requestDays * 24 * 60 * 60 * 1000,
+			snapshotDays * 24 * 60 * 60 * 1000,
+			memorySnapshotDays * 24 * 60 * 60 * 1000,
+		);
 		log.info(
-			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, and ${removedSnapshots} usage snapshots (payload=${payloadDays}d, requests=${requestDays}d, snapshots=${snapshotDays}d)`,
+			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadDays}d, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
 		);
 	} catch (err) {
 		log.error(`Startup cleanup error: ${err}`);
@@ -733,15 +739,26 @@ export default async function startServer(options?: {
 			const payloadDays = config.getDataRetentionDays();
 			const requestDays = config.getRequestRetentionDays();
 			const snapshotDays = config.getUsageSnapshotRetentionDays();
-			const { removedRequests, removedPayloads, removedSnapshots } =
-				await dbOps.cleanupOldRequests(
-					payloadDays * TIME_CONSTANTS.DAY,
-					requestDays * TIME_CONSTANTS.DAY,
-					snapshotDays * TIME_CONSTANTS.DAY,
-				);
-			if (removedRequests > 0 || removedPayloads > 0 || removedSnapshots > 0) {
+			const memorySnapshotDays = config.getMemorySnapshotRetentionDays();
+			const {
+				removedRequests,
+				removedPayloads,
+				removedSnapshots,
+				removedMemorySnapshots,
+			} = await dbOps.cleanupOldRequests(
+				payloadDays * TIME_CONSTANTS.DAY,
+				requestDays * TIME_CONSTANTS.DAY,
+				snapshotDays * TIME_CONSTANTS.DAY,
+				memorySnapshotDays * TIME_CONSTANTS.DAY,
+			);
+			if (
+				removedRequests > 0 ||
+				removedPayloads > 0 ||
+				removedSnapshots > 0 ||
+				removedMemorySnapshots > 0
+			) {
 				log.info(
-					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots in ${Date.now() - startTime}ms`,
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots in ${Date.now() - startTime}ms`,
 				);
 				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
 				// per tick, off-thread via the incremental-vacuum worker. Small N
@@ -1245,6 +1262,17 @@ export default async function startServer(options?: {
 		const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
 		const growthBytes = mem.rss - baselineRss;
 		const growthMb = Math.round(growthBytes / 1024 / 1024);
+
+		// Persist this sample into the memory_snapshots time-series that backs the
+		// dashboard "Memory Usage" graph. Fire-and-forget at debug level: a
+		// transient DB hiccup must never disturb the monitor or spam the journal.
+		void dbOps
+			.insertMemorySnapshot({
+				sampledAt: Date.now(),
+				rssBytes: mem.rss,
+				heapUsedBytes: mem.heapUsed,
+			})
+			.catch((err) => memLog.debug(`memory snapshot insert failed: ${err}`));
 
 		if (growthBytes > MEMORY_GROWTH_ERROR_BYTES) {
 			memLog.error(

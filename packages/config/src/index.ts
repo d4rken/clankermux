@@ -54,6 +54,7 @@ export interface ConfigData {
 	data_retention_days?: number;
 	request_retention_days?: number;
 	usage_snapshot_retention_days?: number;
+	memory_snapshot_retention_days?: number;
 	store_payloads?: boolean;
 	usage_poll_interval_ms?: number;
 	cache_keepalive_ttl_minutes?: number;
@@ -306,6 +307,22 @@ export class Config extends EventEmitter {
 		this.set("usage_snapshot_retention_days", clamped);
 	}
 
+	getMemorySnapshotRetentionDays(): number {
+		const fromEnv = process.env.MEMORY_SNAPSHOT_RETENTION_DAYS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
+		}
+		const fromFile = this.data.memory_snapshot_retention_days;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
+		return 14; // default memory snapshot retention (14 days for the Memory Usage graph)
+	}
+
+	setMemorySnapshotRetentionDays(days: number): void {
+		const clamped = this.clamp(days, 1, 3650);
+		this.set("memory_snapshot_retention_days", clamped);
+	}
+
 	getStorePayloads(): boolean {
 		const fromEnv = process.env.STORE_PAYLOADS;
 		if (fromEnv) {
@@ -407,6 +424,7 @@ export class Config extends EventEmitter {
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
 			usage_snapshot_retention_days: this.getUsageSnapshotRetentionDays(),
+			memory_snapshot_retention_days: this.getMemorySnapshotRetentionDays(),
 			store_payloads: this.getStorePayloads(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 			cache_keepalive_ttl_minutes: this.getCacheKeepaliveTtlMinutes(),

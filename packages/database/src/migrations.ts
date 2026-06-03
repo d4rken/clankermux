@@ -374,6 +374,19 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
 	);
+
+	// Create memory_snapshots table — append-only time-series of the proxy
+	// process's own memory footprint (RSS + JS heap), backing the dashboard
+	// "Memory Usage" graph. One row per sample tick (no account dimension);
+	// sampled_at is the INTEGER PRIMARY KEY (rowid alias) so range scans and
+	// retention pruning are served without a secondary index.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS memory_snapshots (
+			sampled_at INTEGER PRIMARY KEY,
+			rss_bytes INTEGER NOT NULL,
+			heap_used_bytes INTEGER NOT NULL
+		)
+	`);
 }
 
 export function runMigrations(db: Database, dbPath?: string): void {
