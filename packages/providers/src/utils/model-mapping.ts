@@ -84,6 +84,36 @@ export function getModelName(
 }
 
 /**
+ * Read a request body ONCE (without `request.clone()`) for model transformation,
+ * returning the raw bytes plus a `rebuild` helper that constructs a forwardable
+ * Request from a body.
+ *
+ * Why this exists: `request.clone()` on a body-bearing Request forces Bun to
+ * buffer the entire body natively to feed the tee, and that native buffer is
+ * never returned to the OS in a long-lived process — leaking ~1× the request
+ * body size on every proxied request. Consuming the body with `arrayBuffer()`
+ * and rebuilding the Request from the bytes avoids the tee entirely. Because the
+ * original body is consumed, callers MUST forward the returned Request.
+ */
+async function readBodyForTransform(request: Request): Promise<{
+	bytes: ArrayBuffer | null;
+	rebuild: (body: BodyInit) => Request;
+}> {
+	const rebuild = (body: BodyInit): Request =>
+		new Request(request.url, {
+			method: request.method,
+			headers: request.headers,
+			body,
+		});
+	try {
+		return { bytes: await request.arrayBuffer(), rebuild };
+	} catch (error) {
+		log.debug("Failed to read request body for model transform:", error);
+		return { bytes: null, rebuild };
+	}
+}
+
+/**
  * Generic model transformation function that can be used by all providers
  * Handles the common pattern of transforming request body models
  *
@@ -101,44 +131,50 @@ export async function transformRequestBodyModel<T extends TransformRequestBody>(
 	account?: Account | undefined,
 	providerSpecificMapping?: (model: string, account?: Account) => string,
 ): Promise<Request> {
+	// Only JSON bodies carry a model to map; anything else passes through
+	// untouched (and is left un-consumed so identity is preserved), matching the
+	// openai/codex providers' content-type guard.
+	const contentType = request.headers.get("content-type");
+	if (!contentType?.includes("application/json")) {
+		return request;
+	}
+
+	// Read the body ONCE via arrayBuffer rather than `request.clone()` + `.json()`.
+	// Cloning a body-bearing Request forces Bun to buffer the entire body natively
+	// to feed the tee, and that native buffer is never returned to the OS in this
+	// long-lived process — a leak of ~1× the request-body size on EVERY proxied
+	// request (the dominant proxy memory leak). Consuming + rebuilding avoids the
+	// tee entirely. The original `request` body is consumed here, so callers must
+	// use the returned Request (the existing contract — every caller already does).
+	const { bytes, rebuild } = await readBodyForTransform(request);
+	if (!bytes) return request;
+
 	try {
-		const clonedRequest = request.clone();
-		const body: T = await clonedRequest.json();
+		const body: T = JSON.parse(new TextDecoder().decode(bytes));
 
 		// Only transform if model field exists
 		if (body.model) {
 			const originalModel = body.model;
-			let mappedModel = originalModel;
+			const mappedModel = providerSpecificMapping
+				? providerSpecificMapping(originalModel, account)
+				: getModelName(originalModel, account);
 
-			// Use provider-specific mapping if provided, otherwise use standard mapping
-			if (providerSpecificMapping) {
-				mappedModel = providerSpecificMapping(originalModel, account);
-			} else {
-				mappedModel = getModelName(originalModel, account);
-			}
-
-			// Only create new request if model actually changed
+			// Only rewrite the body if the model actually changed
 			if (mappedModel !== originalModel) {
 				body.model = mappedModel;
 				log.debug(
 					`Mapped model in request: ${originalModel} -> ${mappedModel}`,
 				);
-
-				// Create new request with transformed body
-				const transformedRequest = new Request(request.url, {
-					method: request.method,
-					headers: request.headers,
-					body: JSON.stringify(body),
-				});
-
-				return transformedRequest;
+				return rebuild(JSON.stringify(body));
 			}
 		}
 
-		return request;
+		// No model change — forward the original bytes untouched.
+		return rebuild(bytes);
 	} catch (error) {
 		log.debug("Failed to transform request body model:", error);
-		return request;
+		// Non-JSON / unexpected body — forward the raw bytes unchanged.
+		return rebuild(bytes);
 	}
 }
 
@@ -158,28 +194,33 @@ export async function transformRequestBodyModelForce(
 	request: Request,
 	targetModel: string,
 ): Promise<Request> {
+	// Non-JSON bodies pass through untouched (un-consumed → identity preserved).
+	const contentType = request.headers.get("content-type");
+	if (!contentType?.includes("application/json")) {
+		return request;
+	}
+
+	// Same no-clone rationale as transformRequestBodyModel above: avoid the native
+	// body-buffer leak from `request.clone()` by reading the body once and
+	// rebuilding the forwardable Request from the bytes.
+	const { bytes, rebuild } = await readBodyForTransform(request);
+	if (!bytes) return request;
+
 	try {
-		const clonedRequest = request.clone();
-		const body = await clonedRequest.json();
+		const body = JSON.parse(new TextDecoder().decode(bytes));
 
 		// Direct body mutation for performance - avoids object spreading overhead
 		if (body && typeof body === "object" && body.model) {
 			body.model = targetModel;
 			log.debug(`Forced model mapping to: ${targetModel}`);
-
-			// Create new request with mutated body
-			const transformedRequest = new Request(request.url, {
-				method: request.method,
-				headers: request.headers,
-				body: JSON.stringify(body),
-			});
-
-			return transformedRequest;
+			return rebuild(JSON.stringify(body));
 		}
 
-		return request;
+		// No model field — forward the original bytes untouched.
+		return rebuild(bytes);
 	} catch (error) {
 		log.debug("Failed to force model mapping:", error);
-		return request;
+		// Non-JSON / unexpected body — forward the raw bytes unchanged.
+		return rebuild(bytes);
 	}
 }

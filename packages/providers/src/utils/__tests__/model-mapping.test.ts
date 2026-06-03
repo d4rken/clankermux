@@ -1,3 +1,4 @@
+import { describe, expect, it, spyOn } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
 	getModelName,
@@ -212,7 +213,40 @@ describe("transformRequestBodyModelForce", () => {
 
 		const result = await transformRequestBodyModelForce(request, "MiniMax-M2");
 
-		// Should return original request when JSON parsing fails
-		expect(result).toBe(request);
+		// JSON parse fails → forward the original body bytes unchanged (the request
+		// is consumed + rebuilt rather than cloned, so identity is not preserved).
+		expect(await result.text()).toBe("invalid json");
+	});
+});
+
+describe("model transform does not clone the request body", () => {
+	// Regression guard: `request.clone()` on a body-bearing Request makes Bun
+	// buffer the body natively and never reclaim it — a ~1×-body-size leak on
+	// every proxied request. These functions must read the body once instead.
+	const makeRequest = () =>
+		new Request("http://test.com", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5-20250929",
+				messages: [{ role: "user", content: "test" }],
+			}),
+		});
+
+	it("transformRequestBodyModel never calls request.clone()", async () => {
+		const request = makeRequest();
+		const cloneSpy = spyOn(request, "clone");
+		const result = await transformRequestBodyModel(request, undefined);
+		expect(cloneSpy).not.toHaveBeenCalled();
+		// body still forwardable + correct
+		expect((await result.json()).model).toBe("claude-sonnet-4-5-20250929");
+	});
+
+	it("transformRequestBodyModelForce never calls request.clone()", async () => {
+		const request = makeRequest();
+		const cloneSpy = spyOn(request, "clone");
+		const result = await transformRequestBodyModelForce(request, "MiniMax-M2");
+		expect(cloneSpy).not.toHaveBeenCalled();
+		expect((await result.json()).model).toBe("MiniMax-M2");
 	});
 });
