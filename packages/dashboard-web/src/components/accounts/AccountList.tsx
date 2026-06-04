@@ -56,7 +56,6 @@ export function AccountList({
 				<AccountListItem
 					key={account.name}
 					account={account}
-					isPrimary={account.isPrimary}
 					isForced={account.id === forcedAccountId}
 					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
