@@ -1,6 +1,5 @@
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
-	AlertCircle,
 	Crosshair,
 	Edit2,
 	Globe,
@@ -16,15 +15,13 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import type { Account } from "../../api";
+import { deriveAccountStatus } from "../../lib/account-status";
 import {
-	isAnthropicPeakHour,
-	isZaiPeakHour,
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
-import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Button } from "../ui/button";
 import {
 	DropdownMenu,
@@ -35,8 +32,8 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { AccountStatusChips } from "./AccountStatusChips";
 import { RateLimitProgress } from "./RateLimitProgress";
-import { RateLimitStatusChip } from "./RateLimitStatusChip";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -46,7 +43,6 @@ function formatTokenCount(n: number): string {
 
 interface AccountListItemProps {
 	account: Account;
-	isPrimary?: boolean;
 	isForced?: boolean;
 	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
@@ -70,7 +66,6 @@ interface AccountListItemProps {
 
 export function AccountListItem({
 	account,
-	isPrimary = false,
 	isForced = false,
 	onForceAccount,
 	onPauseToggle,
@@ -93,62 +88,15 @@ export function AccountListItem({
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const presenter = new AccountPresenter(account);
-	const now = Date.now();
-	// Only hard-limit statuses mean the account is actually blocked; soft warnings
-	// like "allowed_warning" / "queueing_soft" mean the account is still usable.
-	const HARD_LIMIT_PREFIXES = [
-		"rate_limited",
-		"blocked",
-		"queueing_hard",
-		"payment_required",
-	];
-	const isHardLimited = HARD_LIMIT_PREFIXES.some((prefix) =>
-		presenter.rateLimitStatus.toLowerCase().startsWith(prefix),
-	);
-	// Also show Force Reset when rate_limited_until is in the future even if
-	// rate_limit_status is soft/OK — the selector still skips the account.
-	const isBlockedByLegacyLock =
-		typeof account.rateLimitedUntil === "number" &&
-		account.rateLimitedUntil > now;
-	const showForceReset =
-		(isHardLimited || isBlockedByLegacyLock) && !presenter.isPaused;
-	// staleLockDetected only fires when numeric usage data exists (Anthropic accounts);
-	// Zai accounts have usageUtilization === null and are correctly excluded
-	const staleLockDetected =
-		showForceReset &&
-		typeof account.usageUtilization === "number" &&
-		account.usageUtilization < 100;
-	const isUsageThrottled =
-		typeof account.usageThrottledUntil === "number" &&
-		account.usageThrottledUntil > now;
-	const providerOverloadedUntil =
-		typeof account.providerOverloadedUntil === "number" &&
-		account.providerOverloadedUntil > now
-			? account.providerOverloadedUntil
-			: null;
-	const providerOverloadMinutes = providerOverloadedUntil
-		? Math.max(1, Math.ceil((providerOverloadedUntil - now) / 60000))
-		: null;
+	// All per-account status chips — and the Force Reset gating below — are derived
+	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
+	const status = deriveAccountStatus(account);
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
 			account.hasRefreshToken &&
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth);
-
-	// Peak/off-peak status chip (rendered inline in the status row to save a row).
-	// Only zai and anthropic have peak-hour windows.
-	const isZaiPeak = account.provider === "zai" && isZaiPeakHour(now);
-	const isAnthropicPeak =
-		account.provider === "anthropic" && isAnthropicPeakHour(now);
-	const showPeakChip =
-		account.provider === "zai" || account.provider === "anthropic";
-	const isPeak = isZaiPeak || isAnthropicPeak;
-	const peakChipLabel = isPeak
-		? account.provider === "zai"
-			? "Peak hours (14:00–18:00 SGT)"
-			: "Peak hours (5–11am PT, weekdays)"
-		: "Off-peak hours";
 
 	// Whether the overflow menu should show the "Automation" toggle group.
 	const hasAutomationToggles =
@@ -162,18 +110,6 @@ export function AccountListItem({
 			<div className="flex items-center justify-between">
 				<div className="flex items-center gap-2 min-w-0">
 					<p className="font-medium truncate">{account.name}</p>
-					{isPrimary && (
-						<span className="px-2 py-0.5 text-xs font-medium bg-primary text-primary-foreground rounded-full">
-							Primary
-						</span>
-					)}
-					<span className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full">
-						Priority: {account.priority}
-					</span>
-					<OAuthTokenStatusWithBoundary
-						accountName={account.name}
-						hasRefreshToken={account.hasRefreshToken}
-					/>
 				</div>
 				<div className="flex items-center gap-1 shrink-0">
 					{(account.provider === "anthropic" ||
@@ -399,67 +335,18 @@ export function AccountListItem({
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 				<span>{account.provider}</span>
 			</div>
+			<AccountStatusChips account={account} status={status} />
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-				{presenter.isRateLimited && (
-					<span title="Account is rate-limited - requests will be rejected until the limit resets">
-						<AlertCircle className="h-4 w-4 text-yellow-600" />
-					</span>
-				)}
 				<span>{presenter.requestCount} requests</span>
 				<span className="text-muted-foreground">{presenter.sessionInfo}</span>
-				{presenter.isPaused && (
-					<span className="text-muted-foreground">Paused</span>
-				)}
-				{!presenter.isPaused && presenter.rateLimitStatus !== "OK" && (
-					<RateLimitStatusChip status={presenter.rateLimitStatus} />
-				)}
-				{staleLockDetected && (
-					<span
-						className="text-amber-600"
-						title="Stale lock detected: usage data shows available capacity but account is still rate-limited"
-					>
-						Stale lock detected
-					</span>
-				)}
-				{isUsageThrottled && (
-					<span
-						className="text-amber-600"
-						title="Usage throttling is delaying requests for this account until pacing catches up"
-					>
-						Usage throttled
-					</span>
-				)}
-				{providerOverloadedUntil && (
-					<span
-						className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-						title={`Provider overload cooldown active until ${new Date(providerOverloadedUntil).toLocaleString()}`}
-					>
-						<AlertCircle className="h-3.5 w-3.5" />
-						Provider overloaded ({providerOverloadMinutes}m)
-					</span>
-				)}
-				{showPeakChip && (
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{peakChipLabel}
-					</span>
-				)}
-				{showForceReset && (
+				{status.showForceReset && (
 					<Button
 						variant="outline"
 						size="sm"
 						className="h-7 gap-1 text-xs"
 						onClick={() => onForceResetRateLimit(account)}
 						title={
-							staleLockDetected
+							status.staleLockDetected
 								? "Reset stale rate limit lock (usage shows capacity available)"
 								: "Force clear rate limit state from database"
 						}

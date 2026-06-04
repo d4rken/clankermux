@@ -1,6 +1,7 @@
 import type { AccountResponse } from "@clankermux/types";
 import { extractFiveHour, extractSevenDay } from "../../lib/pool-usage";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
+import { AccountStatusChips } from "../accounts/AccountStatusChips";
 import { RateLimitProgress } from "../accounts/RateLimitProgress";
 import {
 	Card,
@@ -73,6 +74,7 @@ export function AccountUtilizationCard({
 										{account.provider}
 									</span>
 								</div>
+								<AccountStatusChips account={account} />
 								<RateLimitProgress
 									resetIso={account.rateLimitReset}
 									usageUtilization={account.usageUtilization}
