@@ -42,12 +42,13 @@ export interface ForecastSeries {
 /** Per-account live burn state used to drive the projection. */
 interface LiveWindowState {
 	accountId: string;
-	pct: number; // current utilization, strictly within (0, 100)
-	startMs: number; // window start (= now - elapsed)
+	pct: number; // current utilization (clamped 0–100)
+	startMs: number; // window start (= now - elapsed); `now` for held states
 	resetMs: number; // window reset, strictly in the future
-	slopePerMs: number; // utilization-% gained per ms at the current rate
-	isSafe: boolean; // false => projected to hit 100% before reset
+	slopePerMs: number; // utilization-% gained per ms at the current rate (0 when held)
+	isSafe: boolean; // false => projected to hit / already at 100% before reset
 	exhaustsAtMs: number | null; // projected time to reach 100% (at-risk only)
+	held: boolean; // true => flat (not burning): paused, in cooldown, or exhausted
 }
 
 function clampPct(value: number): number {
@@ -57,21 +58,19 @@ function clampPct(value: number): number {
 }
 
 /**
- * Build the live burn state for one account in one window, or null when it
- * can't be projected: paused, in an active rate-limit cooldown, no usage data,
- * window already reset, not actively burning (0%), or already exhausted
- * (>=100%). This deliberately matches the set of accounts `computePoolUsage`
- * treats as actively "contributing".
+ * Build the live burn state for one account in one window, or null when there
+ * is nothing to plot: no usage data, window already reset, or no value / 0%
+ * (no headroom signal). Accounts that are *unavailable but still part of the
+ * pool* — paused, in an active rate-limit cooldown, or already exhausted
+ * (>=100%) — are NOT dropped: they return a `held` (flat) state so the
+ * projected pool average keeps counting them. Dropping a maxed account would
+ * make the pool look healthier the instant it got worse.
  */
 function deriveLiveState(
 	account: AccountResponse,
 	window: PoolWindow,
 	now: number,
 ): LiveWindowState | null {
-	if (account.paused === true) return null;
-	if (account.rateLimitedUntil != null && account.rateLimitedUntil > now) {
-		return null;
-	}
 	if (!account.usageData) return null;
 
 	const extracted =
@@ -84,10 +83,28 @@ function deriveLiveState(
 
 	const pct = extracted.pct;
 	const resetMs = extracted.resetMs;
-	// f must be strictly inside (0, 1): 0% has no rate signal, >=100% is exhausted.
-	if (pct <= 0 || pct >= 100) return null;
+	// 0% carries no headroom signal, and a rolled window has nothing to project.
+	if (pct <= 0) return null;
 	if (resetMs <= now) return null;
 
+	// Unavailable accounts aren't burning, but must stay in the pool: hold them
+	// flat at their current utilization until the window resets.
+	const inCooldown =
+		account.rateLimitedUntil != null && account.rateLimitedUntil > now;
+	if (account.paused === true || inCooldown || pct >= 100) {
+		return {
+			accountId: account.id,
+			pct: clampPct(pct),
+			startMs: now,
+			resetMs,
+			slopePerMs: 0,
+			isSafe: pct < 100, // already-maxed => not safe; paused-below-100 => safe
+			exhaustsAtMs: null,
+			held: true,
+		};
+	}
+
+	// Actively burning: 0 < pct < 100.
 	const startMs = computeWindowStartMs(resetMs, window);
 	if (startMs == null) return null;
 	const elapsed = now - startMs;
@@ -108,19 +125,24 @@ function deriveLiveState(
 		slopePerMs,
 		isSafe,
 		exhaustsAtMs: isSafe ? null : now + timeToExhaustMs,
+		held: false,
 	};
 }
 
 /** Projected utilization at an absolute future timestamp (clamped 0–100). */
 function projectAt(state: LiveWindowState, ts: number): number {
-	// pct(ts) = slope * (ts - startMs); equals `pct` at `now` by construction.
+	// Held accounts are flat at their current value; burning accounts follow
+	// pct(ts) = slope * (ts - startMs), which equals `pct` at `now`.
+	if (state.held) return clampPct(state.pct);
 	return clampPct(state.slopePerMs * (ts - state.startMs));
 }
 
 /** Where a single account's forecast line stops, capped at the chart horizon. */
 function stateEndMs(state: LiveWindowState, horizonMs: number): number {
-	// exhaustsAtMs is non-null whenever isSafe is false (both set together in
-	// deriveLiveState); the null check narrows the type without a cast.
+	// Held states and safe burning states run to the window reset; only an
+	// at-risk burning account stops early at its projected exhaustion. The
+	// `exhaustsAtMs == null` check covers held states (isSafe false, no
+	// exhaustion time) and also narrows the type without a cast.
 	const natural =
 		state.isSafe || state.exhaustsAtMs == null
 			? state.resetMs
