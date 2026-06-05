@@ -1,8 +1,3 @@
-import {
-	getBurstRetryJitterMs,
-	getBurstRetryMaxAttempts,
-	getBurstRetryMaxHoldMs,
-} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { isAnthropicHardLimitStatus } from "@clankermux/providers";
 import {
@@ -18,6 +13,30 @@ import {
 } from "./burst-cooldown";
 
 const log = new Logger("TransparentRetry");
+
+// ---------------------------------------------------------------------------
+// Transparent burst-429 retry tuning constants.
+//
+// The feature is unconditionally on; these are fixed, source-level defaults
+// (no env config — the proxy is deployed from source). The hold knobs live here
+// because the hold orchestrator below owns them.
+// ---------------------------------------------------------------------------
+
+/** Max added latency (ms) spent holding & re-probing the cache account before giving up. */
+const BURST_RETRY_MAX_HOLD_MS = 60_000;
+/** Max number of re-probes of the held account within the hold budget. */
+const BURST_RETRY_MAX_ATTEMPTS = 3;
+/** Jitter bound (ms) added to each re-probe wait (used with Math.random). */
+const BURST_RETRY_JITTER_MS = 500;
+
+/**
+ * Max usage-cache age (ms) trusted when reading fresh headroom for the
+ * transient-429 classification. Exported and consumed by the early-intercept
+ * (proxy-operations.ts) and the marker-active revalidation (proxy.ts) — it's
+ * classification-related, so it lives with the classifier rather than the hold
+ * orchestrator. Defined once here to avoid duplicating the literal.
+ */
+export const BURST_RETRY_MAX_USAGE_AGE_MS = 120_000;
 
 /**
  * Classification of a 429 response for the transparent burst-retry feature.
@@ -53,7 +72,7 @@ export type Burst429Classification =
  *       accountId,
  *       account.provider,
  *       now,
- *       getBurstRetryMaxUsageAgeMs(),
+ *       BURST_RETRY_MAX_USAGE_AGE_MS,
  *     )
  *
  * `getFreshCapacity` already returns `null` for age-stale or content-stale
@@ -202,16 +221,16 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
  * Hold the cache (affinity) account through its transient burst-throttle
  * cooldown and re-probe it, returning the first successful Response.
  *
- * Behaviour (gated/configured by the caller; all bounds read live from env):
+ * Behaviour:
  *  - Acquires a module-level hold slot; if the cap is reached, returns
  *    {@link HOLD_OVERFLOW} immediately (caller does filtered last-resort).
  *  - Sets the shared burst marker so concurrent OAuth-Anthropic-affinity
  *    requests are held on their own cache account (sibling diversion suppressed
  *    pool-wide) for the marker lifetime.
- *  - Loops up to `getBurstRetryMaxAttempts()` re-probes within a total
- *    wall-clock budget of `getBurstRetryMaxHoldMs()`. For `stale_should_retry`
- *    confidence (usage unknown — the account *might* really be exhausted) it
- *    does exactly ONE short probe rather than spending the full budget.
+ *  - Loops up to `BURST_RETRY_MAX_ATTEMPTS` re-probes within a total wall-clock
+ *    budget of `BURST_RETRY_MAX_HOLD_MS`. For `stale_should_retry` confidence
+ *    (usage unknown — the account *might* really be exhausted) it does exactly
+ *    ONE short probe rather than spending the full budget.
  *  - Each wait = (account.rate_limited_until ?? now) - now + jitter. NEVER wakes
  *    early: if the soonest expiry is beyond the remaining budget, it gives up
  *    now (returns null).
@@ -230,9 +249,21 @@ export async function holdAndRetryCacheAccount(args: {
 	reprobe: ReprobeFn;
 	/** Injectable clock for tests; defaults to Date.now. */
 	now?: () => number;
+	/**
+	 * Injectable tuning overrides for tests; each defaults to the module-level
+	 * constant. Production never passes these — the feature uses the fixed
+	 * source-level defaults. They exist purely as a deterministic-timing seam for
+	 * unit tests (same rationale as the injectable `now` clock above).
+	 */
+	maxHoldMs?: number;
+	maxAttempts?: number;
+	jitterMs?: number;
 }): Promise<HoldResult> {
 	const { account, confidence, signal, reprobe } = args;
 	const clock = args.now ?? Date.now;
+	const maxHoldMs = args.maxHoldMs ?? BURST_RETRY_MAX_HOLD_MS;
+	const configuredMaxAttempts = args.maxAttempts ?? BURST_RETRY_MAX_ATTEMPTS;
+	const jitterMs = args.jitterMs ?? BURST_RETRY_JITTER_MS;
 
 	if (!tryAcquireHoldSlot()) {
 		log.warn(
@@ -246,11 +277,11 @@ export async function holdAndRetryCacheAccount(args: {
 	markAnthropicBurstThrottle(clock());
 
 	const start = clock();
-	const budgetMs = getBurstRetryMaxHoldMs();
+	const budgetMs = maxHoldMs;
 	// stale_should_retry: a single short probe only (Codex: don't spend the full
 	// budget on a possibly-real exhaustion).
 	const maxAttempts =
-		confidence === "stale_should_retry" ? 1 : getBurstRetryMaxAttempts();
+		confidence === "stale_should_retry" ? 1 : configuredMaxAttempts;
 	let attempt = 0;
 	let heldMs = 0;
 
@@ -273,7 +304,7 @@ export async function holdAndRetryCacheAccount(args: {
 				0,
 				(account.rate_limited_until ?? now) - now,
 			);
-			const jitter = Math.random() * getBurstRetryJitterMs();
+			const jitter = Math.random() * jitterMs;
 			let wait = cooldownWait + jitter;
 			// Don't-wake-early: if the soonest expiry is beyond the remaining budget,
 			// give up now rather than probe before the window could have cleared.

@@ -1,7 +1,5 @@
 import {
-	getBurstRetryMaxUsageAgeMs,
 	getModelList,
-	isBurstRetryEnabled,
 	logError,
 	mapModelName,
 	ProviderError,
@@ -35,7 +33,10 @@ import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import { handleProxyError, processProxyResponse } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
-import { classify429Transient } from "./transparent-retry";
+import {
+	BURST_RETRY_MAX_USAGE_AGE_MS,
+	classify429Transient,
+} from "./transparent-retry";
 
 const log = new Logger("ProxyOperations");
 
@@ -877,11 +878,7 @@ export async function proxyWithAccount(
 			// to the hold orchestrator WITHOUT cycling model fallbacks at the
 			// throttled IP. The orchestrator decides whether to wait and re-probe
 			// again or give up. Non-429 responses fall through to the normal path.
-			if (
-				options?.reprobe &&
-				rawResponse.status === 429 &&
-				isBurstRetryEnabled()
-			) {
+			if (options?.reprobe && rawResponse.status === 429) {
 				const cooldownUntil = extractCooldownUntil(
 					rawResponse,
 					account.id,
@@ -914,12 +911,11 @@ export async function proxyWithAccount(
 			// OAuth-Anthropic 429. If it is a retryable transient burst throttle,
 			// record `retryable_429` and fail over WITHOUT model cycling so the
 			// proxy.ts decide-before-loop can hold-and-retry the cache account.
-			// Skipped for: feature off, non-429, synthetic keepalive/auto-refresh
-			// replays (their own per-IP-burst handling lives below), and re-probe
-			// mode (handled above). Non-retryable / non-OAuth-Anthropic 429s fall
-			// through to today's model-fallback + failover behaviour unchanged.
+			// Skipped for: non-429, synthetic keepalive/auto-refresh replays (their
+			// own per-IP-burst handling lives below), and re-probe mode (handled
+			// above). Non-retryable / non-OAuth-Anthropic 429s fall through to
+			// today's model-fallback + failover behaviour unchanged.
 			if (
-				isBurstRetryEnabled() &&
 				rawResponse.status === 429 &&
 				!options?.reprobe &&
 				!isSyntheticInternalRequest(req.headers)
@@ -939,7 +935,7 @@ export async function proxyWithAccount(
 					account.id,
 					account.provider,
 					now,
-					getBurstRetryMaxUsageAgeMs(),
+					BURST_RETRY_MAX_USAGE_AGE_MS,
 				);
 				if (capacity === null) {
 					const refreshed = await usageCache.refreshNow(account.id);
@@ -951,7 +947,7 @@ export async function proxyWithAccount(
 							account.id,
 							account.provider,
 							now,
-							getBurstRetryMaxUsageAgeMs(),
+							BURST_RETRY_MAX_USAGE_AGE_MS,
 						);
 					}
 				}

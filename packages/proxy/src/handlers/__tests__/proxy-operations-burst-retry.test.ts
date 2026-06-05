@@ -171,7 +171,6 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete("acc-oauth");
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	afterEach(() => {
@@ -179,7 +178,6 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete("acc-oauth");
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	it("intercepts a transient 429 (x-should-retry) and records retryable_429 WITHOUT cycling model fallbacks", async () => {
@@ -402,39 +400,6 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		// Not OAuth-Anthropic → no retryable_429; classified hard_429 (no fallbacks).
 		expect(outcomes.at(-1)?.kind).toBe("hard_429");
 	});
-
-	it("feature OFF (CCFLARE_BURST_RETRY_ENABLED=false) ⇒ no intercept, normal failover", async () => {
-		process.env.CCFLARE_BURST_RETRY_ENABLED = "false";
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true" }),
-		);
-
-		const outcomes: ProxyAttemptOutcome[] = [];
-		const bodyBuffer = makeRequestBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeOAuthAnthropicAccount(),
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			false,
-			{ onOutcome: (o) => outcomes.push(o) },
-		);
-
-		expect(result).toBeNull();
-		// With the feature off, the 429 follows the normal no-fallback path → hard_429.
-		expect(outcomes.at(-1)?.kind).toBe("hard_429");
-		const calls = outcomes.filter((o) => o.kind === "retryable_429");
-		expect(calls).toHaveLength(0);
-	});
 });
 
 describe("proxyWithAccount — reprobe mode", () => {
@@ -442,12 +407,10 @@ describe("proxyWithAccount — reprobe mode", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	it("reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {

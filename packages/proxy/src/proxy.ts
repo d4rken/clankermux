@@ -1,8 +1,6 @@
 import {
 	codexAccountFitsRequest,
 	estimateRequestTokens,
-	getBurstRetryMaxUsageAgeMs,
-	isBurstRetryEnabled,
 	mapModelName,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
@@ -14,6 +12,7 @@ import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
+	BURST_RETRY_MAX_USAGE_AGE_MS,
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
@@ -737,16 +736,15 @@ export async function handleProxy(
 	// over to a sibling Anthropic account is futile (same egress IP/window) and
 	// wasteful (cold prompt cache). When the cache-affinity account is an
 	// OAuth-Anthropic account, we instead HOLD and re-probe it before iterating
-	// siblings. Gated entirely on isBurstRetryEnabled() — when off, the loop below
-	// runs exactly as before.
+	// siblings.
 	// When the burst-retry first attempt tries the held account and it fails
 	// non-retryably (e.g. a hard 429 / 401), we fall through to the normal loop
 	// below — but the held account has already been attempted, so the loop must
 	// skip it to avoid a wasteful duplicate request. Null when no first attempt
-	// was made (marker-active path, or feature off).
+	// was made (marker-active path).
 	let burstAttemptedAccountId: string | null = null;
 	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
-	if (isBurstRetryEnabled() && !filteredComboInfo?.comboName && burstHeldId) {
+	if (!filteredComboInfo?.comboName && burstHeldId) {
 		// Resolve the held (cache) account object. It may not be in `accounts`
 		// (an affinity_hold serves a sibling because the pinned account is cooled),
 		// so fall back to the DB. We re-probe it directly, bypassing the
@@ -816,7 +814,7 @@ export async function handleProxy(
 					heldAccount.id,
 					heldAccount.provider,
 					Date.now(),
-					getBurstRetryMaxUsageAgeMs(),
+					BURST_RETRY_MAX_USAGE_AGE_MS,
 				);
 				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
 					log.warn(

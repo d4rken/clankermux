@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { getBurstRetryMaxConcurrentHolds } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import {
+	BURST_RETRY_MAX_CONCURRENT_HOLDS,
 	clearAnthropicBurstThrottle,
 	markAnthropicBurstThrottle,
 	resetHoldSlots,
@@ -256,14 +256,11 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		resetHoldSlots();
 		// Deterministic timing. The first 429 sets a cooldown of
 		// min(default-no-reset, backoff-base); floor both to ~1s so a single
-		// re-probe wait fits within a generous hold budget.
-		process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS = "5000";
-		process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS = "3";
-		process.env.CCFLARE_BURST_RETRY_JITTER_MS = "0";
-		process.env.CCFLARE_BURST_RETRY_MARKER_MS = "60000";
+		// re-probe wait fits within the fixed (60s) hold budget. The burst-retry
+		// tuning constants are now fixed in source, so only the cooldown-length
+		// knobs need pinning here.
 		process.env.CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS = "1000";
 		process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS = "1000";
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	afterEach(() => {
@@ -271,13 +268,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
-		delete process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS;
-		delete process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS;
-		delete process.env.CCFLARE_BURST_RETRY_JITTER_MS;
-		delete process.env.CCFLARE_BURST_RETRY_MARKER_MS;
 		delete process.env.CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS;
 		delete process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS;
-		delete process.env.CCFLARE_BURST_RETRY_ENABLED;
 	});
 
 	it("holds the cache account on a transient 429 + quota (429→200), with NO sibling attempt", async () => {
@@ -435,7 +427,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 	it("concurrency-cap overflow ⇒ filtered last-resort (Codex), never a sibling-Anthropic diversion", async () => {
 		// Saturate the hold-slot cap BEFORE the request so holdAndRetryCacheAccount
 		// returns HOLD_OVERFLOW, routing straight to the filtered last-resort.
-		const cap = getBurstRetryMaxConcurrentHolds();
+		const cap = BURST_RETRY_MAX_CONCURRENT_HOLDS;
 		for (let i = 0; i < cap; i++) tryAcquireHoldSlot();
 
 		const held = makeAccount({ id: "held", name: "Cache" });
@@ -472,34 +464,6 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		expect(res.status).toBe(200);
 		expect(codexHit).toBe(true);
-	});
-
-	it("feature OFF ⇒ no hold; normal failover loop runs (sibling can serve)", async () => {
-		process.env.CCFLARE_BURST_RETRY_ENABLED = "false";
-		const held = makeAccount({ id: "held", name: "Cache" });
-		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
-		seedFreshHeadroom("held");
-
-		let n = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
-				if (!isProxyCall(input)) return originalFetch(input as never, init);
-				n += 1;
-				// First account 429s (no fallbacks → failover), second (sibling) 200s.
-				return n === 1 ? rl429({ "x-should-retry": "true" }) : ok200();
-			},
-		);
-
-		const ctx = makeContext([held, sibling], "held");
-		const res = await callHandleProxy(
-			makeRequest(),
-			new URL("https://proxy.local/v1/messages"),
-			ctx,
-		);
-
-		// With the feature off, the normal loop fails over held→sibling and serves.
-		expect(res.status).toBe(200);
-		expect(n).toBe(2);
 	});
 
 	it("held first attempt fails non-retryably (hard-limit 429) ⇒ no hold, loop does NOT re-attempt held, serves sibling", async () => {

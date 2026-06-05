@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getBurstRetryMaxConcurrentHolds } from "@clankermux/core";
 import type { Account } from "@clankermux/types";
 import {
+	BURST_RETRY_MAX_CONCURRENT_HOLDS,
 	clearAnthropicBurstThrottle,
 	getActiveHoldCount,
 	isAnthropicBurstThrottleActive,
@@ -9,6 +9,15 @@ import {
 	tryAcquireHoldSlot,
 } from "../burst-cooldown";
 import { HOLD_OVERFLOW, holdAndRetryCacheAccount } from "../transparent-retry";
+
+// Deterministic timing overrides passed into holdAndRetryCacheAccount in place
+// of the (now fixed) module constants: a short hold budget and zero jitter keep
+// the suite fast and stable. Production uses the fixed constants.
+const TEST_HOLD_OVERRIDES = {
+	maxHoldMs: 2000,
+	maxAttempts: 3,
+	jitterMs: 0,
+} as const;
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -57,20 +66,11 @@ describe("holdAndRetryCacheAccount", () => {
 	beforeEach(() => {
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
-		// Keep waits short and deterministic for the test run.
-		process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS = "2000";
-		process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS = "3";
-		process.env.CCFLARE_BURST_RETRY_JITTER_MS = "0";
-		process.env.CCFLARE_BURST_RETRY_MAX_CONCURRENT = "8";
 	});
 
 	afterEach(() => {
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
-		delete process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS;
-		delete process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS;
-		delete process.env.CCFLARE_BURST_RETRY_JITTER_MS;
-		delete process.env.CCFLARE_BURST_RETRY_MAX_CONCURRENT;
 	});
 
 	it("returns the first successful re-probe Response and releases the slot", async () => {
@@ -85,6 +85,7 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				return okResponse();
 			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeInstanceOf(Response);
 		expect((result as Response).status).toBe(200);
@@ -101,12 +102,12 @@ describe("holdAndRetryCacheAccount", () => {
 			confidence: "fresh_headroom",
 			signal: new AbortController().signal,
 			reprobe: async () => okResponse(),
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
 	});
 
 	it("re-probes up to MAX_ATTEMPTS, returning null when always throttled", async () => {
-		process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS = "3";
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		let probes = 0;
 		const result = await holdAndRetryCacheAccount({
@@ -119,6 +120,7 @@ describe("holdAndRetryCacheAccount", () => {
 				account.rate_limited_until = Date.now() - 1;
 				return null; // still throttled
 			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeNull();
 		expect(probes).toBe(3);
@@ -126,7 +128,6 @@ describe("holdAndRetryCacheAccount", () => {
 	});
 
 	it("does NOT wake early: gives up when soonest expiry exceeds remaining budget", async () => {
-		process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS = "1000";
 		// Cooldown ends far beyond the 1s budget → never probe, give up immediately.
 		const account = makeAccount({ rate_limited_until: Date.now() + 60_000 });
 		let probes = 0;
@@ -139,6 +140,8 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				return okResponse();
 			},
+			...TEST_HOLD_OVERRIDES,
+			maxHoldMs: 1000,
 		});
 		expect(result).toBeNull();
 		expect(probes).toBe(0);
@@ -147,7 +150,6 @@ describe("holdAndRetryCacheAccount", () => {
 	});
 
 	it("stale_should_retry does exactly ONE short probe", async () => {
-		process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS = "3";
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		let probes = 0;
 		const result = await holdAndRetryCacheAccount({
@@ -159,6 +161,7 @@ describe("holdAndRetryCacheAccount", () => {
 				account.rate_limited_until = Date.now() - 1;
 				return null;
 			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeNull();
 		// Single probe despite MAX_ATTEMPTS=3.
@@ -167,7 +170,7 @@ describe("holdAndRetryCacheAccount", () => {
 
 	it("returns HOLD_OVERFLOW when no slot is available (concurrency cap)", async () => {
 		// Saturate the cap.
-		const cap = getBurstRetryMaxConcurrentHolds();
+		const cap = BURST_RETRY_MAX_CONCURRENT_HOLDS;
 		for (let i = 0; i < cap; i++) {
 			expect(tryAcquireHoldSlot()).toBe(true);
 		}
@@ -181,6 +184,7 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				return okResponse();
 			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBe(HOLD_OVERFLOW);
 		expect(probes).toBe(0);
@@ -189,7 +193,6 @@ describe("holdAndRetryCacheAccount", () => {
 	});
 
 	it("aborts promptly during the wait and releases the slot", async () => {
-		process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS = "5000";
 		// Cooldown 200ms out so we enter the sleep, then abort during it.
 		const account = makeAccount({ rate_limited_until: Date.now() + 200 });
 		const controller = new AbortController();
@@ -202,6 +205,8 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				return okResponse();
 			},
+			...TEST_HOLD_OVERRIDES,
+			maxHoldMs: 5000,
 		});
 		// Abort almost immediately, before the 200ms sleep elapses.
 		controller.abort();
@@ -220,8 +225,6 @@ describe("holdAndRetryCacheAccount", () => {
 		// budget-bounded AbortSignal; a real proxyWithAccount turns that abort into
 		// a null return (AbortError → network_error → null). We emulate that here:
 		// the reprobe resolves null only when its signal aborts.
-		process.env.CCFLARE_BURST_RETRY_MAX_HOLD_MS = "300";
-		process.env.CCFLARE_BURST_RETRY_MAX_ATTEMPTS = "3";
 		// Cooldown already past → probe fires (almost) immediately with the full
 		// budget remaining for the probe deadline.
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
@@ -247,6 +250,8 @@ describe("holdAndRetryCacheAccount", () => {
 					);
 				});
 			},
+			...TEST_HOLD_OVERRIDES,
+			maxHoldMs: 300,
 		});
 		const elapsed = Date.now() - start;
 		// The hold gave up (null), the probe WAS aborted by the budget signal, and
@@ -273,6 +278,7 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				return okResponse();
 			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeNull();
 		expect(probes).toBe(0);
