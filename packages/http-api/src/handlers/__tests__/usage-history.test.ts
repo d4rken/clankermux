@@ -223,7 +223,9 @@ describe("usage-history handler", () => {
 					fiveHourReset: null,
 					sevenDayReset: null,
 				},
-				// t2: a=40/12, b=null/null → avg5h=40 max5h=40; avg7d=12 max7d=12; count=1
+				// t2: a=40/12, b reports nothing. b's 5h=80 is carried forward (its
+				// reset is null, so the 5h fallback cap applies and t2 is well within
+				// it) → avg5h=(40+80)/2=60 max5h=80; avg7d=12 max7d=12; count=2.
 				{
 					accountId: "a",
 					provider: "anthropic",
@@ -260,11 +262,153 @@ describe("usage-history handler", () => {
 			expect(p1?.sevenDayMax).toBe(10);
 			expect(p1?.sampledCount).toBe(2);
 
+			// b's last 5h value (80) is carried into t2 instead of dropping out.
 			const p2 = body.pool[1];
-			expect(p2?.fiveHourAvg).toBe(40);
-			expect(p2?.fiveHourMax).toBe(40);
+			expect(p2?.fiveHourAvg).toBe(60);
+			expect(p2?.fiveHourMax).toBe(80);
 			expect(p2?.sevenDayAvg).toBe(12);
-			expect(p2?.sampledCount).toBe(1);
+			expect(p2?.sampledCount).toBe(2);
+		});
+
+		it("holds a maxed-out account's value in the pool until its window resets (no misleading drop)", async () => {
+			// The reported bug: Main-me hits 100% and stops reporting; a still-active
+			// peer keeps the buckets alive. Main-me must keep counting at 100% until
+			// its 5h window resets — the pool must NOT drop the instant it maxes out.
+			const t1 = 1_700_000_000_000;
+			const t2 = t1 + HOUR;
+			const t3 = t1 + 2 * HOUR;
+			const fiveHourReset = t1 + 3 * HOUR; // Main-me's window resets after t3
+			const snapshots: RankedSnapshot[] = [
+				// t1: Main-me at 100% (reset in 3h), Peer at 20%.
+				{
+					accountId: "main",
+					provider: "anthropic",
+					ts: t1,
+					fiveHourPct: 100,
+					sevenDayPct: null,
+					fiveHourReset,
+					sevenDayReset: null,
+				},
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t1,
+					fiveHourPct: 20,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+				// t2 & t3: only Peer still reports (Main-me paused → no rows).
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t2,
+					fiveHourPct: 22,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t3,
+					fiveHourPct: 24,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+			];
+			const dbOps = createDbOps({
+				snapshots,
+				accounts: [
+					makeAccount("main", "Main-me", "anthropic"),
+					makeAccount("peer", "Peer", "anthropic"),
+				],
+			});
+			const { body } = await callHandler(dbOps, "24h");
+			expect(body.pool.map((p) => p.ts)).toEqual([t1, t2, t3]);
+
+			// t1: (100 + 20) / 2 = 60.
+			expect(body.pool[0]?.fiveHourAvg).toBe(60);
+			expect(body.pool[0]?.sampledCount).toBe(2);
+			// t2/t3: Main-me carried at 100% → (100 + 22)/2 = 61, (100 + 24)/2 = 62.
+			// Without carry-forward these would collapse to 22 and 24 (the bug).
+			expect(body.pool[1]?.fiveHourAvg).toBe(61);
+			expect(body.pool[1]?.sampledCount).toBe(2);
+			expect(body.pool[2]?.fiveHourAvg).toBe(62);
+			expect(body.pool[2]?.sampledCount).toBe(2);
+
+			// Main-me's own series is also held flat at 100% across the gap.
+			const main = body.series.find((s) => s.accountId === "main");
+			expect(main?.points.map((p) => p.fiveHourPct)).toEqual([100, 100, 100]);
+		});
+
+		it("expires a carried value once its window reset passes", async () => {
+			// Main-me maxes at t1 with a reset between t2 and t3. It carries through
+			// t2 (still before reset) but drops out at t3 (reset has passed), and the
+			// pool then reflects only the still-reporting peer.
+			const t1 = 1_700_000_000_000;
+			const t2 = t1 + HOUR;
+			const t3 = t1 + 2 * HOUR;
+			const fiveHourReset = t1 + 90 * 60 * 1000; // between t2 and t3
+			const snapshots: RankedSnapshot[] = [
+				{
+					accountId: "main",
+					provider: "anthropic",
+					ts: t1,
+					fiveHourPct: 100,
+					sevenDayPct: null,
+					fiveHourReset,
+					sevenDayReset: null,
+				},
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t1,
+					fiveHourPct: 20,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t2,
+					fiveHourPct: 30,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+				{
+					accountId: "peer",
+					provider: "anthropic",
+					ts: t3,
+					fiveHourPct: 40,
+					sevenDayPct: null,
+					fiveHourReset: t1 + 5 * HOUR,
+					sevenDayReset: null,
+				},
+			];
+			const dbOps = createDbOps({
+				snapshots,
+				accounts: [
+					makeAccount("main", "Main-me", "anthropic"),
+					makeAccount("peer", "Peer", "anthropic"),
+				],
+			});
+			const { body } = await callHandler(dbOps, "24h");
+
+			// t2: carried (100 + 30)/2 = 65, count 2.
+			expect(body.pool[1]?.fiveHourAvg).toBe(65);
+			expect(body.pool[1]?.sampledCount).toBe(2);
+			// t3: Main-me's window has reset → it expires; pool is just Peer at 40.
+			expect(body.pool[2]?.fiveHourAvg).toBe(40);
+			expect(body.pool[2]?.sampledCount).toBe(1);
+
+			// Main-me's series holds at 100% through t2, then ends (no t3 point).
+			const main = body.series.find((s) => s.accountId === "main");
+			expect(main?.points.map((p) => p.ts)).toEqual([t1, t2]);
+			expect(main?.points.map((p) => p.fiveHourPct)).toEqual([100, 100]);
 		});
 
 		it("yields null avg/max when every account is null at a ts", async () => {

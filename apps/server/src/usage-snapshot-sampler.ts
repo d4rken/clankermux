@@ -16,6 +16,12 @@
  *    recorded (its poll is free and runs regardless of paused state).
  *  - Freshness is honest: if the cache for an account is missing or older than
  *    `freshnessMs`, no row is written (gaps are real, never carried forward).
+ *    This is the WRITE path — the DB stores only what was actually observed.
+ *    The READ path (the usage-history handler) is where a paused/maxed account's
+ *    last value is carried forward across those gaps until its recorded window
+ *    reset, so the pool-average chart line doesn't falsely drop when the highest
+ *    account stops reporting. Gap-vs-carry is the write/read boundary: see
+ *    `packages/http-api/src/handlers/usage-history.ts`.
  */
 
 import { intervalManager, readEnv } from "@clankermux/core";

@@ -275,7 +275,10 @@ export interface UsageHistorySeries {
 /**
  * Pool-wide aggregate at a single timestamp, across all sampled accounts.
  * Avg/max ignore nulls; both are null when no account reported a value at `ts`.
- * `sampledCount` is the number of accounts contributing any non-null value.
+ * `sampledCount` is the number of accounts contributing any non-null value —
+ * including values carried forward from an account's last sample until its
+ * window reset (so a paused/maxed account keeps counting until it would roll),
+ * not only accounts freshly sampled in this exact bucket.
  */
 export interface UsageHistoryPoolPoint {
 	ts: number;

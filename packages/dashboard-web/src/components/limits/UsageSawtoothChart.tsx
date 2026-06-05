@@ -274,9 +274,10 @@ export function UsageSawtoothChart({
 						<CardTitle>Usage Over Time</CardTitle>
 						<CardDescription>
 							Per-account utilization with the pool average. Solid lines are
-							recorded history (reset to zero when a window rolls over); dashed
-							lines project the current burn rate forward to each window's
-							reset.
+							recorded history; a paused or maxed-out account holds its last
+							value until its window rolls over, so it never silently drops out
+							of the pool average. Dashed lines project the current burn rate
+							forward to each window's reset.
 						</CardDescription>
 					</div>
 					<TimeRangeSelector value={range} onChange={onRangeChange} />
