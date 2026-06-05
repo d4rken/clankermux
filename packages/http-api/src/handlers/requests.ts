@@ -1,6 +1,10 @@
 import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { RequestResponse } from "../types";
+import {
+	buildRequestFilterClause,
+	type RequestFilters,
+} from "./request-filters";
 
 const MAX_BODY_PREVIEW_BYTES = 256 * 1024; // 256KB - match response body cap to preserve full conversation history
 const MAX_REQUEST_DETAILS_LIMIT = 50;
@@ -31,7 +35,13 @@ function truncateBase64(body: unknown): {
  * Create a requests summary handler (existing functionality)
  */
 export function createRequestsSummaryHandler(db: BunSqlAdapter) {
-	return async (limit: number = 50): Promise<Response> => {
+	return async (
+		limit: number = 50,
+		offset = 0,
+		filters: RequestFilters = {},
+	): Promise<Response> => {
+		const { sql: whereSql, params: filterParams } =
+			buildRequestFilterClause(filters);
 		const requests = await db.query<{
 			id: string;
 			timestamp: number;
@@ -63,10 +73,11 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			SELECT r.*, a.name as account_name
 			FROM requests r
 			LEFT JOIN accounts a ON r.account_used = a.id
+			${whereSql}
 			ORDER BY r.timestamp DESC
-			LIMIT ?
+			LIMIT ? OFFSET ?
 		`,
-			[limit],
+			[...filterParams, limit, offset],
 		);
 
 		const response: RequestResponse[] = requests.map((request) => ({
@@ -99,6 +110,36 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 		}));
 
 		return jsonResponse(response);
+	};
+}
+
+/**
+ * Create a handler that returns the total number of requests matching a set of
+ * filters. Backs the "M of N matching requests" counter in the dashboard's
+ * filtered request explorer.
+ *
+ * Uses the same {@link buildRequestFilterClause} as the summary handler so the
+ * count can never disagree with the list. Time-bounded filters (the common
+ * case) ride the `idx_requests_timestamp` index. Filters without a time bound
+ * scan: there is no index on `status_code`, `api_key_name`, or `account_used`,
+ * so e.g. an API-key-only or status-only count is a full table scan and can take
+ * seconds on a multi-GB DB. That's the caller's tradeoff for an exact total; the
+ * list query stays fast (LIMIT N) and the count runs as a separate request so a
+ * slow count never blocks rendering.
+ */
+export function createRequestsCountHandler(db: BunSqlAdapter) {
+	return async (filters: RequestFilters = {}): Promise<Response> => {
+		const { sql: whereSql, params } = buildRequestFilterClause(filters);
+		const rows = await db.query<{ total: number }>(
+			`
+			SELECT COUNT(*) as total
+			FROM requests r
+			LEFT JOIN accounts a ON r.account_used = a.id
+			${whereSql}
+		`,
+			params,
+		);
+		return jsonResponse({ total: Number(rows[0]?.total ?? 0) });
 	};
 }
 

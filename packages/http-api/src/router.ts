@@ -78,8 +78,10 @@ import {
 	createQwenDeviceFlowStatusHandler,
 	createQwenReauthHandler,
 } from "./handlers/oauth";
+import { parseRequestFilters } from "./handlers/request-filters";
 import {
 	createRequestPayloadHandler,
+	createRequestsCountHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
 } from "./handlers/requests";
@@ -166,6 +168,7 @@ export class APIRouter {
 		const requestsSummaryHandler = createRequestsSummaryHandler(
 			dbOps.getAdapter(),
 		);
+		const requestsCountHandler = createRequestsCountHandler(dbOps.getAdapter());
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
 		const logsStreamHandler = createLogsStreamHandler();
@@ -303,7 +306,19 @@ export class APIRouter {
 					max: 1000,
 					integer: true,
 				}) || 50;
-			return requestsSummaryHandler(limit);
+			const offsetParam = url.searchParams.get("offset");
+			const offset =
+				validateNumber(offsetParam || "0", "offset", {
+					min: 0,
+					max: 10_000_000,
+					integer: true,
+				}) ?? 0;
+			const filters = parseRequestFilters(url.searchParams);
+			return requestsSummaryHandler(limit, offset, filters);
+		});
+		this.handlers.set("GET:/api/requests/count", (_req, url) => {
+			const filters = parseRequestFilters(url.searchParams);
+			return requestsCountHandler(filters);
 		});
 		this.handlers.set("GET:/api/requests/detail", (_req, url) => {
 			const limitParam = url.searchParams.get("limit");

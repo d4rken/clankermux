@@ -1,6 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+	useInfiniteQuery,
+	useMutation,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { queryKeys } from "../lib/query-keys";
+import type { RequestQueryParams } from "../lib/request-filters";
 
 /**
  * Build a lightweight RequestPayload from a RequestSummary.
@@ -34,6 +40,18 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 			bodiesOmitted: true,
 		},
 	};
+}
+
+/**
+ * Normalize a details map that may have been revived from JSON (where a `Map`
+ * round-trips to an array) back into a `Map` keyed by request id. Shared by the
+ * live SSE cache updater and the requests list view.
+ */
+export function toDetailsMap<T extends { id: string }>(
+	raw: Map<string, T> | T[] | undefined,
+): Map<string, T> {
+	if (raw instanceof Map) return raw;
+	return new Map((raw ?? []).map((s) => [s.id, s] as [string, T]));
 }
 
 export const useStorageInfo = (refetchInterval?: number) => {
@@ -281,7 +299,7 @@ export const useMemoryHistory = (range: string) => {
 	});
 };
 
-export const useRequests = (limit: number, _refetchInterval?: number) => {
+export const useRequests = (limit: number, opts?: { enabled?: boolean }) => {
 	return useQuery({
 		queryKey: queryKeys.requests(limit),
 		queryFn: async () => {
@@ -298,7 +316,49 @@ export const useRequests = (limit: number, _refetchInterval?: number) => {
 		},
 		staleTime: Infinity, // Consider data fresh until manually refetched
 		gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
-		// Remove refetchInterval - SSE stream handles real-time updates
+		// Disabled while server-side filters are active (the filtered explorer
+		// owns the view then); SSE handles real-time updates in the live tail.
+		enabled: opts?.enabled ?? true,
+	});
+};
+
+/**
+ * Server-side filtered + paginated request explorer.
+ *
+ * Each page is a `RequestSummary[]` of length `limit` (the last page is short).
+ * "Load more" advances the offset via `fetchNextPage`; there is no next page
+ * once a page comes back shorter than `limit`. Disabled (no fetch) until at
+ * least one filter is active, so the default view stays on the live tail.
+ */
+export const useInfiniteRequests = (
+	params: RequestQueryParams,
+	limit: number,
+	enabled: boolean,
+) => {
+	return useInfiniteQuery({
+		queryKey: queryKeys.requestsFiltered({ ...params, limit }),
+		queryFn: ({ pageParam }) =>
+			api.getRequestsSummary(limit, { ...params, offset: pageParam }),
+		initialPageParam: 0,
+		getNextPageParam: (lastPage, allPages) =>
+			lastPage.length === limit ? allPages.length * limit : undefined,
+		staleTime: Infinity,
+		gcTime: 5 * 60 * 1000,
+		enabled,
+	});
+};
+
+/** Total number of requests matching `params` (drives the "M of N" counter). */
+export const useRequestsCount = (
+	params: RequestQueryParams,
+	enabled: boolean,
+) => {
+	return useQuery({
+		queryKey: queryKeys.requestsCount(params),
+		queryFn: () => api.getRequestsCount(params),
+		staleTime: Infinity,
+		gcTime: 5 * 60 * 1000,
+		enabled,
 	});
 };
 

@@ -20,8 +20,24 @@ import {
 import { useMemo, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { API_LIMITS } from "../constants";
-import { useAccounts, useApiKeys, useRequests } from "../hooks/queries";
+import {
+	summaryToPlaceholder,
+	toDetailsMap,
+	useAccounts,
+	useApiKeys,
+	useInfiniteRequests,
+	useRequests,
+	useRequestsCount,
+} from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
+import {
+	buildRequestQueryParams,
+	isRequestFilterActive,
+	mergeStatusCodes,
+	presetRange,
+	type RequestFilterState,
+	type StatusCategory,
+} from "../lib/request-filters";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
@@ -55,6 +71,7 @@ export function RequestsTab() {
 		new Set(),
 	);
 	const [modalRequest, setModalRequest] = useState<RequestPayload | null>(null);
+	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string>("all");
 	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
 	const [dateFrom, setDateFrom] = useState<string>("");
@@ -64,15 +81,47 @@ export function RequestsTab() {
 		new Set(),
 	);
 
-	const {
-		data: requestsData,
-		isLoading: loading,
-		error,
-		refetch: loadRequests,
-	} = useRequests(API_LIMITS.requestsDetail);
+	// Resolve the filter form into a state object and the server query params.
+	// When any filter is active the page switches from the live tail to a
+	// server-side filtered + paginated "explorer" (see modes below).
+	const filterState: RequestFilterState = useMemo(
+		() => ({
+			status: statusCategory,
+			codes: Array.from(statusCodeFilters),
+			account: accountFilter,
+			apiKey: apiKeyFilter,
+			from: dateFrom,
+			to: dateTo,
+		}),
+		[
+			statusCategory,
+			statusCodeFilters,
+			accountFilter,
+			apiKeyFilter,
+			dateFrom,
+			dateTo,
+		],
+	);
+	const filtersActive = isRequestFilterActive(filterState);
+	const queryParams = useMemo(
+		() => buildRequestQueryParams(filterState),
+		[filterState],
+	);
 
-	// Enable real-time updates
-	useRequestStream(API_LIMITS.requestsDetail);
+	// Mode A — live tail: latest N, real-time via SSE. Active when no filters.
+	const liveQuery = useRequests(API_LIMITS.requestsDetail, {
+		enabled: !filtersActive,
+	});
+	useRequestStream(API_LIMITS.requestsDetail, !filtersActive);
+
+	// Mode B — filtered explorer: server-side WHERE + "Load more". Active when
+	// any filter is set. SSE is paused so the result stays a stable snapshot.
+	const filteredQuery = useInfiniteRequests(
+		queryParams,
+		API_LIMITS.requestsDetail,
+		filtersActive,
+	);
+	const { data: totalMatching } = useRequestsCount(queryParams, filtersActive);
 
 	const { data: accounts } = useAccounts();
 	const { data: configuredApiKeys } = useApiKeys();
@@ -85,23 +134,34 @@ export function RequestsTab() {
 			.map((a) => a.name),
 	);
 
-	// Transform the data to match the expected structure - memoized to avoid recalculation on SSE updates
+	// Unify both modes into a single { requests, summaries } shape so the row
+	// renderer below doesn't care which mode produced the data.
 	const data = useMemo(() => {
-		if (!requestsData) return null;
-		return {
-			requests: requestsData.requests,
-			summaries:
-				requestsData.detailsMap instanceof Map
-					? (requestsData.detailsMap as Map<string, RequestSummary>)
-					: new Map<string, RequestSummary>(
-							Array.isArray(requestsData.detailsMap)
-								? (requestsData.detailsMap as RequestSummary[]).map(
-										(s) => [s.id, s] as [string, RequestSummary],
-									)
-								: [],
-						),
-		};
-	}, [requestsData]);
+		if (filtersActive) {
+			const summariesArr = (filteredQuery.data?.pages ?? []).flat();
+			const summaries = new Map<string, RequestSummary>(
+				summariesArr.map((s) => [s.id, s]),
+			);
+			const requests = summariesArr.map(summaryToPlaceholder);
+			return { requests, summaries };
+		}
+		if (!liveQuery.data) return null;
+		const summaries = toDetailsMap<RequestSummary>(
+			liveQuery.data.detailsMap as
+				| Map<string, RequestSummary>
+				| RequestSummary[],
+		);
+		return { requests: liveQuery.data.requests, summaries };
+	}, [filtersActive, filteredQuery.data, liveQuery.data]);
+
+	const requests = data?.requests ?? [];
+	const loadedCount = requests.length;
+	const loading = filtersActive ? filteredQuery.isLoading : liveQuery.isLoading;
+	const error = filtersActive ? filteredQuery.error : liveQuery.error;
+	const reload = () =>
+		filtersActive ? filteredQuery.refetch() : liveQuery.refetch();
+	const hasMore = filtersActive && Boolean(filteredQuery.hasNextPage);
+	const isFetchingMore = filteredQuery.isFetchingNextPage;
 
 	// Filter dropdown options come from dedicated endpoints (not from the loaded
 	// requests slice) so every configured account/API key is selectable, even
@@ -114,16 +174,14 @@ export function RequestsTab() {
 		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
 	}, [accounts, data]);
 
-	// Extract unique status codes for filter - memoized
-	const uniqueStatusCodes = useMemo(() => {
-		if (!data) return [];
-		return Array.from(
-			new Set(
-				data.requests
-					.map((r) => r.response?.status)
-					.filter((status): status is number => status !== undefined),
-			),
-		).sort((a, b) => a - b);
+	// Status codes for the specific-code picker: the curated common set (so error
+	// codes are always selectable even when the loaded rows are all 200s) unioned
+	// with any codes actually observed in the current data.
+	const statusCodeOptions = useMemo(() => {
+		const observed = (data?.requests ?? [])
+			.map((r) => r.response?.status)
+			.filter((status): status is number => status !== undefined);
+		return mergeStatusCodes(observed);
 	}, [data]);
 
 	// API key filter: union of all configured keys (from /api/api-keys) and any
@@ -139,52 +197,6 @@ export function RequestsTab() {
 		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
 	}, [configuredApiKeys, data]);
 
-	// Filter requests based on selected filters - memoized to avoid recalculation on every render
-	const filteredRequests = useMemo(() => {
-		if (!data) return [];
-		return data.requests.filter((request) => {
-			// Account filter
-			if (accountFilter !== "all") {
-				const requestAccount =
-					request.meta.accountName || request.meta.accountId;
-				if (requestAccount !== accountFilter) return false;
-			}
-
-			// API key filter
-			if (apiKeyFilter !== "all") {
-				const summary = data.summaries.get(request.id);
-				const requestApiKey = summary?.apiKeyName;
-				if (apiKeyFilter === "no-api-key") {
-					if (requestApiKey) return false;
-				} else {
-					if (requestApiKey !== apiKeyFilter) return false;
-				}
-			}
-
-			// Status code filter
-			if (statusCodeFilters.size > 0 && request.response?.status) {
-				if (!statusCodeFilters.has(request.response.status.toString())) {
-					return false;
-				}
-			}
-
-			// Date range filter
-			const requestDate = new Date(request.meta.timestamp);
-			if (dateFrom) {
-				const fromDate = new Date(dateFrom);
-				fromDate.setHours(0, 0, 0, 0);
-				if (requestDate < fromDate) return false;
-			}
-			if (dateTo) {
-				const toDate = new Date(dateTo);
-				toDate.setHours(23, 59, 59, 999);
-				if (requestDate > toDate) return false;
-			}
-
-			return true;
-		});
-	}, [data, accountFilter, apiKeyFilter, statusCodeFilters, dateFrom, dateTo]);
-
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
 			const next = new Set(prev);
@@ -197,37 +209,13 @@ export function RequestsTab() {
 		});
 	};
 
-	// Date preset helpers
+	// Date preset helpers — produce local-time datetime-local strings so the
+	// values match what the inputs display (no UTC drift).
 	const applyDatePreset = (preset: string) => {
-		const now = new Date();
-		const toDate = now.toISOString().slice(0, 16);
-
-		switch (preset) {
-			case "1h": {
-				const fromDate = new Date(now.getTime() - 60 * 60 * 1000);
-				setDateFrom(fromDate.toISOString().slice(0, 16));
-				setDateTo(toDate);
-				break;
-			}
-			case "24h": {
-				const fromDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-				setDateFrom(fromDate.toISOString().slice(0, 16));
-				setDateTo(toDate);
-				break;
-			}
-			case "7d": {
-				const fromDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-				setDateFrom(fromDate.toISOString().slice(0, 16));
-				setDateTo(toDate);
-				break;
-			}
-			case "30d": {
-				const fromDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-				setDateFrom(fromDate.toISOString().slice(0, 16));
-				setDateTo(toDate);
-				break;
-			}
-		}
+		const range = presetRange(preset, new Date());
+		if (!range) return;
+		setDateFrom(range.from);
+		setDateTo(range.to);
 	};
 
 	const toggleStatusCode = (code: string) => {
@@ -250,19 +238,13 @@ export function RequestsTab() {
 	};
 
 	const clearAllFilters = () => {
+		setStatusCategory("all");
 		setAccountFilter("all");
 		setApiKeyFilter("all");
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
 	};
-
-	const hasActiveFilters =
-		accountFilter !== "all" ||
-		apiKeyFilter !== "all" ||
-		dateFrom ||
-		dateTo ||
-		statusCodeFilters.size > 0;
 
 	const decodeBase64 = (str: string | null): string => {
 		if (!str) return "No data";
@@ -278,42 +260,8 @@ export function RequestsTab() {
 		}
 	};
 
-	/**
-	 * Copy the given request to the clipboard as pretty-printed JSON, with
-	 * any base64-encoded bodies already decoded for easier debugging.
-	 */
-	// copyRequest helper removed – handled inline by CopyButton
-
-	if (loading) {
-		return (
-			<Card>
-				<CardContent className="pt-6">
-					<p className="text-muted-foreground">Loading requests...</p>
-				</CardContent>
-			</Card>
-		);
-	}
-
-	if (error) {
-		return (
-			<Card>
-				<CardContent className="pt-6">
-					<p className="text-destructive">
-						Error: {error instanceof Error ? error.message : String(error)}
-					</p>
-					<Button
-						onClick={() => loadRequests()}
-						variant="outline"
-						size="sm"
-						className="mt-2"
-					>
-						<RefreshCw className="mr-2 h-4 w-4" />
-						Retry
-					</Button>
-				</CardContent>
-			</Card>
-		);
-	}
+	const statusCategoryLabel = (cat: StatusCategory) =>
+		cat === "success" ? "Success (2xx)" : "Errors (non-2xx)";
 
 	return (
 		<Card>
@@ -322,8 +270,9 @@ export function RequestsTab() {
 					<div>
 						<CardTitle>Request History</CardTitle>
 						<CardDescription>
-							Detailed request and response data (last{" "}
-							{API_LIMITS.requestsDetail})
+							{filtersActive
+								? "Filtered results · live updates paused"
+								: `Live · latest ${API_LIMITS.requestsDetail} requests`}
 						</CardDescription>
 					</div>
 					<div className="flex gap-2">
@@ -335,21 +284,64 @@ export function RequestsTab() {
 						>
 							<Filter className="h-4 w-4 mr-2" />
 							Filters
-							{hasActiveFilters && !showFilters && (
+							{filtersActive && !showFilters && (
 								<span className="absolute -top-1 -right-1 h-2 w-2 bg-primary rounded-full animate-pulse" />
 							)}
 						</Button>
-						<Button onClick={() => loadRequests()} variant="ghost" size="icon">
+						<Button onClick={() => reload()} variant="ghost" size="icon">
 							<RefreshCw className="h-4 w-4" />
 						</Button>
 					</div>
 				</div>
 			</CardHeader>
 			<CardContent>
+				{error && (
+					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
+						<p className="text-destructive text-sm">
+							Error: {error instanceof Error ? error.message : String(error)}
+						</p>
+						<Button
+							onClick={() => reload()}
+							variant="outline"
+							size="sm"
+							className="mt-2"
+						>
+							<RefreshCw className="mr-2 h-4 w-4" />
+							Retry
+						</Button>
+					</div>
+				)}
+
 				{/* Active Filters Display */}
-				{hasActiveFilters && (
+				{filtersActive && (
 					<div className="mb-4 p-3 bg-muted/50 rounded-lg">
 						<div className="flex flex-wrap items-center gap-2">
+							{statusCategory !== "all" && statusCodeFilters.size === 0 && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Hash className="h-3 w-3" />
+									{statusCategoryLabel(statusCategory)}
+									<button
+										type="button"
+										onClick={() => setStatusCategory("all")}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{statusCodeFilters.size > 0 && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Hash className="h-3 w-3" />
+									{Array.from(statusCodeFilters).join(", ")}
+									<button
+										type="button"
+										onClick={() => setStatusCodeFilters(new Set())}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
 							{accountFilter !== "all" && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<User className="h-3 w-3" />
@@ -370,19 +362,6 @@ export function RequestsTab() {
 									<button
 										type="button"
 										onClick={() => setApiKeyFilter("all")}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
-							)}
-							{statusCodeFilters.size > 0 && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
-									<Hash className="h-3 w-3" />
-									{Array.from(statusCodeFilters).join(", ")}
-									<button
-										type="button"
-										onClick={() => setStatusCodeFilters(new Set())}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -411,8 +390,9 @@ export function RequestsTab() {
 							)}
 							<div className="ml-auto flex items-center gap-2">
 								<span className="text-xs text-muted-foreground">
-									{filteredRequests.length} of {data?.requests.length || 0}{" "}
-									requests
+									{totalMatching != null
+										? `${loadedCount} of ${totalMatching} matching`
+										: `${loadedCount} loaded`}
 								</span>
 								<Button
 									variant="ghost"
@@ -513,6 +493,104 @@ export function RequestsTab() {
 
 							{/* Resource Filters */}
 							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+								{/* Status Category */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<Hash className="h-3 w-3" />
+										Status
+									</Label>
+									<div className="flex h-9 rounded-md border overflow-hidden">
+										{(["all", "success", "error"] as const).map((cat) => (
+											<button
+												key={cat}
+												type="button"
+												onClick={() => setStatusCategory(cat)}
+												className={`flex-1 text-xs px-2 border-r last:border-r-0 transition-colors ${
+													statusCategory === cat
+														? "bg-primary text-primary-foreground"
+														: "hover:bg-accent"
+												}`}
+											>
+												{cat === "all"
+													? "All"
+													: cat === "success"
+														? "2xx"
+														: "Non-2xx"}
+											</button>
+										))}
+									</div>
+								</div>
+
+								{/* Status Code Filter */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<Hash className="h-3 w-3" />
+										Status Codes
+									</Label>
+									<DropdownMenu>
+										<DropdownMenuTrigger asChild>
+											<Button
+												variant="outline"
+												className="h-9 w-full justify-between font-normal"
+											>
+												{statusCodeFilters.size > 0
+													? `${statusCodeFilters.size} selected`
+													: "All codes"}
+												<ChevronDown className="h-4 w-4 opacity-50" />
+											</Button>
+										</DropdownMenuTrigger>
+										<DropdownMenuContent className="w-56 max-h-64 overflow-y-auto">
+											<div className="p-2">
+												<div className="text-xs font-medium text-muted-foreground mb-2">
+													Select status codes
+												</div>
+												{statusCodeOptions.map((code) => (
+													<button
+														key={code}
+														type="button"
+														className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
+														onClick={() => toggleStatusCode(code.toString())}
+													>
+														<div
+															className={`w-4 h-4 border rounded-sm flex items-center justify-center ${
+																statusCodeFilters.has(code.toString())
+																	? "bg-primary border-primary"
+																	: "border-input"
+															}`}
+														>
+															{statusCodeFilters.has(code.toString()) && (
+																<svg
+																	className="w-3 h-3 text-primary-foreground"
+																	fill="none"
+																	viewBox="0 0 24 24"
+																	stroke="currentColor"
+																	aria-label="Selected"
+																>
+																	<title>Selected</title>
+																	<path
+																		strokeLinecap="round"
+																		strokeLinejoin="round"
+																		strokeWidth={3}
+																		d="M5 13l4 4L19 7"
+																	/>
+																</svg>
+															)}
+														</div>
+														<span
+															className={`text-sm font-medium ${getStatusCodeColor(code)}`}
+														>
+															{code}
+														</span>
+													</button>
+												))}
+											</div>
+											<div className="border-t p-2 text-[11px] text-muted-foreground">
+												Specific codes override the Status category.
+											</div>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								</div>
+
 								{/* Account Filter */}
 								<div>
 									<Label className="text-xs flex items-center gap-1 mb-2">
@@ -558,87 +636,22 @@ export function RequestsTab() {
 										</SelectContent>
 									</Select>
 								</div>
-
-								{/* Status Code Filter */}
-								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
-										<Hash className="h-3 w-3" />
-										Status Code
-									</Label>
-									<DropdownMenu>
-										<DropdownMenuTrigger asChild>
-											<Button
-												variant="outline"
-												className="h-9 w-full justify-between font-normal"
-											>
-												{statusCodeFilters.size > 0
-													? `${statusCodeFilters.size} selected`
-													: "All codes"}
-												<ChevronDown className="h-4 w-4 opacity-50" />
-											</Button>
-										</DropdownMenuTrigger>
-										<DropdownMenuContent className="w-56 max-h-64 overflow-y-auto">
-											<div className="p-2">
-												<div className="text-xs font-medium text-muted-foreground mb-2">
-													Select status codes
-												</div>
-												{uniqueStatusCodes.map((code) => (
-													<button
-														key={code}
-														type="button"
-														className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
-														onClick={() => toggleStatusCode(code.toString())}
-													>
-														<div
-															className={`w-4 h-4 border rounded-sm flex items-center justify-center ${
-																statusCodeFilters.has(code.toString())
-																	? "bg-primary border-primary"
-																	: "border-input"
-															}`}
-														>
-															{statusCodeFilters.has(code.toString()) && (
-																<svg
-																	className="w-3 h-3 text-primary-foreground"
-																	fill="none"
-																	viewBox="0 0 24 24"
-																	stroke="currentColor"
-																	aria-label="Selected"
-																>
-																	<title>Selected</title>
-																	<path
-																		strokeLinecap="round"
-																		strokeLinejoin="round"
-																		strokeWidth={3}
-																		d="M5 13l4 4L19 7"
-																	/>
-																</svg>
-															)}
-														</div>
-														<span
-															className={`text-sm font-medium ${getStatusCodeColor(code)}`}
-														>
-															{code}
-														</span>
-													</button>
-												))}
-											</div>
-										</DropdownMenuContent>
-									</DropdownMenu>
-								</div>
 							</div>
 						</div>
 					</div>
 				)}
 
-				{!data ? (
-					<p className="text-muted-foreground">No requests found</p>
-				) : filteredRequests.length === 0 ? (
+				{loading && loadedCount === 0 ? (
+					<p className="text-muted-foreground">Loading requests...</p>
+				) : !data || requests.length === 0 ? (
 					<p className="text-muted-foreground">
-						No requests match the selected filters
+						{filtersActive
+							? "No requests match the selected filters"
+							: "No requests found"}
 					</p>
 				) : (
 					<div className="space-y-2">
-						{filteredRequests.map((request) => {
+						{requests.map((request) => {
 							const isExpanded = expandedRequests.has(request.id);
 							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
@@ -879,6 +892,32 @@ export function RequestsTab() {
 							);
 						})}
 					</div>
+				)}
+
+				{/* Load more / end-of-results — filtered explorer only */}
+				{filtersActive && (hasMore || isFetchingMore) && (
+					<div className="mt-4 flex justify-center">
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => filteredQuery.fetchNextPage()}
+							disabled={isFetchingMore}
+						>
+							{isFetchingMore ? (
+								<>
+									<RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+									Loading...
+								</>
+							) : (
+								"Load more"
+							)}
+						</Button>
+					</div>
+				)}
+				{filtersActive && !hasMore && loadedCount > 0 && (
+					<p className="mt-4 text-center text-xs text-muted-foreground">
+						End of results
+					</p>
 				)}
 			</CardContent>
 
