@@ -231,6 +231,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			affinityKey?: string | null;
 			previousAccountId?: string | null;
 			failoverReason?: string | null;
+			/**
+			 * The cache-affinity-pinned account id — set on affinity hit (the
+			 * pinned account, which equals the selected account) and on affinity
+			 * hold (the pinned-but-cooled account, NOT the served sibling). Lets the
+			 * transparent burst-retry feature target the cache-warm account before
+			 * the failover loop. Left undefined (→ null) for non-affinity picks.
+			 */
+			heldAccountId?: string | null;
 		} = {},
 	): void {
 		meta.routing = {
@@ -242,6 +250,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			previousAccountId: options.previousAccountId ?? null,
 			candidatesCount,
 			failoverReason: options.failoverReason ?? null,
+			heldAccountId: options.heldAccountId ?? null,
 		};
 	}
 
@@ -722,7 +731,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					"affinity_hit",
 					affinedAccount,
 					others.length + 1,
-					{ affinityKey, previousAccountId },
+					{
+						affinityKey,
+						previousAccountId,
+						// The affined account IS the cache account and was selected; expose
+						// it as the held account so a first-attempt transient 429 on it can
+						// route into the hold path instead of diverting to a sibling.
+						heldAccountId: affinedAccount.id,
+					},
 				);
 				this.logSelection(
 					"affinity_hit",
@@ -758,7 +774,14 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					"affinity_hold",
 					chosenAccount,
 					available.length,
-					{ affinityKey, previousAccountId },
+					{
+						affinityKey,
+						previousAccountId,
+						// The pinned (cache-warm) account is cooled and a sibling is being
+						// served this request — expose the PINNED account, not the served
+						// sibling, so the burst-retry feature can hold/re-probe it.
+						heldAccountId: resolution.heldAccountId,
+					},
 				);
 				this.recordComparatorPick(chosenAccount);
 				this.logSelection(

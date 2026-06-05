@@ -80,19 +80,22 @@ export async function makeProxyRequest(
 	hasBody?: boolean,
 	signal?: AbortSignal,
 ): Promise<Response> {
-	let timeoutId: ReturnType<typeof setTimeout> | null = null;
-	let internalController: AbortController | null = null;
+	// The internal request timeout must ALWAYS apply, even when the caller passes
+	// its own signal (e.g. the transparent burst-retry paths thread `req.signal`
+	// through to release the hold slot on a client disconnect). Previously the
+	// caller signal *replaced* the timeout, so a hung upstream with a still-
+	// connected client could hold the concurrency semaphore indefinitely and blow
+	// past BURST_RETRY_MAX_HOLD_MS. Compose both so EITHER a client disconnect OR
+	// the internal timeout aborts the fetch.
+	const internalController = new AbortController();
+	const timeoutId = setTimeout(
+		() => internalController.abort(),
+		TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS,
+	);
 
-	const effectiveSignal =
-		signal ??
-		(() => {
-			internalController = new AbortController();
-			timeoutId = setTimeout(
-				() => internalController?.abort(),
-				TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS,
-			);
-			return internalController.signal;
-		})();
+	const effectiveSignal = signal
+		? AbortSignal.any([signal, internalController.signal])
+		: internalController.signal;
 
 	try {
 		if (target instanceof Request) {
@@ -107,6 +110,6 @@ export async function makeProxyRequest(
 			...(hasBody ? ({ duplex: "half" } as RequestInit) : {}),
 		});
 	} finally {
-		if (timeoutId) clearTimeout(timeoutId);
+		clearTimeout(timeoutId);
 	}
 }

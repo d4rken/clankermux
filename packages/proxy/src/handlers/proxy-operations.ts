@@ -1,5 +1,7 @@
 import {
+	getBurstRetryMaxUsageAgeMs,
 	getModelList,
+	isBurstRetryEnabled,
 	logError,
 	mapModelName,
 	ProviderError,
@@ -9,7 +11,11 @@ import {
 import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
-import { getProvider, usageCache } from "@clankermux/providers";
+import {
+	getFreshCapacity,
+	getProvider,
+	usageCache,
+} from "@clankermux/providers";
 import {
 	type Account,
 	PROVIDER_NAMES,
@@ -23,13 +29,83 @@ import {
 } from "../provider-overload-cooldown";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
+import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import { handleProxyError, processProxyResponse } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
+import { classify429Transient } from "./transparent-retry";
 
 const log = new Logger("ProxyOperations");
+
+/**
+ * Categorical outcome of a single `proxyWithAccount` attempt that returned
+ * `null` (i.e. signalled failover rather than forwarding a response). Recorded
+ * into the optional outcome sink (see {@link ProxyAttemptOptions.onOutcome}) so
+ * the proxy's decide-before-loop control flow can tell a transparent-429
+ * (hold-eligible) failure apart from a hard exhaustion / auth / network / model
+ * failure WITHOUT re-parsing the upstream response (whose body has been
+ * discarded by the `fail()` helper).
+ *
+ *  - `retryable_429`   — an OAuth-Anthropic transient burst 429 the caller may
+ *                         hold-and-retry on the cache account. Carries the
+ *                         classifier confidence so the orchestrator can cap a
+ *                         `stale_should_retry` to a single short probe.
+ *  - `hard_429`        — a 429 that is NOT hold-eligible (non-OAuth-Anthropic,
+ *                         hard-limit status, no headroom + no retry hint, or
+ *                         feature disabled). Normal failover.
+ *  - `auth`            — upstream 401.
+ *  - `overload_529`    — provider overload (529) → provider-overload cooldown.
+ *  - `model_not_found` — a forwarded model-not-found (404/400). (Not a `null`
+ *                         return — recorded for completeness when applicable.)
+ *  - `network_error`   — a thrown error in the attempt (caught failover).
+ *  - `other`           — any other null-return failover not covered above.
+ */
+export type ProxyAttemptOutcome =
+	| {
+			kind: "retryable_429";
+			confidence: "fresh_headroom" | "stale_should_retry";
+			cooldownUntil?: number;
+	  }
+	| { kind: "hard_429"; cooldownUntil?: number }
+	| { kind: "auth" }
+	| { kind: "overload_529"; cooldownUntil?: number }
+	| { kind: "model_not_found" }
+	| { kind: "network_error" }
+	| { kind: "other" };
+
+/**
+ * Optional, behaviour-only extension bag for {@link proxyWithAccount}. Every
+ * field is optional and defaults to today's behaviour, so existing positional
+ * callers and tests are unaffected.
+ */
+export interface ProxyAttemptOptions {
+	/**
+	 * Sink invoked exactly once with the categorical outcome whenever the attempt
+	 * fails over (returns `null`) or forwards a model-not-found. The proxy uses it
+	 * to drive the transparent burst-retry decision. Recording is routed through
+	 * the internal `fail()` helper so it can never drift from the body-cancel.
+	 */
+	onOutcome?: (outcome: ProxyAttemptOutcome) => void;
+	/**
+	 * Re-probe mode for the transparent burst-retry hold. When true:
+	 *   - the cache-keepalive staging step is skipped (no re-`Buffer.from` copy of
+	 *     the body on each re-probe — the original attempt already staged it),
+	 *   - the 429 cooldown is applied with `{ reprobe: true }` semantics (no streak
+	 *     escalation, no `rate_limited_at` bump — see rate-limit-cooldown.ts).
+	 * The caller (the hold orchestrator) is responsible for the cooldown-gate
+	 * bypass (it invokes this directly on a held, still-cooled account).
+	 */
+	reprobe?: boolean;
+	/**
+	 * AbortSignal threaded through to the upstream `fetch` so a client disconnect
+	 * (or the orchestrator giving up) aborts the in-flight request immediately —
+	 * essential in re-probe mode so a disconnect releases the hold slot rather
+	 * than waiting for the upstream timeout.
+	 */
+	signal?: AbortSignal;
+}
 
 export function isSyntheticInternalRequest(headers: Headers): boolean {
 	return (
@@ -502,7 +578,20 @@ export async function proxyWithAccount(
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
 	returnRateLimitedResponseOnExhaustion = false,
+	options?: ProxyAttemptOptions,
 ): Promise<Response | null> {
+	// Single helper that records a categorical outcome into the optional sink AND
+	// cancels the upstream body, so the many failover (`return null`) paths can't
+	// let recording and body-cancel drift apart (Codex's anti-drift requirement).
+	// Returns `null` so call sites can `return fail(...)` directly.
+	const fail = async (
+		outcome: ProxyAttemptOutcome,
+		response?: Response | null,
+	): Promise<null> => {
+		options?.onOutcome?.(outcome);
+		await discardUpstreamBody(response);
+		return null;
+	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
 	// catch below can release it on a thrown error (e.g. a provider
 	// processResponse / processProxyResponse failure after the fetch succeeded)
@@ -565,7 +654,12 @@ export async function proxyWithAccount(
 		// Both checks are truthy (not strict-equality) to preserve the original
 		// keepalive guard's behaviour: any non-empty header value triggers the
 		// skip, matching what `!req.headers.get(...)` returned before.
-		if (!isSyntheticInternalRequest(req.headers)) {
+		//
+		// Also skip on a transparent-retry re-probe: the original attempt already
+		// staged this request id (same account), and stageRequest() does a real
+		// `Buffer.from(body)` copy (~0.5–1.5 MB) — re-staging it on every gentle
+		// re-probe would churn that copy needlessly.
+		if (!isSyntheticInternalRequest(req.headers) && !options?.reprobe) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
 				account.id,
@@ -644,8 +738,18 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Make the request
-		let rawResponse = await makeProxyRequest(transformedRequest);
+		// Make the request. Thread the caller's AbortSignal (if any) into the
+		// upstream fetch so a client disconnect aborts it immediately — essential
+		// in re-probe mode so a disconnect releases the hold slot promptly. When
+		// absent, makeProxyRequest installs its own timeout controller as before.
+		let rawResponse = await makeProxyRequest(
+			transformedRequest,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			options?.signal,
+		);
 		liveUpstream = rawResponse;
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
@@ -681,7 +785,14 @@ export async function proxyWithAccount(
 				// socket + ~512 KB read buffer is released. Acquiring first means a
 				// throw here leaves the original intact for the outer catch/failover
 				// instead of proceeding with an already-cancelled body.
-				const retryResponse = await makeProxyRequest(retryTransformedRequest);
+				const retryResponse = await makeProxyRequest(
+					retryTransformedRequest,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					options?.signal,
+				);
 				await discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
@@ -718,7 +829,14 @@ export async function proxyWithAccount(
 				// catch below continues with the original 400 still intact (its body
 				// not yet cancelled), preserving the "forward the original 400 on
 				// retry failure" contract.
-				const retryResponse = await makeProxyRequest(retryRequest);
+				const retryResponse = await makeProxyRequest(
+					retryRequest,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					options?.signal,
+				);
 				await discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
@@ -752,6 +870,160 @@ export async function proxyWithAccount(
 					`Account ${account.name} received 429 — headers: ${JSON.stringify(rlHeaders)}`,
 				);
 			}
+
+			// ── Transparent burst-retry: re-probe mode ──────────────────────────
+			// A re-probe of a held account that came back 429 (still throttled):
+			// apply the no-streak/no-anchor cooldown and signal "still throttled"
+			// to the hold orchestrator WITHOUT cycling model fallbacks at the
+			// throttled IP. The orchestrator decides whether to wait and re-probe
+			// again or give up. Non-429 responses fall through to the normal path.
+			if (
+				options?.reprobe &&
+				rawResponse.status === 429 &&
+				isBurstRetryEnabled()
+			) {
+				const cooldownUntil = extractCooldownUntil(
+					rawResponse,
+					account.id,
+					usageCache.getRateLimitedUntil.bind(usageCache),
+				);
+				applyRateLimitCooldown(
+					account,
+					{ resetTime: cooldownUntil, reason: "model_fallback_429" },
+					ctx,
+					{ reprobe: true },
+				);
+				// `confidence` here is NOT consumed by the hold orchestrator: a
+				// re-probe outcome is collapsed to `Response | null` (see ReprobeFn)
+				// before it reaches `holdAndRetryCacheAccount`, which branches solely
+				// on the confidence it captured at hold entry. This hardcoded value is
+				// therefore inert for orchestration and must not be relied upon for it.
+				return await fail(
+					{
+						kind: "retryable_429",
+						confidence: "fresh_headroom",
+						cooldownUntil,
+					},
+					rawResponse,
+				);
+			}
+
+			// ── Transparent burst-retry: first-attempt early intercept ──────────
+			// Before cycling this account's model fallbacks (which would fire more
+			// requests at the already-throttled per-IP window), classify an
+			// OAuth-Anthropic 429. If it is a retryable transient burst throttle,
+			// record `retryable_429` and fail over WITHOUT model cycling so the
+			// proxy.ts decide-before-loop can hold-and-retry the cache account.
+			// Skipped for: feature off, non-429, synthetic keepalive/auto-refresh
+			// replays (their own per-IP-burst handling lives below), and re-probe
+			// mode (handled above). Non-retryable / non-OAuth-Anthropic 429s fall
+			// through to today's model-fallback + failover behaviour unchanged.
+			if (
+				isBurstRetryEnabled() &&
+				rawResponse.status === 429 &&
+				!options?.reprobe &&
+				!isSyntheticInternalRequest(req.headers)
+			) {
+				const now = Date.now();
+				// Read fresh capacity once. When usage is stale/absent
+				// (getFreshCapacity → null), the plan calls for ONE best-effort
+				// usage refresh before falling back to the `x-should-retry` hint —
+				// so a real burst 429 doesn't fall through to sibling failover just
+				// because the usage cache happened to be cold. The refresh is a
+				// single, self-bounded fetch (usageCache.refreshNow handles its own
+				// 5s timeout + failure → false); we re-read capacity afterward. The
+				// predicate itself stays pure/synchronous: it classifies on the
+				// pre-resolved capacity value via the closure below.
+				let capacity = getFreshCapacity(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					getBurstRetryMaxUsageAgeMs(),
+				);
+				if (capacity === null) {
+					const refreshed = await usageCache.refreshNow(account.id);
+					if (refreshed) {
+						// Re-read against the same `now` budget; refreshNow updated the
+						// cache timestamp so a successful fetch is fresh by definition.
+						capacity = getFreshCapacity(
+							usageCache,
+							account.id,
+							account.provider,
+							now,
+							getBurstRetryMaxUsageAgeMs(),
+						);
+					}
+				}
+				const classification = classify429Transient({
+					response: rawResponse,
+					account,
+					now,
+					// Pre-resolved capacity (refreshed once if it was stale/absent).
+					getCapacity: () => capacity,
+				});
+				if (classification.retryable) {
+					// Activate the shared burst marker SYNCHRONOUSLY — at the instant
+					// of classification, BEFORE the cooldown write, the audit enqueue,
+					// and the `await fail()` body-discard below. This closes a
+					// concurrency race (Finding 1): a sibling-Anthropic affinity
+					// request that arrives after this account is marked cooled but
+					// before the marker is set would otherwise divert to a sibling,
+					// breaking the "never sibling on burst" invariant. The hold
+					// orchestrator also sets the marker (extends-never-shortens, so a
+					// double set is harmless), but the authoritative set must happen
+					// here, regardless of whether a hold slot is later acquired.
+					markAnthropicBurstThrottle(now);
+					const cooldownUntil = extractCooldownUntil(
+						rawResponse,
+						account.id,
+						usageCache.getRateLimitedUntil.bind(usageCache),
+					);
+					// Mark the cache account rate-limited via the normal (non-reprobe)
+					// cooldown so the affinity strategy holds the pin and concurrent
+					// requests resolve to `affinity_hold` (the shared burst marker +
+					// hold path then take over in proxy.ts). The audit row is written
+					// below in the no-fallback path? No — we short-circuit here, so
+					// record the per-attempt audit row explicitly to preserve history.
+					applyRateLimitCooldown(
+						account,
+						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
+						ctx,
+					);
+					const responseTime = Date.now() - requestMeta.timestamp;
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest(
+							crypto.randomUUID(),
+							req.method,
+							url.pathname,
+							account.id,
+							429,
+							false,
+							"model_fallback_429",
+							responseTime,
+							failoverAttempts,
+							undefined,
+							apiKeyId ?? undefined,
+							apiKeyName ?? undefined,
+							requestMeta.project ?? null,
+							undefined,
+							requestMeta.comboName ?? null,
+						),
+					);
+					log.warn(
+						`Account ${account.name} hit transient burst 429 (${classification.confidence}) — intercepting before model-fallback cycling for hold-and-retry`,
+					);
+					return await fail(
+						{
+							kind: "retryable_429",
+							confidence: classification.confidence,
+							cooldownUntil,
+						},
+						rawResponse,
+					);
+				}
+			}
+
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
@@ -776,8 +1048,7 @@ export async function proxyWithAccount(
 							log.warn(
 								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 							);
-							await discardUpstreamBody(rawResponse);
-							return null;
+							return await fail({ kind: "other" }, rawResponse);
 						}
 
 						log.warn(
@@ -824,8 +1095,7 @@ export async function proxyWithAccount(
 								requestMeta.comboName ?? null,
 							),
 						);
-						await discardUpstreamBody(rawResponse);
-						return null;
+						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
 					}
 					// Model-not-found (404/400) is forwarded to the client so it can
 					// surface the real error. Strip content-encoding/content-length
@@ -840,6 +1110,7 @@ export async function proxyWithAccount(
 					// forwardToClient (→ onSummary) or is a `return null` failover the
 					// proxy.ts caller cleans up via discardStaged.
 					cacheBodyStore.discardStaged(requestMeta.id);
+					options?.onOutcome?.({ kind: "model_not_found" });
 					return withSanitizedProxyHeaders(rawResponse);
 				}
 
@@ -905,7 +1176,14 @@ export async function proxyWithAccount(
 
 					// Acquire the retry first, then cancel the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
-					const retryResponse = await makeProxyRequest(retryTransformedRequest);
+					const retryResponse = await makeProxyRequest(
+						retryTransformedRequest,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						options?.signal,
+					);
 					await discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
 					liveUpstream = rawResponse;
@@ -988,8 +1266,12 @@ export async function proxyWithAccount(
 						);
 					}
 				}
-				await discardUpstreamBody(rawResponse);
-				return null;
+				return await fail(
+					rawResponse.status === 429
+						? { kind: "hard_429" }
+						: { kind: "model_not_found" },
+					rawResponse,
+				);
 			}
 		}
 
@@ -1025,8 +1307,7 @@ export async function proxyWithAccount(
 			log.warn(
 				`Authentication failed (401) for account ${account.name}, failing over to next account`,
 			);
-			await discardUpstreamBody(response);
-			return null;
+			return await fail({ kind: "auth" }, response);
 		}
 
 		if (
@@ -1066,8 +1347,10 @@ export async function proxyWithAccount(
 			log.warn(
 				`Provider ${account.provider} overloaded on account ${account.name}; skipping same-provider accounts for this cooldown window`,
 			);
-			await discardUpstreamBody(response);
-			return null;
+			return await fail(
+				{ kind: "overload_529", cooldownUntil: rateLimitInfo.resetTime },
+				response,
+			);
 		}
 
 		// Check for rate limit using account-specific provider
@@ -1118,8 +1401,16 @@ export async function proxyWithAccount(
 					{ ...ctx, provider },
 				);
 			}
-			await discardUpstreamBody(response);
-			return null; // Signal to try next account
+			// A rate-limited failover that reached processProxyResponse (i.e. NOT a
+			// 429 — those are intercepted in the isModelUnavailableError branch
+			// above — but a 529/other rate-limit signal): record as hard_429-class
+			// so the proxy never treats it as hold-eligible.
+			return await fail(
+				response.status === 529
+					? { kind: "overload_529" }
+					: { kind: "hard_429" },
+				response,
+			);
 		}
 
 		// Forward response to client
@@ -1147,8 +1438,7 @@ export async function proxyWithAccount(
 		handleProxyError(err, account, log);
 		// Release any upstream body owned at the point of failure so a thrown
 		// error (e.g. mid-processResponse) doesn't leak its socket/read buffer.
-		await discardUpstreamBody(liveUpstream);
-		return null;
+		return await fail({ kind: "network_error" }, liveUpstream);
 	}
 }
 

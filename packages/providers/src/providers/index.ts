@@ -2,6 +2,9 @@ export { AlibabaCodingPlanProvider } from "./alibaba-coding-plan/index";
 export {
 	AnthropicOAuthProvider,
 	AnthropicProvider,
+	HARD_LIMIT_STATUSES,
+	isAnthropicHardLimitStatus,
+	SOFT_WARNING_STATUSES,
 } from "./anthropic/index";
 export {
 	type AnthropicCompatibleConfig,
