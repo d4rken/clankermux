@@ -43,6 +43,19 @@ export interface RequestRoutingMeta {
 	previousAccountId?: string | null;
 	candidatesCount?: number | null;
 	failoverReason?: string | null;
+	/**
+	 * The cache-affinity-pinned account id for this request, when one is known —
+	 * EVEN IF that account is currently in cooldown and a sibling was handed out
+	 * as `selectedAccountId` instead (an `affinity_hold`). Populated by the
+	 * session strategy on affinity hit/hold so the transparent burst-retry
+	 * feature can target the cache-warm account before the failover loop iterates
+	 * siblings. `null` when there is no affinity pin (miss/reassign/no key) or the
+	 * strategy doesn't track affinity.
+	 *
+	 * In-memory routing decision only — NOT persisted (omitted from the recorder's
+	 * routing projection).
+	 */
+	heldAccountId?: string | null;
 }
 
 // Retention and maintenance API shapes

@@ -1,6 +1,8 @@
 import {
 	codexAccountFitsRequest,
 	estimateRequestTokens,
+	getBurstRetryMaxUsageAgeMs,
+	isBurstRetryEnabled,
 	mapModelName,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
@@ -8,7 +10,7 @@ import {
 } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import { usageCache } from "@clankermux/providers";
+import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
@@ -21,7 +23,12 @@ import {
 	getComboSlotInfo,
 	getForcedAccount,
 	getUsageThrottleUntil,
+	HOLD_OVERFLOW,
+	holdAndRetryCacheAccount,
+	isAnthropicBurstThrottleActive,
+	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
+	type ProxyAttemptOutcome,
 	type ProxyContext,
 	prepareRequestBody,
 	proxyForcedAccount,
@@ -37,6 +44,7 @@ import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
+	isOfficialAnthropicProvider,
 	isProviderOverloaded,
 } from "./provider-overload-cooldown";
 import { extractRequestAffinity } from "./request-affinity";
@@ -123,6 +131,43 @@ export function setRequestRecorder(recorder: RequestRecorder): void {
 // ctx.requestRecorder, not this.
 export function getRequestRecorder(): RequestRecorder | null {
 	return requestRecorder;
+}
+
+/**
+ * Build a constructed, retryable 429 response for the transparent burst-retry
+ * give-up / last-resort-exhausted path. The real upstream 429 body has already
+ * been discarded (its socket released) by the time we reach here, so we
+ * synthesize a fresh JSON body with a clear message and a `Retry-After` derived
+ * from the held account's remaining cooldown.
+ *
+ * Status 429 (not 503): the condition is a transient per-IP burst throttle the
+ * client should simply retry shortly, not a hard pool exhaustion.
+ */
+function createBurstRetryGiveUpResponse(heldAccount: Account): Response {
+	const now = Date.now();
+	const until = heldAccount.rate_limited_until ?? now + 30_000;
+	const retryAfterSeconds = Math.max(1, Math.round((until - now) / 1000));
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "rate_limited",
+				message:
+					"Upstream is briefly rate-limited (transient burst throttle). " +
+					"The request was held and re-probed but the throttle did not clear " +
+					"in time, and no fallback backend could serve it. Please retry shortly.",
+				retry_after_seconds: retryAfterSeconds,
+			},
+		}),
+		{
+			status: 429,
+			headers: {
+				"Content-Type": "application/json",
+				"Retry-After": String(retryAfterSeconds),
+				"x-clankermux-burst-retry": "exhausted",
+			},
+		},
+	);
 }
 
 // ===== MAIN HANDLER =====
@@ -686,7 +731,255 @@ export async function handleProxy(
 		: null;
 	let response: Response | null = null;
 
+	// 9a. Transparent burst-retry decide-before-loop (OAuth-Anthropic, non-combo).
+	//
+	// Anthropic's 429 is a per-IP burst throttle, not per-account quota: failing
+	// over to a sibling Anthropic account is futile (same egress IP/window) and
+	// wasteful (cold prompt cache). When the cache-affinity account is an
+	// OAuth-Anthropic account, we instead HOLD and re-probe it before iterating
+	// siblings. Gated entirely on isBurstRetryEnabled() — when off, the loop below
+	// runs exactly as before.
+	// When the burst-retry first attempt tries the held account and it fails
+	// non-retryably (e.g. a hard 429 / 401), we fall through to the normal loop
+	// below — but the held account has already been attempted, so the loop must
+	// skip it to avoid a wasteful duplicate request. Null when no first attempt
+	// was made (marker-active path, or feature off).
+	let burstAttemptedAccountId: string | null = null;
+	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
+	if (isBurstRetryEnabled() && !filteredComboInfo?.comboName && burstHeldId) {
+		// Resolve the held (cache) account object. It may not be in `accounts`
+		// (an affinity_hold serves a sibling because the pinned account is cooled),
+		// so fall back to the DB. We re-probe it directly, bypassing the
+		// availability gate, re-checking only paused/existence below.
+		const heldAccount =
+			accounts.find((a) => a.id === burstHeldId) ??
+			selectedAccounts.find((a) => a.id === burstHeldId) ??
+			(await ctx.dbOps.getAccount(burstHeldId));
+
+		if (
+			heldAccount &&
+			!heldAccount.paused &&
+			isOAuthAnthropicAccount(heldAccount)
+		) {
+			// Reprobe closure: re-attempt the held account in reprobe mode (cooldown
+			// gate bypassed, no re-staging, no streak escalation) with the client's
+			// AbortSignal so a disconnect releases the hold promptly.
+			const reprobe = async (
+				probeAccount: Account,
+				signal: AbortSignal,
+			): Promise<Response | null> => {
+				// Re-check paused/existence at probe time (the held account may have
+				// been paused/removed between probes); skip if gone.
+				return proxyWithAccount(
+					req,
+					url,
+					probeAccount,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					0,
+					ctx,
+					null,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					false,
+					{ reprobe: true, signal },
+				);
+			};
+
+			// Decide whether to enter the hold. Two triggers:
+			//  (a) the shared burst marker is already active (a concurrent request
+			//      tripped it) — the held account is known-throttled, go straight to
+			//      the hold without a wasted first attempt;
+			//  (b) otherwise, try the held account ONCE; if it returns a
+			//      `retryable_429`, enter the hold. A real Response is returned
+			//      as-is; a non-retryable outcome falls through to normal failover.
+			let enterHold = false;
+			let holdConfidence: "fresh_headroom" | "stale_should_retry" =
+				"fresh_headroom";
+
+			if (isAnthropicBurstThrottleActive()) {
+				// Marker-active path: a CONCURRENT request tripped the global (per-IP)
+				// burst marker. The marker is provider-family-wide, NOT per-account —
+				// so before suppressing this request's normal failover and burning the
+				// whole hold budget, re-validate that THIS held account is plausibly
+				// transient. If it shows fresh, real exhaustion (zero/negative
+				// headroom — e.g. a genuine 5h/7d quota wall), a global marker set by a
+				// different account must not pin it: fall through to normal failover.
+				// Unknown/stale capacity (null) is left eligible — the marker implies a
+				// prior fresh/stale burst classification, so an ambiguous account is
+				// treated as plausibly transient (consistent with classify429Transient,
+				// which holds on fresh minHeadroom>0 and on stale + retry hint).
+				const heldCapacity = getFreshCapacity(
+					usageCache,
+					heldAccount.id,
+					heldAccount.provider,
+					Date.now(),
+					getBurstRetryMaxUsageAgeMs(),
+				);
+				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
+					log.warn(
+						`Burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, falling through to normal failover`,
+					);
+				} else {
+					enterHold = true;
+				}
+			} else if (accounts.some((a) => a.id === heldAccount.id)) {
+				// The held account is available (affinity_hit) — attempt it first.
+				// Record it so the normal loop below skips a duplicate attempt if we
+				// fall through (non-retryable outcome).
+				burstAttemptedAccountId = heldAccount.id;
+				let firstOutcome: ProxyAttemptOutcome | null = null;
+				const firstResponse = await proxyWithAccount(
+					req,
+					url,
+					heldAccount,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					0,
+					ctx,
+					null,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					false,
+					{
+						signal: req.signal,
+						onOutcome: (o) => {
+							firstOutcome = o;
+						},
+					},
+				);
+				if (firstResponse) {
+					return firstResponse;
+				}
+				// `firstOutcome` is assigned synchronously inside proxyWithAccount via
+				// the onOutcome sink before it returns; the cast narrows the inferred
+				// `never` from the closure-only assignment.
+				const outcome = firstOutcome as ProxyAttemptOutcome | null;
+				if (outcome?.kind === "retryable_429") {
+					enterHold = true;
+					holdConfidence = outcome.confidence;
+				}
+				// Any other outcome → fall through to the normal failover loop below
+				// (the held account already failed; the loop will skip it as cooled).
+			}
+			// If the marker is active but the held account is currently in `accounts`
+			// AND not the trigger path above, holdConfidence stays fresh_headroom
+			// (marker activation always implies a prior fresh/stale classification;
+			// a concurrent request can only over-probe by one short cycle).
+
+			if (enterHold) {
+				const holdResult = await holdAndRetryCacheAccount({
+					account: heldAccount,
+					confidence: holdConfidence,
+					signal: req.signal,
+					reprobe,
+				});
+
+				if (holdResult instanceof Response) {
+					return holdResult;
+				}
+
+				// Hold gave up (null) or overflowed (HOLD_OVERFLOW): LAST RESORT.
+				// Never divert to a sibling Anthropic account — try only non-Anthropic
+				// candidates (Codex/other) that already survived the context-window
+				// gate, then fall back to a constructed retryable response. Discard the
+				// held account's staged body first so a later success can't promote
+				// cache bookkeeping under the wrong account.
+				cacheBodyStore.discardStaged(requestMeta.id);
+				const overflow = holdResult === HOLD_OVERFLOW;
+				log.warn(
+					`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — trying non-Anthropic last-resort candidates`,
+				);
+
+				// Exclude EVERY Anthropic-direct provider (OAuth `anthropic` AND the
+				// pay-as-you-go `claude-console-api`) — both hit api.anthropic.com over
+				// the same egress IP and share the per-IP burst throttle, so a
+				// last-resort attempt on either is futile and can prolong the window.
+				// isOfficialAnthropicProvider() is the single source of truth for
+				// "shares the Anthropic per-IP throttle" (also used by the
+				// provider-overload cooldown keying). Genuinely-different providers
+				// (codex/openai, custom-endpoint compatibles) stay eligible. The
+				// candidates already survived the context-window gate, so "Codex if it
+				// fits" is satisfied.
+				const lastResortCandidates = accounts.filter(
+					(a) =>
+						!isOfficialAnthropicProvider(a.provider) && a.id !== heldAccount.id,
+				);
+				for (let j = 0; j < lastResortCandidates.length; j++) {
+					const candidate = lastResortCandidates[j];
+					const overloadedUntil = getProviderOverloadUntil(candidate.provider);
+					if (overloadedUntil) {
+						log.debug(
+							`Burst last-resort skipping ${candidate.name}; provider ${candidate.provider} overloaded until ${new Date(overloadedUntil).toISOString()}`,
+						);
+						continue;
+					}
+					// Recompute the last-account flag against THIS candidate list (do
+					// not reuse the original loop indices). The loop `continue`s past
+					// provider-overloaded candidates, so the last-by-index candidate is
+					// not necessarily the last one ACTUALLY attempted. Treat this as the
+					// last attempt when every remaining candidate would be skipped for
+					// provider overload — otherwise a 529 from the truly-last attempt
+					// could be swallowed instead of forwarded.
+					const isLast = lastResortCandidates
+						.slice(j + 1)
+						.every((c) => !!getProviderOverloadUntil(c.provider));
+					const lastResortResponse = await proxyWithAccount(
+						req,
+						url,
+						candidate,
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						j,
+						ctx,
+						null,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						isLast ||
+							shouldForwardProviderOverloadIfNoCrossProviderFallback(
+								lastResortCandidates,
+								j,
+							),
+						{ signal: req.signal },
+					);
+					if (lastResortResponse) {
+						return lastResortResponse;
+					}
+				}
+
+				// No eligible/successful non-Anthropic candidate → constructed
+				// retryable response (the upstream 429 body was discarded). Recorded
+				// via the synthetic-error path so history stays intact.
+				//
+				// Re-discard the staged body here: each last-resort proxyWithAccount
+				// call above runs WITHOUT reprobe mode, so it RE-stages this
+				// requestMeta.id (proxy-operations stageRequest, a ~0.5–1.5 MB Buffer
+				// copy). The earlier discardStaged (before the last-resort loop) only
+				// cleared the held account's entry; if every candidate returned null we
+				// reach this terminal return — which emits no onSummary — so without a
+				// final discard the last candidate's staged body would leak until the
+				// age sweep. discardStaged is idempotent, so a redundant call (no
+				// candidate re-staged) is harmless.
+				cacheBodyStore.discardStaged(requestMeta.id);
+				const giveUpResponse = createBurstRetryGiveUpResponse(heldAccount);
+				recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
+				return giveUpResponse;
+			}
+		}
+	}
+
 	for (let i = 0; i < accounts.length; i++) {
+		// Skip the held account if the burst-retry first attempt already tried it
+		// (and fell through non-retryably) — avoid a wasteful duplicate request.
+		if (burstAttemptedAccountId && accounts[i].id === burstAttemptedAccountId) {
+			continue;
+		}
 		const overloadedUntil = getProviderOverloadUntil(accounts[i].provider);
 		if (overloadedUntil) {
 			log.debug(

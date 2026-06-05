@@ -10,13 +10,60 @@ import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
 
-// Hard rate limit statuses that should block account usage
-const HARD_LIMIT_STATUSES = new Set([
+/**
+ * Hard rate limit statuses that should block account usage.
+ *
+ * These are the values Anthropic emits in the
+ * `anthropic-ratelimit-unified-status` header that indicate a HARD,
+ * account-level limit (as opposed to a soft/warning status — see
+ * {@link SOFT_WARNING_STATUSES} — or the normal `"allowed"`).
+ *
+ * Note on `"rate_limited"`: this IS a hard status. Anthropic's per-IP burst
+ * 429s do NOT carry this header value; a `"rate_limited"` unified-status means
+ * the account itself is rate limited (quota), so callers that want to
+ * distinguish a transient burst 429 from a real account limit must treat it as
+ * hard. (Confirmed by `parseRateLimit` behaviour and the streaming tests.)
+ *
+ * This Set is the single source of truth for the Anthropic provider — both
+ * {@link AnthropicProvider.parseRateLimit} and the exported
+ * {@link isAnthropicHardLimitStatus} predicate read from it. Comparison is
+ * exact and case-sensitive, matching the raw header value.
+ */
+export const HARD_LIMIT_STATUSES: ReadonlySet<string> = new Set([
 	"rate_limited",
 	"blocked",
 	"queueing_hard",
 	"payment_required",
 ]);
+
+/**
+ * Soft / warning statuses that must NOT block account usage and must NOT be
+ * treated as hard limits. Exposed for symmetry with {@link HARD_LIMIT_STATUSES};
+ * the normal non-limited value `"allowed"` is not listed here.
+ */
+export const SOFT_WARNING_STATUSES: ReadonlySet<string> = new Set([
+	"allowed_warning",
+	"queueing_soft",
+]);
+
+/**
+ * Returns `true` iff the response's `anthropic-ratelimit-unified-status` header
+ * value indicates a HARD, account-level rate limit (see
+ * {@link HARD_LIMIT_STATUSES}).
+ *
+ * Returns `false` when the header is absent, empty, a soft/warning status, the
+ * normal `"allowed"` value, or any other unrecognized value. Comparison is
+ * exact and case-sensitive, matching how `parseRateLimit` compares the header.
+ *
+ * This is the shared predicate the 429 classifier uses to tell a transient
+ * per-IP burst 429 (no hard status) apart from a real hard account limit.
+ */
+export function isAnthropicHardLimitStatus(response: Response): boolean {
+	const statusHeader = response.headers.get(
+		"anthropic-ratelimit-unified-status",
+	);
+	return statusHeader !== null && HARD_LIMIT_STATUSES.has(statusHeader);
+}
 
 // Maximum allowed reset time: 24 hours from now.
 // Prevents a pathological Retry-After value from keeping an account
@@ -36,9 +83,6 @@ function clampResetTime(candidateMs: number, now: number): number | undefined {
 	}
 	return Math.min(candidateMs, now + MAX_RESET_MS);
 }
-
-// Soft warning statuses that should not block account usage
-const _SOFT_WARNING_STATUSES = new Set(["allowed_warning", "queueing_soft"]);
 
 const log = new Logger("AnthropicProvider");
 

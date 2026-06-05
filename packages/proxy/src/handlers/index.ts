@@ -7,11 +7,17 @@ export {
 	selectAccountsForRequest,
 	setComboSlotInfo,
 } from "./account-selector";
+export {
+	getAnthropicBurstThrottleUntil,
+	isAnthropicBurstThrottleActive,
+} from "./burst-cooldown";
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPoolExhaustedResponse,
+	type ProxyAttemptOptions,
+	type ProxyAttemptOutcome,
 	proxyForcedAccount,
 	proxyUnauthenticated,
 	proxyWithAccount,
@@ -50,6 +56,12 @@ export {
 	restartUsagePollingForAccount,
 	unregisterCodexUsageRefresher,
 } from "./token-manager";
+export {
+	HOLD_OVERFLOW,
+	type HoldResult,
+	holdAndRetryCacheAccount,
+	isOAuthAnthropicAccount,
+} from "./transparent-retry";
 export {
 	createUsageThrottledResponse,
 	getUsageThrottleStatus,
