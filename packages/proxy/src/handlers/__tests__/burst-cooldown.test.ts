@@ -10,34 +10,13 @@ import {
 	tryAcquireHoldSlot,
 } from "../burst-cooldown";
 
-// Env vars read by the burst-marker / semaphore accessors. Saved and restored
-// around each test so a stray host value can't leak into a default assertion
-// and tests can't pollute one another — mirrors constants.test.ts.
-const BURST_ENV_VARS = [
-	"CCFLARE_BURST_RETRY_MARKER_MS",
-	"CCFLARE_BURST_RETRY_MAX_CONCURRENT",
-] as const;
-
 describe("burst cooldown", () => {
-	const saved: Record<string, string | undefined> = {};
-
 	beforeEach(() => {
-		for (const key of BURST_ENV_VARS) {
-			saved[key] = process.env[key];
-			delete process.env[key];
-		}
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
 	});
 
 	afterEach(() => {
-		for (const key of BURST_ENV_VARS) {
-			if (saved[key] === undefined) {
-				delete process.env[key];
-			} else {
-				process.env[key] = saved[key];
-			}
-		}
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
 	});
@@ -50,7 +29,7 @@ describe("burst cooldown", () => {
 		});
 
 		it("set ⇒ active until expiry; after expiry ⇒ null/false", () => {
-			// Default marker lifetime is 60_000ms (TIME_CONSTANTS.BURST_RETRY_MARKER_MS).
+			// Default marker lifetime is 60_000ms (BURST_RETRY_MARKER_MS in burst-cooldown.ts).
 			const now = 1_700_000_000_000;
 			markAnthropicBurstThrottle(now);
 
@@ -99,10 +78,9 @@ describe("burst cooldown", () => {
 			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 70_000);
 		});
 
-		it("respects getBurstRetryMarkerMs() via the env override", () => {
-			process.env.CCFLARE_BURST_RETRY_MARKER_MS = "30000";
+		it("respects the injectable markerMs override", () => {
 			const now = 1_700_000_000_000;
-			markAnthropicBurstThrottle(now);
+			markAnthropicBurstThrottle(now, 30_000);
 
 			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 30_000);
 			expect(isAnthropicBurstThrottleActive(now + 29_999)).toBe(true);
@@ -112,7 +90,7 @@ describe("burst cooldown", () => {
 
 	describe("hold-slot concurrency semaphore", () => {
 		it("acquires up to the cap (default 8) returning true, then false at cap", () => {
-			// Default cap is TIME_CONSTANTS.BURST_RETRY_MAX_CONCURRENT_HOLDS = 8.
+			// Default cap is BURST_RETRY_MAX_CONCURRENT_HOLDS = 8 (burst-cooldown.ts).
 			for (let i = 0; i < 8; i++) {
 				expect(tryAcquireHoldSlot()).toBe(true);
 			}
@@ -156,26 +134,23 @@ describe("burst cooldown", () => {
 			expect(getActiveHoldCount()).toBe(0);
 		});
 
-		it("respects getBurstRetryMaxConcurrentHolds() via the env override", () => {
-			process.env.CCFLARE_BURST_RETRY_MAX_CONCURRENT = "2";
-			expect(tryAcquireHoldSlot()).toBe(true);
-			expect(tryAcquireHoldSlot()).toBe(true);
-			// Cap is 2 now ⇒ the third acquire fails.
-			expect(tryAcquireHoldSlot()).toBe(false);
+		it("respects an injectable maxConcurrentHolds override", () => {
+			expect(tryAcquireHoldSlot(2)).toBe(true);
+			expect(tryAcquireHoldSlot(2)).toBe(true);
+			// Cap is 2 ⇒ the third acquire fails.
+			expect(tryAcquireHoldSlot(2)).toBe(false);
 			expect(getActiveHoldCount()).toBe(2);
 		});
 
-		it("reads the cap at acquire time (env raised mid-flight frees capacity)", () => {
-			process.env.CCFLARE_BURST_RETRY_MAX_CONCURRENT = "1";
-			expect(tryAcquireHoldSlot()).toBe(true);
-			expect(tryAcquireHoldSlot()).toBe(false);
+		it("reads the cap at acquire time (a raised cap frees capacity)", () => {
+			expect(tryAcquireHoldSlot(1)).toBe(true);
+			expect(tryAcquireHoldSlot(1)).toBe(false);
 
-			// Raising the cap without re-importing the module lets a further acquire
-			// through — the cap is NOT cached at module load.
-			process.env.CCFLARE_BURST_RETRY_MAX_CONCURRENT = "3";
-			expect(tryAcquireHoldSlot()).toBe(true);
-			expect(tryAcquireHoldSlot()).toBe(true);
-			expect(tryAcquireHoldSlot()).toBe(false);
+			// A higher cap passed to a later acquire lets a further acquire through —
+			// the cap is evaluated per call, not cached.
+			expect(tryAcquireHoldSlot(3)).toBe(true);
+			expect(tryAcquireHoldSlot(3)).toBe(true);
+			expect(tryAcquireHoldSlot(3)).toBe(false);
 			expect(getActiveHoldCount()).toBe(3);
 		});
 	});
