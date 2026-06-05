@@ -16,6 +16,10 @@ import type {
 	UsageHistoryResponse,
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
+import {
+	type RequestQueryParams,
+	requestQueryToSearchParams,
+} from "./lib/request-filters";
 
 // Re-export types with dashboard-specific aliases for backward compatibility
 export type Account = AccountResponse & {
@@ -651,9 +655,11 @@ class API extends HttpClient {
 
 	async getRequestsSummary(
 		limit: number = API_LIMITS.requestsSummary,
+		params: RequestQueryParams = {},
 	): Promise<RequestSummary[]> {
 		const startTime = Date.now();
-		const url = `/api/requests?limit=${limit}`;
+		const search = requestQueryToSearchParams({ ...params, limit });
+		const url = `/api/requests?${search.toString()}`;
 
 		this.logger.debug(`→ GET ${url}`);
 
@@ -665,6 +671,32 @@ class API extends HttpClient {
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	/**
+	 * Count requests matching a filter set (no limit/offset). Backs the
+	 * "M of N matching requests" total in the filtered request explorer.
+	 */
+	async getRequestsCount(params: RequestQueryParams = {}): Promise<number> {
+		const startTime = Date.now();
+		const search = requestQueryToSearchParams(params);
+		const qs = search.toString();
+		const url = qs ? `/api/requests/count?${qs}` : "/api/requests/count";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{ total: number }>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response.total;
+		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, {
 				error: error instanceof Error ? error.message : String(error),
 				stack: error instanceof Error ? error.stack : undefined,
 			});

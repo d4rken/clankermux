@@ -23,6 +23,12 @@ export const queryKeys = {
 		[...queryKeys.all, "memory-history", { range }] as const,
 	requests: (limit?: number) =>
 		[...queryKeys.all, "requests", { limit }] as const,
+	// Filtered/paginated request explorer. Keyed on the resolved server filter
+	// params (+ page size) so changing any filter starts a fresh infinite query.
+	requestsFiltered: (params: unknown) =>
+		[...queryKeys.all, "requests", "filtered", params] as const,
+	requestsCount: (params: unknown) =>
+		[...queryKeys.all, "requests", "count", params] as const,
 	logs: () => [...queryKeys.all, "logs"] as const,
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,

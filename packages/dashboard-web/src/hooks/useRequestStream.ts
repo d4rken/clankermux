@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
 import type { Account, RequestPayload, RequestResponse } from "../api";
 import { queryKeys } from "../lib/query-keys";
+import { toDetailsMap } from "./queries";
 
 // Connection pool management
 const CONNECTION_POOL = new Map<
@@ -54,7 +55,7 @@ const getOrCreateCleanupInterval = () => {
 	return globalCleanupInterval;
 };
 
-export function useRequestStream(limit = 200) {
+export function useRequestStream(limit = 200, enabled = true) {
 	const queryClient = useQueryClient();
 	const connectionKey = `requests-stream-${limit}`;
 	const isMountedRef = useRef(true);
@@ -108,15 +109,9 @@ export function useRequestStream(limit = 200) {
 						if (!current) return current;
 
 						// Ensure detailsMap is a Map
-						const currentDetailsMap =
-							current.detailsMap instanceof Map
-								? current.detailsMap
-								: new Map(
-										(current.detailsMap as RequestResponse[]).map((s) => [
-											s.id,
-											s,
-										]),
-									);
+						const currentDetailsMap = toDetailsMap<RequestResponse>(
+							current.detailsMap,
+						);
 
 						if (evt.type === "start") {
 							// Look up account name from cache
@@ -319,6 +314,10 @@ export function useRequestStream(limit = 200) {
 	);
 
 	useEffect(() => {
+		// Don't open (or hold) a live connection while the filtered explorer owns
+		// the view — its results are a server query snapshot, not a live tail.
+		if (!enabled) return;
+
 		isMountedRef.current = true;
 		const es = connect();
 
@@ -341,7 +340,7 @@ export function useRequestStream(limit = 200) {
 				es.close();
 			}
 		};
-	}, [connect, connectionKey]);
+	}, [connect, connectionKey, enabled]);
 
 	// Global cleanup on unmount
 	useEffect(() => {
