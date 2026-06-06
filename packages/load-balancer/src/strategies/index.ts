@@ -761,13 +761,45 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					getCachedAvailability,
 					now,
 				);
-				if (available.length === 0) return [];
+				if (available.length === 0) {
+					// STORM-DEGRADE (Finding 1): the pinned cache account AND every
+					// sibling are cooled — there is no available candidate to serve THIS
+					// request. We still record the held (cache-affinity) account in
+					// routing meta before returning the empty list, so the proxy's
+					// no-accounts terminal can run the transparent burst-retry HOLD on
+					// the cache account instead of immediately 503-ing pool_exhausted.
+					// Without this, the worst storm moment (all accounts cooled) would
+					// bypass the hold entirely — exactly when holding the warm cache
+					// account matters most. selectedAccount is null / 0 candidates here
+					// (setRoutingMeta tolerates both); heldAccountId carries the pin.
+					this.setRoutingMeta(meta, "affinity_hold", null, 0, {
+						affinityKey,
+						previousAccountId,
+						heldAccountId: resolution.heldAccountId,
+					});
+					return [];
+				}
 				const chosenAccount = available[0];
 				this.resetSessionIfExpired(chosenAccount);
 				// NOTE: deliberately NOT calling rememberAffinity — the held
 				// account keeps its claim on this affinity key.
+				// Decision-point logging: surface WHY we held vs reassigned — the held
+				// account's rate-limit reason, remaining cooldown, and which rule fired
+				// (a transient/server-wide reason vs a short [<15min] cooldown). The
+				// held account is the affinity-pinned one (resolution.heldAccountId); it
+				// is present in `accounts` (resolveAffinity found it there).
+				const heldAccount = accounts.find(
+					(a) => a.id === resolution.heldAccountId,
+				);
+				const heldReason = heldAccount?.rate_limited_reason ?? null;
+				const heldUntil = heldAccount?.rate_limited_until ?? null;
+				const remainingMs = heldUntil && heldUntil > now ? heldUntil - now : 0;
+				const heldRule =
+					heldReason && TRANSIENT_RATE_LIMIT_REASONS.has(heldReason)
+						? "transient-reason"
+						: `short-cooldown(<${Math.round(AFFINITY_REASSIGN_MIN_COOLDOWN_MS / 60_000)}min)`;
 				this.log.info(
-					`Holding ${this.getAffinityLabel(meta)} affinity (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request`,
+					`Holding ${this.getAffinityLabel(meta)} affinity (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request; reason=${heldReason ?? "unknown"} remainingCooldownMs=${remainingMs} rule=${heldRule}`,
 				);
 				this.setRoutingMeta(
 					meta,

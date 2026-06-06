@@ -8,8 +8,13 @@
  * headers were already sent to the client. It only prevents future requests
  * from being routed to the overloaded account until the cooldown expires.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
+import { forwardToClient } from "../../response-handler";
+import {
+	clearAnthropicBurstThrottle,
+	isAnthropicBurstThrottleActive,
+} from "../burst-cooldown";
 import type { ProxyContext } from "../proxy-types";
 import { applyRateLimitCooldown } from "../rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "../sse-rate-limit-sniffer";
@@ -197,5 +202,190 @@ describe("production sniffer integration — overloaded_error mid-stream", () =>
 			'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
 		);
 		expect(sniffer.feed(frame)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Part 1 (storm-affinity-hold): mid-stream rate_limit_error trips the shared
+// Anthropic-OAuth burst marker. The bytes were already sent so it can't rescue
+// THIS response — but the session's NEXT affinity_hold requests must hold their
+// cache account. Drives the REAL forwardToClient stream path.
+// ---------------------------------------------------------------------------
+describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
+	function makeStreamCtx() {
+		return {
+			strategy: {},
+			dbOps: {
+				markAccountRateLimited: () => Promise.resolve(1),
+				updateAccountUsage: () => {},
+				updateAccountRateLimitMeta: () => {},
+				getAdapter: () => ({
+					get: async () => ({ rate_limited_until: null }),
+					run: async () => {},
+				}),
+				updateRequestUsage: async () => {},
+			},
+			runtime: { port: 8080, tlsEnabled: false },
+			config: { getStorePayloads: () => false },
+			provider: { name: "anthropic", isStreamingResponse: () => true },
+			refreshInFlight: new Map<string, Promise<string>>(),
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+					return Promise.resolve();
+				},
+			},
+			requestRecorder: {
+				begin: () => {},
+				captureResponseChunk: () => {},
+				finishTransport: () => {},
+				attachUsageSummary: () => {},
+				markUsageUnavailable: () => {},
+				recordSynthetic: () => {},
+				sweep: () => {},
+				dispose: () => {},
+			},
+		} as unknown as ProxyContext;
+	}
+
+	function streamWithErrorFrame(errorType: string): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		return new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					enc.encode(
+						`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"x"}}\n\n`,
+					),
+				);
+				controller.close();
+			},
+		});
+	}
+
+	beforeEach(() => clearAnthropicBurstThrottle());
+	afterEach(() => clearAnthropicBurstThrottle());
+
+	it("sets the burst marker on a mid-stream rate_limit_error for an OAuth-Anthropic account", async () => {
+		const account = makeAccount(); // anthropic + refresh_token
+		const ctx = makeStreamCtx();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-rl",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		// Drain so the single-reader pass-through runs the inline analytics + sniffer.
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(true);
+	});
+
+	it("does NOT set the burst marker on a mid-stream overloaded_error (529, separate cooldown)", async () => {
+		const account = makeAccount();
+		const ctx = makeStreamCtx();
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-ovl",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("overloaded_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("does NOT set the burst marker on a mid-stream rate_limit_error for a non-OAuth (console) account", async () => {
+		const account = makeAccount({
+			provider: "claude-console-api",
+			refresh_token: "",
+			access_token: null,
+			api_key: "sk-ant-test",
+		});
+		const ctx = makeStreamCtx();
+		// The sniffer only fires for Anthropic-shape providers; a console account is
+		// still anthropic-shaped, so the sniffer WILL fire — but the OAuth-Anthropic
+		// guard must keep the marker off.
+		(ctx.provider as { name: string }).name = "claude-console-api";
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-console",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("does NOT set the burst marker on a mid-stream rate_limit_error for a synthetic keepalive replay (Finding 4)", async () => {
+		// A cache-keepalive replay can itself trip Anthropic's per-IP limit (the
+		// scheduler fires parallel requests across every account). That is a
+		// self-inflicted probe artifact, not a user-driven storm — the marker must
+		// stay off so real requests aren't pinned to their cache account off a
+		// synthetic burst.
+		const account = makeAccount(); // OAuth anthropic
+		const ctx = makeStreamCtx();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-keepalive",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-keepalive": "true",
+				}),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
 });

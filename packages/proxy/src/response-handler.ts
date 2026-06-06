@@ -11,8 +11,10 @@ import type {
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
+import { markAnthropicBurstThrottle } from "./handlers/burst-cooldown";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
+import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
 import {
 	NO_ACCOUNT_ID,
 	type RecordMeta,
@@ -381,6 +383,34 @@ export async function forwardToClient(
 						},
 						ctx,
 					);
+
+					// Reliable burst marker (storm-affinity-hold Part 1). A mid-stream
+					// `rate_limit_error` frame is the per-IP burst throttle revealing
+					// itself after the 200 headers were already sent — it can't rescue
+					// THIS response, but it must trip the shared Anthropic-OAuth burst
+					// marker so the session's NEXT affinity_hold requests hold their
+					// cache account instead of diverting to a sibling. Only for a
+					// genuine OAuth-Anthropic 429 (rate_limit_error, not the 529
+					// overloaded_error which drives the separate provider-overload
+					// cooldown). The SSE frame carries no HTTP status, so there is no
+					// hard-limit-status check here — a mid-stream rate_limit_error is by
+					// nature the transient burst shape.
+					//
+					// Exclude synthetic cache-keepalive replays: the keepalive scheduler
+					// fires parallel requests across every cached account at once, so a
+					// burst of 4+ trips Anthropic's per-IP limit and a keepalive replay
+					// can itself surface a mid-stream rate_limit_error. That is a
+					// self-inflicted probe artifact, not a user-driven storm — tripping
+					// the marker on it would suppress sibling diversion for real requests
+					// off a synthetic burst. Mirrors the keepalive guard in
+					// response-processor.ts / proxy-operations.ts.
+					if (
+						rateLimitSniffer.firedReason === "rate_limit_error" &&
+						isOAuthAnthropicAccount(account) &&
+						requestHeaders.get("x-clankermux-keepalive") !== "true"
+					) {
+						markAnthropicBurstThrottle(Date.now());
+					}
 				}
 			},
 			onEnd: () => {

@@ -151,6 +151,80 @@ function makeContext(accounts: Account[], heldAccountId: string): ProxyContext {
 	};
 }
 
+/**
+ * Mark the account with fresh usage that is AHEAD OF PACE on the 5-hour window
+ * (so `applyUsageThrottling` removes it) while still leaving POSITIVE rate-limit
+ * headroom (minHeadroom > 0 — NOT a real quota wall). Window started ~1h ago of a
+ * 5h window (20% expected) but 50% used ⇒ pacing-throttled with 50% headroom.
+ * This is the Codex High finding's bug shape: an account the pacing gate removed
+ * even though it is not rate-limited and not exhausted.
+ */
+function seedThrottledFreshHeadroom(accountId: string) {
+	usageCache.set(accountId, {
+		five_hour: {
+			utilization: 50,
+			resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+		},
+		seven_day: {
+			utilization: 20,
+			resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+		},
+	} as never);
+}
+
+/**
+ * Strategy stub for the `affinity_hit` case: the affined (held) account IS
+ * available and selected, so it is returned in the available list AND
+ * `decision` is `affinity_hit` (NOT `affinity_hold`). The downstream
+ * usage-throttle gate may still remove it from `accounts` — which is exactly the
+ * Codex High finding's bug condition (available→selected, then pacing-throttled
+ * out). `heldAccountId` is still recorded (the real strategy sets it on
+ * affinity_hit too).
+ */
+function makeStrategyHit(heldAccountId: string) {
+	return {
+		select: (accs: Account[], meta: RequestMeta) => {
+			const now = Date.now();
+			const available = accs.filter(
+				(acc) =>
+					!acc.paused &&
+					(!acc.rate_limited_until || acc.rate_limited_until <= now),
+			);
+			meta.routing = {
+				strategy: "session",
+				decision: "affinity_hit",
+				affinityScope: "project",
+				affinityKey: "k",
+				selectedAccountId: heldAccountId,
+				previousAccountId: null,
+				candidatesCount: available.length,
+				failoverReason: null,
+				heldAccountId,
+			};
+			return available;
+		},
+	} as never;
+}
+
+/**
+ * Context with 5-hour usage-throttling ENABLED and an `affinity_hit` strategy.
+ * Used to reproduce the Codex High finding: a held account that was available
+ * (affinity_hit) then removed by the usage-throttle gate must NOT enter the
+ * burst hold.
+ */
+function makeThrottledHitContext(
+	accounts: Account[],
+	heldAccountId: string,
+): ProxyContext {
+	const ctx = makeContext(accounts, heldAccountId) as {
+		strategy: unknown;
+		config: { getUsageThrottlingFiveHourEnabled: () => boolean };
+	};
+	ctx.strategy = makeStrategyHit(heldAccountId);
+	ctx.config.getUsageThrottlingFiveHourEnabled = () => true;
+	return ctx as unknown as ProxyContext;
+}
+
 function makeRequest(): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
@@ -339,18 +413,82 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	it("hold exhausted with no fitting non-Anthropic candidate ⇒ constructed retryable 429 (never a sibling)", async () => {
+	it("non-storm regression: held cooled + healthy sibling + marker INACTIVE ⇒ serves from sibling, NO hold", async () => {
+		// The pinned cache account is cooled (affinity_hold) but the burst marker is
+		// NOT active — there is no recent burst. This is today's correct behavior:
+		// serve from a healthy sibling (stay unblocked), do NOT hold. The held
+		// account is NOT re-probed (no hold), so the ONLY upstream call is the
+		// sibling's success.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			// Cooled (affinity_hold): excluded from the available list.
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom("held");
+		// Marker deliberately NOT set (beforeEach clears it).
+
+		let heldProbes = 0;
+		let siblingServed = false;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-held")) {
+					heldProbes += 1;
+					return rl429({ "x-should-retry": "true" });
+				}
+				siblingServed = true;
+				return ok200();
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(res.status).toBe(200);
+		expect(siblingServed).toBe(true);
+		// No hold was entered (marker inactive + held not in `accounts`) ⇒ the held
+		// account was never probed.
+		expect(heldProbes).toBe(0);
+	});
+
+	it("storm: hold gives up, normal loop tries healthy siblings (all 429), then constructed retryable 429", async () => {
+		// Two healthy Anthropic siblings are available. After the hold on the cache
+		// account gives up, the request FALLS THROUGH to the normal failover loop
+		// (Part 4): it attempts the healthy siblings (cache miss but still Opus). The
+		// mock 429s EVERY Anthropic call, so the siblings fail too and the terminal
+		// outcome is the constructed burst-retry give-up 429 — NOT a 503
+		// pool_exhausted. The key change from the old behavior: siblings ARE now
+		// attempted instead of being skipped straight to the last-resort.
 		const held = makeAccount({ id: "held", name: "Cache" });
 		const siblingA = makeAccount({ id: "sibA", name: "SiblingA" });
 		const siblingB = makeAccount({ id: "sibB", name: "SiblingB" });
 		seedFreshHeadroom("held");
 
-		// Every upstream call 429s — held never recovers; siblings must NOT be tried.
+		// Every upstream call 429s — held never recovers, and the siblings also 429.
 		let proxyCalls = 0;
+		const headers = new Set<string>();
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				proxyCalls += 1;
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				headers.add(auth);
 				return rl429({ "x-should-retry": "true" });
 			},
 		);
@@ -363,18 +501,20 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		);
 
 		// Constructed retryable 429 (give-up), not a 503 pool_exhausted and not a
-		// sibling success.
+		// sibling success (every Anthropic call 429'd).
 		expect(res.status).toBe(429);
 		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
 		const body = (await res.json()) as { error?: { type?: string } };
 		expect(body.error?.type).toBe("rate_limited");
-		// Held first attempt + re-probes all 429'd; ONLY the held account was hit —
-		// no sibling-Anthropic was ever tried (they have no fitting non-Anthropic
-		// provider). At least the first attempt fired.
-		expect(proxyCalls).toBeGreaterThanOrEqual(1);
+		// Held first attempt + re-probes + the two siblings (normal-loop fall-through)
+		// all 429'd — strictly more than just the held account's calls.
+		expect(proxyCalls).toBeGreaterThanOrEqual(2);
 	});
 
-	it("hold exhausted ⇒ tries a fitting Codex last-resort candidate (sibling-Anthropic never tried)", async () => {
+	it("hold gives up ⇒ normal loop serves a healthy Anthropic sibling (cache miss but still Opus)", async () => {
+		// The cache account is in a storm (its calls 429), but a healthy sibling
+		// exists. After the hold gives up, the normal loop (Part 4) serves the
+		// request from the sibling — preferred over diverting to Codex (gpt-5.5).
 		const held = makeAccount({ id: "held", name: "Cache" });
 		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
 		const codex = makeAccount({
@@ -389,24 +529,32 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
-		let anthropicCalls = 0;
+		let heldCalls = 0;
+		let siblingServed = false;
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const target = callTarget(input);
-				// Every Anthropic call (held first attempt + held re-probes) 429s; the
-				// Codex last-resort succeeds. Siblings are filtered out of the
-				// last-resort by construction, so the only Anthropic calls are the held
-				// account's — counting them bounds "no extra Anthropic attempt".
 				if (target === "codex") {
 					codexHit = true;
 					return ok200();
 				}
-				anthropicCalls += 1;
+				// Distinguish held vs sibling by the access token on the Authorization
+				// header (both are anthropic-direct → same host). The held account uses
+				// "at-token"; the sibling uses a different one below.
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingServed = true;
+					return ok200();
+				}
+				heldCalls += 1;
 				return rl429({ "x-should-retry": "true" });
 			},
 		);
 
+		sibling.access_token = "at-sibling";
 		const ctx = makeContext([held, sibling, codex], "held");
 		const res = await callHandleProxy(
 			makeRequest(),
@@ -414,21 +562,21 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			ctx,
 		);
 
-		// The fitting Codex candidate served the request.
+		// Served by the healthy Anthropic sibling — NOT Codex (sibling Opus is
+		// preferred over a Codex gpt-5.5 downgrade).
 		expect(res.status).toBe(200);
-		expect(codexHit).toBe(true);
-		// Codex-aware budget (Follow-up 1): a fitting Codex fallback exists, so the
-		// hold bails after a SINGLE still-throttled re-probe instead of looping the
-		// full MAX_ATTEMPTS. Held Anthropic calls = 1 first attempt + 1 re-probe = 2.
-		// (Still no sibling-Anthropic diversion.)
-		expect(anthropicCalls).toBe(2);
+		expect(siblingServed).toBe(true);
+		expect(codexHit).toBe(false);
+		// The held account was probed (hold) but never served.
+		expect(heldCalls).toBeGreaterThanOrEqual(1);
 	});
 
-	it("Follow-up 1(a): storm + a FITTING Codex fallback ⇒ bails to Codex fast (one re-probe), Codex serves it", async () => {
-		// The held account is in a sustained storm (every Anthropic call 429s). A
-		// Codex account that FITS the request exists, so hasViableFallback=true: the
-		// hold must bail after exactly one re-probe (no full multi-attempt loop, no
-		// 60s wait) and the fitting Codex candidate must serve the request.
+	it("storm with no healthy siblings: hold gives up, normal loop empty, Codex-if-fits serves it", async () => {
+		// The held account is in a sustained storm (every Anthropic call 429s) and
+		// the ONLY other available account is Codex. With no healthy Anthropic
+		// sibling, the normal-loop fall-through reaches the Codex candidate, which
+		// serves the request. (Part 3 removed the fast-bail: the hold now uses the
+		// full budget, but the give-up still ends at Codex.)
 		const held = makeAccount({ id: "held", name: "Cache" });
 		const codex = makeAccount({
 			id: "codex",
@@ -456,29 +604,25 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		);
 
 		const ctx = makeContext([held, codex], "held");
-		const start = Date.now();
 		const res = await callHandleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);
-		const elapsed = Date.now() - start;
 
 		expect(res.status).toBe(200);
 		expect(codexHit).toBe(true);
-		// Exactly 2 Anthropic calls: held first attempt + ONE re-probe, then bail.
-		expect(anthropicCalls).toBe(2);
-		// Bailed fast — well under the full 60s budget (only ~1 cooldown was waited).
-		expect(elapsed).toBeLessThan(10_000);
+		// The held account was probed during the hold (≥1 call), then the give-up
+		// fell through to Codex. No sibling-Anthropic existed.
+		expect(anthropicCalls).toBeGreaterThanOrEqual(1);
 	});
 
-	it("Follow-up 1(b): oversized request gates Codex out ⇒ no viable fallback, holds full budget then constructed 429", async () => {
+	it("oversized request gates Codex out, no healthy sibling ⇒ holds full budget then constructed 429", async () => {
 		// The request is too large for the Codex account's mapped model (gpt-5.5,
 		// 400K window → 340K threshold), so the context-window gate excludes it.
-		// With no surviving non-Anthropic candidate, hasViableFallback=false: the
-		// hold keeps the full multi-attempt loop and, when the held account never
-		// recovers, falls through to the constructed retryable 429 (no fitting
-		// last-resort exists).
+		// With no surviving non-Anthropic candidate AND no healthy Anthropic sibling,
+		// the hold uses the full budget and, when the held account never recovers,
+		// the normal-loop fall-through is empty → constructed retryable 429.
 		const held = makeAccount({ id: "held", name: "Cache" });
 		const codex = makeAccount({
 			id: "codex",
@@ -523,19 +667,22 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			ctx,
 		);
 
-		// Codex was gated out (oversized) ⇒ never attempted as a last-resort; the
-		// held account never recovered ⇒ constructed give-up 429.
+		// Codex was gated out (oversized) ⇒ never in `accounts`, so the normal-loop
+		// fall-through is empty; the held account never recovered ⇒ constructed
+		// give-up 429.
 		expect(codexHit).toBe(false);
 		expect(res.status).toBe(429);
 		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
-		// No fallback ⇒ full multi-attempt loop: held first attempt + up to
-		// MAX_ATTEMPTS=3 re-probes ⇒ more than the 2-call fast-bail path above.
+		// Full 120s budget multi-attempt loop: held first attempt + up to
+		// MAX_ATTEMPTS=3 re-probes.
 		expect(anthropicCalls).toBeGreaterThanOrEqual(3);
 	});
 
-	it("concurrency-cap overflow ⇒ filtered last-resort (Codex), never a sibling-Anthropic diversion", async () => {
+	it("concurrency-cap overflow ⇒ normal-loop fall-through serves the fitting Codex candidate", async () => {
 		// Saturate the hold-slot cap BEFORE the request so holdAndRetryCacheAccount
-		// returns HOLD_OVERFLOW, routing straight to the filtered last-resort.
+		// returns HOLD_OVERFLOW. The give-up then FALLS THROUGH to the normal loop
+		// (Part 4): the healthy Anthropic sibling is tried (429) and the fitting
+		// Codex candidate serves the request.
 		const cap = BURST_RETRY_MAX_CONCURRENT_HOLDS;
 		for (let i = 0; i < cap; i++) tryAcquireHoldSlot();
 
@@ -709,23 +856,33 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			name: "Cache",
 			// Cooled (affinity_hold) but already expired so a re-probe fires at once.
 			rate_limited_until: Date.now() - 1,
+			// Distinct token so we can count the held account's hold re-probes apart
+			// from the normal-loop sibling attempt.
+			access_token: "at-held",
 		});
-		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
 		// Deliberately NO usageCache seed for "held" ⇒ getFreshCapacity returns null.
 		usageCache.delete("held");
 		markAnthropicBurstThrottle();
 
-		// Every Anthropic call 429s ⇒ the held account never recovers, so the hold
-		// runs to its attempt cap. No non-Anthropic candidate exists
-		// (sibling is Anthropic-direct, excluded from last-resort) ⇒ hasViableFallback
-		// is false, so the bail-on-rolling shortcut cannot fire and the ONLY cap on
-		// re-probes is the confidence-derived maxAttempts. That isolates the fix:
-		// stale_should_retry ⇒ 1 probe; the buggy fresh_headroom ⇒ up to 3.
-		let anthropicCalls = 0;
+		// Every Anthropic call 429s. We count the held account's HOLD re-probes
+		// separately (by its access token) from the normal-loop sibling attempt.
+		// stale_should_retry must cap the HOLD at exactly ONE re-probe; the buggy
+		// fresh_headroom would re-probe the held account up to 3 times.
+		let heldProbes = 0;
+		let siblingCalls = 0;
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
-				anthropicCalls += 1;
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) siblingCalls += 1;
+				else heldProbes += 1;
 				return rl429({ "x-should-retry": "true" });
 			},
 		);
@@ -737,61 +894,400 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			ctx,
 		);
 
-		// Constructed give-up 429 (no fitting non-Anthropic last-resort).
+		// Constructed give-up 429 (held never recovered; sibling also 429'd; no
+		// fitting non-Anthropic candidate).
 		expect(res.status).toBe(429);
 		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
-		// Marker-active ⇒ no first attempt; every Anthropic call here is a hold
-		// re-probe. stale_should_retry caps the hold at ONE probe — so exactly 1
-		// Anthropic call, NOT the 3 the full fresh_headroom budget would make.
-		expect(anthropicCalls).toBe(1);
+		// Marker-active ⇒ no first attempt; stale_should_retry caps the HOLD at ONE
+		// re-probe of the held account (NOT 3). The normal-loop fall-through then
+		// tries the healthy sibling once (Part 4).
+		expect(heldProbes).toBe(1);
+		expect(siblingCalls).toBe(1);
 	});
 
-	it("Finding 5: last-resort NEVER attempts a claude-console-api account (shares the Anthropic per-IP throttle)", async () => {
-		const held = makeAccount({ id: "held", name: "Cache" });
-		// claude-console-api is Anthropic-DIRECT (api.anthropic.com, same egress IP)
-		// — it must be excluded from the last-resort candidate list. If it WERE
-		// erroneously included, it would be the only non-held candidate and (by the
-		// stub below) would serve a 200 — making the give-up 429 impossible.
-		const consoleAcc = makeAccount({
-			id: "console",
-			name: "Console",
-			provider: "claude-console-api",
-			refresh_token: "",
-			access_token: null,
-			api_key: "sk-ant-test",
+	it("Part 4: give-up falls through to the normal loop, which serves a healthy OAuth-Anthropic sibling", async () => {
+		// Under the OLD jump-to-filtered-last-resort, the give-up went STRAIGHT to the
+		// Codex-if-fits filtered last-resort, skipping every healthy Anthropic sibling.
+		// Part 4 changes this: a declined hold now falls through to the NORMAL failover
+		// loop, which tries every healthy account in `accounts` — including a healthy
+		// Anthropic sibling (cache miss but still Opus), PREFERRED over a Codex
+		// downgrade. The held account itself is NOT re-attempted by the loop (the
+		// burstAttemptedAccountId double-attempt guard).
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		const codex = makeAccount({
+			id: "codex",
+			name: "Codex",
+			provider: "codex",
+			refresh_token: "rt",
+			access_token: "at-codex",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
-		// Distinguish the two Anthropic-host callers: the held OAuth account uses a
-		// Bearer access token (Authorization header); the console account uses the
-		// x-api-key header. The held account always 429s; the console account — if
-		// it is ever attempted — would 200. The filter must exclude it, so the only
-		// outcome left is the constructed give-up 429.
-		let consoleHit = false;
+		let codexHit = false;
+		let siblingServed = false;
+		let heldAttempts = 0;
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
-				const headers =
-					input instanceof Request ? input.headers : new Headers(init?.headers);
-				if (headers.get("x-api-key")) {
-					consoleHit = true;
+				if (callTarget(input) === "codex") {
+					codexHit = true;
 					return ok200();
 				}
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingServed = true;
+					return ok200();
+				}
+				// The held account (at-held) always 429s.
+				heldAttempts += 1;
 				return rl429({ "x-should-retry": "true" });
 			},
 		);
 
-		const ctx = makeContext([held, consoleAcc], "held");
+		const ctx = makeContext([held, sibling, codex], "held");
 		const res = await callHandleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);
 
-		// Give-up (no eligible non-Anthropic last-resort). The console account was
-		// NEVER attempted as a last-resort candidate — so no 200 from it.
-		expect(consoleHit).toBe(false);
+		// The healthy Anthropic sibling served it via the normal-loop fall-through —
+		// preferred over Codex (gpt-5.5). The held account was probed by the hold but
+		// NOT re-attempted by the normal loop (double-attempt guard).
+		expect(res.status).toBe(200);
+		expect(siblingServed).toBe(true);
+		expect(codexHit).toBe(false);
+		expect(heldAttempts).toBeGreaterThanOrEqual(1);
+	});
+
+	// -------------------------------------------------------------------------
+	// Finding 1: storm-degrade — the cache account AND every sibling are cooled, so
+	// the strategy returns ZERO available candidates. The no-accounts terminal must
+	// run the hold on the cache account (marker active) BEFORE degrading to a
+	// pool_exhausted/constructed-give-up terminal — the hold must not be skipped in
+	// the worst storm moment.
+	// -------------------------------------------------------------------------
+	it("Finding 1: ALL accounts cooled + marker active ⇒ holds the held cache account (429→200), NOT immediate pool_exhausted", async () => {
+		// Both the cache account and the only sibling are cooled → makeStrategy
+		// returns [] (zero available) but still records heldAccountId. The held
+		// account's cooldown has already lapsed so a re-probe fires at once.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() - 1, // expired → re-probe immediately
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			rate_limited_until: Date.now() + 60_000, // still cooled → excluded
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom("held");
+		// A concurrent request tripped the global per-IP marker.
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		let n = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) siblingCalls += 1;
+				else heldProbes += 1;
+				n += 1;
+				// First held re-probe 429s, second succeeds.
+				return n === 1 ? rl429({ "x-should-retry": "true" }) : ok200();
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Served by the held cache account via the storm-degrade hold — never the
+		// cooled sibling, and never an immediate pool_exhausted.
+		expect(res.status).toBe(200);
+		expect(siblingCalls).toBe(0);
+		expect(heldProbes).toBeGreaterThanOrEqual(1);
+	});
+
+	it("Finding 1: ALL accounts cooled + marker active + persistent throttle ⇒ constructed give-up 429 (NOT pool_exhausted 503)", async () => {
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() - 1,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			rate_limited_until: Date.now() + 60_000, // cooled → excluded
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		// Held never recovers; the sibling is cooled (excluded) so it is never even
+		// resolved — there is no normal-loop fall-through in the zero-accounts case.
+		let siblingCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) siblingCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Constructed retryable burst-retry give-up 429 — NOT the generic
+		// pool_exhausted 503. The cooled sibling was never attempted.
 		expect(res.status).toBe(429);
 		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
+		expect(siblingCalls).toBe(0);
+	});
+
+	it("Finding 1: ALL accounts cooled + held at ZERO headroom ⇒ degrades to pool_exhausted, NO hold", async () => {
+		// Real per-account exhaustion (minHeadroom=0) on the held account: even with
+		// the marker active, the storm-degrade gate must NOT hold — it degrades to
+		// the existing pool_exhausted terminal without re-probing.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		seedZeroHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				upstreamCalls += 1;
+				return rl429();
+			},
+		);
+
+		const ctx = makeContext([held], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// No hold, no re-probe — straight to the pool_exhausted terminal (503).
+		expect(res.status).toBe(503);
+		expect(upstreamCalls).toBe(0);
+	});
+
+	// -------------------------------------------------------------------------
+	// Finding 2: a client disconnect mid-hold must STOP the request — no
+	// sibling/Codex upstream requests issued after the hold gives up for a client
+	// that is already gone.
+	// -------------------------------------------------------------------------
+	it("Finding 2: client aborts mid-hold ⇒ no sibling/Codex upstream request after give-up", async () => {
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		const codex = makeAccount({
+			id: "codex",
+			name: "Codex",
+			provider: "codex",
+			refresh_token: "rt",
+			access_token: "at-codex",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
+		});
+		seedFreshHeadroom("held");
+
+		const controller = new AbortController();
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		let codexCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const target = callTarget(input);
+				if (target === "codex") {
+					codexCalls += 1;
+					return ok200();
+				}
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingCalls += 1;
+					return ok200();
+				}
+				// Held first attempt: 429 (enters the hold), then abort the client so
+				// the hold gives up on the next wait.
+				heldProbes += 1;
+				controller.abort();
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const req = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				messages: [{ role: "user", content: "hello" }],
+				max_tokens: 10,
+			}),
+			signal: controller.signal,
+		});
+
+		const ctx = makeContext([held, sibling, codex], "held");
+		const res = await callHandleProxy(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The client aborted mid-hold: the request stops at the abort guard. No
+		// sibling and no Codex upstream request is issued after the give-up.
+		expect(siblingCalls).toBe(0);
+		expect(codexCalls).toBe(0);
+		expect(heldProbes).toBeGreaterThanOrEqual(1);
+		expect(res.status).toBe(499);
+	});
+
+	// -------------------------------------------------------------------------
+	// Codex High finding: the burst hold must NEVER fire for an account that was
+	// removed by the usage-throttle (pacing) gate rather than a rate-limit
+	// cooldown. The throttle gate drops accounts with POSITIVE rate-limit headroom
+	// — holding+probing such an account would bypass the configured pacing
+	// throttle by issuing an upstream call. Eligibility requires either presence
+	// in the gated `accounts` list (available) OR decision === "affinity_hold"
+	// (genuine cooldown). An affinity_hit account throttled OUT of `accounts` is
+	// neither, so it must fall to the usage-throttled terminal / normal loop.
+	// -------------------------------------------------------------------------
+	it("Codex High: zero-candidate via usage-throttle (affinity_hit, NOT cooldown) + marker active + positive headroom ⇒ usage-throttled 529, NO hold, NO upstream call", async () => {
+		// The held account is available→selected (affinity_hit) with positive
+		// rate-limit headroom, but the 5-hour pacing gate throttles it out, leaving
+		// `accounts` empty. The marker is active. WITHOUT the eligibility gate the
+		// zero-candidate storm-hold would fire (decision is affinity_hit, not
+		// affinity_hold) and issue an upstream probe that bypasses the throttle.
+		// WITH the gate it degrades to the usage-throttled 529 terminal instead.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		seedThrottledFreshHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				upstreamCalls += 1;
+				return ok200();
+			},
+		);
+
+		const ctx = makeThrottledHitContext([held], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Usage-throttled terminal (529), NOT a held-account hold success and NOT a
+		// pool_exhausted 503. No upstream call was issued — the throttle held.
+		expect(res.status).toBe(529);
+		expect(upstreamCalls).toBe(0);
+	});
+
+	it("Codex High: normal path, held account usage-throttled out (affinity_hit) + healthy sibling + marker active ⇒ serves sibling via normal loop, NO reprobe of the throttled held account", async () => {
+		// The held account is affinity_hit (available, positive headroom) but the
+		// 5-hour pacing gate throttles it out of `accounts`; a healthy sibling
+		// remains (no throttling usage seeded ⇒ passes the gate). The marker is
+		// active. WITHOUT the eligibility gate, Branch A would resolve the held
+		// account from `selectedAccounts`/DB and hold+probe it (bypassing the
+		// throttle). WITH the gate, Branch A is skipped (held absent from `accounts`
+		// AND decision is affinity_hit) and the normal loop serves the sibling. The
+		// throttled held account is NEVER re-probed.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		seedThrottledFreshHeadroom("held");
+		// Sibling: fresh, on-pace headroom ⇒ NOT throttled, passes the gate.
+		seedFreshHeadroom("sibling");
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingServed = false;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingServed = true;
+					return ok200();
+				}
+				heldProbes += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeThrottledHitContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The healthy sibling served it via the normal loop. The throttled held
+		// account was never held/re-probed (its eligibility was denied).
+		expect(res.status).toBe(200);
+		expect(siblingServed).toBe(true);
+		expect(heldProbes).toBe(0);
 	});
 });

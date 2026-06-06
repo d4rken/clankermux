@@ -1,11 +1,30 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
+import { logBus } from "@clankermux/logger";
 import type {
 	Account,
 	CapacitySignal,
 	RequestMeta,
 	StrategyStore,
 } from "@clankermux/types";
+
+/**
+ * Capture INFO/WARN/DEBUG log messages emitted on the shared logBus during `fn`.
+ * Returns the collected message strings. Used to assert decision-point logging.
+ */
+function captureLogs(fn: () => void): string[] {
+	const messages: string[] = [];
+	const listener = (event: { msg?: string }) => {
+		if (typeof event?.msg === "string") messages.push(event.msg);
+	};
+	logBus.on("log", listener);
+	try {
+		fn();
+	} finally {
+		logBus.off("log", listener);
+	}
+	return messages;
+}
 
 // ---------------------------------------------------------------------------
 // Shared Account factory — keeps every test focused on the fields that
@@ -1128,6 +1147,44 @@ describe("SessionStrategy", () => {
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
 		});
 
+		it("records heldAccountId on affinity_hold even when ZERO siblings are available (Finding 1 storm-degrade)", () => {
+			// The pinned cache account AND every sibling are cooled, so no available
+			// candidate exists. The strategy must still set routing meta (decision
+			// affinity_hold + heldAccountId) BEFORE returning [], so the proxy's
+			// no-accounts terminal can run the transparent burst-retry HOLD on the
+			// cache account instead of immediately 503-ing pool_exhausted.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "storm-degrade-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			// Pin the affinity to `affined` while it is healthy.
+			expect(strategy.select([affined], projectMeta)[0]).toBe(affined);
+
+			// Now the ONLY account (the pinned one) is on a short transient throttle
+			// -> resolveAffinity -> hold, but there is no sibling to serve from.
+			affined.rate_limited_until = now + 60_000;
+			affined.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+			const result = strategy.select([affined], projectMeta);
+
+			// Zero candidates returned, but routing meta records the held account so
+			// the proxy can target it for the storm-degrade hold.
+			expect(result).toHaveLength(0);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
+			expect(projectMeta.routing?.heldAccountId).toBe(affined.id);
+			expect(projectMeta.routing?.selectedAccountId).toBeNull();
+			expect(projectMeta.routing?.candidatesCount).toBe(0);
+		});
+
 		it("holds project affinity through a 529 overload regardless of cooldown length", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {
@@ -2103,6 +2160,59 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 		const recovered = projectMeta();
 		expect(strategy.select([a, b], recovered)[0].id).toBe(a.id);
 		expect(recovered.routing?.decision).toBe("affinity_hit");
+	});
+
+	it("Part 5: affinity_hold INFO log explains WHY it held (reason + remaining cooldown + rule)", () => {
+		const now = Date.now();
+		const a = makeAcct("hold-A");
+		const b = makeAcct("hold-B");
+
+		// Pin A on the first select.
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000));
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		expect(strategy.select([a, b], projectMeta())[0].id).toBe(a.id);
+
+		// A hits a SHORT cooldown with a non-transient reason → held via the
+		// short-cooldown(<15min) rule.
+		a.rate_limited_until = now + 60_000;
+		a.rate_limited_reason = "upstream_429_with_reset";
+		const held = projectMeta();
+		const messages = captureLogs(() => {
+			expect(strategy.select([a, b], held)[0].id).toBe(b.id);
+		});
+		expect(held.routing?.decision).toBe("affinity_hold");
+
+		const holdLog = messages.find((m) => m.includes("Holding"));
+		expect(holdLog).toBeDefined();
+		// Enriched fields present.
+		expect(holdLog).toContain("reason=upstream_429_with_reset");
+		expect(holdLog).toContain("remainingCooldownMs=");
+		expect(holdLog).toContain("rule=short-cooldown(<15min)");
+	});
+
+	it("Part 5: affinity_hold log reports the transient-reason rule for a server-wide reason", () => {
+		const now = Date.now();
+		const a = makeAcct("hold-A");
+		const b = makeAcct("hold-B");
+
+		mockStore.setCapacity(a.id, cap(40, 10 * 60_000));
+		mockStore.setCapacity(b.id, cap(40, 60 * 60_000));
+		expect(strategy.select([a, b], projectMeta())[0].id).toBe(a.id);
+
+		// A 529 overload is a server-wide transient reason → held via the
+		// transient-reason rule regardless of cooldown length.
+		a.rate_limited_until = now + 60 * 60_000; // long, but transient reason wins
+		a.rate_limited_reason = "upstream_529_overloaded_with_reset";
+		const held = projectMeta();
+		const messages = captureLogs(() => {
+			expect(strategy.select([a, b], held)[0].id).toBe(b.id);
+		});
+		expect(held.routing?.decision).toBe("affinity_hold");
+
+		const holdLog = messages.find((m) => m.includes("Holding"));
+		expect(holdLog).toBeDefined();
+		expect(holdLog).toContain("reason=upstream_529_overloaded_with_reset");
+		expect(holdLog).toContain("rule=transient-reason");
 	});
 });
 

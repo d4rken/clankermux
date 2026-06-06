@@ -6,8 +6,17 @@ const log = new Logger("BurstCooldown");
 // + the hold-slot semaphore). Fixed, source-level defaults — the feature is
 // unconditionally on and not env-configurable.
 
-/** Lifetime (ms) of the shared burst marker that suppresses sibling diversion. */
-const BURST_RETRY_MARKER_MS = 60_000;
+/**
+ * Lifetime (ms) of the shared burst marker that suppresses sibling diversion.
+ *
+ * Sized to cover (≥) a SINGLE transparent-retry hold budget
+ * (`BURST_RETRY_MAX_HOLD_MS = 120_000` in transparent-retry.ts). A request that
+ * holds its cache account for the full budget must keep the marker live for the
+ * whole hold, so concurrent affinity requests keep holding their own cache
+ * accounts (sibling diversion suppressed) rather than seeing the marker lapse
+ * mid-storm and diverting. If you change the hold budget, change this in step.
+ */
+const BURST_RETRY_MARKER_MS = 120_000;
 /**
  * Module-level cap on simultaneously-held requests. Exported so callers/tests
  * that need to reason about the cap (e.g. to saturate it) read the single
