@@ -358,6 +358,21 @@ export async function processProxyResponse(
 }
 
 /**
+ * Returns true for an intentional abort — a client disconnect or the burst-retry
+ * hold-budget deadline firing on the probe's AbortSignal. Both surface as an
+ * `AbortError`, either as a plain `Error` (name === "AbortError") or as a
+ * `DOMException` of the same name. These are not proxy failures and must not be
+ * logged at ERROR (they de-noise the burst hold-budget aborts and ordinary
+ * client disconnects proxy-wide).
+ */
+function isAbortError(error: unknown): boolean {
+	return (
+		(error instanceof Error || error instanceof DOMException) &&
+		error.name === "AbortError"
+	);
+}
+
+/**
  * Handles errors that occur during proxy operations
  * @param error - The error that occurred
  * @param account - The account that failed (optional)
@@ -368,6 +383,15 @@ export function handleProxyError(
 	account: Account | null,
 	logger: Logger,
 ): void {
+	// Intentional aborts (client disconnect or hold-budget deadline) are expected,
+	// not failures — log a single concise DEBUG line and skip the ERROR output.
+	if (isAbortError(error)) {
+		logger.debug(
+			`Upstream request aborted for account ${account?.name ?? "(none)"} (client disconnect or hold budget) — not a failure`,
+		);
+		return;
+	}
+
 	logError(error, logger);
 	if (account) {
 		logger.error(`Failed to proxy request with account ${account.name}`);
