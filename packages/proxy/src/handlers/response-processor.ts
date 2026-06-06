@@ -1,7 +1,7 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
-	isAnthropicHardLimitStatus,
+	getFreshCapacity,
 	isGenuineWindowRoll,
 	type Provider,
 	parseCodexUsageHeaders,
@@ -12,7 +12,11 @@ import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
-import { isOAuthAnthropicAccount } from "./transparent-retry";
+import {
+	BURST_RETRY_MAX_USAGE_AGE_MS,
+	classify429Transient,
+	isOAuthAnthropicAccount,
+} from "./transparent-retry";
 
 const log = new Logger("ResponseProcessor");
 
@@ -307,17 +311,39 @@ export async function processProxyResponse(
 			// model-fallback 429 that wasn't intercepted) cooled the cache account
 			// WITHOUT tripping the marker — so subsequent affinity_hold requests
 			// diverted to a sibling (cache miss) instead of holding. Set the marker
-			// here too for a genuine OAuth-Anthropic transient burst 429: status 429
+			// here too — but ONLY when the 429 is the SAME transient burst the hold
+			// path acts on, using the exact `classify429Transient` predicate the
+			// early-intercept uses rather than a broader OAuth-Anthropic-non-hard
+			// check (Finding 5). The broader check would trip the marker on a 429
+			// that classify429Transient rejects (e.g. zero/negative headroom with no
+			// `x-should-retry` hint — a real per-account wall, not a per-IP burst),
+			// pinning siblings to a genuinely-exhausted account. Gate on status 429
 			// (NOT a 529 overload — that drives the separate provider-overload
-			// cooldown) and NOT a hard account-level unified-status. This is a pure
-			// side-effect — it does not change this request's cooldown/return path;
-			// it only makes the marker reliable for the session's NEXT requests.
-			if (
-				response.status === 429 &&
-				isOAuthAnthropicAccount(account) &&
-				!isAnthropicHardLimitStatus(response)
-			) {
-				markAnthropicBurstThrottle(Date.now());
+			// cooldown); `classify429Transient` itself excludes non-OAuth-Anthropic
+			// accounts and hard account-level unified-statuses. The freshness-guarded
+			// capacity lookup mirrors the early-intercept wiring in
+			// proxy-operations.ts (no usage refresh here — this is a pure
+			// fire-and-forget side-effect on a request that already failed over). It
+			// does not change this request's cooldown/return path; it only makes the
+			// marker reliable for the session's NEXT requests.
+			if (response.status === 429 && isOAuthAnthropicAccount(account)) {
+				const now = Date.now();
+				const classification = classify429Transient({
+					response,
+					account,
+					now,
+					getCapacity: (accountId) =>
+						getFreshCapacity(
+							usageCache,
+							accountId,
+							account.provider,
+							now,
+							BURST_RETRY_MAX_USAGE_AGE_MS,
+						),
+				});
+				if (classification.retryable) {
+					markAnthropicBurstThrottle(now);
+				}
 			}
 		}
 		// Also update metadata for rate-limited responses

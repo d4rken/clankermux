@@ -29,20 +29,21 @@ describe("burst cooldown", () => {
 		});
 
 		it("set ⇒ active until expiry; after expiry ⇒ null/false", () => {
-			// Default marker lifetime is 60_000ms (BURST_RETRY_MARKER_MS in burst-cooldown.ts).
+			// Default marker lifetime is 120_000ms (BURST_RETRY_MARKER_MS in
+			// burst-cooldown.ts), sized to cover a single 120s hold budget.
 			const now = 1_700_000_000_000;
 			markAnthropicBurstThrottle(now);
 
 			const until = getAnthropicBurstThrottleUntil(now);
-			expect(until).toBe(now + 60_000);
+			expect(until).toBe(now + 120_000);
 			expect(isAnthropicBurstThrottleActive(now)).toBe(true);
 
 			// Still active just before expiry.
-			expect(isAnthropicBurstThrottleActive(now + 59_999)).toBe(true);
+			expect(isAnthropicBurstThrottleActive(now + 119_999)).toBe(true);
 
 			// At/after expiry ⇒ inactive (lazy clear).
-			expect(getAnthropicBurstThrottleUntil(now + 60_000)).toBeNull();
-			expect(isAnthropicBurstThrottleActive(now + 60_001)).toBe(false);
+			expect(getAnthropicBurstThrottleUntil(now + 120_000)).toBeNull();
+			expect(isAnthropicBurstThrottleActive(now + 120_001)).toBe(false);
 		});
 
 		it("lazily clears expired state on read", () => {
@@ -68,14 +69,14 @@ describe("burst cooldown", () => {
 		it("extends (never shortens) an existing marker", () => {
 			const now = 1_700_000_000_000;
 			markAnthropicBurstThrottle(now);
-			// A later mark pushes the deadline forward.
+			// A later mark pushes the deadline forward (now + 10_000 + 120_000).
 			markAnthropicBurstThrottle(now + 10_000);
-			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 70_000);
+			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 130_000);
 
 			// An earlier mark (e.g. concurrent request with a slightly stale clock)
 			// does NOT pull the deadline back in.
 			markAnthropicBurstThrottle(now + 5_000);
-			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 70_000);
+			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 130_000);
 		});
 
 		it("respects the injectable markerMs override", () => {

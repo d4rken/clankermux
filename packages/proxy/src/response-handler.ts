@@ -395,9 +395,19 @@ export async function forwardToClient(
 					// cooldown). The SSE frame carries no HTTP status, so there is no
 					// hard-limit-status check here — a mid-stream rate_limit_error is by
 					// nature the transient burst shape.
+					//
+					// Exclude synthetic cache-keepalive replays: the keepalive scheduler
+					// fires parallel requests across every cached account at once, so a
+					// burst of 4+ trips Anthropic's per-IP limit and a keepalive replay
+					// can itself surface a mid-stream rate_limit_error. That is a
+					// self-inflicted probe artifact, not a user-driven storm — tripping
+					// the marker on it would suppress sibling diversion for real requests
+					// off a synthetic burst. Mirrors the keepalive guard in
+					// response-processor.ts / proxy-operations.ts.
 					if (
 						rateLimitSniffer.firedReason === "rate_limit_error" &&
-						isOAuthAnthropicAccount(account)
+						isOAuthAnthropicAccount(account) &&
+						requestHeaders.get("x-clankermux-keepalive") !== "true"
 					) {
 						markAnthropicBurstThrottle(Date.now());
 					}

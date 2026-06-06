@@ -1147,6 +1147,44 @@ describe("SessionStrategy", () => {
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
 		});
 
+		it("records heldAccountId on affinity_hold even when ZERO siblings are available (Finding 1 storm-degrade)", () => {
+			// The pinned cache account AND every sibling are cooled, so no available
+			// candidate exists. The strategy must still set routing meta (decision
+			// affinity_hold + heldAccountId) BEFORE returning [], so the proxy's
+			// no-accounts terminal can run the transparent burst-retry HOLD on the
+			// cache account instead of immediately 503-ing pool_exhausted.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "storm-degrade-project",
+			};
+
+			const affined = makeAccount({
+				id: "affined",
+				name: "affined",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			// Pin the affinity to `affined` while it is healthy.
+			expect(strategy.select([affined], projectMeta)[0]).toBe(affined);
+
+			// Now the ONLY account (the pinned one) is on a short transient throttle
+			// -> resolveAffinity -> hold, but there is no sibling to serve from.
+			affined.rate_limited_until = now + 60_000;
+			affined.rate_limited_reason = "upstream_429_no_reset_probe_cooldown";
+			const result = strategy.select([affined], projectMeta);
+
+			// Zero candidates returned, but routing meta records the held account so
+			// the proxy can target it for the storm-degrade hold.
+			expect(result).toHaveLength(0);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
+			expect(projectMeta.routing?.heldAccountId).toBe(affined.id);
+			expect(projectMeta.routing?.selectedAccountId).toBeNull();
+			expect(projectMeta.routing?.candidatesCount).toBe(0);
+		});
+
 		it("holds project affinity through a 529 overload regardless of cooldown length", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {

@@ -761,7 +761,24 @@ export class SessionStrategy implements LoadBalancingStrategy {
 					getCachedAvailability,
 					now,
 				);
-				if (available.length === 0) return [];
+				if (available.length === 0) {
+					// STORM-DEGRADE (Finding 1): the pinned cache account AND every
+					// sibling are cooled — there is no available candidate to serve THIS
+					// request. We still record the held (cache-affinity) account in
+					// routing meta before returning the empty list, so the proxy's
+					// no-accounts terminal can run the transparent burst-retry HOLD on
+					// the cache account instead of immediately 503-ing pool_exhausted.
+					// Without this, the worst storm moment (all accounts cooled) would
+					// bypass the hold entirely — exactly when holding the warm cache
+					// account matters most. selectedAccount is null / 0 candidates here
+					// (setRoutingMeta tolerates both); heldAccountId carries the pin.
+					this.setRoutingMeta(meta, "affinity_hold", null, 0, {
+						affinityKey,
+						previousAccountId,
+						heldAccountId: resolution.heldAccountId,
+					});
+					return [];
+				}
 				const chosenAccount = available[0];
 				this.resetSessionIfExpired(chosenAccount);
 				// NOTE: deliberately NOT calling rememberAffinity — the held

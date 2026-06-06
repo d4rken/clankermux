@@ -353,4 +353,39 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		await response.text();
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
+
+	it("does NOT set the burst marker on a mid-stream rate_limit_error for a synthetic keepalive replay (Finding 4)", async () => {
+		// A cache-keepalive replay can itself trip Anthropic's per-IP limit (the
+		// scheduler fires parallel requests across every account). That is a
+		// self-inflicted probe artifact, not a user-driven storm — the marker must
+		// stay off so real requests aren't pinned to their cache account off a
+		// synthetic burst.
+		const account = makeAccount(); // OAuth anthropic
+		const ctx = makeStreamCtx();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-keepalive",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-keepalive": "true",
+				}),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
 });

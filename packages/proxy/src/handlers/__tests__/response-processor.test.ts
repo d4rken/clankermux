@@ -726,17 +726,65 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 // affinity_hold requests hold their cache account instead of diverting to a
 // sibling. It must NOT trip on a hard-limit 429, a 529 overload, a non-OAuth
 // account, or a successful response.
+//
+// Finding 5 tightening: the marker predicate now matches `classify429Transient`
+// exactly rather than "any OAuth-Anthropic non-hard 429". The marker is set only
+// when the 429 is actually retryable per the classifier: fresh, positive
+// headroom OR (stale/zero headroom AND `x-should-retry: true`). A 429 with no
+// known headroom and no retry hint is a possible real per-account wall — it must
+// NOT pin siblings to that account.
 // ---------------------------------------------------------------------------
 describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 	beforeEach(() => clearAnthropicBurstThrottle());
 	afterEach(() => clearAnthropicBurstThrottle());
 
-	it("sets the burst marker on an OAuth-Anthropic transient 429 (non-hard-status)", async () => {
+	it("sets the burst marker on an OAuth-Anthropic transient 429 with fresh headroom (classify429Transient: fresh_headroom)", async () => {
 		const account = makeAccount(); // anthropic + refresh_token → OAuth-Anthropic
+		// Seed fresh, positive headroom (utilization 2 → minHeadroom 98 > 0) so the
+		// classifier returns `fresh_headroom`.
+		usageCache.set(account.id, {
+			five_hour: { utilization: 2, resets_at: null },
+			seven_day: { utilization: 5, resets_at: null },
+		});
 		const { ctx } = makeCtx({ isStream: false, rateLimited: true });
 		const response = new Response('{"error":"rate_limit"}', {
 			status: 429,
 			headers: { "content-type": "application/json" },
+		});
+
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		await processProxyResponse(response, account, ctx);
+		expect(isAnthropicBurstThrottleActive()).toBe(true);
+		usageCache.delete(account.id);
+	});
+
+	it("does NOT set the marker on a 429 with no headroom and no x-should-retry hint (Finding 5)", async () => {
+		// Usage stale/absent (no cache entry → getFreshCapacity null) AND no
+		// `x-should-retry` header → classify429Transient: no_headroom_no_retry_hint.
+		// Before Finding 5 the broad predicate WOULD have set the marker here; now it
+		// must not, so a genuine per-account wall doesn't pin siblings.
+		const account = makeAccount();
+		const { ctx } = makeCtx({ isStream: false, rateLimited: true });
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(response, account, ctx);
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("sets the marker on a 429 with no headroom but x-should-retry:true (classify429Transient: stale_should_retry)", async () => {
+		// Usage stale/absent but the upstream signalled it's worth retrying — the
+		// classifier grants `stale_should_retry`, so the marker is set.
+		const account = makeAccount();
+		const { ctx } = makeCtx({ isStream: false, rateLimited: true });
+		const response = new Response('{"error":"rate_limit"}', {
+			status: 429,
+			headers: {
+				"content-type": "application/json",
+				"x-should-retry": "true",
+			},
 		});
 
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
@@ -802,6 +850,13 @@ describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 
 	it("does NOT set the marker on a keepalive replay 429", async () => {
 		const account = makeAccount();
+		// Seed fresh headroom so the 429 WOULD classify as retryable — proving the
+		// keepalive guard (not a non-retryable classification) is what suppresses
+		// the marker here.
+		usageCache.set(account.id, {
+			five_hour: { utilization: 2, resets_at: null },
+			seven_day: { utilization: 5, resets_at: null },
+		});
 		const { ctx } = makeCtx({ isStream: false, rateLimited: true });
 		const response = new Response('{"error":"rate_limit"}', {
 			status: 429,
@@ -814,5 +869,6 @@ describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 
 		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		usageCache.delete(account.id);
 	});
 });

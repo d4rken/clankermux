@@ -169,6 +169,33 @@ function createBurstRetryGiveUpResponse(heldAccount: Account): Response {
 	);
 }
 
+/**
+ * Synthetic response returned when a transparent burst-retry hold gave up
+ * because the CLIENT disconnected mid-hold (Finding 2). The client is already
+ * gone, so the body is never read — we only need a terminal Response so the
+ * handler stops WITHOUT issuing further sibling/Codex upstream requests for a
+ * request nobody is waiting on. Uses 499 (Client Closed Request) so history/logs
+ * reflect the disconnect rather than a server-side failure.
+ */
+function createClientAbortResponse(): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "client_closed_request",
+				message: "Client disconnected before the request could be served.",
+			},
+		}),
+		{
+			status: 499,
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-burst-retry": "client-aborted",
+			},
+		},
+	);
+}
+
 // ===== MAIN HANDLER =====
 
 /**
@@ -657,8 +684,195 @@ export async function handleProxy(
 		requestMeta.routing.candidatesCount = accounts.length;
 	}
 
+	// Transparent burst-retry hold state + orchestration (OAuth-Anthropic). These
+	// are declared HERE — before the no-accounts terminal — because the
+	// zero-accounts storm-degrade hold (Finding 1) runs inside that terminal, and
+	// the normal decide-before-loop (section 9a below) runs after account
+	// selection. Both reuse the SAME orchestration so it is defined exactly once.
+	//
+	// When the burst-retry first attempt tries the held account and it fails
+	// non-retryably (e.g. a hard 429 / 401), we fall through to the normal loop
+	// below — but the held account has already been attempted, so the loop must
+	// skip it to avoid a wasteful duplicate request. Null when no first attempt
+	// was made (marker-active path).
+	let burstAttemptedAccountId: string | null = null;
+	// Set when a burst hold was entered then declined/gave-up/overflowed. The
+	// request then falls through to the normal failover loop (healthy siblings
+	// first, then Codex-if-fits); if that loop ALSO produces no response, the
+	// terminal error is the constructed burst-retry give-up 429 (built from
+	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
+	let burstHoldDeclined = false;
+	let burstHeldAccountForGiveUp: Account | null = null;
+	// The cache-affinity-pinned account id recorded by the routing strategy (set
+	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
+	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
+
+	// Shared reprobe closure: re-attempt the given (held) account in reprobe mode
+	// (cooldown gate bypassed, no re-staging, no streak escalation) with a supplied
+	// AbortSignal so a client disconnect releases the hold promptly.
+	// `holdAndRetryCacheAccount` always invokes this with the held account, so the
+	// closure is generic over the account it is handed. Shared by the normal
+	// decide-before-loop and the zero-accounts storm-degrade hold (Finding 1) so
+	// both re-probe identically.
+	const reprobe = async (
+		probeAccount: Account,
+		signal: AbortSignal,
+	): Promise<Response | null> =>
+		proxyWithAccount(
+			req,
+			url,
+			probeAccount,
+			requestMeta,
+			finalBodyBuffer,
+			finalCreateBodyStream,
+			0,
+			ctx,
+			null,
+			apiKeyId,
+			apiKeyName,
+			requestBodyContext,
+			false,
+			{ reprobe: true, signal },
+		);
+
+	// Outcome of a burst hold once it has run. `served` carries the real upstream
+	// Response; `aborted` means the client disconnected mid-hold (Finding 2) and
+	// the caller must NOT fall through to more upstream requests; `gave-up` means
+	// the hold declined/exhausted/overflowed and the caller may fall through to
+	// its normal failover (when siblings exist) or degrade to the constructed
+	// give-up terminal (storm).
+	type BurstHoldOutcome =
+		| { kind: "served"; response: Response }
+		| { kind: "aborted" }
+		| { kind: "gave-up" };
+
+	// Run the hold on `heldAccount` and apply the shared give-up machinery
+	// (staged-body discard, double-attempt guard, give-up bookkeeping). Reused by
+	// BOTH the normal decide-before-loop (siblings present) and the zero-accounts
+	// storm-degrade path (Finding 1) so the orchestration is defined once.
+	const runBurstHold = async (
+		heldAccount: Account,
+		confidence: "fresh_headroom" | "stale_should_retry",
+	): Promise<BurstHoldOutcome> => {
+		const holdResult = await holdAndRetryCacheAccount({
+			account: heldAccount,
+			confidence,
+			signal: req.signal,
+			reprobe,
+		});
+
+		if (holdResult instanceof Response) {
+			return { kind: "served", response: holdResult };
+		}
+
+		// Hold declined/gave up (null) or overflowed (HOLD_OVERFLOW). Discard the
+		// held account's staged body so a later success on a sibling/Codex can't
+		// promote cache bookkeeping under the wrong account.
+		cacheBodyStore.discardStaged(requestMeta.id);
+		burstHoldDeclined = true;
+		burstHeldAccountForGiveUp = heldAccount;
+		// Double-attempt guard: the held account was just re-probed by the hold. If
+		// its cooldown lapsed it may now be back in `accounts`, so mark it attempted
+		// to make the normal loop skip it (no wasteful duplicate request at the same
+		// throttled per-IP window).
+		burstAttemptedAccountId = heldAccount.id;
+		const overflow = holdResult === HOLD_OVERFLOW;
+
+		// Finding 2: if the give-up was caused by a CLIENT ABORT (the client
+		// disconnected mid-hold), do NOT fall through to the normal failover loop /
+		// last-resort — issuing sibling/Codex upstream requests for a disconnected
+		// client is wasteful. Signal `aborted` so the caller stops here. A
+		// non-abort give-up (budget/attempts/overflow) keeps the intended
+		// fall-through.
+		if (req.signal.aborted) {
+			log.info(
+				`Burst-retry hold gave up due to client abort for ${heldAccount.name} — not falling through to siblings/Codex`,
+			);
+			return { kind: "aborted" };
+		}
+
+		log.warn(
+			`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — falling through to normal failover (healthy siblings first, then Codex-if-fits)`,
+		);
+		return { kind: "gave-up" };
+	};
+
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
+		// STORM-DEGRADE hold (Finding 1): in the worst burst moment the pinned
+		// cache account AND every sibling are cooled, so the strategy returned ZERO
+		// candidates. Before degrading to the pool_exhausted / throttled / context
+		// terminal, run the transparent burst-retry HOLD on the cache (affinity)
+		// account when it is genuinely a transient per-IP burst — exactly when
+		// holding the warm cache account matters most. Gate identically to the
+		// marker-active branch of the normal decide-before-loop: the held account
+		// must be OAuth-Anthropic, not paused, the shared burst marker active, and
+		// NOT showing fresh real exhaustion (minHeadroom <= 0 — a genuine quota
+		// wall, not a burst). On served → return it; on give-up/abort → fall through
+		// to the existing terminals below (there are no siblings, so the normal loop
+		// is empty; a non-abort give-up degrades to the constructed give-up 429).
+		// `accounts` is empty here so there is no combo slot to honor — gate on the
+		// request's own comboName (filteredComboInfo isn't built until section 9).
+		if (!requestMeta.comboName && burstHeldId) {
+			const heldAccount =
+				selectedAccounts.find((a) => a.id === burstHeldId) ??
+				(await ctx.dbOps.getAccount(burstHeldId));
+			if (
+				heldAccount &&
+				!heldAccount.paused &&
+				isOAuthAnthropicAccount(heldAccount) &&
+				isAnthropicBurstThrottleActive()
+			) {
+				const heldCapacity = getFreshCapacity(
+					usageCache,
+					heldAccount.id,
+					heldAccount.provider,
+					Date.now(),
+					BURST_RETRY_MAX_USAGE_AGE_MS,
+				);
+				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
+					log.warn(
+						`Storm-degrade: burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, degrading to terminal`,
+					);
+				} else {
+					// Null capacity (usage stale/absent) ⇒ stale_should_retry (single
+					// probe); fresh positive headroom ⇒ fresh_headroom (full budget).
+					const holdConfidence: "fresh_headroom" | "stale_should_retry" =
+						heldCapacity === null ? "stale_should_retry" : "fresh_headroom";
+					log.warn(
+						`Storm-degrade: all accounts cooled — holding the cache account ${heldAccount.name} (confidence=${holdConfidence}) instead of immediate pool_exhausted`,
+					);
+					const outcome = await runBurstHold(heldAccount, holdConfidence);
+					if (outcome.kind === "served") {
+						return outcome.response;
+					}
+					// Finding 2: client disconnected mid-hold — stop, don't degrade to a
+					// terminal that does more work; return the abort marker.
+					if (outcome.kind === "aborted") {
+						return createClientAbortResponse();
+					}
+					// gave-up: fall through to the terminals below. `burstHoldDeclined` +
+					// `burstHeldAccountForGiveUp` are now set, so the constructed
+					// burst-retry give-up 429 (preferred over generic pool_exhausted) is
+					// returned at the end of this block.
+				}
+			}
+		}
+
+		// If a storm-degrade hold gave up above, return the constructed retryable
+		// burst-retry give-up 429 (consistent history/headers:
+		// `x-clankermux-burst-retry: exhausted`) rather than the generic
+		// pool_exhausted 503. There are no siblings in this zero-accounts case, so
+		// there is no normal failover loop to run first.
+		if (burstHoldDeclined && burstHeldAccountForGiveUp) {
+			cacheBodyStore.discardStaged(requestMeta.id);
+			const giveUpResponse = createBurstRetryGiveUpResponse(
+				burstHeldAccountForGiveUp,
+			);
+			recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
+			return giveUpResponse;
+		}
+
 		// If the pool was emptied specifically by the context-window gate
 		// (and there were Codex accounts that would have been available
 		// otherwise), return a 400 context_window_exceeded instead of 503.
@@ -730,27 +944,6 @@ export async function handleProxy(
 		: null;
 	let response: Response | null = null;
 
-	// 9a. Transparent burst-retry decide-before-loop (OAuth-Anthropic, non-combo).
-	//
-	// Anthropic's 429 is a per-IP burst throttle, not per-account quota: failing
-	// over to a sibling Anthropic account is futile (same egress IP/window) and
-	// wasteful (cold prompt cache). When the cache-affinity account is an
-	// OAuth-Anthropic account, we instead HOLD and re-probe it before iterating
-	// siblings.
-	// When the burst-retry first attempt tries the held account and it fails
-	// non-retryably (e.g. a hard 429 / 401), we fall through to the normal loop
-	// below — but the held account has already been attempted, so the loop must
-	// skip it to avoid a wasteful duplicate request. Null when no first attempt
-	// was made (marker-active path).
-	let burstAttemptedAccountId: string | null = null;
-	// Set when a burst hold was entered then declined/gave-up/overflowed. The
-	// request then falls through to the normal failover loop (healthy siblings
-	// first, then Codex-if-fits); if that loop ALSO produces no response, the
-	// terminal error is the constructed burst-retry give-up 429 (built from
-	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
-	let burstHoldDeclined = false;
-	let burstHeldAccountForGiveUp: Account | null = null;
-	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
 	if (!filteredComboInfo?.comboName && burstHeldId) {
 		// Resolve the held (cache) account object. It may not be in `accounts`
 		// (an affinity_hold serves a sibling because the pinned account is cooled),
@@ -766,32 +959,7 @@ export async function handleProxy(
 			!heldAccount.paused &&
 			isOAuthAnthropicAccount(heldAccount)
 		) {
-			// Reprobe closure: re-attempt the held account in reprobe mode (cooldown
-			// gate bypassed, no re-staging, no streak escalation) with the client's
-			// AbortSignal so a disconnect releases the hold promptly.
-			const reprobe = async (
-				probeAccount: Account,
-				signal: AbortSignal,
-			): Promise<Response | null> => {
-				// Re-check paused/existence at probe time (the held account may have
-				// been paused/removed between probes); skip if gone.
-				return proxyWithAccount(
-					req,
-					url,
-					probeAccount,
-					requestMeta,
-					finalBodyBuffer,
-					finalCreateBodyStream,
-					0,
-					ctx,
-					null,
-					apiKeyId,
-					apiKeyName,
-					requestBodyContext,
-					false,
-					{ reprobe: true, signal },
-				);
-			};
+			// The hold uses the shared `reprobe` closure defined above.
 
 			// Decide whether to enter the hold. Two triggers:
 			//  (a) the shared burst marker is already active (a concurrent request
@@ -914,16 +1082,20 @@ export async function handleProxy(
 			};
 
 			if (enterHold) {
-				const holdResult = await holdAndRetryCacheAccount({
-					account: heldAccount,
-					confidence: holdConfidence,
-					signal: req.signal,
-					reprobe,
-				});
+				const outcome = await runBurstHold(heldAccount, holdConfidence);
 
-				if (holdResult instanceof Response) {
+				if (outcome.kind === "served") {
 					logBurstDecision("entered-hold");
-					return holdResult;
+					return outcome.response;
+				}
+
+				// Finding 2: the hold gave up because the CLIENT disconnected mid-hold.
+				// Stop here — do NOT fall through to the normal failover loop /
+				// last-resort and issue sibling/Codex upstream requests for a request
+				// nobody is waiting on. (The staged body was already discarded inside
+				// runBurstHold.)
+				if (outcome.kind === "aborted") {
+					return createClientAbortResponse();
 				}
 
 				// Hold declined/gave up (null) or overflowed (HOLD_OVERFLOW). Rather
@@ -936,22 +1108,8 @@ export async function handleProxy(
 				// `burstHoldDeclined` after the loop). During a true storm no healthy
 				// siblings remain in `accounts` (all cooled) so the loop is empty and we
 				// degrade straight to that constructed error — same terminal outcome as
-				// before.
-				//
-				// Discard the held account's staged body first so a later success on a
-				// sibling/Codex can't promote cache bookkeeping under the wrong account.
-				cacheBodyStore.discardStaged(requestMeta.id);
-				burstHoldDeclined = true;
-				burstHeldAccountForGiveUp = heldAccount;
-				// Guard against a double-attempt: the held account was just re-probed by
-				// the hold. If its cooldown lapsed it may now be back in `accounts`, so
-				// mark it attempted to make the normal loop skip it (no wasteful
-				// duplicate request at the same throttled per-IP window).
-				burstAttemptedAccountId = heldAccount.id;
-				const overflow = holdResult === HOLD_OVERFLOW;
-				log.warn(
-					`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — falling through to normal failover (healthy siblings first, then Codex-if-fits)`,
-				);
+				// before. (The staged-body discard + give-up bookkeeping happened inside
+				// runBurstHold.)
 				logBurstDecision("declined-fell-through");
 			} else {
 				// Marker inactive (no recent burst) or a non-retryable first attempt:

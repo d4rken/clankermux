@@ -898,4 +898,220 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(codexHit).toBe(false);
 		expect(heldAttempts).toBeGreaterThanOrEqual(1);
 	});
+
+	// -------------------------------------------------------------------------
+	// Finding 1: storm-degrade — the cache account AND every sibling are cooled, so
+	// the strategy returns ZERO available candidates. The no-accounts terminal must
+	// run the hold on the cache account (marker active) BEFORE degrading to a
+	// pool_exhausted/constructed-give-up terminal — the hold must not be skipped in
+	// the worst storm moment.
+	// -------------------------------------------------------------------------
+	it("Finding 1: ALL accounts cooled + marker active ⇒ holds the held cache account (429→200), NOT immediate pool_exhausted", async () => {
+		// Both the cache account and the only sibling are cooled → makeStrategy
+		// returns [] (zero available) but still records heldAccountId. The held
+		// account's cooldown has already lapsed so a re-probe fires at once.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() - 1, // expired → re-probe immediately
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			rate_limited_until: Date.now() + 60_000, // still cooled → excluded
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom("held");
+		// A concurrent request tripped the global per-IP marker.
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		let n = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) siblingCalls += 1;
+				else heldProbes += 1;
+				n += 1;
+				// First held re-probe 429s, second succeeds.
+				return n === 1 ? rl429({ "x-should-retry": "true" }) : ok200();
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Served by the held cache account via the storm-degrade hold — never the
+		// cooled sibling, and never an immediate pool_exhausted.
+		expect(res.status).toBe(200);
+		expect(siblingCalls).toBe(0);
+		expect(heldProbes).toBeGreaterThanOrEqual(1);
+	});
+
+	it("Finding 1: ALL accounts cooled + marker active + persistent throttle ⇒ constructed give-up 429 (NOT pool_exhausted 503)", async () => {
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() - 1,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			rate_limited_until: Date.now() + 60_000, // cooled → excluded
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		// Held never recovers; the sibling is cooled (excluded) so it is never even
+		// resolved — there is no normal-loop fall-through in the zero-accounts case.
+		let siblingCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) siblingCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Constructed retryable burst-retry give-up 429 — NOT the generic
+		// pool_exhausted 503. The cooled sibling was never attempted.
+		expect(res.status).toBe(429);
+		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
+		expect(siblingCalls).toBe(0);
+	});
+
+	it("Finding 1: ALL accounts cooled + held at ZERO headroom ⇒ degrades to pool_exhausted, NO hold", async () => {
+		// Real per-account exhaustion (minHeadroom=0) on the held account: even with
+		// the marker active, the storm-degrade gate must NOT hold — it degrades to
+		// the existing pool_exhausted terminal without re-probing.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		seedZeroHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				upstreamCalls += 1;
+				return rl429();
+			},
+		);
+
+		const ctx = makeContext([held], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// No hold, no re-probe — straight to the pool_exhausted terminal (503).
+		expect(res.status).toBe(503);
+		expect(upstreamCalls).toBe(0);
+	});
+
+	// -------------------------------------------------------------------------
+	// Finding 2: a client disconnect mid-hold must STOP the request — no
+	// sibling/Codex upstream requests issued after the hold gives up for a client
+	// that is already gone.
+	// -------------------------------------------------------------------------
+	it("Finding 2: client aborts mid-hold ⇒ no sibling/Codex upstream request after give-up", async () => {
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		const codex = makeAccount({
+			id: "codex",
+			name: "Codex",
+			provider: "codex",
+			refresh_token: "rt",
+			access_token: "at-codex",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
+		});
+		seedFreshHeadroom("held");
+
+		const controller = new AbortController();
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		let codexCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const target = callTarget(input);
+				if (target === "codex") {
+					codexCalls += 1;
+					return ok200();
+				}
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingCalls += 1;
+					return ok200();
+				}
+				// Held first attempt: 429 (enters the hold), then abort the client so
+				// the hold gives up on the next wait.
+				heldProbes += 1;
+				controller.abort();
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const req = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				messages: [{ role: "user", content: "hello" }],
+				max_tokens: 10,
+			}),
+			signal: controller.signal,
+		});
+
+		const ctx = makeContext([held, sibling, codex], "held");
+		const res = await callHandleProxy(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The client aborted mid-hold: the request stops at the abort guard. No
+		// sibling and no Codex upstream request is issued after the give-up.
+		expect(siblingCalls).toBe(0);
+		expect(codexCalls).toBe(0);
+		expect(heldProbes).toBeGreaterThanOrEqual(1);
+		expect(res.status).toBe(499);
+	});
 });
