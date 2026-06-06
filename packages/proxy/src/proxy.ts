@@ -743,6 +743,13 @@ export async function handleProxy(
 	// skip it to avoid a wasteful duplicate request. Null when no first attempt
 	// was made (marker-active path).
 	let burstAttemptedAccountId: string | null = null;
+	// Set when a burst hold was entered then declined/gave-up/overflowed. The
+	// request then falls through to the normal failover loop (healthy siblings
+	// first, then Codex-if-fits); if that loop ALSO produces no response, the
+	// terminal error is the constructed burst-retry give-up 429 (built from
+	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
+	let burstHoldDeclined = false;
+	let burstHeldAccountForGiveUp: Account | null = null;
 	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
 	if (!filteredComboInfo?.comboName && burstHeldId) {
 		// Resolve the held (cache) account object. It may not be in `accounts`
@@ -796,8 +803,13 @@ export async function handleProxy(
 			let enterHold = false;
 			let holdConfidence: "fresh_headroom" | "stale_should_retry" =
 				"fresh_headroom";
+			// Decision-point logging inputs (Part 5). markerActive is snapshotted at
+			// branch-entry; heldMinHeadroom is the freshly-read held-account headroom
+			// when known (marker-active path reads it), else null (unknown/not read).
+			const markerActive = isAnthropicBurstThrottleActive();
+			let heldMinHeadroom: number | null = null;
 
-			if (isAnthropicBurstThrottleActive()) {
+			if (markerActive) {
 				// Marker-active path: a CONCURRENT request tripped the global (per-IP)
 				// burst marker. The marker is provider-family-wide, NOT per-account —
 				// so before suppressing this request's normal failover and burning the
@@ -816,6 +828,7 @@ export async function handleProxy(
 					Date.now(),
 					BURST_RETRY_MAX_USAGE_AGE_MS,
 				);
+				heldMinHeadroom = heldCapacity?.minHeadroom ?? null;
 				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
 					log.warn(
 						`Burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, falling through to normal failover`,
@@ -876,128 +889,75 @@ export async function handleProxy(
 			// (marker activation always implies a prior fresh/stale classification;
 			// a concurrent request can only over-probe by one short cycle).
 
-			if (enterHold) {
-				// Codex-aware budget: does a non-Anthropic candidate that will ACTUALLY
-				// be attempted in the last-resort exist for this request? Use the EXACT
-				// predicate the last-resort filter uses below (non-official-Anthropic
-				// provider, excluding the held account itself) against the same gated
-				// `accounts` list — so the budget decision and the real last-resort set
-				// agree. A `true` here means falling back is cheap, so the hold uses the
-				// short budget and bails after one still-throttled probe instead of
-				// martyring latency to preserve the cache during a sustained storm.
-				// Candidates here already survived the context-window gate, so a Codex
-				// account that was gated out (oversized request) is correctly absent —
-				// yielding `false` and the full hold budget. This is a SNAPSHOT at
-				// hold-entry: it counts non-Anthropic candidates present right now and
-				// does NOT pre-exclude provider-overloaded ones. A candidate that becomes
-				// provider-overloaded DURING the hold may later be skipped by the
-				// last-resort loop (it can `continue` past it), in which case the fast
-				// bail still yields the constructed 429 — the same terminal outcome the
-				// full budget would reach, just sooner.
-				const hasViableFallback = accounts.some(
-					(a) =>
-						!isOfficialAnthropicProvider(a.provider) && a.id !== heldAccount.id,
-				);
+			// Snapshot at hold-entry: does a non-Anthropic candidate that survived the
+			// context-window gate exist for this request? Used ONLY for the
+			// decision-point DEBUG log below (it no longer shortens the hold budget —
+			// see Part 3). A Codex account gated out by an oversized request is
+			// correctly absent here (it never entered `accounts`).
+			const hasViableFallback = accounts.some(
+				(a) =>
+					!isOfficialAnthropicProvider(a.provider) && a.id !== heldAccount.id,
+			);
 
+			// Part 5: one concise DEBUG capturing every path's decision once. Closes
+			// over the branch-entry inputs (decision/marker/headroom/fallback) so the
+			// only per-call argument is the branch outcome.
+			const logBurstDecision = (
+				outcome:
+					| "entered-hold"
+					| "served-sibling-no-marker"
+					| "declined-fell-through",
+			) => {
+				log.debug(
+					`Burst decide: decision=${requestMeta.routing?.decision ?? "?"} held=${heldAccount.name} markerActive=${markerActive} heldMinHeadroom=${heldMinHeadroom ?? "unknown"} hasViableFallback=${hasViableFallback} outcome=${outcome}`,
+				);
+			};
+
+			if (enterHold) {
 				const holdResult = await holdAndRetryCacheAccount({
 					account: heldAccount,
 					confidence: holdConfidence,
-					hasViableFallback,
 					signal: req.signal,
 					reprobe,
 				});
 
 				if (holdResult instanceof Response) {
+					logBurstDecision("entered-hold");
 					return holdResult;
 				}
 
-				// Hold gave up (null) or overflowed (HOLD_OVERFLOW): LAST RESORT.
-				// Never divert to a sibling Anthropic account — try only non-Anthropic
-				// candidates (Codex/other) that already survived the context-window
-				// gate, then fall back to a constructed retryable response. Discard the
-				// held account's staged body first so a later success can't promote
-				// cache bookkeeping under the wrong account.
+				// Hold declined/gave up (null) or overflowed (HOLD_OVERFLOW). Rather
+				// than jumping straight to the Codex-if-fits last-resort (which would
+				// wrongly skip a HEALTHY Anthropic sibling — a cache miss but still
+				// Opus), FALL THROUGH to the normal failover loop below over the gated
+				// `accounts`. That loop attempts healthy Anthropic siblings first, then
+				// any non-Anthropic candidate (Codex if it fits); only its exhaustion
+				// reaches the constructed burst-retry give-up 429 (see
+				// `burstHoldDeclined` after the loop). During a true storm no healthy
+				// siblings remain in `accounts` (all cooled) so the loop is empty and we
+				// degrade straight to that constructed error — same terminal outcome as
+				// before.
+				//
+				// Discard the held account's staged body first so a later success on a
+				// sibling/Codex can't promote cache bookkeeping under the wrong account.
 				cacheBodyStore.discardStaged(requestMeta.id);
+				burstHoldDeclined = true;
+				burstHeldAccountForGiveUp = heldAccount;
+				// Guard against a double-attempt: the held account was just re-probed by
+				// the hold. If its cooldown lapsed it may now be back in `accounts`, so
+				// mark it attempted to make the normal loop skip it (no wasteful
+				// duplicate request at the same throttled per-IP window).
+				burstAttemptedAccountId = heldAccount.id;
 				const overflow = holdResult === HOLD_OVERFLOW;
 				log.warn(
-					`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — trying non-Anthropic last-resort candidates`,
+					`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — falling through to normal failover (healthy siblings first, then Codex-if-fits)`,
 				);
-
-				// Exclude EVERY Anthropic-direct provider (OAuth `anthropic` AND the
-				// pay-as-you-go `claude-console-api`) — both hit api.anthropic.com over
-				// the same egress IP and share the per-IP burst throttle, so a
-				// last-resort attempt on either is futile and can prolong the window.
-				// isOfficialAnthropicProvider() is the single source of truth for
-				// "shares the Anthropic per-IP throttle" (also used by the
-				// provider-overload cooldown keying). Genuinely-different providers
-				// (codex/openai, custom-endpoint compatibles) stay eligible. The
-				// candidates already survived the context-window gate, so "Codex if it
-				// fits" is satisfied.
-				const lastResortCandidates = accounts.filter(
-					(a) =>
-						!isOfficialAnthropicProvider(a.provider) && a.id !== heldAccount.id,
-				);
-				for (let j = 0; j < lastResortCandidates.length; j++) {
-					const candidate = lastResortCandidates[j];
-					const overloadedUntil = getProviderOverloadUntil(candidate.provider);
-					if (overloadedUntil) {
-						log.debug(
-							`Burst last-resort skipping ${candidate.name}; provider ${candidate.provider} overloaded until ${new Date(overloadedUntil).toISOString()}`,
-						);
-						continue;
-					}
-					// Recompute the last-account flag against THIS candidate list (do
-					// not reuse the original loop indices). The loop `continue`s past
-					// provider-overloaded candidates, so the last-by-index candidate is
-					// not necessarily the last one ACTUALLY attempted. Treat this as the
-					// last attempt when every remaining candidate would be skipped for
-					// provider overload — otherwise a 529 from the truly-last attempt
-					// could be swallowed instead of forwarded.
-					const isLast = lastResortCandidates
-						.slice(j + 1)
-						.every((c) => !!getProviderOverloadUntil(c.provider));
-					const lastResortResponse = await proxyWithAccount(
-						req,
-						url,
-						candidate,
-						requestMeta,
-						finalBodyBuffer,
-						finalCreateBodyStream,
-						j,
-						ctx,
-						null,
-						apiKeyId,
-						apiKeyName,
-						requestBodyContext,
-						isLast ||
-							shouldForwardProviderOverloadIfNoCrossProviderFallback(
-								lastResortCandidates,
-								j,
-							),
-						{ signal: req.signal },
-					);
-					if (lastResortResponse) {
-						return lastResortResponse;
-					}
-				}
-
-				// No eligible/successful non-Anthropic candidate → constructed
-				// retryable response (the upstream 429 body was discarded). Recorded
-				// via the synthetic-error path so history stays intact.
-				//
-				// Re-discard the staged body here: each last-resort proxyWithAccount
-				// call above runs WITHOUT reprobe mode, so it RE-stages this
-				// requestMeta.id (proxy-operations stageRequest, a ~0.5–1.5 MB Buffer
-				// copy). The earlier discardStaged (before the last-resort loop) only
-				// cleared the held account's entry; if every candidate returned null we
-				// reach this terminal return — which emits no onSummary — so without a
-				// final discard the last candidate's staged body would leak until the
-				// age sweep. discardStaged is idempotent, so a redundant call (no
-				// candidate re-staged) is harmless.
-				cacheBodyStore.discardStaged(requestMeta.id);
-				const giveUpResponse = createBurstRetryGiveUpResponse(heldAccount);
-				recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
-				return giveUpResponse;
+				logBurstDecision("declined-fell-through");
+			} else {
+				// Marker inactive (no recent burst) or a non-retryable first attempt:
+				// the held account is being served from a sibling this request (today's
+				// affinity_hold behavior). The normal loop handles it.
+				logBurstDecision("served-sibling-no-marker");
 			}
 		}
 	}
@@ -1061,6 +1021,25 @@ export async function handleProxy(
 				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
 			);
 		}
+	}
+
+	// Part 4 terminal: a burst hold was entered then declined/gave-up, AND the
+	// normal failover loop above (healthy Anthropic siblings + Codex-if-fits) also
+	// produced no response. Return the constructed retryable burst-retry give-up
+	// 429 — NOT the generic ALL_ACCOUNTS_FAILED — so history/headers stay
+	// consistent (`x-clankermux-burst-retry: exhausted`). During a true storm the
+	// loop was empty (all siblings cooled, Codex gated out) so we reach here
+	// directly, the same terminal outcome as before the give-up-fall-through
+	// change. The normal loop re-stages requestMeta.id on every attempt (no
+	// reprobe mode); discard once more so the last attempt's staged body doesn't
+	// leak (idempotent if nothing re-staged).
+	if (burstHoldDeclined && burstHeldAccountForGiveUp) {
+		cacheBodyStore.discardStaged(requestMeta.id);
+		const giveUpResponse = createBurstRetryGiveUpResponse(
+			burstHeldAccountForGiveUp,
+		);
+		recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
+		return giveUpResponse;
 	}
 
 	// 10. Combo fallback: if combo routing was active and all slots failed,

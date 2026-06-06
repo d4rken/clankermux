@@ -766,8 +766,23 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.resetSessionIfExpired(chosenAccount);
 				// NOTE: deliberately NOT calling rememberAffinity — the held
 				// account keeps its claim on this affinity key.
+				// Decision-point logging: surface WHY we held vs reassigned — the held
+				// account's rate-limit reason, remaining cooldown, and which rule fired
+				// (a transient/server-wide reason vs a short [<15min] cooldown). The
+				// held account is the affinity-pinned one (resolution.heldAccountId); it
+				// is present in `accounts` (resolveAffinity found it there).
+				const heldAccount = accounts.find(
+					(a) => a.id === resolution.heldAccountId,
+				);
+				const heldReason = heldAccount?.rate_limited_reason ?? null;
+				const heldUntil = heldAccount?.rate_limited_until ?? null;
+				const remainingMs = heldUntil && heldUntil > now ? heldUntil - now : 0;
+				const heldRule =
+					heldReason && TRANSIENT_RATE_LIMIT_REASONS.has(heldReason)
+						? "transient-reason"
+						: `short-cooldown(<${Math.round(AFFINITY_REASSIGN_MIN_COOLDOWN_MS / 60_000)}min)`;
 				this.log.info(
-					`Holding ${this.getAffinityLabel(meta)} affinity (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request`,
+					`Holding ${this.getAffinityLabel(meta)} affinity (account ${resolution.heldAccountId} temporarily unavailable) — serving from ${chosenAccount.name} this request; reason=${heldReason ?? "unknown"} remainingCooldownMs=${remainingMs} rule=${heldRule}`,
 				);
 				this.setRoutingMeta(
 					meta,

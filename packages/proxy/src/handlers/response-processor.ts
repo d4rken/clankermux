@@ -1,6 +1,7 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	isAnthropicHardLimitStatus,
 	isGenuineWindowRoll,
 	type Provider,
 	parseCodexUsageHeaders,
@@ -8,8 +9,10 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
+import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
+import { isOAuthAnthropicAccount } from "./transparent-retry";
 
 const log = new Logger("ResponseProcessor");
 
@@ -296,6 +299,26 @@ export async function processProxyResponse(
 						: "upstream_529_overloaded_no_reset"
 					: undefined;
 			applyRateLimitCooldown(account, { ...rateLimitInfo, reason }, ctx);
+
+			// Reliable burst marker (storm-affinity-hold Part 1). The transparent
+			// burst-retry hold is gated on the shared Anthropic-OAuth burst marker,
+			// but historically ONLY the proxy-operations early-intercept set it. A
+			// 429 that reaches THIS path (e.g. a streamed-content-type 429, or a
+			// model-fallback 429 that wasn't intercepted) cooled the cache account
+			// WITHOUT tripping the marker — so subsequent affinity_hold requests
+			// diverted to a sibling (cache miss) instead of holding. Set the marker
+			// here too for a genuine OAuth-Anthropic transient burst 429: status 429
+			// (NOT a 529 overload — that drives the separate provider-overload
+			// cooldown) and NOT a hard account-level unified-status. This is a pure
+			// side-effect — it does not change this request's cooldown/return path;
+			// it only makes the marker reliable for the session's NEXT requests.
+			if (
+				response.status === 429 &&
+				isOAuthAnthropicAccount(account) &&
+				!isAnthropicHardLimitStatus(response)
+			) {
+				markAnthropicBurstThrottle(Date.now());
+			}
 		}
 		// Also update metadata for rate-limited responses
 		const bypassSession =

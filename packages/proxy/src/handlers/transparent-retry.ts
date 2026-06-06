@@ -22,16 +22,16 @@ const log = new Logger("TransparentRetry");
 // because the hold orchestrator below owns them.
 // ---------------------------------------------------------------------------
 
-/** Max added latency (ms) spent holding & re-probing the cache account before giving up. */
-const BURST_RETRY_MAX_HOLD_MS = 60_000;
 /**
- * Short hold budget (ms) used when a non-Anthropic provider can serve the
- * request — falling back is cheap, so don't martyr latency to preserve the cache
- * during a sustained storm; the full {@link BURST_RETRY_MAX_HOLD_MS} is used only
- * when holding is the sole alternative to an error (no viable fallback, e.g. an
- * oversized request where Codex was context-gated out).
+ * Max added latency (ms) spent holding & re-probing the cache account before
+ * giving up. A SINGLE always-on budget — we no longer shorten it when a
+ * non-Anthropic provider could serve the request: Codex serves gpt-5.5, a full
+ * model change from Opus (the same downgrade as Opus→Sonnet), so we hold Opus
+ * rather than bail to Codex early. A declined/over-budget hold falls through to
+ * the normal failover loop (healthy Anthropic siblings first), and only its
+ * exhaustion reaches the Codex-if-fits last-resort.
  */
-const BURST_RETRY_FALLBACK_HOLD_MS = 15_000;
+const BURST_RETRY_MAX_HOLD_MS = 120_000;
 /** Max number of re-probes of the held account within the hold budget. */
 const BURST_RETRY_MAX_ATTEMPTS = 3;
 /** Jitter bound (ms) added to each re-probe wait (used with Math.random). */
@@ -235,18 +235,14 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
  *  - Sets the shared burst marker so concurrent OAuth-Anthropic-affinity
  *    requests are held on their own cache account (sibling diversion suppressed
  *    pool-wide) for the marker lifetime.
- *  - Loops up to `BURST_RETRY_MAX_ATTEMPTS` re-probes within a total wall-clock
- *    budget. The budget is `BURST_RETRY_FALLBACK_HOLD_MS` (short) when a viable
- *    non-Anthropic fallback exists for this request, else `BURST_RETRY_MAX_HOLD_MS`
- *    (full) — falling back is cheap, so we don't martyr latency to preserve the
- *    cache during a sustained storm; the full budget is reserved for when holding
- *    is the only alternative to an error. For `stale_should_retry` confidence
+ *  - Loops up to `BURST_RETRY_MAX_ATTEMPTS` re-probes within a single always-on
+ *    `BURST_RETRY_MAX_HOLD_MS` total wall-clock budget. We do NOT bail early to a
+ *    non-Anthropic fallback: Codex serves gpt-5.5, a full model change from Opus
+ *    (the same downgrade as Opus→Sonnet), so we hold Opus and let a
+ *    declined/over-budget hold fall through to the caller's normal failover loop
+ *    (healthy Anthropic siblings first). For `stale_should_retry` confidence
  *    (usage unknown — the account *might* really be exhausted) it does exactly
- *    ONE short probe rather than spending the full budget.
- *  - Bail-on-rolling: when a viable fallback exists, a re-probe that comes back
- *    still-throttled bails immediately (returns null → caller runs last-resort)
- *    rather than looping to wait a SECOND (rolled-forward) cooldown. With no
- *    fallback the multi-attempt loop is preserved.
+ *    ONE probe rather than spending the full budget.
  *  - Each wait = (account.rate_limited_until ?? now) - now + jitter. NEVER wakes
  *    early: if the soonest expiry is beyond the remaining budget, it gives up
  *    now (returns null).
@@ -261,16 +257,6 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
 export async function holdAndRetryCacheAccount(args: {
 	account: Account;
 	confidence: "fresh_headroom" | "stale_should_retry";
-	/**
-	 * Whether at least one viable non-Anthropic fallback exists for THIS request
-	 * (a candidate that survived the context-window gate and will actually be
-	 * attempted in the caller's last-resort). When true, the hold uses the short
-	 * {@link BURST_RETRY_FALLBACK_HOLD_MS} budget and bails to null after a single
-	 * still-throttled re-probe (falling back is cheaper than holding). When false,
-	 * holding is the only alternative to an error, so the full
-	 * {@link BURST_RETRY_MAX_HOLD_MS} budget and multi-attempt loop are used.
-	 */
-	hasViableFallback: boolean;
 	signal: AbortSignal;
 	reprobe: ReprobeFn;
 	/** Injectable clock for tests; defaults to Date.now. */
@@ -285,15 +271,12 @@ export async function holdAndRetryCacheAccount(args: {
 	maxAttempts?: number;
 	jitterMs?: number;
 }): Promise<HoldResult> {
-	const { account, confidence, hasViableFallback, signal, reprobe } = args;
+	const { account, confidence, signal, reprobe } = args;
 	const clock = args.now ?? Date.now;
-	// Budget: the test-override (maxHoldMs) wins; otherwise pick the short fallback
-	// budget when a non-Anthropic fallback can serve the request, else the full one.
-	const maxHoldMs =
-		args.maxHoldMs ??
-		(hasViableFallback
-			? BURST_RETRY_FALLBACK_HOLD_MS
-			: BURST_RETRY_MAX_HOLD_MS);
+	// Budget: the test-override (maxHoldMs) wins; otherwise the single always-on
+	// full budget. We no longer shorten it when a non-Anthropic fallback exists —
+	// a declined hold falls through to the caller's normal failover loop.
+	const maxHoldMs = args.maxHoldMs ?? BURST_RETRY_MAX_HOLD_MS;
 	const configuredMaxAttempts = args.maxAttempts ?? BURST_RETRY_MAX_ATTEMPTS;
 	const jitterMs = args.jitterMs ?? BURST_RETRY_JITTER_MS;
 
@@ -397,22 +380,10 @@ export async function holdAndRetryCacheAccount(args: {
 				return response;
 			}
 
-			// Still throttled (null). Bail-on-rolling: when a viable non-Anthropic
-			// fallback can serve this request, never wait a SECOND (rolled-forward)
-			// cooldown — falling back is cheaper than martyring latency to preserve
-			// the cache during a sustained storm. Break out now so the caller runs
-			// its last-resort. (The short fallback budget already makes the
-			// never-wake-early guard bail quickly; this just guarantees we never
-			// loop into a second wait while a fallback exists. Composes cleanly with
-			// stale_should_retry's single-probe cap — both mean "at most one wait".)
-			if (hasViableFallback) {
-				log.info(
-					`Burst-retry bailing on ${account.name} after ${heldMs}ms held, ${attempt} attempt(s) — viable fallback exists, deferring to last-resort instead of waiting another cooldown`,
-				);
-				return null;
-			}
-			// No fallback — holding is the only alternative to an error; loop to wait
-			// out the refreshed cooldown within the full budget.
+			// Still throttled (null) — loop to wait out the refreshed cooldown
+			// within the full budget (subject to the never-wake-early guard and the
+			// stale_should_retry single-probe cap). On give-up the caller falls
+			// through to its normal failover loop (healthy Anthropic siblings first).
 		}
 
 		log.info(

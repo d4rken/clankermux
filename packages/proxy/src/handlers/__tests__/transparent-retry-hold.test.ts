@@ -80,7 +80,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -101,7 +100,6 @@ describe("holdAndRetryCacheAccount", () => {
 		await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => okResponse(),
 			...TEST_HOLD_OVERRIDES,
@@ -115,7 +113,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -138,7 +135,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -159,7 +155,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "stale_should_retry",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -184,7 +179,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -206,7 +200,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const promise = holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: controller.signal,
 			reprobe: async () => {
 				probes += 1;
@@ -241,7 +234,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: (_account, signal) => {
 				probes += 1;
@@ -281,7 +273,6 @@ describe("holdAndRetryCacheAccount", () => {
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: controller.signal,
 			reprobe: async () => {
 				probes += 1;
@@ -295,75 +286,21 @@ describe("holdAndRetryCacheAccount", () => {
 	});
 
 	// ---------------------------------------------------------------------------
-	// Follow-up 1: codex-aware budget + bail-on-rolling-cooldown.
-	//
-	// When a viable non-Anthropic fallback exists (hasViableFallback=true), the
-	// hold must NOT martyr latency to preserve the cache during a sustained storm:
-	// it does at most ONE wait+probe and, if still throttled, bails to null (the
-	// caller then runs the last-resort). When no fallback exists
-	// (hasViableFallback=false), the prior full-budget multi-attempt loop is kept.
+	// Part 3: single always-on 120s budget — no codex-aware short budget, no
+	// bail-on-rolling. A still-throttled re-probe loops within the full budget
+	// (subject to never-wake-early + the stale_should_retry single-probe cap)
+	// REGARDLESS of whether a non-Anthropic fallback exists; the caller's normal
+	// failover loop handles the give-up fall-through.
 	// ---------------------------------------------------------------------------
 
-	it("hasViableFallback=true: still-throttled re-probe bails after ONE wait+probe (no second cooldown)", async () => {
-		// Cooldown already past so the single wait is ~0; reprobe always returns
-		// null (still throttled). With a fallback available we must NOT loop to wait
-		// a second (rolled-forward) cooldown — exactly one probe, then null.
-		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
-		let probes = 0;
-		const start = Date.now();
-		const result = await holdAndRetryCacheAccount({
-			account,
-			confidence: "fresh_headroom",
-			hasViableFallback: true,
-			signal: new AbortController().signal,
-			reprobe: async () => {
-				probes += 1;
-				// Roll the cooldown forward a touch — under the OLD behavior this would
-				// have driven a second wait+probe. The bail must prevent that.
-				account.rate_limited_until = Date.now() - 1;
-				return null;
-			},
-			...TEST_HOLD_OVERRIDES,
-		});
-		expect(result).toBeNull();
-		expect(probes).toBe(1);
-		// Returned promptly — did not wait a second cooldown.
-		expect(Date.now() - start).toBeLessThan(1000);
-		expect(getActiveHoldCount()).toBe(0);
-	});
-
-	it("hasViableFallback=true: a first-probe success still returns the Response (cache-preserve intact)", async () => {
-		// The quick-recovery common case: the cache account clears on the first
-		// probe. The fallback flag must NOT short-circuit a successful preserve.
+	it("loops up to MAX_ATTEMPTS within the full budget even when a viable fallback exists (no fast bail)", async () => {
+		// Under the OLD codex-aware budget this would have bailed after ONE probe.
+		// Now the hold always uses the full budget: it probes MAX_ATTEMPTS times.
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		let probes = 0;
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: true,
-			signal: new AbortController().signal,
-			reprobe: async () => {
-				probes += 1;
-				return okResponse();
-			},
-			...TEST_HOLD_OVERRIDES,
-		});
-		expect(result).toBeInstanceOf(Response);
-		expect((result as Response).status).toBe(200);
-		expect(probes).toBe(1);
-		expect(getActiveHoldCount()).toBe(0);
-	});
-
-	it("hasViableFallback=false: keeps looping up to MAX_ATTEMPTS within the full budget", async () => {
-		// No fallback → holding is the only alternative to an error, so the prior
-		// multi-attempt loop is preserved: reprobe keeps returning null with the
-		// cooldown staying within budget ⇒ it probes MAX_ATTEMPTS times.
-		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
-		let probes = 0;
-		const result = await holdAndRetryCacheAccount({
-			account,
-			confidence: "fresh_headroom",
-			hasViableFallback: false,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
@@ -377,76 +314,48 @@ describe("holdAndRetryCacheAccount", () => {
 		expect(getActiveHoldCount()).toBe(0);
 	});
 
-	it("budget selection: hasViableFallback=true uses the SHORT (15s) budget, false uses the FULL (60s) budget", async () => {
-		// With NO maxHoldMs override, the chosen budget is observable at the
-		// don't-wake-early give-up boundary: a cooldown that exceeds the short 15s
-		// budget but fits within the full 60s budget gives up immediately when a
-		// fallback exists (short budget) but waits-and-probes when none does.
-
-		// (a) Fallback present → 15s budget. Cooldown 30s out > 15s ⇒ give up, no probe.
-		const acctShort = makeAccount({ rate_limited_until: Date.now() + 30_000 });
-		let shortProbes = 0;
-		const shortStart = Date.now();
-		const shortResult = await holdAndRetryCacheAccount({
-			account: acctShort,
+	it("a first-probe success returns the Response (cache-preserve intact)", async () => {
+		// The quick-recovery common case: the cache account clears on the first
+		// probe — the preserve must still win.
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
 			confidence: "fresh_headroom",
-			hasViableFallback: true,
 			signal: new AbortController().signal,
 			reprobe: async () => {
-				shortProbes += 1;
+				probes += 1;
 				return okResponse();
 			},
-			// No maxHoldMs override — exercise the real BURST_RETRY_FALLBACK_HOLD_MS.
-			maxAttempts: 3,
-			jitterMs: 0,
+			...TEST_HOLD_OVERRIDES,
 		});
-		expect(shortResult).toBeNull();
-		expect(shortProbes).toBe(0);
-		// Gave up promptly (did not sleep the 30s cooldown).
-		expect(Date.now() - shortStart).toBeLessThan(1000);
-
-		// (b) No fallback → 60s budget. Same 30s cooldown now FITS ⇒ it waits and
-		// probes. To keep the test fast we stub the clock so the 30s "sleep" is
-		// near-instant by pre-expiring the cooldown the moment the probe fires; the
-		// observable signal is simply that a probe DID happen (budget allowed it).
-		const acctFull = makeAccount({ rate_limited_until: Date.now() - 1 });
-		let fullProbes = 0;
-		const fullResult = await holdAndRetryCacheAccount({
-			account: acctFull,
-			confidence: "stale_should_retry", // single probe → fast, still proves budget admits it
-			hasViableFallback: false,
-			signal: new AbortController().signal,
-			reprobe: async () => {
-				fullProbes += 1;
-				return okResponse();
-			},
-			// No maxHoldMs override — exercise the real BURST_RETRY_MAX_HOLD_MS.
-			maxAttempts: 3,
-			jitterMs: 0,
-		});
-		expect(fullResult).toBeInstanceOf(Response);
-		expect(fullProbes).toBe(1);
+		expect(result).toBeInstanceOf(Response);
+		expect((result as Response).status).toBe(200);
+		expect(probes).toBe(1);
+		expect(getActiveHoldCount()).toBe(0);
 	});
 
-	it("hasViableFallback=true composes with stale_should_retry (still at most one wait+probe)", async () => {
-		// stale_should_retry already caps attempts at 1; with a fallback the bail is
-		// a no-op extra guarantee. Either way: exactly one probe, then null.
+	it("uses the full 120s budget (default): a 30s cooldown FITS and is waited+probed", async () => {
+		// With NO maxHoldMs override the real BURST_RETRY_MAX_HOLD_MS (120s) applies.
+		// A 30s cooldown is well within it, so the never-wake-early guard admits the
+		// wait. We keep the test fast by pre-expiring the cooldown so the wait is ~0
+		// and use stale_should_retry (single probe). The observable signal: a probe
+		// DID happen (the budget admitted it).
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		let probes = 0;
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "stale_should_retry",
-			hasViableFallback: true,
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				account.rate_limited_until = Date.now() - 1;
-				return null;
+				return okResponse();
 			},
-			...TEST_HOLD_OVERRIDES,
+			// No maxHoldMs override — exercise the real 120s BURST_RETRY_MAX_HOLD_MS.
+			maxAttempts: 3,
+			jitterMs: 0,
 		});
-		expect(result).toBeNull();
+		expect(result).toBeInstanceOf(Response);
 		expect(probes).toBe(1);
-		expect(getActiveHoldCount()).toBe(0);
 	});
 });
