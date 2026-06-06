@@ -417,11 +417,120 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// The fitting Codex candidate served the request.
 		expect(res.status).toBe(200);
 		expect(codexHit).toBe(true);
-		// Only the held account's Anthropic calls happened (1 first attempt + up to
-		// MAX_ATTEMPTS=3 re-probes). A sibling-Anthropic diversion would have added
-		// a 5th Anthropic call.
-		expect(anthropicCalls).toBeLessThanOrEqual(4);
-		expect(anthropicCalls).toBeGreaterThanOrEqual(1);
+		// Codex-aware budget (Follow-up 1): a fitting Codex fallback exists, so the
+		// hold bails after a SINGLE still-throttled re-probe instead of looping the
+		// full MAX_ATTEMPTS. Held Anthropic calls = 1 first attempt + 1 re-probe = 2.
+		// (Still no sibling-Anthropic diversion.)
+		expect(anthropicCalls).toBe(2);
+	});
+
+	it("Follow-up 1(a): storm + a FITTING Codex fallback ⇒ bails to Codex fast (one re-probe), Codex serves it", async () => {
+		// The held account is in a sustained storm (every Anthropic call 429s). A
+		// Codex account that FITS the request exists, so hasViableFallback=true: the
+		// hold must bail after exactly one re-probe (no full multi-attempt loop, no
+		// 60s wait) and the fitting Codex candidate must serve the request.
+		const held = makeAccount({ id: "held", name: "Cache" });
+		const codex = makeAccount({
+			id: "codex",
+			name: "Codex",
+			provider: "codex",
+			refresh_token: "rt",
+			access_token: "at-codex",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
+		});
+		seedFreshHeadroom("held");
+
+		let codexHit = false;
+		let anthropicCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				if (callTarget(input) === "codex") {
+					codexHit = true;
+					return ok200();
+				}
+				anthropicCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeContext([held, codex], "held");
+		const start = Date.now();
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		const elapsed = Date.now() - start;
+
+		expect(res.status).toBe(200);
+		expect(codexHit).toBe(true);
+		// Exactly 2 Anthropic calls: held first attempt + ONE re-probe, then bail.
+		expect(anthropicCalls).toBe(2);
+		// Bailed fast — well under the full 60s budget (only ~1 cooldown was waited).
+		expect(elapsed).toBeLessThan(10_000);
+	});
+
+	it("Follow-up 1(b): oversized request gates Codex out ⇒ no viable fallback, holds full budget then constructed 429", async () => {
+		// The request is too large for the Codex account's mapped model (gpt-5.5,
+		// 400K window → 340K threshold), so the context-window gate excludes it.
+		// With no surviving non-Anthropic candidate, hasViableFallback=false: the
+		// hold keeps the full multi-attempt loop and, when the held account never
+		// recovers, falls through to the constructed retryable 429 (no fitting
+		// last-resort exists).
+		const held = makeAccount({ id: "held", name: "Cache" });
+		const codex = makeAccount({
+			id: "codex",
+			name: "Codex",
+			provider: "codex",
+			refresh_token: "rt",
+			access_token: "at-codex",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
+		});
+		seedFreshHeadroom("held");
+
+		let codexHit = false;
+		let anthropicCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				if (callTarget(input) === "codex") {
+					codexHit = true;
+					return ok200();
+				}
+				anthropicCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		// Oversized body: ~1.2M chars ⇒ estimate ~400K tokens > 340K gpt-5.5 cap.
+		const largeReq = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-5",
+				messages: [{ role: "user", content: "x".repeat(1_200_000) }],
+				max_tokens: 16,
+			}),
+		});
+
+		const ctx = makeContext([held, codex], "held");
+		const res = await callHandleProxy(
+			largeReq,
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Codex was gated out (oversized) ⇒ never attempted as a last-resort; the
+		// held account never recovered ⇒ constructed give-up 429.
+		expect(codexHit).toBe(false);
+		expect(res.status).toBe(429);
+		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
+		// No fallback ⇒ full multi-attempt loop: held first attempt + up to
+		// MAX_ATTEMPTS=3 re-probes ⇒ more than the 2-call fast-bail path above.
+		expect(anthropicCalls).toBeGreaterThanOrEqual(3);
 	});
 
 	it("concurrency-cap overflow ⇒ filtered last-resort (Codex), never a sibling-Anthropic diversion", async () => {
@@ -584,6 +693,57 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// hold/re-probe budget burned on the exhausted held account.
 		expect(res.status).toBe(200);
 		expect(n).toBe(1);
+	});
+
+	it("marker active + held account capacity STALE/absent ⇒ single re-probe only (stale_should_retry), not the full 3-attempt budget", async () => {
+		// A concurrent request tripped the global per-IP marker, and THIS held
+		// account's usage is stale/absent (no seed ⇒ getFreshCapacity → null) — the
+		// SAME condition under which classify429Transient would only grant
+		// `stale_should_retry`. The marker-active branch must therefore enter the
+		// hold at `stale_should_retry` confidence, capping it at ONE re-probe rather
+		// than burning the full BURST_RETRY_MAX_ATTEMPTS (3) against a
+		// possibly-exhausted account. With the bug (confidence left as
+		// `fresh_headroom`) this path would re-probe up to 3 times.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			// Cooled (affinity_hold) but already expired so a re-probe fires at once.
+			rate_limited_until: Date.now() - 1,
+		});
+		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
+		// Deliberately NO usageCache seed for "held" ⇒ getFreshCapacity returns null.
+		usageCache.delete("held");
+		markAnthropicBurstThrottle();
+
+		// Every Anthropic call 429s ⇒ the held account never recovers, so the hold
+		// runs to its attempt cap. No non-Anthropic candidate exists
+		// (sibling is Anthropic-direct, excluded from last-resort) ⇒ hasViableFallback
+		// is false, so the bail-on-rolling shortcut cannot fire and the ONLY cap on
+		// re-probes is the confidence-derived maxAttempts. That isolates the fix:
+		// stale_should_retry ⇒ 1 probe; the buggy fresh_headroom ⇒ up to 3.
+		let anthropicCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				anthropicCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Constructed give-up 429 (no fitting non-Anthropic last-resort).
+		expect(res.status).toBe(429);
+		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
+		// Marker-active ⇒ no first attempt; every Anthropic call here is a hold
+		// re-probe. stale_should_retry caps the hold at ONE probe — so exactly 1
+		// Anthropic call, NOT the 3 the full fresh_headroom budget would make.
+		expect(anthropicCalls).toBe(1);
 	});
 
 	it("Finding 5: last-resort NEVER attempts a claude-console-api account (shares the Anthropic per-IP throttle)", async () => {

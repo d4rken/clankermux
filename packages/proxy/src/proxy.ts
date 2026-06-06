@@ -822,6 +822,13 @@ export async function handleProxy(
 					);
 				} else {
 					enterHold = true;
+					// Null capacity (usage stale/absent) is the SAME condition under which
+					// classify429Transient would only grant `stale_should_retry` — so cap
+					// the hold at a single probe rather than burning the full attempt
+					// budget against a possibly-exhausted account. Fresh, positive
+					// headroom keeps the default `fresh_headroom` (full budget).
+					holdConfidence =
+						heldCapacity === null ? "stale_should_retry" : "fresh_headroom";
 				}
 			} else if (accounts.some((a) => a.id === heldAccount.id)) {
 				// The held account is available (affinity_hit) — attempt it first.
@@ -870,9 +877,32 @@ export async function handleProxy(
 			// a concurrent request can only over-probe by one short cycle).
 
 			if (enterHold) {
+				// Codex-aware budget: does a non-Anthropic candidate that will ACTUALLY
+				// be attempted in the last-resort exist for this request? Use the EXACT
+				// predicate the last-resort filter uses below (non-official-Anthropic
+				// provider, excluding the held account itself) against the same gated
+				// `accounts` list — so the budget decision and the real last-resort set
+				// agree. A `true` here means falling back is cheap, so the hold uses the
+				// short budget and bails after one still-throttled probe instead of
+				// martyring latency to preserve the cache during a sustained storm.
+				// Candidates here already survived the context-window gate, so a Codex
+				// account that was gated out (oversized request) is correctly absent —
+				// yielding `false` and the full hold budget. This is a SNAPSHOT at
+				// hold-entry: it counts non-Anthropic candidates present right now and
+				// does NOT pre-exclude provider-overloaded ones. A candidate that becomes
+				// provider-overloaded DURING the hold may later be skipped by the
+				// last-resort loop (it can `continue` past it), in which case the fast
+				// bail still yields the constructed 429 — the same terminal outcome the
+				// full budget would reach, just sooner.
+				const hasViableFallback = accounts.some(
+					(a) =>
+						!isOfficialAnthropicProvider(a.provider) && a.id !== heldAccount.id,
+				);
+
 				const holdResult = await holdAndRetryCacheAccount({
 					account: heldAccount,
 					confidence: holdConfidence,
+					hasViableFallback,
 					signal: req.signal,
 					reprobe,
 				});
