@@ -151,6 +151,80 @@ function makeContext(accounts: Account[], heldAccountId: string): ProxyContext {
 	};
 }
 
+/**
+ * Mark the account with fresh usage that is AHEAD OF PACE on the 5-hour window
+ * (so `applyUsageThrottling` removes it) while still leaving POSITIVE rate-limit
+ * headroom (minHeadroom > 0 — NOT a real quota wall). Window started ~1h ago of a
+ * 5h window (20% expected) but 50% used ⇒ pacing-throttled with 50% headroom.
+ * This is the Codex High finding's bug shape: an account the pacing gate removed
+ * even though it is not rate-limited and not exhausted.
+ */
+function seedThrottledFreshHeadroom(accountId: string) {
+	usageCache.set(accountId, {
+		five_hour: {
+			utilization: 50,
+			resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+		},
+		seven_day: {
+			utilization: 20,
+			resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+		},
+	} as never);
+}
+
+/**
+ * Strategy stub for the `affinity_hit` case: the affined (held) account IS
+ * available and selected, so it is returned in the available list AND
+ * `decision` is `affinity_hit` (NOT `affinity_hold`). The downstream
+ * usage-throttle gate may still remove it from `accounts` — which is exactly the
+ * Codex High finding's bug condition (available→selected, then pacing-throttled
+ * out). `heldAccountId` is still recorded (the real strategy sets it on
+ * affinity_hit too).
+ */
+function makeStrategyHit(heldAccountId: string) {
+	return {
+		select: (accs: Account[], meta: RequestMeta) => {
+			const now = Date.now();
+			const available = accs.filter(
+				(acc) =>
+					!acc.paused &&
+					(!acc.rate_limited_until || acc.rate_limited_until <= now),
+			);
+			meta.routing = {
+				strategy: "session",
+				decision: "affinity_hit",
+				affinityScope: "project",
+				affinityKey: "k",
+				selectedAccountId: heldAccountId,
+				previousAccountId: null,
+				candidatesCount: available.length,
+				failoverReason: null,
+				heldAccountId,
+			};
+			return available;
+		},
+	} as never;
+}
+
+/**
+ * Context with 5-hour usage-throttling ENABLED and an `affinity_hit` strategy.
+ * Used to reproduce the Codex High finding: a held account that was available
+ * (affinity_hit) then removed by the usage-throttle gate must NOT enter the
+ * burst hold.
+ */
+function makeThrottledHitContext(
+	accounts: Account[],
+	heldAccountId: string,
+): ProxyContext {
+	const ctx = makeContext(accounts, heldAccountId) as {
+		strategy: unknown;
+		config: { getUsageThrottlingFiveHourEnabled: () => boolean };
+	};
+	ctx.strategy = makeStrategyHit(heldAccountId);
+	ctx.config.getUsageThrottlingFiveHourEnabled = () => true;
+	return ctx as unknown as ProxyContext;
+}
+
 function makeRequest(): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
@@ -1113,5 +1187,107 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(codexCalls).toBe(0);
 		expect(heldProbes).toBeGreaterThanOrEqual(1);
 		expect(res.status).toBe(499);
+	});
+
+	// -------------------------------------------------------------------------
+	// Codex High finding: the burst hold must NEVER fire for an account that was
+	// removed by the usage-throttle (pacing) gate rather than a rate-limit
+	// cooldown. The throttle gate drops accounts with POSITIVE rate-limit headroom
+	// — holding+probing such an account would bypass the configured pacing
+	// throttle by issuing an upstream call. Eligibility requires either presence
+	// in the gated `accounts` list (available) OR decision === "affinity_hold"
+	// (genuine cooldown). An affinity_hit account throttled OUT of `accounts` is
+	// neither, so it must fall to the usage-throttled terminal / normal loop.
+	// -------------------------------------------------------------------------
+	it("Codex High: zero-candidate via usage-throttle (affinity_hit, NOT cooldown) + marker active + positive headroom ⇒ usage-throttled 529, NO hold, NO upstream call", async () => {
+		// The held account is available→selected (affinity_hit) with positive
+		// rate-limit headroom, but the 5-hour pacing gate throttles it out, leaving
+		// `accounts` empty. The marker is active. WITHOUT the eligibility gate the
+		// zero-candidate storm-hold would fire (decision is affinity_hit, not
+		// affinity_hold) and issue an upstream probe that bypasses the throttle.
+		// WITH the gate it degrades to the usage-throttled 529 terminal instead.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		seedThrottledFreshHeadroom("held");
+		markAnthropicBurstThrottle();
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				upstreamCalls += 1;
+				return ok200();
+			},
+		);
+
+		const ctx = makeThrottledHitContext([held], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Usage-throttled terminal (529), NOT a held-account hold success and NOT a
+		// pool_exhausted 503. No upstream call was issued — the throttle held.
+		expect(res.status).toBe(529);
+		expect(upstreamCalls).toBe(0);
+	});
+
+	it("Codex High: normal path, held account usage-throttled out (affinity_hit) + healthy sibling + marker active ⇒ serves sibling via normal loop, NO reprobe of the throttled held account", async () => {
+		// The held account is affinity_hit (available, positive headroom) but the
+		// 5-hour pacing gate throttles it out of `accounts`; a healthy sibling
+		// remains (no throttling usage seeded ⇒ passes the gate). The marker is
+		// active. WITHOUT the eligibility gate, Branch A would resolve the held
+		// account from `selectedAccounts`/DB and hold+probe it (bypassing the
+		// throttle). WITH the gate, Branch A is skipped (held absent from `accounts`
+		// AND decision is affinity_hit) and the normal loop serves the sibling. The
+		// throttled held account is NEVER re-probed.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		seedThrottledFreshHeadroom("held");
+		// Sibling: fresh, on-pace headroom ⇒ NOT throttled, passes the gate.
+		seedFreshHeadroom("sibling");
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingServed = false;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = reqHeaders.get("authorization") ?? "";
+				if (auth.includes("at-sibling")) {
+					siblingServed = true;
+					return ok200();
+				}
+				heldProbes += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeThrottledHitContext([held, sibling], "held");
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The healthy sibling served it via the normal loop. The throttled held
+		// account was never held/re-probed (its eligibility was denied).
+		expect(res.status).toBe(200);
+		expect(siblingServed).toBe(true);
+		expect(heldProbes).toBe(0);
 	});
 });

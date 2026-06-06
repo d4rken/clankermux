@@ -196,6 +196,35 @@ function createClientAbortResponse(): Response {
 	);
 }
 
+/**
+ * Burst-hold eligibility guard (Codex High finding): the transparent burst-retry
+ * hold may ONLY target an account whose unavailability is a rate-limit cooldown
+ * (the storm shape — strategy decision `affinity_hold`) OR an account that is
+ * currently available (present in the gated `accounts` list, decision
+ * `affinity_hit`). It must NEVER hold an account that was removed by the
+ * usage-throttle (`applyUsageThrottling`) or context-window gate — those gates
+ * drop accounts that still have positive rate-limit headroom, so holding+probing
+ * such an account would issue an upstream call that bypasses the configured
+ * pacing throttle / context safety check.
+ *
+ * `heldAccountId` is set by the routing strategy on BOTH `affinity_hit` (the
+ * affined account was available and selected) and `affinity_hold` (the affined
+ * account is genuinely cooldown-unavailable). An account that was selected as
+ * `affinity_hit` but then gated OUT of `accounts` by usage-throttle/context is
+ * therefore NOT eligible — only its presence in `accounts` (still available) or
+ * an `affinity_hold` decision (cooldown-unavailable) makes it holdable.
+ *
+ * @param decision           `requestMeta.routing?.decision`
+ * @param heldInGatedAccounts whether the held account is present in the gated
+ *                            `accounts` list (i.e. survived every gate)
+ */
+function isBurstHoldEligible(
+	decision: string | undefined,
+	heldInGatedAccounts: boolean,
+): boolean {
+	return heldInGatedAccounts || decision === "affinity_hold";
+}
+
 // ===== MAIN HANDLER =====
 
 /**
@@ -813,7 +842,17 @@ export async function handleProxy(
 		// is empty; a non-abort give-up degrades to the constructed give-up 429).
 		// `accounts` is empty here so there is no combo slot to honor — gate on the
 		// request's own comboName (filteredComboInfo isn't built until section 9).
-		if (!requestMeta.comboName && burstHeldId) {
+		if (
+			!requestMeta.comboName &&
+			burstHeldId &&
+			// Codex High finding: never hold an account that was gated out by the
+			// usage-throttle / context-window gate. `accounts` is empty here, so the
+			// held account is NOT available — it must be a genuine cooldown
+			// (`affinity_hold`). An account that was `affinity_hit` (available, then
+			// usage-throttled / context-gated out) must fall to the
+			// createUsageThrottledResponse / context / pool_exhausted terminal below.
+			isBurstHoldEligible(requestMeta.routing?.decision, false)
+		) {
 			const heldAccount =
 				selectedAccounts.find((a) => a.id === burstHeldId) ??
 				(await ctx.dbOps.getAccount(burstHeldId));
@@ -944,7 +983,21 @@ export async function handleProxy(
 		: null;
 	let response: Response | null = null;
 
-	if (!filteredComboInfo?.comboName && burstHeldId) {
+	// Codex High finding: the held account may only enter the hold when it is
+	// EITHER present in the gated `accounts` list (still available — fine to
+	// probe) OR genuinely cooldown-unavailable (`affinity_hold`). If it is absent
+	// from `accounts` AND the decision was `affinity_hit` (i.e. it was selected as
+	// available but then removed by the usage-throttle / context-window gate),
+	// holding+probing it would bypass the configured pacing throttle / context
+	// safety — so do NOT hold; fall through to today's normal-loop behavior.
+	const heldInGatedAccounts = burstHeldId
+		? accounts.some((a) => a.id === burstHeldId)
+		: false;
+	if (
+		!filteredComboInfo?.comboName &&
+		burstHeldId &&
+		isBurstHoldEligible(requestMeta.routing?.decision, heldInGatedAccounts)
+	) {
 		// Resolve the held (cache) account object. It may not be in `accounts`
 		// (an affinity_hold serves a sibling because the pinned account is cooled),
 		// so fall back to the DB. We re-probe it directly, bypassing the
