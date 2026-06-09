@@ -25,5 +25,5 @@ export { analyzeIndexUsage } from "./performance-indexes";
 // Re-export repository types
 export type { StatsRepository } from "./repositories/stats.repository";
 // Re-export retry utilities for external use (from your improvements)
-export { withDatabaseRetry, withDatabaseRetrySync } from "./retry";
+export { withDatabaseRetry } from "./retry";
 export { DatabaseOperations };
