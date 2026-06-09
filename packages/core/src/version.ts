@@ -37,10 +37,10 @@ export async function getVersion(): Promise<string> {
 		return cachedVersion;
 	}
 
-	// 3. Try reading from apps/cli/package.json (dev environment)
+	// 3. Try reading from the repo-root package.json (dev environment)
 	try {
 		const packageJsonPath = new URL(
-			"../../../apps/cli/package.json",
+			"../../../package.json",
 			import.meta.url,
 		);
 		const packageJson = await fetch(packageJsonPath);
