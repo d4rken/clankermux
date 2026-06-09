@@ -12,23 +12,6 @@ import type {
 
 const logger = new Logger("openai-responses-adapter");
 
-// Map OpenAI model names to Claude family aliases so per-account model_mappings
-// (opus/sonnet/haiku) resolve correctly when Codex CLI requests reach the proxy.
-// Rules based on OpenAI naming conventions:
-//   *-pro   → opus  (heavy reasoning tier, $30+/M input)
-//   *-mini  → haiku (fast/cheap tier)
-//   *-nano  → haiku (fast/cheap tier)
-//   gpt-5*  → sonnet (default capable tier, everything else)
-// Non-gpt-5 names (e.g. gpt-4) are passed through unchanged.
-function mapGptModelToClaudeFamily(model: string): string {
-	const lower = model.toLowerCase();
-	if (!lower.startsWith("gpt-")) return model;
-	if (lower.endsWith("-pro")) return "claude-opus-4-5";
-	if (lower.endsWith("-mini") || lower.endsWith("-nano"))
-		return "claude-haiku-4-5";
-	return "claude-sonnet-4-6";
-}
-
 function parseArguments(args: string): unknown {
 	try {
 		return JSON.parse(args);
@@ -187,7 +170,15 @@ export function translateRequestToAnthropic(
 	const mergedMessages = mergeConsecutiveSameRole(messages);
 
 	const result: AnthropicRequest = {
-		model: mapGptModelToClaudeFamily(req.model),
+		// Pass the client's model name straight through. The Codex CLI sends
+		// OpenAI model names (e.g. "gpt-5.5"); forwarding them unchanged lets the
+		// selected account's provider resolve them (the Codex provider passes
+		// unknown gpt-* names to its backend as-is) — so "set model X, get model
+		// X". We deliberately do NOT reverse-map gpt-* → a Claude family here: that
+		// round-trip discarded the exact model the user asked for (e.g. "gpt-5.5"
+		// became sonnet → gpt-5.4). Claude Code traffic is unaffected — it sends
+		// claude-* names, which per-account family model_mappings still handle.
+		model: req.model,
 		messages: mergedMessages,
 		max_tokens: req.max_output_tokens ?? 4096,
 	};
