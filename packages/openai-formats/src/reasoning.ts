@@ -26,12 +26,13 @@ const EFFORT_RANK: Record<ReasoningEffort, number> = {
 };
 
 const CLAUDE_REASONING_EFFORTS: Record<
-	"opus" | "sonnet" | "haiku",
+	"opus" | "sonnet" | "haiku" | "fable",
 	readonly ReasoningEffort[]
 > = {
 	opus: ["low", "medium", "high", "xhigh", "max"],
 	sonnet: ["low", "medium", "high", "xhigh", "max"],
 	haiku: ["low", "medium"],
+	fable: ["low", "medium", "high", "xhigh", "max"],
 };
 
 const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {

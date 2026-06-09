@@ -1,7 +1,7 @@
 import {
 	codexAccountFitsRequest,
 	estimateRequestTokens,
-	mapModelName,
+	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
 	trackClientVersion,
@@ -747,7 +747,7 @@ export async function handleProxy(
 			if (
 				!codexAccountFitsRequest(account, modelForGate, requestTokenEstimate)
 			) {
-				const target = mapModelName(modelForGate, account);
+				const target = resolveCodexTargetModel(modelForGate, account);
 				const window = resolveModelContextWindow(target);
 				log.info(
 					`Context-window gate: excluding Codex account "${account.name}" ` +

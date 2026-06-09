@@ -136,6 +136,28 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 6.25,
 				},
 			},
+			// Mythos-class models: $10/M input, $50/M output,
+			// $1.00/M cache read (0.1x), $12.50/M cache write (1.25x).
+			[CLAUDE_MODEL_IDS.FABLE_5]: {
+				id: CLAUDE_MODEL_IDS.FABLE_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.FABLE_5],
+				cost: {
+					input: 10,
+					output: 50,
+					cache_read: 1.0,
+					cache_write: 12.5,
+				},
+			},
+			[CLAUDE_MODEL_IDS.MYTHOS_5]: {
+				id: CLAUDE_MODEL_IDS.MYTHOS_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.MYTHOS_5],
+				cost: {
+					input: 10,
+					output: 50,
+					cache_read: 1.0,
+					cache_write: 12.5,
+				},
+			},
 		},
 	},
 };

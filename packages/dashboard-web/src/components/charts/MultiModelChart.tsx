@@ -61,6 +61,8 @@ const MODEL_COLORS: Record<string, string> = {
 	"claude-opus-4.1": COLORS.indigo,
 	"claude-sonnet-4": COLORS.cyan,
 	"claude-sonnet-4.5": COLORS.purple,
+	"claude-fable-5": COLORS.warning,
+	"claude-mythos-5": COLORS.primary,
 };
 
 function getModelColor(model: string, index: number): string {

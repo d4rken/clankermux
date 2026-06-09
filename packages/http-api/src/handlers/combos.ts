@@ -350,10 +350,10 @@ export function createFamiliesListHandler(dbOps: DatabaseOperations) {
 export function createFamilyAssignHandler(dbOps: DatabaseOperations) {
 	return async (req: Request, family: string): Promise<Response> => {
 		try {
-			const validFamilies: ComboFamily[] = ["opus", "sonnet", "haiku"];
+			const validFamilies: ComboFamily[] = ["opus", "sonnet", "haiku", "fable"];
 			if (!validFamilies.includes(family as ComboFamily)) {
 				return errorResponse(
-					BadRequest("family must be one of: opus, sonnet, haiku"),
+					BadRequest("family must be one of: opus, sonnet, haiku, fable"),
 				);
 			}
 

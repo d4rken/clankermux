@@ -813,6 +813,29 @@ describe("CodexProvider.transformRequestBody", () => {
 		expect(body.model).toBe("gpt-5.3-codex");
 	});
 
+	it("maps fable and mythos models to the top Codex tier", async () => {
+		const provider = new CodexProvider();
+		for (const model of ["claude-fable-5", "claude-mythos-5"]) {
+			const request = new Request("https://example.com/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					max_tokens: 10,
+					messages: [{ role: "user", content: "hello" }],
+				}),
+			});
+
+			const transformed = await provider.transformRequestBody(
+				request,
+				undefined,
+			);
+			const body = await transformed.json();
+
+			expect(body.model).toBe("gpt-5.5");
+		}
+	});
+
 	it("uses account sonnet mapping for sonnet-family models", async () => {
 		const provider = new CodexProvider();
 		const account = {

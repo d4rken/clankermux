@@ -42,6 +42,7 @@ export {
 export {
 	codexAccountFitsRequest,
 	createCustomEndpointData,
+	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	estimateRequestTokens,
 	getAllowedModelsMessage,
 	getEndpointUrl,
@@ -55,6 +56,7 @@ export {
 	parseCustomEndpointData,
 	parseModelFallbacks,
 	parseModelMappings,
+	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	SAFETY_MARGIN,
 	validateAndSanitizeModelFallbacks,
@@ -67,6 +69,7 @@ export {
 	getModelDisplayName,
 	getModelShortName,
 	isValidModelId,
+	LATEST_FABLE_MODEL,
 	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,

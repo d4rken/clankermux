@@ -94,3 +94,37 @@ describe("bundled Opus pricing (offline fallback)", () => {
 		);
 	});
 });
+
+describe("bundled Mythos-class pricing (offline fallback)", () => {
+	// Fable 5 and Mythos 5 both price at $10/M input, $50/M output,
+	// $1.00/M cache read, $12.50/M cache write.
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+	const cacheTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	it("prices claude-fable-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-fable-5", ioTokens)).toBeCloseTo(
+			60,
+			6,
+		);
+	});
+
+	it("prices claude-fable-5 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-fable-5", cacheTokens)).toBeCloseTo(
+			13.5,
+			6,
+		);
+	});
+
+	it("prices claude-mythos-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-mythos-5", ioTokens)).toBeCloseTo(
+			60,
+			6,
+		);
+	});
+});

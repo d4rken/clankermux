@@ -506,6 +506,51 @@ describe("selectAccountsForRequest — combo routing", () => {
 		// Ghost slot is skipped; only acc-1 is returned
 		expect(result.map((a) => a.id)).toEqual(["acc-1"]);
 	});
+
+	it("re-syncs candidatesCount after excluding official-Anthropic accounts later in the list", async () => {
+		// Combo head is a Codex account; an official Anthropic account sits later.
+		// With excludeOfficialAnthropic the Anthropic account is filtered out but
+		// the head is unchanged — candidatesCount must still shrink from 2 to 1.
+		const codexHead = makeAccount({ id: "acc-codex", provider: "codex" });
+		const anthropicLater = makeAccount({
+			id: "acc-anthropic",
+			provider: "anthropic",
+		});
+		const combo = makeCombo([
+			{
+				id: "slot-codex",
+				combo_id: "combo-1",
+				account_id: "acc-codex",
+				model: "claude-sonnet-4-5",
+				priority: 0,
+				enabled: true,
+			},
+			{
+				id: "slot-anthropic",
+				combo_id: "combo-1",
+				account_id: "acc-anthropic",
+				model: "claude-sonnet-4-5",
+				priority: 1,
+				enabled: true,
+			},
+		]);
+		const ctx = makeCtx({
+			accounts: [codexHead, anthropicLater],
+			activeCombo: combo,
+		});
+		const meta = makeRequestMeta({ excludeOfficialAnthropic: true });
+
+		const result = await selectAccountsForRequest(
+			meta,
+			ctx,
+			"claude-sonnet-4-5",
+		);
+
+		// Official Anthropic account filtered out; Codex head remains.
+		expect(result.map((a) => a.id)).toEqual(["acc-codex"]);
+		expect(meta.routing?.selectedAccountId).toBe("acc-codex");
+		expect(meta.routing?.candidatesCount).toBe(1);
+	});
 });
 
 // ── selectAccountsForRequest — auto-refresh bypass for overage-paused accounts ─

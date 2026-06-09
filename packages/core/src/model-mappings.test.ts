@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	codexAccountFitsRequest,
+	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	estimateRequestTokens,
 	getAllowedModelsMessage,
 	getModelFamily,
@@ -8,6 +9,7 @@ import {
 	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	parseModelMappings,
+	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	SAFETY_MARGIN,
 } from "@clankermux/core";
@@ -241,6 +243,16 @@ describe("Model Validation Utilities", () => {
 		expect(getModelFamily("claude-haiku-5-0")).toBe("haiku");
 	});
 
+	test("getModelFamily detects fable models", () => {
+		expect(getModelFamily("claude-fable-5")).toBe("fable");
+		expect(getModelFamily("CLAUDE-FABLE-5")).toBe("fable"); // case insensitive
+	});
+
+	test("getModelFamily maps mythos models to the fable family", () => {
+		expect(getModelFamily("claude-mythos-5")).toBe("fable");
+		expect(getModelFamily("claude-mythos-preview")).toBe("fable");
+	});
+
 	test("getModelFamily returns null for invalid models", () => {
 		expect(getModelFamily("gpt-4")).toBeNull();
 		expect(getModelFamily("invalid-model")).toBeNull();
@@ -251,6 +263,8 @@ describe("Model Validation Utilities", () => {
 		expect(isValidClaudeModel("claude-opus-4-6")).toBe(true);
 		expect(isValidClaudeModel("claude-sonnet-4-5-20250929")).toBe(true);
 		expect(isValidClaudeModel("claude-haiku-4-5-20251001")).toBe(true);
+		expect(isValidClaudeModel("claude-fable-5")).toBe(true);
+		expect(isValidClaudeModel("claude-mythos-5")).toBe(true);
 		expect(isValidClaudeModel("claude-opus-5-0-future")).toBe(true); // future models
 	});
 
@@ -265,6 +279,7 @@ describe("Model Validation Utilities", () => {
 		expect(message).toContain("opus");
 		expect(message).toContain("sonnet");
 		expect(message).toContain("haiku");
+		expect(message).toContain("fable");
 	});
 });
 
@@ -416,14 +431,72 @@ describe("codexAccountFitsRequest", () => {
 		);
 	});
 
-	test("uses default mapping when no stored mapping exists", () => {
-		// No mappings → mapModelName passes through unchanged
-		// "claude-opus-4-7" contains "opus" but without a codex mapping,
-		// it passes through unchanged → unknown model → fits
+	test("resolves the family default Codex model when no stored mapping exists", () => {
+		// No account mapping → opus resolves to the gpt-5.5 family default
+		// (400K window, threshold 340K), matching what the provider actually
+		// sends, so an oversized request is correctly excluded (not "fits").
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
+			false,
+		);
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
 			true,
 		);
+	});
+
+	test("gates a default-config account on the fable family window", () => {
+		// fable → gpt-5.5 default (400K, threshold 340K).
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 340_000)).toBe(
+			true,
+		);
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 340_001)).toBe(
+			false,
+		);
+		// mythos resolves to the same fable family default.
+		expect(codexAccountFitsRequest(account, "claude-mythos-5", 340_001)).toBe(
+			false,
+		);
+	});
+});
+
+describe("resolveCodexTargetModel", () => {
+	test("prefers an explicit account mapping over the family default", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex" }),
+		});
+		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe(
+			"gpt-5.3-codex",
+		);
+	});
+
+	test("falls back to the family default when no mapping exists", () => {
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe("gpt-5.5");
+		expect(resolveCodexTargetModel("claude-sonnet-4-5", account)).toBe(
+			"gpt-5.3-codex",
+		);
+		expect(resolveCodexTargetModel("claude-haiku-4-5", account)).toBe(
+			"gpt-5.4-mini",
+		);
+		expect(resolveCodexTargetModel("claude-fable-5", account)).toBe("gpt-5.5");
+		expect(resolveCodexTargetModel("claude-mythos-5", account)).toBe("gpt-5.5");
+	});
+
+	test("returns a non-Claude model with no mapping unchanged", () => {
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(resolveCodexTargetModel("gpt-5.3-codex", account)).toBe(
+			"gpt-5.3-codex",
+		);
+	});
+
+	test("DEFAULT_CODEX_MODEL_BY_FAMILY covers every family", () => {
+		expect(DEFAULT_CODEX_MODEL_BY_FAMILY).toEqual({
+			opus: "gpt-5.5",
+			sonnet: "gpt-5.3-codex",
+			haiku: "gpt-5.4-mini",
+			fable: "gpt-5.5",
+		});
 	});
 
 	test("SAFETY_MARGIN is 0.85", () => {

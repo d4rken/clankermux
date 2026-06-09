@@ -1,4 +1,5 @@
 import {
+	LATEST_FABLE_MODEL,
 	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,
@@ -51,10 +52,12 @@ export function AccountModelMappingsDialog({
 		opus: string;
 		sonnet: string;
 		haiku: string;
+		fable: string;
 	}>({
 		opus: "",
 		sonnet: "",
 		haiku: "",
+		fable: "",
 	});
 	const [isLoading, setIsLoading] = useState(false);
 
@@ -65,12 +68,14 @@ export function AccountModelMappingsDialog({
 				opus: formatMappingValue(account.modelMappings.opus || ""),
 				sonnet: formatMappingValue(account.modelMappings.sonnet || ""),
 				haiku: formatMappingValue(account.modelMappings.haiku || ""),
+				fable: formatMappingValue(account.modelMappings.fable || ""),
 			});
 		} else {
 			setModelMappings({
 				opus: "",
 				sonnet: "",
 				haiku: "",
+				fable: "",
 			});
 		}
 	}, [account]);
@@ -84,10 +89,12 @@ export function AccountModelMappingsDialog({
 			const opus = parseMappingValue(modelMappings.opus);
 			const sonnet = parseMappingValue(modelMappings.sonnet);
 			const haiku = parseMappingValue(modelMappings.haiku);
+			const fable = parseMappingValue(modelMappings.fable);
 
 			if (opus) mappingsToSend.opus = opus;
 			if (sonnet) mappingsToSend.sonnet = sonnet;
 			if (haiku) mappingsToSend.haiku = haiku;
+			if (fable) mappingsToSend.fable = fable;
 
 			await onUpdateModelMappings(account.id, mappingsToSend);
 			onOpenChange(false);
@@ -99,7 +106,7 @@ export function AccountModelMappingsDialog({
 	};
 
 	const handleInputChange = (
-		modelType: "opus" | "sonnet" | "haiku",
+		modelType: "opus" | "sonnet" | "haiku" | "fable",
 		value: string,
 	) => {
 		setModelMappings((prev) => ({
@@ -131,7 +138,7 @@ export function AccountModelMappingsDialog({
 							</code>
 							) to cycle on rate limits.
 						</p>
-						<div className="grid grid-cols-3 gap-3">
+						<div className="grid grid-cols-2 gap-3">
 							<div className="space-y-1">
 								<Label htmlFor="opus" className="text-xs">
 									Opus
@@ -165,6 +172,18 @@ export function AccountModelMappingsDialog({
 									value={modelMappings.haiku}
 									onChange={(e) => handleInputChange("haiku", e.target.value)}
 									placeholder={`e.g., ${LATEST_HAIKU_MODEL}`}
+									className="h-8"
+								/>
+							</div>
+							<div className="space-y-1">
+								<Label htmlFor="fable" className="text-xs">
+									Fable
+								</Label>
+								<Input
+									id="fable"
+									value={modelMappings.fable}
+									onChange={(e) => handleInputChange("fable", e.target.value)}
+									placeholder={`e.g., ${LATEST_FABLE_MODEL}`}
 									className="h-8"
 								/>
 							</div>

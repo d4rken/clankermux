@@ -172,7 +172,12 @@ async function selectByStrategy(
 	if (model) {
 		const family = getModelFamily(model);
 		if (family) {
-			const validFamilies: readonly string[] = ["opus", "sonnet", "haiku"];
+			const validFamilies: readonly string[] = [
+				"opus",
+				"sonnet",
+				"haiku",
+				"fable",
+			];
 			if (!validFamilies.includes(family)) {
 				log.warn(`Unknown model family "${family}", skipping combo lookup`);
 			} else {
@@ -456,8 +461,11 @@ export async function selectAccountsForRequest(
 			};
 			return [];
 		}
-		// Keep routing telemetry consistent with the filtered head/count.
-		if (meta.routing && filtered[0].id !== meta.routing.selectedAccountId) {
+		// Keep routing telemetry consistent with the filtered head/count. The
+		// count must be re-synced even when the head account is unchanged —
+		// excluded official-Anthropic accounts may sit later in the list, so
+		// `candidatesCount` would otherwise over-report the pre-filter size.
+		if (meta.routing) {
 			meta.routing.selectedAccountId = filtered[0].id;
 			meta.routing.candidatesCount = filtered.length;
 		}

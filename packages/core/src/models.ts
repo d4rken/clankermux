@@ -16,6 +16,9 @@ export const CLAUDE_MODEL_IDS = {
 	OPUS_4_6: "claude-opus-4-6",
 	OPUS_4_7: "claude-opus-4-7",
 	OPUS_4_8: "claude-opus-4-8",
+	// Mythos-class models (Fable 5 = public; Mythos 5 = invite-only Glasswing)
+	FABLE_5: "claude-fable-5",
+	MYTHOS_5: "claude-mythos-5",
 } as const;
 
 // Model display names
@@ -30,6 +33,8 @@ export const MODEL_DISPLAY_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "Claude Opus 4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "Claude Opus 4.7",
 	[CLAUDE_MODEL_IDS.OPUS_4_8]: "Claude Opus 4.8",
+	[CLAUDE_MODEL_IDS.FABLE_5]: "Claude Fable 5",
+	[CLAUDE_MODEL_IDS.MYTHOS_5]: "Claude Mythos 5",
 };
 
 // Short model names used in UI (for color mapping, etc.)
@@ -44,6 +49,8 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
 	[CLAUDE_MODEL_IDS.OPUS_4_6]: "claude-opus-4.6",
 	[CLAUDE_MODEL_IDS.OPUS_4_7]: "claude-opus-4.7",
 	[CLAUDE_MODEL_IDS.OPUS_4_8]: "claude-opus-4.8",
+	[CLAUDE_MODEL_IDS.FABLE_5]: "claude-fable-5",
+	[CLAUDE_MODEL_IDS.MYTHOS_5]: "claude-mythos-5",
 };
 
 // Latest model aliases — update these when Anthropic releases new models.
@@ -51,6 +58,7 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
 export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_4_8;
 export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;
 export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_4_5;
+export const LATEST_FABLE_MODEL = CLAUDE_MODEL_IDS.FABLE_5;
 
 // Default model for various contexts
 export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_4_6;

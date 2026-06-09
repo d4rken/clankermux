@@ -10,17 +10,24 @@ const log = new Logger("ModelMappings");
 // Known model family patterns for O(1) direct matching
 // Pattern order: Check "opus" before "haiku" before "sonnet" to avoid substring collisions
 // in edge cases like "claude-opus-haiku-test" (though we would never see this pattern from the client)
-export const KNOWN_PATTERNS = ["opus", "haiku", "sonnet"] as const;
+export const KNOWN_PATTERNS = ["opus", "haiku", "sonnet", "fable"] as const;
 
 /**
- * Get the model family (opus/sonnet/haiku) from a model ID
- * Uses the same pattern matching as mapModelName()
+ * Get the model family (opus/sonnet/haiku/fable) from a model ID
+ * Uses the same pattern matching as mapModelName().
+ * Mythos-class IDs (e.g. claude-mythos-5) resolve to the "fable" family —
+ * Mythos 5 is the same underlying model as Fable 5, so they share routing,
+ * combo, and provider-fallback behaviour.
  * @returns Model family or null if no pattern matches
  */
 export function getModelFamily(
 	modelId: string,
-): "opus" | "sonnet" | "haiku" | null {
+): "opus" | "sonnet" | "haiku" | "fable" | null {
 	const normalized = modelId.toLowerCase();
+	// Mythos 5 shares the Fable model class — route it as the "fable" family.
+	if (normalized.includes("mythos")) {
+		return "fable";
+	}
 	for (const pattern of KNOWN_PATTERNS) {
 		if (normalized.includes(pattern)) {
 			return pattern;
@@ -31,7 +38,8 @@ export function getModelFamily(
 
 /**
  * Validate if a model ID is a valid Claude model
- * Accepts any model containing opus, sonnet, or haiku (case-insensitive)
+ * Accepts any model containing opus, sonnet, haiku, fable, or mythos
+ * (case-insensitive)
  * @returns true if model matches a known pattern
  */
 export function isValidClaudeModel(modelId: string): boolean {
@@ -43,7 +51,7 @@ export function isValidClaudeModel(modelId: string): boolean {
  * @returns Error message string for API responses
  */
 export function getAllowedModelsMessage(): string {
-	return "Model must contain one of: opus, sonnet, haiku (e.g., claude-opus-4-6, claude-sonnet-4-5-20250929)";
+	return "Model must contain one of: opus, sonnet, haiku, fable (e.g., claude-opus-4-6, claude-fable-5)";
 }
 
 /**
@@ -299,7 +307,7 @@ export function createCustomEndpointData(
 
 /**
  * Parse model fallbacks from account's model_fallbacks field.
- * Model fallbacks map model family names (opus/sonnet/haiku) to fallback model names.
+ * Model fallbacks map model family names (opus/sonnet/haiku/fable) to fallback model names.
  */
 export function parseModelFallbacks(
 	modelFallbacks: string | null,
@@ -410,15 +418,59 @@ export function estimateRequestTokens(
 }
 
 /**
+ * Default Anthropic-family → Codex model mapping, used when a Codex account has
+ * no explicit `model_mappings` entry for the requested family.
+ *
+ * This is the single source of truth shared with the Codex provider's
+ * `mapModel()`. Keeping both on this map is load-bearing: the context-window
+ * gate and the provider MUST agree on which Codex model a defaulted request
+ * actually hits, or the gate would size requests against the wrong window.
+ */
+export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
+	"opus" | "sonnet" | "haiku" | "fable",
+	string
+> = {
+	opus: "gpt-5.5",
+	sonnet: "gpt-5.3-codex",
+	haiku: "gpt-5.4-mini",
+	// Fable/Mythos are above Opus — route to the top Codex tier (same as opus).
+	fable: "gpt-5.5",
+};
+
+/**
+ * Resolve the Codex model a request will actually be sent to for the given
+ * account: the account's explicit `model_mappings` entry if one exists,
+ * otherwise the family default (`DEFAULT_CODEX_MODEL_BY_FAMILY`). Mirrors the
+ * Codex provider's `mapModel()` precedence exactly. A non-Claude model with no
+ * mapping is returned unchanged.
+ */
+export function resolveCodexTargetModel(
+	effectiveModel: string,
+	account: Account,
+): string {
+	const mapped = mapModelName(effectiveModel, account);
+	if (mapped !== effectiveModel) {
+		return mapped; // explicit account mapping (or combo slot already-gpt model) wins
+	}
+	const family = getModelFamily(effectiveModel);
+	if (family) {
+		return DEFAULT_CODEX_MODEL_BY_FAMILY[family];
+	}
+	return effectiveModel;
+}
+
+/**
  * Check whether a Codex account can serve a request of the given estimated size.
  *
- * Resolves the target model via `mapModelName`, looks up `MODEL_CONTEXT_WINDOWS`,
- * and returns true if the estimate fits within `floor(window * SAFETY_MARGIN)`.
- * Unknown models (not in the table) always fit — no false exclusion.
+ * Resolves the target model via `resolveCodexTargetModel` (account mapping, then
+ * family default — matching what the provider will actually send), looks up
+ * `MODEL_CONTEXT_WINDOWS`, and returns true if the estimate fits within
+ * `floor(window * SAFETY_MARGIN)`. Models with no known window always fit — no
+ * false exclusion.
  *
  * @param account      The Codex account to check
  * @param effectiveModel  The Anthropic-side model name (e.g. "claude-opus-4-7")
- *                        — will be mapped through the account's model_mappings.
+ *                        — resolved through the account's mapping / family default.
  * @param estimate     Token estimate from `estimateRequestTokens()`
  */
 export function codexAccountFitsRequest(
@@ -426,7 +478,7 @@ export function codexAccountFitsRequest(
 	effectiveModel: string,
 	estimate: number,
 ): boolean {
-	const target = mapModelName(effectiveModel, account);
+	const target = resolveCodexTargetModel(effectiveModel, account);
 	const window = MODEL_CONTEXT_WINDOWS[target];
 	if (window === undefined) return true; // unknown model → fits (no false exclusion)
 	return estimate <= Math.floor(window * SAFETY_MARGIN);

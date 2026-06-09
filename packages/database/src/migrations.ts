@@ -257,12 +257,14 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
-	// Seed the three canonical families so fresh installs have assignment rows
+	// Seed the canonical families so fresh installs have assignment rows.
+	// Re-runs on every startup (ensureSchema), so existing DBs gain new rows too.
 	db.run(`
 		INSERT OR IGNORE INTO combo_family_assignments (family, combo_id, enabled)
 		VALUES ('opus',   NULL, 0),
 		       ('sonnet', NULL, 0),
-		       ('haiku',  NULL, 0);
+		       ('haiku',  NULL, 0),
+		       ('fable',  NULL, 0);
 	`);
 
 	// Create usage_snapshots table — append-only time-series of per-account

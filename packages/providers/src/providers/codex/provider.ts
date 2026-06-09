@@ -1,4 +1,6 @@
 import {
+	DEFAULT_CODEX_MODEL_BY_FAMILY,
+	getModelFamily,
 	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	ValidationError,
@@ -53,12 +55,9 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 	};
 };
 
-// Default model mapping: Anthropic model name prefixes → Codex model names
-const DEFAULT_MODEL_MAP: Record<string, string> = {
-	opus: "gpt-5.5",
-	sonnet: "gpt-5.3-codex",
-	haiku: "gpt-5.4-mini",
-};
+// The default Anthropic-family → Codex model mapping lives in @clankermux/core
+// (DEFAULT_CODEX_MODEL_BY_FAMILY) so the context-window gate and this provider
+// resolve the same target model. Do not re-declare it here.
 
 // MODEL_CONTEXT_WINDOWS is the shared source of truth from @clankermux/core.
 // It feeds both routing-side context-window gating and the display-metadata
@@ -486,10 +485,9 @@ export class CodexProvider extends BaseProvider {
 			}
 		}
 
-		const lower = anthropicModel.toLowerCase();
-		if (lower.includes("haiku")) return DEFAULT_MODEL_MAP.haiku;
-		if (lower.includes("sonnet")) return DEFAULT_MODEL_MAP.sonnet;
-		if (lower.includes("opus")) return DEFAULT_MODEL_MAP.opus;
+		// Family default (opus/sonnet/haiku/fable; mythos resolves to fable).
+		const family = getModelFamily(anthropicModel);
+		if (family) return DEFAULT_CODEX_MODEL_BY_FAMILY[family];
 		return anthropicModel;
 	}
 
