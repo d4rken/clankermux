@@ -377,6 +377,78 @@ describe("Database Migrations - Tier Column Removal", () => {
 		});
 	});
 
+	describe("Account Notes Migration", () => {
+		it("adds notes TEXT column to accounts table", () => {
+			ensureSchema(db);
+			runMigrations(db);
+
+			const columns = db.prepare("PRAGMA table_info(accounts)").all() as Array<{
+				name: string;
+				type: string;
+			}>;
+			const col = columns.find((c) => c.name === "notes");
+
+			expect(col).toBeDefined();
+			expect(col?.type.toUpperCase()).toBe("TEXT");
+		});
+
+		it("notes defaults to NULL for existing rows", () => {
+			ensureSchema(db);
+			db.prepare(
+				`INSERT INTO accounts (id, name, provider, refresh_token, created_at) VALUES (?, ?, ?, ?, ?)`,
+			).run("notes-existing-id", "notes-existing", "anthropic", "", Date.now());
+
+			runMigrations(db);
+
+			const row = db
+				.prepare("SELECT notes FROM accounts WHERE id = ?")
+				.get("notes-existing-id") as { notes: string | null };
+
+			expect(row.notes).toBeNull();
+		});
+
+		it("adds notes column to a legacy DB missing it (table-rebuild path)", () => {
+			// Simulate a pre-notes schema that still has account_tier so the
+			// destructive rebuild path runs; the rebuilt table must keep notes.
+			db.exec(`
+				CREATE TABLE accounts (
+					id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					provider TEXT DEFAULT 'anthropic',
+					api_key TEXT,
+					refresh_token TEXT,
+					access_token TEXT,
+					expires_at INTEGER,
+					created_at INTEGER NOT NULL,
+					last_used INTEGER,
+					request_count INTEGER DEFAULT 0,
+					total_requests INTEGER DEFAULT 0,
+					priority INTEGER DEFAULT 0,
+					billing_type TEXT DEFAULT NULL,
+					account_tier TEXT DEFAULT 'free'
+				)
+			`);
+			db.prepare(
+				`INSERT INTO accounts (id, name, provider, refresh_token, created_at) VALUES (?, ?, ?, ?, ?)`,
+			).run("legacy-notes-id", "legacy-notes", "anthropic", "", Date.now());
+
+			runMigrations(db);
+
+			const cols = (
+				db.prepare("PRAGMA table_info(accounts)").all() as Array<{
+					name: string;
+				}>
+			).map((c) => c.name);
+			expect(cols).toContain("notes");
+			expect(cols).not.toContain("account_tier");
+
+			const row = db
+				.prepare("SELECT notes FROM accounts WHERE id = ?")
+				.get("legacy-notes-id") as { notes: string | null };
+			expect(row.notes).toBeNull();
+		});
+	});
+
 	describe("API Key Storage Migration", () => {
 		it("should migrate API keys from refresh_token to api_key field for API-key providers", () => {
 			// Initialize the schema

@@ -25,6 +25,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				model_fallbacks,
 				billing_type,
 				pause_reason,
+				notes,
 				refresh_token_issued_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
@@ -52,6 +53,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				model_fallbacks,
 				billing_type,
 				pause_reason,
+				notes,
 				refresh_token_issued_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
@@ -249,6 +251,13 @@ export class AccountRepository extends BaseRepository<Account> {
 	): Promise<void> {
 		await this.run(`UPDATE accounts SET billing_type = ? WHERE id = ?`, [
 			billingType,
+			accountId,
+		]);
+	}
+
+	async setNotes(accountId: string, notes: string | null): Promise<void> {
+		await this.run(`UPDATE accounts SET notes = ? WHERE id = ?`, [
+			notes,
 			accountId,
 		]);
 	}

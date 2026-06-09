@@ -105,6 +105,7 @@ export interface AccountRow {
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	notes?: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 }
 
@@ -141,6 +142,7 @@ export interface Account {
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	notes: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 }
 
@@ -192,6 +194,7 @@ export interface AccountResponse {
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
+	notes: string | null; // Free-text per-account operator notes
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
@@ -317,6 +320,7 @@ export function toAccount(row: AccountRow): Account {
 		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
+		notes: row.notes || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 	};
 }
@@ -411,6 +415,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
 		modelFallbacks,
 		billingType: account.billing_type,
+		notes: account.notes,
 		sessionStats: null,
 		isPrimary: false,
 	};

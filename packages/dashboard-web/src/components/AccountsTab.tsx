@@ -431,6 +431,18 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleSaveNotes = async (account: Account, notes: string | null) => {
+		try {
+			await api.updateAccountNotes(account.id, notes);
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			// Rethrow so the inline editor stays open and preserves the draft.
+			throw err;
+		}
+	};
+
 	const handleAutoFallbackToggle = async (account: Account) => {
 		try {
 			await api.updateAccountAutoFallback(
@@ -636,6 +648,7 @@ export function AccountsTab() {
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
+						onSaveNotes={handleSaveNotes}
 						onResetStickiness={handleResetStickiness}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}

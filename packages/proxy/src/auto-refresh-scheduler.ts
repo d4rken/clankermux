@@ -380,6 +380,7 @@ export class AutoRefreshScheduler {
 				model_fallbacks: null,
 				billing_type: null,
 				pause_reason: null,
+				notes: null,
 				refresh_token_issued_at: null,
 				consecutive_rate_limits: 0,
 			};
@@ -834,6 +835,7 @@ export class AutoRefreshScheduler {
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
+					notes: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
 				};
@@ -962,6 +964,7 @@ export class AutoRefreshScheduler {
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
+					notes: null,
 					refresh_token_issued_at: null,
 					consecutive_rate_limits: 0,
 				};

@@ -720,6 +720,12 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Backfilled pause_reason for existing paused accounts");
 		}
 
+		// Add notes column for free-text per-account operator notes
+		if (!initialAccountsColumnNames.includes("notes")) {
+			db.prepare("ALTER TABLE accounts ADD COLUMN notes TEXT").run();
+			log.info("Added notes column to accounts table");
+		}
+
 		if (!initialAccountsColumnNames.includes("rate_limited_reason")) {
 			db.prepare(
 				"ALTER TABLE accounts ADD COLUMN rate_limited_reason TEXT",
@@ -775,7 +781,8 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					cross_region_mode TEXT DEFAULT 'geographic',
 					model_fallbacks TEXT,
 					auto_pause_on_overage_enabled INTEGER DEFAULT 0,
-					pause_reason TEXT
+					pause_reason TEXT,
+					notes TEXT
 				)
 			`).run();
 
@@ -791,7 +798,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					paused, rate_limit_reset, rate_limit_status, rate_limit_remaining,
 					auto_fallback_enabled, custom_endpoint, auto_refresh_enabled,
 					model_mappings, cross_region_mode, model_fallbacks,
-					auto_pause_on_overage_enabled, pause_reason
+					auto_pause_on_overage_enabled, pause_reason, notes
 				FROM accounts
 			`).run();
 
@@ -1036,7 +1043,7 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       rate_limit_reset, rate_limit_status, rate_limit_remaining,
 			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
 			       cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
-			       pause_reason
+			       pause_reason, notes
 			FROM accounts
 		`).run();
 
