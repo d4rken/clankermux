@@ -5,7 +5,7 @@ import {
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
-} from "@clankermux/cli-commands";
+} from "../services/admin/api-keys";
 import type { DatabaseOperations } from "@clankermux/database";
 import { BadRequest } from "@clankermux/errors";
 import type { ApiKeyGenerationResult } from "@clankermux/types";
