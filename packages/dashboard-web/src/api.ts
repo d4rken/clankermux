@@ -1129,6 +1129,33 @@ class API extends HttpClient {
 		}
 	}
 
+	async updateAccountRenewal(
+		accountId: string,
+		renewalAnchor: string | null,
+		renewalCadence: "monthly" | "yearly" | "none",
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/renewal`;
+
+		this.logger.debug(`→ POST ${url}`, { renewalAnchor, renewalCadence });
+
+		try {
+			await this.post(url, { renewalAnchor, renewalCadence });
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async updateAccountAutoFallback(
 		accountId: string,
 		enabled: boolean,
@@ -1251,6 +1278,34 @@ class API extends HttpClient {
 		try {
 			await this.post(url, {
 				customEndpoint,
+			});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async updateAccountNotes(
+		accountId: string,
+		notes: string | null,
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/notes`;
+
+		this.logger.debug(`→ POST ${url}`, { notes });
+
+		try {
+			await this.post(url, {
+				notes,
 			});
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);

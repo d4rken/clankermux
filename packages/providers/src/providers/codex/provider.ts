@@ -262,7 +262,7 @@ export class CodexProvider extends BaseProvider {
 			// Rotating refresh tokens: reuse → must re-auth
 			if (errorData?.error === "refresh_token_reused") {
 				throw new Error(
-					`Codex refresh token was reused for account ${account.name}. Please re-authenticate with: bun run cli --reauthenticate ${account.name}`,
+					`Codex refresh token was reused for account ${account.name}. Re-authenticate account "${account.name}" from the dashboard (Accounts tab).`,
 				);
 			}
 

@@ -1,5 +1,6 @@
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
+	CalendarClock,
 	Crosshair,
 	Edit2,
 	Globe,
@@ -9,6 +10,7 @@ import {
 	Pause,
 	Play,
 	RefreshCw,
+	StickyNote,
 	Trash2,
 	Unlink,
 	Zap,
@@ -16,6 +18,7 @@ import {
 import { useState } from "react";
 import type { Account } from "../../api";
 import { deriveAccountStatus } from "../../lib/account-status";
+import { hasSecondaryWeeklyWindows } from "../../lib/secondary-limits";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -32,8 +35,10 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { Textarea } from "../ui/textarea";
 import { AccountStatusChips } from "./AccountStatusChips";
 import { RateLimitProgress } from "./RateLimitProgress";
+import { useShowSecondaryLimits } from "./useShowSecondaryLimits";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -51,6 +56,8 @@ interface AccountListItemProps {
 	onRemove: (name: string) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
+	onSaveNotes: (account: Account, notes: string | null) => void | Promise<void>;
+	onRenewalChange: (account: Account) => void;
 	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
@@ -74,6 +81,8 @@ export function AccountListItem({
 	onRemove,
 	onRename,
 	onPriorityChange,
+	onSaveNotes,
+	onRenewalChange,
 	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
@@ -87,10 +96,21 @@ export function AccountListItem({
 	onCodexReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
+	const [isEditingNotes, setIsEditingNotes] = useState(false);
+	const [notesDraft, setNotesDraft] = useState("");
+	const [isSavingNotes, setIsSavingNotes] = useState(false);
 	const presenter = new AccountPresenter(account);
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
+	// The model-specific weekly bars (Opus/Sonnet) are hidden by default on the
+	// Accounts page and revealed per-account via the overflow-menu toggle below.
+	// The hook is always called (Rules of Hooks); the checkbox only renders when
+	// those bars exist for this account.
+	const canShowSecondary = hasSecondaryWeeklyWindows(account.usageData);
+	const [showSecondaryLimits, toggleSecondaryLimits] = useShowSecondaryLimits(
+		account.id,
+	);
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -231,6 +251,20 @@ export function AccountListItem({
 									<DropdownMenuSeparator />
 								</>
 							)}
+							{canShowSecondary && (
+								<>
+									<DropdownMenuLabel>Display</DropdownMenuLabel>
+									<DropdownMenuCheckboxItem
+										checked={showSecondaryLimits}
+										onCheckedChange={toggleSecondaryLimits}
+										onSelect={(e) => e.preventDefault()}
+										title="Show the per-model weekly limits (Opus, Sonnet) in addition to the 5-hour and overall weekly limits."
+									>
+										Show secondary limits
+									</DropdownMenuCheckboxItem>
+									<DropdownMenuSeparator />
+								</>
+							)}
 							<DropdownMenuItem onClick={() => onRename(account)}>
 								<Edit2 className="mr-2 h-4 w-4" />
 								Rename
@@ -238,6 +272,24 @@ export function AccountListItem({
 							<DropdownMenuItem onClick={() => onPriorityChange(account)}>
 								<Zap className="mr-2 h-4 w-4" />
 								Change Priority
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								onClick={() => onRenewalChange(account)}
+								title={
+									account.renewalAnchor
+										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})`
+										: "Set subscription renewal date"
+								}
+							>
+								<CalendarClock
+									className={`mr-2 h-4 w-4 ${account.renewalAnchor ? "text-primary" : ""}`}
+								/>
+								Set Renewal Date
+								{account.renewalAnchor && (
+									<span className="ml-auto text-xs text-muted-foreground">
+										set
+									</span>
+								)}
 							</DropdownMenuItem>
 							{onResetStickiness && (
 								<DropdownMenuItem
@@ -335,6 +387,78 @@ export function AccountListItem({
 			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
 				<span>{account.provider}</span>
 			</div>
+			{isEditingNotes ? (
+				<div className="space-y-2">
+					<Textarea
+						value={notesDraft}
+						onChange={(e) => setNotesDraft(e.target.value)}
+						placeholder="Add a note for this account…"
+						disabled={isSavingNotes}
+						autoFocus
+					/>
+					<div className="flex items-center gap-2">
+						<Button
+							size="sm"
+							disabled={isSavingNotes}
+							onClick={async () => {
+								setIsSavingNotes(true);
+								try {
+									await onSaveNotes(account, notesDraft.trim() || null);
+									setIsEditingNotes(false);
+								} catch {
+									// Save failed; keep the editor open with the draft
+									// intact. The error is surfaced by the parent handler.
+								} finally {
+									setIsSavingNotes(false);
+								}
+							}}
+						>
+							Save
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={isSavingNotes}
+							onClick={() => setIsEditingNotes(false)}
+						>
+							Cancel
+						</Button>
+					</div>
+				</div>
+			) : account.notes ? (
+				<div className="flex items-center gap-1.5 text-sm text-muted-foreground min-w-0">
+					<StickyNote className="h-3.5 w-3.5 shrink-0" />
+					<span className="truncate" title={account.notes}>
+						{account.notes.split("\n")[0]}
+					</span>
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-6 w-6 p-0 shrink-0"
+						title="Edit note"
+						onClick={() => {
+							setNotesDraft(account.notes ?? "");
+							setIsEditingNotes(true);
+						}}
+					>
+						<Edit2 className="h-3.5 w-3.5" />
+					</Button>
+				</div>
+			) : (
+				<Button
+					variant="ghost"
+					size="sm"
+					className="h-6 gap-1 px-1 text-xs text-muted-foreground"
+					title="Add a note for this account"
+					onClick={() => {
+						setNotesDraft("");
+						setIsEditingNotes(true);
+					}}
+				>
+					<StickyNote className="h-3.5 w-3.5" />
+					Add note
+				</Button>
+			)}
 			<AccountStatusChips account={account} status={status} />
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
 				<span>{presenter.requestCount} requests</span>
@@ -392,6 +516,7 @@ export function AccountListItem({
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
+					showSecondaryWeekly={showSecondaryLimits}
 				/>
 			)}
 		</div>

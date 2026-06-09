@@ -12,6 +12,7 @@ import {
 	createAccountForceResetRateLimitHandler,
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
+	createAccountNotesUpdateHandler,
 	createAccountPauseHandler,
 	createAccountPeakHoursPauseHandler,
 	createAccountPriorityUpdateHandler,
@@ -19,6 +20,7 @@ import {
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
+	createAccountRenewalUpdateHandler,
 	createAccountResetStickinessHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
@@ -554,6 +556,16 @@ export class APIRouter {
 					url,
 				);
 			}
+			// Account notes update
+			if (path.endsWith("/notes") && method === "POST") {
+				const notesHandler = createAccountNotesUpdateHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) => notesHandler(req, accountId))(
+					req,
+					url,
+				);
+			}
 			// Account auto-fallback toggle
 			if (path.endsWith("/auto-fallback") && method === "POST") {
 				const autoFallbackHandler = createAccountAutoFallbackHandler(
@@ -591,6 +603,17 @@ export class APIRouter {
 				return await this.wrapHandler((req) =>
 					billingTypeHandler(req, accountId),
 				)(req, url);
+			}
+
+			// Account renewal date
+			if (path.endsWith("/renewal") && method === "POST") {
+				const renewalHandler = createAccountRenewalUpdateHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) => renewalHandler(req, accountId))(
+					req,
+					url,
+				);
 			}
 
 			// Account auto-refresh toggle

@@ -136,8 +136,9 @@ export async function getOrderedAccounts(
 		console.error(
 			"This may indicate database corruption or integrity issues.\n",
 		);
-		console.error("To diagnose and repair the database, run:");
-		console.error("  bun run cli --repair-db\n");
+		console.error(
+			"There is no built-in repair command. Inspect and repair the database manually with sqlite3, and review the server logs.\n",
+		);
 		console.error("The request will fall back to unauthenticated mode.");
 		console.error(`${"═".repeat(50)}\n`);
 		// Return empty array to gracefully handle database errors
@@ -554,8 +555,9 @@ async function selectCandidates(
 				console.error(
 					"This may indicate database corruption or integrity issues.\n",
 				);
-				console.error("To diagnose and repair the database, run:");
-				console.error("  bun run cli --repair-db\n");
+				console.error(
+					"There is no built-in repair command. Inspect and repair the database manually with sqlite3, and review the server logs.\n",
+				);
 				console.error("Falling back to normal account selection.");
 				console.error(`${"═".repeat(50)}\n`);
 				// Fall through to normal selection

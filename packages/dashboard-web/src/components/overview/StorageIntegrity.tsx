@@ -190,7 +190,7 @@ export function StorageIntegrityBanner() {
 				</p>
 				<p className="text-muted-foreground">
 					{data?.last_integrity_error ??
-						"See server logs and run `bun run cli --doctor` for details."}
+						"Check database integrity from the Overview (Storage / Integrity) and review the server logs for details."}
 				</p>
 			</div>
 		</div>

@@ -35,12 +35,11 @@ Requires [Bun](https://bun.sh).
 git clone https://github.com/d4rken/better-ccflare
 cd better-ccflare
 bun install
-bun run build       # builds the dashboard + CLI (required before first run)
+bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
-Add your provider accounts in the dashboard (or via the `clankermux` CLI), then point
-Claude Code at the proxy.
+Add your provider accounts in the dashboard, then point Claude Code at the proxy.
 
 ## Use it with Claude Code
 
@@ -58,7 +57,7 @@ protected:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8080
-export ANTHROPIC_AUTH_TOKEN=dummy-key     # or: clankermux --generate-api-key "my machine"
+export ANTHROPIC_AUTH_TOKEN=dummy-key     # or a key generated in the dashboard
 claude
 ```
 

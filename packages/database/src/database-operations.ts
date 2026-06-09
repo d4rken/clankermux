@@ -758,7 +758,8 @@ DATABASE RECOVERY INSTRUCTIONS
 If your database is corrupted, follow these steps:
 
 1. STOP THE SERVER
-   bun run cli --stop
+   Stop the service via your service manager (e.g. systemctl stop clankermux),
+   or press Ctrl-C if it is running in a terminal.
 
 2. BACKUP CORRUPTED DATABASE
    cp ${dbPath} ${dbPath}.corrupted.backup
@@ -777,7 +778,7 @@ If your database is corrupted, follow these steps:
    bun start
 
 5. RE-ADD ACCOUNTS
-   bun run cli --add-account <name> --mode <mode> --priority <number>
+   Add accounts from the dashboard (Accounts tab) or via POST /api/accounts.
 
 NOTE: You will lose all historical request data and account configurations.
 OAuth tokens will need to be re-authenticated.
@@ -934,6 +935,21 @@ OAuth tokens will need to be re-authenticated.
 		billingType: string | null,
 	): Promise<void> {
 		await this.accounts.setBillingType(accountId, billingType);
+	}
+
+	async setAccountNotes(
+		accountId: string,
+		notes: string | null,
+	): Promise<void> {
+		await this.accounts.setNotes(accountId, notes);
+	}
+
+	async setAccountRenewal(
+		accountId: string,
+		anchor: string | null,
+		cadence: string | null,
+	): Promise<void> {
+		await this.accounts.setRenewal(accountId, anchor, cadence);
 	}
 
 	async updateAccountRequestCount(

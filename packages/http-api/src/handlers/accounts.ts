@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import * as cliCommands from "@clankermux/cli-commands";
 import type { Config } from "@clankermux/config";
 import {
 	patterns,
@@ -47,6 +46,11 @@ import type {
 	RateLimitReason,
 } from "@clankermux/types";
 import { requiresSessionDurationTracking } from "@clankermux/types";
+import {
+	pauseAccount,
+	removeAccount,
+	resumeAccount,
+} from "../services/admin/accounts";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
@@ -200,6 +204,9 @@ export function createAccountsListHandler(
 			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
+			notes: string | null;
+			renewal_anchor: string | null;
+			renewal_cadence: string | null;
 		}>(
 			`
 				SELECT
@@ -233,6 +240,9 @@ export function createAccountsListHandler(
 					model_fallbacks,
 					billing_type,
 					pause_reason,
+					notes,
+					renewal_anchor,
+					renewal_cadence,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -533,6 +543,11 @@ export function createAccountsListHandler(
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields
 					modelFallbacks,
 					billingType: account.billing_type,
+					notes: account.notes,
+					renewalAnchor: account.renewal_anchor ?? null,
+					renewalCadence:
+						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
+						null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					isPrimary: account.id === primaryId,
 				};
@@ -575,6 +590,51 @@ export function createAccountPriorityUpdateHandler(dbOps: DatabaseOperations) {
 		} catch (_error) {
 			return errorResponse(
 				InternalServerError("Failed to update account priority"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account notes update handler.
+ * Notes are optional/clearable free-text: null/undefined/empty-after-trim
+ * stores null. Over-length input (>2000 chars) is rejected with HTTP 400.
+ */
+export function createAccountNotesUpdateHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// notes is optional/clearable: null/undefined/empty-after-trim => store null
+			let notes: string | null = null;
+			if (body.notes !== null && body.notes !== undefined) {
+				const validated = validateString(body.notes, "notes", {
+					required: false,
+					maxLength: 2000,
+					transform: sanitizers.trim,
+				});
+				notes = validated && validated.length > 0 ? validated : null;
+			}
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			await dbOps.setAccountNotes(accountId, notes);
+
+			return jsonResponse({ success: true, notes });
+		} catch (error) {
+			if (error instanceof ValidationError) {
+				return errorResponse(BadRequest(error.message));
+			}
+			return errorResponse(
+				InternalServerError("Failed to update account notes"),
 			);
 		}
 	};
@@ -730,7 +790,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = await cliCommands.removeAccount(dbOps, accountName);
+			const result = await removeAccount(dbOps, accountName);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
@@ -777,7 +837,7 @@ export function createAccountPauseHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = await cliCommands.pauseAccount(dbOps, account.name);
+			const result = await pauseAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));
@@ -812,7 +872,7 @@ export function createAccountResumeHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = await cliCommands.resumeAccount(dbOps, account.name);
+			const result = await resumeAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));
@@ -2154,6 +2214,94 @@ export function createAccountBillingTypeHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to update billing type"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account renewal date update handler.
+ * Stores a manually-entered subscription renewal anchor date and cadence.
+ * Sending renewalAnchor: null (or empty) clears the renewal (both columns set to NULL).
+ */
+export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const cadence = validateString(body.renewalCadence, "renewalCadence", {
+				required: true,
+				allowedValues: ["monthly", "yearly", "none"],
+			});
+
+			if (cadence === undefined) {
+				return errorResponse(
+					BadRequest("renewalCadence must be 'monthly', 'yearly', or 'none'"),
+				);
+			}
+
+			// Validate renewalAnchor: may be null/empty (clears) or a real YYYY-MM-DD date.
+			let anchor: string | null;
+			if (body.renewalAnchor == null || body.renewalAnchor === "") {
+				anchor = null;
+			} else {
+				const raw =
+					typeof body.renewalAnchor === "string"
+						? body.renewalAnchor.trim()
+						: "";
+				const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+				if (!match) {
+					return errorResponse(
+						BadRequest("renewalAnchor must be a YYYY-MM-DD date or null"),
+					);
+				}
+				const y = Number(match[1]);
+				const m = Number(match[2]);
+				const d = Number(match[3]);
+				const parsed = new Date(Date.UTC(y, m - 1, d));
+				const isRealDate =
+					parsed.getUTCFullYear() === y &&
+					parsed.getUTCMonth() === m - 1 &&
+					parsed.getUTCDate() === d;
+				if (!isRealDate) {
+					return errorResponse(
+						BadRequest("renewalAnchor must be a YYYY-MM-DD date or null"),
+					);
+				}
+				anchor = raw;
+			}
+
+			// No anchor means no cadence — don't store a dangling cadence.
+			const storedCadence = anchor === null ? null : cadence;
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			await dbOps.setAccountRenewal(accountId, anchor, storedCadence);
+
+			return jsonResponse({
+				success: true,
+				message:
+					anchor === null
+						? `Renewal date cleared for account '${account.name}'`
+						: `Renewal date set to '${anchor}' (${storedCadence}) for account '${account.name}'`,
+				renewalAnchor: anchor,
+				renewalCadence: storedCadence,
+			});
+		} catch (error) {
+			log.error("Account renewal update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update renewal date"),
 			);
 		}
 	};

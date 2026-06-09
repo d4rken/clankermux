@@ -380,7 +380,10 @@ export class AutoRefreshScheduler {
 				model_fallbacks: null,
 				billing_type: null,
 				pause_reason: null,
+				notes: null,
 				refresh_token_issued_at: null,
+				renewal_anchor: null,
+				renewal_cadence: null,
 				consecutive_rate_limits: 0,
 			};
 
@@ -531,7 +534,7 @@ export class AutoRefreshScheduler {
 							`⚠️  Auto-refresh for "${accountRow.name}" reports an expired OAuth refresh token.`,
 						);
 						log.warn(
-							`   Reauthenticate with: bun run cli --reauthenticate "${accountRow.name}"`,
+							`   Re-authenticate account "${accountRow.name}" from the dashboard (Accounts tab).`,
 						);
 					}
 				} catch {
@@ -736,7 +739,7 @@ export class AutoRefreshScheduler {
 				// writes and log entries — the account is already paused.
 				this.consecutiveFailures.delete(accountId);
 				log.error(
-					`Account "${accountName}" has been PAUSED. Resume with: bun run cli --resume "${accountName}"`,
+					`Account "${accountName}" has been PAUSED. Resume it from the dashboard (Accounts tab) or via POST /api/accounts/:id/resume.`,
 				);
 			} catch (dbErr) {
 				log.error(`Failed to pause account ${accountName} in database:`, dbErr);
@@ -834,7 +837,10 @@ export class AutoRefreshScheduler {
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
+					notes: null,
 					refresh_token_issued_at: null,
+					renewal_anchor: null,
+					renewal_cadence: null,
 					consecutive_rate_limits: 0,
 				};
 
@@ -962,7 +968,10 @@ export class AutoRefreshScheduler {
 					model_fallbacks: null,
 					billing_type: null,
 					pause_reason: null,
+					notes: null,
 					refresh_token_issued_at: null,
+					renewal_anchor: null,
+					renewal_cadence: null,
 					consecutive_rate_limits: 0,
 				};
 

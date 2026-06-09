@@ -3,16 +3,16 @@ import { existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { DatabaseOperations } from "@clankermux/database";
 import {
+	AuthService,
 	deleteApiKey,
 	disableApiKey,
 	enableApiKey,
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
-} from "@clankermux/cli-commands";
-import { DatabaseOperations } from "@clankermux/database";
-import { AuthService } from "@clankermux/http-api";
+} from "@clankermux/http-api";
 
 function tempDbPath(): string {
 	return join(tmpdir(), `test-api-auth-${randomBytes(6).toString("hex")}.db`);
