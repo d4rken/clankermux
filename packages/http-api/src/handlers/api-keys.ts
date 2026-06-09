@@ -13,6 +13,7 @@ import {
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
+	renameApiKey,
 } from "../services/admin/api-keys";
 import { errorResponse } from "../utils/http-error";
 
@@ -253,6 +254,43 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 					headers: { "Content-Type": "application/json" },
 				},
 			);
+		} catch (error) {
+			return errorResponse(error);
+		}
+	};
+}
+
+export function createApiKeyRenameHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, idOrName: string): Promise<Response> => {
+		try {
+			// A malformed/non-object body must be a 400, not a 500. Mirror the pin
+			// handler: reject invalid JSON and non-object payloads (incl. top-level
+			// null/arrays/scalars) before touching the service.
+			let body: { name?: unknown };
+			try {
+				const parsed = await req.json();
+				if (
+					typeof parsed !== "object" ||
+					parsed === null ||
+					Array.isArray(parsed)
+				) {
+					return errorResponse(
+						BadRequest("Request body must be a JSON object."),
+					);
+				}
+				body = parsed as { name?: unknown };
+			} catch {
+				return errorResponse(BadRequest("Invalid JSON body."));
+			}
+
+			// A missing/non-string name becomes "" so the service's validation
+			// reports the empty-name 400 rather than throwing.
+			const name = typeof body.name === "string" ? body.name : "";
+			const result = await renameApiKey(dbOps, idOrName, name);
+			return new Response(JSON.stringify({ success: true, data: result }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
 		} catch (error) {
 			return errorResponse(error);
 		}

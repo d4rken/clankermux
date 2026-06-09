@@ -236,6 +236,16 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		return changes > 0;
 	}
 
+	/** Rename an API key (change its label). Secret, stats, pin, and active state
+	 *  are preserved. Returns false when no row matched the id (e.g. a TOCTOU delete). */
+	async rename(id: string, newName: string): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE api_keys SET name = ? WHERE id = ?`,
+			[newName, id],
+		);
+		return changes > 0;
+	}
+
 	/**
 	 * Replace the stored secret for an API key, preserving every other column
 	 * (name, created_at, usage_count, last_used, is_active).

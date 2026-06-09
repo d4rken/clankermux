@@ -1779,6 +1779,14 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async renameApiKey(id: string, newName: string): Promise<boolean> {
+		return withDatabaseRetry(
+			() => this.apiKeys.rename(id, newName),
+			this.retryConfig,
+			"renameApiKey",
+		);
+	}
+
 	async deleteApiKey(id: string): Promise<boolean> {
 		return withDatabaseRetry(
 			() => this.apiKeys.delete(id),

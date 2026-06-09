@@ -41,6 +41,7 @@ import {
 	createApiKeyEnableHandler,
 	createApiKeyPinHandler,
 	createApiKeyRegenerateHandler,
+	createApiKeyRenameHandler,
 	createApiKeysGenerateHandler,
 	createApiKeysListHandler,
 	createApiKeysStatsHandler,
@@ -702,6 +703,15 @@ export class APIRouter {
 			if (path.endsWith("/pin") && method === "PUT") {
 				const pinHandler = createApiKeyPinHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => pinHandler(req, keyIdOrName))(
+					req,
+					url,
+				);
+			}
+
+			// API key rename (change the human-readable label; secret + stats preserved)
+			if (path.endsWith("/rename") && method === "POST") {
+				const renameHandler = createApiKeyRenameHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => renameHandler(req, keyIdOrName))(
 					req,
 					url,
 				);

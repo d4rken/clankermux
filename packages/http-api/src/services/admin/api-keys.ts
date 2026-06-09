@@ -173,6 +173,63 @@ export async function disableApiKey(
 }
 
 /**
+ * Rename an API key (change only its human-readable label). The secret, stats,
+ * routing pin, and active state are all preserved. Resolves the target by id
+ * first, then by name, so the route's idOrName segment works either way.
+ */
+export async function renameApiKey(
+	dbOps: DatabaseOperations,
+	idOrName: string,
+	newName: string,
+): Promise<ApiKeyResponse> {
+	// Validate the new name exactly like generateApiKey does (no char pattern).
+	if (!newName || newName.trim().length === 0) {
+		throw BadRequest("API key name cannot be empty");
+	}
+
+	const trimmed = newName.trim();
+
+	if (trimmed.length > 100) {
+		throw BadRequest("API key name cannot exceed 100 characters");
+	}
+
+	const existing =
+		(await dbOps.getApiKey(idOrName)) ??
+		(await dbOps.getApiKeyByName(idOrName));
+	if (!existing) {
+		throw NotFound(`API key '${idOrName}' not found`);
+	}
+
+	// Reject a collision with a *different* key; renaming to its own current
+	// name is a harmless no-op and must be allowed.
+	const clash = await dbOps.getApiKeyByName(trimmed);
+	if (clash && clash.id !== existing.id) {
+		throw Conflict(`API key with name '${trimmed}' already exists`);
+	}
+
+	const ok = await dbOps.renameApiKey(existing.id, trimmed);
+	if (!ok) {
+		// TOCTOU: the row read above was gone by the time we tried to rename it.
+		throw NotFound(
+			`API key '${idOrName}' was deleted before the rename could complete.`,
+		);
+	}
+
+	const updated = await dbOps.getApiKey(existing.id);
+	if (!updated) {
+		throw NotFound(
+			`API key '${idOrName}' was deleted before the rename could complete.`,
+		);
+	}
+
+	logger.info(
+		`API key renamed: id=${existing.id} name='${existing.name}' -> '${trimmed}'`,
+	);
+
+	return toApiKeyResponse(updated);
+}
+
+/**
  * Enable a previously disabled API key
  */
 export async function enableApiKey(
