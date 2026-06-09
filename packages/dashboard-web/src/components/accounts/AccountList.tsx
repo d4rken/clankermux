@@ -11,6 +11,7 @@ interface AccountListProps {
 	onRemove: (name: string) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
+	onRenewalChange: (account: Account) => void;
 	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
@@ -34,6 +35,7 @@ export function AccountList({
 	onRemove,
 	onRename,
 	onPriorityChange,
+	onRenewalChange,
 	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
@@ -64,6 +66,7 @@ export function AccountList({
 					onRemove={onRemove}
 					onRename={onRename}
 					onPriorityChange={onPriorityChange}
+					onRenewalChange={onRenewalChange}
 					onResetStickiness={onResetStickiness}
 					onAutoFallbackToggle={onAutoFallbackToggle}
 					onAutoRefreshToggle={onAutoRefreshToggle}

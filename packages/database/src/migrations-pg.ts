@@ -73,6 +73,8 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			pause_reason TEXT,
 			billing_type TEXT DEFAULT NULL,
 			refresh_token_issued_at BIGINT,
+			renewal_anchor TEXT,
+			renewal_cadence TEXT,
 			rate_limited_reason TEXT,
 			rate_limited_at BIGINT,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0
@@ -356,6 +358,16 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "refresh_token_issued_at",
 			definition:
 				"ALTER TABLE accounts ADD COLUMN refresh_token_issued_at BIGINT",
+		},
+		{
+			table: "accounts",
+			column: "renewal_anchor",
+			definition: "ALTER TABLE accounts ADD COLUMN renewal_anchor TEXT",
+		},
+		{
+			table: "accounts",
+			column: "renewal_cadence",
+			definition: "ALTER TABLE accounts ADD COLUMN renewal_cadence TEXT",
 		},
 		{
 			table: "accounts",
