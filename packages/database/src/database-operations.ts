@@ -250,7 +250,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	/** Raw bun:sqlite Database. */
 	private sqliteDb: Database;
 	/** Resolved path to the SQLite DB file — used by the vacuum worker */
-	private resolvedDbPath?: string;
+	private resolvedDbPath: string;
 	/**
 	 * auto_vacuum mode as it was on disk when this handle was opened, captured
 	 * BEFORE `configureSqlite()` issues its own `PRAGMA auto_vacuum =
@@ -456,10 +456,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	}
 
 	/**
-	 * Path to the live SQLite file, or `undefined` before initialization. Used
-	 * by the integrity-check worker to open its own read-only handle.
+	 * Path to the live SQLite file. Used by the integrity-check worker to open
+	 * its own read-only handle.
 	 */
-	getResolvedDbPath(): string | undefined {
+	getResolvedDbPath(): string {
 		return this.resolvedDbPath;
 	}
 
@@ -690,7 +690,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * Generate manual recovery instructions for corrupted database
 	 */
 	generateRecoveryInstructions(): string {
-		const dbPath = this.resolvedDbPath ?? "~/.config/clankermux/clankermux.db";
+		const dbPath = this.resolvedDbPath;
 		return `
 DATABASE RECOVERY INSTRUCTIONS
 
@@ -1279,9 +1279,6 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async getDbSizeBytes(): Promise<number> {
-		if (!this.resolvedDbPath) {
-			return 0;
-		}
 		try {
 			const { size } = await stat(this.resolvedDbPath);
 			return size;
@@ -1292,12 +1289,10 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
-	 * Size of the WAL sidecar file in bytes, or 0 when there is no resolved DB
-	 * path (uninitialized) or no `-wal` file (non-WAL journal mode, or it
-	 * hasn't been created yet).
+	 * Size of the WAL sidecar file in bytes, or 0 when there is no `-wal` file
+	 * (non-WAL journal mode, or it hasn't been created yet).
 	 */
 	async getWalSizeBytes(): Promise<number> {
-		if (!this.resolvedDbPath) return 0;
 		try {
 			const { size } = await stat(`${this.resolvedDbPath}-wal`);
 			return size;
@@ -1450,10 +1445,6 @@ OAuth tokens will need to be re-authenticated.
 		walTruncateBusy?: number;
 		error?: string;
 	}> {
-		if (!this.sqliteDb || !this.resolvedDbPath) {
-			return { walBusy: 0, walLog: 0, walCheckpointed: 0, vacuumed: false };
-		}
-
 		if (this.compacting) {
 			return {
 				walBusy: 0,
@@ -1545,8 +1536,6 @@ OAuth tokens will need to be re-authenticated.
 	 * than throwing, so a transient failure doesn't crash the hourly tick.
 	 */
 	async incrementalVacuum(pages = 8000): Promise<void> {
-		if (!this.sqliteDb || !this.resolvedDbPath) return;
-
 		// Resolve the effective auto_vacuum mode. The captured `originalMode`
 		// is the on-disk value at handle-open time; configureSqlite then
 		// issued `PRAGMA auto_vacuum = INCREMENTAL`. Two cases:
