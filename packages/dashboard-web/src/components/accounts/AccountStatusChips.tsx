@@ -1,5 +1,5 @@
 import type { AccountResponse } from "@clankermux/types";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, CalendarClock } from "lucide-react";
 import {
 	type AccountStatus,
 	deriveAccountStatus,
@@ -91,6 +91,71 @@ export function AccountStatusChips({
 					{status.peakChipLabel}
 				</span>
 			)}
+			{status.renewalNextDate && (
+				<RenewalChip account={account} status={status} />
+			)}
 		</div>
+	);
+}
+
+const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
+	imminent: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+	soon: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+	none: "bg-secondary text-secondary-foreground",
+	past: "bg-secondary text-secondary-foreground",
+};
+
+/**
+ * Subscription-renewal chip. Amber when renewal is near, red when imminent,
+ * muted for far-off or already-elapsed one-time dates. Only rendered when a
+ * renewal date is set (`status.renewalNextDate` is non-null).
+ */
+function RenewalChip({
+	account,
+	status,
+}: {
+	account: AccountResponse;
+	status: AccountStatus;
+}) {
+	const nextDate = status.renewalNextDate;
+	if (!nextDate) return null;
+
+	const shortDate = nextDate.toLocaleDateString(undefined, {
+		month: "short",
+		day: "numeric",
+	});
+	// ISO YYYY-MM-DD of the local next date for the tooltip. en-CA renders a
+	// local Date as YYYY-MM-DD without the UTC shift that toISOString() causes.
+	const isoDate = nextDate.toLocaleDateString("en-CA");
+	const cadence = account.renewalCadence ?? "none";
+
+	const isPast = status.renewalUrgency === "past";
+	const daysLeft = status.renewalDaysLeft;
+
+	let label: string;
+	if (isPast) {
+		label = `Renewed ${shortDate}`;
+	} else if (daysLeft === 0) {
+		label = `Renews ${shortDate} (today)`;
+	} else {
+		label = `Renews ${shortDate} (${daysLeft}d)`;
+	}
+
+	const title = isPast
+		? `Subscription renewed ${isoDate} (${cadence})`
+		: `Subscription renews ${isoDate} (${cadence})`;
+
+	const colorClasses =
+		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??
+		RENEWAL_URGENCY_CLASSES.none;
+
+	return (
+		<span
+			className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${colorClasses}`}
+			title={title}
+		>
+			<CalendarClock className="h-3.5 w-3.5" />
+			{label}
+		</span>
 	);
 }

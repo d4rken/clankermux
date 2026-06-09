@@ -1,6 +1,7 @@
 import type { AccountResponse } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
+import { computeRenewal, type RenewalUrgency } from "./renewal";
 
 /**
  * Only these hard-limit statuses mean the account is actually blocked; soft
@@ -55,6 +56,12 @@ export interface AccountStatus {
 	isBlockedByLegacyLock: boolean;
 	/** Whether to offer the Force Reset action (Accounts page only). */
 	showForceReset: boolean;
+	/** Next subscription renewal date (local), or null when no anchor is set. */
+	renewalNextDate: Date | null;
+	/** Whole local-calendar days until renewal; negative if past, null when unset. */
+	renewalDaysLeft: number | null;
+	/** Renewal urgency level driving the chip color. */
+	renewalUrgency: RenewalUrgency;
 }
 
 /**
@@ -109,6 +116,12 @@ export function deriveAccountStatus(
 			: "Peak hours (5–11am PT, weekdays)"
 		: "Off-peak hours";
 
+	const renewal = computeRenewal(
+		account.renewalAnchor,
+		account.renewalCadence,
+		now,
+	);
+
 	return {
 		isPrimary: account.isPrimary,
 		priority: account.priority,
@@ -127,5 +140,8 @@ export function deriveAccountStatus(
 		isHardLimited,
 		isBlockedByLegacyLock,
 		showForceReset,
+		renewalNextDate: renewal.nextDate,
+		renewalDaysLeft: renewal.daysLeft,
+		renewalUrgency: renewal.urgency,
 	};
 }

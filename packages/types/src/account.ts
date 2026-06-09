@@ -107,6 +107,8 @@ export interface AccountRow {
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 }
 
 // Domain model - used throughout the application
@@ -143,6 +145,8 @@ export interface Account {
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 }
 
 // Session statistics for 5-hour token window
@@ -193,6 +197,8 @@ export interface AccountResponse {
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
+	renewalAnchor?: string | null;
+	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
@@ -319,6 +325,8 @@ export function toAccount(row: AccountRow): Account {
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
+		renewal_anchor: row.renewal_anchor || null,
+		renewal_cadence: row.renewal_cadence || null,
 	};
 }
 
@@ -412,6 +420,9 @@ export function toAccountResponse(account: Account): AccountResponse {
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
 		modelFallbacks,
 		billingType: account.billing_type,
+		renewalAnchor: account.renewal_anchor,
+		renewalCadence:
+			(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ?? null,
 		sessionStats: null,
 		isPrimary: false,
 	};

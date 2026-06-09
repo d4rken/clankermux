@@ -1,5 +1,6 @@
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
+	CalendarClock,
 	Crosshair,
 	Edit2,
 	Globe,
@@ -53,6 +54,7 @@ interface AccountListItemProps {
 	onRemove: (name: string) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
+	onRenewalChange: (account: Account) => void;
 	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
@@ -76,6 +78,7 @@ export function AccountListItem({
 	onRemove,
 	onRename,
 	onPriorityChange,
+	onRenewalChange,
 	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
@@ -262,6 +265,24 @@ export function AccountListItem({
 							<DropdownMenuItem onClick={() => onPriorityChange(account)}>
 								<Zap className="mr-2 h-4 w-4" />
 								Change Priority
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								onClick={() => onRenewalChange(account)}
+								title={
+									account.renewalAnchor
+										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})`
+										: "Set subscription renewal date"
+								}
+							>
+								<CalendarClock
+									className={`mr-2 h-4 w-4 ${account.renewalAnchor ? "text-primary" : ""}`}
+								/>
+								Set Renewal Date
+								{account.renewalAnchor && (
+									<span className="ml-auto text-xs text-muted-foreground">
+										set
+									</span>
+								)}
 							</DropdownMenuItem>
 							{onResetStickiness && (
 								<DropdownMenuItem

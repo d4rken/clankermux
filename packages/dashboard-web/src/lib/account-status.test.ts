@@ -48,6 +48,8 @@ function makeAccount(
 		providerOverloadedUntil: null,
 		modelFallbacks: null,
 		billingType: null,
+		renewalAnchor: null,
+		renewalCadence: null,
 		...overrides,
 	};
 }
@@ -336,5 +338,54 @@ describe("deriveAccountStatus — peak windows", () => {
 		);
 		expect(status.showPeakChip).toBe(false);
 		expect(status.isPeak).toBe(false);
+	});
+});
+
+describe("deriveAccountStatus — renewal", () => {
+	it("surfaces no renewal for an account without an anchor", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.renewalNextDate).toBeNull();
+		expect(status.renewalDaysLeft).toBeNull();
+		expect(status.renewalUrgency).toBe("none");
+	});
+
+	it("surfaces a 'soon' renewal for a monthly anchor 5 days out", () => {
+		// NOW = 2024-01-03 UTC; in any local TZ a monthly anchor on the 8th of
+		// the current month is a few days away. Use a one-time date for a
+		// deterministic 5-day gap independent of timezone month boundaries.
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2024-01-08",
+				renewalCadence: "none",
+			}),
+			NOW,
+		);
+		expect(status.renewalNextDate).not.toBeNull();
+		expect(status.renewalDaysLeft).toBe(5);
+		expect(status.renewalUrgency).toBe("soon");
+	});
+
+	it("surfaces an 'imminent' renewal for a one-time date 1 day out", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2024-01-04",
+				renewalCadence: "none",
+			}),
+			NOW,
+		);
+		expect(status.renewalDaysLeft).toBe(1);
+		expect(status.renewalUrgency).toBe("imminent");
+	});
+
+	it("surfaces a 'past' renewal for an elapsed one-time date", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2024-01-01",
+				renewalCadence: "none",
+			}),
+			NOW,
+		);
+		expect(status.renewalDaysLeft).toBe(-2);
+		expect(status.renewalUrgency).toBe("past");
 	});
 });

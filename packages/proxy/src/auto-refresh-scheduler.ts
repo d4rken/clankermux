@@ -381,6 +381,8 @@ export class AutoRefreshScheduler {
 				billing_type: null,
 				pause_reason: null,
 				refresh_token_issued_at: null,
+				renewal_anchor: null,
+				renewal_cadence: null,
 				consecutive_rate_limits: 0,
 			};
 
@@ -835,6 +837,8 @@ export class AutoRefreshScheduler {
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
+					renewal_anchor: null,
+					renewal_cadence: null,
 					consecutive_rate_limits: 0,
 				};
 
@@ -963,6 +967,8 @@ export class AutoRefreshScheduler {
 					billing_type: null,
 					pause_reason: null,
 					refresh_token_issued_at: null,
+					renewal_anchor: null,
+					renewal_cadence: null,
 					consecutive_rate_limits: 0,
 				};
 
