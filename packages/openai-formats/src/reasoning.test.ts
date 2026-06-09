@@ -24,6 +24,20 @@ describe("reasoning effort support", () => {
 			"low",
 			"medium",
 		]);
+		expect(getSupportedReasoningEfforts("claude-fable-5")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		expect(getSupportedReasoningEfforts("claude-mythos-5")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 		expect(getSupportedReasoningEfforts("gpt-5.3-codex")).toEqual([
 			"minimal",
 			"low",

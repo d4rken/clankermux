@@ -1,8 +1,8 @@
 import {
 	getModelList,
 	logError,
-	mapModelName,
 	ProviderError,
+	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
@@ -1784,7 +1784,7 @@ export function createContextWindowExceededResponse(
 	requestModel: string,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
-		const target = mapModelName(model, account);
+		const target = resolveCodexTargetModel(model, account);
 		const window = resolveModelContextWindow(target);
 		return {
 			name: account.name,
