@@ -1,6 +1,7 @@
 import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
 import type { FullUsageData } from "@clankermux/types";
 import { useEffect, useState } from "react";
+import { hasAnthropicSecondaryWindow } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
 import {
 	providerShowsCreditsBalance,
@@ -19,6 +20,7 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
+	showSecondaryWeekly?: boolean; // Show the model-specific weekly windows (Opus/Sonnet). Defaults true so callers that don't opt into the compact view are unaffected.
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 }
 
@@ -195,6 +197,7 @@ export function RateLimitProgress({
 	provider,
 	className,
 	showWeekly = false,
+	showSecondaryWeekly = true,
 	inlineProjection = false,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
@@ -391,33 +394,29 @@ export function RateLimitProgress({
 			});
 		}
 
-		// Check if seven_day_opus data exists, has valid utilization, and resets_at is not null
+		// Model-specific weekly windows (Opus/Sonnet) are "secondary": shown only
+		// when opted in, and only when the window would actually render. The
+		// eligibility check is shared with the overflow-menu gate via
+		// hasAnthropicSecondaryWindow so the two never drift apart.
 		if (
-			anthropicData &&
-			anthropicData.seven_day_opus &&
-			anthropicData.seven_day_opus.utilization !== null &&
-			anthropicData.seven_day_opus.utilization !== undefined &&
-			anthropicData.seven_day_opus.resets_at !== null
+			showSecondaryWeekly &&
+			hasAnthropicSecondaryWindow(anthropicData?.seven_day_opus)
 		) {
 			usages.push({
-				utilization: anthropicData.seven_day_opus.utilization,
+				utilization: anthropicData.seven_day_opus?.utilization ?? null,
 				window: "seven_day_opus",
-				resetTime: anthropicData.seven_day_opus.resets_at,
+				resetTime: anthropicData.seven_day_opus?.resets_at ?? null,
 			});
 		}
 
-		// Check if seven_day_sonnet data exists, has valid utilization, and resets_at is not null
 		if (
-			anthropicData &&
-			anthropicData.seven_day_sonnet &&
-			anthropicData.seven_day_sonnet.utilization !== null &&
-			anthropicData.seven_day_sonnet.utilization !== undefined &&
-			anthropicData.seven_day_sonnet.resets_at !== null
+			showSecondaryWeekly &&
+			hasAnthropicSecondaryWindow(anthropicData?.seven_day_sonnet)
 		) {
 			usages.push({
-				utilization: anthropicData.seven_day_sonnet.utilization,
+				utilization: anthropicData.seven_day_sonnet?.utilization ?? null,
 				window: "seven_day_sonnet",
-				resetTime: anthropicData.seven_day_sonnet.resets_at,
+				resetTime: anthropicData.seven_day_sonnet?.resets_at ?? null,
 			});
 		}
 	} else if (

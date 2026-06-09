@@ -17,6 +17,7 @@ import {
 import { useState } from "react";
 import type { Account } from "../../api";
 import { deriveAccountStatus } from "../../lib/account-status";
+import { hasSecondaryWeeklyWindows } from "../../lib/secondary-limits";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -35,6 +36,7 @@ import {
 } from "../ui/dropdown-menu";
 import { AccountStatusChips } from "./AccountStatusChips";
 import { RateLimitProgress } from "./RateLimitProgress";
+import { useShowSecondaryLimits } from "./useShowSecondaryLimits";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -94,6 +96,14 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
+	// The model-specific weekly bars (Opus/Sonnet) are hidden by default on the
+	// Accounts page and revealed per-account via the overflow-menu toggle below.
+	// The hook is always called (Rules of Hooks); the checkbox only renders when
+	// those bars exist for this account.
+	const canShowSecondary = hasSecondaryWeeklyWindows(account.usageData);
+	const [showSecondaryLimits, toggleSecondaryLimits] = useShowSecondaryLimits(
+		account.id,
+	);
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -231,6 +241,20 @@ export function AccountListItem({
 											Peak hours pause
 										</DropdownMenuCheckboxItem>
 									)}
+									<DropdownMenuSeparator />
+								</>
+							)}
+							{canShowSecondary && (
+								<>
+									<DropdownMenuLabel>Display</DropdownMenuLabel>
+									<DropdownMenuCheckboxItem
+										checked={showSecondaryLimits}
+										onCheckedChange={toggleSecondaryLimits}
+										onSelect={(e) => e.preventDefault()}
+										title="Show the per-model weekly limits (Opus, Sonnet) in addition to the 5-hour and overall weekly limits."
+									>
+										Show secondary limits
+									</DropdownMenuCheckboxItem>
 									<DropdownMenuSeparator />
 								</>
 							)}
@@ -413,6 +437,7 @@ export function AccountListItem({
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
+					showSecondaryWeekly={showSecondaryLimits}
 				/>
 			)}
 		</div>

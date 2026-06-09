@@ -24,6 +24,7 @@ export interface AnthropicUsageData {
 	seven_day?: UsageWindowData;
 	seven_day_oauth_apps?: UsageWindowData;
 	seven_day_opus?: UsageWindowData;
+	seven_day_sonnet?: UsageWindowData;
 }
 
 // Usage data types for Zai accounts
