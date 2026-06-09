@@ -29,7 +29,10 @@ import {
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
 import { Logger } from "@clankermux/logger";
-import { handleResponsesRequest } from "@clankermux/openai-responses-adapter";
+import {
+	handleModelsRequest,
+	handleResponsesRequest,
+} from "@clankermux/openai-responses-adapter";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	fetchCodexUsageOnDemand,
@@ -1202,6 +1205,15 @@ export default async function startServer(options?: {
 							authResult.apiKeyId,
 							authResult.apiKeyName,
 						);
+					}
+
+					// Codex CLI probes GET /v1/models to list/validate models. ClankerMux
+					// has no models route, so without this it falls through to the proxy
+					// and 400s ("Provider cannot handle path: /v1/models") on every Codex
+					// startup. Serve a static OpenAI-format model list (advisory — model
+					// names are forwarded verbatim by the responses adapter).
+					if (req.method === "GET" && url.pathname === "/v1/models") {
+						return handleModelsRequest();
 					}
 
 					return await dispatchProxyRequest(
