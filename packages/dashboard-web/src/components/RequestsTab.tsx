@@ -30,6 +30,7 @@ import {
 	useRequestsCount,
 } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
+import { decodeBase64Utf8 } from "../lib/base64";
 import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
@@ -244,20 +245,6 @@ export function RequestsTab() {
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
-	};
-
-	const decodeBase64 = (str: string | null): string => {
-		if (!str) return "No data";
-		try {
-			// Handle edge cases like "[streamed]" from older data
-			if (str === "[streamed]") {
-				return "[Streaming data not captured]";
-			}
-			return atob(str);
-		} catch (error) {
-			console.error("Failed to decode base64:", error, "Input:", str);
-			return `Failed to decode: ${str}`;
-		}
 	};
 
 	const statusCategoryLabel = (cat: StatusCategory) =>
@@ -763,7 +750,7 @@ export function RequestsTab() {
 															? {
 																	...full.request,
 																	body: full.request.body
-																		? decodeBase64(full.request.body)
+																		? decodeBase64Utf8(full.request.body)
 																		: null,
 																}
 															: full.request,
@@ -771,7 +758,7 @@ export function RequestsTab() {
 															? {
 																	...full.response,
 																	body: full.response.body
-																		? decodeBase64(full.response.body)
+																		? decodeBase64Utf8(full.response.body)
 																		: null,
 																}
 															: null,
