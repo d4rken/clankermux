@@ -1,14 +1,13 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
-import { ensureSchema, runMigrations } from "../../migrations";
+import { ensureSchema } from "../../migrations";
 import { RequestRepository } from "../request.repository";
 
 function makeDb(): Database {
 	const db = new Database(":memory:");
 	db.run("PRAGMA foreign_keys = ON");
 	ensureSchema(db);
-	runMigrations(db);
 	return db;
 }
 

@@ -269,7 +269,7 @@ export function createAnalyticsHandler(context: APIContext) {
 			// is the robust "typical" speed; p95 is the honest fast end. Both are
 			// artifact-filtered via the sanity ceiling and computed with the same
 			// PERCENT_RANK ranked-CTE pattern used for p95 response time below
-			// (portable across bun:sqlite and Postgres — no PERCENTILE_CONT).
+			// (uses a PERCENT_RANK CTE rather than PERCENTILE_CONT).
 			phaseStartedAt = performance.now();
 			const speedTotals = await db.get<{
 				median_tokens_per_second: number | null;

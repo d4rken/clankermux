@@ -61,18 +61,17 @@ Check if recent commits already partially or fully address the issue. Rate limit
 - Custom: Set `CLANKERMUX_DB_PATH=/path/to/dev.db` in env or .env (legacy `BETTER_CCFLARE_DB_PATH` still honored)
 - Query: `sqlite3 ~/.config/clankermux/clankermux.db "SELECT name, provider, custom_endpoint FROM accounts;"`
 
-## ⚠️ CRITICAL: Database Migrations — Port to PostgreSQL
+## ⚠️ CRITICAL: Database Migrations (SQLite only)
 
-**Every migration added to `packages/database/src/migrations.ts` MUST also be ported to `packages/database/src/migrations-pg.ts`.**
+SQLite is the only backend — there is **no PostgreSQL support** and no `migrations-pg.ts`. Fresh installs get the **complete** schema from `ensureSchema()` in `packages/database/src/migrations.ts`; existing live DBs are brought forward by `runMigrations()`, which applies only the columns added since they were created.
 
-When adding a new column or table to SQLite:
-1. Add it to `ensureSchema()` in `migrations.ts` (SQLite CREATE TABLE)
-2. Add it to `runMigrations()` in `migrations.ts` (SQLite ALTER TABLE for existing DBs)
-3. Add it to `ensureSchemaPg()` in `migrations-pg.ts` (PG CREATE TABLE for new installs)
-4. Add an entry to the `columnsToAdd` array in `runMigrationsPg()` in `migrations-pg.ts` (PG ALTER TABLE for existing DBs)
-5. If there's a backfill/data migration in SQLite, add the equivalent `adapter.unsafe(UPDATE ...)` call in `runMigrationsPg()` as well.
+To add a new column:
+1. Add it to the relevant `CREATE TABLE` in `ensureSchema()` (so fresh installs have it).
+2. Append one entry to the `ADDITIVE_COLUMNS` array in `runMigrations()` (so existing live DBs gain it on the next restart).
 
-New tables also need to be created in `ensureSchemaPg()` AND in `runMigrationsPg()` (using `CREATE TABLE IF NOT EXISTS` so upgrades work).
+> **If you skip the `ADDITIVE_COLUMNS` step, the column will be silently missing on every existing live DB** — `ensureSchema()` only runs `CREATE TABLE IF NOT EXISTS`, which is a no-op when the table already exists. There is no startup error; the omission surfaces as a runtime failure. Both steps are required.
+
+Additive `ALTER TABLE ADD COLUMN` only — no destructive rebuilds, data backfills, table renames, or pre-migration VACUUM backups. (Those were one-time legacy upgrades and have been removed.) New tables go in `ensureSchema()` with `CREATE TABLE IF NOT EXISTS`.
 
 ## Subagents for Multi-Task Work
 When a session involves multiple independent tasks, always spawn subagents rather than doing them sequentially in the main context. This conserves tokens and keeps the main context clean. Tasks don't need to run in parallel — the goal is context isolation, not speed.

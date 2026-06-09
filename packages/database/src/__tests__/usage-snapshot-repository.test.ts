@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { UsageSnapshotRow } from "@clankermux/types";
 import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
-import { ensureSchema, runMigrations } from "../migrations";
+import { ensureSchema } from "../migrations";
 import { UsageSnapshotRepository } from "../repositories/usage-snapshot.repository";
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,6 @@ import { UsageSnapshotRepository } from "../repositories/usage-snapshot.reposito
 function makeDb(): Database {
 	const db = new Database(":memory:");
 	ensureSchema(db);
-	runMigrations(db);
 	// Enforce foreign keys so the cascade test exercises real behavior.
 	db.run("PRAGMA foreign_keys = ON");
 	return db;

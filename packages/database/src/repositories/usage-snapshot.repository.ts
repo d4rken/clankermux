@@ -13,7 +13,7 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	 * Bulk-insert snapshots. Upsert semantics on the (account_id, sampled_at)
 	 * primary key: a duplicate tick overwrites the prior row rather than
 	 * erroring. Matches the ON CONFLICT DO UPDATE style used by the request
-	 * repository, so it works on modern SQLite and PostgreSQL alike.
+	 * repository.
 	 */
 	async insertSnapshots(rows: UsageSnapshotRow[]): Promise<void> {
 		if (rows.length === 0) return;
@@ -48,8 +48,8 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	/**
 	 * Read the last value per (account, time bucket) since `sinceMs`. Buckets are
 	 * `bucketMs`-wide windows aligned to the epoch; within each bucket the row
-	 * with the greatest `sampled_at` wins. Uses a window-function CTE that is
-	 * robust on modern SQLite and PostgreSQL.
+	 * with the greatest `sampled_at` wins. Uses a window-function CTE
+	 * (modern SQLite).
 	 */
 	async getSnapshots(opts: {
 		sinceMs: number;

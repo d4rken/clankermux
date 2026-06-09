@@ -13,9 +13,8 @@ export type {
 export { DatabaseFactory } from "./factory";
 export type { IntegrityCheckKind } from "./integrity-check-runner";
 export { runIntegrityCheckInWorker } from "./integrity-check-runner";
-export { migrateFromCcflare } from "./migrate-from-ccflare";
 export { ensureSchema, runMigrations } from "./migrations";
-export { getLegacyDbPath, getLegacyDbPaths, resolveDbPath } from "./paths";
+export { resolveDbPath } from "./paths";
 // Public encryption API — only init/status helpers are exported.
 // `encryptPayload`/`decryptPayload` are internal to the database package.
 export {

@@ -1,0 +1,137 @@
+/**
+ * Tests asserting that ensureSchema() ALONE produces the full current schema
+ * for a fresh install. After the legacy-migration removal, ensureSchema() owns
+ * the complete schema and runMigrations() is a lean additive no-op (its
+ * ADDITIVE_COLUMNS list is empty), so a fresh DB must already have every
+ * column, table, and performance index — without runMigrations() doing
+ * anything.
+ *
+ * Also asserts that intentionally-dropped Bedrock artifacts (the
+ * accounts.cross_region_mode column and the model_translations table) are
+ * absent, and that the retired requests.agent_used column is gone.
+ */
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { ensureSchema, runMigrations } from "../migrations";
+
+function columnNames(db: Database, table: string): Set<string> {
+	return new Set(
+		(
+			db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+				name: string;
+			}>
+		).map((c) => c.name),
+	);
+}
+
+function tableExists(db: Database, name: string): boolean {
+	return (
+		db
+			.prepare(
+				`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+			)
+			.get(name) != null
+	);
+}
+
+function indexExists(db: Database, name: string): boolean {
+	return (
+		db
+			.prepare(
+				`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
+			)
+			.get(name) != null
+	);
+}
+
+describe("ensureSchema completeness", () => {
+	let db: Database;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		ensureSchema(db);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("creates the accounts table with every current column", () => {
+		const cols = columnNames(db, "accounts");
+		const expected = [
+			"id",
+			"name",
+			"provider",
+			"api_key",
+			"refresh_token",
+			"access_token",
+			"expires_at",
+			"created_at",
+			"last_used",
+			"request_count",
+			"total_requests",
+			"priority",
+			"rate_limited_until",
+			"session_start",
+			"session_request_count",
+			"paused",
+			"rate_limit_reset",
+			"rate_limit_status",
+			"rate_limit_remaining",
+			"auto_fallback_enabled",
+			"custom_endpoint",
+			"auto_refresh_enabled",
+			"model_mappings",
+			"model_fallbacks",
+			"billing_type",
+			"refresh_token_issued_at",
+			"auto_pause_on_overage_enabled",
+			"peak_hours_pause_enabled",
+			"pause_reason",
+			"rate_limited_reason",
+			"rate_limited_at",
+			"consecutive_rate_limits",
+			"renewal_anchor",
+			"renewal_cadence",
+			"notes",
+		];
+		for (const col of expected) {
+			expect(cols.has(col)).toBe(true);
+		}
+	});
+
+	it("does NOT create the intentionally-dropped accounts.cross_region_mode column (Bedrock)", () => {
+		const cols = columnNames(db, "accounts");
+		expect(cols.has("cross_region_mode")).toBe(false);
+	});
+
+	it("creates the requests table with current columns and without the retired agent_used column", () => {
+		const cols = columnNames(db, "requests");
+		expect(cols.has("api_key_id")).toBe(true);
+		expect(cols.has("api_key_name")).toBe(true);
+		expect(cols.has("combo_name")).toBe(true);
+		expect(cols.has("agent_used")).toBe(false);
+	});
+
+	it("does NOT create the model_translations table (Bedrock dropped)", () => {
+		expect(tableExists(db, "model_translations")).toBe(false);
+	});
+
+	it("creates the representative performance indexes", () => {
+		for (const idx of [
+			"idx_requests_summary_covering",
+			"idx_requests_analytics_covering",
+			"idx_accounts_paused",
+			"idx_requests_api_key",
+		]) {
+			expect(indexExists(db, idx)).toBe(true);
+		}
+	});
+
+	it("runMigrations() on a fresh ensureSchema DB does not throw and adds no columns", () => {
+		const before = columnNames(db, "accounts").size;
+		expect(() => runMigrations(db)).not.toThrow();
+		const after = columnNames(db, "accounts").size;
+		expect(after).toBe(before);
+	});
+});

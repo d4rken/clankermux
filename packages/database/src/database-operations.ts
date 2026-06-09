@@ -25,8 +25,7 @@ import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
-import { ensureSchema, runMigrations } from "./migrations";
-import { ensureSchemaPg, runMigrationsPg } from "./migrations-pg";
+import { runMigrations } from "./migrations";
 import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
@@ -243,13 +242,13 @@ export interface RetentionStorageUsage {
  * DatabaseOperations using Repository Pattern
  * Provides a clean, organized interface for database operations
  *
- * Supports both SQLite (default) and PostgreSQL (via DATABASE_URL env var).
- * All public methods are async to support both backends.
+ * SQLite-only. All public methods are async; the underlying bun:sqlite calls
+ * resolve synchronously under the hood (see {@link BunSqlAdapter}).
  */
 export class DatabaseOperations implements StrategyStore, Disposable {
 	private adapter: BunSqlAdapter;
-	/** Raw bun:sqlite Database — only set in SQLite mode */
-	private sqliteDb?: Database;
+	/** Raw bun:sqlite Database. */
+	private sqliteDb: Database;
 	/** Resolved path to the SQLite DB file — used by the vacuum worker */
 	private resolvedDbPath?: string;
 	/**
@@ -278,7 +277,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private runtime?: RuntimeConfig;
 	private dbConfig: DatabaseConfig;
 	private retryConfig: DatabaseRetryConfig;
-	readonly isSQLite: boolean;
 	/** Cached integrity check status; surfaced via /api/storage and /health. */
 	private integrityStatus: IntegrityStatus = {
 		status: "unchecked",
@@ -340,51 +338,30 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			...retryConfig,
 		};
 
-		// Detect PostgreSQL mode from DATABASE_URL
-		const databaseUrl = process.env.DATABASE_URL;
-		const isPostgres =
-			databaseUrl &&
-			(databaseUrl.startsWith("postgres://") ||
-				databaseUrl.startsWith("postgresql://"));
+		const resolvedPath = dbPath ?? resolveDbPath();
+		this.resolvedDbPath = resolvedPath;
 
-		if (isPostgres) {
-			this.isSQLite = false;
-			// Import SQL lazily to avoid issues when not needed
-			const { SQL } = require("bun");
-			const sqlClient = new SQL({
-				url: databaseUrl,
-				max: 10,
-				idleTimeout: 30,
-			});
-			this.adapter = new BunSqlAdapter(sqlClient, false);
-		} else {
-			this.isSQLite = true;
-			const resolvedPath = dbPath ?? resolveDbPath();
-			this.resolvedDbPath = resolvedPath;
+		// Ensure the directory exists
+		const dir = dirname(resolvedPath);
+		mkdirSync(dir, { recursive: true });
 
-			// Ensure the directory exists
-			const dir = dirname(resolvedPath);
-			mkdirSync(dir, { recursive: true });
+		this.sqliteDb = new Database(resolvedPath, { create: true });
 
-			this.sqliteDb = new Database(resolvedPath, { create: true });
+		// Capture the persisted auto_vacuum mode BEFORE configureSqlite's
+		// leading PRAGMA flips the connection-local view. See the field
+		// docstring for the SQLite quirk this works around. (Greptile #230)
+		this.originalAutoVacuumMode = (
+			this.sqliteDb.query("PRAGMA auto_vacuum").get() as {
+				auto_vacuum: number;
+			}
+		).auto_vacuum;
 
-			// Capture the persisted auto_vacuum mode BEFORE configureSqlite's
-			// leading PRAGMA flips the connection-local view. See the field
-			// docstring for the SQLite quirk this works around. (Greptile #230)
-			this.originalAutoVacuumMode = (
-				this.sqliteDb.query("PRAGMA auto_vacuum").get() as {
-					auto_vacuum: number;
-				}
-			).auto_vacuum;
+		// Apply SQLite configuration
+		configureSqlite(this.sqliteDb, this.dbConfig);
 
-			// Apply SQLite configuration
-			configureSqlite(this.sqliteDb, this.dbConfig);
+		runMigrations(this.sqliteDb);
 
-			ensureSchema(this.sqliteDb);
-			runMigrations(this.sqliteDb, resolvedPath);
-
-			this.adapter = new BunSqlAdapter(this.sqliteDb);
-		}
+		this.adapter = new BunSqlAdapter(this.sqliteDb);
 
 		// Initialize repositories
 		this.accounts = new AccountRepository(this.adapter);
@@ -396,16 +373,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.combo = new ComboRepository(this.adapter);
 		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
 		this.memorySnapshots = new MemorySnapshotRepository(this.adapter);
-	}
-
-	/**
-	 * Initialize the PostgreSQL schema (async, must be called after construction in PG mode)
-	 */
-	async initializeAsync(): Promise<void> {
-		if (!this.isSQLite) {
-			await ensureSchemaPg(this.adapter);
-			await runMigrationsPg(this.adapter);
-		}
 	}
 
 	setRuntimeConfig(runtime: RuntimeConfig): void {
@@ -422,7 +389,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 	/**
 	 * Get the underlying BunSqlAdapter for direct queries.
-	 * Use this instead of getDatabase() for cross-backend compatible raw queries.
+	 * Prefer this over getDatabase() — it exposes the async, Promise-returning
+	 * query API with built-in busy-retry.
 	 */
 	getAdapter(): BunSqlAdapter {
 		return this.adapter;
@@ -430,24 +398,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 	/**
 	 * Get the underlying bun:sqlite Database.
-	 * @deprecated Use getAdapter() for cross-backend compatible code.
-	 * Only valid when running in SQLite mode.
+	 * @deprecated Use getAdapter() for the async query API with busy-retry.
 	 */
 	getDatabase(): Database {
-		if (!this.sqliteDb) {
-			throw new Error(
-				"getDatabase() is not available in PostgreSQL mode. Use getAdapter() instead.",
-			);
-		}
 		return this.sqliteDb;
 	}
 
 	async runQuickIntegrityCheck(): Promise<string> {
-		if (!this.sqliteDb) {
-			// PostgreSQL: verify connectivity with a lightweight query
-			await this.adapter.get("SELECT 1 AS ok");
-			return "ok";
-		}
 		const result = this.sqliteDb.query("PRAGMA quick_check").get() as {
 			quick_check: string;
 		};
@@ -467,11 +424,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * to avoid freezing the event loop.
 	 */
 	async runFullIntegrityCheck(): Promise<string> {
-		if (!this.sqliteDb) {
-			// PostgreSQL: verify connectivity with a lightweight query
-			await this.adapter.get("SELECT 1 AS ok");
-			return "ok";
-		}
 		// integrity_check can return multiple rows for long error reports.
 		const integrityRows = this.sqliteDb
 			.query("PRAGMA integrity_check")
@@ -504,9 +456,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	}
 
 	/**
-	 * Path to the live SQLite file, or `undefined` when running against
-	 * PostgreSQL or before initialization. Used by the integrity-check worker
-	 * to open its own read-only handle.
+	 * Path to the live SQLite file, or `undefined` before initialization. Used
+	 * by the integrity-check worker to open its own read-only handle.
 	 */
 	getResolvedDbPath(): string | undefined {
 		return this.resolvedDbPath;
@@ -655,10 +606,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * in-flight computation, and `cleanupOldRequests()` clears the cache so a
 	 * manual "Clean up now" is reflected on the next read.
 	 *
-	 * SQLite-only: returns `available: false` with empty `types` on PostgreSQL,
-	 * mirroring `getTableRowCounts`. A full-table scan is unavoidable for the
-	 * byte sums, but WAL readers don't block the proxy's writer and the TTL
-	 * keeps scans rare.
+	 * A full-table scan is unavoidable for the byte sums, but WAL readers don't
+	 * block the proxy's writer and the TTL keeps scans rare.
 	 */
 	async getRetentionStorageUsage(opts?: {
 		maxAgeMs?: number;
@@ -685,16 +634,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 	private async computeRetentionStorageUsage(): Promise<RetentionStorageUsage> {
 		const measuredAt = Date.now();
-		if (!this.adapter.isSQLite) {
-			return {
-				available: false,
-				measuredAt,
-				dbBytes: 0,
-				walBytes: 0,
-				types: [],
-			};
-		}
-
 		const dbBytes = await this.getDbSizeBytes();
 		const walBytes = await this.getWalSizeBytes();
 
@@ -1305,9 +1244,6 @@ OAuth tokens will need to be re-authenticated.
 	async getTableRowCounts(): Promise<
 		Array<{ name: string; rowCount: number; dataBytes?: number }>
 	> {
-		if (!this.adapter.isSQLite) {
-			return [];
-		}
 		try {
 			const tables = await this.adapter.query<{ name: string }>(
 				"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -1343,7 +1279,7 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async getDbSizeBytes(): Promise<number> {
-		if (!this.adapter.isSQLite || !this.resolvedDbPath) {
+		if (!this.resolvedDbPath) {
 			return 0;
 		}
 		try {
@@ -1357,8 +1293,8 @@ OAuth tokens will need to be re-authenticated.
 
 	/**
 	 * Size of the WAL sidecar file in bytes, or 0 when there is no resolved DB
-	 * path (PostgreSQL/uninitialized) or no `-wal` file (non-WAL journal mode,
-	 * or it hasn't been created yet).
+	 * path (uninitialized) or no `-wal` file (non-WAL journal mode, or it
+	 * hasn't been created yet).
 	 */
 	async getWalSizeBytes(): Promise<number> {
 		if (!this.resolvedDbPath) return 0;

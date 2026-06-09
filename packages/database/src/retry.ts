@@ -14,20 +14,6 @@ const RETRYABLE_SQLITE_ERRORS = [
 ];
 
 /**
- * PostgreSQL error codes / messages that are transient and should trigger retries
- */
-const RETRYABLE_PG_ERRORS = [
-	"ECONNREFUSED",
-	"ECONNRESET",
-	"connection timeout",
-	"too many connections",
-	"deadlock detected",
-	"could not connect",
-	"Connection terminated",
-	"socket hang up",
-];
-
-/**
  * Check if an error is retryable (indicates database lock contention)
  */
 function isRetryableError(error: unknown): boolean {
@@ -39,14 +25,9 @@ function isRetryableError(error: unknown): boolean {
 			? error.code
 			: undefined;
 
-	return (
-		RETRYABLE_SQLITE_ERRORS.some(
-			(retryableError) =>
-				errorMessage.includes(retryableError) || errorCode === retryableError,
-		) ||
-		RETRYABLE_PG_ERRORS.some((retryableError) =>
-			errorMessage.includes(retryableError),
-		)
+	return RETRYABLE_SQLITE_ERRORS.some(
+		(retryableError) =>
+			errorMessage.includes(retryableError) || errorCode === retryableError,
 	);
 }
 

@@ -284,7 +284,7 @@ export interface AccountDeleteRequest {
 	confirm: string;
 }
 
-// Helper coercions for database rows (handles both SQLite integers and PostgreSQL booleans/bigints)
+// Helper coercions for database rows (normalizes SQLite integer/text values)
 function toNum(v: unknown): number {
 	return Number(v) || 0;
 }
