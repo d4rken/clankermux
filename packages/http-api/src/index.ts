@@ -4,6 +4,9 @@
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 export * from "./handlers/storage";
 export { APIRouter } from "./router";
+// Export admin service functions (account + API-key management)
+export * from "./services/admin/accounts";
+export * from "./services/admin/api-keys";
 // Export services
 export { AuthService } from "./services/auth-service";
 // Export types

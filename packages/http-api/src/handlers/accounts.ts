@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import * as cliCommands from "@clankermux/cli-commands";
 import type { Config } from "@clankermux/config";
 import {
 	patterns,
@@ -47,6 +46,11 @@ import type {
 	RateLimitReason,
 } from "@clankermux/types";
 import { requiresSessionDurationTracking } from "@clankermux/types";
+import {
+	pauseAccount,
+	removeAccount,
+	resumeAccount,
+} from "../services/admin/accounts";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
@@ -738,7 +742,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = await cliCommands.removeAccount(dbOps, accountName);
+			const result = await removeAccount(dbOps, accountName);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
@@ -785,7 +789,7 @@ export function createAccountPauseHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = await cliCommands.pauseAccount(dbOps, account.name);
+			const result = await pauseAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));
@@ -820,7 +824,7 @@ export function createAccountResumeHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const result = await cliCommands.resumeAccount(dbOps, account.name);
+			const result = await resumeAccount(dbOps, account.name);
 
 			if (!result.success) {
 				return errorResponse(BadRequest(result.message));

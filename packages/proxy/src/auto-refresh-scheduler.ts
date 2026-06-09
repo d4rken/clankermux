@@ -533,7 +533,7 @@ export class AutoRefreshScheduler {
 							`⚠️  Auto-refresh for "${accountRow.name}" reports an expired OAuth refresh token.`,
 						);
 						log.warn(
-							`   Reauthenticate with: bun run cli --reauthenticate "${accountRow.name}"`,
+							`   Re-authenticate account "${accountRow.name}" from the dashboard (Accounts tab).`,
 						);
 					}
 				} catch {
@@ -738,7 +738,7 @@ export class AutoRefreshScheduler {
 				// writes and log entries — the account is already paused.
 				this.consecutiveFailures.delete(accountId);
 				log.error(
-					`Account "${accountName}" has been PAUSED. Resume with: bun run cli --resume "${accountName}"`,
+					`Account "${accountName}" has been PAUSED. Resume it from the dashboard (Accounts tab) or via POST /api/accounts/:id/resume.`,
 				);
 			} catch (dbErr) {
 				log.error(`Failed to pause account ${accountName} in database:`, dbErr);

@@ -1,3 +1,6 @@
+import type { DatabaseOperations } from "@clankermux/database";
+import { BadRequest } from "@clankermux/errors";
+import type { ApiKeyGenerationResult } from "@clankermux/types";
 import {
 	deleteApiKey,
 	disableApiKey,
@@ -5,10 +8,7 @@ import {
 	generateApiKey,
 	listApiKeys,
 	regenerateApiKey,
-} from "@clankermux/cli-commands";
-import type { DatabaseOperations } from "@clankermux/database";
-import { BadRequest } from "@clankermux/errors";
-import type { ApiKeyGenerationResult } from "@clankermux/types";
+} from "../services/admin/api-keys";
 import { errorResponse } from "../utils/http-error";
 
 export function createApiKeysListHandler(dbOps: DatabaseOperations) {

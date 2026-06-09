@@ -147,7 +147,7 @@ export function OAuthTokenStatus({
 				return `OAuth token expiring soon - ${message}`;
 			case "critical":
 			case "expired":
-				return `OAuth token expired - ${message} - Re-authenticate with: bun run cli --reauthenticate ${accountName}`;
+				return `OAuth token expired - ${message} - Re-authenticate account "${accountName}" from the dashboard (Accounts tab).`;
 			case "loading":
 				return "Checking OAuth token status...";
 			default:

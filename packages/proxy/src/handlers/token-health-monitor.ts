@@ -242,7 +242,7 @@ export function formatTokenHealthReport(report: TokenHealthReport): string {
 
 			if (account.requiresReauth) {
 				lines.push(
-					`   🔄 Action required: run 'bun run cli --reauthenticate ${account.accountName}'`,
+					`   🔄 Action required: re-authenticate account "${account.accountName}" from the dashboard (Accounts tab).`,
 				);
 			}
 
@@ -252,9 +252,12 @@ export function formatTokenHealthReport(report: TokenHealthReport): string {
 
 	if (report.summary.requiresReauth > 0) {
 		lines.push("🔧 Recommended Actions:");
+		lines.push(
+			"  Re-authenticate the following account(s) from the dashboard (Accounts tab):",
+		);
 		const needsReauth = report.accounts.filter((a) => a.requiresReauth);
 		needsReauth.forEach((account) => {
-			lines.push(`  bun run cli --reauthenticate ${account.accountName}`);
+			lines.push(`  - ${account.accountName}`);
 		});
 		lines.push("");
 	}
@@ -309,15 +312,15 @@ export function getOAuthErrorMessage(
 	const health = checkRefreshTokenHealth(account);
 
 	if (health.status === "expired" || health.status === "critical") {
-		return `OAuth tokens have expired for account '${account.name}'. Please re-authenticate: bun run cli --reauthenticate ${account.name}`;
+		return `OAuth tokens have expired for account '${account.name}'. Re-authenticate account "${account.name}" from the dashboard (Accounts tab).`;
 	}
 
 	if (health.status === "no-refresh-token" && health.requiresReauth) {
-		return `OAuth account '${account.name}' missing refresh token. Please re-authenticate: bun run cli --reauthenticate ${account.name}`;
+		return `OAuth account '${account.name}' missing refresh token. Re-authenticate account "${account.name}" from the dashboard (Accounts tab).`;
 	}
 
 	if (health.status === "warning") {
-		return `OAuth tokens for account '${account.name}' are nearing expiration. Consider re-authenticating soon: bun run cli --reauthenticate ${account.name}. Original error: ${originalError}`;
+		return `OAuth tokens for account '${account.name}' are nearing expiration. Consider re-authenticating account "${account.name}" soon from the dashboard (Accounts tab). Original error: ${originalError}`;
 	}
 
 	return `OAuth token refresh failed for account '${account.name}': ${originalError}`;

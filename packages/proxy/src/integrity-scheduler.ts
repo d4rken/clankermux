@@ -110,7 +110,7 @@ export function startIntegrityScheduler(
 		} else {
 			logger.error(`Quick integrity check FAILED: ${error}`);
 			logger.error(
-				"Database corruption detected. Run `bun run cli --doctor` for details.",
+				"Database corruption detected. Check database integrity from the dashboard (Overview → Storage / Integrity) or review these server logs for details.",
 			);
 		}
 	};
@@ -127,7 +127,7 @@ export function startIntegrityScheduler(
 		} else {
 			logger.error(`Full integrity check FAILED: ${error}`);
 			logger.error(
-				"Database corruption detected. Run `bun run cli --doctor` for details.",
+				"Database corruption detected. Check database integrity from the dashboard (Overview → Storage / Integrity) or review these server logs for details.",
 			);
 		}
 	};

@@ -38,7 +38,7 @@ export function createTokenHealthService(): TokenHealthService {
 					log.warn(`  - ${account.name} (${account.provider})`);
 				});
 				log.warn(
-					"Run 'bun run cli --reauth-needed' to see details and get re-authentication commands.",
+					"Re-authenticate the affected account(s) from the dashboard (Accounts tab).",
 				);
 			}
 

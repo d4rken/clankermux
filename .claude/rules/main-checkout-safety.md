@@ -12,6 +12,7 @@ The main checkout at `/home/darken/clankermux` is the **live deployment**. The s
 
 - `WorkingDirectory=/home/darken/clankermux`
 - `ExecStartPre=bun run build:dashboard` — rebuilds the dashboard from working-tree source on every restart
+- `ExecStartPre=bun run build:db-workers` — regenerates the gitignored inline DB workers from working-tree source on every restart (so they self-heal)
 - `ExecStart=bun run apps/server/src/server.ts` — runs the server directly from working-tree TypeScript
 
 **Whatever branch is checked out and whatever working-tree state exists at the moment of the next service start (manual restart, crash-recovery, or reboot) is what gets deployed.** There is no separate build artifact, no staging directory, no deploy pipeline between the working tree and production.
@@ -128,4 +129,4 @@ A future hardening step is a `PreToolUse` hook in `.claude/settings.json` that i
 - `CLAUDE.md` — general repo rules, file exclusions, commit prefixes, the lint/typecheck/format requirement
 - `.claude/rules/fork-workflow.md` — ClankerMux dev workflow (fork-only, branch from origin/main), `--no-ff` merge pattern, cherry-pick-from-upstream
 - `/etc/systemd/system/clankermux.service` — the systemd unit that makes this directory live
-- `/etc/systemd/system/clankermux.service.d/dashboard-build.conf` — the drop-in that adds the `ExecStartPre` dashboard rebuild
+- `/etc/systemd/system/clankermux.service.d/dashboard-build.conf` — the drop-in that adds the `ExecStartPre` dashboard rebuild (and the `build:db-workers` regeneration step)

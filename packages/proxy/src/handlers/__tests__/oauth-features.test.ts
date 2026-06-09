@@ -222,16 +222,6 @@ describe("OAuth Token Health Monitoring Features", () => {
 	});
 });
 
-describe("CLI Command Integration", () => {
-	it("should have access to token health CLI functions", () => {
-		// This test verifies that the CLI command exports are available
-		expect(() => {
-			// Import should not throw if CLI commands exist
-			require("@clankermux/cli-commands");
-		}).not.toThrow();
-	});
-});
-
 // Note: PKCE Generation tests live in packages/providers/src/oauth/__tests__/pkce.test.ts
 // to avoid mock.module contamination from complete-reauth.test.ts.
 

@@ -1357,15 +1357,9 @@ export async function handleProxy(
 	);
 
 	if (needsReauth.length > 0) {
-		// Quote account names to prevent command injection (defense-in-depth)
-		const reauthCommands = needsReauth
-			.map(
-				(acc) =>
-					`bun run cli --reauthenticate "${acc.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
-			)
-			.join("\n  ");
+		const accountNames = needsReauth.map((acc) => acc.name).join(", ");
 		throw new ServiceUnavailableError(
-			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${needsReauth.map((acc) => acc.name).join(", ")}.\n\nPlease re-authenticate:\n  ${reauthCommands}`,
+			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${accountNames}.\n\nRe-authenticate these account(s) from the dashboard (Accounts tab).`,
 			ctx.provider.name,
 		);
 	}

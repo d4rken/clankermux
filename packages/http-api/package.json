@@ -13,6 +13,8 @@
 		"@clankermux/core": "workspace:*",
 		"@clankermux/database": "workspace:*",
 		"@clankermux/config": "workspace:*",
+		"@clankermux/errors": "workspace:*",
+		"@clankermux/logger": "workspace:*",
 		"@clankermux/oauth-flow": "workspace:*",
 		"@clankermux/providers": "workspace:*",
 		"@clankermux/proxy": "workspace:*",

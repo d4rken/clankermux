@@ -8,6 +8,7 @@
 	},
 	"scripts": {
 		"typecheck": "bunx tsc --noEmit",
+		"build:workers": "bun run scripts/build-workers.ts",
 		"analyze": "bun run ./src/analyze-performance.ts"
 	},
 	"dependencies": {
