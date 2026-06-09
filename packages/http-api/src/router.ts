@@ -37,6 +37,7 @@ import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
 	createApiKeyEnableHandler,
+	createApiKeyPinHandler,
 	createApiKeyRegenerateHandler,
 	createApiKeysGenerateHandler,
 	createApiKeysListHandler,
@@ -669,6 +670,15 @@ export class APIRouter {
 			if (path.endsWith("/enable") && method === "POST") {
 				const enableHandler = createApiKeyEnableHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => enableHandler(req, keyIdOrName))(
+					req,
+					url,
+				);
+			}
+
+			// API key routing pin (set/clear which account or provider-class this key routes to)
+			if (path.endsWith("/pin") && method === "PUT") {
+				const pinHandler = createApiKeyPinHandler(this.context.dbOps);
+				return await this.wrapHandler((req) => pinHandler(req, keyIdOrName))(
 					req,
 					url,
 				);

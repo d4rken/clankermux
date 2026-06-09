@@ -80,6 +80,40 @@ describe("handleResponsesRequest", () => {
 		expect(body.output[0].type).toBe("message");
 	});
 
+	test("Test 2b: sets the no-official-Anthropic floor header on the synthetic request", async () => {
+		let denyHeader: string | null = null;
+
+		const mockHandleProxy: HandleProxyFn = async (req) => {
+			denyHeader = req.headers.get("x-clankermux-deny-official-anthropic");
+			return new Response(ANTHROPIC_MESSAGE_BODY, {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+				stream: false,
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
+
+		// Codex CLI traffic must be marked so the proxy never routes it to a
+		// Claude account — independent of any API-key pin or auth config.
+		expect(denyHeader).toBe("1");
+	});
+
 	test("Test 3: error passthrough → if handleProxy returns 429, handler returns 429", async () => {
 		const mockHandleProxy: HandleProxyFn = async () =>
 			new Response("rate limited", { status: 429 });

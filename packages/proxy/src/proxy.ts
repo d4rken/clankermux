@@ -15,6 +15,7 @@ import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
+	createPinnedTargetUnavailableResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
 	createUsageThrottledResponse,
@@ -349,6 +350,12 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	// Unconditional floor for Codex-CLI traffic: the /v1/responses adapter sets
+	// this header on every request it forwards. When set, the request may never
+	// be routed to (or burst-held on) an official Claude account — independent of
+	// any API-key pin or auth config.
+	requestMeta.excludeOfficialAnthropic =
+		req.headers.get("x-clankermux-deny-official-anthropic") === "1";
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
 	// set, EVERY non-internal client request goes straight to that account:
@@ -395,6 +402,26 @@ export async function handleProxy(
 			);
 		}
 
+		// Codex-CLI floor (API-key pin backstop) overrides the global force: a
+		// /v1/responses request carrying excludeOfficialAnthropic must NEVER be
+		// routed to an official Claude account, even under an operator force-route
+		// (ban risk + not a cross-model review). Fail closed. Left UNRECORDED for
+		// the same ordering reason as the forced-missing case above
+		// (recordSyntheticErrorResponse isn't defined this early).
+		if (
+			requestMeta.excludeOfficialAnthropic &&
+			isOfficialAnthropicProvider(forcedAccount.provider)
+		) {
+			log.warn(
+				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a deny-official-anthropic (Codex CLI) request`,
+			);
+			return createPinnedTargetUnavailableResponse({
+				code: "anthropic_excluded_no_account",
+				message:
+					"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
+			});
+		}
+
 		requestMeta.routing = {
 			strategy: "forced",
 			decision: "force_account_global",
@@ -422,6 +449,48 @@ export async function handleProxy(
 			apiKeyName,
 			requestBodyContext,
 		);
+	}
+
+	// Resolve the per-key routing pin (Feature: API-key→account/class pin). Only
+	// for authenticated client requests; internal probes carry no apiKeyId and
+	// must stay unconstrained. On a DB error we FAIL CLOSED — refuse the request
+	// (pinned_resolution_error) rather than silently routing a pinned key to a
+	// disallowed account. For a Codex-pinned key, routing unpinned could answer
+	// from a Claude OAuth account (ban risk + not the intended cross-model path),
+	// so "can't tell what the pin is" must never degrade to "ignore the pin".
+	if (apiKeyId && !isInternal) {
+		try {
+			const pin = await ctx.dbOps.getApiKeyPin(apiKeyId);
+			if (pin?.malformed) {
+				// The pin is stored but unparseable (corruption / manual tampering).
+				// Fail closed — treating it as "unpinned" could route a Codex-pinned
+				// key to a Claude account (ban risk + wrong model).
+				requestMeta.pinFailure = {
+					code: "pinned_resolution_error",
+					message:
+						"The API key routing pin is stored in an invalid form. Refusing to route to avoid violating the pin.",
+				};
+			} else if (
+				pin &&
+				(pin.pinnedAccountId ||
+					(pin.pinnedProviders && pin.pinnedProviders.length > 0))
+			) {
+				requestMeta.pin = {
+					accountId: pin.pinnedAccountId,
+					providers: pin.pinnedProviders,
+				};
+			}
+		} catch (err) {
+			log.error(
+				"Failed to resolve API key pin; failing closed to avoid routing a pinned key to a disallowed account",
+				err,
+			);
+			requestMeta.pinFailure = {
+				code: "pinned_resolution_error",
+				message:
+					"Could not resolve the API key routing pin (database error). Refusing to route to avoid violating the pin.",
+			};
+		}
 	}
 
 	// 5. Select accounts
@@ -734,7 +803,12 @@ export async function handleProxy(
 	let burstHeldAccountForGiveUp: Account | null = null;
 	// The cache-affinity-pinned account id recorded by the routing strategy (set
 	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
-	const burstHeldId = requestMeta.routing?.heldAccountId ?? null;
+	// The burst-hold only ever serves an OAuth-Anthropic account, so for a
+	// Codex-CLI (excludeOfficialAnthropic) request it MUST be disabled — otherwise
+	// the hold could serve a Claude account that selection deliberately excluded.
+	const burstHeldId = requestMeta.excludeOfficialAnthropic
+		? null
+		: (requestMeta.routing?.heldAccountId ?? null);
 
 	// Shared reprobe closure: re-attempt the given (held) account in reprobe mode
 	// (cooldown gate bypassed, no re-staging, no streak escalation) with a supplied
@@ -828,6 +902,19 @@ export async function handleProxy(
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
+		// A pin strict-failed selection (pinned account/class had no allowed,
+		// available candidate). Return a clean terminal error rather than degrading
+		// to storm-hold / pool_exhausted — never silently answer from a disallowed
+		// account. The /v1/responses adapter converts this non-200 to the OpenAI
+		// error shape, so the Codex CLI surfaces a real error.
+		if (requestMeta.pinFailure) {
+			const pinnedResponse = createPinnedTargetUnavailableResponse(
+				requestMeta.pinFailure,
+			);
+			recordSyntheticErrorResponse(pinnedResponse, requestMeta.pinFailure.code);
+			return pinnedResponse;
+		}
+
 		// STORM-DEGRADE hold (Finding 1): in the worst burst moment the pinned
 		// cache account AND every sibling are cooled, so the strategy returned ZERO
 		// candidates. Before degrading to the pool_exhausted / throttled / context
@@ -933,6 +1020,24 @@ export async function handleProxy(
 			providerOverloadedAccounts.length > 0
 		) {
 			return createProviderOverloadedResponse(providerOverloadedAccounts);
+		}
+
+		// A pin or the Codex-CLI Anthropic floor was active but post-selection
+		// gates removed every allowed candidate (and no more-specific terminal
+		// above applied). Return the pinned terminal rather than a generic
+		// pool_exhausted that reports the wrong (provider-default) accounts — and
+		// never silently fall through to other handling.
+		if (
+			(requestMeta.pin || requestMeta.excludeOfficialAnthropic) &&
+			!requestMeta.pinFailure
+		) {
+			const pinnedResponse = createPinnedTargetUnavailableResponse({
+				code: "pinned_target_unavailable",
+				message:
+					"The account/provider pinned to this API key has no available account for this request.",
+			});
+			recordSyntheticErrorResponse(pinnedResponse, "pinned_target_unavailable");
+			return pinnedResponse;
 		}
 
 		log.error(ERROR_MESSAGES.POOL_EXHAUSTED);

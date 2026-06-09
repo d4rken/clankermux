@@ -9,7 +9,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		const rows = await this.query<ApiKeyRow>(`
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, usage_count, is_active
+				last_used, usage_count, is_active,
+				pinned_account_id, pinned_providers
 			FROM api_keys
 			ORDER BY created_at DESC
 		`);
@@ -23,7 +24,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		const rows = await this.query<ApiKeyRow>(`
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, usage_count, is_active
+				last_used, usage_count, is_active,
+				pinned_account_id, pinned_providers
 			FROM api_keys
 			WHERE is_active = 1
 			ORDER BY created_at DESC
@@ -39,7 +41,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			`
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, usage_count, is_active
+				last_used, usage_count, is_active,
+				pinned_account_id, pinned_providers
 			FROM api_keys
 			WHERE id = ?
 		`,
@@ -57,7 +60,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			`
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, usage_count, is_active
+				last_used, usage_count, is_active,
+				pinned_account_id, pinned_providers
 			FROM api_keys
 			WHERE hashed_key = ? AND is_active = 1
 		`,
@@ -68,6 +72,35 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 	}
 
 	/**
+	 * Read the RAW routing-pin columns for a key (no domain parsing). Lets the
+	 * routing layer tell "no pin" apart from "pin stored but unparseable" so it
+	 * can fail closed on a corrupt/tampered pinned_providers value.
+	 */
+	async findRawPinById(id: string): Promise<{
+		pinnedAccountId: string | null;
+		pinnedProvidersRaw: string | null;
+	} | null> {
+		const row = await this.get<{
+			pinned_account_id: string | null;
+			pinned_providers: string | null;
+		}>(
+			`
+			SELECT pinned_account_id, pinned_providers
+			FROM api_keys
+			WHERE id = ?
+		`,
+			[id],
+		);
+
+		return row
+			? {
+					pinnedAccountId: row.pinned_account_id ?? null,
+					pinnedProvidersRaw: row.pinned_providers ?? null,
+				}
+			: null;
+	}
+
+	/**
 	 * Find API key by name
 	 */
 	async findByName(name: string): Promise<ApiKey | null> {
@@ -75,7 +108,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			`
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, usage_count, is_active
+				last_used, usage_count, is_active,
+				pinned_account_id, pinned_providers
 			FROM api_keys
 			WHERE name = ?
 		`,
@@ -102,9 +136,16 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 	}
 
 	/**
-	 * Create a new API key
+	 * Create a new API key. New keys start unpinned — the pin columns
+	 * (pinned_account_id, pinned_providers) default to NULL and are set later
+	 * via updatePin — so they're excluded from the create contract.
 	 */
-	async create(apiKey: Omit<ApiKeyRow, "usage_count">): Promise<void> {
+	async create(
+		apiKey: Omit<
+			ApiKeyRow,
+			"usage_count" | "pinned_account_id" | "pinned_providers"
+		>,
+	): Promise<void> {
 		await this.run(
 			`
 			INSERT INTO api_keys (
@@ -137,6 +178,30 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		`,
 			[timestamp, id],
 		);
+	}
+
+	/**
+	 * Set (or clear) the routing pin for an API key. `pinnedAccountId` pins the
+	 * key to one backend account; `pinnedProviders` is the already-serialized
+	 * JSON array string of allowed providers (or null). Serialization happens in
+	 * the dbOps facade. Returns false when no row matched the id.
+	 */
+	async updatePin(
+		id: string,
+		pinnedAccountId: string | null,
+		pinnedProviders: string | null,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`
+			UPDATE api_keys
+			SET pinned_account_id = ?,
+				pinned_providers = ?
+			WHERE id = ?
+		`,
+			[pinnedAccountId, pinnedProviders, id],
+		);
+
+		return changes > 0;
 	}
 
 	/**

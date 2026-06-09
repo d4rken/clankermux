@@ -15,6 +15,7 @@ export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
+	createPinnedTargetUnavailableResponse,
 	createPoolExhaustedResponse,
 	type ProxyAttemptOptions,
 	type ProxyAttemptOutcome,
