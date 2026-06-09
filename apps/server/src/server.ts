@@ -588,42 +588,40 @@ export default async function startServer(options?: {
 	// fast no-op. Existing DBs upgraded into this build run a full VACUUM
 	// here — minutes on a multi-GB file. Done BEFORE the HTTP listener binds
 	// so the proxy never sees a stalled writer slot.
-	if (dbOps.isSQLite) {
-		const startupLog = new Logger("Startup");
-		try {
-			const result = dbOps.bootstrapAutoVacuum();
-			if (result.migrated) {
-				startupLog.info(
-					`One-time auto_vacuum migration: mode ${result.modeBefore} → ${result.modeAfter} ` +
-						`in ${result.durationMs}ms. Future free-page reclamation runs incrementally via the ` +
-						`hourly worker — no more blocking VACUUM.`,
-				);
-				if (result.modeAfter !== 2) {
-					startupLog.error(
-						`auto_vacuum still ${result.modeAfter} after migration VACUUM — ` +
-							`incremental reclamation will be a no-op. Investigate disk space and DB integrity.`,
-					);
-				}
-			} else if (result.modeBefore === 1) {
-				// Operator set auto_vacuum=FULL on purpose. We don't migrate it to
-				// INCREMENTAL silently because FULL reclaims pages on every COMMIT
-				// while INCREMENTAL only reclaims when our hourly worker runs —
-				// rewriting that policy without notice would surprise the user.
-				// Log so it shows up in startup logs and `journalctl`. (Greptile #230)
-				startupLog.info(
-					`auto_vacuum=FULL (mode 1) detected — left in place. The hourly incremental_vacuum ` +
-						`worker is a no-op under FULL mode; pages are reclaimed on every COMMIT. ` +
-						`Switch to INCREMENTAL manually if you want the worker-driven cadence.`,
+	const startupLog = new Logger("Startup");
+	try {
+		const result = dbOps.bootstrapAutoVacuum();
+		if (result.migrated) {
+			startupLog.info(
+				`One-time auto_vacuum migration: mode ${result.modeBefore} → ${result.modeAfter} ` +
+					`in ${result.durationMs}ms. Future free-page reclamation runs incrementally via the ` +
+					`hourly worker — no more blocking VACUUM.`,
+			);
+			if (result.modeAfter !== 2) {
+				startupLog.error(
+					`auto_vacuum still ${result.modeAfter} after migration VACUUM — ` +
+						`incremental reclamation will be a no-op. Investigate disk space and DB integrity.`,
 				);
 			}
-		} catch (err) {
-			startupLog.error(
-				`Bootstrap auto_vacuum migration failed: ${err instanceof Error ? err.message : String(err)}. ` +
-					`Free pages will not be reclaimed until this is resolved. ` +
-					`Common causes: disk full (VACUUM needs ~2× DB size free), DB corruption.`,
+		} else if (result.modeBefore === 1) {
+			// Operator set auto_vacuum=FULL on purpose. We don't migrate it to
+			// INCREMENTAL silently because FULL reclaims pages on every COMMIT
+			// while INCREMENTAL only reclaims when our hourly worker runs —
+			// rewriting that policy without notice would surprise the user.
+			// Log so it shows up in startup logs and `journalctl`. (Greptile #230)
+			startupLog.info(
+				`auto_vacuum=FULL (mode 1) detected — left in place. The hourly incremental_vacuum ` +
+					`worker is a no-op under FULL mode; pages are reclaimed on every COMMIT. ` +
+					`Switch to INCREMENTAL manually if you want the worker-driven cadence.`,
 			);
-			throw err;
 		}
+	} catch (err) {
+		startupLog.error(
+			`Bootstrap auto_vacuum migration failed: ${err instanceof Error ? err.message : String(err)}. ` +
+				`Free pages will not be reclaimed until this is resolved. ` +
+				`Common causes: disk full (VACUUM needs ~2× DB size free), DB corruption.`,
+		);
+		throw err;
 	}
 
 	// Start periodic integrity scheduler. The startup `PRAGMA integrity_check`

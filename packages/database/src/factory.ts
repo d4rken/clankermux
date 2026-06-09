@@ -5,12 +5,10 @@ import {
 	DatabaseOperations,
 	type DatabaseRetryConfig,
 } from "./database-operations";
-import { migrateFromCcflare } from "./migrate-from-ccflare";
 
 let instance: DatabaseOperations | null = null;
 let dbPath: string | undefined;
 let runtimeConfig: RuntimeConfig | undefined;
-let migrationChecked = false;
 
 /**
  * The `fastMode` parameter is retained for backward compatibility with
@@ -30,11 +28,6 @@ export function initialize(
 
 export function getInstance(_fastMode?: boolean): DatabaseOperations {
 	if (!instance) {
-		// Perform one-time migration check from legacy ccflare
-		if (!migrationChecked) {
-			migrateFromCcflare();
-			migrationChecked = true;
-		}
 		// Extract database configuration from runtime config
 		const dbConfig: DatabaseConfig | undefined = runtimeConfig?.database
 			? {
@@ -73,16 +66,14 @@ export function getInstance(_fastMode?: boolean): DatabaseOperations {
 }
 
 /**
- * Get or create the database instance, running async initialization for PostgreSQL.
- * Use this in server startup code where async is available.
+ * Get or create the database instance. Retained as an async wrapper around
+ * `getInstance()` so existing `await DatabaseFactory.getInstanceAsync()` call
+ * sites (e.g. server startup) keep working; there is no async setup left.
  */
 export async function getInstanceAsync(
 	_fastMode?: boolean,
 ): Promise<DatabaseOperations> {
-	const db = getInstance();
-	// Initialize PostgreSQL schema/migrations if needed
-	await db.initializeAsync();
-	return db;
+	return getInstance();
 }
 
 export function closeAll(): void {

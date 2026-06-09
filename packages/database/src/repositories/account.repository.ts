@@ -198,8 +198,7 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * Distinct from `resetSession()`, which sets `session_start = now` and
 	 * thus makes the account MORE sticky. Here we null `session_start` so the
 	 * account is no longer a candidate for the active-session continue path.
-	 * Returns the number of rows changed. Plain UPDATE — valid on SQLite and
-	 * Postgres, no schema change.
+	 * Returns the number of rows changed. Plain UPDATE — no schema change.
 	 */
 	async clearSessionAnchor(accountId: string): Promise<number> {
 		return this.runWithChanges(

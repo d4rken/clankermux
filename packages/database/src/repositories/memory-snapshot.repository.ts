@@ -15,8 +15,7 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 	/**
 	 * Insert one memory sample. Upsert semantics on the `sampled_at` primary key:
 	 * a duplicate tick overwrites the prior row rather than erroring. Matches the
-	 * ON CONFLICT DO UPDATE style used elsewhere, so it works on modern SQLite and
-	 * PostgreSQL alike.
+	 * ON CONFLICT DO UPDATE style used elsewhere.
 	 */
 	async insert(row: MemorySnapshotRow): Promise<void> {
 		await this.run(

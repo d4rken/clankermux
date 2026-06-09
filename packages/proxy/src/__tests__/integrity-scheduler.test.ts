@@ -10,8 +10,9 @@
  *
  * `runIntegrityCheckInWorker` is mocked via `mock.module` so we can verify
  * routing without spawning real `bun:sqlite` workers. Tests with
- * `dbPath: undefined` exercise the PG/fallback branch (no worker); tests
- * with `dbPath: "/tmp/anything"` exercise the worker branch.
+ * `dbPath: undefined` exercise the no-file-path fallback branch (no worker —
+ * e.g. an in-memory DB whose path can't be resolved); tests with
+ * `dbPath: "/tmp/anything"` exercise the worker branch.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
@@ -207,7 +208,7 @@ describe("runIntegrityCheckOnDemand", () => {
 		if (!out.ok) expect(out.reason).toBe("already-running");
 	});
 
-	it("full falls back to PG-style runFullIntegrityCheck when no SQLite path", async () => {
+	it("full falls back to direct runFullIntegrityCheck when no SQLite path is resolvable", async () => {
 		const dbOps = makeDbOps({ dbPath: undefined, fullResult: { ok: true } });
 		const out = await runIntegrityCheckOnDemand(dbOps, "full");
 		expect(out.ok).toBe(true);
@@ -253,7 +254,7 @@ describe("runIntegrityCheckOnDemand", () => {
 		);
 	});
 
-	it("quick falls back to direct call when no SQLite path (e.g. PostgreSQL)", async () => {
+	it("quick falls back to direct call when no SQLite path is resolvable", async () => {
 		const dbOps = makeDbOps({ dbPath: undefined, quickResult: "ok" });
 		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
 		expect(out.ok).toBe(true);

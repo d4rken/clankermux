@@ -312,22 +312,6 @@ describe("createStorageUsageHandler", () => {
 		]);
 	});
 
-	it("reports available=false (PostgreSQL) with empty types", async () => {
-		const body = (await (
-			await createStorageUsageHandler(
-				makeUsageDbOps({
-					available: false,
-					dbBytes: 0,
-					walBytes: 0,
-					types: [],
-				}),
-			)()
-		).json()) as Record<string, unknown>;
-
-		expect(body.available).toBe(false);
-		expect(body.types).toEqual([]);
-	});
-
 	it("calls getRetentionStorageUsage exactly once", async () => {
 		const dbOps = makeUsageDbOps();
 		await createStorageUsageHandler(dbOps)();

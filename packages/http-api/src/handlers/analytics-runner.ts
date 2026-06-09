@@ -43,7 +43,7 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		const dbOps = context.dbOps as Partial<APIContext["dbOps"]>;
 		const dbPath = dbOps.getResolvedDbPath?.();
-		if (!dbOps.isSQLite || !dbPath) {
+		if (!dbPath) {
 			return directHandler(params);
 		}
 

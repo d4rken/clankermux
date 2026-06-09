@@ -121,8 +121,8 @@ export interface StorageUsageType {
  */
 export interface StorageUsageResponse {
 	/**
-	 * False when running against PostgreSQL — per-table logical sizing is
-	 * SQLite-only (mirrors getTableRowCounts). The card hides sizes then.
+	 * Whether per-table logical sizing could be measured. The card hides the
+	 * size breakdown when false. (SQLite always reports true today.)
 	 */
 	available: boolean;
 	/** ISO timestamp of when these figures were measured (possibly cached). */
