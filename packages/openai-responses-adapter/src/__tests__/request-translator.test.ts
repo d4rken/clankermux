@@ -494,24 +494,15 @@ describe("translateRequestToAnthropic", () => {
 		expect(translateRequestToAnthropic(req).model).toBe("claude-opus-4-5");
 	});
 
-	test("gpt-5 model mapping — *-pro maps to opus family alias", () => {
-		for (const model of ["gpt-5.5-pro", "gpt-5.4-pro", "GPT-5.5-PRO"]) {
-			expect(translateRequestToAnthropic({ model, input: [] }).model).toBe(
-				"claude-opus-4-5",
-			);
-		}
-	});
-
-	test("gpt-5 model mapping — *-mini and *-nano map to haiku family alias", () => {
-		for (const model of ["gpt-5.4-mini", "gpt-5.4-nano", "GPT-5.4-MINI"]) {
-			expect(translateRequestToAnthropic({ model, input: [] }).model).toBe(
-				"claude-haiku-4-5",
-			);
-		}
-	});
-
-	test("gpt model mapping — no suffix maps to sonnet family alias", () => {
+	test("gpt-* model names pass through unchanged (no Claude-family remap)", () => {
+		// Previously these were reverse-mapped by tier (-pro→opus, -mini/-nano→
+		// haiku, else→sonnet). That discarded the exact model the user asked for,
+		// so it now forwards verbatim and the account's provider resolves it.
 		for (const model of [
+			"gpt-5.5-pro",
+			"gpt-5.4-pro",
+			"gpt-5.4-mini",
+			"gpt-5.4-nano",
 			"gpt-5.5",
 			"gpt-5.4",
 			"gpt-5.3-codex",
@@ -520,9 +511,15 @@ describe("translateRequestToAnthropic", () => {
 			"gpt-4o",
 		]) {
 			expect(translateRequestToAnthropic({ model, input: [] }).model).toBe(
-				"claude-sonnet-4-6",
+				model,
 			);
 		}
+	});
+
+	test("model name casing is preserved (not lowercased) on the wire", () => {
+		expect(
+			translateRequestToAnthropic({ model: "GPT-5.5-PRO", input: [] }).model,
+		).toBe("GPT-5.5-PRO");
 	});
 
 	test("non-gpt model names pass through unchanged", () => {
@@ -538,5 +535,41 @@ describe("translateRequestToAnthropic", () => {
 			stream: true,
 		};
 		expect(translateRequestToAnthropic(req).stream).toBe(true);
+	});
+});
+
+describe("translateRequestToAnthropic — model passthrough", () => {
+	const reqWithModel = (model: string): ResponsesRequest => ({
+		model,
+		input: [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "Hi" }],
+			},
+		],
+	});
+
+	// The adapter must forward the client's model name VERBATIM — no reverse-map
+	// to a Claude family. The selected account's provider resolves it downstream
+	// (the Codex provider passes unknown gpt-* names through to its backend).
+	test.each([
+		"gpt-5.5",
+		"gpt-5-pro", // previously aliased to opus/claude-opus → now verbatim
+		"gpt-5.4-mini", // previously aliased to haiku → now verbatim
+		"gpt-5.3-codex",
+		"gpt-4o", // non-gpt-5 also verbatim
+		"o3",
+		"claude-sonnet-4-6", // Claude Code names unaffected
+		"some-unknown-model",
+	])("forwards model %p unchanged", (model) => {
+		expect(translateRequestToAnthropic(reqWithModel(model)).model).toBe(model);
+	});
+
+	test("does NOT rewrite gpt-5.5 to a Claude family (regression guard)", () => {
+		const result = translateRequestToAnthropic(reqWithModel("gpt-5.5"));
+		expect(result.model).toBe("gpt-5.5");
+		expect(result.model).not.toContain("claude");
+		expect(result.model).not.toContain("sonnet");
 	});
 });
