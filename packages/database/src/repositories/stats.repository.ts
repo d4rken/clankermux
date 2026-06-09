@@ -1,5 +1,5 @@
 /**
- * Consolidated stats repository to eliminate duplication between cli-commands and http-api
+ * Consolidated stats repository used by http-api (formerly duplicated between the CLI and http-api)
  */
 
 import type {
@@ -108,7 +108,7 @@ export class StatsRepository {
 
 	/**
 	 * Get account statistics with success rates
-	 * This consolidates the duplicated logic between cli-commands and http-api
+	 * This consolidates logic formerly duplicated between the CLI and http-api
 	 */
 	async getAccountStats(
 		limit = 10,

@@ -39,10 +39,7 @@ export async function getVersion(): Promise<string> {
 
 	// 3. Try reading from the repo-root package.json (dev environment)
 	try {
-		const packageJsonPath = new URL(
-			"../../../package.json",
-			import.meta.url,
-		);
+		const packageJsonPath = new URL("../../../package.json", import.meta.url);
 		const packageJson = await fetch(packageJsonPath);
 		const pkg = (await packageJson.json()) as { version?: string };
 		if (pkg.version) {

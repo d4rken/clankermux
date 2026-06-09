@@ -65,7 +65,10 @@ async function buildWorkers() {
 	for (const worker of workers) {
 		const inlinePath = join(srcDir, worker.inline);
 		if (!existsSync(inlinePath)) {
-			writeFileSync(inlinePath, `${HEADER}\nexport const ${worker.constName} = "";`);
+			writeFileSync(
+				inlinePath,
+				`${HEADER}\nexport const ${worker.constName} = "";`,
+			);
 		}
 	}
 
