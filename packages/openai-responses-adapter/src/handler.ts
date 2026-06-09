@@ -104,9 +104,13 @@ export async function handleResponsesRequest(
 	if (!syntheticHeaders.has("anthropic-version")) {
 		syntheticHeaders.set("anthropic-version", "2023-06-01");
 	}
-	// claude-oauth accounts use Claude's OAuth tokens — Anthropic bans them
-	// when used outside Claude CLI. Always exclude from Codex CLI traffic.
-	syntheticHeaders.set("x-clankermux-exclude-providers", "anthropic-oauth");
+	// Codex CLI traffic must NEVER land on an official Claude account — Anthropic
+	// bans OAuth tokens used outside Claude CLI, and a Claude model answering is
+	// not a cross-model review. This floor is UNCONDITIONAL (independent of any
+	// API-key pin or auth config): the proxy drops official-Anthropic accounts
+	// from selection for this request and disables the Anthropic-only burst-hold.
+	// A key pinned to the Codex account/class further constrains routing on top.
+	syntheticHeaders.set("x-clankermux-deny-official-anthropic", "1");
 	const syntheticReq = new Request(messagesUrl.toString(), {
 		method: "POST",
 		headers: syntheticHeaders,

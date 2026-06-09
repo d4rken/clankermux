@@ -163,6 +163,53 @@ describe("force-account proxy override", () => {
 		setForcedAccount(null);
 	});
 
+	it("Codex-CLI floor OVERRIDES a global force to a Claude account (never routes there)", async () => {
+		const forcedClaude = makeAccount({
+			id: "forced-claude",
+			name: "Claude",
+			provider: "anthropic",
+		});
+		const { ctx } = makeContext([forcedClaude], { providerName: "anthropic" });
+		setForcedAccount("forced-claude");
+
+		let fetchCalled = false;
+		globalThis.fetch = mock(async () => {
+			fetchCalled = true;
+			return jsonResponse({}, 200);
+		}) as never;
+
+		// Synthetic /v1/messages request carrying the Codex-CLI floor header.
+		const req = makeRequest({ "x-clankermux-deny-official-anthropic": "1" });
+		const resp = await callHandleProxy(req, new URL(req.url), ctx);
+
+		expect(resp.status).toBe(503);
+		const body = (await resp.json()) as {
+			error: { type: string };
+		};
+		expect(body.error.type).toBe("anthropic_excluded_no_account");
+		// The forced Claude account must never have been contacted.
+		expect(fetchCalled).toBe(false);
+	});
+
+	it("global force to a Claude account still applies WITHOUT the Codex floor header", async () => {
+		const forcedClaude = makeAccount({
+			id: "forced-claude-2",
+			name: "Claude2",
+			provider: "anthropic",
+		});
+		const { ctx } = makeContext([forcedClaude], { providerName: "anthropic" });
+		setForcedAccount("forced-claude-2");
+
+		globalThis.fetch = mock(async () =>
+			jsonResponse({ ok: true }, 200),
+		) as never;
+
+		const req = makeRequest(); // no deny header → normal force behavior
+		const resp = await callHandleProxy(req, new URL(req.url), ctx);
+
+		expect(resp.status).toBe(200);
+	});
+
 	it("returns the forced account's 429 as-is with NO failover to a second healthy account", async () => {
 		const forced = makeAccount({ id: "forced-1", name: "Forced-1" });
 		const healthy = makeAccount({ id: "healthy-2", name: "Healthy-2" });

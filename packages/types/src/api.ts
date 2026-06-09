@@ -27,6 +27,18 @@ export interface RequestMeta {
 	comboSlotIndex?: number | null;
 	/** Internal routing telemetry persisted with the request for optimization analysis */
 	routing?: RequestRoutingMeta;
+	/** Resolved per-key routing pin from the authenticated API key (Feature: API-key→account/class pin). */
+	pin?: { accountId: string | null; providers: string[] | null } | null;
+	/** Set when a pin strict-fails account selection; handleProxy returns a terminal pinned_target_unavailable error. */
+	pinFailure?: { code: string; message: string } | null;
+	/**
+	 * Unconditional floor for Codex-CLI traffic: when true, the request may NEVER
+	 * be routed to an official Anthropic/Claude account (ban risk + not a real
+	 * cross-model review). Set by the /v1/responses adapter for ALL Codex CLI
+	 * requests, independent of any API-key pin or auth config. Composes with the
+	 * pin and also disables the (Anthropic-only) burst-hold for the request.
+	 */
+	excludeOfficialAnthropic?: boolean | null;
 }
 
 export type RequestAffinityScope =

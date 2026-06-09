@@ -188,7 +188,9 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			created_at BIGINT NOT NULL,
 			last_used BIGINT,
 			usage_count INTEGER DEFAULT 0,
-			is_active INTEGER DEFAULT 1
+			is_active INTEGER DEFAULT 1,
+			pinned_account_id TEXT,
+			pinned_providers TEXT
 		)
 	`);
 
@@ -454,6 +456,16 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "heap_total_bytes",
 			definition:
 				"ALTER TABLE memory_snapshots ADD COLUMN heap_total_bytes BIGINT",
+		},
+		{
+			table: "api_keys",
+			column: "pinned_account_id",
+			definition: "ALTER TABLE api_keys ADD COLUMN pinned_account_id TEXT",
+		},
+		{
+			table: "api_keys",
+			column: "pinned_providers",
+			definition: "ALTER TABLE api_keys ADD COLUMN pinned_providers TEXT",
 		},
 	];
 

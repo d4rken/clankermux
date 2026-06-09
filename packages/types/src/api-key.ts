@@ -10,6 +10,11 @@ export interface ApiKeyRow {
 	last_used: number | null;
 	usage_count: number;
 	is_active: boolean | number;
+	// Optional routing constraint: pin the key to one backend account
+	// (pinned_account_id, takes precedence) or to a class of providers
+	// (pinned_providers, a JSON array string). NULL = no constraint.
+	pinned_account_id: string | null;
+	pinned_providers: string | null;
 }
 
 // Domain model - used throughout the application
@@ -22,6 +27,10 @@ export interface ApiKey {
 	lastUsed: number | null;
 	usageCount: number;
 	isActive: boolean;
+	// Parsed routing constraint (see ApiKeyRow). pinnedProviders is the parsed
+	// allow-list of provider names, or null when unset / unparseable.
+	pinnedAccountId: string | null;
+	pinnedProviders: string[] | null;
 }
 
 // API response type - what clients receive (excluding sensitive data)
@@ -33,6 +42,8 @@ export interface ApiKeyResponse {
 	lastUsed: string | null;
 	usageCount: number;
 	isActive: boolean;
+	pinnedAccountId: string | null;
+	pinnedProviders: string[] | null;
 }
 
 // API key generation result
@@ -120,6 +131,30 @@ export class NodeCryptoUtils implements CryptoUtils {
 	}
 }
 
+// Defensively parse the stored pinned_providers JSON array string. Returns the
+// allow-list only when the value is a non-empty array of strings; null/empty,
+// invalid JSON, or any non-array/non-string-element shape all collapse to null
+// (never throws). Exported so the routing layer can distinguish "no pin" from
+// "pin stored but unparseable" and fail closed on the latter.
+export function parsePinnedProviders(raw: string | null): string[] | null {
+	if (raw == null || raw === "") {
+		return null;
+	}
+	try {
+		const parsed = JSON.parse(raw);
+		if (
+			Array.isArray(parsed) &&
+			parsed.length > 0 &&
+			parsed.every((p) => typeof p === "string")
+		) {
+			return parsed as string[];
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 // Converter functions
 export function toApiKey(row: ApiKeyRow): ApiKey {
 	return {
@@ -131,6 +166,8 @@ export function toApiKey(row: ApiKeyRow): ApiKey {
 		lastUsed: row.last_used != null ? Number(row.last_used) : null,
 		usageCount: Number(row.usage_count) || 0,
 		isActive: !!row.is_active,
+		pinnedAccountId: row.pinned_account_id ?? null,
+		pinnedProviders: parsePinnedProviders(row.pinned_providers),
 	};
 }
 
@@ -143,5 +180,7 @@ export function toApiKeyResponse(apiKey: ApiKey): ApiKeyResponse {
 		lastUsed: apiKey.lastUsed ? new Date(apiKey.lastUsed).toISOString() : null,
 		usageCount: apiKey.usageCount,
 		isActive: apiKey.isActive,
+		pinnedAccountId: apiKey.pinnedAccountId,
+		pinnedProviders: apiKey.pinnedProviders,
 	};
 }

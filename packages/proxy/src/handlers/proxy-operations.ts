@@ -1830,3 +1830,34 @@ export function createContextWindowExceededResponse(
 		},
 	);
 }
+
+/**
+ * Create a 503 response when an API-key routing pin strict-failed selection —
+ * the pinned account/class had no allowed, available candidate. Returned
+ * (instead of the generic 503 pool_exhausted or the storm-hold path) so a
+ * pinned key never silently degrades to, or is answered from, a disallowed
+ * account. `failure.code` becomes the error `type` so the operator sees exactly
+ * which pin rule fired (pinned_account_missing / pinned_account_unavailable /
+ * pinned_no_available_account / pinned_header_rejected / pinned_resolution_error).
+ */
+export function createPinnedTargetUnavailableResponse(failure: {
+	code: string;
+	message: string;
+}): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: failure.code,
+				message: failure.message,
+			},
+		}),
+		{
+			status: 503,
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-pool-status": "pinned-target-unavailable",
+			},
+		},
+	);
+}

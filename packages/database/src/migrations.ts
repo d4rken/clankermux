@@ -258,7 +258,9 @@ export function ensureSchema(db: Database): void {
 			created_at INTEGER NOT NULL,
 			last_used INTEGER,
 			usage_count INTEGER DEFAULT 0,
-			is_active INTEGER DEFAULT 1
+			is_active INTEGER DEFAULT 1,
+			pinned_account_id TEXT,
+			pinned_providers TEXT
 		)
 	`);
 
@@ -1008,6 +1010,24 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE memory_snapshots ADD COLUMN heap_total_bytes INTEGER",
 			).run();
 			log.info("Added heap_total_bytes column to memory_snapshots table");
+		}
+
+		// Add pinned_account_id column to api_keys if it doesn't exist. Pins a
+		// key to one backend account for routing (takes precedence over
+		// pinned_providers). Nullable, defaults NULL = no constraint.
+		if (!apiKeysColumnNames.includes("pinned_account_id")) {
+			db.prepare(
+				"ALTER TABLE api_keys ADD COLUMN pinned_account_id TEXT",
+			).run();
+			log.info("Added pinned_account_id column to api_keys table");
+		}
+
+		// Add pinned_providers column to api_keys if it doesn't exist. JSON array
+		// string of allowed provider names, used only when pinned_account_id is
+		// null. Nullable, defaults NULL = no constraint.
+		if (!apiKeysColumnNames.includes("pinned_providers")) {
+			db.prepare("ALTER TABLE api_keys ADD COLUMN pinned_providers TEXT").run();
+			log.info("Added pinned_providers column to api_keys table");
 		}
 
 		// Drop role column from api_keys if it exists (cleanup migration).

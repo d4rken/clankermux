@@ -21,6 +21,7 @@ import type {
 	StrategyStore,
 	UsageSnapshotRow,
 } from "@clankermux/types";
+import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
@@ -1773,6 +1774,67 @@ OAuth tokens will need to be re-authenticated.
 			() => this.apiKeys.updateUsage(id, timestamp),
 			this.retryConfig,
 			"updateApiKeyUsage",
+		);
+	}
+
+	/**
+	 * Read just the routing pin for an API key. Returns null when the key does
+	 * not exist; otherwise the parsed pinnedAccountId / pinnedProviders without
+	 * exposing the stored secret to the caller.
+	 */
+	async getApiKeyPin(id: string): Promise<{
+		pinnedAccountId: string | null;
+		pinnedProviders: string[] | null;
+		/**
+		 * True when pinned_providers is stored as a non-empty value that does not
+		 * parse to a valid provider allow-list (corruption / manual tampering).
+		 * The routing layer must FAIL CLOSED on this rather than treat the key as
+		 * unpinned — silently dropping a pin could route a Codex-pinned key to a
+		 * Claude account (ban risk + wrong model).
+		 */
+		malformed: boolean;
+	} | null> {
+		const raw = await withDatabaseRetry(
+			() => this.apiKeys.findRawPinById(id),
+			this.retryConfig,
+			"getApiKeyPin",
+		);
+		if (!raw) {
+			return null;
+		}
+		const pinnedProviders = parsePinnedProviders(raw.pinnedProvidersRaw);
+		// Only NULL and "" are legitimate "no providers pin" states (the write
+		// path clears to NULL). ANY other stored value that fails to parse to a
+		// valid allow-list — whitespace-only, "[]", malformed JSON, wrong shape —
+		// is corruption/tampering and must fail closed, not route unpinned.
+		const malformed =
+			raw.pinnedProvidersRaw != null &&
+			raw.pinnedProvidersRaw !== "" &&
+			pinnedProviders === null;
+		return {
+			pinnedAccountId: raw.pinnedAccountId,
+			pinnedProviders,
+			malformed,
+		};
+	}
+
+	/**
+	 * Set (or clear) the routing pin for an API key. Serializes the provider
+	 * allow-list to a JSON array string (null when empty/unset) before storing.
+	 */
+	async updateApiKeyPin(
+		id: string,
+		pinnedAccountId: string | null,
+		pinnedProviders: string[] | null,
+	): Promise<boolean> {
+		const serialized =
+			pinnedProviders && pinnedProviders.length > 0
+				? JSON.stringify(pinnedProviders)
+				: null;
+		return withDatabaseRetry(
+			() => this.apiKeys.updatePin(id, pinnedAccountId, serialized),
+			this.retryConfig,
+			"updateApiKeyPin",
 		);
 	}
 

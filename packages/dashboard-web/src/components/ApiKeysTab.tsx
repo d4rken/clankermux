@@ -5,13 +5,15 @@ import {
 	Copy,
 	Plus,
 	RefreshCw,
+	Route,
 	Shield,
 	ToggleLeft,
 	ToggleRight,
 	Trash2,
 } from "lucide-react";
 import { useState } from "react";
-import { api } from "../api";
+import { type Account, api } from "../api";
+import { useAccounts } from "../hooks/queries";
 import { Button } from "./ui/button";
 import {
 	Card,
@@ -31,6 +33,13 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "./ui/select";
 
 interface ApiKey {
 	id: string;
@@ -40,7 +49,33 @@ interface ApiKey {
 	lastUsed: string | null;
 	usageCount: number;
 	isActive: boolean;
+	pinnedAccountId: string | null;
+	pinnedProviders: string[] | null;
 }
+
+/**
+ * Human-readable summary of a key's routing pin, shown in the key row. Pure and
+ * exported so it can be unit-tested without mounting the whole tab.
+ *   - pinned account  -> "Pinned → <accountName>" (falls back to the id when the
+ *     account no longer exists)
+ *   - pinned providers -> "Pinned → <providers joined with ', '>"
+ *   - neither          -> "Unpinned" (normal load-balancing)
+ */
+export function describePinTarget(
+	key: Pick<ApiKey, "pinnedAccountId" | "pinnedProviders">,
+	accounts: Pick<Account, "id" | "name">[],
+): string {
+	if (key.pinnedAccountId) {
+		const account = accounts.find((a) => a.id === key.pinnedAccountId);
+		return `Pinned → ${account?.name ?? key.pinnedAccountId}`;
+	}
+	if (key.pinnedProviders && key.pinnedProviders.length > 0) {
+		return `Pinned → ${key.pinnedProviders.join(", ")}`;
+	}
+	return "Unpinned";
+}
+
+type PinMode = "unpinned" | "account" | "provider";
 
 interface ApiKeysResponse {
 	success: boolean;
@@ -78,8 +113,17 @@ export function ApiKeysTab() {
 		apiKey: string;
 		source: "created" | "regenerated";
 	} | null>(null);
+	// Id of the key whose Routing editor is currently expanded (only one at a
+	// time). The editor's draft state lives in the <PinEditor> child so opening
+	// a row starts from that key's current pin.
+	const [editingPinKeyId, setEditingPinKeyId] = useState<string | null>(null);
 
 	const queryClient = useQueryClient();
+
+	// Accounts power the pin dropdown (pin to a specific account) and the
+	// distinct-provider list (pin to a provider class). Shared hook used across
+	// the dashboard.
+	const { data: accounts = [] } = useAccounts();
 
 	// Fetch API key statistics - only when not showing the generated key dialog
 	const { data: statsResponse, error: statsError } =
@@ -180,9 +224,49 @@ export function ApiKeysTab() {
 		},
 	});
 
+	// Set / clear a key's routing pin. Body shape mirrors the backend contract:
+	//   {}                        -> clear (normal load-balancing)
+	//   { accountId }             -> pin to a specific account
+	//   { providers: [...] }      -> pin to a provider class
+	// accountId and providers are mutually exclusive (enforced server-side; the
+	// editor never submits both). Doesn't touch api-keys-stats — pinning doesn't
+	// change active/inactive counts.
+	const setPinMutation = useMutation({
+		mutationFn: async ({
+			id,
+			body,
+		}: {
+			id: string;
+			body: { accountId?: string | null; providers?: string[] | null };
+		}) => {
+			return api.put(`/api/api-keys/${encodeURIComponent(id)}/pin`, body);
+		},
+		onSuccess: () => {
+			setEditingPinKeyId(null);
+			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+		},
+		onError: (error: Error) => {
+			// Inline error UI surfaces mutation.error next to the editor's Save
+			// button; log for parity with the other mutations in this tab.
+			console.error("Failed to update API key routing:", error);
+		},
+	});
+
 	const handleGenerateKey = () => {
 		if (!newKeyName.trim()) return;
 		generateKeyMutation.mutate({ name: newKeyName.trim() });
+	};
+
+	const handleSavePin = (
+		key: ApiKey,
+		body: { accountId?: string | null; providers?: string[] | null },
+	) => {
+		setPinMutation.mutate({ id: key.id, body });
+	};
+
+	const togglePinEditor = (key: ApiKey) => {
+		setPinMutation.reset();
+		setEditingPinKeyId((current) => (current === key.id ? null : key.id));
 	};
 
 	const handleToggleKey = (key: ApiKey, enable: boolean) => {
@@ -219,6 +303,12 @@ export function ApiKeysTab() {
 
 	const stats = statsResponse?.data;
 	const apiKeys = apiKeysResponse?.data || [];
+
+	// Distinct providers actually configured, so the operator can only pin to a
+	// provider class they have an account for. Sorted for a stable list.
+	const availableProviders = Array.from(
+		new Set(accounts.map((a) => a.provider)),
+	).sort();
 
 	if (keysError || statsError) {
 		return (
@@ -351,89 +441,124 @@ export function ApiKeysTab() {
 							{apiKeys.map((key) => (
 								<div
 									key={key.id}
-									className="flex items-center justify-between p-4 border rounded-lg"
+									className="flex flex-col gap-3 p-4 border rounded-lg"
 								>
-									<div className="flex-1">
-										<div className="flex items-center gap-2">
-											<h3 className="font-medium">{key.name}</h3>
-											<div
-												className={`px-2 py-1 rounded text-xs font-medium ${
-													key.isActive
-														? "bg-green-100 text-green-800"
-														: "bg-gray-100 text-gray-600"
-												}`}
-											>
-												{key.isActive ? "Active" : "Disabled"}
+									<div className="flex items-center justify-between">
+										<div className="flex-1">
+											<div className="flex items-center gap-2">
+												<h3 className="font-medium">{key.name}</h3>
+												<div
+													className={`px-2 py-1 rounded text-xs font-medium ${
+														key.isActive
+															? "bg-green-100 text-green-800"
+															: "bg-gray-100 text-gray-600"
+													}`}
+												>
+													{key.isActive ? "Active" : "Disabled"}
+												</div>
+											</div>
+											<div className="text-sm text-muted-foreground mt-1">
+												Key ends with:{" "}
+												<code className="bg-muted px-1 rounded">
+													{key.prefixLast8}
+												</code>
+											</div>
+											<div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+												<Route className="h-3 w-3" />
+												<span>{describePinTarget(key, accounts)}</span>
+											</div>
+											<div className="text-xs text-muted-foreground mt-1">
+												Created{" "}
+												{formatDistanceToNow(new Date(key.createdAt), {
+													addSuffix: true,
+												})}
+												{key.lastUsed && (
+													<>
+														{" • "}Last used{" "}
+														{formatDistanceToNow(new Date(key.lastUsed), {
+															addSuffix: true,
+														})}
+													</>
+												)}
+												{" • "}Used {key.usageCount} time
+												{key.usageCount !== 1 ? "s" : ""}
 											</div>
 										</div>
-										<div className="text-sm text-muted-foreground mt-1">
-											Key ends with:{" "}
-											<code className="bg-muted px-1 rounded">
-												{key.prefixLast8}
-											</code>
-										</div>
-										<div className="text-xs text-muted-foreground mt-1">
-											Created{" "}
-											{formatDistanceToNow(new Date(key.createdAt), {
-												addSuffix: true,
-											})}
-											{key.lastUsed && (
-												<>
-													{" • "}Last used{" "}
-													{formatDistanceToNow(new Date(key.lastUsed), {
-														addSuffix: true,
-													})}
-												</>
-											)}
-											{" • "}Used {key.usageCount} time
-											{key.usageCount !== 1 ? "s" : ""}
+										<div className="flex items-center gap-2">
+											<Button
+												variant="outline"
+												size="sm"
+												onClick={() => togglePinEditor(key)}
+												title="Change request routing for this key"
+												aria-label="Change routing"
+												aria-expanded={editingPinKeyId === key.id}
+											>
+												<Route className="h-4 w-4" />
+											</Button>
+											<Button
+												variant="outline"
+												size="sm"
+												onClick={() => copyToClipboard(key.prefixLast8)}
+											>
+												<Copy className="h-4 w-4" />
+											</Button>
+											<Button
+												variant="outline"
+												size="sm"
+												onClick={() => handleToggleKey(key, !key.isActive)}
+												disabled={toggleKeyMutation.isPending}
+											>
+												{key.isActive ? (
+													<ToggleLeft className="h-4 w-4" />
+												) : (
+													<ToggleRight className="h-4 w-4" />
+												)}
+											</Button>
+											<Button
+												variant="outline"
+												size="sm"
+												onClick={() => handleRegenerateKey(key)}
+												disabled={
+													!key.isActive || regenerateKeyMutation.isPending
+												}
+												title={
+													key.isActive
+														? "Regenerate API key"
+														: "Enable the key first to regenerate it"
+												}
+												aria-label="Regenerate API key"
+											>
+												<RefreshCw className="h-4 w-4" />
+											</Button>
+											<Button
+												variant="outline"
+												size="sm"
+												onClick={() => handleDeleteKey(key)}
+												disabled={deleteKeyMutation.isPending}
+											>
+												<Trash2 className="h-4 w-4 text-destructive" />
+											</Button>
 										</div>
 									</div>
-									<div className="flex items-center gap-2">
-										<Button
-											variant="outline"
-											size="sm"
-											onClick={() => copyToClipboard(key.prefixLast8)}
-										>
-											<Copy className="h-4 w-4" />
-										</Button>
-										<Button
-											variant="outline"
-											size="sm"
-											onClick={() => handleToggleKey(key, !key.isActive)}
-											disabled={toggleKeyMutation.isPending}
-										>
-											{key.isActive ? (
-												<ToggleLeft className="h-4 w-4" />
-											) : (
-												<ToggleRight className="h-4 w-4" />
-											)}
-										</Button>
-										<Button
-											variant="outline"
-											size="sm"
-											onClick={() => handleRegenerateKey(key)}
-											disabled={
-												!key.isActive || regenerateKeyMutation.isPending
+									{editingPinKeyId === key.id && (
+										<PinEditor
+											apiKey={key}
+											accounts={accounts}
+											availableProviders={availableProviders}
+											isPending={setPinMutation.isPending}
+											error={
+												setPinMutation.isError
+													? (setPinMutation.error?.message ??
+														"Failed to update routing.")
+													: null
 											}
-											title={
-												key.isActive
-													? "Regenerate API key"
-													: "Enable the key first to regenerate it"
-											}
-											aria-label="Regenerate API key"
-										>
-											<RefreshCw className="h-4 w-4" />
-										</Button>
-										<Button
-											variant="outline"
-											size="sm"
-											onClick={() => handleDeleteKey(key)}
-											disabled={deleteKeyMutation.isPending}
-										>
-											<Trash2 className="h-4 w-4 text-destructive" />
-										</Button>
-									</div>
+											onSave={(body) => handleSavePin(key, body)}
+											onCancel={() => {
+												setPinMutation.reset();
+												setEditingPinKeyId(null);
+											}}
+										/>
+									)}
 								</div>
 							))}
 						</div>
@@ -591,6 +716,165 @@ export function ApiKeysTab() {
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+		</div>
+	);
+}
+
+interface PinEditorProps {
+	apiKey: ApiKey;
+	accounts: Pick<Account, "id" | "name" | "provider">[];
+	availableProviders: string[];
+	isPending: boolean;
+	error: string | null;
+	onSave: (body: {
+		accountId?: string | null;
+		providers?: string[] | null;
+	}) => void;
+	onCancel: () => void;
+}
+
+/**
+ * Inline editor for a single key's routing pin. Local draft state is seeded from
+ * the key's current pin so opening the editor reflects what's live; nothing is
+ * persisted until Save. The three modes are mutually exclusive (the backend also
+ * enforces this), so we only ever submit one of accountId / providers.
+ */
+function PinEditor({
+	apiKey,
+	accounts,
+	availableProviders,
+	isPending,
+	error,
+	onSave,
+	onCancel,
+}: PinEditorProps) {
+	const initialMode: PinMode = apiKey.pinnedAccountId
+		? "account"
+		: apiKey.pinnedProviders && apiKey.pinnedProviders.length > 0
+			? "provider"
+			: "unpinned";
+
+	const [mode, setMode] = useState<PinMode>(initialMode);
+	const [accountId, setAccountId] = useState<string>(
+		apiKey.pinnedAccountId ?? "",
+	);
+	const [providers, setProviders] = useState<string[]>(
+		apiKey.pinnedProviders ?? [],
+	);
+
+	const toggleProvider = (provider: string) => {
+		setProviders((current) =>
+			current.includes(provider)
+				? current.filter((p) => p !== provider)
+				: [...current, provider],
+		);
+	};
+
+	const handleSave = () => {
+		if (mode === "account") {
+			onSave({ accountId });
+		} else if (mode === "provider") {
+			onSave({ providers });
+		} else {
+			onSave({});
+		}
+	};
+
+	// Block Save on incomplete selections so we never POST an empty pin that the
+	// operator didn't intend as "clear".
+	const saveDisabled =
+		isPending ||
+		(mode === "account" && !accountId) ||
+		(mode === "provider" && providers.length === 0);
+
+	return (
+		<div className="border-t pt-3 space-y-3">
+			<div className="space-y-2">
+				<Label className="text-xs">Routing mode</Label>
+				<Select value={mode} onValueChange={(v) => setMode(v as PinMode)}>
+					<SelectTrigger className="h-9">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						<SelectItem value="unpinned">Unpinned (load-balanced)</SelectItem>
+						<SelectItem value="account">Pin to account</SelectItem>
+						<SelectItem value="provider">Pin to provider class</SelectItem>
+					</SelectContent>
+				</Select>
+			</div>
+
+			{mode === "account" && (
+				<div className="space-y-2">
+					<Label className="text-xs">Account</Label>
+					{accounts.length === 0 ? (
+						<p className="text-xs text-muted-foreground">
+							No accounts configured.
+						</p>
+					) : (
+						<Select value={accountId} onValueChange={setAccountId}>
+							<SelectTrigger className="h-9">
+								<SelectValue placeholder="Select an account" />
+							</SelectTrigger>
+							<SelectContent>
+								{accounts.map((account) => (
+									<SelectItem key={account.id} value={account.id}>
+										{account.name}
+										<span className="ml-2 text-xs text-muted-foreground">
+											{account.provider}
+										</span>
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					)}
+				</div>
+			)}
+
+			{mode === "provider" && (
+				<div className="space-y-2">
+					<Label className="text-xs">Provider classes</Label>
+					{availableProviders.length === 0 ? (
+						<p className="text-xs text-muted-foreground">
+							No providers configured.
+						</p>
+					) : (
+						<div className="flex flex-wrap gap-3">
+							{availableProviders.map((provider) => (
+								<label
+									key={provider}
+									className="flex items-center gap-2 text-sm cursor-pointer"
+								>
+									<input
+										type="checkbox"
+										className="h-4 w-4"
+										checked={providers.includes(provider)}
+										onChange={() => toggleProvider(provider)}
+									/>
+									{provider}
+								</label>
+							))}
+						</div>
+					)}
+				</div>
+			)}
+
+			{error && (
+				<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+					<div className="flex items-start gap-2 text-destructive">
+						<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+						<span className="text-sm">{error}</span>
+					</div>
+				</div>
+			)}
+
+			<div className="flex items-center gap-2">
+				<Button size="sm" onClick={handleSave} disabled={saveDisabled}>
+					{isPending ? "Saving..." : "Save"}
+				</Button>
+				<Button size="sm" variant="outline" onClick={onCancel}>
+					Cancel
+				</Button>
+			</div>
 		</div>
 	);
 }
