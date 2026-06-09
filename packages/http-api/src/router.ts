@@ -20,6 +20,7 @@ import {
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
+	createAccountRenewalUpdateHandler,
 	createAccountResetStickinessHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
@@ -601,6 +602,17 @@ export class APIRouter {
 				return await this.wrapHandler((req) =>
 					billingTypeHandler(req, accountId),
 				)(req, url);
+			}
+
+			// Account renewal date
+			if (path.endsWith("/renewal") && method === "POST") {
+				const renewalHandler = createAccountRenewalUpdateHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) => renewalHandler(req, accountId))(
+					req,
+					url,
+				);
 			}
 
 			// Account auto-refresh toggle

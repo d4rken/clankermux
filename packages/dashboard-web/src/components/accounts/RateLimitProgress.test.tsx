@@ -123,6 +123,68 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
+	describe("secondary weekly windows", () => {
+		const future = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+		const usageData = () => ({
+			five_hour: { utilization: 10, resets_at: future() },
+			seven_day: { utilization: 20, resets_at: future() },
+			seven_day_opus: { utilization: 30, resets_at: future() },
+			seven_day_sonnet: { utilization: 5, resets_at: future() },
+		});
+
+		it("hides the Opus/Sonnet weekly bars when showSecondaryWeekly is false", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={usageData()}
+					provider="anthropic"
+					showWeekly
+					showSecondaryWeekly={false}
+				/>,
+			);
+
+			expect(html).toContain("5-hour");
+			expect(html).toContain("Weekly");
+			expect(html).not.toContain("Opus (Weekly)");
+			expect(html).not.toContain("Sonnet (Weekly)");
+		});
+
+		it("shows the Opus/Sonnet weekly bars when showSecondaryWeekly is true", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={usageData()}
+					provider="anthropic"
+					showWeekly
+					showSecondaryWeekly
+				/>,
+			);
+
+			expect(html).toContain("Opus (Weekly)");
+			expect(html).toContain("Sonnet (Weekly)");
+		});
+
+		it("shows the Opus/Sonnet weekly bars by default (prop omitted)", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={usageData()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("Opus (Weekly)");
+			expect(html).toContain("Sonnet (Weekly)");
+		});
+	});
+
 	it("does not display a throttled-until time past reset for over-100% usage", () => {
 		const now = Date.now();
 		const resetAt = now + 30 * 1000;

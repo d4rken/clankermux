@@ -687,6 +687,18 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added refresh_token_issued_at column to accounts table");
 		}
 
+		// Add renewal_anchor column for manually-entered subscription renewal date (YYYY-MM-DD, NULL = off)
+		if (!initialAccountsColumnNames.includes("renewal_anchor")) {
+			db.prepare("ALTER TABLE accounts ADD COLUMN renewal_anchor TEXT").run();
+			log.info("Added renewal_anchor column to accounts table");
+		}
+
+		// Add renewal_cadence column for renewal recurrence ('monthly' | 'yearly' | 'none', NULL when no anchor)
+		if (!initialAccountsColumnNames.includes("renewal_cadence")) {
+			db.prepare("ALTER TABLE accounts ADD COLUMN renewal_cadence TEXT").run();
+			log.info("Added renewal_cadence column to accounts table");
+		}
+
 		// Add auto_pause_on_overage_enabled column for Anthropic accounts
 		if (!initialAccountsColumnNames.includes("auto_pause_on_overage_enabled")) {
 			db.prepare(

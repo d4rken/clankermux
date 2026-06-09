@@ -27,6 +27,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				notes,
 				refresh_token_issued_at,
+				renewal_anchor,
+				renewal_cadence,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			ORDER BY priority DESC
@@ -55,6 +57,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				notes,
 				refresh_token_issued_at,
+				renewal_anchor,
+				renewal_cadence,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			WHERE id = ?
@@ -260,6 +264,17 @@ export class AccountRepository extends BaseRepository<Account> {
 			notes,
 			accountId,
 		]);
+	}
+
+	async setRenewal(
+		accountId: string,
+		anchor: string | null,
+		cadence: string | null,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET renewal_anchor = ?, renewal_cadence = ? WHERE id = ?`,
+			[anchor, cadence, accountId],
+		);
 	}
 
 	/**

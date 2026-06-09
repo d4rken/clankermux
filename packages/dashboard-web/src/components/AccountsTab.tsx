@@ -15,6 +15,7 @@ import {
 	AccountList,
 	AccountModelMappingsDialog,
 	AccountPriorityDialog,
+	AccountRenewalDialog,
 	AnthropicReauthDialog,
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
@@ -89,6 +90,13 @@ export function AccountsTab() {
 		account: null,
 	});
 	const [priorityDialog, setPriorityDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [renewalDialog, setRenewalDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
 	}>({
@@ -443,6 +451,24 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleRenewalChange = (account: Account) => {
+		setRenewalDialog({ isOpen: true, account });
+	};
+
+	const handleUpdateRenewal = async (
+		accountId: string,
+		anchor: string | null,
+		cadence: "monthly" | "yearly" | "none",
+	) => {
+		try {
+			await api.updateAccountRenewal(accountId, anchor, cadence);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleAutoFallbackToggle = async (account: Account) => {
 		try {
 			await api.updateAccountAutoFallback(
@@ -649,6 +675,7 @@ export function AccountsTab() {
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
 						onSaveNotes={handleSaveNotes}
+						onRenewalChange={handleRenewalChange}
 						onResetStickiness={handleResetStickiness}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
@@ -707,6 +734,20 @@ export function AccountsTab() {
 						})
 					}
 					onUpdatePriority={handleUpdatePriority}
+				/>
+			)}
+
+			{renewalDialog.isOpen && renewalDialog.account && (
+				<AccountRenewalDialog
+					account={renewalDialog.account}
+					isOpen={renewalDialog.isOpen}
+					onOpenChange={(open) =>
+						setRenewalDialog({
+							isOpen: open,
+							account: open ? renewalDialog.account : null,
+						})
+					}
+					onUpdateRenewal={handleUpdateRenewal}
 				/>
 			)}
 

@@ -942,6 +942,14 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.setNotes(accountId, notes);
 	}
 
+	async setAccountRenewal(
+		accountId: string,
+		anchor: string | null,
+		cadence: string | null,
+	): Promise<void> {
+		await this.accounts.setRenewal(accountId, anchor, cadence);
+	}
+
 	async updateAccountRequestCount(
 		accountId: string,
 		count: number,

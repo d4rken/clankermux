@@ -24,6 +24,7 @@ export interface AnthropicUsageData {
 	seven_day?: UsageWindowData;
 	seven_day_oauth_apps?: UsageWindowData;
 	seven_day_opus?: UsageWindowData;
+	seven_day_sonnet?: UsageWindowData;
 }
 
 // Usage data types for Zai accounts
@@ -107,6 +108,8 @@ export interface AccountRow {
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	notes?: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 }
 
 // Domain model - used throughout the application
@@ -144,6 +147,8 @@ export interface Account {
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
 	notes: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 }
 
 // Session statistics for 5-hour token window
@@ -195,6 +200,8 @@ export interface AccountResponse {
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
 	notes: string | null; // Free-text per-account operator notes
+	renewalAnchor?: string | null;
+	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
@@ -322,6 +329,8 @@ export function toAccount(row: AccountRow): Account {
 		pause_reason: row.pause_reason || null,
 		notes: row.notes || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
+		renewal_anchor: row.renewal_anchor || null,
+		renewal_cadence: row.renewal_cadence || null,
 	};
 }
 
@@ -416,6 +425,9 @@ export function toAccountResponse(account: Account): AccountResponse {
 		modelFallbacks,
 		billingType: account.billing_type,
 		notes: account.notes,
+		renewalAnchor: account.renewal_anchor,
+		renewalCadence:
+			(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ?? null,
 		sessionStats: null,
 		isPrimary: false,
 	};
