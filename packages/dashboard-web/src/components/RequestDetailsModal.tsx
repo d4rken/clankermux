@@ -7,6 +7,7 @@ import {
 import { Eye } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
+import { decodeBase64Utf8 } from "../lib/base64";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
@@ -68,19 +69,6 @@ export function RequestDetailsModal({
 		};
 	}, [needsHydration, request.id]);
 
-	const decodeBase64 = (str: string | null): string => {
-		if (!str) return "No data";
-		try {
-			if (str === "[streamed]") {
-				return "[Streaming data not captured]";
-			}
-			return atob(str);
-		} catch (error) {
-			console.error("Failed to decode base64:", error, "Input:", str);
-			return `Failed to decode: ${str}`;
-		}
-	};
-
 	const formatJson = (str: string): string => {
 		try {
 			const parsed = JSON.parse(str);
@@ -101,7 +89,7 @@ export function RequestDetailsModal({
 	};
 
 	const formatBody = (body: string | null): string => {
-		const decoded = decodeBase64(body);
+		const decoded = decodeBase64Utf8(body);
 		if (!beautifyMode) return decoded;
 		return formatJson(decoded);
 	};
@@ -171,8 +159,8 @@ export function RequestDetailsModal({
 
 					<TabsContent value="conversation" className="mt-4 flex-1 min-h-0">
 						<ConversationView
-							requestBody={decodeBase64(effective.request?.body ?? null)}
-							responseBody={decodeBase64(effective.response?.body || null)}
+							requestBody={decodeBase64Utf8(effective.request?.body ?? null)}
+							responseBody={decodeBase64Utf8(effective.response?.body || null)}
 						/>
 					</TabsContent>
 
