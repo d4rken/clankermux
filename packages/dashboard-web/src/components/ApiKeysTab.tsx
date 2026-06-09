@@ -3,6 +3,7 @@ import { formatDistanceToNow } from "date-fns";
 import {
 	AlertTriangle,
 	Copy,
+	Pencil,
 	Plus,
 	RefreshCw,
 	Route,
@@ -75,6 +76,31 @@ export function describePinTarget(
 	return "Unpinned";
 }
 
+/**
+ * Client-side validation for the rename-key dialog. Pure and exported so it can
+ * be unit-tested without mounting the tab (mirrors `describePinTarget`). Returns
+ * an inline error message to show, or `null` when the trimmed name is a valid,
+ * changed name that may be submitted. Mirrors the server contract: non-empty
+ * after trim, ≤100 chars, and renaming to the current name is a no-op (blocked
+ * client-side so we never fire a pointless request).
+ */
+export function validateRenameKey(
+	rawName: string,
+	currentName: string,
+): string | null {
+	const trimmed = rawName.trim();
+	if (!trimmed) {
+		return "Name cannot be empty";
+	}
+	if (trimmed.length > 100) {
+		return "Name cannot exceed 100 characters";
+	}
+	if (trimmed === currentName) {
+		return "Name is unchanged";
+	}
+	return null;
+}
+
 type PinMode = "unpinned" | "account" | "provider";
 
 interface ApiKeysResponse {
@@ -107,7 +133,9 @@ export function ApiKeysTab() {
 	const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
 	const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 	const [isRegenerateDialogOpen, setIsRegenerateDialogOpen] = useState(false);
+	const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
 	const [newKeyName, setNewKeyName] = useState("");
+	const [renameValue, setRenameValue] = useState("");
 	const [selectedKey, setSelectedKey] = useState<ApiKey | null>(null);
 	const [generatedKey, setGeneratedKey] = useState<{
 		apiKey: string;
@@ -224,6 +252,30 @@ export function ApiKeysTab() {
 		},
 	});
 
+	// Rename an existing key. Keyed by id (not name) since the name is exactly
+	// what's changing. A rename leaves the row count and active/inactive split
+	// untouched, so we intentionally don't invalidate api-keys-stats. The server
+	// returns 409 when the new name is held by a different key — surfaced inline
+	// in the dialog via renameKeyMutation.error.
+	const renameKeyMutation = useMutation({
+		mutationFn: async ({ id, name }: { id: string; name: string }) => {
+			return api.post(`/api/api-keys/${encodeURIComponent(id)}/rename`, {
+				name,
+			});
+		},
+		onSuccess: () => {
+			setIsRenameDialogOpen(false);
+			setSelectedKey(null);
+			setRenameValue("");
+			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			// counts don't change on rename → intentionally NOT invalidating
+			// ["api-keys-stats"]
+		},
+		onError: (error: Error) => {
+			console.error("Failed to rename API key:", error);
+		},
+	});
+
 	// Set / clear a key's routing pin. Body shape mirrors the backend contract:
 	//   {}                        -> clear (normal load-balancing)
 	//   { accountId }             -> pin to a specific account
@@ -295,6 +347,26 @@ export function ApiKeysTab() {
 		}
 	};
 
+	const handleRenameKey = (key: ApiKey) => {
+		setSelectedKey(key);
+		setRenameValue(key.name);
+		renameKeyMutation.reset();
+		setIsRenameDialogOpen(true);
+	};
+
+	const confirmRenameKey = () => {
+		// Single source of truth for validity: reuse validateRenameKey rather than
+		// re-deriving the empty/unchanged rules inline (the Save button is gated by
+		// the same helper, so they can't drift).
+		if (
+			!selectedKey ||
+			validateRenameKey(renameValue, selectedKey.name) !== null
+		) {
+			return;
+		}
+		renameKeyMutation.mutate({ id: selectedKey.id, name: renameValue.trim() });
+	};
+
 	const copyToClipboard = (text: string) => {
 		navigator.clipboard.writeText(text).catch((err) => {
 			console.error("Failed to copy to clipboard:", err);
@@ -303,6 +375,12 @@ export function ApiKeysTab() {
 
 	const stats = statsResponse?.data;
 	const apiKeys = apiKeysResponse?.data || [];
+
+	// Client-side rename validation, computed once for both the inline error
+	// message and the Save-button disabled state. `null` means the trimmed name
+	// is valid and changed (safe to submit).
+	const renameError = validateRenameKey(renameValue, selectedKey?.name ?? "");
+	const canRenameSubmit = renameError === null;
 
 	// Distinct providers actually configured, so the operator can only pin to a
 	// provider class they have an account for. Sorted for a stable list.
@@ -505,6 +583,16 @@ export function ApiKeysTab() {
 											<Button
 												variant="outline"
 												size="sm"
+												onClick={() => handleRenameKey(key)}
+												disabled={renameKeyMutation.isPending}
+												title="Rename API key"
+												aria-label="Rename API key"
+											>
+												<Pencil className="h-4 w-4" />
+											</Button>
+											<Button
+												variant="outline"
+												size="sm"
 												onClick={() => handleToggleKey(key, !key.isActive)}
 												disabled={toggleKeyMutation.isPending}
 											>
@@ -680,6 +768,79 @@ export function ApiKeysTab() {
 								: "Regenerate Key"}
 						</Button>
 					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			{/* Rename Dialog */}
+			<Dialog
+				open={isRenameDialogOpen}
+				onOpenChange={(open) => {
+					setIsRenameDialogOpen(open);
+					if (!open) {
+						setSelectedKey(null);
+						setRenameValue("");
+						renameKeyMutation.reset();
+					}
+				}}
+			>
+				<DialogContent>
+					<form
+						onSubmit={(e) => {
+							e.preventDefault();
+							confirmRenameKey();
+						}}
+					>
+						<DialogHeader>
+							<DialogTitle>Rename API Key</DialogTitle>
+							<DialogDescription>
+								Enter a new name for the API key "{selectedKey?.name}".
+							</DialogDescription>
+						</DialogHeader>
+						<div className="grid gap-4 py-4">
+							<div className="grid gap-2">
+								<Label htmlFor="rename-key-name">New Name</Label>
+								<Input
+									id="rename-key-name"
+									value={renameValue}
+									onChange={(e) => setRenameValue(e.target.value)}
+									placeholder="Enter new key name"
+									autoFocus
+									maxLength={100}
+									disabled={renameKeyMutation.isPending}
+								/>
+								{renameError && (
+									<p className="text-sm text-destructive">{renameError}</p>
+								)}
+							</div>
+							{renameKeyMutation.isError && (
+								<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+									<div className="flex items-start gap-2 text-destructive">
+										<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+										<span className="text-sm">
+											{renameKeyMutation.error?.message ??
+												"Failed to rename API key."}
+										</span>
+									</div>
+								</div>
+							)}
+						</div>
+						<DialogFooter>
+							<Button
+								type="button"
+								variant="outline"
+								onClick={() => setIsRenameDialogOpen(false)}
+								disabled={renameKeyMutation.isPending}
+							>
+								Cancel
+							</Button>
+							<Button
+								type="submit"
+								disabled={!canRenameSubmit || renameKeyMutation.isPending}
+							>
+								{renameKeyMutation.isPending ? "Renaming..." : "Rename"}
+							</Button>
+						</DialogFooter>
+					</form>
 				</DialogContent>
 			</Dialog>
 
