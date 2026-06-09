@@ -936,6 +936,13 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.setBillingType(accountId, billingType);
 	}
 
+	async setAccountNotes(
+		accountId: string,
+		notes: string | null,
+	): Promise<void> {
+		await this.accounts.setNotes(accountId, notes);
+	}
+
 	async setAccountRenewal(
 		accountId: string,
 		anchor: string | null,

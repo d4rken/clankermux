@@ -12,6 +12,7 @@ import {
 	createAccountForceResetRateLimitHandler,
 	createAccountModelFallbacksUpdateHandler,
 	createAccountModelMappingsUpdateHandler,
+	createAccountNotesUpdateHandler,
 	createAccountPauseHandler,
 	createAccountPeakHoursPauseHandler,
 	createAccountPriorityUpdateHandler,
@@ -550,6 +551,16 @@ export class APIRouter {
 					this.context.dbOps,
 				);
 				return await this.wrapHandler((req) => priorityHandler(req, accountId))(
+					req,
+					url,
+				);
+			}
+			// Account notes update
+			if (path.endsWith("/notes") && method === "POST") {
+				const notesHandler = createAccountNotesUpdateHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) => notesHandler(req, accountId))(
 					req,
 					url,
 				);

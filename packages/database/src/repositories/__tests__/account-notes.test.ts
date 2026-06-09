@@ -1,15 +1,15 @@
 /**
- * Tests for AccountRepository.setRenewal — subscription renewal date storage.
+ * Tests for AccountRepository per-account free-text notes.
  *
  * Verifies that:
- *  - setRenewal(id, anchor, cadence) writes both columns
- *  - setRenewal(id, null, null) clears the renewal
- *  - findById() surfaces the columns as renewal_anchor / renewal_cadence
+ *  - setNotes(id, "text")  persists the note, surfaced via findById().notes
+ *  - setNotes(id, null)    clears the note back to NULL
+ *  - findAll() also surfaces notes
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 // Force @clankermux/core to initialise before @clankermux/types resolves its
-// circular dependency. Same pattern as account-pause-reason.test.ts.
+// circular dependency (types/agent.ts → core → core/strategy.ts → types/StrategyName).
 import "@clankermux/core";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { AccountRepository } from "../account.repository";
@@ -17,7 +17,7 @@ import { AccountRepository } from "../account.repository";
 function makeDb(): { db: Database; repo: AccountRepository } {
 	const db = new Database(":memory:");
 
-	// Minimal schema — only the columns AccountRepository touches, plus renewal_*
+	// Minimal schema — the columns AccountRepository's SELECTs touch, plus notes.
 	db.run(`
 		CREATE TABLE accounts (
 			id TEXT PRIMARY KEY,
@@ -52,10 +52,10 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			billing_type TEXT,
 			pause_reason TEXT,
 			refresh_token_issued_at INTEGER,
-			renewal_anchor TEXT,
-			renewal_cadence TEXT,
 			consecutive_rate_limits INTEGER DEFAULT 0,
-			notes TEXT
+			notes TEXT,
+			renewal_anchor TEXT,
+			renewal_cadence TEXT
 		)
 	`);
 
@@ -72,20 +72,7 @@ function insertAccount(db: Database, id: string): void {
 	]);
 }
 
-interface RawRenewal {
-	renewal_anchor: string | null;
-	renewal_cadence: string | null;
-}
-
-function getRaw(db: Database, id: string): RawRenewal {
-	return db
-		.query<RawRenewal, [string]>(
-			"SELECT renewal_anchor, renewal_cadence FROM accounts WHERE id = ?",
-		)
-		.get(id) as RawRenewal;
-}
-
-describe("AccountRepository — setRenewal", () => {
+describe("AccountRepository — notes", () => {
 	let db: Database;
 	let repo: AccountRepository;
 
@@ -97,34 +84,39 @@ describe("AccountRepository — setRenewal", () => {
 		db.close();
 	});
 
-	it("writes renewal_anchor and renewal_cadence", async () => {
+	it("defaults to null for a freshly inserted account", async () => {
 		insertAccount(db, "acc-1");
 
-		await repo.setRenewal("acc-1", "2026-01-14", "monthly");
-
-		const row = getRaw(db, "acc-1");
-		expect(row.renewal_anchor).toBe("2026-01-14");
-		expect(row.renewal_cadence).toBe("monthly");
-	});
-
-	it("clears both columns when anchor and cadence are null", async () => {
-		insertAccount(db, "acc-2");
-		await repo.setRenewal("acc-2", "2026-03-31", "yearly");
-
-		await repo.setRenewal("acc-2", null, null);
-
-		const row = getRaw(db, "acc-2");
-		expect(row.renewal_anchor).toBeNull();
-		expect(row.renewal_cadence).toBeNull();
-	});
-
-	it("surfaces the columns through findById()", async () => {
-		insertAccount(db, "acc-3");
-		await repo.setRenewal("acc-3", "2026-06-09", "none");
-
-		const account = await repo.findById("acc-3");
+		const account = await repo.findById("acc-1");
 		expect(account).not.toBeNull();
-		expect(account?.renewal_anchor).toBe("2026-06-09");
-		expect(account?.renewal_cadence).toBe("none");
+		expect(account?.notes).toBeNull();
+	});
+
+	it("setNotes persists a value and findById round-trips it", async () => {
+		insertAccount(db, "acc-2");
+
+		await repo.setNotes("acc-2", "primary work account — do not pause");
+
+		const account = await repo.findById("acc-2");
+		expect(account?.notes).toBe("primary work account — do not pause");
+	});
+
+	it("setNotes(null) clears a previously set value", async () => {
+		insertAccount(db, "acc-3");
+
+		await repo.setNotes("acc-3", "temporary note");
+		expect((await repo.findById("acc-3"))?.notes).toBe("temporary note");
+
+		await repo.setNotes("acc-3", null);
+		expect((await repo.findById("acc-3"))?.notes).toBeNull();
+	});
+
+	it("findAll surfaces notes", async () => {
+		insertAccount(db, "acc-4");
+		await repo.setNotes("acc-4", "listed note");
+
+		const all = await repo.findAll();
+		const found = all.find((a) => a.id === "acc-4");
+		expect(found?.notes).toBe("listed note");
 	});
 });

@@ -204,6 +204,7 @@ export function createAccountsListHandler(
 			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
+			notes: string | null;
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
 		}>(
@@ -239,6 +240,7 @@ export function createAccountsListHandler(
 					model_fallbacks,
 					billing_type,
 					pause_reason,
+					notes,
 					renewal_anchor,
 					renewal_cadence,
 					CASE
@@ -541,6 +543,7 @@ export function createAccountsListHandler(
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields
 					modelFallbacks,
 					billingType: account.billing_type,
+					notes: account.notes,
 					renewalAnchor: account.renewal_anchor ?? null,
 					renewalCadence:
 						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
@@ -587,6 +590,51 @@ export function createAccountPriorityUpdateHandler(dbOps: DatabaseOperations) {
 		} catch (_error) {
 			return errorResponse(
 				InternalServerError("Failed to update account priority"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account notes update handler.
+ * Notes are optional/clearable free-text: null/undefined/empty-after-trim
+ * stores null. Over-length input (>2000 chars) is rejected with HTTP 400.
+ */
+export function createAccountNotesUpdateHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// notes is optional/clearable: null/undefined/empty-after-trim => store null
+			let notes: string | null = null;
+			if (body.notes !== null && body.notes !== undefined) {
+				const validated = validateString(body.notes, "notes", {
+					required: false,
+					maxLength: 2000,
+					transform: sanitizers.trim,
+				});
+				notes = validated && validated.length > 0 ? validated : null;
+			}
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			await dbOps.setAccountNotes(accountId, notes);
+
+			return jsonResponse({ success: true, notes });
+		} catch (error) {
+			if (error instanceof ValidationError) {
+				return errorResponse(BadRequest(error.message));
+			}
+			return errorResponse(
+				InternalServerError("Failed to update account notes"),
 			);
 		}
 	};

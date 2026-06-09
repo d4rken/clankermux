@@ -106,6 +106,7 @@ export interface AccountRow {
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	notes?: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
@@ -144,6 +145,7 @@ export interface Account {
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	notes: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
@@ -197,6 +199,7 @@ export interface AccountResponse {
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
+	notes: string | null; // Free-text per-account operator notes
 	renewalAnchor?: string | null;
 	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	sessionStats: SessionStats | null;
@@ -324,6 +327,7 @@ export function toAccount(row: AccountRow): Account {
 		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
+		notes: row.notes || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 		renewal_anchor: row.renewal_anchor || null,
 		renewal_cadence: row.renewal_cadence || null,
@@ -420,6 +424,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
 		modelFallbacks,
 		billingType: account.billing_type,
+		notes: account.notes,
 		renewalAnchor: account.renewal_anchor,
 		renewalCadence:
 			(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ?? null,
