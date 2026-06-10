@@ -82,6 +82,12 @@ import {
 	createQwenDeviceFlowStatusHandler,
 	createQwenReauthHandler,
 } from "./handlers/oauth";
+import {
+	createPaymentCreateHandler,
+	createPaymentDeleteHandler,
+	createPaymentsSeedHandler,
+	createPaymentsSummaryHandler,
+} from "./handlers/payments";
 import { parseRequestFilters } from "./handlers/request-filters";
 import {
 	createRequestPayloadHandler,
@@ -381,6 +387,19 @@ export class APIRouter {
 			configHandlers.setUsageThrottling(req),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
+
+		// Payments ledger routes (summary reads dispatch through the read-only
+		// dashboard worker; DELETE /api/payments/:id is in the dynamic block)
+		const paymentsSummaryHandler = createPaymentsSummaryHandler(this.context);
+		const paymentCreateHandler = createPaymentCreateHandler(dbOps);
+		const paymentsSeedHandler = createPaymentsSeedHandler(dbOps);
+		this.handlers.set("GET:/api/payments/summary", (_req, url) =>
+			paymentsSummaryHandler(url.searchParams),
+		);
+		this.handlers.set("POST:/api/payments", (req) => paymentCreateHandler(req));
+		this.handlers.set("POST:/api/payments/seed", (req) =>
+			paymentsSeedHandler(req),
+		);
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
@@ -673,6 +692,16 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// Payment soft delete: DELETE /api/payments/:id
+		if (path.startsWith("/api/payments/") && method === "DELETE") {
+			const parts = path.split("/");
+			const paymentId = decodeURIComponent(parts[3] ?? "");
+			if (parts.length === 4 && paymentId) {
+				const deleteHandler = createPaymentDeleteHandler(this.context.dbOps);
+				return await this.wrapHandler(() => deleteHandler(paymentId))(req, url);
 			}
 		}
 

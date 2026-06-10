@@ -28,6 +28,7 @@ interface AccountRenewalDialogProps {
 		accountId: string,
 		anchor: string | null,
 		cadence: RenewalCadence,
+		priceUsd: number | null,
 	) => Promise<void>;
 }
 
@@ -41,6 +42,9 @@ export function AccountRenewalDialog({
 	const [cadence, setCadence] = useState<RenewalCadence>(
 		account?.renewalCadence ?? "monthly",
 	);
+	const [price, setPrice] = useState(
+		account?.renewalPriceUsd != null ? String(account.renewalPriceUsd) : "",
+	);
 	const [isUpdating, setIsUpdating] = useState(false);
 
 	// Reset fields when the account changes or the dialog opens.
@@ -48,17 +52,31 @@ export function AccountRenewalDialog({
 		if (account) {
 			setAnchor(account.renewalAnchor ?? "");
 			setCadence(account.renewalCadence ?? "monthly");
+			setPrice(
+				account.renewalPriceUsd != null ? String(account.renewalPriceUsd) : "",
+			);
 		}
 	}, [account]);
 
 	const hasAnchorSet = !!account?.renewalAnchor;
+	// One-time dates aren't auto-recorded, so a price would be inert — the
+	// input is disabled and the save sends null.
+	const priceDisabled = cadence === "none";
+
+	const parsedPrice = Number.parseFloat(price);
+	const priceValid =
+		priceDisabled ||
+		price.trim() === "" ||
+		(Number.isFinite(parsedPrice) && parsedPrice > 0);
 
 	const handleSave = async () => {
 		if (!account) return;
 		const anchorOrNull = anchor.trim() === "" ? null : anchor;
+		const priceOrNull =
+			priceDisabled || price.trim() === "" ? null : parsedPrice;
 		setIsUpdating(true);
 		try {
-			await onUpdateRenewal(account.id, anchorOrNull, cadence);
+			await onUpdateRenewal(account.id, anchorOrNull, cadence, priceOrNull);
 			onOpenChange(false);
 		} catch (error) {
 			console.error("Failed to update renewal date:", error);
@@ -71,7 +89,7 @@ export function AccountRenewalDialog({
 		if (!account) return;
 		setIsUpdating(true);
 		try {
-			await onUpdateRenewal(account.id, null, "none");
+			await onUpdateRenewal(account.id, null, "none", null);
 			onOpenChange(false);
 		} catch (error) {
 			console.error("Failed to clear renewal date:", error);
@@ -122,6 +140,28 @@ export function AccountRenewalDialog({
 							</SelectContent>
 						</Select>
 					</div>
+					<div className="grid grid-cols-4 items-center gap-4">
+						<Label htmlFor="renewal-price" className="text-right">
+							Price USD
+						</Label>
+						<div className="col-span-3">
+							<Input
+								id="renewal-price"
+								type="number"
+								min={0}
+								step={0.01}
+								placeholder="Price per renewal (empty = no price)"
+								value={price}
+								onChange={(e) => setPrice(e.target.value)}
+								disabled={priceDisabled}
+							/>
+							{priceDisabled && (
+								<p className="mt-1 text-xs text-muted-foreground">
+									One-time dates aren't auto-recorded — use Record Payment.
+								</p>
+							)}
+						</div>
+					</div>
 				</div>
 				<DialogFooter>
 					<Button
@@ -139,7 +179,11 @@ export function AccountRenewalDialog({
 					>
 						Clear
 					</Button>
-					<Button type="button" onClick={handleSave} disabled={isUpdating}>
+					<Button
+						type="button"
+						onClick={handleSave}
+						disabled={isUpdating || !priceValid}
+					>
 						{isUpdating ? "Saving..." : "Save"}
 					</Button>
 				</DialogFooter>

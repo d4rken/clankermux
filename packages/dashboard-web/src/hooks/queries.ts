@@ -308,6 +308,55 @@ export const useMemoryHistory = (range: string) => {
 	});
 };
 
+/**
+ * Spend/plan-value summary from the payments ledger. Slow-moving data
+ * (subscription renewals land hourly at most), so a relaxed cadence: 60s
+ * stale, 2-minute poll, paused in the background. Mutations (record/delete
+ * payment, renewal price changes) invalidate the prefix key explicitly.
+ */
+export const usePaymentsSummary = (range: string) => {
+	return useQuery({
+		queryKey: queryKeys.paymentsSummary(range),
+		queryFn: () => api.getPaymentsSummary(range),
+		staleTime: 60_000,
+		refetchInterval: 120_000,
+		refetchIntervalInBackground: false,
+	});
+};
+
+export const useCreatePayment = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (input: {
+			accountId: string;
+			kind: "subscription" | "credits";
+			paidDate: string;
+			amountUsd: number;
+			notes?: string;
+		}) => api.createPayment(input),
+		onSuccess: () => {
+			// Prefix invalidation: every range-keyed summary is stale now.
+			queryClient.invalidateQueries({
+				queryKey: queryKeys.paymentsSummaries(),
+			});
+			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+		},
+	});
+};
+
+export const useDeletePayment = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (id: string) => api.deletePayment(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: queryKeys.paymentsSummaries(),
+			});
+			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+		},
+	});
+};
+
 export const useRequests = (limit: number, opts?: { enabled?: boolean }) => {
 	return useQuery({
 		queryKey: queryKeys.requests(limit),

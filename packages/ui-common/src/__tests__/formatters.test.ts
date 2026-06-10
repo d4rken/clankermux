@@ -3,7 +3,26 @@ import {
 	formatBytes,
 	formatReasoningEffort,
 	formatTokensPerSecond,
+	formatUsd,
 } from "../formatters";
+
+describe("formatUsd", () => {
+	it("always renders exactly two decimals", () => {
+		expect(formatUsd(200)).toBe("$200.00");
+		expect(formatUsd(0)).toBe("$0.00");
+		expect(formatUsd(19.9)).toBe("$19.90");
+	});
+
+	it("rounds sub-cent amounts to two decimals", () => {
+		expect(formatUsd(3.456)).toBe("$3.46");
+		expect(formatUsd(3.451)).toBe("$3.45");
+	});
+
+	it("groups thousands", () => {
+		expect(formatUsd(1234.5)).toBe("$1,234.50");
+		expect(formatUsd(1_000_000)).toBe("$1,000,000.00");
+	});
+});
 
 describe("formatBytes", () => {
 	it("returns '0 B' for zero, negative, and undefined", () => {

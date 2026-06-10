@@ -45,13 +45,18 @@ import type {
 	LoadBalancingStrategy,
 	RateLimitReason,
 } from "@clankermux/types";
-import { requiresSessionDurationTracking } from "@clankermux/types";
+import {
+	microsToUsd,
+	requiresSessionDurationTracking,
+	usdToMicros,
+} from "@clankermux/types";
 import {
 	pauseAccount,
 	removeAccount,
 	resumeAccount,
 } from "../services/admin/accounts";
 import type { AccountResponse } from "../types";
+import { invalidateDashboardCache } from "./analytics-runner";
 
 const log = new Logger("AccountsHandler");
 
@@ -207,6 +212,7 @@ export function createAccountsListHandler(
 			notes: string | null;
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
+			renewal_price_usd_micros: number | null;
 		}>(
 			`
 				SELECT
@@ -243,6 +249,7 @@ export function createAccountsListHandler(
 					notes,
 					renewal_anchor,
 					renewal_cadence,
+					renewal_price_usd_micros,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -548,6 +555,10 @@ export function createAccountsListHandler(
 					renewalCadence:
 						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
 						null,
+					renewalPriceUsd:
+						account.renewal_price_usd_micros != null
+							? microsToUsd(account.renewal_price_usd_micros)
+							: null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					isPrimary: account.id === primaryId,
 				};
@@ -2219,10 +2230,26 @@ export function createAccountBillingTypeHandler(dbOps: DatabaseOperations) {
 	};
 }
 
+/** Local "YYYY-MM-DD" of today (zero-padded; renewal dates are local-calendar). */
+function localTodayDate(): string {
+	const d = new Date();
+	const mm = String(d.getMonth() + 1).padStart(2, "0");
+	const dd = String(d.getDate()).padStart(2, "0");
+	return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 /**
  * Create an account renewal date update handler.
- * Stores a manually-entered subscription renewal anchor date and cadence.
- * Sending renewalAnchor: null (or empty) clears the renewal (both columns set to NULL).
+ * Stores a manually-entered subscription renewal anchor date, cadence, and
+ * optional price (`renewalPriceUsd`, USD float → stored as integer micros).
+ * Sending renewalAnchor: null (or empty) clears everything (cadence, price,
+ * auto-start all NULL).
+ *
+ * `renewal_auto_start_date` transitions (the auto-recorder's lower bound, so
+ * it never invents history):
+ *  - price unset → set: stamp today (auto-recording starts now)
+ *  - price set → set (changed or not): keep the existing auto-start
+ *  - price → null: clear the auto-start
  */
 export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 	return async (req: Request, accountId: string): Promise<Response> => {
@@ -2274,10 +2301,33 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 			// No anchor means no cadence — don't store a dangling cadence.
 			const storedCadence = anchor === null ? null : cadence;
 
-			// Check if account exists
+			// Validate renewalPriceUsd: optional; null/""/undefined means "no
+			// price"; otherwise must be a finite number > 0.
+			let priceUsd: number | null;
+			if (body.renewalPriceUsd == null || body.renewalPriceUsd === "") {
+				priceUsd = null;
+			} else if (
+				typeof body.renewalPriceUsd !== "number" ||
+				!Number.isFinite(body.renewalPriceUsd) ||
+				body.renewalPriceUsd <= 0
+			) {
+				return errorResponse(
+					BadRequest("renewalPriceUsd must be a positive number or null"),
+				);
+			} else {
+				priceUsd = body.renewalPriceUsd;
+			}
+
+			// Check if account exists (and fetch the current price/auto-start to
+			// drive the auto-start transition rules).
 			const db = dbOps.getAdapter();
-			const account = await db.get<{ name: string }>(
-				"SELECT name FROM accounts WHERE id = ?",
+			const account = await db.get<{
+				name: string;
+				renewal_price_usd_micros: number | null;
+				renewal_auto_start_date: string | null;
+			}>(
+				`SELECT name, renewal_price_usd_micros, renewal_auto_start_date
+				 FROM accounts WHERE id = ?`,
 				[accountId],
 			);
 
@@ -2285,7 +2335,31 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			await dbOps.setAccountRenewal(accountId, anchor, storedCadence);
+			// anchor null clears everything; price null clears the auto-start; a
+			// newly-set price stamps today; a kept/changed price keeps the
+			// existing auto-start (defensively falling back to today if it was
+			// somehow never stamped — mirrors the auto-recorder's fallback).
+			let storedPriceMicros: number | null = null;
+			let storedAutoStart: string | null = null;
+			if (anchor !== null && priceUsd !== null) {
+				storedPriceMicros = usdToMicros(priceUsd);
+				storedAutoStart =
+					account.renewal_price_usd_micros != null
+						? (account.renewal_auto_start_date ?? localTodayDate())
+						: localTodayDate();
+			}
+
+			await dbOps.setAccountRenewal(
+				accountId,
+				anchor,
+				storedCadence,
+				storedPriceMicros,
+				storedAutoStart,
+			);
+
+			// Renewal price/cadence feed the payments-summary amortization math;
+			// drop the cached summary so the UI's refetch reflects this change.
+			invalidateDashboardCache("payments-summary");
 
 			return jsonResponse({
 				success: true,
@@ -2295,6 +2369,8 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 						: `Renewal date set to '${anchor}' (${storedCadence}) for account '${account.name}'`,
 				renewalAnchor: anchor,
 				renewalCadence: storedCadence,
+				renewalPriceUsd:
+					storedPriceMicros != null ? microsToUsd(storedPriceMicros) : null,
 			});
 		} catch (error) {
 			log.error("Account renewal update error:", error);

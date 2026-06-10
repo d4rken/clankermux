@@ -1,3 +1,5 @@
+import { microsToUsd } from "./payment";
+
 export type RateLimitReason =
 	| "upstream_429_with_reset"
 	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
@@ -110,6 +112,8 @@ export interface AccountRow {
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
+	renewal_price_usd_micros?: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
+	renewal_auto_start_date?: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
 }
 
 // Domain model - used throughout the application
@@ -149,6 +153,8 @@ export interface Account {
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
+	renewal_price_usd_micros: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
+	renewal_auto_start_date: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
 }
 
 // Session statistics for 5-hour token window
@@ -202,6 +208,7 @@ export interface AccountResponse {
 	notes: string | null; // Free-text per-account operator notes
 	renewalAnchor?: string | null;
 	renewalCadence?: "monthly" | "yearly" | "none" | null;
+	renewalPriceUsd?: number | null; // Subscription price in USD (API boundary speaks USD floats)
 	sessionStats: SessionStats | null;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
@@ -331,6 +338,8 @@ export function toAccount(row: AccountRow): Account {
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 		renewal_anchor: row.renewal_anchor || null,
 		renewal_cadence: row.renewal_cadence || null,
+		renewal_price_usd_micros: toNumOrNull(row.renewal_price_usd_micros),
+		renewal_auto_start_date: row.renewal_auto_start_date || null,
 	};
 }
 
@@ -428,6 +437,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 		renewalAnchor: account.renewal_anchor,
 		renewalCadence:
 			(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ?? null,
+		renewalPriceUsd:
+			account.renewal_price_usd_micros != null
+				? microsToUsd(account.renewal_price_usd_micros)
+				: null,
 		sessionStats: null,
 		isPrimary: false,
 	};

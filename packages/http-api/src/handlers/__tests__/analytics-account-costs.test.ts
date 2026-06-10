@@ -87,11 +87,12 @@ describe("analytics account costs", () => {
 		});
 	});
 
-	it("maps null billing_type: planCostUsd and apiCostUsd are 0, totalCostUsd includes cost", async () => {
-		// SQLite NULL comparisons: `billing_type = 'plan'` and `billing_type != 'plan'`
-		// both evaluate to false when billing_type IS NULL, so CASE WHEN conditions
-		// produce 0 for plan and api buckets. SUM(COALESCE(cost_usd, 0)) still captures
-		// the cost in total_cost_usd. This test documents that expected NULL behaviour.
+	it("maps null billing_type: cost counts as token (api) cost, not plan", async () => {
+		// The SQL buckets non-plan cost with `COALESCE(billing_type, 'api') != 'plan'`,
+		// so rows with billing_type IS NULL land in api_cost_usd (a bare
+		// `billing_type != 'plan'` would evaluate to NULL and silently drop them).
+		// The SQL-level behaviour is covered by the real-DB test in
+		// analytics-project-breakdown.test.ts; this documents the mapping.
 		const context = createContext([
 			{
 				data_type: "account_performance",
@@ -103,7 +104,7 @@ describe("analytics account costs", () => {
 				cost_usd: null,
 				total_tokens: null,
 				plan_cost_usd: 0,
-				api_cost_usd: 0,
+				api_cost_usd: 5,
 				total_cost_usd: 5,
 			},
 		]);
@@ -114,7 +115,7 @@ describe("analytics account costs", () => {
 		const data = await response.json();
 
 		expect(data.accountPerformance[0].planCostUsd).toBe(0);
-		expect(data.accountPerformance[0].apiCostUsd).toBe(0);
+		expect(data.accountPerformance[0].apiCostUsd).toBe(5);
 		expect(data.accountPerformance[0].totalCostUsd).toBe(5);
 	});
 

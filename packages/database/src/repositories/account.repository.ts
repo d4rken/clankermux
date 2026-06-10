@@ -29,6 +29,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				renewal_anchor,
 				renewal_cadence,
+				renewal_price_usd_micros,
+				renewal_auto_start_date,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			ORDER BY priority DESC
@@ -59,6 +61,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				renewal_anchor,
 				renewal_cadence,
+				renewal_price_usd_micros,
+				renewal_auto_start_date,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			WHERE id = ?
@@ -269,10 +273,42 @@ export class AccountRepository extends BaseRepository<Account> {
 		accountId: string,
 		anchor: string | null,
 		cadence: string | null,
+		priceUsdMicros: number | null,
+		autoStartDate: string | null,
 	): Promise<void> {
 		await this.run(
-			`UPDATE accounts SET renewal_anchor = ?, renewal_cadence = ? WHERE id = ?`,
-			[anchor, cadence, accountId],
+			`UPDATE accounts
+			 SET renewal_anchor = ?, renewal_cadence = ?,
+			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?
+			 WHERE id = ?`,
+			[anchor, cadence, priceUsdMicros, autoStartDate, accountId],
+		);
+	}
+
+	/**
+	 * Per-account renewal config for the payments auto-recorder. An account is
+	 * "active" for auto-recording when anchor is set, cadence is
+	 * monthly/yearly, and price > 0 — the recorder filters; this returns all
+	 * rows so it can also see why an account is skipped.
+	 */
+	async getRenewalConfigs(): Promise<
+		Array<{
+			id: string;
+			name: string;
+			renewal_anchor: string | null;
+			renewal_cadence: string | null;
+			renewal_price_usd_micros: number | null;
+			renewal_auto_start_date: string | null;
+			paused: number;
+		}>
+	> {
+		return this.query(
+			`
+			SELECT id, name, renewal_anchor, renewal_cadence,
+			       renewal_price_usd_micros, renewal_auto_start_date,
+			       COALESCE(paused, 0) as paused
+			FROM accounts
+		`,
 		);
 	}
 

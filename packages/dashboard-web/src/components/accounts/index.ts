@@ -10,4 +10,5 @@ export { CodexReauthDialog } from "./CodexReauthDialog";
 export { DeleteConfirmationDialog } from "./DeleteConfirmationDialog";
 export { QwenReauthDialog } from "./QwenReauthDialog";
 export { RateLimitProgress } from "./RateLimitProgress";
+export { RecordPaymentDialog } from "./RecordPaymentDialog";
 export { RenameAccountDialog } from "./RenameAccountDialog";

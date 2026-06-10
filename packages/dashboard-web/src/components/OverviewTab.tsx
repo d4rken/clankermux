@@ -16,6 +16,7 @@ import { MemoryUsageChart } from "./overview/MemoryUsageChart";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
+import { SpendSummaryBand } from "./overview/SpendSummaryBand";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemStatus } from "./overview/SystemStatus";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
@@ -212,6 +213,9 @@ export const OverviewTab = React.memo(() => {
 					window="seven_day"
 				/>
 			</div>
+
+			{/* Calendar-month ledger spend + amortized subscription run rates. */}
+			<SpendSummaryBand />
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}

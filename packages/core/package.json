@@ -5,7 +5,8 @@
 	"main": "./src/index.ts",
 	"exports": {
 		".": "./src/index.ts",
-		"./env": "./src/env.ts"
+		"./env": "./src/env.ts",
+		"./renewal": "./src/renewal.ts"
 	},
 	"scripts": {
 		"typecheck": "bunx tsc --noEmit"

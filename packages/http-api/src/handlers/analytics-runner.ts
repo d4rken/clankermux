@@ -12,6 +12,7 @@ import type {
 	DashboardWorkerKind,
 } from "./analytics-worker";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
+import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 
@@ -31,6 +32,33 @@ type CachedResponse = {
 
 const responseCache = new Map<string, CachedResponse>();
 const inFlight = new Map<string, Promise<Response>>();
+
+// Per-kind invalidation epoch. Bumped by invalidateDashboardCache so a
+// pre-invalidation request that is still in flight can't re-prime the cache
+// with stale data when it completes (cacheIfSuccessful compares epochs).
+const invalidationEpochs = new Map<DashboardWorkerKind, number>();
+
+/**
+ * Drop all cached responses (and in-flight dedup promises) for one dashboard
+ * worker kind. Call after a mutation that changes the data backing that kind
+ * (e.g. payment ledger writes invalidate "payments-summary") so an immediate
+ * follow-up read reflects the write instead of a pre-mutation cache entry.
+ *
+ * In-flight promises are only removed from the dedup map — their original
+ * awaiters still resolve normally; new readers start a fresh worker request.
+ * The epoch bump prevents those orphaned requests from writing stale results
+ * into the cache when they finish.
+ */
+export function invalidateDashboardCache(kind: DashboardWorkerKind): void {
+	invalidationEpochs.set(kind, (invalidationEpochs.get(kind) ?? 0) + 1);
+	const prefix = `${kind}\0`;
+	for (const key of responseCache.keys()) {
+		if (key.startsWith(prefix)) responseCache.delete(key);
+	}
+	for (const key of inFlight.keys()) {
+		if (key.startsWith(prefix)) inFlight.delete(key);
+	}
+}
 
 type PendingWorkerRequest = {
 	resolve: (response: Response) => void;
@@ -67,6 +95,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch memory history data",
 		tooManyMessage: "Too many memory history requests",
 	},
+	"payments-summary": {
+		timeoutMessage: "Payments summary request timed out",
+		failureMessage: "Failed to fetch payments summary data",
+		tooManyMessage: "Too many payments summary requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
@@ -98,6 +131,19 @@ export function createIsolatedMemoryHistoryHandler(context: APIContext) {
 		context,
 		"memory-history",
 		createDirectMemoryHistoryHandler(context),
+	);
+}
+
+/**
+ * Worker-routed data collector for the payments summary. Returns the RAW
+ * PaymentsSummaryData JSON (see payments-summary-direct.ts); the main-thread
+ * assembly into the PaymentsSummary response shape lives in payments.ts.
+ */
+export function createIsolatedPaymentsSummaryDataHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"payments-summary",
+		createDirectPaymentsSummaryDataHandler(context),
 	);
 }
 
@@ -143,7 +189,9 @@ function createIsolatedDashboardHandler(
 		try {
 			return (await promise).clone();
 		} finally {
-			inFlight.delete(key);
+			// Identity-checked: invalidateDashboardCache() may have evicted this
+			// entry and a fresh request may have claimed the key since.
+			if (inFlight.get(key) === promise) inFlight.delete(key);
 		}
 	};
 }
@@ -163,9 +211,10 @@ async function runDashboardRequest(
 	params: URLSearchParams,
 	cacheKey: string,
 ): Promise<Response> {
+	const epochAtStart = invalidationEpochs.get(kind) ?? 0;
 	try {
 		const response = await runDashboardWorker(kind, dbPath, params);
-		await cacheIfSuccessful(kind, cacheKey, response);
+		await cacheIfSuccessful(kind, cacheKey, response, epochAtStart);
 		return response;
 	} catch (error) {
 		log.error(`Dashboard worker failed (${kind}):`, error);
@@ -307,8 +356,12 @@ async function cacheIfSuccessful(
 	kind: DashboardWorkerKind,
 	cacheKey: string,
 	response: Response,
+	epochAtStart: number,
 ): Promise<void> {
 	if (!response.ok) return;
+	// The data was read before an invalidation landed — caching it would
+	// resurrect pre-mutation results for a full TTL.
+	if ((invalidationEpochs.get(kind) ?? 0) !== epochAtStart) return;
 	try {
 		const body = await response.clone().text();
 		responseCache.set(cacheKey, {

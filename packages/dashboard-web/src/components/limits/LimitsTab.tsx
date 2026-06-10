@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
 	useAnalytics,
+	usePaymentsSummary,
 	useUsageHistory,
 } from "../../hooks/queries";
 import { computePoolUsage } from "../../lib/pool-usage";
@@ -11,6 +12,7 @@ import { LoadingSkeleton } from "../overview/LoadingSkeleton";
 import { PoolMetricCard } from "../overview/PoolMetricCard";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
+import { PaymentsHistoryCard } from "./PaymentsHistoryCard";
 import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
 export const LimitsTab = React.memo(() => {
@@ -27,6 +29,8 @@ export const LimitsTab = React.memo(() => {
 	);
 	const { data: usageHistory, isLoading: usageHistoryLoading } =
 		useUsageHistory(usageRange);
+	// Payments-ledger spend summary follows the Account Performance card's range.
+	const { data: paymentsSummary } = usePaymentsSummary(perfRange);
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -57,7 +61,6 @@ export const LimitsTab = React.memo(() => {
 	const accountList = accounts ?? [];
 	const costSummary = {
 		planCostUsd: totals?.planCostUsd ?? 0,
-		apiCostUsd: totals?.apiCostUsd ?? 0,
 		avgDailyPlanCostUsd: totals?.avgDailyPlanCostUsd ?? 0,
 		avgWeeklyPlanCostUsd: totals?.avgWeeklyPlanCostUsd ?? 0,
 	};
@@ -103,15 +106,19 @@ export const LimitsTab = React.memo(() => {
 				onRangeChange={setUsageRange}
 			/>
 
-			{/* Account performance + folded-in Plan Value / API Cost summary; own range
-			    picker in the card header. */}
+			{/* Account performance + folded-in Plan Value / Cost / Value Ratio summary;
+			    own range picker in the card header. */}
 			<AccountPerformanceSection
 				accountPerformance={analytics?.accountPerformance ?? []}
 				loading={loading}
 				range={perfRange}
 				onRangeChange={setPerfRange}
 				costSummary={costSummary}
+				paymentsSummary={paymentsSummary}
 			/>
+
+			{/* Recent payments-ledger entries (auto renewals + manual credits). */}
+			<PaymentsHistoryCard payments={paymentsSummary?.recentPayments ?? []} />
 		</div>
 	);
 });

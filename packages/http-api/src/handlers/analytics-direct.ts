@@ -208,7 +208,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					(SELECT SUM(COALESCE(total_tokens, 0)) FROM filtered_requests) as total_tokens,
 					(SELECT SUM(COALESCE(cost_usd, 0)) FROM filtered_requests) as total_cost_usd,
 					(SELECT SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as plan_cost_usd,
-					(SELECT SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as api_cost_usd,
+					(SELECT SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as api_cost_usd,
 					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
 						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) FROM filtered_requests) as cache_hit_rate,
 					(SELECT AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) FROM filtered_requests) as avg_tokens_per_second,
@@ -243,11 +243,11 @@ export function createAnalyticsHandler(context: APIContext) {
 				`
 				SELECT
 					SUM(CASE WHEN timestamp > ? AND billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_7d,
-					SUM(CASE WHEN timestamp > ? AND billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_7d,
+					SUM(CASE WHEN timestamp > ? AND COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_7d,
 					SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_30d,
-					SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_30d,
+					SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_30d,
 					MIN(CASE WHEN billing_type = 'plan' THEN timestamp ELSE NULL END) as first_plan_ts,
-					MIN(CASE WHEN billing_type != 'plan' THEN timestamp ELSE NULL END) as first_api_ts
+					MIN(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN timestamp ELSE NULL END) as first_api_ts
 				FROM requests
 				WHERE timestamp > ?
 			`,
@@ -342,7 +342,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(COALESCE(total_tokens, 0)) as tokens,
 					SUM(COALESCE(cost_usd, 0)) as cost_usd,
 					SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-					SUM(CASE WHEN billing_type != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_usd,
 					SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
 					SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as error_rate,
 					SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
@@ -418,7 +418,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(r.id), 0) as success_rate,
 						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
 						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-						SUM(CASE WHEN r.billing_type != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
 						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
 						CAST(NULL AS BIGINT) as total_tokens
 					FROM requests r
@@ -519,7 +519,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
 						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
 						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-						SUM(CASE WHEN r.billing_type != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
 						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
 						SUM(COALESCE(r.total_tokens, 0)) as total_tokens
 					FROM requests r

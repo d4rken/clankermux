@@ -29,6 +29,18 @@ export function formatCost(cost?: number): string {
 }
 
 /**
+ * Format a real-money USD amount with grouping and exactly 2 decimals:
+ * 200 -> "$200.00", 1234.5 -> "$1,234.50". Use for ledger/subscription
+ * payments; keep `formatCost` (4 decimals) for token-cost figures.
+ */
+export function formatUsd(amount: number): string {
+	return `$${amount.toLocaleString("en-US", {
+		minimumFractionDigits: 2,
+		maximumFractionDigits: 2,
+	})}`;
+}
+
+/**
  * Format percentage with specified decimal places
  */
 export function formatPercentage(value: number, decimals = 1): string {

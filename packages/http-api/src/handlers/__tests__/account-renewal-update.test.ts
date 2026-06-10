@@ -32,13 +32,40 @@ async function insertAccount(
 async function readRenewal(
 	dbOps: DatabaseOperations,
 	id: string,
-): Promise<{ renewal_anchor: string | null; renewal_cadence: string | null }> {
+): Promise<{
+	renewal_anchor: string | null;
+	renewal_cadence: string | null;
+	renewal_price_usd_micros: number | null;
+	renewal_auto_start_date: string | null;
+}> {
 	const db = dbOps.getAdapter();
 	const row = await db.get<{
 		renewal_anchor: string | null;
 		renewal_cadence: string | null;
-	}>("SELECT renewal_anchor, renewal_cadence FROM accounts WHERE id = ?", [id]);
-	return row ?? { renewal_anchor: null, renewal_cadence: null };
+		renewal_price_usd_micros: number | null;
+		renewal_auto_start_date: string | null;
+	}>(
+		`SELECT renewal_anchor, renewal_cadence, renewal_price_usd_micros,
+		        renewal_auto_start_date
+		 FROM accounts WHERE id = ?`,
+		[id],
+	);
+	return (
+		row ?? {
+			renewal_anchor: null,
+			renewal_cadence: null,
+			renewal_price_usd_micros: null,
+			renewal_auto_start_date: null,
+		}
+	);
+}
+
+/** Local "YYYY-MM-DD" of today (matches the handler's auto-start stamping). */
+function localToday(): string {
+	const d = new Date();
+	const mm = String(d.getMonth() + 1).padStart(2, "0");
+	const dd = String(d.getDate()).padStart(2, "0");
+	return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
 /** Build a fake POST Request carrying the given JSON body. */
@@ -99,7 +126,7 @@ describe("createAccountRenewalUpdateHandler", () => {
 
 	it("clears the renewal when renewalAnchor is null", async () => {
 		const id = await insertAccount(dbOps, "acc2");
-		await dbOps.setAccountRenewal(id, "2026-03-31", "yearly");
+		await dbOps.setAccountRenewal(id, "2026-03-31", "yearly", null, null);
 
 		const response = await handler(
 			makeRequest({ renewalAnchor: null, renewalCadence: "monthly" }),
@@ -180,5 +207,172 @@ describe("createAccountRenewalUpdateHandler", () => {
 			"nonexistent-id",
 		);
 		expect(response.status).toBe(404);
+	});
+
+	describe("renewalPriceUsd", () => {
+		it("persists the price as micros and stamps auto_start with today on first set", async () => {
+			const id = await insertAccount(dbOps, "price1");
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: 21.5,
+				}),
+				id,
+			);
+			const data = (await response.json()) as {
+				renewalPriceUsd: number | null;
+			};
+
+			expect(response.status).toBe(200);
+			expect(data.renewalPriceUsd).toBe(21.5);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_price_usd_micros).toBe(21_500_000);
+			expect(stored.renewal_auto_start_date).toBe(localToday());
+		});
+
+		it("keeps the existing auto_start when the price changes", async () => {
+			const id = await insertAccount(dbOps, "price2");
+			await dbOps.setAccountRenewal(
+				id,
+				"2026-01-14",
+				"monthly",
+				20_000_000,
+				"2026-02-01",
+			);
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: 25,
+				}),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_price_usd_micros).toBe(25_000_000);
+			expect(stored.renewal_auto_start_date).toBe("2026-02-01");
+		});
+
+		it("clears auto_start when the price is cleared", async () => {
+			const id = await insertAccount(dbOps, "price3");
+			await dbOps.setAccountRenewal(
+				id,
+				"2026-01-14",
+				"monthly",
+				20_000_000,
+				"2026-02-01",
+			);
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: null,
+				}),
+				id,
+			);
+			const data = (await response.json()) as {
+				renewalPriceUsd: number | null;
+			};
+
+			expect(response.status).toBe(200);
+			expect(data.renewalPriceUsd).toBeNull();
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_price_usd_micros).toBeNull();
+			expect(stored.renewal_auto_start_date).toBeNull();
+		});
+
+		it("clears cadence, price, and auto_start when the anchor is cleared", async () => {
+			const id = await insertAccount(dbOps, "price4");
+			await dbOps.setAccountRenewal(
+				id,
+				"2026-01-14",
+				"monthly",
+				20_000_000,
+				"2026-02-01",
+			);
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: null,
+					renewalCadence: "monthly",
+					renewalPriceUsd: 25,
+				}),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_anchor).toBeNull();
+			expect(stored.renewal_cadence).toBeNull();
+			expect(stored.renewal_price_usd_micros).toBeNull();
+			expect(stored.renewal_auto_start_date).toBeNull();
+		});
+
+		it("treats an empty-string price as no price", async () => {
+			const id = await insertAccount(dbOps, "price5");
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: "",
+				}),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_price_usd_micros).toBeNull();
+			expect(stored.renewal_auto_start_date).toBeNull();
+		});
+
+		it("rejects a negative price with 400", async () => {
+			const id = await insertAccount(dbOps, "price6");
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: -5,
+				}),
+				id,
+			);
+			expect(response.status).toBe(400);
+		});
+
+		it("rejects a zero price with 400", async () => {
+			const id = await insertAccount(dbOps, "price7");
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: 0,
+				}),
+				id,
+			);
+			expect(response.status).toBe(400);
+		});
+
+		it("rejects a non-number price with 400", async () => {
+			const id = await insertAccount(dbOps, "price8");
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: "12.5",
+				}),
+				id,
+			);
+			expect(response.status).toBe(400);
+		});
 	});
 });

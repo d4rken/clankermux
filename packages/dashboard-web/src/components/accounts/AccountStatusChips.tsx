@@ -1,4 +1,5 @@
 import type { AccountResponse } from "@clankermux/types";
+import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle, CalendarClock } from "lucide-react";
 import {
 	type AccountStatus,
@@ -141,9 +142,14 @@ function RenewalChip({
 		label = `Renews ${shortDate} (${daysLeft}d)`;
 	}
 
-	const title = isPast
-		? `Subscription renewed ${isoDate} (${cadence})`
-		: `Subscription renews ${isoDate} (${cadence})`;
+	const priceSuffix =
+		account.renewalPriceUsd != null
+			? ` · ${formatUsd(account.renewalPriceUsd)}/renewal`
+			: "";
+	const title =
+		(isPast
+			? `Subscription renewed ${isoDate} (${cadence})`
+			: `Subscription renews ${isoDate} (${cadence})`) + priceSuffix;
 
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??

@@ -384,6 +384,8 @@ export class AutoRefreshScheduler {
 				refresh_token_issued_at: null,
 				renewal_anchor: null,
 				renewal_cadence: null,
+				renewal_price_usd_micros: null,
+				renewal_auto_start_date: null,
 				consecutive_rate_limits: 0,
 			};
 
@@ -841,6 +843,8 @@ export class AutoRefreshScheduler {
 					refresh_token_issued_at: null,
 					renewal_anchor: null,
 					renewal_cadence: null,
+					renewal_price_usd_micros: null,
+					renewal_auto_start_date: null,
 					consecutive_rate_limits: 0,
 				};
 
@@ -972,6 +976,8 @@ export class AutoRefreshScheduler {
 					refresh_token_issued_at: null,
 					renewal_anchor: null,
 					renewal_cadence: null,
+					renewal_price_usd_micros: null,
+					renewal_auto_start_date: null,
 					consecutive_rate_limits: 0,
 				};
 
