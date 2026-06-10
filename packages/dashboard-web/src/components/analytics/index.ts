@@ -14,3 +14,4 @@ export { ModelAnalytics } from "./ModelAnalytics";
 export { ProjectAnalytics } from "./ProjectAnalytics";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";
 export { TokenSpeedAnalytics } from "./TokenSpeedAnalytics";
+export { ToolErrorsPanel } from "./ToolErrorsPanel";

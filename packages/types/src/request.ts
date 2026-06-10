@@ -23,6 +23,26 @@ export interface ContextComposition {
 	largestToolName: string | null;
 }
 
+/**
+ * Per-request tool-call stats mined from the FINAL message of the parsed
+ * /v1/messages body: each tool_result block counts as one call for the tool
+ * resolved via its tool_use_id (tool_use blocks anywhere in the history);
+ * blocks with `is_error: true` (strict boolean) additionally count as errors
+ * and contribute a truncated error-text sample. Stats travel as
+ * `ToolCallStat[] | null` (one entry per distinct toolName, insertion order);
+ * null means the final message contained no tool_result blocks.
+ */
+export interface ToolCallStat {
+	/** Resolved via tool_use_id → tool_use.name; "unknown" if unresolvable. */
+	toolName: string;
+	/** tool_result blocks for this tool in the FINAL message. */
+	callCount: number;
+	/** Subset with is_error === true (strict). */
+	errorCount: number;
+	/** Up to MAX_ERROR_SAMPLES truncated error texts (errors only). */
+	errorSamples: string[];
+}
+
 // Database row type
 export interface RequestRow {
 	id: string;

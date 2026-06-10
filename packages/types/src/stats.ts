@@ -192,6 +192,41 @@ export interface CacheFlowPoint {
 	uncachedTokens: number;
 }
 
+// Tool-call error analytics (Analytics tab). Built from the per-request
+// request_tool_calls / request_tool_errors tables, which only have rows for
+// requests recorded after the extraction feature shipped — older history
+// simply contributes nothing.
+
+/** Aggregate call/error totals for one tool over the filtered range. */
+export interface ToolErrorRow {
+	toolName: string;
+	totalCalls: number;
+	totalErrors: number;
+	/** totalErrors / totalCalls × 100; 0 when totalCalls is 0. */
+	errorRatePct: number;
+}
+
+/** One per-tool point in the tool-error time series (top tools by errors). */
+export interface ToolErrorTimePoint {
+	ts: number; // bucket start (ms)
+	toolName: string;
+	calls: number;
+	errors: number;
+}
+
+/** One distinct (tool, truncated error text) sample with its occurrence count. */
+export interface ToolErrorMessage {
+	toolName: string;
+	errorText: string;
+	occurrences: number;
+}
+
+export interface ToolCallErrorAnalytics {
+	byTool: ToolErrorRow[];
+	timeSeries: ToolErrorTimePoint[];
+	topMessages: ToolErrorMessage[];
+}
+
 export interface AnalyticsResponse {
 	meta?: {
 		range: string;
@@ -319,6 +354,12 @@ export interface AnalyticsResponse {
 			chars: number;
 		}>;
 	};
+	// Tool-call error analytics over the per-request tool tables. Only requests
+	// recorded after tool-call extraction shipped have rows, so partial history
+	// yields partial coverage (no explicit coverage marker — absent rows just
+	// don't aggregate). Optional because an older server may not populate it —
+	// consumers should treat absence as undefined.
+	toolCallErrors?: ToolCallErrorAnalytics;
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

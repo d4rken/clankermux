@@ -1,4 +1,4 @@
-import type { ContextComposition } from "@clankermux/types";
+import type { ContextComposition, ToolCallStat } from "@clankermux/types";
 import type { RequestJsonBody } from "./request-body-context";
 
 /**
@@ -10,7 +10,19 @@ import type { RequestJsonBody } from "./request-body-context";
  * Char counts are proportions, not tokens. Defensive throughout: malformed
  * shapes contribute 0 and the walk never throws; a shapeless body (no
  * `messages` array) returns null, which is the NULL-column coverage marker.
+ *
+ * The same walk also yields per-tool call/error stats from the FINAL message
+ * only (each request re-sends the whole conversation, so earlier messages'
+ * tool_results were already counted by previous requests — the last message
+ * is the one new turn). Tool names resolve via the full-history
+ * tool_use_id → tool_use.name map built during the walk.
  */
+
+/** Truncation cap for captured tool error texts. */
+const ERROR_TEXT_MAX_CHARS = 500;
+
+/** Per-tool cap on captured error samples (errors beyond this still count). */
+const MAX_ERROR_SAMPLES = 3;
 
 /** JSON.stringify length, 0 for unstringifiable values (circular refs, undefined). */
 function safeJsonLength(value: unknown): number {
@@ -44,10 +56,79 @@ function computeSystemChars(system: unknown): number {
 	return total;
 }
 
-export function computeContextComposition(
-	body: RequestJsonBody | null,
-): ContextComposition | null {
-	if (!body || !Array.isArray(body.messages)) return null;
+/** Error text for a tool_result block: string content as-is, array content as
+ * joined `type:"text"` block texts; anything else yields "" (the error still
+ * counts, the sample is just skipped). Truncated to ERROR_TEXT_MAX_CHARS. */
+function extractErrorText(content: unknown): string {
+	let text = "";
+	if (typeof content === "string") {
+		text = content;
+	} else if (Array.isArray(content)) {
+		const parts: string[] = [];
+		for (const item of content) {
+			if (
+				isRecord(item) &&
+				item.type === "text" &&
+				typeof item.text === "string"
+			) {
+				parts.push(item.text);
+			}
+		}
+		text = parts.join("\n");
+	}
+	return text.slice(0, ERROR_TEXT_MAX_CHARS);
+}
+
+/** Per-tool call/error stats for the FINAL message only. Returns null when it
+ * contains no tool_result blocks (so non-tool turns produce no stats rows). */
+function extractFinalMessageToolStats(
+	lastMessage: unknown,
+	toolNamesByUseId: Map<string, string>,
+): ToolCallStat[] | null {
+	if (!isRecord(lastMessage) || !Array.isArray(lastMessage.content)) {
+		return null;
+	}
+
+	// Insertion-ordered (Map iteration order) per-tool accumulator.
+	const statsByTool = new Map<string, ToolCallStat>();
+
+	for (const block of lastMessage.content) {
+		if (!isRecord(block) || block.type !== "tool_result") continue;
+
+		const toolName =
+			(typeof block.tool_use_id === "string"
+				? toolNamesByUseId.get(block.tool_use_id)
+				: undefined) ?? "unknown";
+
+		let stat = statsByTool.get(toolName);
+		if (!stat) {
+			stat = { toolName, callCount: 0, errorCount: 0, errorSamples: [] };
+			statsByTool.set(toolName, stat);
+		}
+		stat.callCount++;
+
+		// Strict boolean check: truthy non-booleans ("true", 1) are NOT errors.
+		if (block.is_error !== true) continue;
+		stat.errorCount++;
+		if (stat.errorSamples.length < MAX_ERROR_SAMPLES) {
+			const sample = extractErrorText(block.content);
+			if (sample.trim().length > 0) {
+				stat.errorSamples.push(sample);
+			}
+		}
+	}
+
+	if (statsByTool.size === 0) return null;
+	return Array.from(statsByTool.values());
+}
+
+export function computeContextAndToolStats(body: RequestJsonBody | null): {
+	composition: ContextComposition | null;
+	toolStats: ToolCallStat[] | null;
+} {
+	if (!body || !Array.isArray(body.messages)) {
+		return { composition: null, toolStats: null };
+	}
 
 	let systemChars = 0;
 	let toolsChars = 0;
@@ -106,7 +187,7 @@ export function computeContextComposition(
 		}
 	}
 
-	return {
+	const composition: ContextComposition = {
 		systemChars,
 		toolsChars,
 		toolCount,
@@ -118,5 +199,13 @@ export function computeContextComposition(
 			largestToolUseId !== null
 				? (toolNamesByUseId.get(largestToolUseId) ?? null)
 				: null,
+	};
+
+	return {
+		composition,
+		toolStats: extractFinalMessageToolStats(
+			body.messages[body.messages.length - 1],
+			toolNamesByUseId,
+		),
 	};
 }

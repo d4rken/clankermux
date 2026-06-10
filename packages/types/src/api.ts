@@ -1,4 +1,4 @@
-import type { ContextComposition } from "./request";
+import type { ContextComposition, ToolCallStat } from "./request";
 
 /** Combo slot routing info — maps each returned account to its slot's model override */
 export interface ComboSlotInfo {
@@ -26,6 +26,13 @@ export interface RequestMeta {
 	 * endpoints, unparseable body). Threaded to the recorder like `project`.
 	 */
 	contextComposition?: ContextComposition | null;
+	/**
+	 * Ingest-time per-tool call/error stats mined from the final message of the
+	 * parsed POST /v1/messages body; null/absent when not computed (other
+	 * endpoints, no tool_result blocks). Threaded to the recorder like
+	 * `contextComposition`.
+	 */
+	toolCallStats?: ToolCallStat[] | null;
 	/**
 	 * Per-request reasoning effort: `"thinking:<budget>"` / `"thinking"` for
 	 * Anthropic bodies, the raw `reasoning.effort` string for OpenAI Responses
@@ -121,7 +128,13 @@ export interface CleanupResponse {
  * undercount and will NOT sum to `dbBytes`; the UI labels them approximate.
  */
 export interface StorageUsageType {
-	key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots";
+	key:
+		| "payloads"
+		| "requests"
+		| "usage_snapshots"
+		| "memory_snapshots"
+		| "tool_calls"
+		| "tool_errors";
 	/** Underlying SQLite table that was measured. */
 	table: string;
 	rowCount: number;

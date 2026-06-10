@@ -118,6 +118,27 @@ describe("ensureSchema completeness", () => {
 		expect(tableExists(db, "model_translations")).toBe(false);
 	});
 
+	it("creates the tool-call analytics tables with their columns and index", () => {
+		expect(tableExists(db, "request_tool_calls")).toBe(true);
+		const callCols = columnNames(db, "request_tool_calls");
+		for (const col of [
+			"request_id",
+			"tool_name",
+			"call_count",
+			"error_count",
+		]) {
+			expect(callCols.has(col)).toBe(true);
+		}
+
+		expect(tableExists(db, "request_tool_errors")).toBe(true);
+		const errorCols = columnNames(db, "request_tool_errors");
+		for (const col of ["id", "request_id", "tool_name", "error_text"]) {
+			expect(errorCols.has(col)).toBe(true);
+		}
+
+		expect(indexExists(db, "idx_request_tool_errors_request_id")).toBe(true);
+	});
+
 	it("creates the account_payments table with every current column", () => {
 		expect(tableExists(db, "account_payments")).toBe(true);
 		const cols = columnNames(db, "account_payments");

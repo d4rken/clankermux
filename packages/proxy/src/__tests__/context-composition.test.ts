@@ -6,14 +6,19 @@
  * (the NULL-column coverage marker).
  */
 import { describe, expect, it } from "bun:test";
-import { computeContextComposition } from "../context-composition";
+import { computeContextAndToolStats } from "../context-composition";
 import type { RequestJsonBody } from "../request-body-context";
 
 function jsonLen(value: unknown): number {
 	return JSON.stringify(value).length;
 }
 
-describe("computeContextComposition", () => {
+/** Composition-only view of the combined walk — all this suite asserts on. */
+function computeContextComposition(body: RequestJsonBody | null) {
+	return computeContextAndToolStats(body).composition;
+}
+
+describe("computeContextAndToolStats — composition", () => {
 	it("returns null for a null body", () => {
 		expect(computeContextComposition(null)).toBeNull();
 	});

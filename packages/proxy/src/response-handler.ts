@@ -9,6 +9,7 @@ import type {
 	ContextComposition,
 	RateLimitReason,
 	RequestRoutingMeta,
+	ToolCallStat,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
@@ -168,6 +169,8 @@ export interface ResponseHandlerOptions {
 	project?: string | null;
 	/** Ingest-time context composition (see RequestMeta.contextComposition). */
 	contextComposition?: ContextComposition | null;
+	/** Ingest-time per-tool call/error stats (see RequestMeta.toolCallStats). */
+	toolCallStats?: ToolCallStat[] | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort?: string | null;
 	response: Response;
@@ -207,6 +210,7 @@ export async function forwardToClient(
 		requestBody,
 		project,
 		contextComposition,
+		toolCallStats,
 		reasoningEffort,
 		response: responseRaw,
 		timestamp,
@@ -294,6 +298,7 @@ export async function forwardToClient(
 			comboName: comboName || null,
 			project: project ?? null,
 			contextComposition: contextComposition ?? null,
+			toolCallStats: toolCallStats ?? null,
 			reasoningEffort: reasoningEffort ?? null,
 			routing: routingRecord,
 			timestamp,
