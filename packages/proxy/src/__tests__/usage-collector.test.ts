@@ -303,8 +303,11 @@ describe("usage-collector", () => {
 
 		it("discards an implausibly fast result (above the sanity ceiling)", async () => {
 			// 100 output tokens over a 10ms total duration = 10,000 tok/s, far
-			// above MAX_PLAUSIBLE_TOKENS_PER_SECOND (1500) — a measurement
-			// artifact, so it is dropped rather than recorded.
+			// above MAX_PLAUSIBLE_TOKENS_PER_SECOND (1500). This is the zai
+			// total-time path, which has no further fallback — the value is
+			// dropped rather than recorded. (The non-zai streaming-window path
+			// instead falls back to total duration; see the "total-duration
+			// fallback" suite below.)
 			const state = createUsageState();
 			feedChunk(
 				state,
