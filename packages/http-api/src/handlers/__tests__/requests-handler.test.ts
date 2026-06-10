@@ -58,6 +58,7 @@ describe("createRequestsSummaryHandler", () => {
 				status_code: 429,
 				success: 0,
 				error_message: null,
+				project: "clankermux",
 			},
 		]);
 		const res = await createRequestsSummaryHandler(db)();
@@ -66,11 +67,13 @@ describe("createRequestsSummaryHandler", () => {
 			statusCode: number | null;
 			rateLimited: boolean;
 			accountUsed: string | null;
+			project?: string;
 		}>;
 		expect(body[0].id).toBe("r1");
 		expect(body[0].statusCode).toBe(429);
 		expect(body[0].rateLimited).toBe(true);
 		expect(body[0].accountUsed).toBe("Primary");
+		expect(body[0].project).toBe("clankermux");
 	});
 });
 
