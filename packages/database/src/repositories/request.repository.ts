@@ -451,25 +451,6 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	/**
-	 * Get top models by usage
-	 */
-	async getTopModels(
-		limit = 10,
-	): Promise<Array<{ model: string; count: number }>> {
-		return this.query<{ model: string; count: number }>(
-			`
-			SELECT model, COUNT(*) as count
-			FROM requests
-			WHERE model IS NOT NULL
-			GROUP BY model
-			ORDER BY count DESC
-			LIMIT ?
-		`,
-			[limit],
-		);
-	}
-
-	/**
 	 * Get recent error messages
 	 */
 	async getRecentErrors(limit = 10): Promise<string[]> {

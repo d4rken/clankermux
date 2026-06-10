@@ -1134,12 +1134,6 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRecentErrors(limit);
 	}
 
-	async getTopModels(
-		limit?: number,
-	): Promise<Array<{ model: string; count: number }>> {
-		return this.requests.getTopModels(limit);
-	}
-
 	async getRequestsByAccount(since?: number): Promise<
 		Array<{
 			accountId: string;

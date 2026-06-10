@@ -34,17 +34,11 @@ export function createStatsHandler(dbOps: DatabaseOperations) {
 				? Math.round((stats.successfulRequests / stats.totalRequests) * 100)
 				: 0;
 
-		// Get per-account stats (including unauthenticated requests)
-		const accountsWithStats = await statsRepository.getAccountStats(10, true);
-
 		// Get recent errors
 		const recentErrors = await statsRepository.getRecentErrorGroups(
 			errorsSinceMs,
 			50,
 		);
-
-		// Get top models
-		const topModels = await statsRepository.getTopModels();
 
 		const response = {
 			totalRequests: stats.totalRequests,
@@ -53,9 +47,7 @@ export function createStatsHandler(dbOps: DatabaseOperations) {
 			avgResponseTime: Math.round(stats.avgResponseTime || 0),
 			totalTokens: stats.totalTokens,
 			totalCostUsd: stats.totalCostUsd,
-			topModels,
 			avgTokensPerSecond: stats.avgTokensPerSecond,
-			accounts: accountsWithStats,
 			recentErrors,
 		};
 
