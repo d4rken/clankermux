@@ -66,6 +66,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			output_tokens_per_second: number | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
+			project: string | null;
 			billing_type: string | null;
 			combo_name: string | null;
 		}>(
@@ -104,6 +105,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			tokensPerSecond: request.output_tokens_per_second || undefined,
 			apiKeyId: request.api_key_id || undefined,
 			apiKeyName: request.api_key_name || undefined,
+			project: request.project || undefined,
 			billingType: request.billing_type || undefined,
 			comboName: request.combo_name || undefined,
 			rateLimited: request.status_code === 429,

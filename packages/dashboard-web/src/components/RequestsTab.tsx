@@ -11,6 +11,7 @@ import {
 	Clock,
 	Eye,
 	Filter,
+	Folder,
 	Hash,
 	Key,
 	RefreshCw,
@@ -66,6 +67,32 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "./ui/select";
+
+/**
+ * Styling for the cost chip in the requests list, keyed off the request's
+ * server-derived billing type. Pure and exported so it can be unit-tested
+ * without mounting the tab (mirrors `describePinTarget` in ApiKeysTab):
+ *   - "overage" / "api" -> orange (the request costs real per-token money)
+ *   - "plan"            -> neutral (covered by the subscription plan)
+ *   - null / unknown    -> neutral, no title (billing not determined)
+ * The title keeps the billing information discoverable now that the
+ * standalone Plan/Overage badges are gone.
+ */
+export function costBadgeProps(billingType: string | null | undefined): {
+	className: string;
+	title: string | undefined;
+} {
+	if (billingType === "overage" || billingType === "api") {
+		return {
+			className: "text-xs border-orange-500 text-orange-500",
+			title: "Pay-per-token",
+		};
+	}
+	return {
+		className: "text-xs",
+		title: billingType === "plan" ? "Covered by plan" : undefined,
+	};
+}
 
 export function RequestsTab() {
 	const [expandedRequests, setExpandedRequests] = useState<Set<string>>(
@@ -776,7 +803,7 @@ export function RequestsTab() {
 										summary?.apiKeyName ||
 										summary?.totalTokens != null ||
 										summary?.costUsd != null ||
-										summary?.billingType ||
+										summary?.project ||
 										(summary?.tokensPerSecond ?? 0) > 0 ||
 										accountLabel ||
 										request.meta.rateLimited ||
@@ -808,24 +835,17 @@ export function RequestsTab() {
 												</Badge>
 											)}
 											{summary?.costUsd != null && summary.costUsd > 0 && (
-												<Badge variant="default" className="text-xs">
+												<Badge
+													variant="outline"
+													{...costBadgeProps(summary.billingType)}
+												>
 													{formatCost(summary.costUsd)}
 												</Badge>
 											)}
-											{summary?.billingType === "overage" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-orange-500 text-orange-500"
-												>
-													Overage
-												</Badge>
-											)}
-											{summary?.billingType === "plan" && (
-												<Badge
-													variant="outline"
-													className="text-xs border-teal-500 text-teal-500"
-												>
-													Plan
+											{summary?.project && (
+												<Badge variant="outline" className="text-xs">
+													<Folder className="h-3 w-3 mr-1" />
+													{summary.project}
 												</Badge>
 											)}
 											{summary?.tokensPerSecond != null &&
