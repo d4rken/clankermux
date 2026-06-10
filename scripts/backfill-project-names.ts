@@ -63,6 +63,7 @@ const JUNK_PROJECT_VALUES = [
 	"projects",
 	"System",
 	"Harness",
+	"User's Current Configuration",
 ];
 const SAMPLE_LIMIT = 15;
 // Sentinel for NULL payload timestamps in keyset pagination: NULLs sort as
