@@ -1,6 +1,10 @@
 import { BUFFER_SIZES } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { NO_ACCOUNT_ID, type RequestResponse } from "@clankermux/types";
+import {
+	type ContextComposition,
+	NO_ACCOUNT_ID,
+	type RequestResponse,
+} from "@clankermux/types";
 import { parseUpstreamError } from "./upstream-error";
 
 const log = new Logger("RequestRecorder");
@@ -72,6 +76,12 @@ export interface RecordMeta {
 	apiKeyName: string | null;
 	comboName: string | null;
 	project: string | null;
+	/**
+	 * Ingest-time context composition (see RequestMeta.contextComposition).
+	 * Optional: synthetic/audit rows intentionally omit it and stay
+	 * NULL-covered in the context_* columns.
+	 */
+	contextComposition?: ContextComposition | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort: string | null;
 	routing: RecordRouting | null;
@@ -166,6 +176,7 @@ interface DbOpsLike {
 		billingType?: string,
 		comboName?: string | null,
 		reasoningEffort?: string | null,
+		contextComposition?: ContextComposition | null,
 	): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
 	saveRequestPayloadRaw(id: string, json: string): Promise<void>;
@@ -696,6 +707,7 @@ export class RequestRecorder {
 					record.billingType,
 					meta.comboName ?? null,
 					meta.reasoningEffort ?? null,
+					meta.contextComposition ?? null,
 				);
 				if (routing) {
 					await this.dbOps.saveRequestRouting({

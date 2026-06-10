@@ -952,6 +952,7 @@ OAuth tokens will need to be re-authenticated.
 		billingType?: string,
 		comboName?: string | null,
 		reasoningEffort?: string | null,
+		contextComposition?: RequestData["contextComposition"],
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -972,6 +973,7 @@ OAuth tokens will need to be re-authenticated.
 					billingType,
 					comboName,
 					reasoningEffort,
+					contextComposition,
 				}),
 			this.retryConfig,
 			"saveRequest",

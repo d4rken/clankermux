@@ -96,7 +96,15 @@ export function ensureSchema(db: Database): void {
 			api_key_id TEXT,
 			api_key_name TEXT,
 			combo_name TEXT,
-			reasoning_effort TEXT
+			reasoning_effort TEXT,
+			context_system_chars INTEGER,
+			context_tools_chars INTEGER,
+			context_tool_count INTEGER,
+			context_messages_chars INTEGER,
+			context_message_count INTEGER,
+			context_tool_result_chars INTEGER,
+			context_largest_tool_chars INTEGER,
+			context_largest_tool_name TEXT
 		)
 	`);
 
@@ -337,6 +345,50 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "reasoning_effort",
 		ddl: "ALTER TABLE requests ADD COLUMN reasoning_effort TEXT",
+	},
+	// Ingest-time context composition: per-bucket character counts computed
+	// from the parsed /v1/messages body. All nullable — NULL = "composition
+	// not recorded" (old rows, parse failures, non-messages endpoints), while
+	// 0 is a valid recorded value.
+	{
+		table: "requests",
+		column: "context_system_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_system_chars INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_tools_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_tools_chars INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_tool_count",
+		ddl: "ALTER TABLE requests ADD COLUMN context_tool_count INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_messages_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_messages_chars INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_message_count",
+		ddl: "ALTER TABLE requests ADD COLUMN context_message_count INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_tool_result_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_tool_result_chars INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_largest_tool_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_largest_tool_chars INTEGER",
+	},
+	{
+		table: "requests",
+		column: "context_largest_tool_name",
+		ddl: "ALTER TABLE requests ADD COLUMN context_largest_tool_name TEXT",
 	},
 ];
 

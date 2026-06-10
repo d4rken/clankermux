@@ -1,3 +1,5 @@
+import type { ContextComposition } from "./request";
+
 /** Combo slot routing info — maps each returned account to its slot's model override */
 export interface ComboSlotInfo {
 	/** The combo name (null when not using combo routing) */
@@ -18,6 +20,12 @@ export interface RequestMeta {
 	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
 	affinityPartition?: string | null;
 	project?: string | null;
+	/**
+	 * Ingest-time context composition computed once in handleProxy from the
+	 * parsed POST /v1/messages body; null/absent when not computed (other
+	 * endpoints, unparseable body). Threaded to the recorder like `project`.
+	 */
+	contextComposition?: ContextComposition | null;
 	/**
 	 * Per-request reasoning effort: `"thinking:<budget>"` / `"thinking"` for
 	 * Anthropic bodies, the raw `reasoning.effort` string for OpenAI Responses

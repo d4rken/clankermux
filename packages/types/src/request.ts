@@ -1,3 +1,28 @@
+/**
+ * Per-request context composition: character counts per context-window bucket
+ * (system prompt / tool definitions / messages / tool results), computed once
+ * at ingest from the already-parsed /v1/messages body. Char counts are
+ * proportions, not tokens. Persisted as the nullable requests.context_*
+ * columns; NULL = "composition not recorded" (old rows, parse failures,
+ * non-messages endpoints), while 0 is a valid recorded value.
+ */
+export interface ContextComposition {
+	/** System prompt: string length or summed text-block lengths. */
+	systemChars: number;
+	/** JSON.stringify(body.tools).length; 0 when no tools are defined. */
+	toolsChars: number;
+	toolCount: number;
+	/** Sum over all messages' content (includes toolResultChars). */
+	messagesChars: number;
+	messageCount: number;
+	/** Subset of messagesChars contributed by tool_result blocks. */
+	toolResultChars: number;
+	/** Biggest single tool_result block. */
+	largestToolResultChars: number;
+	/** Tool name of the largest tool_result, resolved via tool_use_id. */
+	largestToolName: string | null;
+}
+
 // Database row type
 export interface RequestRow {
 	id: string;
