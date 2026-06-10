@@ -791,15 +791,28 @@ export default async function startServer(options?: {
 
 	stopDataCleanupJob = unregisterDataCleanup;
 
-	// Set up periodic WAL checkpoint every 5 minutes to prevent unbounded WAL growth
+	// Set up periodic WAL checkpoint every 5 minutes to prevent unbounded WAL growth.
+	// Runs PRAGMA optimize + PRAGMA wal_checkpoint(PASSIVE) in a worker thread —
+	// the old synchronous dbOps.optimize() parked the main thread in SQLite's
+	// busy handler for up to busy_timeout (10s) whenever the hourly vacuum
+	// worker held the write lock, freezing the event loop.
 	const unregisterWalCheckpoint = registerCleanup({
 		id: "wal-checkpoint",
 		callback: () => {
-			try {
-				dbOps.optimize(); // runs PRAGMA optimize + PRAGMA wal_checkpoint(PASSIVE)
-			} catch (err) {
-				log.error(`WAL checkpoint error: ${err}`);
-			}
+			dbOps
+				.optimizeAsync()
+				.then((result) => {
+					if (!result.ok) {
+						log.warn(`WAL checkpoint/optimize error: ${result.error}`);
+					} else if (result.skipped) {
+						log.debug(
+							"checkpoint/optimize skipped: DB busy (will retry next tick)",
+						);
+					}
+				})
+				.catch((err) => {
+					log.error(`WAL checkpoint error: ${err}`);
+				});
 		},
 		minutes: 5,
 		description: "WAL checkpoint to prevent unbounded WAL file growth",
