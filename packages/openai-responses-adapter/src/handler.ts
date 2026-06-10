@@ -127,6 +127,11 @@ export async function handleResponsesRequest(
 	setNativeResponsesRequestContext(syntheticReq, {
 		nativeBody: JSON.stringify(body),
 		clientStream: body.stream === true,
+		// Captured from the ORIGINAL body before translation; the real effort
+		// vocabulary is wider than the narrow type in types.ts, so treat it as an
+		// arbitrary string.
+		reasoningEffort:
+			typeof body.reasoning?.effort === "string" ? body.reasoning.effort : null,
 	});
 
 	// 6. Forward to proxy

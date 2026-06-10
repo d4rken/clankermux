@@ -72,6 +72,8 @@ export interface RecordMeta {
 	apiKeyName: string | null;
 	comboName: string | null;
 	project: string | null;
+	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
+	reasoningEffort: string | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -163,6 +165,7 @@ interface DbOpsLike {
 		project?: string | null,
 		billingType?: string,
 		comboName?: string | null,
+		reasoningEffort?: string | null,
 	): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
 	saveRequestPayloadRaw(id: string, json: string): Promise<void>;
@@ -692,6 +695,7 @@ export class RequestRecorder {
 					meta.project ?? null,
 					record.billingType,
 					meta.comboName ?? null,
+					meta.reasoningEffort ?? null,
 				);
 				if (routing) {
 					await this.dbOps.saveRequestRouting({
@@ -778,6 +782,7 @@ export class RequestRecorder {
 					meta.project ?? null,
 					billingType,
 					meta.comboName ?? null,
+					meta.reasoningEffort ?? null,
 				);
 				if (routing) {
 					await this.dbOps.saveRequestRouting({
@@ -876,6 +881,7 @@ export class RequestRecorder {
 				isStream: meta.isStream,
 				retry: meta.retryAttempt,
 				project: meta.project ?? undefined,
+				reasoningEffort: meta.reasoningEffort ?? undefined,
 			},
 		});
 	}
@@ -939,6 +945,7 @@ export class RequestRecorder {
 			project: meta.project ?? undefined,
 			billingType,
 			comboName: meta.comboName ?? undefined,
+			reasoningEffort: meta.reasoningEffort ?? undefined,
 		};
 	}
 

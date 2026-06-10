@@ -552,6 +552,7 @@ export async function proxyUnauthenticated(
 				requestHeaders: req.headers,
 				requestBody: requestBodyBuffer,
 				project: requestMeta.project,
+				reasoningEffort: requestMeta.reasoningEffort,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -1084,6 +1085,7 @@ export async function proxyWithAccount(
 							requestMeta.project ?? null,
 							undefined,
 							requestMeta.comboName ?? null,
+							requestMeta.reasoningEffort ?? null,
 						),
 					);
 					log.warn(
@@ -1169,6 +1171,7 @@ export async function proxyWithAccount(
 								requestMeta.project ?? null,
 								undefined,
 								requestMeta.comboName ?? null,
+								requestMeta.reasoningEffort ?? null,
 							),
 						);
 						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
@@ -1338,6 +1341,7 @@ export async function proxyWithAccount(
 								requestMeta.project ?? null,
 								undefined,
 								requestMeta.comboName ?? null,
+								requestMeta.reasoningEffort ?? null,
 							),
 						);
 					}
@@ -1415,6 +1419,7 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						project: requestMeta.project,
+						reasoningEffort: requestMeta.reasoningEffort,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -1473,6 +1478,7 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						project: requestMeta.project,
+						reasoningEffort: requestMeta.reasoningEffort,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -1507,6 +1513,7 @@ export async function proxyWithAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				project: requestMeta.project,
+				reasoningEffort: requestMeta.reasoningEffort,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -1628,6 +1635,7 @@ export async function proxyForcedAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				project: requestMeta.project,
+				reasoningEffort: requestMeta.reasoningEffort,
 				response: errorResponse,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -1748,6 +1756,7 @@ export async function proxyForcedAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				project: requestMeta.project,
+				reasoningEffort: requestMeta.reasoningEffort,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,

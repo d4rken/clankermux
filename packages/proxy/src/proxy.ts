@@ -51,6 +51,7 @@ import {
 	isOfficialAnthropicProvider,
 	isProviderOverloaded,
 } from "./provider-overload-cooldown";
+import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
@@ -360,6 +361,13 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	// Per-request reasoning effort, derived once for all failover attempts. The
+	// Codex path's translated Anthropic body loses reasoning.effort, so fall
+	// back to the value captured from the ORIGINAL Responses body (Stage A).
+	requestMeta.reasoningEffort =
+		parseReasoningEffort(parsedBody) ??
+		nativeResponsesCtx?.reasoningEffort ??
+		null;
 	// Unconditional floor for Codex-CLI traffic: the /v1/responses adapter sets
 	// this header on every request it forwards. When set, the request may never
 	// be routed to (or burst-held on) an official Claude account — independent of
@@ -557,6 +565,7 @@ export async function handleProxy(
 			apiKeyName: apiKeyName || null,
 			comboName: null,
 			project: project ?? null,
+			reasoningEffort: requestMeta.reasoningEffort ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,

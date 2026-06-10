@@ -165,6 +165,8 @@ export interface ResponseHandlerOptions {
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
 	project?: string | null;
+	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
+	reasoningEffort?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -201,6 +203,7 @@ export async function forwardToClient(
 		requestHeaders,
 		requestBody,
 		project,
+		reasoningEffort,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -286,6 +289,7 @@ export async function forwardToClient(
 			apiKeyName: apiKeyName || null,
 			comboName: comboName || null,
 			project: project ?? null,
+			reasoningEffort: reasoningEffort ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:

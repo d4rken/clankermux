@@ -71,6 +71,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			project: string | null;
 			billing_type: string | null;
 			combo_name: string | null;
+			reasoning_effort: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name,
@@ -120,6 +121,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			project: request.project || undefined,
 			billingType: request.billing_type || undefined,
 			comboName: request.combo_name || undefined,
+			reasoningEffort: request.reasoning_effort || undefined,
 			rateLimited: request.status_code === 429,
 		}));
 

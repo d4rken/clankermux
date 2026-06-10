@@ -41,6 +41,7 @@ export interface RequestData {
 	project?: string | null;
 	billingType?: string;
 	comboName?: string | null;
+	reasoningEffort?: string | null;
 	usage?: {
 		model?: string;
 		promptTokens?: number;
@@ -82,9 +83,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 					output_tokens_per_second, output_tokens_per_second_approx,
 					api_key_id, api_key_name, project,
-					billing_type, combo_name
+					billing_type, combo_name, reasoning_effort
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -110,7 +111,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				api_key_name = EXCLUDED.api_key_name,
 				project = COALESCE(EXCLUDED.project, requests.project),
 				billing_type = COALESCE(EXCLUDED.billing_type, requests.billing_type),
-				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name)
+				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name),
+				reasoning_effort = COALESCE(EXCLUDED.reasoning_effort, requests.reasoning_effort)
 		`,
 			[
 				data.id,
@@ -139,6 +141,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.project || null,
 				data.billingType || null,
 				data.comboName || null,
+				data.reasoningEffort || null,
 			],
 		);
 	}
