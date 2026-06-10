@@ -60,8 +60,15 @@ interface BucketConfig {
 	displayName: string;
 }
 
-function getRangeConfig(range: string): {
-	startMs: number;
+/**
+ * Map a range to its lookback cutoff + time-series bucket. `startMs: null`
+ * means "no cutoff" (the all-time range): the timestamp predicate is omitted
+ * from the WHERE clause entirely rather than degenerating to `timestamp > 0`.
+ * All-time uses daily buckets like 30d — anything finer produces thousands of
+ * points over months of history. Exported for unit tests.
+ */
+export function getRangeConfig(range: string): {
+	startMs: number | null;
 	bucket: BucketConfig;
 } {
 	const now = Date.now();
@@ -94,6 +101,11 @@ function getRangeConfig(range: string): {
 				startMs: now - 30 * day,
 				bucket: { bucketMs: day, displayName: "1d" },
 			};
+		case "all":
+			return {
+				startMs: null,
+				bucket: { bucketMs: day, displayName: "1d" },
+			};
 		default:
 			return {
 				startMs: now - day,
@@ -118,9 +130,15 @@ export function createAnalyticsHandler(context: APIContext) {
 			params.get("apiKeys")?.split(",").filter(Boolean) || [];
 		const statusFilter = params.get("status") || "all";
 
-		// Build filter conditions
-		const conditions: string[] = ["r.timestamp > ?"];
-		const queryParams: (string | number)[] = [startMs];
+		// Build filter conditions. The timestamp bound is structurally omitted
+		// for the all-time range (startMs === null) instead of widening to
+		// `timestamp > 0`.
+		const conditions: string[] = [];
+		const queryParams: (string | number)[] = [];
+		if (startMs !== null) {
+			conditions.push("r.timestamp > ?");
+			queryParams.push(startMs);
+		}
 
 		if (accountsFilter.length > 0) {
 			// Handle account filter - map account names to IDs via join
@@ -155,7 +173,10 @@ export function createAnalyticsHandler(context: APIContext) {
 			conditions.push("r.success = FALSE");
 		}
 
-		const whereClause = conditions.join(" AND ");
+		// range=all with no filters leaves no conditions; keep the WHERE slot
+		// valid with a constant-true predicate.
+		const whereClause =
+			conditions.length > 0 ? conditions.join(" AND ") : "1=1";
 
 		try {
 			const analyticsStartedAt = performance.now();

@@ -243,7 +243,10 @@ export function MainMetricsChart({
 						case "tokens":
 							return <TokenUsageChart {...commonProps} />;
 						case "cost": {
-							const isLongRange = timeRange === "7d" || timeRange === "30d";
+							const isLongRange =
+								timeRange === "7d" ||
+								timeRange === "30d" ||
+								timeRange === "all";
 							const strokeW = 2;
 							return (
 								<ResponsiveContainer width="100%" height={CHART_HEIGHTS.large}>

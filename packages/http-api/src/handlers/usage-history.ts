@@ -46,14 +46,16 @@ function advanceCarry(
 	return carry;
 }
 
-const ALLOWED_RANGES = ["1h", "6h", "24h", "7d", "30d"] as const;
+const ALLOWED_RANGES = ["1h", "6h", "24h", "7d", "30d", "all"] as const;
 type Range = (typeof ALLOWED_RANGES)[number];
 const DEFAULT_RANGE: Range = "7d";
 
 /**
  * Map a range to its lookback window + bucket size. Mirrors getRangeConfig in
  * analytics-direct.ts so the sawtooth chart bucketing matches the analytics
- * charts: 1h→1m, 6h→5m, 24h/7d→1h, 30d→1d.
+ * charts: 1h→1m, 6h→5m, 24h/7d→1h, 30d/all→1d. "all" scans from sinceMs 0 —
+ * the usage_snapshots table is small and retention-capped, so an unbounded
+ * lookback stays cheap.
  */
 function getRangeConfig(range: Range): { sinceMs: number; bucketMs: number } {
 	const now = Date.now();
@@ -71,6 +73,8 @@ function getRangeConfig(range: Range): { sinceMs: number; bucketMs: number } {
 			return { sinceMs: now - 7 * day, bucketMs: hour };
 		case "30d":
 			return { sinceMs: now - 30 * day, bucketMs: day };
+		case "all":
+			return { sinceMs: 0, bucketMs: day };
 	}
 }
 

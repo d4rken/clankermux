@@ -105,6 +105,22 @@ describe("usage-history handler", () => {
 			expect(captured?.bucketMs).toBe(3_600_000);
 		});
 
+		it("maps all → sinceMs 0 with daily buckets (retention-capped)", async () => {
+			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			const dbOps = createDbOps({
+				snapshots: [],
+				accounts: [],
+				captureOpts: (o) => {
+					captured = o;
+				},
+			});
+			const { body } = await callHandler(dbOps, "all");
+			expect(body.range).toBe("all");
+			expect(captured?.sinceMs).toBe(0);
+			expect(captured?.bucketMs).toBe(24 * HOUR);
+			expect(body.bucketMs).toBe(24 * HOUR);
+		});
+
 		it("computes sinceMs as now - windowMs for the range", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
 			const dbOps = createDbOps({

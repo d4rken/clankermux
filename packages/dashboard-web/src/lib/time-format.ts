@@ -15,9 +15,12 @@ import type { TooltipLabelFormatter } from "./chart-utils";
  * | 1h/6h/24h    | 14:00     | 14:00              |
  * | 7d           | Jun 2     | Mon, Jun 2 · 14:00 |
  * | 30d          | Jun 2     | Mon, Jun 2         |
+ * | all          | Jun 2     | Mon, Jun 2, 2026   |
  *
- * 7d is hourly-bucketed, so its tooltip keeps the time-of-day; 30d is
- * daily-bucketed, so the time is dropped. Ranges of 24h or less stay
+ * 7d is hourly-bucketed, so its tooltip keeps the time-of-day; 30d and all-time
+ * are daily-bucketed, so the time is dropped. All-time spans can cross year
+ * boundaries, so its tooltip adds the year (the axis tick stays compact and
+ * relies on the tooltip to disambiguate). Ranges of 24h or less stay
  * time-only — they're a single rolling day window.
  */
 
@@ -27,6 +30,7 @@ export function formatAxisTime(ts: number, range: TimeRange): string {
 	switch (range) {
 		case "7d":
 		case "30d":
+		case "all":
 			return format(date, "MMM d");
 		default:
 			return format(date, "HH:mm");
@@ -37,6 +41,8 @@ export function formatAxisTime(ts: number, range: TimeRange): string {
 export function formatTooltipTime(ts: number, range: TimeRange): string {
 	const date = new Date(ts);
 	switch (range) {
+		case "all":
+			return format(date, "EEE, MMM d, yyyy");
 		case "30d":
 			return format(date, "EEE, MMM d");
 		case "7d":
