@@ -86,6 +86,7 @@ export function ensureSchema(db: Database): void {
 			total_tokens INTEGER DEFAULT 0,
 			cost_usd REAL DEFAULT 0,
 			output_tokens_per_second REAL,
+			output_tokens_per_second_approx INTEGER,
 			input_tokens INTEGER DEFAULT 0,
 			cache_read_input_tokens INTEGER DEFAULT 0,
 			cache_creation_input_tokens INTEGER DEFAULT 0,
@@ -322,8 +323,13 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 	column: string; // e.g. "my_field"
 	ddl: string; // full statement, e.g. "ALTER TABLE accounts ADD COLUMN my_field TEXT"
 }> = [
-	// Empty: ensureSchema currently defines every column. Append future columns here, e.g.:
-	// { table: "accounts", column: "my_field", ddl: "ALTER TABLE accounts ADD COLUMN my_field TEXT" },
+	// 1 when output_tokens_per_second came from the implausible-streaming-window
+	// → total-request-duration fallback (rendered "~N tok/s"), NULL otherwise.
+	{
+		table: "requests",
+		column: "output_tokens_per_second_approx",
+		ddl: "ALTER TABLE requests ADD COLUMN output_tokens_per_second_approx INTEGER",
+	},
 ];
 
 export function runMigrations(db: Database): void {

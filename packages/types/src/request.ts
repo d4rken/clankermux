@@ -20,6 +20,9 @@ export interface RequestRow {
 	cache_creation_input_tokens: number | null;
 	output_tokens: number | null;
 	output_tokens_per_second: number | null;
+	// 1 when output_tokens_per_second came from the implausible-streaming-window
+	// → total-request-duration fallback, NULL otherwise.
+	output_tokens_per_second_approx: number | null;
 	api_key_id: string | null;
 	api_key_name: string | null;
 	project: string | null;
@@ -49,6 +52,7 @@ export interface Request {
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
 	tokensPerSecond?: number;
+	tokensPerSecondApproximate?: boolean;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string;
@@ -78,6 +82,9 @@ export interface RequestResponse {
 	outputTokens?: number;
 	costUsd?: number;
 	tokensPerSecond?: number;
+	// True when tokensPerSecond is the total-duration fallback (rendered with a
+	// "~" prefix in the dashboard). Only meaningful when tokensPerSecond is set.
+	tokensPerSecondApproximate?: boolean;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string;
@@ -165,6 +172,9 @@ export function toRequest(row: RequestRow): Request {
 			row.output_tokens_per_second != null
 				? Number(row.output_tokens_per_second)
 				: undefined,
+		tokensPerSecondApproximate: row.output_tokens_per_second_approx
+			? true
+			: undefined,
 		apiKeyId: row.api_key_id || undefined,
 		apiKeyName: row.api_key_name || undefined,
 		project: row.project || undefined,
@@ -195,6 +205,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		outputTokens: request.outputTokens,
 		costUsd: request.costUsd,
 		tokensPerSecond: request.tokensPerSecond,
+		tokensPerSecondApproximate: request.tokensPerSecondApproximate,
 		apiKeyId: request.apiKeyId,
 		apiKeyName: request.apiKeyName,
 		project: request.project,

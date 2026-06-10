@@ -518,7 +518,7 @@ export async function finalizeUsage(
 				})
 			: undefined;
 
-	const tokensPerSecond = computeTokensPerSecond(state, finalOutput, opts);
+	const speed = computeTokensPerSecond(state, finalOutput, opts);
 
 	const summary: FinalizedUsage = {
 		// requestId is attached by the caller via attachUsageSummary(id, summary).
@@ -532,11 +532,12 @@ export async function finalizeUsage(
 			totalTokens,
 			costUsd,
 		},
-		tokensPerSecond,
+		tokensPerSecond: speed?.value,
 		responseTimeMs: opts.responseTimeMs,
 		cacheCreationInputTokens: state.cacheCreationInputTokens,
 	};
 	if (outputApproximate) summary.outputApproximate = true;
+	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
 	return summary;
 }
 
@@ -553,18 +554,27 @@ export async function finalizeUsage(
  * analytics average. We now record NULL instead: no measurable duration means
  * we genuinely don't know the speed, and `isPlausibleSpeed` (shared with the
  * analytics SQL filter) discards anything above MAX_PLAUSIBLE_TOKENS_PER_SECOND.
+ *
+ * One exception to the "implausible → NULL" rule: when the streaming-window
+ * result exists but is implausible (e.g. all chunks arrived in one burst), we
+ * fall back to finalOutput / total request duration instead of recording
+ * nothing — flagged `approximate: true` because total duration includes TTFB
+ * and so understates the real streaming speed. The pre-existing fallbacks
+ * (no streaming window at all, and the zai total-time path) are the normal
+ * measurement for those shapes and are NOT flagged.
  */
 function computeTokensPerSecond(
 	state: UsageState,
 	finalOutput: number,
 	opts: FinalizeOpts,
-): number | undefined {
+): { value: number; approximate: boolean } | undefined {
 	if (finalOutput <= 0) return undefined;
 
 	const totalDurationSec = opts.responseTimeMs / 1000;
 	const isZaiModel = state.model?.startsWith("glm-") ?? false;
 
 	let result: number | undefined;
+	let windowWasImplausible = false;
 	if (isZaiModel) {
 		if (totalDurationSec > 0) result = finalOutput / totalDurationSec;
 	} else {
@@ -572,7 +582,14 @@ function computeTokensPerSecond(
 		if (state.firstChunkTs !== undefined && state.lastChunkTs !== undefined) {
 			const streamingDurationMs = state.lastChunkTs - state.firstChunkTs;
 			if (streamingDurationMs > 0) {
-				result = finalOutput / (streamingDurationMs / 1000);
+				const windowed = finalOutput / (streamingDurationMs / 1000);
+				if (isPlausibleSpeed(windowed)) {
+					result = windowed;
+				} else {
+					// Implausible window (burst delivery artifact): fall back to the
+					// total request duration below, marked approximate.
+					windowWasImplausible = true;
+				}
 			}
 		}
 		if (result === undefined && totalDurationSec > 0) {
@@ -582,5 +599,5 @@ function computeTokensPerSecond(
 
 	// No usable duration, or a sub-ms-duration artifact: record nothing.
 	if (result === undefined || !isPlausibleSpeed(result)) return undefined;
-	return result;
+	return { value: result, approximate: windowWasImplausible };
 }

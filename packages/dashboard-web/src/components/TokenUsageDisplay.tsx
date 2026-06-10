@@ -17,6 +17,7 @@ export function TokenUsageDisplay({ summary }: TokenUsageDisplayProps) {
 				costUsd: summary.costUsd,
 				responseTimeMs: summary.responseTimeMs ?? undefined,
 				tokensPerSecond: summary.tokensPerSecond,
+				tokensPerSecondApproximate: summary.tokensPerSecondApproximate,
 			}
 		: undefined;
 
