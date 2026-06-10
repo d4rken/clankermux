@@ -17,15 +17,18 @@ ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/
 After 30+ upstream PRs I just decided to just have my own bespoke solution.
 Fast iteration and tailored to my use-case, mostly Anthropic and OpenAI accounts.
 
-Changes:
+Features:
 
-* API key system is sepperate from dashboard access.
-* Smaller dependency trees to reduce supply-chain attack surface.
-* Memory leak fixes, stability improvements, performance improvements.
-* Improved account selection algorithm, maximized token availability.
-* Improved session routing, increased cache hit rate.
-* Improved fallover mechanims, reduced token churn.
-* Additional analytics: Usage windows, cache hit rate, model performance and system status
+* Multiplexes one endpoint across multiple Anthropic, Codex/OpenAI, and OpenAI-compatible accounts.
+* Capacity-aware account selection (FEFO) — maximizes total token availability across the pool.
+* Sticky session routing for high prompt-cache hit rates; survives priority edits and failover.
+* Transparent burst-429 retry — rides out rate-limit storms without losing the prompt cache.
+* Overload (529) detection, cooldowns, and cross-provider fallback.
+* Manual control: priorities, pause/resume, force-account mode, pin an API key to an account.
+* Native Responses-API passthrough for Codex CLI.
+* Proxy API keys separate from dashboard access.
+* Web dashboard: accounts, request history, rate-limit graphs with burn-rate forecasts, analytics, spend tracking, logs.
+* Small dependency tree; memory-leak and stability hardening for long-running deployments.
 
 ## Build from source
 
