@@ -7,19 +7,19 @@
  */
 export const NO_PROJECT_LABEL = "(no project)";
 
-export interface ProjectRequestsRow {
+export interface ProjectTokensRow {
 	project: string | null;
-	requests: number;
+	totalTokens: number;
 }
 
 export function toProjectDonutData(
-	rows: ProjectRequestsRow[],
+	rows: ProjectTokensRow[],
 ): Array<{ name: string; value: number }> {
 	return rows
-		.filter((row) => row.requests > 0)
+		.filter((row) => row.totalTokens > 0)
 		.map((row) => ({
 			name: row.project ?? NO_PROJECT_LABEL,
-			value: row.requests,
+			value: row.totalTokens,
 		}))
 		.sort((a, b) => b.value - a.value);
 }

@@ -1,7 +1,9 @@
+import { formatTokens } from "@clankermux/ui-common";
 import { useMemo } from "react";
 import { CHART_COLORS } from "../../constants";
+import { formatCompactNumber } from "../../lib/chart-utils";
 import {
-	type ProjectRequestsRow,
+	type ProjectTokensRow,
 	toProjectDonutData,
 } from "../../lib/project-donut";
 import { BasePieChart, RequestVolumeSuccessChart } from "../charts";
@@ -31,7 +33,7 @@ interface ChartsSectionProps {
 		model: string;
 		count: number;
 	}>;
-	projectBreakdownData: ProjectRequestsRow[];
+	projectBreakdownData: ProjectTokensRow[];
 	loading: boolean;
 }
 
@@ -67,7 +69,7 @@ export function ChartsSection({
 		return breakdown;
 	}, [accountModelUsageData]);
 
-	// Prepare project donut data (requests per project)
+	// Prepare project donut data (total tokens per project)
 	const projectDonutData = useMemo(
 		() => toProjectDonutData(projectBreakdownData),
 		[projectBreakdownData],
@@ -200,7 +202,7 @@ export function ChartsSection({
 					<CardHeader className="p-4">
 						<CardTitle>Usage by Project</CardTitle>
 						<CardDescription>
-							Request distribution across projects
+							Token usage distribution across projects
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
@@ -212,6 +214,10 @@ export function ChartsSection({
 							outerRadius={72}
 							paddingAngle={5}
 							tooltipStyle="success"
+							tooltipFormatter={(value) => [
+								formatTokens(Number(value)),
+								"Tokens",
+							]}
 						/>
 						<div className="mt-3 space-y-2">
 							{projectDonutData.map((project, index) => (
@@ -231,7 +237,9 @@ export function ChartsSection({
 											{project.name}
 										</span>
 									</div>
-									<span className="font-medium">{project.value}</span>
+									<span className="font-medium">
+										{formatCompactNumber(project.value)}
+									</span>
 								</div>
 							))}
 						</div>
