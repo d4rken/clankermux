@@ -276,6 +276,56 @@ export interface AnalyticsResponse {
 		totalCostUsd: number;
 		totalTokens: number;
 	}>;
+	// Context composition analytics. Char sums are recorded at ingest on
+	// "covered" rows (context columns non-NULL); coverage reports how much of
+	// the range is covered so partial history is labeled honestly. Token
+	// figures are REAL tokens (input + cache read + cache creation); the
+	// covered-only denominator in `totals` exists because the global
+	// tokenBreakdown spans all rows and would skew estimates under partial
+	// coverage. Optional because an older server may not populate it —
+	// consumers should treat absence as undefined.
+	contextComposition?: {
+		coverage: { withComposition: number; totalRequests: number };
+		totals: {
+			systemChars: number;
+			toolsChars: number;
+			messagesChars: number;
+			toolResultChars: number;
+			contextTokens: number;
+			avgContextTokens: number;
+		};
+		avgPerRequest: {
+			systemChars: number;
+			toolsChars: number;
+			messagesChars: number;
+			messageCount: number;
+		};
+		byProject: Array<{
+			project: string | null;
+			requests: number;
+			avgContextTokens: number;
+			avgSystemChars: number;
+			avgToolsChars: number;
+			avgMessagesChars: number;
+		}>;
+		// Context size over time per project (top projects by request count in
+		// range), over ALL rows — works for history without composition columns.
+		growthCurve: Array<{
+			ts: number;
+			project: string | null;
+			avgContextTokens: number;
+			maxContextTokens: number;
+			requests: number;
+		}>;
+		topToolContributors: Array<{
+			requestId: string;
+			ts: number;
+			project: string | null;
+			model: string | null;
+			toolName: string | null;
+			chars: number;
+		}>;
+	};
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

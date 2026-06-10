@@ -26,6 +26,18 @@ const SPEED_IN_RANGE_SQL = `output_tokens_per_second > 0 AND output_tokens_per_s
 // Max project rows in the project_breakdown UNION branch.
 const PROJECT_BREAKDOWN_LIMIT = 20;
 
+// Context composition limits.
+const CONTEXT_BY_PROJECT_LIMIT = 10;
+const GROWTH_CURVE_PROJECT_LIMIT = 5;
+const GROWTH_CURVE_POINT_LIMIT = 1000;
+const TOP_TOOL_CONTRIBUTORS_LIMIT = 10;
+
+// Real context-window tokens for one request: uncached input plus both cache
+// buckets. Used by every contextComposition query so the token denominator is
+// identical everywhere.
+const CONTEXT_TOKENS_SQL =
+	"COALESCE(r.input_tokens, 0) + COALESCE(r.cache_read_input_tokens, 0) + COALESCE(r.cache_creation_input_tokens, 0)";
+
 type PhaseTiming = { phase: string; durationMs: number };
 
 function recordPhase(
@@ -958,6 +970,207 @@ export function createAnalyticsHandler(context: APIContext) {
 				uncachedTokens: Number(row.uncached_tokens) || 0,
 			}));
 
+			// Context composition (1/3): char-bucket totals/averages plus the
+			// per-project split, over COVERED rows only (context columns recorded
+			// at ingest; NULL = not recorded). One UNION query with a shared
+			// covered-only CTE — the discriminator column separates the single
+			// totals row from the grouped project rows.
+			phaseStartedAt = performance.now();
+			const compositionRows = await db.query<{
+				row_type: string;
+				project: string | null;
+				requests: number;
+				sum_system_chars: number | null;
+				sum_tools_chars: number | null;
+				sum_messages_chars: number | null;
+				sum_tool_result_chars: number | null;
+				sum_context_tokens: number | null;
+				avg_context_tokens: number | null;
+				avg_system_chars: number | null;
+				avg_tools_chars: number | null;
+				avg_messages_chars: number | null;
+				avg_message_count: number | null;
+			}>(
+				`
+				WITH covered AS (
+					SELECT
+						r.project as project,
+						COALESCE(r.context_system_chars, 0) as system_chars,
+						COALESCE(r.context_tools_chars, 0) as tools_chars,
+						COALESCE(r.context_messages_chars, 0) as messages_chars,
+						COALESCE(r.context_tool_result_chars, 0) as tool_result_chars,
+						COALESCE(r.context_message_count, 0) as message_count,
+						${CONTEXT_TOKENS_SQL} as context_tokens
+					FROM requests r
+					WHERE ${whereClause} AND r.context_messages_chars IS NOT NULL
+				)
+				SELECT
+					'totals' as row_type,
+					CAST(NULL AS TEXT) as project,
+					COUNT(*) as requests,
+					SUM(system_chars) as sum_system_chars,
+					SUM(tools_chars) as sum_tools_chars,
+					SUM(messages_chars) as sum_messages_chars,
+					SUM(tool_result_chars) as sum_tool_result_chars,
+					SUM(context_tokens) as sum_context_tokens,
+					AVG(context_tokens) as avg_context_tokens,
+					AVG(system_chars) as avg_system_chars,
+					AVG(tools_chars) as avg_tools_chars,
+					AVG(messages_chars) as avg_messages_chars,
+					AVG(message_count) as avg_message_count
+				FROM covered
+
+				UNION ALL
+
+				SELECT * FROM (
+					SELECT
+						'project' as row_type,
+						project,
+						COUNT(*) as requests,
+						CAST(NULL AS BIGINT) as sum_system_chars,
+						CAST(NULL AS BIGINT) as sum_tools_chars,
+						CAST(NULL AS BIGINT) as sum_messages_chars,
+						CAST(NULL AS BIGINT) as sum_tool_result_chars,
+						CAST(NULL AS BIGINT) as sum_context_tokens,
+						AVG(context_tokens) as avg_context_tokens,
+						AVG(system_chars) as avg_system_chars,
+						AVG(tools_chars) as avg_tools_chars,
+						AVG(messages_chars) as avg_messages_chars,
+						CAST(NULL AS DOUBLE PRECISION) as avg_message_count
+					FROM covered
+					GROUP BY project
+					ORDER BY requests DESC
+					LIMIT ${CONTEXT_BY_PROJECT_LIMIT}
+				)
+			`,
+				queryParams,
+			);
+			recordPhase(phaseTimings, "context_composition", phaseStartedAt);
+
+			// Context composition (2/3): growth curve over ALL filtered rows (no
+			// composition predicate — token columns exist for full history),
+			// bucketed like timeSeries, restricted to the top projects by
+			// request count in range. The NULL "project" needs its own branch:
+			// IN (...) never matches SQL NULL.
+			phaseStartedAt = performance.now();
+			const growthCurveRows = await db.query<{
+				ts: number;
+				project: string | null;
+				avg_context_tokens: number | null;
+				max_context_tokens: number | null;
+				requests: number;
+			}>(
+				`
+				WITH top_projects AS (
+					SELECT r.project as project
+					FROM requests r
+					WHERE ${whereClause}
+					GROUP BY r.project
+					ORDER BY COUNT(*) DESC
+					LIMIT ${GROWTH_CURVE_PROJECT_LIMIT}
+				)
+				SELECT
+					(r.timestamp / ?) * ? as ts,
+					r.project as project,
+					AVG(${CONTEXT_TOKENS_SQL}) as avg_context_tokens,
+					MAX(${CONTEXT_TOKENS_SQL}) as max_context_tokens,
+					COUNT(*) as requests
+				FROM requests r
+				WHERE ${whereClause}
+					AND (
+						r.project IN (SELECT project FROM top_projects WHERE project IS NOT NULL)
+						OR (r.project IS NULL AND EXISTS (SELECT 1 FROM top_projects WHERE project IS NULL))
+					)
+				GROUP BY ts, r.project
+				ORDER BY ts
+				LIMIT ${GROWTH_CURVE_POINT_LIMIT}
+			`,
+				[...queryParams, bucket.bucketMs, bucket.bucketMs, ...queryParams],
+			);
+			recordPhase(phaseTimings, "context_growth_curve", phaseStartedAt);
+
+			// Context composition (3/3): biggest single tool results — the
+			// actionable "what to trim" list. > 0 excludes both NULL (not
+			// recorded) and zero (no tool results in the request).
+			phaseStartedAt = performance.now();
+			const topToolRows = await db.query<{
+				id: string;
+				timestamp: number;
+				project: string | null;
+				model: string | null;
+				context_largest_tool_name: string | null;
+				context_largest_tool_chars: number;
+			}>(
+				`
+				SELECT
+					r.id,
+					r.timestamp,
+					r.project,
+					r.model,
+					r.context_largest_tool_name,
+					r.context_largest_tool_chars
+				FROM requests r
+				WHERE ${whereClause} AND r.context_largest_tool_chars > 0
+				ORDER BY r.context_largest_tool_chars DESC
+				LIMIT ${TOP_TOOL_CONTRIBUTORS_LIMIT}
+			`,
+				queryParams,
+			);
+			recordPhase(phaseTimings, "context_top_tools", phaseStartedAt);
+
+			const compositionTotalsRow = compositionRows.find(
+				(row) => row.row_type === "totals",
+			);
+			const contextComposition = {
+				coverage: {
+					withComposition: Number(compositionTotalsRow?.requests) || 0,
+					// Reuse the consolidated all-rows total — same whereClause,
+					// already computed; recounting would just burn a scan.
+					totalRequests: Number(consolidatedResult?.total_requests) || 0,
+				},
+				totals: {
+					systemChars: Number(compositionTotalsRow?.sum_system_chars) || 0,
+					toolsChars: Number(compositionTotalsRow?.sum_tools_chars) || 0,
+					messagesChars: Number(compositionTotalsRow?.sum_messages_chars) || 0,
+					toolResultChars:
+						Number(compositionTotalsRow?.sum_tool_result_chars) || 0,
+					contextTokens: Number(compositionTotalsRow?.sum_context_tokens) || 0,
+					avgContextTokens:
+						Number(compositionTotalsRow?.avg_context_tokens) || 0,
+				},
+				avgPerRequest: {
+					systemChars: Number(compositionTotalsRow?.avg_system_chars) || 0,
+					toolsChars: Number(compositionTotalsRow?.avg_tools_chars) || 0,
+					messagesChars: Number(compositionTotalsRow?.avg_messages_chars) || 0,
+					messageCount: Number(compositionTotalsRow?.avg_message_count) || 0,
+				},
+				byProject: compositionRows
+					.filter((row) => row.row_type === "project")
+					.map((row) => ({
+						project: row.project ?? null,
+						requests: Number(row.requests) || 0,
+						avgContextTokens: Number(row.avg_context_tokens) || 0,
+						avgSystemChars: Number(row.avg_system_chars) || 0,
+						avgToolsChars: Number(row.avg_tools_chars) || 0,
+						avgMessagesChars: Number(row.avg_messages_chars) || 0,
+					})),
+				growthCurve: growthCurveRows.map((row) => ({
+					ts: Number(row.ts),
+					project: row.project ?? null,
+					avgContextTokens: Number(row.avg_context_tokens) || 0,
+					maxContextTokens: Number(row.max_context_tokens) || 0,
+					requests: Number(row.requests) || 0,
+				})),
+				topToolContributors: topToolRows.map((row) => ({
+					requestId: row.id,
+					ts: Number(row.timestamp),
+					project: row.project ?? null,
+					model: row.model ?? null,
+					toolName: row.context_largest_tool_name ?? null,
+					chars: Number(row.context_largest_tool_chars) || 0,
+				})),
+			};
+
 			const routingTotalRequests = routingDecisionRows.reduce(
 				(total, row) => total + (Number(row.requests) || 0),
 				0,
@@ -1136,6 +1349,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				routing,
 				cacheFlow,
 				projectBreakdown,
+				contextComposition,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);
