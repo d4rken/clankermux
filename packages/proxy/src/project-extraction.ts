@@ -1,5 +1,6 @@
 import { sanitizeProjectName } from "./project-name";
 import type { RequestJsonBody } from "./request-body-context";
+import type { SessionProjectCache } from "./session-project-cache";
 
 /**
  * Tiered project-name extraction for routing affinity:
@@ -8,6 +9,12 @@ import type { RequestJsonBody } from "./request-body-context";
  *   2. Anchored working-directory labels in the system prompt
  *      ("Primary working directory:" wins over plain "Working directory:")
  *   3. Codex-style `<cwd>…</cwd>` tag in the FIRST user message only
+ *   4. Session inheritance: requests with no anchored signal (Claude Code
+ *      sidechains, title generation, count_tokens) inherit the project last
+ *      anchored by the same Claude Code session (`metadata.user_id` →
+ *      `session_id`, scoped per API key). `resolveProject` only READS the
+ *      session cache — anchored seeds are committed by the caller AFTER
+ *      request validation, so 400-rejected bodies can't poison the cache.
  *
  * Each tier maps the captured path to a project name via
  * `mapWorkingDirToProject` and normalizes it; `null` means "unknown project"
@@ -173,17 +180,99 @@ export function extractProjectFromBody(
 	return null;
 }
 
+// Paths eligible for project attribution (anchored tiers AND session
+// inheritance). count_tokens shares the session's body shape and metadata.
+const PROJECT_ELIGIBLE_PATHS = new Set([
+	"/v1/messages",
+	"/v1/messages/count_tokens",
+]);
+
+// Defensive bound on session_id (real Claude Code session ids are UUIDs).
+const SESSION_ID_MAX_LENGTH = 64;
+
 export function extractProjectFromRequest(
 	method: string,
 	path: string,
 	headers: Headers,
 	body: RequestJsonBody | null,
 ): string | null {
-	if (method !== "POST" || path !== "/v1/messages") return null;
+	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) return null;
 
 	// Tier 1: explicit header.
 	const headerProject = normalizeProjectCandidate(headers.get("x-project"));
 	if (headerProject) return headerProject;
 
 	return extractProjectFromBody(body);
+}
+
+/**
+ * Pull the Claude Code session id out of `body.metadata.user_id`, which is a
+ * JSON-encoded STRING like
+ * `{"device_id":"…","account_uuid":"","session_id":"<uuid>"}`.
+ * Returns null for anything malformed, empty, or implausibly long.
+ */
+export function extractSessionId(body: RequestJsonBody | null): string | null {
+	const metadata = body?.metadata;
+	if (typeof metadata !== "object" || metadata === null) return null;
+
+	const userId = (metadata as { user_id?: unknown }).user_id;
+	if (typeof userId !== "string") return null;
+
+	try {
+		const parsed: unknown = JSON.parse(userId);
+		if (typeof parsed !== "object" || parsed === null) return null;
+
+		const sessionId = (parsed as { session_id?: unknown }).session_id;
+		if (typeof sessionId !== "string") return null;
+
+		const trimmed = sessionId.trim();
+		if (trimmed.length === 0 || trimmed.length > SESSION_ID_MAX_LENGTH) {
+			return null;
+		}
+		return trimmed;
+	} catch {
+		return null;
+	}
+}
+
+export interface ResolvedProject {
+	project: string | null;
+	source: "anchored" | "inherited" | null;
+	sessionKey: string | null;
+}
+
+/**
+ * Full project resolution: anchored tiers 1–3 first, then tier-4 session
+ * inheritance from `cache`. READ-ONLY with respect to the cache (a hit only
+ * refreshes LRU recency) — the caller commits anchored seeds after request
+ * validation so invalid, 400-rejected bodies never poison the cache.
+ */
+export function resolveProject(
+	method: string,
+	path: string,
+	headers: Headers,
+	body: RequestJsonBody | null,
+	apiKeyId: string | null,
+	cache: SessionProjectCache,
+): ResolvedProject {
+	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) {
+		return { project: null, source: null, sessionKey: null };
+	}
+
+	const sessionId = extractSessionId(body);
+	const sessionKey = sessionId ? `${apiKeyId ?? "anon"}:${sessionId}` : null;
+
+	const anchored = extractProjectFromRequest(method, path, headers, body);
+	if (anchored) {
+		return { project: anchored, source: "anchored", sessionKey };
+	}
+
+	if (sessionKey) {
+		const inherited = cache.get(sessionKey);
+		if (inherited) {
+			return { project: inherited, source: "inherited", sessionKey };
+		}
+	}
+
+	return { project: null, source: null, sessionKey };
 }
