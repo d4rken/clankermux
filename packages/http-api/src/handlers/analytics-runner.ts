@@ -189,7 +189,9 @@ function createIsolatedDashboardHandler(
 		try {
 			return (await promise).clone();
 		} finally {
-			inFlight.delete(key);
+			// Identity-checked: invalidateDashboardCache() may have evicted this
+			// entry and a fresh request may have claimed the key since.
+			if (inFlight.get(key) === promise) inFlight.delete(key);
 		}
 	};
 }
