@@ -12,6 +12,7 @@ import type {
 	CacheFlowPoint,
 	SpeedTimePoint,
 } from "../types";
+import { getRangeConfig } from "./range-config";
 
 const log = new Logger("AnalyticsHandler");
 
@@ -75,58 +76,16 @@ export function effectiveBurnRateDays(
 	return Math.min(windowDays, Math.max(1, days));
 }
 
-interface BucketConfig {
-	bucketMs: number;
-	displayName: string;
-}
-
-function getRangeConfig(range: string): {
-	startMs: number;
-	bucket: BucketConfig;
-} {
-	const now = Date.now();
-	const hour = 60 * 60 * 1000;
-	const day = 24 * hour;
-
-	switch (range) {
-		case "1h":
-			return {
-				startMs: now - hour,
-				bucket: { bucketMs: 60 * 1000, displayName: "1m" },
-			};
-		case "6h":
-			return {
-				startMs: now - 6 * hour,
-				bucket: { bucketMs: 5 * 60 * 1000, displayName: "5m" },
-			};
-		case "24h":
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "7d":
-			return {
-				startMs: now - 7 * day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "30d":
-			return {
-				startMs: now - 30 * day,
-				bucket: { bucketMs: day, displayName: "1d" },
-			};
-		default:
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-	}
-}
-
 export function createAnalyticsHandler(context: APIContext) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		const db = context.dbOps.getAdapter();
 		const range = params.get("range") ?? "24h";
-		const { startMs, bucket } = getRangeConfig(range);
+		// `startMs: null` means "no cutoff" (the all-time range): the timestamp
+		// predicate is omitted from the WHERE clause entirely rather than
+		// degenerating to `timestamp > 0`.
+		const bucket = getRangeConfig(range);
+		const startMs =
+			bucket.windowMs === null ? null : Date.now() - bucket.windowMs;
 		const mode = params.get("mode") ?? "normal";
 		const isCumulative = mode === "cumulative";
 
@@ -144,9 +103,15 @@ export function createAnalyticsHandler(context: APIContext) {
 		const projectsNone = params.get("projectsNone") === "true";
 		const statusFilter = params.get("status") || "all";
 
-		// Build filter conditions
-		const conditions: string[] = ["r.timestamp > ?"];
-		const queryParams: (string | number)[] = [startMs];
+		// Build filter conditions. The timestamp bound is structurally omitted
+		// for the all-time range (startMs === null) instead of widening to
+		// `timestamp > 0`.
+		const conditions: string[] = [];
+		const queryParams: (string | number)[] = [];
+		if (startMs !== null) {
+			conditions.push("r.timestamp > ?");
+			queryParams.push(startMs);
+		}
 
 		if (accountsFilter.length > 0) {
 			// Handle account filter - map account names to IDs via join
@@ -202,7 +167,10 @@ export function createAnalyticsHandler(context: APIContext) {
 			conditions.push("r.success = FALSE");
 		}
 
-		const whereClause = conditions.join(" AND ");
+		// range=all with no filters leaves no conditions; keep the WHERE slot
+		// valid with a constant-true predicate.
+		const whereClause =
+			conditions.length > 0 ? conditions.join(" AND ") : "1=1";
 
 		try {
 			const analyticsStartedAt = performance.now();

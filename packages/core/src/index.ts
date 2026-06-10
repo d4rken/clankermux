@@ -33,6 +33,17 @@ export type ModelMappingData = {
 export type ModelFallback = { [modelFamily: string]: string };
 export { readEnv } from "./env";
 export {
+	drainEventLoopSnapshotMaxLagMs,
+	EVENT_LOOP_ERROR_THRESHOLD_MS,
+	EVENT_LOOP_TICK_INTERVAL_MS,
+	EVENT_LOOP_WARN_THRESHOLD_MS,
+	EventLoopMonitor,
+	type EventLoopMonitorOptions,
+	getEventLoopStats,
+	startEventLoopMonitor,
+	stopEventLoopMonitor,
+} from "./event-loop-monitor";
+export {
 	type IntervalConfig,
 	intervalManager,
 	registerCleanup,

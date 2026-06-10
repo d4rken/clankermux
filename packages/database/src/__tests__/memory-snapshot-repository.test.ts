@@ -29,6 +29,7 @@ function row(overrides: Partial<MemorySnapshotRow>): MemorySnapshotRow {
 		rssBytes: 100,
 		heapUsedBytes: 50,
 		heapTotalBytes: 80,
+		eventLoopMaxLagMs: 5,
 		...overrides,
 	};
 }
@@ -62,6 +63,13 @@ describe("MemorySnapshotRepository", () => {
 			expect(result[0].rssBytes).toBe(123);
 			expect(result[0].heapUsedBytes).toBe(45);
 			expect(result[0].heapTotalBytes).toBe(67);
+		});
+
+		it("round-trips eventLoopMaxLagMs", async () => {
+			await repo.insert(row({ sampledAt: 1_000, eventLoopMaxLagMs: 312.5 }));
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result).toHaveLength(1);
+			expect(result[0].eventLoopMaxLagMs).toBe(312.5);
 		});
 	});
 
@@ -133,6 +141,23 @@ describe("MemorySnapshotRepository", () => {
 			await repo.insert(row({ sampledAt: 900, heapTotalBytes: 200 }));
 			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
 			expect(result[0].heapTotalBytes).toBe(200);
+		});
+	});
+
+	describe("nullable event_loop_max_lag_ms handling", () => {
+		it("round-trips a null lag as null (rows predating the column)", async () => {
+			await repo.insert(row({ sampledAt: 1_000, eventLoopMaxLagMs: null }));
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result[0].eventLoopMaxLagMs).toBeNull();
+		});
+
+		it("takes the column-wise MAX of lag within a bucket, ignoring nulls", async () => {
+			await repo.insert(row({ sampledAt: 100, eventLoopMaxLagMs: null }));
+			await repo.insert(row({ sampledAt: 500, eventLoopMaxLagMs: 750 }));
+			await repo.insert(row({ sampledAt: 900, eventLoopMaxLagMs: 20 }));
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result).toHaveLength(1);
+			expect(result[0].eventLoopMaxLagMs).toBe(750);
 		});
 	});
 

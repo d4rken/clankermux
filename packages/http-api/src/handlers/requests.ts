@@ -160,6 +160,24 @@ export function createRequestsCountHandler(db: BunSqlAdapter) {
 }
 
 /**
+ * Create a handler that returns every distinct project name stamped on a
+ * request, sorted alphabetically. Backs the Project filter dropdown in the
+ * dashboard's request explorer, so historical projects stay selectable even
+ * when they don't appear in the currently-loaded slice. NULL rows are excluded
+ * here; the dashboard exposes them via its dedicated "No Project" sentinel.
+ * Capped so a pathological high-cardinality project header can't produce an
+ * unbounded response (a dropdown past a few hundred entries is unusable anyway).
+ */
+export function createRequestProjectsHandler(db: BunSqlAdapter) {
+	return async (): Promise<Response> => {
+		const rows = await db.query<{ project: string }>(
+			"SELECT DISTINCT project FROM requests WHERE project IS NOT NULL ORDER BY project LIMIT 500",
+		);
+		return jsonResponse(rows.map((row) => row.project));
+	};
+}
+
+/**
  * Create a detailed requests handler with full payload data
  */
 export function createRequestsDetailHandler(dbOps: DatabaseOperations) {

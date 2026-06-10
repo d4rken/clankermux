@@ -80,6 +80,7 @@ export const OverviewTab = React.memo(() => {
 			case "7d":
 				return "previous hour";
 			case "30d":
+			case "all":
 				return "previous day";
 			default:
 				return "previous period";

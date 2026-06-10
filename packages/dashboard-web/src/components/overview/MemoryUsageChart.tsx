@@ -13,6 +13,7 @@ import {
 	YAxis,
 } from "recharts";
 import { CHART_PROPS, COLORS, type TimeRange } from "../../constants";
+import { formatLagMs } from "../../lib/event-loop";
 import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
@@ -43,6 +44,8 @@ interface MemoryRow {
 	heapMb: number;
 	/** Committed heap; null for buckets sampled before the column existed. */
 	heapTotalMb: number | null;
+	/** Peak event-loop lag in the bucket (ms); null for pre-column buckets. */
+	lagMs: number | null;
 }
 
 const BYTES_PER_MB = 1024 * 1024;
@@ -75,6 +78,7 @@ export function MemoryUsageChart({
 				p.heapTotalBytes == null
 					? null
 					: Math.round(p.heapTotalBytes / BYTES_PER_MB),
+			lagMs: p.eventLoopMaxLagMs,
 		}));
 	}, [memoryHistory]);
 
@@ -91,7 +95,9 @@ export function MemoryUsageChart({
 						<CardDescription>
 							Proxy process memory over time (MB). RSS is the filled area;
 							committed and used JS heap are the lines — a widening RSS-vs-heap
-							gap is native (non-heap) memory.
+							gap is native (non-heap) memory. The thin overlay is peak
+							event-loop lag (ms, right axis) — spikes mean the main thread
+							stalled.
 						</CardDescription>
 					</div>
 					<TimeRangeSelector value={range} onChange={onRangeChange} />
@@ -135,9 +141,21 @@ export function MemoryUsageChart({
 								tickFormatter={(value) => formatAxisTime(Number(value), tr)}
 							/>
 							<YAxis
+								yAxisId="memory"
 								className="text-xs"
 								width={56}
 								tickFormatter={(value) => `${formatNumber(Number(value))} MB`}
+							/>
+							{/* Right axis for the event-loop lag overlay (ms); auto domain
+							    since lag spans <1 ms to multi-second stalls. */}
+							<YAxis
+								yAxisId="lag"
+								orientation="right"
+								className="text-xs"
+								width={56}
+								tickFormatter={(value) =>
+									`${formatNumber(Math.round(Number(value)))} ms`
+								}
 							/>
 							<Tooltip
 								content={
@@ -149,6 +167,8 @@ export function MemoryUsageChart({
 													? `${formatNumber(value)} MB`
 													: "n/a",
 											heapMb: (value) => `${formatNumber(Number(value))} MB`,
+											lagMs: (value) =>
+												formatLagMs(typeof value === "number" ? value : null),
 										}}
 										labelFormatter={(label, payload) => {
 											// Resolve the header from the hovered bucket's `ts` so it
@@ -164,6 +184,7 @@ export function MemoryUsageChart({
 							/>
 							<Legend verticalAlign="top" height={36} iconType="rect" />
 							<Area
+								yAxisId="memory"
 								type="monotone"
 								dataKey="rssMb"
 								name="RSS"
@@ -174,6 +195,7 @@ export function MemoryUsageChart({
 								isAnimationActive={false}
 							/>
 							<Line
+								yAxisId="memory"
 								type="monotone"
 								dataKey="heapTotalMb"
 								name="Heap (committed)"
@@ -184,12 +206,27 @@ export function MemoryUsageChart({
 								isAnimationActive={false}
 							/>
 							<Line
+								yAxisId="memory"
 								type="monotone"
 								dataKey="heapMb"
 								name="Heap (used)"
 								stroke={COLORS.blue}
 								strokeWidth={2}
 								dot={false}
+								isAnimationActive={false}
+							/>
+							{/* Subordinate overlay: thin cyan line on the right (ms) axis.
+							    connectNulls=false gaps buckets that predate the lag column
+							    instead of drawing them as zero. */}
+							<Line
+								yAxisId="lag"
+								type="monotone"
+								dataKey="lagMs"
+								name="Event loop lag (peak)"
+								stroke={COLORS.cyan}
+								strokeWidth={1}
+								dot={false}
+								connectNulls={false}
 								isAnimationActive={false}
 							/>
 						</ComposedChart>

@@ -31,7 +31,8 @@ interface RequestVolumeSuccessChartProps {
 
 const GRADIENT_ID = "requestVolumeGradient";
 
-const isMultiDayRange = (range: string) => range === "7d" || range === "30d";
+const isMultiDayRange = (range: string) =>
+	range === "7d" || range === "30d" || range === "all";
 
 /**
  * Compact X-axis tick: just the time within a day, but the date once the range
@@ -43,12 +44,13 @@ function formatAxisLabel(ts: number, range: string): string {
 }
 
 /**
- * Unambiguous tooltip header — always carries the date. 30d uses daily buckets,
- * so the (meaningless) 00:00 time is dropped in favour of a year for clarity.
+ * Unambiguous tooltip header — always carries the date. 30d and all-time use
+ * daily buckets, so the (meaningless) 00:00 time is dropped in favour of a
+ * year for clarity.
  */
 function formatTooltipLabel(ts: number, range: string): string {
 	const date = new Date(ts);
-	return range === "30d"
+	return range === "30d" || range === "all"
 		? format(date, "MMM d, yyyy")
 		: format(date, "MMM d, HH:mm");
 }

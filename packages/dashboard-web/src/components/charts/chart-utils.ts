@@ -16,7 +16,7 @@ export function longRangeAxisProps(range: TimeRange): {
 	xAxisTextAnchor: "start" | "middle" | "end";
 	xAxisHeight: number;
 } {
-	const isLong = range === "7d" || range === "30d";
+	const isLong = range === "7d" || range === "30d" || range === "all";
 	return {
 		xAxisAngle: isLong ? -45 : 0,
 		xAxisTextAnchor: isLong ? "end" : "middle",

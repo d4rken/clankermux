@@ -1,7 +1,13 @@
-import { AlertTriangle, CheckCircle, Clock, Cpu, XCircle } from "lucide-react";
+import {
+	Activity,
+	AlertTriangle,
+	CheckCircle,
+	Clock,
+	XCircle,
+} from "lucide-react";
 import type { ReactElement } from "react";
-import { useEffect, useRef, useState } from "react";
 import { useSystemStatus } from "../../hooks/queries";
+import { eventLoopTone, formatLagMs } from "../../lib/event-loop";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -11,10 +17,6 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { StorageIntegritySection } from "./StorageIntegrity";
-import {
-	type MemorySample,
-	MemorySparkline,
-} from "./system-status/MemorySparkline";
 import { RecentErrorsCard } from "./system-status/RecentErrorsCard";
 import {
 	formatUptime,
@@ -22,29 +24,8 @@ import {
 	statusSummary,
 } from "./system-status/system-status-utils";
 
-// Keep ~5 minutes of history at the 10s healthy poll cadence.
-const MAX_SAMPLES = 30;
-
 export function SystemStatus() {
 	const { data, isLoading, error } = useSystemStatus();
-
-	// Ring buffer of RSS samples, accumulated client-side across polls (the
-	// server keeps no time series). Keyed on `timestamp` so each distinct poll
-	// appends exactly one sample even across re-renders.
-	const [samples, setSamples] = useState<MemorySample[]>([]);
-	const lastTsRef = useRef<string | null>(null);
-
-	useEffect(() => {
-		if (!data || data.timestamp === lastTsRef.current) return;
-		lastTsRef.current = data.timestamp;
-		setSamples((prev) => {
-			const next = [
-				...prev,
-				{ t: Date.parse(data.timestamp), rss: data.memory.rss_mb },
-			];
-			return next.length > MAX_SAMPLES ? next.slice(-MAX_SAMPLES) : next;
-		});
-	}, [data]);
 
 	// The system-status portion has three states (loading / unavailable / live).
 	// It's computed into `statusBody` so the storage-integrity sub-section below
@@ -69,9 +50,12 @@ export function SystemStatus() {
 			</div>
 		);
 	} else {
-		const { status, pool, memory, uptime_s } = data;
+		const { status, pool, eventLoop, uptime_s } = data;
 		const { label, description } = statusSummary(data);
-		const color = statusColor(status);
+		// Health tone for the event-loop row: keyed on the ~60s rolling max so a
+		// stall stays visible for a minute, mirroring the monitor's WARN/ERROR
+		// thresholds (250 ms / 2000 ms).
+		const lagTone = eventLoopTone(eventLoop?.maxRecentLagMs);
 
 		const tonePanel =
 			status === "ok"
@@ -129,20 +113,34 @@ export function SystemStatus() {
 						</p>
 					</div>
 
-					{/* Memory (RSS) with sparkline */}
+					{/* Event-loop health: current lag + recent (~60s window) max. A
+					    blocked main thread freezes all HTTP serving, so this is the
+					    primary stall signal. Memory moved to the chart below. */}
 					<div className="rounded-lg border p-3">
 						<div className="flex items-center justify-between text-sm text-muted-foreground">
 							<span className="flex items-center gap-2">
-								<Cpu className="h-4 w-4" />
-								Memory (RSS)
+								<Activity className="h-4 w-4" />
+								Event loop
 							</span>
-							<span className="font-semibold tabular-nums text-foreground">
-								{memory.rss_mb} MB
-							</span>
+							<span
+								className="inline-block h-2.5 w-2.5 rounded-full"
+								style={{ backgroundColor: statusColor(lagTone) }}
+								title={
+									lagTone === "ok"
+										? "Event loop responsive"
+										: lagTone === "degraded"
+											? "Event loop lag ≥ 250 ms in the last minute"
+											: "Event loop stalled ≥ 2 s in the last minute"
+								}
+								aria-hidden
+							/>
 						</div>
-						<div className="mt-1">
-							<MemorySparkline data={samples} color={color} height={40} />
-						</div>
+						<p className="mt-1 text-lg font-semibold tabular-nums">
+							{formatLagMs(eventLoop?.lastLagMs)}
+						</p>
+						<p className="text-xs text-muted-foreground tabular-nums">
+							max (1m): {formatLagMs(eventLoop?.maxRecentLagMs)}
+						</p>
 					</div>
 				</div>
 

@@ -20,6 +20,7 @@ describe("formatAxisTime", () => {
 	it("shows the calendar date for multi-day ranges", () => {
 		expect(formatAxisTime(ts, "7d")).toBe("Jun 2");
 		expect(formatAxisTime(ts, "30d")).toBe("Jun 2");
+		expect(formatAxisTime(ts, "all")).toBe("Jun 2");
 	});
 });
 
@@ -36,6 +37,10 @@ describe("formatTooltipTime", () => {
 
 	it("includes weekday and date but no time for the daily 30d range", () => {
 		expect(formatTooltipTime(ts, "30d")).toBe("Tue, Jun 2");
+	});
+
+	it("adds the year for the all-time range (spans can cross years)", () => {
+		expect(formatTooltipTime(ts, "all")).toBe("Tue, Jun 2, 2026");
 	});
 });
 

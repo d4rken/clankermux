@@ -55,13 +55,20 @@ const EMPTY_MESSAGE =
 const FORECAST_DASH = "5 4";
 const POOL_KEY = "pool";
 
-/** Lookback span per range string; also caps how far the forecast projects. */
+/**
+ * Lookback span per range string; also caps how far the forecast projects.
+ * "all" maps to the 30d span: the true history span is unbounded, but this
+ * value only drives the label-pattern day check (any multi-day value works)
+ * and the forecast horizon, which should not stretch with the history (window
+ * resets are at most 7 days out anyway).
+ */
 const RANGE_MS: Record<string, number> = {
 	"1h": 60 * 60 * 1000,
 	"6h": 6 * 60 * 60 * 1000,
 	"24h": 24 * 60 * 60 * 1000,
 	"7d": 7 * 24 * 60 * 60 * 1000,
 	"30d": 30 * 24 * 60 * 60 * 1000,
+	all: 30 * 24 * 60 * 60 * 1000,
 };
 
 function rangeToMs(range: string | undefined): number {

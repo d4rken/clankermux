@@ -1,6 +1,19 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 
 /**
+ * busy_timeout for the shutdown `wal_checkpoint(TRUNCATE)` in `close()`.
+ *
+ * The main connection runs with a deliberately small busy_timeout (see
+ * MAIN_CONNECTION_BUSY_TIMEOUT_MS in database-operations.ts) so SQLITE_BUSY
+ * fails fast instead of freezing the event loop. At shutdown that protection
+ * is counterproductive: blocking a couple of seconds is fine, and giving the
+ * checkpoint a real chance to truncate the WAL beats leaving a fat WAL behind.
+ * If the lock is still held past this window the truncate is skipped with a
+ * log — shutdown must never crash on a busy checkpoint.
+ */
+const CLOSE_CHECKPOINT_BUSY_TIMEOUT_MS = 2000;
+
+/**
  * SQL adapter that wraps bun:sqlite behind an async, Promise-returning API.
  *
  * The `query`, `get`, `run`, `runWithChanges` methods return Promises so that
@@ -103,9 +116,26 @@ export class BunSqlAdapter {
 
 	/**
 	 * Close the database connection.
+	 *
+	 * Best-effort WAL truncate first: the main connection's busy_timeout is
+	 * bounded (fail-fast for event-loop safety), so temporarily widen it for
+	 * the shutdown checkpoint and tolerate a still-busy database — a skipped
+	 * truncate only leaves WAL frames for the next open to checkpoint, whereas
+	 * a thrown SQLITE_BUSY here would crash shutdown.
 	 */
 	async close(): Promise<void> {
-		this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+		try {
+			this.sqliteDb.exec(
+				`PRAGMA busy_timeout = ${CLOSE_CHECKPOINT_BUSY_TIMEOUT_MS}`,
+			);
+			this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+		} catch (err) {
+			console.warn(
+				`[BunSqlAdapter] shutdown wal_checkpoint(TRUNCATE) skipped: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
 		this.sqliteDb.close();
 	}
 }

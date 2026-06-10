@@ -85,6 +85,7 @@ import {
 import { parseRequestFilters } from "./handlers/request-filters";
 import {
 	createRequestPayloadHandler,
+	createRequestProjectsHandler,
 	createRequestsCountHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
@@ -137,6 +138,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 			getStrategy,
+			getEventLoopLag,
 		} = this.context;
 
 		// Create handlers
@@ -146,7 +148,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 		);
-		const statsHandler = createStatsHandler(dbOps);
+		const statsHandler = createStatsHandler(this.context);
 		const statsResetHandler = createStatsResetHandler(dbOps);
 		const storageHandler = createStorageHandler(dbOps);
 		const storageUsageHandler = createStorageUsageHandler(dbOps);
@@ -173,13 +175,16 @@ export class APIRouter {
 			dbOps.getAdapter(),
 		);
 		const requestsCountHandler = createRequestsCountHandler(dbOps.getAdapter());
+		const requestProjectsHandler = createRequestProjectsHandler(
+			dbOps.getAdapter(),
+		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
-		const usageHistoryHandler = createUsageHistoryHandler(dbOps);
-		const memoryHistoryHandler = createMemoryHistoryHandler(dbOps);
+		const usageHistoryHandler = createUsageHistoryHandler(this.context);
+		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);
@@ -202,6 +207,7 @@ export class APIRouter {
 			config,
 			getAsyncWriterHealth,
 			getIntegrityStatus,
+			getEventLoopLag,
 		);
 		const versionCheckHandler = createVersionCheckHandler();
 
@@ -324,6 +330,9 @@ export class APIRouter {
 			const filters = parseRequestFilters(url.searchParams);
 			return requestsCountHandler(filters);
 		});
+		this.handlers.set("GET:/api/requests/projects", () =>
+			requestProjectsHandler(),
+		);
 		this.handlers.set("GET:/api/requests/detail", (_req, url) => {
 			const limitParam = url.searchParams.get("limit");
 			const limit =

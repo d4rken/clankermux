@@ -2,9 +2,25 @@ import { Database } from "bun:sqlite";
 import { BunSqlAdapter } from "@clankermux/database";
 import type { APIContext } from "@clankermux/types";
 import { createAnalyticsHandler } from "./analytics-direct";
+import { createMemoryHistoryHandler } from "./memory-history-direct";
+import { createStatsHandler } from "./stats-direct";
+import { createUsageHistoryHandler } from "./usage-history-direct";
+
+/**
+ * Read-only dashboard worker: executes the synchronous bun:sqlite dashboard
+ * queries (analytics + stats + usage/memory history) off the main thread.
+ * The `kind` discriminator selects which direct handler runs; it defaults to
+ * "analytics" for backward compatibility.
+ */
+export type DashboardWorkerKind =
+	| "analytics"
+	| "stats"
+	| "usage-history"
+	| "memory-history";
 
 export interface AnalyticsWorkerRequest {
 	id: string;
+	kind?: DashboardWorkerKind;
 	dbPath: string;
 	params: string;
 	busyTimeoutMs: number;
@@ -24,6 +40,7 @@ export interface AnalyticsWorkerResponse {
 self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 	const startedAt = performance.now();
 	const { id, dbPath, params, busyTimeoutMs } = event.data;
+	const kind: DashboardWorkerKind = event.data.kind ?? "analytics";
 	let db: Database | undefined;
 
 	try {
@@ -42,9 +59,15 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			},
 		} as APIContext;
 
-		const response = await createAnalyticsHandler(context)(
-			new URLSearchParams(params),
-		);
+		const handler =
+			kind === "stats"
+				? createStatsHandler(context)
+				: kind === "usage-history"
+					? createUsageHistoryHandler(context)
+					: kind === "memory-history"
+						? createMemoryHistoryHandler(context)
+						: createAnalyticsHandler(context);
+		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();
 		db = undefined;
@@ -62,7 +85,7 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			id,
 			ok: false,
 			status: 500,
-			body: JSON.stringify({ error: "Failed to fetch analytics data" }),
+			body: JSON.stringify({ error: `Failed to fetch ${kind} data` }),
 			error: error instanceof Error ? error.message : String(error),
 			timings: { totalMs: performance.now() - startedAt },
 		} satisfies AnalyticsWorkerResponse);

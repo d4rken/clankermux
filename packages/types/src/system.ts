@@ -1,6 +1,20 @@
 import type { PoolStatus } from "./stats";
 
 /**
+ * Live event-loop lag stats from the in-process monitor (see
+ * @clankermux/core event-loop-monitor). With synchronous bun:sqlite a blocked
+ * main thread freezes ALL HTTP serving, so lag is the primary stall signal.
+ */
+export interface EventLoopLagStats {
+	/** Lag measured on the most recent monitor tick, ms. */
+	lastLagMs: number;
+	/** Worst lag observed since the monitor started, ms. */
+	maxLagMs: number;
+	/** Worst lag within the recent rolling window (~last minute), ms. */
+	maxRecentLagMs: number;
+}
+
+/**
  * Live operational snapshot for the dashboard's System Status tile.
  *
  * Served by `GET /api/system/status`. Unlike `/health` (consumed by external
@@ -26,6 +40,8 @@ export interface SystemStatusResponse {
 		asyncWriterHealthy: boolean;
 		integrityStatus: "ok" | "corrupt" | "unchecked" | "running";
 	};
+	/** Event-loop lag from the in-process monitor (zeros when not running). */
+	eventLoop: EventLoopLagStats;
 	strategy: string;
 	timestamp: string;
 }

@@ -21,19 +21,22 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 		await this.run(
 			`
 			INSERT INTO memory_snapshots (
-				sampled_at, rss_bytes, heap_used_bytes, heap_total_bytes
+				sampled_at, rss_bytes, heap_used_bytes, heap_total_bytes,
+				event_loop_max_lag_ms
 			)
-			VALUES (?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?)
 			ON CONFLICT (sampled_at) DO UPDATE SET
 				rss_bytes = EXCLUDED.rss_bytes,
 				heap_used_bytes = EXCLUDED.heap_used_bytes,
-				heap_total_bytes = EXCLUDED.heap_total_bytes
+				heap_total_bytes = EXCLUDED.heap_total_bytes,
+				event_loop_max_lag_ms = EXCLUDED.event_loop_max_lag_ms
 		`,
 			[
 				row.sampledAt,
 				row.rssBytes,
 				row.heapUsedBytes,
 				row.heapTotalBytes ?? null,
+				row.eventLoopMaxLagMs ?? null,
 			],
 		);
 	}
@@ -55,18 +58,21 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 			rss_bytes: number;
 			heap_used_bytes: number;
 			heap_total_bytes: number | null;
+			event_loop_max_lag_ms: number | null;
 		}>(
 			`
 			WITH bucketed AS (
 				SELECT (sampled_at / ?) * ? AS ts,
-				       rss_bytes, heap_used_bytes, heap_total_bytes
+				       rss_bytes, heap_used_bytes, heap_total_bytes,
+				       event_loop_max_lag_ms
 				FROM memory_snapshots
 				WHERE sampled_at >= ?
 			)
 			SELECT ts,
 			       MAX(rss_bytes) AS rss_bytes,
 			       MAX(heap_used_bytes) AS heap_used_bytes,
-			       MAX(heap_total_bytes) AS heap_total_bytes
+			       MAX(heap_total_bytes) AS heap_total_bytes,
+			       MAX(event_loop_max_lag_ms) AS event_loop_max_lag_ms
 			FROM bucketed
 			GROUP BY ts
 			ORDER BY ts;
@@ -80,6 +86,10 @@ export class MemorySnapshotRepository extends BaseRepository<MemorySnapshotRow> 
 			heapUsedBytes: Number(row.heap_used_bytes),
 			heapTotalBytes:
 				row.heap_total_bytes == null ? null : Number(row.heap_total_bytes),
+			eventLoopMaxLagMs:
+				row.event_loop_max_lag_ms == null
+					? null
+					: Number(row.event_loop_max_lag_ms),
 		}));
 	}
 

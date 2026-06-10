@@ -21,7 +21,7 @@ export const CHART_COLORS = [
 ] as const;
 
 // Time range options for analytics
-export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
+export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d" | "all";
 
 export const TIME_RANGES: Record<TimeRange, string> = {
 	"1h": "Last Hour",
@@ -29,6 +29,7 @@ export const TIME_RANGES: Record<TimeRange, string> = {
 	"24h": "Last 24 Hours",
 	"7d": "Last 7 Days",
 	"30d": "Last 30 Days",
+	all: "All Time",
 } as const;
 
 // Chart dimensions
