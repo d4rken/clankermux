@@ -64,6 +64,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			output_tokens: number | null;
 			cost_usd: number | null;
 			output_tokens_per_second: number | null;
+			output_tokens_per_second_approx: number | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
 			project: string | null;
@@ -103,6 +104,11 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			outputTokens: request.output_tokens || undefined,
 			costUsd: request.cost_usd || undefined,
 			tokensPerSecond: request.output_tokens_per_second || undefined,
+			// Only meaningful alongside tokensPerSecond (stored 1 only when the
+			// fallback value was recorded).
+			tokensPerSecondApproximate: request.output_tokens_per_second_approx
+				? true
+				: undefined,
 			apiKeyId: request.api_key_id || undefined,
 			apiKeyName: request.api_key_name || undefined,
 			project: request.project || undefined,

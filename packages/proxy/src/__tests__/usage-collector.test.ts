@@ -366,6 +366,134 @@ describe("usage-collector", () => {
 		});
 	});
 
+	describe("tokens/sec total-duration fallback (approximate)", () => {
+		/** Anthropic stream with a chosen streaming window + output count. */
+		function buildState(firstTs: number, lastTs: number, outputTokens: number) {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				firstTs,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: outputTokens },
+				}),
+				lastTs,
+			);
+			return state;
+		}
+
+		it("falls back to total duration and flags approximate when the streaming window is implausible", async () => {
+			// 100 tokens over a 10ms streaming window = 10,000 tok/s — implausible
+			// (> MAX_PLAUSIBLE_TOKENS_PER_SECOND). Instead of dropping the value
+			// entirely, fall back to total duration: 100 / 4s = 25 tok/s, flagged
+			// approximate because it includes TTFB, not just streaming time.
+			const state = buildState(1000, 1010, 100);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 4000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeCloseTo(25, 5);
+			expect(summary.tokensPerSecondApproximate).toBe(true);
+		});
+
+		it("returns undefined when both the window and the total-duration fallback are implausible", async () => {
+			// Window: 100 / 0.01s = 10,000 tok/s. Total: 100 / 0.05s = 2,000 tok/s.
+			// Both above the ceiling → record nothing, no approximate flag.
+			const state = buildState(1000, 1010, 100);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 50, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeUndefined();
+			expect(summary.tokensPerSecondApproximate).toBeUndefined();
+		});
+
+		it("returns undefined when the window is implausible and there is no total duration", async () => {
+			const state = buildState(1000, 1010, 100);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 0, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeUndefined();
+			expect(summary.tokensPerSecondApproximate).toBeUndefined();
+		});
+
+		it("does NOT flag approximate for a plausible streaming-window result", async () => {
+			// 100 tokens over 2s window = 50 tok/s — plausible, window used as-is.
+			const state = buildState(1000, 3000, 100);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 10000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeCloseTo(50, 5);
+			expect(summary.tokensPerSecondApproximate).toBeUndefined();
+		});
+
+		it("does NOT flag approximate for the existing no-window total-duration fallback", async () => {
+			// Single-chunk stream (firstChunkTs === lastChunkTs): no streaming
+			// window, so the pre-existing total-duration path is used — that path
+			// is the normal measurement for this shape, not an approximation flag.
+			const state = buildState(1000, 1000, 100);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 4000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeCloseTo(25, 5);
+			expect(summary.tokensPerSecondApproximate).toBeUndefined();
+		});
+
+		it("does NOT flag approximate on the zai (glm-*) total-duration path", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "glm-4.5-air",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 100 },
+				}),
+				1500,
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 4000, providerName: "zai", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.tokensPerSecond).toBeCloseTo(25, 5);
+			expect(summary.tokensPerSecondApproximate).toBeUndefined();
+		});
+	});
+
 	describe("non-stream body", () => {
 		it("uses the usage object when present", async () => {
 			const state = createUsageState();

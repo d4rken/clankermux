@@ -68,11 +68,17 @@ export function formatTimestamp(timestamp: number | string): string {
 }
 
 /**
- * Format tokens per second with 1 decimal place
+ * Format tokens per second with 1 decimal place. When `approximate` is true
+ * (the value came from the total-duration fallback rather than the streaming
+ * window) the result is prefixed with a tilde, e.g. "~36.0 tok/s".
  */
-export function formatTokensPerSecond(tokensPerSecond?: number | null): string {
+export function formatTokensPerSecond(
+	tokensPerSecond?: number | null,
+	approximate?: boolean,
+): string {
 	if (!tokensPerSecond || tokensPerSecond === 0) return "0 tok/s";
-	return `${tokensPerSecond.toFixed(1)} tok/s`;
+	const formatted = `${tokensPerSecond.toFixed(1)} tok/s`;
+	return approximate ? `~${formatted}` : formatted;
 }
 
 /**

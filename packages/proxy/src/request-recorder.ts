@@ -96,6 +96,12 @@ export interface SlimUsageSummary {
 		costUsd?: number;
 	};
 	tokensPerSecond?: number;
+	/**
+	 * True when tokensPerSecond came from the implausible-streaming-window →
+	 * total-request-duration fallback (set only when true; includes TTFB, so
+	 * it understates the real streaming speed).
+	 */
+	tokensPerSecondApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
 }
@@ -926,6 +932,8 @@ export class RequestRecorder {
 			outputTokens: usage?.outputTokens,
 			costUsd: usage?.costUsd,
 			tokensPerSecond: summary?.tokensPerSecond,
+			tokensPerSecondApproximate:
+				summary?.tokensPerSecondApproximate || undefined,
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,
 			project: meta.project ?? undefined,
@@ -955,6 +963,8 @@ export class RequestRecorder {
 			cacheReadInputTokens: u.cacheReadInputTokens,
 			cacheCreationInputTokens: u.cacheCreationInputTokens,
 			tokensPerSecond: summary.tokensPerSecond,
+			tokensPerSecondApproximate:
+				summary.tokensPerSecondApproximate || undefined,
 		};
 	}
 

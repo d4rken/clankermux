@@ -17,6 +17,8 @@ export interface TokenUsageData {
 	costUsd?: number;
 	responseTimeMs?: number;
 	tokensPerSecond?: number;
+	/** True when tokensPerSecond is the total-duration fallback (rendered "~N tok/s"). */
+	tokensPerSecondApproximate?: boolean;
 }
 
 /**
@@ -118,7 +120,10 @@ export function processTokenUsage(
 	if (data.tokensPerSecond !== undefined && data.tokensPerSecond > 0) {
 		sections.tokensPerSecond = {
 			label: "Speed",
-			value: formatTokensPerSecond(data.tokensPerSecond),
+			value: formatTokensPerSecond(
+				data.tokensPerSecond,
+				data.tokensPerSecondApproximate,
+			),
 		};
 	}
 

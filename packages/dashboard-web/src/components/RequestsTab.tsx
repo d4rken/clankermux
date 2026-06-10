@@ -851,7 +851,10 @@ export function RequestsTab() {
 											{summary?.tokensPerSecond != null &&
 												summary.tokensPerSecond > 0 && (
 													<Badge variant="secondary" className="text-xs">
-														{formatTokensPerSecond(summary.tokensPerSecond)}
+														{formatTokensPerSecond(
+															summary.tokensPerSecond,
+															summary.tokensPerSecondApproximate,
+														)}
 													</Badge>
 												)}
 											{accountLabel && (

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatBytes } from "../formatters";
+import { formatBytes, formatTokensPerSecond } from "../formatters";
 
 describe("formatBytes", () => {
 	it("returns '0 B' for zero, negative, and undefined", () => {
@@ -27,5 +27,33 @@ describe("formatBytes", () => {
 		expect(formatBytes(5 * 1024 ** 4)).toBe("5.0 TB");
 		// Beyond TB still reports in TB rather than an unlabeled unit.
 		expect(formatBytes(1024 ** 5)).toBe("1024.0 TB");
+	});
+});
+
+describe("formatTokensPerSecond", () => {
+	it("returns '0 tok/s' for zero, undefined, and null", () => {
+		expect(formatTokensPerSecond(0)).toBe("0 tok/s");
+		expect(formatTokensPerSecond(undefined)).toBe("0 tok/s");
+		expect(formatTokensPerSecond(null)).toBe("0 tok/s");
+	});
+
+	it("formats with one decimal place", () => {
+		expect(formatTokensPerSecond(12.5)).toBe("12.5 tok/s");
+		expect(formatTokensPerSecond(36)).toBe("36.0 tok/s");
+	});
+
+	it("prefixes a tilde when the value is approximate", () => {
+		expect(formatTokensPerSecond(36, true)).toBe("~36.0 tok/s");
+		expect(formatTokensPerSecond(12.5, true)).toBe("~12.5 tok/s");
+	});
+
+	it("does not prefix a tilde when approximate is false or omitted", () => {
+		expect(formatTokensPerSecond(36, false)).toBe("36.0 tok/s");
+		expect(formatTokensPerSecond(36)).toBe("36.0 tok/s");
+	});
+
+	it("keeps the zero placeholder tilde-free even when approximate", () => {
+		expect(formatTokensPerSecond(0, true)).toBe("0 tok/s");
+		expect(formatTokensPerSecond(undefined, true)).toBe("0 tok/s");
 	});
 });

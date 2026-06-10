@@ -1,10 +1,9 @@
 /**
  * Tests asserting that ensureSchema() ALONE produces the full current schema
  * for a fresh install. After the legacy-migration removal, ensureSchema() owns
- * the complete schema and runMigrations() is a lean additive no-op (its
- * ADDITIVE_COLUMNS list is empty), so a fresh DB must already have every
- * column, table, and performance index — without runMigrations() doing
- * anything.
+ * the complete schema and runMigrations() only back-fills ADDITIVE_COLUMNS on
+ * pre-existing live DBs, so a fresh DB must already have every column, table,
+ * and performance index — without runMigrations() adding anything.
  *
  * Also asserts that intentionally-dropped Bedrock artifacts (the
  * accounts.cross_region_mode column and the model_translations table) are

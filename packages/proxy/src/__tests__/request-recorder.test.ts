@@ -386,6 +386,36 @@ describe("RequestRecorder — normal terminal end", () => {
 		expect(ev.billingType).toBe("plan");
 	});
 
+	it("carries tokensPerSecondApproximate into the row usage and the live event", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ tokensPerSecondApproximate: true }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const usage = h.dbOps.saveRequestCalls[0].usage as Record<string, unknown>;
+		expect(usage.tokensPerSecond).toBe(12.5);
+		expect(usage.tokensPerSecondApproximate).toBe(true);
+
+		expect(h.emitted[0].tokensPerSecond).toBe(12.5);
+		expect(h.emitted[0].tokensPerSecondApproximate).toBe(true);
+	});
+
+	it("leaves tokensPerSecondApproximate unset on the event when the summary lacks it", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const usage = h.dbOps.saveRequestCalls[0].usage as Record<string, unknown>;
+		expect(usage.tokensPerSecondApproximate).toBeUndefined();
+		expect(h.emitted[0].tokensPerSecondApproximate).toBeUndefined();
+	});
+
 	it("emits the cacheCreationInputTokens on the event for cache-body-store consumers", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());

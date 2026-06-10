@@ -52,6 +52,7 @@ export interface RequestData {
 		cacheCreationInputTokens?: number;
 		outputTokens?: number;
 		tokensPerSecond?: number;
+		tokensPerSecondApproximate?: boolean;
 	};
 }
 
@@ -79,10 +80,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					status_code, success, error_message, response_time_ms, failover_attempts,
 					model, prompt_tokens, completion_tokens, total_tokens, cost_usd,
 					input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
-					output_tokens_per_second, api_key_id, api_key_name, project,
+					output_tokens_per_second, output_tokens_per_second_approx,
+					api_key_id, api_key_name, project,
 					billing_type, combo_name
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -103,6 +105,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
 				output_tokens = EXCLUDED.output_tokens,
 				output_tokens_per_second = EXCLUDED.output_tokens_per_second,
+				output_tokens_per_second_approx = EXCLUDED.output_tokens_per_second_approx,
 				api_key_id = EXCLUDED.api_key_id,
 				api_key_name = EXCLUDED.api_key_name,
 				project = COALESCE(EXCLUDED.project, requests.project),
@@ -130,6 +133,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage?.cacheCreationInputTokens || null,
 				usage?.outputTokens || null,
 				usage?.tokensPerSecond || null,
+				usage?.tokensPerSecondApproximate && usage?.tokensPerSecond ? 1 : null,
 				data.apiKeyId || null,
 				data.apiKeyName || null,
 				data.project || null,
@@ -195,7 +199,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				cache_read_input_tokens = COALESCE(?, cache_read_input_tokens),
 				cache_creation_input_tokens = COALESCE(?, cache_creation_input_tokens),
 				output_tokens = COALESCE(?, output_tokens),
-				output_tokens_per_second = COALESCE(?, output_tokens_per_second)
+				output_tokens_per_second = COALESCE(?, output_tokens_per_second),
+				output_tokens_per_second_approx = COALESCE(?, output_tokens_per_second_approx)
 			WHERE id = ?
 		`,
 			[
@@ -209,6 +214,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage.cacheCreationInputTokens || null,
 				usage.outputTokens || null,
 				usage.tokensPerSecond || null,
+				usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,
 				requestId,
 			],
 		);
