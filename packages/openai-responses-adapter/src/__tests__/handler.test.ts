@@ -483,6 +483,26 @@ describe("handleResponsesRequest", () => {
 			expect(ctx?.clientStream).toBe(false);
 		});
 
+		test("carries the original reasoning.effort string", async () => {
+			const ctx = await captureContext({ reasoning: { effort: "high" } });
+			expect(ctx).toBeDefined();
+			expect(ctx?.reasoningEffort).toBe("high");
+		});
+
+		test("reasoningEffort is null when reasoning.effort is absent or non-string", async () => {
+			expect((await captureContext({}))?.reasoningEffort).toBeNull();
+			expect(
+				(await captureContext({ reasoning: {} }))?.reasoningEffort,
+			).toBeNull();
+			expect(
+				(
+					await captureContext({
+						reasoning: { effort: 3 as unknown as string },
+					})
+				)?.reasoningEffort,
+			).toBeNull();
+		});
+
 		test("string input is normalized in the attached nativeBody", async () => {
 			const ctx = await captureContext({ input: "plain text", stream: true });
 			expect(ctx).toBeDefined();

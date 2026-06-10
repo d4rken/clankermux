@@ -59,6 +59,7 @@ describe("createRequestsSummaryHandler", () => {
 				success: 0,
 				error_message: null,
 				project: "clankermux",
+				reasoning_effort: "thinking:2048",
 			},
 		]);
 		const res = await createRequestsSummaryHandler(db)();
@@ -68,12 +69,36 @@ describe("createRequestsSummaryHandler", () => {
 			rateLimited: boolean;
 			accountUsed: string | null;
 			project?: string;
+			reasoningEffort?: string;
 		}>;
 		expect(body[0].id).toBe("r1");
 		expect(body[0].statusCode).toBe(429);
 		expect(body[0].rateLimited).toBe(true);
 		expect(body[0].accountUsed).toBe("Primary");
 		expect(body[0].project).toBe("clankermux");
+		expect(body[0].reasoningEffort).toBe("thinking:2048");
+	});
+
+	it("omits reasoningEffort when the row has none", async () => {
+		const { db } = mockDb([
+			{
+				id: "r2",
+				timestamp: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				account_used: "acc1",
+				account_name: "Primary",
+				status_code: 200,
+				success: 1,
+				error_message: null,
+				reasoning_effort: null,
+			},
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<{
+			reasoningEffort?: string;
+		}>;
+		expect(body[0].reasoningEffort).toBeUndefined();
 	});
 });
 

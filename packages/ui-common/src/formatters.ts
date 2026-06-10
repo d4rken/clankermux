@@ -82,6 +82,34 @@ export function formatTokensPerSecond(
 }
 
 /**
+ * Compact token-count formatting for chip labels: 1500 -> "1.5k", 8000 -> "8k",
+ * 32000 -> "32k", 1000000 -> "1M". Values under 1000 stay plain numbers.
+ */
+function formatCompactCount(n: number): string {
+	const trim = (s: string) => s.replace(/\.0$/, "");
+	if (n >= 1_000_000) return `${trim((n / 1_000_000).toFixed(1))}M`;
+	if (n >= 1_000) {
+		const thousands = n / 1_000;
+		return thousands < 10
+			? `${trim(thousands.toFixed(1))}k`
+			: `${Math.round(thousands)}k`;
+	}
+	return `${n}`;
+}
+
+/**
+ * Format a per-request reasoning-effort value for display:
+ *   - "thinking:<budget_tokens>" (Anthropic) -> "32k thinking"
+ *   - "thinking" (Anthropic, no budget)      -> "thinking"
+ *   - anything else (raw OpenAI effort)      -> unchanged, e.g. "high"
+ */
+export function formatReasoningEffort(value: string): string {
+	const match = value.match(/^thinking:(\d+)$/);
+	if (match) return `${formatCompactCount(Number(match[1]))} thinking`;
+	return value;
+}
+
+/**
  * Format billing type label
  */
 export function formatBillingType(billingType?: string): string {

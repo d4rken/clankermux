@@ -95,7 +95,8 @@ export function ensureSchema(db: Database): void {
 			billing_type TEXT DEFAULT 'api',
 			api_key_id TEXT,
 			api_key_name TEXT,
-			combo_name TEXT
+			combo_name TEXT,
+			reasoning_effort TEXT
 		)
 	`);
 
@@ -329,6 +330,13 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "output_tokens_per_second_approx",
 		ddl: "ALTER TABLE requests ADD COLUMN output_tokens_per_second_approx INTEGER",
+	},
+	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
+	// or the raw reasoning.effort string (OpenAI Responses), NULL when absent.
+	{
+		table: "requests",
+		column: "reasoning_effort",
+		ddl: "ALTER TABLE requests ADD COLUMN reasoning_effort TEXT",
 	},
 ];
 
