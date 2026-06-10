@@ -23,6 +23,9 @@ const log = new Logger("AnalyticsHandler");
 // constant, not user input, so interpolating it is injection-safe.
 const SPEED_IN_RANGE_SQL = `output_tokens_per_second > 0 AND output_tokens_per_second <= ${MAX_PLAUSIBLE_TOKENS_PER_SECOND}`;
 
+// Max project rows in the project_breakdown UNION branch.
+const PROJECT_BREAKDOWN_LIMIT = 20;
+
 type PhaseTiming = { phase: string; durationMs: number };
 
 function recordPhase(
@@ -121,6 +124,12 @@ export function createAnalyticsHandler(context: APIContext) {
 		const modelsFilter = params.get("models")?.split(",").filter(Boolean) || [];
 		const apiKeysFilter =
 			params.get("apiKeys")?.split(",").filter(Boolean) || [];
+		// Named projects plus a dedicated flag for the NULL bucket — no in-band
+		// sentinel, so a project literally named "no-project" stays filterable
+		// as a normal name.
+		const projectsFilter =
+			params.get("projects")?.split(",").filter(Boolean) || [];
+		const projectsNone = params.get("projectsNone") === "true";
 		const statusFilter = params.get("status") || "all";
 
 		// Build filter conditions
@@ -160,6 +169,19 @@ export function createAnalyticsHandler(context: APIContext) {
 				`COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) IN (${placeholders})`,
 			);
 			queryParams.push(...apiKeysFilter);
+		}
+
+		if (projectsFilter.length > 0 || projectsNone) {
+			const parts: string[] = [];
+			if (projectsFilter.length > 0) {
+				const placeholders = projectsFilter.map(() => "?").join(",");
+				parts.push(`r.project IN (${placeholders})`);
+				queryParams.push(...projectsFilter);
+			}
+			if (projectsNone) {
+				parts.push("r.project IS NULL");
+			}
+			conditions.push(`(${parts.join(" OR ")})`);
 		}
 
 		if (statusFilter === "success") {
@@ -372,7 +394,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				total_tokens: number | null;
 			}>(
 				`
-				-- UNION 11-column contract (ALL 5 sub-selects MUST match in this exact column order):
+				-- UNION 11-column contract (ALL 6 sub-selects MUST match in this exact column order):
 				-- 1. data_type TEXT
 				-- 2. name TEXT
 				-- 3. secondary_name TEXT
@@ -501,10 +523,39 @@ export function createAnalyticsHandler(context: APIContext) {
 					ORDER BY count DESC
 					LIMIT 50
 				) q5
+
+				UNION ALL
+
+				SELECT * FROM (
+					SELECT
+						'project_breakdown' as data_type,
+						-- Raw column, no COALESCE: SQL NULL groups as one bucket
+						-- (mapped to null in TS) and a historical row literally
+						-- named 'no-project' stays a distinct project.
+						r.project as name,
+						CAST(NULL AS TEXT) as secondary_name,
+						CAST(NULL AS BIGINT) as count,
+						COUNT(*) as requests,
+						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+						SUM(CASE WHEN r.billing_type != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+						SUM(COALESCE(r.total_tokens, 0)) as total_tokens
+					FROM requests r
+					WHERE ${whereClause}
+					-- Positional: "GROUP BY name" would bind to a source column if
+					-- one existed; 2 pins the grouping to the project label
+					-- (column 1 is the constant data_type).
+					GROUP BY 2
+					ORDER BY total_tokens DESC
+					LIMIT ${PROJECT_BREAKDOWN_LIMIT}
+				) q6
 			`,
 				[
 					...queryParams,
 					NO_ACCOUNT_ID,
+					...queryParams,
 					...queryParams,
 					...queryParams,
 					...queryParams,
@@ -556,6 +607,20 @@ export function createAnalyticsHandler(context: APIContext) {
 					account: row.name,
 					model: row.secondary_name ?? "Unknown",
 					count: Number(row.count) || 0,
+				}));
+
+			const projectBreakdown = additionalData
+				.filter((row) => row.data_type === "project_breakdown")
+				.map((row) => ({
+					// q6 selects the raw r.project column, so unlike the other
+					// branches `name` can be SQL NULL here (the no-project bucket).
+					project: (row.name as string | null) ?? null,
+					requests: Number(row.requests) || 0,
+					successRate: Number(row.success_rate) || 0,
+					planCostUsd: Number(row.plan_cost_usd) || 0,
+					apiCostUsd: Number(row.api_cost_usd) || 0,
+					totalCostUsd: Number(row.total_cost_usd) || 0,
+					totalTokens: Number(row.total_tokens) || 0,
 				}));
 
 			// Get model performance metrics. Speed percentiles (median/p95) are
@@ -1070,6 +1135,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				speedTimeSeries,
 				routing,
 				cacheFlow,
+				projectBreakdown,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

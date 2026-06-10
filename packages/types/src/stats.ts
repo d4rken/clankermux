@@ -263,6 +263,19 @@ export interface AnalyticsResponse {
 	// Cache token flow grouped by (model, account). Optional because an older
 	// server may not populate it — consumers should `?? []`.
 	cacheFlow?: CacheFlowPoint[];
+	// Per-project aggregates, ordered by total tokens. `project: null` is the
+	// bucket for requests with no recorded project (distinct from any literal
+	// project name). Optional because an older server may not populate it —
+	// consumers should `?? []`.
+	projectBreakdown?: Array<{
+		project: string | null;
+		requests: number;
+		successRate: number;
+		planCostUsd: number;
+		apiCostUsd: number;
+		totalCostUsd: number;
+		totalTokens: number;
+	}>;
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

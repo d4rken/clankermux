@@ -12,6 +12,7 @@ import {
 	MainMetricsChart,
 	ModelAnalytics,
 	PerformanceIndicatorsChart,
+	ProjectAnalytics,
 	RoutingAnalyticsPanel,
 	TokenSpeedAnalytics,
 	TokenUsageBreakdown,
@@ -26,6 +27,8 @@ export const AnalyticsTab = React.memo(() => {
 		accounts: [],
 		models: [],
 		apiKeys: [],
+		projects: [],
+		noProject: false,
 		status: "all",
 	});
 
@@ -58,6 +61,9 @@ export const AnalyticsTab = React.memo(() => {
 	);
 	const [allSeenModels, setAllSeenModels] = useState<Set<string>>(new Set());
 	const [allSeenApiKeys, setAllSeenApiKeys] = useState<Set<string>>(new Set());
+	const [allSeenProjects, setAllSeenProjects] = useState<Set<string>>(
+		new Set(),
+	);
 
 	// Update seen values whenever analytics data changes
 	useEffect(() => {
@@ -95,6 +101,20 @@ export const AnalyticsTab = React.memo(() => {
 				return updated;
 			});
 		}
+
+		// Add new projects — named projects only; the NULL bucket is handled by
+		// the dedicated "(no project)" checkbox, never as a name.
+		if (analytics.projectBreakdown) {
+			setAllSeenProjects((prev) => {
+				const updated = new Set(prev);
+				for (const row of analytics.projectBreakdown ?? []) {
+					if (row.project != null) {
+						updated.add(row.project);
+					}
+				}
+				return updated;
+			});
+		}
 	}, [analytics]);
 
 	// Convert sets to sorted arrays for filter dropdowns
@@ -109,6 +129,10 @@ export const AnalyticsTab = React.memo(() => {
 	const availableApiKeys = useMemo(
 		() => Array.from(allSeenApiKeys).sort(),
 		[allSeenApiKeys],
+	);
+	const availableProjects = useMemo(
+		() => Array.from(allSeenProjects).sort(),
+		[allSeenProjects],
 	);
 
 	// Memoize filter function
@@ -211,6 +235,8 @@ export const AnalyticsTab = React.memo(() => {
 		filters.accounts.length +
 		filters.models.length +
 		filters.apiKeys.length +
+		filters.projects.length +
+		(filters.noProject ? 1 : 0) +
 		(filters.status !== "all" ? 1 : 0);
 
 	return (
@@ -224,6 +250,7 @@ export const AnalyticsTab = React.memo(() => {
 				availableAccounts={availableAccounts}
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
+				availableProjects={availableProjects}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}
@@ -266,6 +293,12 @@ export const AnalyticsTab = React.memo(() => {
 			<ModelAnalytics
 				modelPerformance={analytics?.modelPerformance || []}
 				costByModel={costByModel}
+				loading={loading}
+			/>
+
+			{/* Project Breakdown */}
+			<ProjectAnalytics
+				projectBreakdown={analytics?.projectBreakdown ?? []}
 				loading={loading}
 			/>
 
