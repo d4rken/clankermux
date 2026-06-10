@@ -6,6 +6,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import type {
 	Account,
+	ContextComposition,
 	RateLimitReason,
 	RequestRoutingMeta,
 } from "@clankermux/types";
@@ -165,6 +166,8 @@ export interface ResponseHandlerOptions {
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
 	project?: string | null;
+	/** Ingest-time context composition (see RequestMeta.contextComposition). */
+	contextComposition?: ContextComposition | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort?: string | null;
 	response: Response;
@@ -203,6 +206,7 @@ export async function forwardToClient(
 		requestHeaders,
 		requestBody,
 		project,
+		contextComposition,
 		reasoningEffort,
 		response: responseRaw,
 		timestamp,
@@ -289,6 +293,7 @@ export async function forwardToClient(
 			apiKeyName: apiKeyName || null,
 			comboName: comboName || null,
 			project: project ?? null,
+			contextComposition: contextComposition ?? null,
 			reasoningEffort: reasoningEffort ?? null,
 			routing: routingRecord,
 			timestamp,

@@ -6,12 +6,14 @@ import { formatAxisTime } from "../lib/time-format";
 import {
 	AnalyticsControls,
 	CacheFlowPanel,
+	ContextCompositionPanel,
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
 	type FilterState,
 	MainMetricsChart,
 	ModelAnalytics,
 	PerformanceIndicatorsChart,
+	ProjectAnalytics,
 	RoutingAnalyticsPanel,
 	TokenSpeedAnalytics,
 	TokenUsageBreakdown,
@@ -26,6 +28,8 @@ export const AnalyticsTab = React.memo(() => {
 		accounts: [],
 		models: [],
 		apiKeys: [],
+		projects: [],
+		noProject: false,
 		status: "all",
 	});
 
@@ -58,6 +62,14 @@ export const AnalyticsTab = React.memo(() => {
 	);
 	const [allSeenModels, setAllSeenModels] = useState<Set<string>>(new Set());
 	const [allSeenApiKeys, setAllSeenApiKeys] = useState<Set<string>>(new Set());
+	const [allSeenProjects, setAllSeenProjects] = useState<Set<string>>(
+		new Set(),
+	);
+	// Whether any breakdown row in this session had project === null. Accumulated
+	// like the seen-sets (latched true, never reset) so the "(no project)"
+	// checkbox doesn't flicker away when the current range happens to have no
+	// NULL-project rows.
+	const [hasNoProjectBucket, setHasNoProjectBucket] = useState(false);
 
 	// Update seen values whenever analytics data changes
 	useEffect(() => {
@@ -95,6 +107,23 @@ export const AnalyticsTab = React.memo(() => {
 				return updated;
 			});
 		}
+
+		// Add new projects — named projects only; the NULL bucket is handled by
+		// the dedicated "(no project)" checkbox, never as a name.
+		if (analytics.projectBreakdown) {
+			setAllSeenProjects((prev) => {
+				const updated = new Set(prev);
+				for (const row of analytics.projectBreakdown ?? []) {
+					if (row.project != null) {
+						updated.add(row.project);
+					}
+				}
+				return updated;
+			});
+			if (analytics.projectBreakdown.some((row) => row.project == null)) {
+				setHasNoProjectBucket(true);
+			}
+		}
 	}, [analytics]);
 
 	// Convert sets to sorted arrays for filter dropdowns
@@ -109,6 +138,10 @@ export const AnalyticsTab = React.memo(() => {
 	const availableApiKeys = useMemo(
 		() => Array.from(allSeenApiKeys).sort(),
 		[allSeenApiKeys],
+	);
+	const availableProjects = useMemo(
+		() => Array.from(allSeenProjects).sort(),
+		[allSeenProjects],
 	);
 
 	// Memoize filter function
@@ -211,6 +244,8 @@ export const AnalyticsTab = React.memo(() => {
 		filters.accounts.length +
 		filters.models.length +
 		filters.apiKeys.length +
+		filters.projects.length +
+		(filters.noProject ? 1 : 0) +
 		(filters.status !== "all" ? 1 : 0);
 
 	return (
@@ -224,6 +259,8 @@ export const AnalyticsTab = React.memo(() => {
 				availableAccounts={availableAccounts}
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
+				availableProjects={availableProjects}
+				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}
@@ -262,10 +299,23 @@ export const AnalyticsTab = React.memo(() => {
 			{/* Cache Flow */}
 			<CacheFlowPanel cacheFlow={analytics?.cacheFlow} loading={loading} />
 
+			{/* Context Composition */}
+			<ContextCompositionPanel
+				contextComposition={analytics?.contextComposition}
+				loading={loading}
+				timeRange={timeRange}
+			/>
+
 			{/* Enhanced Model Analytics */}
 			<ModelAnalytics
 				modelPerformance={analytics?.modelPerformance || []}
 				costByModel={costByModel}
+				loading={loading}
+			/>
+
+			{/* Project Breakdown */}
+			<ProjectAnalytics
+				projectBreakdown={analytics?.projectBreakdown ?? []}
 				loading={loading}
 			/>
 

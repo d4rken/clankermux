@@ -718,6 +718,8 @@ class API extends HttpClient {
 			accounts?: string[];
 			models?: string[];
 			apiKeys?: string[];
+			projects?: string[];
+			noProject?: boolean;
 			status?: "all" | "success" | "error";
 		},
 		mode: "normal" | "cumulative" = "normal",
@@ -733,6 +735,12 @@ class API extends HttpClient {
 		}
 		if (filters?.apiKeys?.length) {
 			params.append("apiKeys", filters.apiKeys.join(","));
+		}
+		if (filters?.projects?.length) {
+			params.append("projects", filters.projects.join(","));
+		}
+		if (filters?.noProject) {
+			params.append("projectsNone", "true");
 		}
 		if (filters?.status && filters.status !== "all") {
 			params.append("status", filters.status);

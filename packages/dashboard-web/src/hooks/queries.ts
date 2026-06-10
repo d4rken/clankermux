@@ -205,6 +205,8 @@ export const useAnalytics = (
 		accounts?: string[];
 		models?: string[];
 		apiKeys?: string[];
+		projects?: string[];
+		noProject?: boolean;
 		status?: "all" | "success" | "error";
 	},
 	viewMode: "normal" | "cumulative",

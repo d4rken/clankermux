@@ -1,4 +1,5 @@
 import { Logger } from "@clankermux/logger";
+import type { ContextComposition } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 
@@ -42,6 +43,12 @@ export interface RequestData {
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
+	/**
+	 * Ingest-time context composition (the requests.context_* columns).
+	 * Absent/null = "not recorded" → columns stay NULL; 0 is a valid recorded
+	 * value and must be bound with `?? null` (never `|| null`).
+	 */
+	contextComposition?: ContextComposition | null;
 	usage?: {
 		model?: string;
 		promptTokens?: number;
@@ -74,6 +81,7 @@ export interface RequestRoutingData {
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
+		const comp = data.contextComposition ?? null;
 		await this.run(
 			`
 				INSERT INTO requests (
@@ -83,9 +91,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 					output_tokens_per_second, output_tokens_per_second_approx,
 					api_key_id, api_key_name, project,
-					billing_type, combo_name, reasoning_effort
+					billing_type, combo_name, reasoning_effort,
+					context_system_chars, context_tools_chars, context_tool_count,
+					context_messages_chars, context_message_count, context_tool_result_chars,
+					context_largest_tool_chars, context_largest_tool_name
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -112,7 +123,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				project = COALESCE(EXCLUDED.project, requests.project),
 				billing_type = COALESCE(EXCLUDED.billing_type, requests.billing_type),
 				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name),
-				reasoning_effort = COALESCE(EXCLUDED.reasoning_effort, requests.reasoning_effort)
+				reasoning_effort = COALESCE(EXCLUDED.reasoning_effort, requests.reasoning_effort),
+				context_system_chars = COALESCE(EXCLUDED.context_system_chars, requests.context_system_chars),
+				context_tools_chars = COALESCE(EXCLUDED.context_tools_chars, requests.context_tools_chars),
+				context_tool_count = COALESCE(EXCLUDED.context_tool_count, requests.context_tool_count),
+				context_messages_chars = COALESCE(EXCLUDED.context_messages_chars, requests.context_messages_chars),
+				context_message_count = COALESCE(EXCLUDED.context_message_count, requests.context_message_count),
+				context_tool_result_chars = COALESCE(EXCLUDED.context_tool_result_chars, requests.context_tool_result_chars),
+				context_largest_tool_chars = COALESCE(EXCLUDED.context_largest_tool_chars, requests.context_largest_tool_chars),
+				context_largest_tool_name = COALESCE(EXCLUDED.context_largest_tool_name, requests.context_largest_tool_name)
 		`,
 			[
 				data.id,
@@ -142,6 +161,16 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.billingType || null,
 				data.comboName || null,
 				data.reasoningEffort || null,
+				// `?? null`, NEVER `|| null`: 0 is a valid recorded bucket value
+				// (e.g. no tools defined) and must stay distinct from NULL.
+				comp?.systemChars ?? null,
+				comp?.toolsChars ?? null,
+				comp?.toolCount ?? null,
+				comp?.messagesChars ?? null,
+				comp?.messageCount ?? null,
+				comp?.toolResultChars ?? null,
+				comp?.largestToolResultChars ?? null,
+				comp?.largestToolName ?? null,
 			],
 		);
 	}
