@@ -1,5 +1,9 @@
 import { useMemo } from "react";
 import { CHART_COLORS } from "../../constants";
+import {
+	type ProjectRequestsRow,
+	toProjectDonutData,
+} from "../../lib/project-donut";
 import { BasePieChart, RequestVolumeSuccessChart } from "../charts";
 import {
 	Card,
@@ -27,11 +31,7 @@ interface ChartsSectionProps {
 		model: string;
 		count: number;
 	}>;
-	apiKeyPerformanceData: Array<{
-		name: string;
-		requests: number;
-		successRate: number;
-	}>;
+	projectBreakdownData: ProjectRequestsRow[];
 	loading: boolean;
 }
 
@@ -40,7 +40,7 @@ export function ChartsSection({
 	timeRange,
 	modelData,
 	accountModelUsageData,
-	apiKeyPerformanceData,
+	projectBreakdownData,
 	loading,
 }: ChartsSectionProps) {
 	// Aggregate account-model usage into per-account totals for the donut chart
@@ -67,12 +67,11 @@ export function ChartsSection({
 		return breakdown;
 	}, [accountModelUsageData]);
 
-	// Prepare API key donut data (requests per client API key)
-	const apiKeyDonutData = useMemo(() => {
-		return apiKeyPerformanceData
-			.map((k) => ({ name: k.name, value: k.requests }))
-			.sort((a, b) => b.value - a.value);
-	}, [apiKeyPerformanceData]);
+	// Prepare project donut data (requests per project)
+	const projectDonutData = useMemo(
+		() => toProjectDonutData(projectBreakdownData),
+		[projectBreakdownData],
+	);
 
 	return (
 		<>
@@ -196,17 +195,17 @@ export function ChartsSection({
 					</CardContent>
 				</Card>
 
-				{/* Usage by Client API Key */}
+				{/* Usage by Project */}
 				<Card>
 					<CardHeader className="p-4">
-						<CardTitle>Usage by API Key</CardTitle>
+						<CardTitle>Usage by Project</CardTitle>
 						<CardDescription>
-							Request distribution across your client API keys
+							Request distribution across projects
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
 						<BasePieChart
-							data={apiKeyDonutData}
+							data={projectDonutData}
 							loading={loading}
 							height="compact"
 							innerRadius={48}
@@ -215,22 +214,24 @@ export function ChartsSection({
 							tooltipStyle="success"
 						/>
 						<div className="mt-3 space-y-2">
-							{apiKeyDonutData.map((key, index) => (
+							{projectDonutData.map((project, index) => (
 								<div
-									key={key.name}
+									key={project.name}
 									className="flex items-center justify-between text-sm"
 								>
-									<div className="flex items-center gap-2">
+									<div className="flex items-center gap-2 min-w-0">
 										<div
-											className="h-3 w-3 rounded-full"
+											className="h-3 w-3 shrink-0 rounded-full"
 											style={{
 												backgroundColor:
 													CHART_COLORS[index % CHART_COLORS.length],
 											}}
 										/>
-										<span className="text-muted-foreground">{key.name}</span>
+										<span className="text-muted-foreground truncate">
+											{project.name}
+										</span>
 									</div>
-									<span className="font-medium">{key.value}</span>
+									<span className="font-medium">{project.value}</span>
 								</div>
 							))}
 						</div>

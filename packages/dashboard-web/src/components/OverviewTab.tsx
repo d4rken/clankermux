@@ -157,7 +157,7 @@ export const OverviewTab = React.memo(() => {
 		})) || [];
 
 	const accountModelUsageData = analytics?.accountModelUsage || [];
-	const apiKeyPerformanceData = analytics?.apiKeyPerformance || [];
+	const projectBreakdownData = analytics?.projectBreakdown || [];
 
 	return (
 		<div className="space-y-6">
@@ -222,7 +222,7 @@ export const OverviewTab = React.memo(() => {
 				timeRange={timeRange}
 				modelData={modelData}
 				accountModelUsageData={accountModelUsageData}
-				apiKeyPerformanceData={apiKeyPerformanceData}
+				projectBreakdownData={projectBreakdownData}
 				loading={loading}
 			/>
 
