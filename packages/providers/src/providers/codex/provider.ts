@@ -490,6 +490,15 @@ export class CodexProvider extends BaseProvider {
 		if (nativeMode && response.status === 200) {
 			const headers = sanitizeResponseHeaders(response.headers);
 			headers.set(NATIVE_RESPONSES_RESPONSE_HEADER, "1");
+			// The Codex backend frequently returns SSE WITHOUT a content-type
+			// header (the translated path's sniffing fix-up below exists for
+			// exactly this). Native mode is always a stream, so apply the same
+			// fix-up here — without it isStreamingResponse() is false downstream,
+			// the response takes the non-stream path, and SSE usage collection
+			// never runs (request recorded with no model/tokens).
+			if (!headers.get("content-type")?.includes("text/event-stream")) {
+				headers.set("content-type", "text/event-stream");
+			}
 			return new Response(response.body, {
 				status: response.status,
 				statusText: response.statusText,

@@ -210,9 +210,12 @@ const rawCodexSse = [
 ].join("\n");
 
 function codexSseResponse() {
+	// Deliberately NO content-type header: the real Codex backend frequently
+	// omits it on SSE responses (the provider applies a fix-up). Mocking it
+	// here previously masked a live bug where native responses took the
+	// non-stream path and usage collection never ran.
 	return new Response(rawCodexSse, {
 		status: 200,
-		headers: { "content-type": "text/event-stream" },
 	});
 }
 
