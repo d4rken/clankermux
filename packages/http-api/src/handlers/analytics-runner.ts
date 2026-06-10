@@ -12,6 +12,7 @@ import type {
 	DashboardWorkerKind,
 } from "./analytics-worker";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
+import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 
@@ -67,6 +68,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch memory history data",
 		tooManyMessage: "Too many memory history requests",
 	},
+	"payments-summary": {
+		timeoutMessage: "Payments summary request timed out",
+		failureMessage: "Failed to fetch payments summary data",
+		tooManyMessage: "Too many payments summary requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
@@ -98,6 +104,19 @@ export function createIsolatedMemoryHistoryHandler(context: APIContext) {
 		context,
 		"memory-history",
 		createDirectMemoryHistoryHandler(context),
+	);
+}
+
+/**
+ * Worker-routed data collector for the payments summary. Returns the RAW
+ * PaymentsSummaryData JSON (see payments-summary-direct.ts); the main-thread
+ * assembly into the PaymentsSummary response shape lives in payments.ts.
+ */
+export function createIsolatedPaymentsSummaryDataHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"payments-summary",
+		createDirectPaymentsSummaryDataHandler(context),
 	);
 }
 

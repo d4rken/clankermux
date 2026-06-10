@@ -22,10 +22,11 @@ export {
 	isEncryptionEnabled,
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
-// Re-export repositories (these are constructed directly by the read-only
-// dashboard worker against its own connection — stats, usage-history and
-// memory-history all run there)
 export { AccountRepository } from "./repositories/account.repository";
+// Re-export repositories (these are constructed directly by the read-only
+// dashboard worker against its own connection — stats, usage-history,
+// memory-history and payments-summary all run there)
+export { AccountPaymentRepository } from "./repositories/account-payment.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
