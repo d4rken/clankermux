@@ -45,7 +45,10 @@ import type {
 	LoadBalancingStrategy,
 	RateLimitReason,
 } from "@clankermux/types";
-import { requiresSessionDurationTracking } from "@clankermux/types";
+import {
+	microsToUsd,
+	requiresSessionDurationTracking,
+} from "@clankermux/types";
 import {
 	pauseAccount,
 	removeAccount,
@@ -207,6 +210,7 @@ export function createAccountsListHandler(
 			notes: string | null;
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
+			renewal_price_usd_micros: number | null;
 		}>(
 			`
 				SELECT
@@ -243,6 +247,7 @@ export function createAccountsListHandler(
 					notes,
 					renewal_anchor,
 					renewal_cadence,
+					renewal_price_usd_micros,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -548,6 +553,10 @@ export function createAccountsListHandler(
 					renewalCadence:
 						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
 						null,
+					renewalPriceUsd:
+						account.renewal_price_usd_micros != null
+							? microsToUsd(account.renewal_price_usd_micros)
+							: null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					isPrimary: account.id === primaryId,
 				};
@@ -2285,7 +2294,15 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			await dbOps.setAccountRenewal(accountId, anchor, storedCadence);
+			// Stage 1: price/auto-start not yet exposed via this endpoint — pass
+			// nulls so behavior is unchanged (Stage 3 extends the handler).
+			await dbOps.setAccountRenewal(
+				accountId,
+				anchor,
+				storedCadence,
+				null,
+				null,
+			);
 
 			return jsonResponse({
 				success: true,

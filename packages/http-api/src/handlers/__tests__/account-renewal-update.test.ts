@@ -99,7 +99,7 @@ describe("createAccountRenewalUpdateHandler", () => {
 
 	it("clears the renewal when renewalAnchor is null", async () => {
 		const id = await insertAccount(dbOps, "acc2");
-		await dbOps.setAccountRenewal(id, "2026-03-31", "yearly");
+		await dbOps.setAccountRenewal(id, "2026-03-31", "yearly", null, null);
 
 		const response = await handler(
 			makeRequest({ renewalAnchor: null, renewalCadence: "monthly" }),

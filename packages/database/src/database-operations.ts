@@ -7,6 +7,7 @@ import type { Disposable } from "@clankermux/core";
 import { TIME_CONSTANTS } from "@clankermux/core";
 import type {
 	Account,
+	AccountPaymentRow,
 	Combo,
 	ComboFamily,
 	ComboFamilyAssignment,
@@ -15,6 +16,7 @@ import type {
 	IntegrityStatus,
 	MemoryHistoryPoint,
 	MemorySnapshotRow,
+	PaymentSource,
 	RankedSnapshot,
 	RateLimitReason,
 	StorageUsageType,
@@ -28,6 +30,7 @@ import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { runMigrations } from "./migrations";
 import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
+import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
@@ -338,6 +341,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
+	private accountPayments: AccountPaymentRepository;
 
 	constructor(
 		dbPath?: string,
@@ -399,6 +403,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.combo = new ComboRepository(this.adapter);
 		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
 		this.memorySnapshots = new MemorySnapshotRepository(this.adapter);
+		this.accountPayments = new AccountPaymentRepository(this.adapter);
 	}
 
 	setRuntimeConfig(runtime: RuntimeConfig): void {
@@ -913,8 +918,30 @@ OAuth tokens will need to be re-authenticated.
 		accountId: string,
 		anchor: string | null,
 		cadence: string | null,
+		priceUsdMicros: number | null,
+		autoStartDate: string | null,
 	): Promise<void> {
-		await this.accounts.setRenewal(accountId, anchor, cadence);
+		await this.accounts.setRenewal(
+			accountId,
+			anchor,
+			cadence,
+			priceUsdMicros,
+			autoStartDate,
+		);
+	}
+
+	async getAccountRenewalConfigs(): Promise<
+		Array<{
+			id: string;
+			name: string;
+			renewal_anchor: string | null;
+			renewal_cadence: string | null;
+			renewal_price_usd_micros: number | null;
+			renewal_auto_start_date: string | null;
+			paused: number;
+		}>
+	> {
+		return this.accounts.getRenewalConfigs();
 	}
 
 	async updateAccountRequestCount(
@@ -2070,6 +2097,140 @@ OAuth tokens will need to be re-authenticated.
 			() => this.memorySnapshots.deleteOlderThan(cutoffMs),
 			this.retryConfig,
 			"deleteMemorySnapshotsOlderThan",
+		);
+	}
+
+	// ── Account payment (ledger) operations delegated to repository ───────────
+
+	async recordAutoPayment(
+		accountId: string,
+		accountName: string,
+		dueDate: string,
+		amountUsdMicros: number,
+		now: number = Date.now(),
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			() =>
+				this.accountPayments.recordAuto(
+					accountId,
+					accountName,
+					dueDate,
+					amountUsdMicros,
+					now,
+				),
+			this.retryConfig,
+			"recordAutoPayment",
+		);
+	}
+
+	async upsertSubscriptionPayment(
+		accountId: string,
+		accountName: string,
+		paidDate: string,
+		amountUsdMicros: number,
+		source: PaymentSource,
+		notes: string | null,
+		now: number = Date.now(),
+	): Promise<void> {
+		await withDatabaseRetry(
+			() =>
+				this.accountPayments.upsertSubscription(
+					accountId,
+					accountName,
+					paidDate,
+					amountUsdMicros,
+					source,
+					notes,
+					now,
+				),
+			this.retryConfig,
+			"upsertSubscriptionPayment",
+		);
+	}
+
+	async insertCreditPayment(
+		accountId: string,
+		accountName: string,
+		paidDate: string,
+		amountUsdMicros: number,
+		source: PaymentSource,
+		notes: string | null,
+		importKey: string | null,
+		now: number = Date.now(),
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			() =>
+				this.accountPayments.insertCredit(
+					accountId,
+					accountName,
+					paidDate,
+					amountUsdMicros,
+					source,
+					notes,
+					importKey,
+					now,
+				),
+			this.retryConfig,
+			"insertCreditPayment",
+		);
+	}
+
+	async softDeletePayment(id: string): Promise<boolean> {
+		return withDatabaseRetry(
+			() => this.accountPayments.softDelete(id),
+			this.retryConfig,
+			"softDeletePayment",
+		);
+	}
+
+	async getRecentPayments(limit: number): Promise<AccountPaymentRow[]> {
+		return withDatabaseRetry(
+			() => this.accountPayments.findRecent(limit),
+			this.retryConfig,
+			"getRecentPayments",
+		);
+	}
+
+	async getPaymentsInRange(
+		fromMs: number,
+		toMs: number,
+	): Promise<AccountPaymentRow[]> {
+		return withDatabaseRetry(
+			() => this.accountPayments.findInRange(fromMs, toMs),
+			this.retryConfig,
+			"getPaymentsInRange",
+		);
+	}
+
+	async sumPaymentsByKindInRange(
+		fromMs: number,
+		toMs: number,
+	): Promise<{ kind: string; total_micros: number }[]> {
+		return withDatabaseRetry(
+			() => this.accountPayments.sumByKindInRange(fromMs, toMs),
+			this.retryConfig,
+			"sumPaymentsByKindInRange",
+		);
+	}
+
+	async sumPaymentsByAccountInRange(
+		fromMs: number,
+		toMs: number,
+	): Promise<{ account_id: string; total_micros: number }[]> {
+		return withDatabaseRetry(
+			() => this.accountPayments.sumByAccountInRange(fromMs, toMs),
+			this.retryConfig,
+			"sumPaymentsByAccountInRange",
+		);
+	}
+
+	async latestSubscriptionPaymentDueDate(
+		accountId: string,
+	): Promise<string | null> {
+		return withDatabaseRetry(
+			() => this.accountPayments.latestSubscriptionDueDate(accountId),
+			this.retryConfig,
+			"latestSubscriptionPaymentDueDate",
 		);
 	}
 }

@@ -55,7 +55,9 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			consecutive_rate_limits INTEGER DEFAULT 0,
 			notes TEXT,
 			renewal_anchor TEXT,
-			renewal_cadence TEXT
+			renewal_cadence TEXT,
+			renewal_price_usd_micros INTEGER,
+			renewal_auto_start_date TEXT
 		)
 	`);
 

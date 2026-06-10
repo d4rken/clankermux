@@ -92,6 +92,8 @@ describe("ensureSchema completeness", () => {
 			"consecutive_rate_limits",
 			"renewal_anchor",
 			"renewal_cadence",
+			"renewal_price_usd_micros",
+			"renewal_auto_start_date",
 			"notes",
 		];
 		for (const col of expected) {
@@ -114,6 +116,39 @@ describe("ensureSchema completeness", () => {
 
 	it("does NOT create the model_translations table (Bedrock dropped)", () => {
 		expect(tableExists(db, "model_translations")).toBe(false);
+	});
+
+	it("creates the account_payments table with every current column", () => {
+		expect(tableExists(db, "account_payments")).toBe(true);
+		const cols = columnNames(db, "account_payments");
+		const expected = [
+			"id",
+			"account_id",
+			"account_name",
+			"kind",
+			"paid_date",
+			"paid_at_ms",
+			"amount_usd_micros",
+			"recorded_at",
+			"source",
+			"import_key",
+			"notes",
+			"deleted_at",
+		];
+		for (const col of expected) {
+			expect(cols.has(col)).toBe(true);
+		}
+	});
+
+	it("creates the account_payments indexes", () => {
+		for (const idx of [
+			"idx_account_payments_subscription_due",
+			"idx_account_payments_import_key",
+			"idx_account_payments_paid_at",
+			"idx_account_payments_account",
+		]) {
+			expect(indexExists(db, idx)).toBe(true);
+		}
 	});
 
 	it("creates the representative performance indexes", () => {

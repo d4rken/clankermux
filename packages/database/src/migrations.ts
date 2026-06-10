@@ -63,6 +63,8 @@ export function ensureSchema(db: Database): void {
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
 			renewal_anchor TEXT,
 			renewal_cadence TEXT,
+			renewal_price_usd_micros INTEGER,
+			renewal_auto_start_date TEXT,
 			notes TEXT
 		)
 	`);
@@ -315,6 +317,52 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
+	// Create account_payments table — the per-account payments ledger
+	// (subscription renewals + ad-hoc usage-credit purchases) backing the
+	// dashboard's real out-of-pocket cost view. Deliberately NO foreign key
+	// on account_id: the ledger must survive account deletion (account_name
+	// is denormalized for display after the account is gone). Rows are
+	// soft-deleted via deleted_at; the partial UNIQUE index on
+	// (account_id, paid_date) for kind='subscription' covers soft-deleted
+	// rows too, so a tombstone suppresses the auto-recorder from re-inserting
+	// the same due date (idempotency by design). The partial UNIQUE index on
+	// import_key gives seed/backfill retries the same idempotency for credit
+	// purchases.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS account_payments (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			account_name TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('subscription','credits')),
+			paid_date TEXT NOT NULL,
+			paid_at_ms INTEGER NOT NULL,
+			amount_usd_micros INTEGER NOT NULL CHECK (amount_usd_micros >= 0),
+			recorded_at INTEGER NOT NULL,
+			source TEXT NOT NULL CHECK (source IN ('auto','manual','backfill')),
+			import_key TEXT,
+			notes TEXT,
+			deleted_at INTEGER
+		)
+	`);
+
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_account_payments_subscription_due
+			ON account_payments(account_id, paid_date) WHERE kind = 'subscription'`,
+	);
+
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_account_payments_import_key
+			ON account_payments(import_key) WHERE import_key IS NOT NULL`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_account_payments_paid_at ON account_payments(paid_at_ms DESC)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_account_payments_account ON account_payments(account_id, paid_at_ms DESC)`,
+	);
+
 	// Performance indexes (covering/partial indexes for hot query paths)
 	addPerformanceIndexes(db);
 }
@@ -399,6 +447,21 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "context_largest_tool_name",
 		ddl: "ALTER TABLE requests ADD COLUMN context_largest_tool_name TEXT",
+	},
+	// Subscription price in USD micros (integer math; 1 USD = 1_000_000) for
+	// the payments-ledger auto-recorder and dashboard display. NULL = no price
+	// configured (auto-recording disabled for the account).
+	{
+		table: "accounts",
+		column: "renewal_price_usd_micros",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_price_usd_micros INTEGER",
+	},
+	// Lower bound (YYYY-MM-DD, local calendar) for auto-recorded subscription
+	// payments — due dates strictly before it are never auto-backfilled.
+	{
+		table: "accounts",
+		column: "renewal_auto_start_date",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_auto_start_date TEXT",
 	},
 ];
 
