@@ -27,7 +27,10 @@ import type {
 } from "@clankermux/types";
 import { microsToUsd, toAccountPayment, usdToMicros } from "@clankermux/types";
 import type { APIContext } from "../types";
-import { createIsolatedPaymentsSummaryDataHandler } from "./analytics-runner";
+import {
+	createIsolatedPaymentsSummaryDataHandler,
+	invalidateDashboardCache,
+} from "./analytics-runner";
 import type { PaymentsSummaryData } from "./payments-summary-direct";
 
 const log = new Logger("PaymentsHandler");
@@ -351,6 +354,10 @@ export function createPaymentCreateHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
+			// Drop cached summary responses so the UI's immediate refetch sees
+			// the new payment instead of a pre-mutation cache entry.
+			invalidateDashboardCache("payments-summary");
+
 			const row = await findPaymentRow(dbOps, accountId, kind, paidDate);
 			return jsonResponse(
 				{
@@ -487,6 +494,8 @@ export function createPaymentsSeedHandler(dbOps: DatabaseOperations) {
 			}
 			const after = await countRows();
 
+			invalidateDashboardCache("payments-summary");
+
 			const inserted = after - before;
 			return jsonResponse({
 				inserted,
@@ -512,6 +521,7 @@ export function createPaymentDeleteHandler(dbOps: DatabaseOperations) {
 			if (!deleted) {
 				return errorResponse(NotFound("Payment not found"));
 			}
+			invalidateDashboardCache("payments-summary");
 			return jsonResponse({ success: true, id: paymentId });
 		} catch (error) {
 			log.error("Payment delete error:", error);

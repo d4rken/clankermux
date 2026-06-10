@@ -22,7 +22,7 @@
  */
 
 import { intervalManager } from "@clankermux/core";
-import { computeAllDueDates } from "@clankermux/core/renewal";
+import { computeAllDueDates, parseAnchor } from "@clankermux/core/renewal";
 import { Logger } from "@clankermux/logger";
 
 const log = new Logger("SubscriptionPaymentRecorder");
@@ -164,8 +164,18 @@ export class SubscriptionPaymentRecorder {
 
 		// Lower bound: never auto-book due dates before the auto-start date.
 		// Null is defensive (the API always sets it alongside a price) — fall
-		// back to today so we never invent history.
-		const fromDate = config.renewal_auto_start_date ?? localDateOf(now);
+		// back to today so we never invent history. A malformed stored value
+		// gets the same fallback: computeAllDueDates treats an unparseable
+		// fromDate as "no lower bound", which would book every due date back
+		// to the anchor.
+		let fromDate = config.renewal_auto_start_date;
+		if (fromDate != null && !parseAnchor(fromDate)) {
+			log.warn(
+				`Payment recorder: account ${config.name} (${config.id}) has malformed renewal_auto_start_date ${JSON.stringify(fromDate)}; falling back to today`,
+			);
+			fromDate = null;
+		}
+		fromDate ??= localDateOf(now);
 
 		const dueDates = computeAllDueDates(anchor, cadence, fromDate, now);
 

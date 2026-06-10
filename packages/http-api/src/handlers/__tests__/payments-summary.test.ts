@@ -21,7 +21,10 @@ import {
 	clearAnalyticsCachesForTests,
 	terminateAnalyticsWorker,
 } from "../analytics-runner";
-import { createPaymentsSummaryHandler } from "../payments";
+import {
+	createPaymentCreateHandler,
+	createPaymentsSummaryHandler,
+} from "../payments";
 import { makeContext } from "./dashboard-test-helpers";
 
 const DAY = 86_400_000;
@@ -307,5 +310,46 @@ describe("GET /api/payments/summary", () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
 		expect(data.range.to - data.range.from).toBeCloseTo(30 * DAY, -4);
+	});
+
+	it("reflects a new payment immediately after creation (runner cache invalidated)", async () => {
+		const now = Date.now();
+		await insertAccount("acct-a", "Alpha");
+
+		// Prime the runner's response cache with the pre-mutation summary.
+		// (No clearAnalyticsCachesForTests between requests in this test — that
+		// is the point.)
+		const summaryHandler = createPaymentsSummaryHandler(makeContext(dbOps));
+		const primeParams = new URLSearchParams({ range: "30d" });
+		const primed = await summaryHandler(primeParams);
+		expect(primed.status).toBe(200);
+		const primedData = (await primed.json()) as PaymentsSummary;
+		expect(primedData.range.ledgerUsd).toBe(0);
+
+		// Write through the mutation handler — must invalidate "payments-summary".
+		const createHandler = createPaymentCreateHandler(dbOps);
+		const created = await createHandler(
+			new Request("http://localhost/api/payments", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					accountId: "acct-a",
+					kind: "credits",
+					paidDate: localDateOf(now),
+					amountUsd: 10,
+				}),
+			}),
+		);
+		expect(created.status).toBe(201);
+
+		// Same params, well within the 10s TTL: without invalidation this would
+		// serve the cached pre-mutation body ("worker-cache" mode, ledgerUsd 0).
+		const after = await summaryHandler(primeParams);
+		expect(after.status).toBe(200);
+		expect(after.headers.get("x-clankermux-analytics-mode")).toBe("worker");
+		const afterData = (await after.json()) as PaymentsSummary;
+		expect(afterData.range.ledgerUsd).toBeCloseTo(10, 6);
+		expect(afterData.range.creditsUsd).toBeCloseTo(10, 6);
+		expect(afterData.recentPayments).toHaveLength(1);
 	});
 });

@@ -56,6 +56,7 @@ import {
 	resumeAccount,
 } from "../services/admin/accounts";
 import type { AccountResponse } from "../types";
+import { invalidateDashboardCache } from "./analytics-runner";
 
 const log = new Logger("AccountsHandler");
 
@@ -2355,6 +2356,10 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 				storedPriceMicros,
 				storedAutoStart,
 			);
+
+			// Renewal price/cadence feed the payments-summary amortization math;
+			// drop the cached summary so the UI's refetch reflects this change.
+			invalidateDashboardCache("payments-summary");
 
 			return jsonResponse({
 				success: true,

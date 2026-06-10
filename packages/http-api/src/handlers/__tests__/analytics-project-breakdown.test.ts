@@ -51,7 +51,7 @@ async function insertRequest(opts: {
 	success: boolean;
 	totalTokens: number;
 	costUsd: number;
-	billingType: "plan" | "api";
+	billingType: "plan" | "api" | null;
 }): Promise<void> {
 	await dbOps.getAdapter().run(
 		`INSERT INTO requests (
@@ -238,5 +238,55 @@ describe("analytics projectBreakdown", () => {
 	it("returns an empty projectBreakdown array when there are no requests in range", async () => {
 		const data = await fetchAnalytics({});
 		expect(data.projectBreakdown).toEqual([]);
+	});
+
+	it("counts NULL billing_type rows as token (api) cost in totals, timeSeries, accountPerformance, and projectBreakdown", async () => {
+		// Pre-billing_type history has billing_type IS NULL. A bare
+		// `billing_type != 'plan'` predicate evaluates to NULL for those rows and
+		// silently drops their cost from every "Token Cost" series while the
+		// payments summary still counts them; the COALESCE(billing_type, 'api')
+		// form keeps them in the api bucket.
+		const now = Date.now();
+		await insertRequest({
+			id: "nb1",
+			timestamp: now - 1000,
+			project: "gamma",
+			success: true,
+			totalTokens: 100,
+			costUsd: 0.75,
+			billingType: null,
+		});
+		await insertRequest({
+			id: "nb2",
+			timestamp: now - 2000,
+			project: "gamma",
+			success: true,
+			totalTokens: 100,
+			costUsd: 1.25,
+			billingType: "plan",
+		});
+
+		const data = await fetchAnalytics({});
+
+		expect(data.totals.apiCostUsd).toBeCloseTo(0.75, 6);
+		expect(data.totals.planCostUsd).toBeCloseTo(1.25, 6);
+		expect(data.totals.avgDailyApiCostUsd).toBeGreaterThan(0);
+
+		const seriesApiCost = data.timeSeries.reduce(
+			(sum: number, point: { apiCostUsd: number }) => sum + point.apiCostUsd,
+			0,
+		);
+		expect(seriesApiCost).toBeCloseTo(0.75, 6);
+
+		// No account_used set, so both rows group under the no-account bucket.
+		expect(data.accountPerformance).toHaveLength(1);
+		expect(data.accountPerformance[0].apiCostUsd).toBeCloseTo(0.75, 6);
+		expect(data.accountPerformance[0].planCostUsd).toBeCloseTo(1.25, 6);
+
+		expect(data.projectBreakdown).toHaveLength(1);
+		expect(data.projectBreakdown[0].project).toBe("gamma");
+		expect(data.projectBreakdown[0].apiCostUsd).toBeCloseTo(0.75, 6);
+		expect(data.projectBreakdown[0].planCostUsd).toBeCloseTo(1.25, 6);
+		expect(data.projectBreakdown[0].totalCostUsd).toBeCloseTo(2.0, 6);
 	});
 });

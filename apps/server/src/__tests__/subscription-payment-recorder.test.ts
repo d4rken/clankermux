@@ -243,6 +243,23 @@ describe("SubscriptionPaymentRecorder", () => {
 		expect(rows.map((r) => r.paid_date)).toEqual([TODAY_STR]);
 	});
 
+	it("falls back to today when auto_start_date is malformed (no anchor-era backfill)", async () => {
+		// computeAllDueDates treats an unparseable fromDate as "no lower bound",
+		// so without validation a corrupted stored value would book all 24
+		// historical occurrences back to the anchor.
+		await seedAccount("acc-1", {
+			anchor: "2024-06-09",
+			cadence: "monthly",
+			price: 20_000_000,
+			autoStart: "garbage",
+		});
+
+		await makeRecorder().tick();
+
+		const rows = await paymentsFor("acc-1");
+		expect(rows.map((r) => r.paid_date)).toEqual([TODAY_STR]);
+	});
+
 	it("isolates per-account errors — one failing account doesn't block the others", async () => {
 		const cfg = (id: string): AccountRenewalConfig => ({
 			id,
