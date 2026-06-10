@@ -12,7 +12,10 @@
  * (packages/proxy/src/context-composition.ts).
  *
  * For every `request_payloads` row whose joined `requests` row has
- * `context_messages_chars IS NULL`: decrypt the envelope, base64-decode the
+ * `context_messages_chars IS NULL` AND was a `POST /v1/messages` request
+ * (mirroring the live ingest gate — other endpoints such as
+ * /v1/messages/count_tokens are never selected, so they stay NULL just like
+ * the live path leaves them): decrypt the envelope, base64-decode the
  * captured request body, JSON.parse it, run `computeContextComposition`, and
  * UPDATE the eight `context_*` columns. Rows are left untouched (NULL = honest
  * coverage marker) when the envelope has `request.body: null` (capture-capped),
@@ -175,6 +178,7 @@ async function runBackfill(
 		 FROM request_payloads p
 		 JOIN requests r ON r.id = p.id
 		 WHERE r.context_messages_chars IS NULL
+		   AND r.method = 'POST' AND r.path = '/v1/messages'
 		   AND (COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) > ?1
 		        OR (COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) = ?1 AND p.id > ?2))
 		   AND (COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) < ?3
@@ -377,7 +381,7 @@ async function main(): Promise<void> {
 
 		console.log(
 			"\nBackfill — recompute context composition from stored payloads " +
-				"(requests with context_messages_chars IS NULL)",
+				"(POST /v1/messages requests with context_messages_chars IS NULL)",
 		);
 		const { counters: c, samples } = await runBackfill(db, options);
 		console.log(

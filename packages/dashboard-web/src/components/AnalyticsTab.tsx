@@ -65,6 +65,11 @@ export const AnalyticsTab = React.memo(() => {
 	const [allSeenProjects, setAllSeenProjects] = useState<Set<string>>(
 		new Set(),
 	);
+	// Whether any breakdown row in this session had project === null. Accumulated
+	// like the seen-sets (latched true, never reset) so the "(no project)"
+	// checkbox doesn't flicker away when the current range happens to have no
+	// NULL-project rows.
+	const [hasNoProjectBucket, setHasNoProjectBucket] = useState(false);
 
 	// Update seen values whenever analytics data changes
 	useEffect(() => {
@@ -115,6 +120,9 @@ export const AnalyticsTab = React.memo(() => {
 				}
 				return updated;
 			});
+			if (analytics.projectBreakdown.some((row) => row.project == null)) {
+				setHasNoProjectBucket(true);
+			}
 		}
 	}, [analytics]);
 
@@ -252,6 +260,7 @@ export const AnalyticsTab = React.memo(() => {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}

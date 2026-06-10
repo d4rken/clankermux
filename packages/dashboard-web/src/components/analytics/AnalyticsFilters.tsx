@@ -30,6 +30,8 @@ interface AnalyticsFiltersProps {
 	availableModels: string[];
 	availableApiKeys: string[];
 	availableProjects: string[];
+	/** Any breakdown row had project === null — drives the "(no project)" checkbox. */
+	hasNoProjectBucket: boolean;
 	activeFilterCount: number;
 	filterOpen: boolean;
 	setFilterOpen: (open: boolean) => void;
@@ -42,6 +44,7 @@ export function AnalyticsFilters({
 	availableModels,
 	availableApiKeys,
 	availableProjects,
+	hasNoProjectBucket,
 	activeFilterCount,
 	filterOpen,
 	setFilterOpen,
@@ -217,8 +220,12 @@ export function AnalyticsFilters({
 						</div>
 					)}
 
-					{/* Project Filter */}
-					{availableProjects.length > 0 && (
+					{/* Project Filter — also shown when only the NULL bucket exists in
+					    range (or noProject is already applied), so "(no project)" stays
+					    reachable/clearable even with zero named projects. */}
+					{(availableProjects.length > 0 ||
+						hasNoProjectBucket ||
+						filters.noProject) && (
 						<div className="space-y-2">
 							<Label>
 								Projects (
@@ -226,17 +233,19 @@ export function AnalyticsFilters({
 								selected)
 							</Label>
 							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
-								<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
-									<input
-										type="checkbox"
-										className="rounded border-gray-300"
-										checked={filters.noProject}
-										onChange={(e) =>
-											setFilters({ ...filters, noProject: e.target.checked })
-										}
-									/>
-									<span className="text-sm italic">(no project)</span>
-								</label>
+								{(hasNoProjectBucket || filters.noProject) && (
+									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
+										<input
+											type="checkbox"
+											className="rounded border-gray-300"
+											checked={filters.noProject}
+											onChange={(e) =>
+												setFilters({ ...filters, noProject: e.target.checked })
+											}
+										/>
+										<span className="text-sm italic">(no project)</span>
+									</label>
+								)}
 								{availableProjects.map((project) => (
 									<label
 										key={project}

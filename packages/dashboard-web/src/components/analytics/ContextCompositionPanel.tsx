@@ -62,6 +62,14 @@ function projectLabel(project: string | null): string {
 	return project ?? NO_PROJECT_LABEL;
 }
 
+// Stable identity for series keys — distinct from any real project name, so a
+// project literally named "(no project)" can't collide with the NULL bucket.
+const NULL_PROJECT_KEY = "__null_project__";
+
+function projectKey(project: string | null): string {
+	return project ?? NULL_PROJECT_KEY;
+}
+
 function EmptyState({
 	loading,
 	noCoverage,
@@ -201,20 +209,23 @@ function GrowthChart({
 	growthCurve: ContextComposition["growthCurve"];
 	timeRange: TimeRange;
 }) {
-	const { data, labels } = useMemo(() => {
+	const { data, series } = useMemo(() => {
 		// Stable series order: projects by total requests desc, so colors don't
-		// shuffle between refreshes.
-		const requestsByLabel = new Map<string, number>();
+		// shuffle between refreshes. Series are keyed by projectKey (NULL bucket
+		// gets a sentinel key distinct from any real name) and labeled separately.
+		const requestsByKey = new Map<string, number>();
+		const labelByKey = new Map<string, string>();
 		for (const point of growthCurve) {
-			const label = projectLabel(point.project);
-			requestsByLabel.set(
-				label,
-				(requestsByLabel.get(label) ?? 0) + point.requests,
-			);
+			const key = projectKey(point.project);
+			requestsByKey.set(key, (requestsByKey.get(key) ?? 0) + point.requests);
+			labelByKey.set(key, projectLabel(point.project));
 		}
-		const labels = Array.from(requestsByLabel.entries())
+		const series = Array.from(requestsByKey.entries())
 			.sort((a, b) => b[1] - a[1])
-			.map(([label]) => label);
+			.map(([key]) => ({
+				key,
+				label: labelByKey.get(key) ?? key,
+			}));
 
 		const byTs = new Map<number, Record<string, string | number>>();
 		for (const point of growthCurve) {
@@ -223,12 +234,12 @@ function GrowthChart({
 				row = { time: formatAxisTime(point.ts, timeRange), ts: point.ts };
 				byTs.set(point.ts, row);
 			}
-			row[projectLabel(point.project)] = Math.round(point.avgContextTokens);
+			row[projectKey(point.project)] = Math.round(point.avgContextTokens);
 		}
 		const data = Array.from(byTs.entries())
 			.sort(([a], [b]) => a - b)
 			.map(([, row]) => row);
-		return { data, labels };
+		return { data, series };
 	}, [growthCurve, timeRange]);
 
 	if (data.length === 0) return null;
@@ -238,20 +249,20 @@ function GrowthChart({
 			<h4 className="mb-2 text-sm font-medium">Context growth over time</h4>
 			<p className="mb-2 text-xs text-muted-foreground">
 				Average context tokens per request, per project (top{" "}
-				{labels.length === 1 ? "project" : `${labels.length} projects`} by
+				{series.length === 1 ? "project" : `${series.length} projects`} by
 				requests)
 			</p>
 			<BaseLineChart
 				data={data as unknown as ChartDataPoint[]}
-				lines={labels.map((label, index) => ({
-					dataKey: label,
+				lines={series.map(({ key, label }, index) => ({
+					dataKey: key,
 					name: label,
 					stroke: CHART_COLORS[index % CHART_COLORS.length],
 					connectNulls: true,
 				}))}
 				xAxisKey="time"
 				height="medium"
-				showLegend={labels.length > 1}
+				showLegend={series.length > 1}
 				yAxisTickFormatter={(value) => formatCompactNumber(Number(value))}
 				tooltipFormatter={(value, name) => [
 					`${formatTokens(Number(value))} tokens`,

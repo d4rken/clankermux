@@ -30,6 +30,14 @@ function projectLabel(project: string | null): string {
 	return project ?? NO_PROJECT_LABEL;
 }
 
+// Stable identity for keys — distinct from any real project name, so a project
+// literally named "(no project)" can't collide with the NULL bucket.
+const NULL_PROJECT_KEY = "__null_project__";
+
+function projectKey(project: string | null): string {
+	return project ?? NULL_PROJECT_KEY;
+}
+
 interface ProjectAnalyticsProps {
 	projectBreakdown: ProjectBreakdownRow[];
 	loading?: boolean;
@@ -123,7 +131,7 @@ export function ProjectAnalytics({
 						</thead>
 						<tbody>
 							{projectBreakdown.map((row) => (
-								<tr key={projectLabel(row.project)} className="border-t">
+								<tr key={projectKey(row.project)} className="border-t">
 									<td
 										className={`px-3 py-2 ${
 											row.project == null
