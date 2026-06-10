@@ -70,9 +70,11 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual([]);
 	});
 
-	it("matches a named API key", () => {
+	it("matches a named API key by current name with snapshot fallback", () => {
 		const { sql, params } = buildRequestFilterClause({ apiKey: "my-key" });
-		expect(sql).toBe("WHERE r.api_key_name = ?");
+		expect(sql).toBe(
+			"WHERE COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+		);
 		expect(params).toEqual(["my-key"]);
 	});
 
@@ -87,7 +89,8 @@ describe("buildRequestFilterClause", () => {
 		expect(sql).toBe(
 			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300) " +
 				"AND r.timestamp >= ? AND r.timestamp <= ? " +
-				"AND (a.name = ? OR r.account_used = ?) AND r.api_key_name = ?",
+				"AND (a.name = ? OR r.account_used = ?) " +
+				"AND COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
 		);
 		expect(params).toEqual([100, 200, "acct-1", "acct-1", "my-key"]);
 	});

@@ -144,8 +144,16 @@ export function createAnalyticsHandler(context: APIContext) {
 		}
 
 		if (apiKeysFilter.length > 0) {
+			// Match the key's CURRENT name (api_keys.name) so a filter on the
+			// post-rename name finds requests stamped under the old one; the
+			// record-time snapshot remains the fallback for hard-deleted keys.
+			// A correlated subquery keeps the shared whereClause self-contained —
+			// it's interpolated into many sub-selects whose requests alias is `r`,
+			// so it must not depend on any particular JOIN being present.
 			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(`r.api_key_name IN (${placeholders})`);
+			conditions.push(
+				`COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) IN (${placeholders})`,
+			);
 			queryParams.push(...apiKeysFilter);
 		}
 
@@ -442,19 +450,24 @@ export function createAnalyticsHandler(context: APIContext) {
 				SELECT * FROM (
 					SELECT
 						'api_key_performance' as data_type,
-						api_key_name as name,
+						-- Current key name with the record-time snapshot as fallback for
+						-- hard-deleted keys. Grouped by key id alone so a key renamed
+						-- mid-history still collapses to ONE row; MAX() picks a single
+						-- deterministic name when deleted-key snapshots vary.
+						MAX(COALESCE(k.name, r.api_key_name)) as name,
 						CAST(NULL AS TEXT) as secondary_name,
 						CAST(NULL AS BIGINT) as count,
 						COUNT(*) as requests,
-						SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
 						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
 						CAST(NULL AS BIGINT) as total_tokens
 					FROM requests r
-					WHERE ${whereClause} AND api_key_id IS NOT NULL
-					GROUP BY api_key_id, api_key_name
+					LEFT JOIN api_keys k ON k.id = r.api_key_id
+					WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+					GROUP BY r.api_key_id
 					HAVING COUNT(*) > 0
 					ORDER BY requests DESC
 					LIMIT 10
