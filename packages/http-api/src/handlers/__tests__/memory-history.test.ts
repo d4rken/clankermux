@@ -134,12 +134,14 @@ describe("memory-history handler", () => {
 					rssBytes: 500_000_000,
 					heapUsedBytes: 120_000_000,
 					heapTotalBytes: 180_000_000,
+					eventLoopMaxLagMs: 412,
 				},
 				{
 					ts: t1 + HOUR,
 					rssBytes: 520_000_000,
 					heapUsedBytes: 118_000_000,
 					heapTotalBytes: null,
+					eventLoopMaxLagMs: null,
 				},
 			];
 			const dbOps = createDbOps({ points });
@@ -148,8 +150,10 @@ describe("memory-history handler", () => {
 			expect(body.points[0].rssBytes).toBe(500_000_000);
 			expect(body.points[0].heapUsedBytes).toBe(120_000_000);
 			expect(body.points[0].heapTotalBytes).toBe(180_000_000);
+			expect(body.points[0].eventLoopMaxLagMs).toBe(412);
 			expect(body.points[1].rssBytes).toBe(520_000_000);
 			expect(body.points[1].heapTotalBytes).toBeNull();
+			expect(body.points[1].eventLoopMaxLagMs).toBeNull();
 		});
 
 		it("returns an empty points array when there is no history", async () => {

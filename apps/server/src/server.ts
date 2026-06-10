@@ -4,6 +4,8 @@ import { Config, type RuntimeConfig } from "@clankermux/config";
 import {
 	CACHE,
 	DEFAULT_STRATEGY,
+	drainEventLoopSnapshotMaxLagMs,
+	getEventLoopStats,
 	getVersion,
 	HTTP_STATUS,
 	NETWORK,
@@ -13,6 +15,8 @@ import {
 	requestEvents,
 	setPricingLogger,
 	shutdown,
+	startEventLoopMonitor,
+	stopEventLoopMonitor,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import { container, SERVICE_KEYS } from "@clankermux/core-di";
@@ -681,6 +685,7 @@ export default async function startServer(options?: {
 		getAsyncWriterHealth: () => asyncWriter.getHealth(),
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getStrategy: () => currentStrategy,
+		getEventLoopLag: () => getEventLoopStats(),
 	});
 
 	// Initialize AuthService for proxy authentication
@@ -1276,6 +1281,11 @@ export default async function startServer(options?: {
 		throw error;
 	}
 
+	// Event-loop lag watchdog — makes main-thread stalls (synchronous bun:sqlite
+	// etc.) diagnosable: WARN/ERROR logs on blocked ticks, live stats on
+	// /api/system/status, and peak lag persisted per memory snapshot below.
+	startEventLoopMonitor();
+
 	// Memory monitoring - log RSS every 60s with warnings at growth thresholds
 	const baselineRss = process.memoryUsage.rss();
 	const memLog = new Logger("MemoryMonitor");
@@ -1289,12 +1299,15 @@ export default async function startServer(options?: {
 		// Persist this sample into the memory_snapshots time-series that backs the
 		// dashboard "Memory Usage" graph. Fire-and-forget at debug level: a
 		// transient DB hiccup must never disturb the monitor or spam the journal.
+		// eventLoopMaxLagMs drains (and resets) the lag monitor's window counter,
+		// so each row carries the peak lag of exactly its own sample interval.
 		void dbOps
 			.insertMemorySnapshot({
 				sampledAt: Date.now(),
 				rssBytes: mem.rss,
 				heapUsedBytes: mem.heapUsed,
 				heapTotalBytes: mem.heapTotal,
+				eventLoopMaxLagMs: drainEventLoopSnapshotMaxLagMs(),
 			})
 			.catch((err) => memLog.debug(`memory snapshot insert failed: ${err}`));
 
@@ -1611,6 +1624,9 @@ async function handleGracefulShutdown(signal: string) {
 			clearInterval(memoryMonitorInterval);
 			memoryMonitorInterval = null;
 		}
+
+		// Stop the event-loop lag watchdog
+		stopEventLoopMonitor();
 
 		// Stop token health monitoring
 		stopGlobalTokenHealthChecks();

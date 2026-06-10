@@ -1,6 +1,10 @@
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
-import type { IntegrityStatus, SystemStatusResponse } from "@clankermux/types";
+import type {
+	EventLoopLagStats,
+	IntegrityStatus,
+	SystemStatusResponse,
+} from "@clankermux/types";
 import {
 	errorResponse,
 	InternalServerError,
@@ -10,6 +14,14 @@ import { computeHealthStatus, computePoolStatus } from "./health";
 
 type AsyncWriterHealthFn = () => { healthy: boolean };
 type IntegrityStatusFn = () => IntegrityStatus;
+type EventLoopLagFn = () => EventLoopLagStats;
+
+/** Reported when no monitor getter is wired (e.g. bare handler in tests). */
+const ZERO_EVENT_LOOP_LAG: EventLoopLagStats = {
+	lastLagMs: 0,
+	maxLagMs: 0,
+	maxRecentLagMs: 0,
+};
 
 /**
  * `GET /api/system/status` — live operational snapshot for the dashboard's
@@ -26,6 +38,7 @@ export function createSystemStatusHandler(
 	config: Config,
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
+	getEventLoopLag?: EventLoopLagFn,
 ) {
 	return async (): Promise<Response> => {
 		try {
@@ -56,6 +69,7 @@ export function createSystemStatusHandler(
 					asyncWriterHealthy,
 					integrityStatus,
 				},
+				eventLoop: getEventLoopLag ? getEventLoopLag() : ZERO_EVENT_LOOP_LAG,
 				strategy: config.getStrategy(),
 				timestamp: new Date().toISOString(),
 			};

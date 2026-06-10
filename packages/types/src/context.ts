@@ -5,6 +5,7 @@ import type { RequestMeta } from "./api";
 import type { ApiKey } from "./api-key";
 import type { IntegrityStatus } from "./stats";
 import type { StrategyStore } from "./strategy";
+import type { EventLoopLagStats } from "./system";
 
 // API context for HTTP handlers
 export interface APIContext {
@@ -27,6 +28,7 @@ export interface APIContext {
 	};
 	getIntegrityStatus?: () => IntegrityStatus;
 	getStrategy?: () => LoadBalancingStrategy | null;
+	getEventLoopLag?: () => EventLoopLagStats;
 }
 
 // Load balancing strategy interface

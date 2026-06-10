@@ -137,6 +137,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 			getStrategy,
+			getEventLoopLag,
 		} = this.context;
 
 		// Create handlers
@@ -202,6 +203,7 @@ export class APIRouter {
 			config,
 			getAsyncWriterHealth,
 			getIntegrityStatus,
+			getEventLoopLag,
 		);
 		const versionCheckHandler = createVersionCheckHandler();
 
