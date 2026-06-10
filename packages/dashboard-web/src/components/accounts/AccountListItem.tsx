@@ -9,6 +9,7 @@ import {
 	MoreHorizontal,
 	Pause,
 	Play,
+	Receipt,
 	RefreshCw,
 	StickyNote,
 	Trash2,
@@ -58,6 +59,7 @@ interface AccountListItemProps {
 	onPriorityChange: (account: Account) => void;
 	onSaveNotes: (account: Account, notes: string | null) => void | Promise<void>;
 	onRenewalChange: (account: Account) => void;
+	onRecordPayment: (account: Account) => void;
 	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
@@ -83,6 +85,7 @@ export function AccountListItem({
 	onPriorityChange,
 	onSaveNotes,
 	onRenewalChange,
+	onRecordPayment,
 	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
@@ -290,6 +293,13 @@ export function AccountListItem({
 										set
 									</span>
 								)}
+							</DropdownMenuItem>
+							<DropdownMenuItem
+								onClick={() => onRecordPayment(account)}
+								title="Record a manual payment (subscription renewal or usage-credit purchase) in the ledger"
+							>
+								<Receipt className="mr-2 h-4 w-4" />
+								Record Payment…
 							</DropdownMenuItem>
 							{onResetStickiness && (
 								<DropdownMenuItem

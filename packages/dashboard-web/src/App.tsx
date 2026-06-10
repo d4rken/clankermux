@@ -75,8 +75,8 @@ export function App() {
 						<LazyLimitsTab />
 					</Suspense>
 				),
-				title: "Limits",
-				subtitle: "Rate-limit usage over time and pool capacity",
+				title: "Usage",
+				subtitle: "Rate-limit usage, capacity, and spend",
 			},
 			{
 				path: "/requests",

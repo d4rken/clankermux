@@ -120,7 +120,7 @@ export function ProjectAnalytics({
 									Plan Value
 								</th>
 								<th scope="col" className="text-right px-3 py-2">
-									API Cost
+									Token Cost
 								</th>
 								<th scope="col" className="text-right px-3 py-2">
 									Success

@@ -21,6 +21,10 @@ export const queryKeys = {
 		[...queryKeys.all, "usage-history", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
+	// Prefix key — invalidating this hits every range-keyed payments summary.
+	paymentsSummaries: () => [...queryKeys.all, "payments-summary"] as const,
+	paymentsSummary: (range?: string) =>
+		[...queryKeys.paymentsSummaries(), { range }] as const,
 	requests: (limit?: number) =>
 		[...queryKeys.all, "requests", { limit }] as const,
 	// Filtered/paginated request explorer. Keyed on the resolved server filter

@@ -8,6 +8,8 @@ import type {
 	ComboWithSlots,
 	LogEvent,
 	MemoryHistoryResponse,
+	PaymentKind,
+	PaymentsSummary,
 	RequestPayload,
 	RequestResponse,
 	StatsWithErrors,
@@ -880,6 +882,75 @@ class API extends HttpClient {
 		}
 	}
 
+	// Spend/plan-value summary for the payments ledger (Overview spend band +
+	// Usage-tab cost panels). `currentMonth`/amortized fields are
+	// range-independent; the `range` block follows the selector.
+	async getPaymentsSummary(range: string): Promise<PaymentsSummary> {
+		const startTime = Date.now();
+		const url = `/api/payments/summary?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<PaymentsSummary>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Manual ledger entry (subscription renewal or usage-credit purchase).
+	async createPayment(input: {
+		accountId: string;
+		kind: PaymentKind;
+		paidDate: string;
+		amountUsd: number;
+		notes?: string;
+	}): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/payments";
+		this.logger.debug(`→ POST ${url}`, { input });
+		try {
+			await this.post(url, input);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 201 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	// Soft-delete a ledger entry.
+	async deletePayment(id: string): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/payments/${encodeURIComponent(id)}`;
+		this.logger.debug(`→ DELETE ${url}`);
+		try {
+			await this.delete(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← DELETE ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ DELETE ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async pauseAccount(accountId: string): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/pause`;
@@ -1149,14 +1220,19 @@ class API extends HttpClient {
 		accountId: string,
 		renewalAnchor: string | null,
 		renewalCadence: "monthly" | "yearly" | "none",
+		renewalPriceUsd: number | null = null,
 	): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/renewal`;
 
-		this.logger.debug(`→ POST ${url}`, { renewalAnchor, renewalCadence });
+		this.logger.debug(`→ POST ${url}`, {
+			renewalAnchor,
+			renewalCadence,
+			renewalPriceUsd,
+		});
 
 		try {
-			await this.post(url, { renewalAnchor, renewalCadence });
+			await this.post(url, { renewalAnchor, renewalCadence, renewalPriceUsd });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 		} catch (error) {

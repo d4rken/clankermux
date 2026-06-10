@@ -13,6 +13,7 @@ interface AccountListProps {
 	onPriorityChange: (account: Account) => void;
 	onSaveNotes: (account: Account, notes: string | null) => void | Promise<void>;
 	onRenewalChange: (account: Account) => void;
+	onRecordPayment: (account: Account) => void;
 	onResetStickiness?: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
@@ -38,6 +39,7 @@ export function AccountList({
 	onPriorityChange,
 	onSaveNotes,
 	onRenewalChange,
+	onRecordPayment,
 	onResetStickiness,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
@@ -70,6 +72,7 @@ export function AccountList({
 					onPriorityChange={onPriorityChange}
 					onSaveNotes={onSaveNotes}
 					onRenewalChange={onRenewalChange}
+					onRecordPayment={onRecordPayment}
 					onResetStickiness={onResetStickiness}
 					onAutoFallbackToggle={onAutoFallbackToggle}
 					onAutoRefreshToggle={onAutoRefreshToggle}

@@ -200,7 +200,7 @@ export function MainMetricsChart({
 							<SelectContent>
 								<SelectItem value="requests">Requests</SelectItem>
 								<SelectItem value="tokens">Token Usage</SelectItem>
-								<SelectItem value="cost">Cost ($)</SelectItem>
+								<SelectItem value="cost">Token Cost ($)</SelectItem>
 								<SelectItem value="responseTime">Response Time</SelectItem>
 								<SelectItem value="tokensPerSecond">Output Speed</SelectItem>
 							</SelectContent>
@@ -316,9 +316,7 @@ export function MainMetricsChart({
 											formatter={
 												((value: number, name: string) => [
 													formatCost(Number(value)),
-													name === "planCost"
-														? "Plan Cost"
-														: "API/Overage Cost",
+													name === "planCost" ? "Plan Cost" : "Token Cost",
 												]) as TooltipFormatter
 											}
 											labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
@@ -338,7 +336,7 @@ export function MainMetricsChart({
 										<Area
 											type="monotone"
 											dataKey="apiCost"
-											name="API/Overage Cost"
+											name="Token Cost"
 											stroke="#f97316"
 											strokeWidth={strokeW}
 											fillOpacity={1}
@@ -637,8 +635,8 @@ export function CumulativeGrowthChart({
 							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 							formatter={
 								((value: number | string, name: string) => {
-									if (name === "Total Cost")
-										return [formatCost(Number(value)), "Total Cost"];
+									if (name === "Total Token Cost")
+										return [formatCost(Number(value)), "Total Token Cost"];
 									return [formatTokens(value as number), "Total Tokens"];
 								}) as TooltipFormatterProp
 							}
@@ -671,7 +669,7 @@ export function CumulativeGrowthChart({
 							fillOpacity={1}
 							fill="url(#cumulativeCost)"
 							filter="url(#cumulativeGlow)"
-							name="Total Cost"
+							name="Total Token Cost"
 						/>
 					</AreaChart>
 				</ResponsiveContainer>

@@ -20,6 +20,7 @@ import {
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
 	QwenReauthDialog,
+	RecordPaymentDialog,
 	RenameAccountDialog,
 } from "./accounts";
 import { Button } from "./ui/button";
@@ -97,6 +98,13 @@ export function AccountsTab() {
 		account: null,
 	});
 	const [renewalDialog, setRenewalDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
+	const [recordPaymentDialog, setRecordPaymentDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
 	}>({
@@ -459,14 +467,23 @@ export function AccountsTab() {
 		accountId: string,
 		anchor: string | null,
 		cadence: "monthly" | "yearly" | "none",
+		priceUsd: number | null,
 	) => {
 		try {
-			await api.updateAccountRenewal(accountId, anchor, cadence);
+			await api.updateAccountRenewal(accountId, anchor, cadence, priceUsd);
 			await loadAccounts();
+			// Renewal price feeds the amortized spend figures.
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.paymentsSummaries(),
+			});
 		} catch (err) {
 			setActionError(formatError(err));
 			throw err;
 		}
+	};
+
+	const handleRecordPayment = (account: Account) => {
+		setRecordPaymentDialog({ isOpen: true, account });
 	};
 
 	const handleAutoFallbackToggle = async (account: Account) => {
@@ -676,6 +693,7 @@ export function AccountsTab() {
 						onPriorityChange={handlePriorityChange}
 						onSaveNotes={handleSaveNotes}
 						onRenewalChange={handleRenewalChange}
+						onRecordPayment={handleRecordPayment}
 						onResetStickiness={handleResetStickiness}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
@@ -748,6 +766,19 @@ export function AccountsTab() {
 						})
 					}
 					onUpdateRenewal={handleUpdateRenewal}
+				/>
+			)}
+
+			{recordPaymentDialog.isOpen && recordPaymentDialog.account && (
+				<RecordPaymentDialog
+					account={recordPaymentDialog.account}
+					isOpen={recordPaymentDialog.isOpen}
+					onOpenChange={(open) =>
+						setRecordPaymentDialog({
+							isOpen: open,
+							account: open ? recordPaymentDialog.account : null,
+						})
+					}
 				/>
 			)}
 
