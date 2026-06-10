@@ -9,13 +9,13 @@
 // sets straight through to the selected account's backend (see
 // request-translator.ts — no gpt-* → Claude-family remap), so a model absent
 // from this list still works as long as the upstream accepts it. Keep it to the
-// Codex/OpenAI models commonly routed through the proxy.
+// CURRENTLY-SERVED Codex models (per the codex-cli models cache, 2026-06-09);
+// retired slugs (gpt-5-codex, gpt-5.3-codex) were dropped.
 const CODEX_MODELS = [
 	"gpt-5.5",
 	"gpt-5.4",
-	"gpt-5.3-codex",
 	"gpt-5.4-mini",
-	"gpt-5-codex",
+	"gpt-5.3-codex-spark",
 ] as const;
 
 // Fixed creation timestamp. Clients only read `id`; a constant keeps the

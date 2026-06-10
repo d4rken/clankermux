@@ -35,6 +35,8 @@ describe("handleModelsRequest", () => {
 		const ids = body.data.map((m) => m.id);
 		expect(ids).toContain("gpt-5.5");
 		expect(ids).toContain("gpt-5.4");
+		expect(ids).toContain("gpt-5.4-mini");
+		expect(ids).toContain("gpt-5.3-codex-spark");
 	});
 
 	test("model ids are unique", async () => {

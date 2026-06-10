@@ -580,11 +580,11 @@ describe("CodexProvider.processResponse", () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
 			...eventLine("response.created", {
-				response: { id: "resp_test", model: "gpt-5.3-codex" },
+				response: { id: "resp_test", model: "gpt-5.3-codex-spark" },
 			}),
 			...eventLine("response.completed", {
 				response: {
-					model: "gpt-5.3-codex",
+					model: "gpt-5.3-codex-spark",
 					usage: {
 						input_tokens: 100,
 						output_tokens: 50,
@@ -611,7 +611,7 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).toContain('"context_window"');
 		expect(messageDeltaLine).toContain('"cache_read_input_tokens":25');
 		expect(messageDeltaLine).toContain('"cache_creation_input_tokens":10');
-		expect(messageDeltaLine).toContain('"context_window_size":200000');
+		expect(messageDeltaLine).toContain('"context_window_size":128000');
 	});
 
 	it("omits context_window when model metadata is unavailable", async () => {
@@ -726,7 +726,7 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).not.toBeUndefined();
 		expect(messageDeltaLine).toContain('"cache_creation_input_tokens":9');
 		expect(messageDeltaLine).toContain('"context_window"');
-		expect(messageDeltaLine).toContain('"context_window_size":400000');
+		expect(messageDeltaLine).toContain('"context_window_size":272000');
 	});
 
 	it("treats successful missing-content-type SSE bodies as streams", async () => {
@@ -810,7 +810,7 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex");
+		expect(body.model).toBe("gpt-5.4");
 	});
 
 	it("maps fable and mythos models to the top Codex tier", async () => {
@@ -839,7 +839,7 @@ describe("CodexProvider.transformRequestBody", () => {
 	it("uses account sonnet mapping for sonnet-family models", async () => {
 		const provider = new CodexProvider();
 		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
 		} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -854,14 +854,14 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex");
+		expect(body.model).toBe("gpt-5.3-codex-spark");
 	});
 
 	it("uses first model when account mapping value is an ordered array", async () => {
 		const provider = new CodexProvider();
 		const account = {
 			model_mappings: JSON.stringify({
-				sonnet: ["gpt-5.3-codex", "gpt-5.4"],
+				sonnet: ["gpt-5.3-codex-spark", "gpt-5.4"],
 			}),
 		} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
@@ -877,13 +877,13 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex");
+		expect(body.model).toBe("gpt-5.3-codex-spark");
 	});
 
 	it("uses default Codex mapping for families missing from account mappings", async () => {
 		const provider = new CodexProvider();
 		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
 		} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
