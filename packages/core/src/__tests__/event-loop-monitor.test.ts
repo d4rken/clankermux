@@ -167,6 +167,28 @@ describe("EventLoopMonitor", () => {
 		});
 	});
 
+	describe("default clock", () => {
+		it("defaults to a monotonic clock — a Date.now step can't fake lag", () => {
+			// Replace Date.now BEFORE construction so a Date.now-based default
+			// would capture the fake. Fake a wall-clock step (NTP correction): a
+			// Date.now clock would report ~59s of bogus lag; performance.now is
+			// immune.
+			const originalDateNow = Date.now;
+			let fakeWallClock = 1_000_000;
+			Date.now = () => fakeWallClock;
+			try {
+				const monitor = new EventLoopMonitor();
+				monitor.tick(); // baseline
+				fakeWallClock += 60_000;
+				monitor.tick();
+				expect(monitor.getStats().lastLagMs).toBe(0);
+				expect(monitor.getStats().maxLagMs).toBe(0);
+			} finally {
+				Date.now = originalDateNow;
+			}
+		});
+	});
+
 	describe("start/stop scheduling", () => {
 		it("start() schedules ticks and stop() halts them", async () => {
 			const monitor = new EventLoopMonitor({ tickIntervalMs: 5 });

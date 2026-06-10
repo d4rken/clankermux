@@ -42,7 +42,11 @@ export interface EventLoopMonitorOptions {
 	errorThresholdMs?: number;
 	/** Size of the rolling recent-lag window, in ticks. */
 	recentWindowTicks?: number;
-	/** Injectable clock for tests; defaults to Date.now. */
+	/**
+	 * Injectable clock for tests; defaults to performance.now() — monotonic,
+	 * so NTP/wall-clock steps can neither fake nor hide lag. Values may be
+	 * fractional milliseconds.
+	 */
 	now?: () => number;
 	/** Injectable log sink for tests; defaults to Logger("EventLoopMonitor"). */
 	logger?: LagLogSink;
@@ -73,7 +77,12 @@ export class EventLoopMonitor {
 			options.warnThresholdMs ?? EVENT_LOOP_WARN_THRESHOLD_MS;
 		this.errorThresholdMs =
 			options.errorThresholdMs ?? EVENT_LOOP_ERROR_THRESHOLD_MS;
-		this.now = options.now ?? Date.now;
+		// performance.now() is monotonic: a wall-clock step (NTP correction)
+		// can't fake or hide lag the way Date.now could. Bun supports it
+		// natively; fractional-ms values flow through unchanged (lag stats are
+		// plain numbers, the Float64Array window holds them, and threshold
+		// comparisons are ordinary >= checks).
+		this.now = options.now ?? (() => performance.now());
 		this.log = options.logger ?? defaultLog;
 		this.recentLags = new Float64Array(
 			options.recentWindowTicks ?? RECENT_WINDOW_TICKS,

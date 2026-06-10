@@ -45,7 +45,12 @@ import { withDatabaseRetry } from "./retry";
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
 	walMode?: boolean;
-	/** SQLite busy timeout in milliseconds */
+	/**
+	 * SQLite busy timeout in milliseconds for WORKER connections (vacuum,
+	 * integrity-check). The MAIN connection deliberately does NOT use this —
+	 * it is bounded to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} so a C-level
+	 * busy wait can never freeze the event loop for seconds.
+	 */
 	busyTimeoutMs?: number;
 	/** Cache size in pages (negative value = KB) */
 	cacheSize?: number;
@@ -69,6 +74,24 @@ export interface DatabaseRetryConfig {
 	/** Maximum delay between retries in milliseconds */
 	maxDelayMs?: number;
 }
+
+/**
+ * busy_timeout for the MAIN-thread connection only.
+ *
+ * bun:sqlite's busy handler waits at the C level (usleep) — the entire Bun
+ * event loop freezes for however long this is whenever a main-thread call
+ * hits SQLITE_BUSY (e.g. while the vacuum/integrity worker holds the write
+ * lock). Keep it just long enough to absorb a brief write burst from a
+ * worker connection; anything longer is handled asynchronously by
+ * `BunSqlAdapter.withBusyRetry`, which catches SQLITE_BUSY and retries via
+ * setTimeout (500ms cadence, up to 10 minutes) with the event loop free
+ * between attempts.
+ *
+ * The separate `dbConfig.busyTimeoutMs` (default 10 000) is still passed to
+ * WORKER connections (vacuum / integrity-check / dashboard workers), where
+ * long C-level blocking is fine — workers have no event loop to protect.
+ */
+export const MAIN_CONNECTION_BUSY_TIMEOUT_MS = 250;
 
 /**
  * Apply SQLite pragmas for optimal performance on distributed filesystems.
@@ -120,10 +143,13 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 			}
 		}
 
-		// Set busy timeout for lock handling
-		if (config.busyTimeoutMs !== undefined) {
-			db.run(`PRAGMA busy_timeout = ${config.busyTimeoutMs}`);
-		}
+		// Bound the C-level busy wait on the main connection. Deliberately NOT
+		// config.busyTimeoutMs (that value is for worker connections): a long
+		// busy_timeout here parks the whole event loop inside SQLite's busy
+		// handler whenever a worker holds the write lock. The adapter's async
+		// busy-retry layer takes over past this bound. See
+		// MAIN_CONNECTION_BUSY_TIMEOUT_MS.
+		db.run(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
 
 		// Configure cache size
 		if (config.cacheSize !== undefined) {

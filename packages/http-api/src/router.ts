@@ -179,8 +179,8 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
-		const usageHistoryHandler = createUsageHistoryHandler(dbOps);
-		const memoryHistoryHandler = createMemoryHistoryHandler(dbOps);
+		const usageHistoryHandler = createUsageHistoryHandler(this.context);
+		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);

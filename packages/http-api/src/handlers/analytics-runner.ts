@@ -11,7 +11,9 @@ import type {
 	AnalyticsWorkerResponse,
 	DashboardWorkerKind,
 } from "./analytics-worker";
+import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
+import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 
 const log = new Logger("AnalyticsRunner");
 
@@ -55,6 +57,16 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch stats data",
 		tooManyMessage: "Too many stats requests",
 	},
+	"usage-history": {
+		timeoutMessage: "Usage history request timed out",
+		failureMessage: "Failed to fetch usage history data",
+		tooManyMessage: "Too many usage history requests",
+	},
+	"memory-history": {
+		timeoutMessage: "Memory history request timed out",
+		failureMessage: "Failed to fetch memory history data",
+		tooManyMessage: "Too many memory history requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
@@ -70,6 +82,22 @@ export function createIsolatedStatsHandler(context: APIContext) {
 		context,
 		"stats",
 		createDirectStatsHandler(context),
+	);
+}
+
+export function createIsolatedUsageHistoryHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"usage-history",
+		createDirectUsageHistoryHandler(context),
+	);
+}
+
+export function createIsolatedMemoryHistoryHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"memory-history",
+		createDirectMemoryHistoryHandler(context),
 	);
 }
 

@@ -2,15 +2,21 @@ import { Database } from "bun:sqlite";
 import { BunSqlAdapter } from "@clankermux/database";
 import type { APIContext } from "@clankermux/types";
 import { createAnalyticsHandler } from "./analytics-direct";
+import { createMemoryHistoryHandler } from "./memory-history-direct";
 import { createStatsHandler } from "./stats-direct";
+import { createUsageHistoryHandler } from "./usage-history-direct";
 
 /**
  * Read-only dashboard worker: executes the synchronous bun:sqlite dashboard
- * queries (analytics + stats) off the main thread. The `kind` discriminator
- * selects which direct handler runs; it defaults to "analytics" for
- * backward compatibility.
+ * queries (analytics + stats + usage/memory history) off the main thread.
+ * The `kind` discriminator selects which direct handler runs; it defaults to
+ * "analytics" for backward compatibility.
  */
-export type DashboardWorkerKind = "analytics" | "stats";
+export type DashboardWorkerKind =
+	| "analytics"
+	| "stats"
+	| "usage-history"
+	| "memory-history";
 
 export interface AnalyticsWorkerRequest {
 	id: string;
@@ -56,7 +62,11 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 		const handler =
 			kind === "stats"
 				? createStatsHandler(context)
-				: createAnalyticsHandler(context);
+				: kind === "usage-history"
+					? createUsageHistoryHandler(context)
+					: kind === "memory-history"
+						? createMemoryHistoryHandler(context)
+						: createAnalyticsHandler(context);
 		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();

@@ -8,6 +8,9 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BunSqlAdapter } from "../bun-sql-adapter";
 
 // ---------------------------------------------------------------------------
@@ -160,6 +163,94 @@ describe("BunSqlAdapter withBusyRetry", () => {
 			} finally {
 				// biome-ignore lint/suspicious/noExplicitAny: restoring original
 				(sqliteDb as any).query = original;
+			}
+		});
+	});
+
+	describe("real lock contention with a bounded main busy_timeout", () => {
+		it("resolves via async retry while a second connection holds BEGIN IMMEDIATE, without a multi-second synchronous block", async () => {
+			// Mirrors production: the main connection's busy_timeout is bounded
+			// to 250ms (see MAIN_CONNECTION_BUSY_TIMEOUT_MS), so a write hitting
+			// a worker-held lock blocks the event loop for at most ~250ms at the
+			// C level, then the JS layer yields and retries via setTimeout.
+			const dir = mkdtempSync(join(tmpdir(), "ccflare-busy-contention-"));
+			const dbPath = join(dir, "contention.db");
+			const main = new Database(dbPath, { create: true });
+			const writer = new Database(dbPath);
+			try {
+				main.exec("PRAGMA journal_mode = WAL");
+				main.exec("PRAGMA busy_timeout = 250");
+				main.run(
+					"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)",
+				);
+				const contendedAdapter = new BunSqlAdapter(main);
+
+				writer.exec("PRAGMA busy_timeout = 0");
+				writer.exec("BEGIN IMMEDIATE"); // hold the write lock
+
+				// The synchronous portion of an adapter call is everything up to
+				// the first await: one C-level busy wait of <= busy_timeout. With
+				// the old 10s timeout this took ~10s; bounded it must stay well
+				// under 1s.
+				const syncStart = performance.now();
+				const pending = contendedAdapter.run(
+					"INSERT INTO t (id, val) VALUES (?, ?)",
+					[1, "through-retry"],
+				);
+				const syncMs = performance.now() - syncStart;
+				expect(syncMs).toBeLessThan(1000);
+
+				// Release the lock while the adapter is parked in its async
+				// 500ms retry sleep — the next attempt must succeed.
+				setTimeout(() => writer.exec("COMMIT"), 300);
+				await pending;
+
+				const row = main.query("SELECT val FROM t WHERE id = 1").get() as {
+					val: string;
+				} | null;
+				expect(row?.val).toBe("through-retry");
+			} finally {
+				try {
+					writer.close();
+				} catch {}
+				try {
+					main.close();
+				} catch {}
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	describe("close() under contention", () => {
+		it("does not crash shutdown when another connection holds the write lock", async () => {
+			// close() runs PRAGMA wal_checkpoint(TRUNCATE). With the bounded main
+			// busy_timeout that checkpoint can come back busy while a worker
+			// holds the lock — shutdown must degrade gracefully (skip the
+			// truncate), never throw.
+			const dir = mkdtempSync(join(tmpdir(), "ccflare-busy-close-"));
+			const dbPath = join(dir, "close.db");
+			const main = new Database(dbPath, { create: true });
+			const writer = new Database(dbPath);
+			try {
+				main.exec("PRAGMA journal_mode = WAL");
+				main.exec("PRAGMA busy_timeout = 250");
+				main.run(
+					"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)",
+				);
+				const closingAdapter = new BunSqlAdapter(main);
+
+				writer.exec("PRAGMA busy_timeout = 0");
+				writer.exec("BEGIN IMMEDIATE");
+				writer.run("INSERT INTO t (id, val) VALUES (9, 'held')");
+
+				await expect(closingAdapter.close()).resolves.toBeUndefined();
+
+				writer.exec("COMMIT");
+			} finally {
+				try {
+					writer.close();
+				} catch {}
+				rmSync(dir, { recursive: true, force: true });
 			}
 		});
 	});

@@ -1,34 +1,38 @@
 import { describe, expect, it } from "bun:test";
-import type { DatabaseOperations } from "@clankermux/database";
 import type {
 	MemoryHistoryPoint,
 	MemoryHistoryResponse,
 } from "@clankermux/types";
-import { createMemoryHistoryHandler } from "../memory-history";
+import {
+	createMemoryHistoryHandlerFromSources,
+	type MemoryHistorySources,
+} from "../memory-history-direct";
 
 const HOUR = 60 * 60 * 1000;
 
 /**
- * Mock DatabaseOperations exposing only getMemorySnapshots. `captureOpts` lets a
- * test assert the {sinceMs, bucketMs} the handler derived from the range.
+ * Mock MemoryHistorySources (the seam the direct handler reads through; in
+ * production this is a repository on the dashboard worker's read-only
+ * connection). `captureOpts` lets a test assert the {sinceMs, bucketMs} the
+ * handler derived from the range.
  */
-function createDbOps(opts: {
+function createSources(opts: {
 	points: MemoryHistoryPoint[];
 	captureOpts?: (o: { sinceMs: number; bucketMs: number }) => void;
-}): DatabaseOperations {
+}): MemoryHistorySources {
 	return {
 		getMemorySnapshots: async (o: { sinceMs: number; bucketMs: number }) => {
 			opts.captureOpts?.(o);
 			return opts.points;
 		},
-	} as unknown as DatabaseOperations;
+	};
 }
 
 async function callHandler(
-	dbOps: DatabaseOperations,
+	sources: MemoryHistorySources,
 	range?: string,
 ): Promise<{ status: number; body: MemoryHistoryResponse }> {
-	const handler = createMemoryHistoryHandler(dbOps);
+	const handler = createMemoryHistoryHandlerFromSources(sources);
 	const params = new URLSearchParams();
 	if (range !== undefined) params.set("range", range);
 	const res = await handler(params);
@@ -42,13 +46,13 @@ describe("memory-history handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "6h");
+			const { body } = await callHandler(sources, "6h");
 			expect(captured?.bucketMs).toBe(300_000);
 			expect(body.bucketMs).toBe(300_000);
 			expect(body.range).toBe("6h");
@@ -56,52 +60,52 @@ describe("memory-history handler", () => {
 
 		it("maps 1h → bucketMs 60000", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "1h");
+			const { body } = await callHandler(sources, "1h");
 			expect(captured?.bucketMs).toBe(60_000);
 			expect(body.bucketMs).toBe(60_000);
 		});
 
 		it("defaults to 7d (bucketMs 3600000) when range omitted", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps);
+			const { body } = await callHandler(sources);
 			expect(body.range).toBe("7d");
 			expect(captured?.bucketMs).toBe(3_600_000);
 		});
 
 		it("falls back to the 7d default for an invalid range", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "bogus");
+			const { body } = await callHandler(sources, "bogus");
 			expect(body.range).toBe("7d");
 			expect(captured?.bucketMs).toBe(3_600_000);
 		});
 
 		it("maps all → sinceMs 0 with daily buckets (retention-capped)", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "all");
+			const { body } = await callHandler(sources, "all");
 			expect(body.range).toBe("all");
 			expect(captured?.sinceMs).toBe(0);
 			expect(captured?.bucketMs).toBe(24 * HOUR);
@@ -110,14 +114,14 @@ describe("memory-history handler", () => {
 
 		it("computes sinceMs as now - windowMs for the range", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
 			const before = Date.now();
-			await callHandler(dbOps, "24h");
+			await callHandler(sources, "24h");
 			const after = Date.now();
 			const day = 24 * HOUR;
 			expect(captured?.sinceMs).toBeGreaterThanOrEqual(before - day);
@@ -144,8 +148,8 @@ describe("memory-history handler", () => {
 					eventLoopMaxLagMs: null,
 				},
 			];
-			const dbOps = createDbOps({ points });
-			const { body } = await callHandler(dbOps, "24h");
+			const sources = createSources({ points });
+			const { body } = await callHandler(sources, "24h");
 			expect(body.points).toHaveLength(2);
 			expect(body.points[0].rssBytes).toBe(500_000_000);
 			expect(body.points[0].heapUsedBytes).toBe(120_000_000);
@@ -157,8 +161,8 @@ describe("memory-history handler", () => {
 		});
 
 		it("returns an empty points array when there is no history", async () => {
-			const dbOps = createDbOps({ points: [] });
-			const { body } = await callHandler(dbOps, "7d");
+			const sources = createSources({ points: [] });
+			const { body } = await callHandler(sources, "7d");
 			expect(body.points).toEqual([]);
 		});
 	});
