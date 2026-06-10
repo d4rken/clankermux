@@ -85,6 +85,7 @@ import {
 import { parseRequestFilters } from "./handlers/request-filters";
 import {
 	createRequestPayloadHandler,
+	createRequestProjectsHandler,
 	createRequestsCountHandler,
 	createRequestsDetailHandler,
 	createRequestsSummaryHandler,
@@ -173,6 +174,9 @@ export class APIRouter {
 			dbOps.getAdapter(),
 		);
 		const requestsCountHandler = createRequestsCountHandler(dbOps.getAdapter());
+		const requestProjectsHandler = createRequestProjectsHandler(
+			dbOps.getAdapter(),
+		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
 		const logsStreamHandler = createLogsStreamHandler();
@@ -324,6 +328,9 @@ export class APIRouter {
 			const filters = parseRequestFilters(url.searchParams);
 			return requestsCountHandler(filters);
 		});
+		this.handlers.set("GET:/api/requests/projects", () =>
+			requestProjectsHandler(),
+		);
 		this.handlers.set("GET:/api/requests/detail", (_req, url) => {
 			const limitParam = url.searchParams.get("limit");
 			const limit =

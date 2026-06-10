@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { BunSqlAdapter } from "@clankermux/database";
 import {
+	createRequestProjectsHandler,
 	createRequestsCountHandler,
 	createRequestsSummaryHandler,
 } from "../requests";
@@ -121,5 +122,25 @@ describe("createRequestsCountHandler", () => {
 		const res = await createRequestsCountHandler(db)();
 		const body = (await res.json()) as { total: number };
 		expect(body.total).toBe(0);
+	});
+});
+
+describe("createRequestProjectsHandler", () => {
+	it("returns the distinct non-null projects as a plain string array", async () => {
+		const { db, last } = mockDb([{ project: "alpha" }, { project: "beta" }]);
+		const res = await createRequestProjectsHandler(db)();
+		const body = (await res.json()) as string[];
+		expect(body).toEqual(["alpha", "beta"]);
+		const { sql } = last();
+		expect(normalize(sql)).toBe(
+			"SELECT DISTINCT project FROM requests WHERE project IS NOT NULL ORDER BY project LIMIT 500",
+		);
+	});
+
+	it("returns an empty array when no requests carry a project", async () => {
+		const { db } = mockDb([]);
+		const res = await createRequestProjectsHandler(db)();
+		const body = (await res.json()) as string[];
+		expect(body).toEqual([]);
 	});
 });

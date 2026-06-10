@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildRequestFilterClause,
 	NO_API_KEY,
+	NO_PROJECT,
 	parseRequestFilters,
 } from "../request-filters";
 
@@ -78,6 +79,18 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["my-key"]);
 	});
 
+	it("matches the no-project sentinel with IS NULL and no param", () => {
+		const { sql, params } = buildRequestFilterClause({ project: NO_PROJECT });
+		expect(sql).toBe("WHERE r.project IS NULL");
+		expect(params).toEqual([]);
+	});
+
+	it("matches a named project against the stamped column", () => {
+		const { sql, params } = buildRequestFilterClause({ project: "my-proj" });
+		expect(sql).toBe("WHERE r.project = ?");
+		expect(params).toEqual(["my-proj"]);
+	});
+
 	it("combines clauses with AND in a stable order and param sequence", () => {
 		const { sql, params } = buildRequestFilterClause({
 			status: "error",
@@ -85,14 +98,16 @@ describe("buildRequestFilterClause", () => {
 			to: 200,
 			account: "acct-1",
 			apiKey: "my-key",
+			project: "my-proj",
 		});
 		expect(sql).toBe(
 			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300) " +
 				"AND r.timestamp >= ? AND r.timestamp <= ? " +
 				"AND (a.name = ? OR r.account_used = ?) " +
-				"AND COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+				"AND COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ? " +
+				"AND r.project = ?",
 		);
-		expect(params).toEqual([100, 200, "acct-1", "acct-1", "my-key"]);
+		expect(params).toEqual([100, 200, "acct-1", "acct-1", "my-key", "my-proj"]);
 	});
 });
 
@@ -131,18 +146,23 @@ describe("parseRequestFilters", () => {
 		expect(parse("from=abc")).toEqual({});
 	});
 
-	it("omits the 'all' sentinel for account and apiKey", () => {
-		expect(parse("account=all&apiKey=all")).toEqual({});
+	it("omits the 'all' sentinel for account, apiKey, and project", () => {
+		expect(parse("account=all&apiKey=all&project=all")).toEqual({});
 	});
 
-	it("parses account and apiKey values", () => {
-		expect(parse("account=acct-1&apiKey=my-key")).toEqual({
+	it("parses account, apiKey, and project values", () => {
+		expect(parse("account=acct-1&apiKey=my-key&project=my-proj")).toEqual({
 			account: "acct-1",
 			apiKey: "my-key",
+			project: "my-proj",
 		});
 	});
 
 	it("parses the no-API-key sentinel", () => {
 		expect(parse(`apiKey=${NO_API_KEY}`)).toEqual({ apiKey: NO_API_KEY });
+	});
+
+	it("parses the no-project sentinel", () => {
+		expect(parse(`project=${NO_PROJECT}`)).toEqual({ project: NO_PROJECT });
 	});
 });

@@ -28,6 +28,7 @@ import {
 	useAccounts,
 	useApiKeys,
 	useInfiniteRequests,
+	useRequestProjects,
 	useRequests,
 	useRequestsCount,
 } from "../hooks/queries";
@@ -37,15 +38,17 @@ import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
 	mergeStatusCodes,
+	NO_PROJECT,
 	presetRange,
 	type RequestFilterState,
 	type StatusCategory,
 } from "../lib/request-filters";
+import { cn } from "../lib/utils";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
-import { Badge } from "./ui/badge";
+import { Badge, badgeVariants } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
 	Card,
@@ -103,6 +106,7 @@ export function RequestsTab() {
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string>("all");
 	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
+	const [projectFilter, setProjectFilter] = useState<string>("all");
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -119,6 +123,7 @@ export function RequestsTab() {
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
 			apiKey: apiKeyFilter,
+			project: projectFilter,
 			from: dateFrom,
 			to: dateTo,
 		}),
@@ -127,6 +132,7 @@ export function RequestsTab() {
 			statusCodeFilters,
 			accountFilter,
 			apiKeyFilter,
+			projectFilter,
 			dateFrom,
 			dateTo,
 		],
@@ -154,6 +160,7 @@ export function RequestsTab() {
 
 	const { data: accounts } = useAccounts();
 	const { data: configuredApiKeys } = useApiKeys();
+	const { data: knownProjects } = useRequestProjects();
 	const zaiAccountNames = new Set(
 		(accounts ?? []).filter((a) => a.provider === "zai").map((a) => a.name),
 	);
@@ -226,6 +233,19 @@ export function RequestsTab() {
 		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
 	}, [configuredApiKeys, data]);
 
+	// Project filter: union of every project seen across recorded requests (from
+	// /api/requests/projects) and any projects observed in the loaded slice
+	// (covers brand-new projects the cached endpoint result doesn't know yet).
+	const uniqueProjects = useMemo(() => {
+		const fromEndpoint = knownProjects ?? [];
+		const fromRequests = data
+			? Array.from(data.summaries.values())
+					.map((s) => s.project)
+					.filter((v): v is string => Boolean(v))
+			: [];
+		return Array.from(new Set([...fromEndpoint, ...fromRequests])).sort();
+	}, [knownProjects, data]);
+
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
 			const next = new Set(prev);
@@ -270,6 +290,7 @@ export function RequestsTab() {
 		setStatusCategory("all");
 		setAccountFilter("all");
 		setApiKeyFilter("all");
+		setProjectFilter("all");
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
@@ -377,6 +398,19 @@ export function RequestsTab() {
 									<button
 										type="button"
 										onClick={() => setApiKeyFilter("all")}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{projectFilter !== "all" && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Folder className="h-3 w-3" />
+									{projectFilter === NO_PROJECT ? "No Project" : projectFilter}
+									<button
+										type="button"
+										onClick={() => setProjectFilter("all")}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -651,6 +685,31 @@ export function RequestsTab() {
 										</SelectContent>
 									</Select>
 								</div>
+
+								{/* Project Filter */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<Folder className="h-3 w-3" />
+										Project
+									</Label>
+									<Select
+										value={projectFilter}
+										onValueChange={setProjectFilter}
+									>
+										<SelectTrigger className="h-9">
+											<SelectValue placeholder="All projects" />
+										</SelectTrigger>
+										<SelectContent>
+											<SelectItem value="all">All projects</SelectItem>
+											<SelectItem value={NO_PROJECT}>No Project</SelectItem>
+											{uniqueProjects.map((project) => (
+												<SelectItem key={project} value={project || ""}>
+													{project}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -681,6 +740,10 @@ export function RequestsTab() {
 							// The default endpoint is noise — only surface unusual paths.
 							const showPath = Boolean(path && path !== "/v1/messages");
 							const retries = summary?.failoverAttempts ?? 0;
+							// Hoisted as consts so the click-to-filter chips below capture a
+							// narrowed string in their onClick closures.
+							const apiKeyName = summary?.apiKeyName;
+							const project = summary?.project;
 							// Tokens that weren't served from / written to the prompt cache.
 							// Derived from totalTokens (not input+output) because OpenAI rows
 							// count cached tokens inside inputTokens.
@@ -832,21 +895,35 @@ export function RequestsTab() {
 									</div>
 
 									{/* Row 2 "attribution": wraps freely — who/what triggered the request */}
-									{(summary?.apiKeyName ||
-										summary?.project ||
-										summary?.comboName) && (
+									{(apiKeyName || project || summary?.comboName) && (
 										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5 pl-9 text-xs">
-											{summary?.apiKeyName && (
-												<Badge variant="outline" className="text-xs">
+											{apiKeyName && (
+												<button
+													type="button"
+													className={cn(
+														badgeVariants({ variant: "outline" }),
+														"text-xs cursor-pointer hover:bg-accent",
+													)}
+													onClick={() => setApiKeyFilter(apiKeyName)}
+													title={`Filter by API key ${apiKeyName}`}
+												>
 													<Key className="h-3 w-3 mr-1" />
-													{summary.apiKeyName}
-												</Badge>
+													{apiKeyName}
+												</button>
 											)}
-											{summary?.project && (
-												<Badge variant="outline" className="text-xs">
+											{project && (
+												<button
+													type="button"
+													className={cn(
+														badgeVariants({ variant: "outline" }),
+														"text-xs cursor-pointer hover:bg-accent",
+													)}
+													onClick={() => setProjectFilter(project)}
+													title={`Filter by project ${project}`}
+												>
 													<Folder className="h-3 w-3 mr-1" />
-													{summary.project}
-												</Badge>
+													{project}
+												</button>
 											)}
 											{summary?.comboName && (
 												<Badge
