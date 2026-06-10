@@ -4,6 +4,7 @@ export type {
 	AccountResponse,
 	AnalyticsResponse,
 	APIContext,
+	CacheFlowPoint,
 	CleanupResponse,
 	ConfigResponse,
 	HealthResponse,

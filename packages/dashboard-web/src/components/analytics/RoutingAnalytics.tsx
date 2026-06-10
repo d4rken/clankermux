@@ -15,6 +15,7 @@ import {
 	YAxis,
 } from "recharts";
 import { CHART_COLORS, COLORS, type TimeRange } from "../../constants";
+import { shortLabel } from "../../lib/chart-utils";
 import {
 	formatAxisTime,
 	makeTimeTooltipLabelFormatter,
@@ -28,7 +29,6 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { RoutingSummaryCard } from "./RoutingSummaryCard";
 import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
@@ -55,11 +55,6 @@ const DECISION_EXPLANATIONS: Record<string, string> = {
 		"Accounts were sorted by priority, then upstream utilization.",
 	untracked: "This request was logged before routing telemetry was recorded.",
 };
-
-function shortLabel(value: string, max = 24): string {
-	if (value.length <= max) return value;
-	return `${value.slice(0, max - 1)}...`;
-}
 
 function EmptyRoutingState({ loading }: { loading: boolean }) {
 	return (
@@ -382,8 +377,6 @@ export function RoutingAnalyticsPanel({
 					<RoutingFlowGraph flow={routing.flow} />
 				</CardContent>
 			</Card>
-
-			<RoutingSummaryCard routing={routing} />
 
 			<Card>
 				<CardHeader>
