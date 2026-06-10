@@ -141,6 +141,7 @@ export function MemoryUsageChart({
 								tickFormatter={(value) => formatAxisTime(Number(value), tr)}
 							/>
 							<YAxis
+								yAxisId="memory"
 								className="text-xs"
 								width={56}
 								tickFormatter={(value) => `${formatNumber(Number(value))} MB`}
@@ -183,6 +184,7 @@ export function MemoryUsageChart({
 							/>
 							<Legend verticalAlign="top" height={36} iconType="rect" />
 							<Area
+								yAxisId="memory"
 								type="monotone"
 								dataKey="rssMb"
 								name="RSS"
@@ -193,6 +195,7 @@ export function MemoryUsageChart({
 								isAnimationActive={false}
 							/>
 							<Line
+								yAxisId="memory"
 								type="monotone"
 								dataKey="heapTotalMb"
 								name="Heap (committed)"
@@ -203,6 +206,7 @@ export function MemoryUsageChart({
 								isAnimationActive={false}
 							/>
 							<Line
+								yAxisId="memory"
 								type="monotone"
 								dataKey="heapMb"
 								name="Heap (used)"

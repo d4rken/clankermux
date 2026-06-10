@@ -48,6 +48,7 @@ describe("eventLoopTone", () => {
 	});
 
 	it("treats missing stats as ok (monitor not running)", () => {
+		expect(eventLoopTone(null)).toBe("ok");
 		expect(eventLoopTone(undefined)).toBe("ok");
 		expect(eventLoopTone(Number.NaN)).toBe("ok");
 	});
