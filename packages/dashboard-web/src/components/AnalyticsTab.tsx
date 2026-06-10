@@ -5,6 +5,7 @@ import { toCumulativeSeries } from "../lib/cumulative";
 import { formatAxisTime } from "../lib/time-format";
 import {
 	AnalyticsControls,
+	CacheFlowPanel,
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
 	type FilterState,
@@ -257,6 +258,9 @@ export const AnalyticsTab = React.memo(() => {
 					timeRange={timeRange}
 				/>
 			</div>
+
+			{/* Cache Flow */}
+			<CacheFlowPanel cacheFlow={analytics?.cacheFlow} loading={loading} />
 
 			{/* Enhanced Model Analytics */}
 			<ModelAnalytics

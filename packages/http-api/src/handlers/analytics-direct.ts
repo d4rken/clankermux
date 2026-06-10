@@ -6,7 +6,12 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
-import type { AnalyticsResponse, APIContext, SpeedTimePoint } from "../types";
+import type {
+	AnalyticsResponse,
+	APIContext,
+	CacheFlowPoint,
+	SpeedTimePoint,
+} from "../types";
 
 const log = new Logger("AnalyticsHandler");
 
@@ -835,6 +840,43 @@ export function createAnalyticsHandler(context: APIContext) {
 			);
 			recordPhase(phaseTimings, "routing", phaseStartedAt);
 
+			// Cache token flow: per-(model, account) sums of the three disjoint
+			// input buckets (cache reads, cache writes, uncached input). Feeds
+			// the Cache Flow graph on the dashboard.
+			phaseStartedAt = performance.now();
+			const cacheFlowRows = await db.query<{
+				model: string;
+				account_name: string;
+				cache_read_tokens: number;
+				cache_write_tokens: number;
+				uncached_tokens: number;
+			}>(
+				`
+				SELECT
+					COALESCE(r.model, 'unknown') as model,
+					COALESCE(a.name, r.account_used, ?) as account_name,
+					SUM(COALESCE(r.cache_read_input_tokens, 0)) as cache_read_tokens,
+					SUM(COALESCE(r.cache_creation_input_tokens, 0)) as cache_write_tokens,
+					SUM(COALESCE(r.input_tokens, 0)) as uncached_tokens
+				FROM requests r
+				LEFT JOIN accounts a ON a.id = r.account_used
+				WHERE ${whereClause}
+				GROUP BY model, account_name
+				ORDER BY (cache_read_tokens + cache_write_tokens + uncached_tokens) DESC
+				LIMIT 100
+			`,
+				[NO_ACCOUNT_ID, ...queryParams],
+			);
+			recordPhase(phaseTimings, "cache_flow", phaseStartedAt);
+
+			const cacheFlow: CacheFlowPoint[] = cacheFlowRows.map((row) => ({
+				model: row.model,
+				accountName: row.account_name,
+				cacheReadTokens: Number(row.cache_read_tokens) || 0,
+				cacheWriteTokens: Number(row.cache_write_tokens) || 0,
+				uncachedTokens: Number(row.uncached_tokens) || 0,
+			}));
+
 			const routingTotalRequests = routingDecisionRows.reduce(
 				(total, row) => total + (Number(row.requests) || 0),
 				0,
@@ -1011,6 +1053,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				modelPerformance,
 				speedTimeSeries,
 				routing,
+				cacheFlow,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);
