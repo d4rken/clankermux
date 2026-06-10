@@ -689,6 +689,273 @@ describe("usage-collector", () => {
 		});
 	});
 
+	describe("Codex-Responses stream (native passthrough)", () => {
+		// Event shapes mirror what CodexProvider.transformStreamingResponse parses:
+		// response.created carries `response.{id,model}`; response.completed
+		// carries `response.usage` with cache info under `input_tokens_details`.
+		function codexCreated(model = "gpt-5.5-codex"): Uint8Array {
+			return sse("response.created", {
+				type: "response.created",
+				response: { id: "resp_backend_1", model },
+			});
+		}
+
+		function codexTextDelta(text: string): Uint8Array {
+			return sse("response.output_text.delta", {
+				type: "response.output_text.delta",
+				delta: text,
+			});
+		}
+
+		function codexCompleted(usage?: unknown): Uint8Array {
+			return sse("response.completed", {
+				type: "response.completed",
+				response: {
+					id: "resp_backend_1",
+					model: "gpt-5.5-codex",
+					...(usage !== undefined ? { usage } : {}),
+				},
+			});
+		}
+
+		it("computes totals from response.completed usage — NOT the bytes/4 estimate", async () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(state, codexTextDelta("Hello"), 1100);
+			feedChunk(state, codexTextDelta(" world"), 1200);
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 1117,
+					output_tokens: 215,
+					input_tokens_details: {
+						cached_tokens: 1024,
+						cache_creation_input_tokens: 64,
+					},
+				}),
+				1300,
+			);
+
+			expect(state.model).toBe("gpt-5.5-codex");
+			expect(state.inputTokens).toBe(1117);
+			expect(state.providerFinalOutputTokens).toBe(215);
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.cacheReadInputTokens).toBe(1024);
+			expect(state.cacheCreationInputTokens).toBe(64);
+
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 2000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.model).toBe("gpt-5.5-codex");
+			expect(summary.usage.inputTokens).toBe(1117);
+			expect(summary.usage.outputTokens).toBe(215);
+			expect(summary.usage.cacheReadInputTokens).toBe(1024);
+			expect(summary.usage.cacheCreationInputTokens).toBe(64);
+			expect(summary.usage.totalTokens).toBe(1117 + 1024 + 64 + 215);
+			// The provider reported — the bytes/4 fallback must NOT have been used.
+			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.usage.outputTokens).not.toBe(
+				Math.ceil(state.streamedBytes / 4),
+			);
+		});
+
+		it("handles a usage object without input_tokens_details (no cached info)", async () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(
+				state,
+				codexCompleted({ input_tokens: 50, output_tokens: 9 }),
+				1100,
+			);
+			expect(state.inputTokens).toBe(50);
+			expect(state.providerFinalOutputTokens).toBe(9);
+			expect(state.cacheReadInputTokens).toBe(0);
+			expect(state.cacheCreationInputTokens).toBe(0);
+
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.outputTokens).toBe(9);
+			expect(summary.outputApproximate).toBeUndefined();
+		});
+
+		it("ignores negative cached-token details (mirrors CodexProvider's >= 0 guard)", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 10,
+					output_tokens: 5,
+					input_tokens_details: {
+						cached_tokens: -1,
+						cache_creation_input_tokens: -7,
+					},
+				}),
+				1000,
+			);
+			expect(state.cacheReadInputTokens).toBe(0);
+			expect(state.cacheCreationInputTokens).toBe(0);
+			expect(state.inputTokens).toBe(10);
+			expect(state.providerFinalOutputTokens).toBe(5);
+		});
+
+		it("unknown response.* events are no-ops on token state", () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			const before = {
+				input: state.inputTokens,
+				cacheRead: state.cacheReadInputTokens,
+				cacheCreation: state.cacheCreationInputTokens,
+				finalOutput: state.providerFinalOutputTokens,
+				reported: state.providerReportedOutput,
+			};
+			feedChunk(
+				state,
+				sse("response.output_item.added", {
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "message", role: "assistant" },
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("response.in_progress", {
+					type: "response.in_progress",
+					response: { id: "resp_backend_1", model: "gpt-5.5-codex" },
+				}),
+				1200,
+			);
+			expect(state.inputTokens).toBe(before.input);
+			expect(state.cacheReadInputTokens).toBe(before.cacheRead);
+			expect(state.cacheCreationInputTokens).toBe(before.cacheCreation);
+			expect(state.providerFinalOutputTokens).toBe(before.finalOutput);
+			expect(state.providerReportedOutput).toBe(before.reported);
+		});
+
+		it("tolerates mixed garbage between Codex events without losing usage", async () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(
+				state,
+				enc.encode("event: ping\ndata: this-is-not-json\n\n"),
+				1100,
+			);
+			feedChunk(state, enc.encode(": comment line\n\n"), 1200);
+			feedChunk(
+				state,
+				codexCompleted({ input_tokens: 20, output_tokens: 7 }),
+				1300,
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.inputTokens).toBe(20);
+			expect(summary.usage.outputTokens).toBe(7);
+			expect(summary.outputApproximate).toBeUndefined();
+		});
+
+		it("parses a response.completed split across feedChunk calls", () => {
+			const state = createUsageState();
+			const full = `event: response.completed\ndata: ${JSON.stringify({
+				type: "response.completed",
+				response: {
+					id: "resp_backend_1",
+					model: "gpt-5.5-codex",
+					usage: { input_tokens: 33, output_tokens: 44 },
+				},
+			})}\n\n`;
+			const splitAt = full.indexOf("output_tokens") + 4;
+			feedChunk(state, enc.encode(full.slice(0, splitAt)), 1000);
+			expect(state.providerReportedOutput).toBe(false);
+			feedChunk(state, enc.encode(full.slice(splitAt)), 1100);
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.inputTokens).toBe(33);
+			expect(state.providerFinalOutputTokens).toBe(44);
+		});
+
+		it("usage-less Codex stream falls back to bytes/4 as today", async () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(state, codexTextDelta("x".repeat(400)), 1100);
+			// response.completed WITHOUT a usage object — nothing reported.
+			feedChunk(state, codexCompleted(), 1200);
+			expect(state.providerReportedOutput).toBe(false);
+
+			const expectedBytes = state.streamedBytes;
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.outputApproximate).toBe(true);
+			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedBytes / 4));
+		});
+
+		it("Anthropic stream regression: behavior is unchanged with the Codex vocabulary present", async () => {
+			// Byte-identical Anthropic stream as in the first suite — must produce
+			// exactly the same numbers now that response.* events are also handled.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: {
+							input_tokens: 100,
+							cache_read_input_tokens: 20,
+							cache_creation_input_tokens: 5,
+							output_tokens: 1,
+						},
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "hello world" },
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 250 },
+				}),
+				1200,
+			);
+			feedChunk(state, sse("message_stop", { type: "message_stop" }), 1300);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 2000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			expect(summary.usage.model).toBe("claude-opus-4-8");
+			expect(summary.usage.inputTokens).toBe(100);
+			expect(summary.usage.outputTokens).toBe(250);
+			expect(summary.usage.cacheReadInputTokens).toBe(20);
+			expect(summary.usage.cacheCreationInputTokens).toBe(5);
+			expect(summary.usage.totalTokens).toBe(375);
+			expect(summary.outputApproximate).toBeUndefined();
+			expect(state.sawMessageStop).toBe(true);
+		});
+	});
+
 	describe("R5: non-clean stream endings (B2)", () => {
 		it("clean end trusts the provider's output count", async () => {
 			const state = createUsageState();

@@ -13,6 +13,7 @@
 	},
 	"dependencies": {
 		"@clankermux/core": "workspace:*",
-		"@clankermux/openai-formats": "workspace:*"
+		"@clankermux/openai-formats": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

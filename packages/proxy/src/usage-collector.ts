@@ -19,10 +19,16 @@ import type { SlimUsageSummary } from "./request-recorder";
  *     line split across chunk boundaries is never lost. Parsing of a `data:`
  *     payload runs only when it could carry usage (the substring guard). The
  *     `event:`/`data:` pairing is tracked via `currentEvent` carried across
- *     chunks. `message_start` supplies input/cache/model; `message_delta`
- *     supplies the authoritative cumulative `output_tokens`; `message_stop`
- *     sets `sawMessageStop`. `content_block_delta`/`text_delta` are NEVER parsed
- *     for tokens.
+ *     chunks. Two disjoint SSE vocabularies are dispatched by event name:
+ *       - Anthropic (`message_*`): `message_start` supplies input/cache/model;
+ *         `message_delta` supplies the authoritative cumulative
+ *         `output_tokens`; `message_stop` sets `sawMessageStop`.
+ *       - Codex-Responses (`response.*`, native Responses passthrough):
+ *         `response.created` supplies the model; `response.completed` supplies
+ *         the authoritative usage (input/output + cached-token details) and
+ *         sets `sawMessageStop`. All other `response.*` events are no-ops.
+ *     `content_block_delta`/`text_delta`/`response.output_text.delta` are
+ *     NEVER parsed for tokens.
  *
  *   - Non-stream: `feedNonStreamBody` parses the (capped) JSON body once. A
  *     `usage` object is authoritative; otherwise the body length seeds the
@@ -181,13 +187,36 @@ interface SseParsed {
 		cache_creation_input_tokens?: number;
 		output_tokens?: number;
 	};
+	/**
+	 * Codex-Responses vocabulary (native Responses passthrough):
+	 * `response.created` / `response.completed` carry a `response` envelope —
+	 * model on created, OpenAI-shaped usage (cached-token info nested under
+	 * `input_tokens_details`) on completed. Mirrors the shape
+	 * CodexProvider.transformStreamingResponse parses.
+	 */
+	response?: {
+		model?: string;
+		usage?: {
+			input_tokens?: number;
+			output_tokens?: number;
+			input_tokens_details?: {
+				cached_tokens?: number;
+				cache_creation_input_tokens?: number;
+			};
+		};
+	};
 }
 
 /**
- * Apply a parsed SSE `data:` object to the state. ONLY `message_start`
- * (input/cache/model) and `message_delta` (cumulative output_tokens →
- * providerReportedOutput) are honoured. content_block_delta / text_delta are
- * intentionally ignored. `message_stop` flips `sawMessageStop`.
+ * Apply a parsed SSE `data:` object to the state. Dispatch is by event name
+ * across two disjoint vocabularies:
+ *   - Anthropic: ONLY `message_start` (input/cache/model) and `message_delta`
+ *     (cumulative output_tokens → providerReportedOutput) are honoured.
+ *     content_block_delta / text_delta are intentionally ignored.
+ *     `message_stop` flips `sawMessageStop`.
+ *   - Codex-Responses (native passthrough): `response.created` supplies the
+ *     model, `response.completed` supplies the authoritative usage. All other
+ *     `response.*` events are no-ops.
  */
 function applySseData(
 	parsed: SseParsed,
@@ -230,6 +259,53 @@ function applySseData(
 	}
 
 	if (parsed.type === "message_stop" || eventType === "message_stop") {
+		state.sawMessageStop = true;
+	}
+
+	// ── Codex-Responses vocabulary (native Responses passthrough) ────────────
+	// On the native path the stream is raw Codex-Responses SSE (`response.*`
+	// events) instead of Anthropic SSE. Field mapping mirrors
+	// CodexProvider.handleCodexEvent: the model comes from `response.created`'s
+	// `response.model`; usage comes from `response.completed`'s
+	// `response.usage` (OpenAI shape, cached-token info nested under
+	// `input_tokens_details` with the same >= 0 guards).
+	const isResponseCreated =
+		parsed.type === "response.created" || eventType === "response.created";
+	if (isResponseCreated && parsed.response?.model) {
+		state.model = parsed.response.model;
+	}
+
+	const isResponseCompleted =
+		parsed.type === "response.completed" || eventType === "response.completed";
+	if (isResponseCompleted) {
+		const usage = parsed.response?.usage;
+		if (usage) {
+			if (typeof usage.input_tokens === "number") {
+				state.inputTokens = usage.input_tokens;
+			}
+			if (typeof usage.output_tokens === "number") {
+				// `response.completed` is the terminal event — its count is the Codex
+				// analogue of Anthropic's authoritative `message_delta`.
+				state.providerFinalOutputTokens = usage.output_tokens;
+				state.providerReportedOutput = true;
+			}
+			const inputTokenDetails = usage.input_tokens_details;
+			if (
+				typeof inputTokenDetails?.cached_tokens === "number" &&
+				inputTokenDetails.cached_tokens >= 0
+			) {
+				state.cacheReadInputTokens = inputTokenDetails.cached_tokens;
+			}
+			if (
+				typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
+				inputTokenDetails.cache_creation_input_tokens >= 0
+			) {
+				state.cacheCreationInputTokens =
+					inputTokenDetails.cache_creation_input_tokens;
+			}
+		}
+		// Terminal event — the Codex analogue of message_stop (diagnostic-only
+		// clean-ending signal; endedCleanly is still the caller's flag).
 		state.sawMessageStop = true;
 	}
 }

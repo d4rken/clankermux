@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
 import { Logger } from "@clankermux/logger";
+import {
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+	setNativeResponsesRequestContext,
+} from "@clankermux/types";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -116,6 +120,14 @@ export async function handleResponsesRequest(
 		headers: syntheticHeaders,
 		body: JSON.stringify(anthropicBody),
 	});
+	// Native Responses passthrough (Stage A): carry the original (normalized)
+	// Responses body alongside the translated request. When the proxy selects a
+	// codex account for a streaming client, it forwards this body verbatim
+	// instead of double-translating — handleProxy re-keys it onto RequestMeta.
+	setNativeResponsesRequestContext(syntheticReq, {
+		nativeBody: JSON.stringify(body),
+		clientStream: body.stream === true,
+	});
 
 	// 6. Forward to proxy
 	log.info(`Forwarding responses request to ${messagesUrl.pathname}`);
@@ -193,7 +205,34 @@ export async function handleResponsesRequest(
 		});
 	}
 
-	// 8. Stream path
+	// 8. Native Responses passthrough (Stage B, response leg): on a codex-native
+	// attempt the proxy returns the backend's RAW Codex-Responses SSE marked
+	// with the internal marker header (only ever set on status 200 — non-200s
+	// were error-translated above). The body is already genuine Responses SSE
+	// (response.created / response.output_text.delta / response.completed, with
+	// the backend's own response id), so it goes to the client AS-IS — no
+	// translation, no responseId substitution — minus the internal marker. The
+	// marker implies the client requested streaming (Stage A only goes native
+	// when clientStream === true), so this branch sits naturally before the
+	// `body.stream` check below.
+	if (anthropicResp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER) === "1") {
+		if (body.stream) {
+			const passthroughHeaders = new Headers(anthropicResp.headers);
+			passthroughHeaders.delete(NATIVE_RESPONSES_RESPONSE_HEADER);
+			return new Response(anthropicResp.body, {
+				status: anthropicResp.status,
+				statusText: anthropicResp.statusText,
+				headers: passthroughHeaders,
+			});
+		}
+		// Should be impossible — Stage A guards on clientStream === true. Warn
+		// for observability and fall through to the normal translation path.
+		log.warn(
+			"Native Responses marker present but the client did not request streaming — falling back to translation",
+		);
+	}
+
+	// 9. Stream path
 	if (body.stream) {
 		return translateAnthropicStreamToResponses(
 			anthropicResp,
@@ -202,7 +241,7 @@ export async function handleResponsesRequest(
 		);
 	}
 
-	// 9. Non-stream path
+	// 10. Non-stream path
 	let respBody: unknown;
 	try {
 		respBody = await anthropicResp.json();

@@ -16,6 +16,8 @@ import {
 } from "@clankermux/providers";
 import {
 	type Account,
+	getNativeResponsesMetaContext,
+	NATIVE_RESPONSES_REQUEST_HEADER,
 	PROVIDER_NAMES,
 	type RateLimitReason,
 	type RequestMeta,
@@ -482,6 +484,27 @@ async function discardUpstreamBody(
 }
 
 /**
+ * Validate the native Responses body and apply a combo model override to it
+ * (native Responses passthrough, Stage A). The body is ALWAYS parsed — even
+ * with no override — so a corrupt nativeBody can never enter the native path.
+ * Never throws: a parse failure returns null so the caller falls back to the
+ * translated Anthropic body (defensive — the adapter always stores valid JSON).
+ */
+function prepareNativeBody(
+	nativeBody: string,
+	modelOverride: string | null | undefined,
+): string | null {
+	try {
+		const parsed = JSON.parse(nativeBody) as Record<string, unknown>;
+		if (!modelOverride) return nativeBody;
+		parsed.model = modelOverride;
+		return JSON.stringify(parsed);
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Handles proxy request without authentication
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -692,11 +715,48 @@ export async function proxyWithAccount(
 		);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
+		// ── Native Responses passthrough (Stage A, request leg) ────────────────
+		// When the client request was an OpenAI-Responses call (the adapter
+		// attached a NativeResponsesContext), this attempt targets a codex account
+		// AND the client asked for streaming, forward the ORIGINAL Responses body
+		// instead of the double-translated Anthropic body. The decision is strictly
+		// per-attempt: the translated effectiveBodyBuffer stays untouched, so a
+		// failover to a non-codex account re-enters here and picks it up.
+		const nativeCtx = getNativeResponsesMetaContext(requestMeta);
+		const useNative =
+			nativeCtx?.clientStream === true && account.provider === "codex";
+		let nativeBodyText: string | null = null;
+		if (nativeCtx && useNative) {
+			nativeBodyText = prepareNativeBody(nativeCtx.nativeBody, modelOverride);
+			if (nativeBodyText !== null) {
+				log.info(
+					`Native Responses passthrough: forwarding original request to ${account.name}`,
+				);
+			} else {
+				log.warn(
+					`Native Responses passthrough: unparseable native body (model override: ${modelOverride ? `"${modelOverride}"` : "none"}) — using translated body for ${account.name}`,
+				);
+			}
+		} else if (nativeCtx && account.provider !== "codex") {
+			log.debug(
+				`Native passthrough unavailable for account ${account.name} (provider ${account.provider}); using translated body`,
+			);
+		}
+
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
 			headers,
 		};
-		if (effectiveBodyBuffer) {
+		if (nativeBodyText !== null) {
+			// Use a copy of the prepared headers: the shared `headers` object is
+			// reused by the translated-body retry paths below (thinking-signature,
+			// model cycling), which must NOT carry the native flag.
+			const nativeHeaders = new Headers(headers);
+			nativeHeaders.set(NATIVE_RESPONSES_REQUEST_HEADER, "1");
+			requestInit.headers = nativeHeaders;
+			requestInit.body = nativeBodyText;
+			requestInit.duplex = "half";
+		} else if (effectiveBodyBuffer) {
 			requestInit.body = new Uint8Array(effectiveBodyBuffer);
 			requestInit.duplex = "half";
 		}
@@ -714,6 +774,26 @@ export async function proxyWithAccount(
 			transformedBodyJson = JSON.parse(transformedBodyText);
 		} catch {
 			// ignore
+		}
+
+		// ── Native Responses passthrough: capture the relay flag, strip the
+		// internal header ─────────────────────────────────────────────────────
+		// The TRANSFORMED request is authoritative for the native flag (the
+		// provider strips it in its parse-failure fallback, so reading it here —
+		// not the nativeBodyText decision above — can never mis-mark a fallback
+		// response as native). Capture it into a boolean for the response tag
+		// below, then DELETE the internal header so it never reaches the
+		// upstream Codex backend.
+		const nativeUpstreamAttempt =
+			transformedRequest.headers.get(NATIVE_RESPONSES_REQUEST_HEADER) === "1";
+		if (nativeUpstreamAttempt) {
+			const outboundHeaders = new Headers(transformedRequest.headers);
+			outboundHeaders.delete(NATIVE_RESPONSES_REQUEST_HEADER);
+			transformedRequest = new Request(transformedRequest.url, {
+				method: transformedRequest.method,
+				headers: outboundHeaders,
+				body: transformedBodyText,
+			});
 		}
 		const transformedModel =
 			(transformedBodyJson?.model as string | undefined) ?? "";
@@ -1280,6 +1360,14 @@ export async function proxyWithAccount(
 		);
 		if (internalRequestStream === "true" || internalRequestStream === "false") {
 			responseHeaders.set("x-clankermux-request-stream", internalRequestStream);
+		}
+		// Native Responses passthrough: relay the captured native flag onto the
+		// response (same channel as x-clankermux-request-stream) so the
+		// provider's processResponse can skip the Anthropic back-translation.
+		// The boolean was captured BEFORE the internal header was stripped from
+		// the outbound request, so the flag never reaches the upstream backend.
+		if (nativeUpstreamAttempt) {
+			responseHeaders.set(NATIVE_RESPONSES_REQUEST_HEADER, "1");
 		}
 		const taggedRawResponse = new Response(rawResponse.body, {
 			status: rawResponse.status,

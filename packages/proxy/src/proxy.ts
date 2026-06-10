@@ -9,7 +9,11 @@ import {
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import {
+	type Account,
+	getNativeResponsesRequestContext,
+	setNativeResponsesMetaContext,
+} from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
@@ -345,6 +349,12 @@ export async function handleProxy(
 
 	// 4. Create request metadata
 	const requestMeta = createRequestMetadata(req, url);
+	// Native Responses passthrough: re-key the adapter's Request-scoped context
+	// onto the RequestMeta so it reaches each per-account attempt downstream.
+	const nativeResponsesCtx = getNativeResponsesRequestContext(req);
+	if (nativeResponsesCtx) {
+		setNativeResponsesMetaContext(requestMeta, nativeResponsesCtx);
+	}
 	requestMeta.internal = isInternal;
 	requestMeta.affinityKey = affinity.key;
 	requestMeta.affinityScope = affinity.scope;

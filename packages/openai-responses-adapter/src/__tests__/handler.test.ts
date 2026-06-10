@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+	getNativeResponsesRequestContext,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+} from "@clankermux/types";
 import { handleResponsesRequest } from "../handler";
 import type { HandleProxyFn } from "../types";
 
@@ -224,5 +228,272 @@ describe("handleResponsesRequest", () => {
 		const rawBody = await resp.text();
 		expect(rawBody).toContain("response.created");
 		expect(rawBody).toContain("response.completed");
+	});
+
+	describe("native Responses passthrough (Stage B, response leg)", () => {
+		// Raw Codex-backend Responses SSE — distinctively NOT Anthropic SSE and
+		// carrying the backend's own response id, which must survive untouched.
+		const RAW_CODEX_SSE = [
+			"event: response.created",
+			`data: ${JSON.stringify({
+				type: "response.created",
+				response: { id: "resp_backend_1", model: "gpt-5.5-codex" },
+			})}`,
+			"",
+			"event: response.output_text.delta",
+			`data: ${JSON.stringify({
+				type: "response.output_text.delta",
+				delta: "Hello",
+			})}`,
+			"",
+			"event: response.completed",
+			`data: ${JSON.stringify({
+				type: "response.completed",
+				response: {
+					id: "resp_backend_1",
+					usage: { input_tokens: 3, output_tokens: 2 },
+				},
+			})}`,
+			"",
+			"",
+		].join("\n");
+
+		function streamingRequest(stream: boolean): Request {
+			return new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "gpt-5.5-codex",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+					stream,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+		}
+
+		test("marked 200 SSE → returned as-is (same bytes), marker header stripped", async () => {
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(RAW_CODEX_SSE, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/event-stream",
+						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+						"x-other-header": "kept",
+					},
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(true),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(200);
+			// Internal marker must NOT leak to the client; other headers survive.
+			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			expect(resp.headers.get("content-type")).toContain("text/event-stream");
+			expect(resp.headers.get("x-other-header")).toBe("kept");
+
+			// The SAME bytes reach the client — no translation, no responseId
+			// substitution: the backend's own response id survives.
+			const rawBody = await resp.text();
+			expect(rawBody).toBe(RAW_CODEX_SSE);
+			expect(rawBody).toContain("resp_backend_1");
+		});
+
+		test("unmarked 200 SSE → still translated via the stream translator (regression)", async () => {
+			const anthropicSse =
+				"event: message_start\ndata: " +
+				JSON.stringify({
+					type: "message_start",
+					message: {
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						model: "claude-haiku-4-5",
+						content: [],
+						stop_reason: null,
+						stop_sequence: null,
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}) +
+				"\n\n" +
+				"event: message_delta\ndata: " +
+				JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { output_tokens: 5 },
+				}) +
+				"\n\n" +
+				"event: message_stop\ndata: " +
+				JSON.stringify({ type: "message_stop" }) +
+				"\n\n";
+
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(anthropicSse, {
+					status: 200,
+					headers: { "Content-Type": "text/event-stream" },
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(true),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(200);
+			const rawBody = await resp.text();
+			// Translation ran: Responses vocabulary out, Anthropic vocabulary gone.
+			expect(rawBody).toContain("response.created");
+			expect(rawBody).toContain("response.completed");
+			expect(rawBody).not.toContain("message_start");
+		});
+
+		test("marked response with body.stream false → warns and falls back to translation", async () => {
+			// Should be impossible (Stage A only goes native when clientStream is
+			// true) — the defensive fallback must still produce a translated
+			// non-stream response from an Anthropic JSON body.
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(ANTHROPIC_MESSAGE_BODY, {
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+					},
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(false),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(200);
+			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			const body = await resp.json();
+			// The JSON translation path ran, not the passthrough.
+			expect(body.object).toBe("response");
+			expect(Array.isArray(body.output)).toBe(true);
+		});
+
+		test("non-200 keeps error translation even if a marker were present (ordering)", async () => {
+			// Stage A only marks 200s; should one ever arrive marked, the error
+			// handling above the passthrough branch still wins.
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "rate_limit_error", message: "slow down" },
+					}),
+					{
+						status: 429,
+						headers: {
+							"Content-Type": "application/json",
+							[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+						},
+					},
+				);
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(true),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(429);
+			const body = await resp.json();
+			expect(body.error.type).toBe("rate_limit_error");
+			expect(body.error.message).toBe("slow down");
+		});
+	});
+
+	describe("native Responses context attachment", () => {
+		/**
+		 * Drive the handler with the given Responses body and return the context
+		 * attached to the synthetic Request that reached handleProxy.
+		 */
+		async function captureContext(bodyOverrides: Record<string, unknown>) {
+			let capturedReq: Request | null = null;
+			const mockHandleProxy: HandleProxyFn = async (req) => {
+				capturedReq = req;
+				return new Response(ANTHROPIC_MESSAGE_BODY, {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "gpt-5.5-codex",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+					...bodyOverrides,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+			await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
+			expect(capturedReq).not.toBeNull();
+			return getNativeResponsesRequestContext(
+				capturedReq as unknown as Request,
+			);
+		}
+
+		test("attaches the original body with clientStream:true for stream:true", async () => {
+			const ctx = await captureContext({
+				stream: true,
+				tools: [{ type: "web_search" }],
+			});
+			expect(ctx).toBeDefined();
+			expect(ctx?.clientStream).toBe(true);
+			const native = JSON.parse(ctx?.nativeBody ?? "{}");
+			expect(native.model).toBe("gpt-5.5-codex");
+			expect(native.tools).toEqual([{ type: "web_search" }]);
+			expect(native.input).toEqual([
+				{
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text: "Hi" }],
+				},
+			]);
+		});
+
+		test("clientStream:false for stream:false", async () => {
+			const ctx = await captureContext({ stream: false });
+			expect(ctx).toBeDefined();
+			expect(ctx?.clientStream).toBe(false);
+		});
+
+		test("clientStream:false when stream is absent", async () => {
+			const ctx = await captureContext({});
+			expect(ctx).toBeDefined();
+			expect(ctx?.clientStream).toBe(false);
+		});
+
+		test("string input is normalized in the attached nativeBody", async () => {
+			const ctx = await captureContext({ input: "plain text", stream: true });
+			expect(ctx).toBeDefined();
+			const native = JSON.parse(ctx?.nativeBody ?? "{}");
+			expect(native.input).toEqual([
+				{
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text: "plain text" }],
+				},
+			]);
+		});
 	});
 });
