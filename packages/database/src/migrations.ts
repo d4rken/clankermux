@@ -151,6 +151,34 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
 	);
 
+	// Create request_tool_calls table for per-request tool-call analytics
+	// (one row per distinct tool used in the request's final message).
+	db.run(`
+		CREATE TABLE IF NOT EXISTS request_tool_calls (
+			request_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			call_count INTEGER NOT NULL DEFAULT 1,
+			error_count INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (request_id, tool_name),
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Create request_tool_errors table for truncated per-tool error samples.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS request_tool_errors (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			error_text TEXT,
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_tool_errors_request_id ON request_tool_errors(request_id)`,
+	);
+
 	// Create strategies table for persisted operational metadata.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS strategies (

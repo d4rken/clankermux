@@ -4,6 +4,7 @@ import {
 	type ContextComposition,
 	NO_ACCOUNT_ID,
 	type RequestResponse,
+	type ToolCallStat,
 } from "@clankermux/types";
 import { parseUpstreamError } from "./upstream-error";
 
@@ -82,6 +83,12 @@ export interface RecordMeta {
 	 * NULL-covered in the context_* columns.
 	 */
 	contextComposition?: ContextComposition | null;
+	/**
+	 * Ingest-time per-tool call/error stats (see RequestMeta.toolCallStats).
+	 * Optional: synthetic/audit rows intentionally omit it and write no
+	 * request_tool_calls / request_tool_errors rows.
+	 */
+	toolCallStats?: ToolCallStat[] | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort: string | null;
 	routing: RecordRouting | null;
@@ -179,6 +186,7 @@ interface DbOpsLike {
 		contextComposition?: ContextComposition | null,
 	): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
+	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
 	saveRequestPayloadRaw(id: string, json: string): Promise<void>;
 	updateRequestUsage(requestId: string, usage: unknown): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
@@ -723,6 +731,12 @@ export class RequestRecorder {
 						failoverReason: routing.failoverReason,
 						createdAt: meta.timestamp,
 					});
+				}
+				if (meta.toolCallStats?.length) {
+					await this.dbOps.saveRequestToolCalls(
+						meta.requestId,
+						meta.toolCallStats,
+					);
 				}
 			} catch (error) {
 				log.error(`Failed to save request for ${meta.requestId}:`, error);

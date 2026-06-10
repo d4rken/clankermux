@@ -15,7 +15,7 @@ import {
 	setNativeResponsesMetaContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
-import { computeContextComposition } from "./context-composition";
+import { computeContextAndToolStats } from "./context-composition";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	type ContextWindowExcludedBackend,
@@ -247,13 +247,14 @@ export async function handleProxy(
 		sessionProjectCache,
 	);
 	const project = resolved.project;
-	// Ingest-time context composition: walk the already-parsed body once (no
-	// second JSON.parse) for proxied /v1/messages requests only. null for
-	// other endpoints / unparseable bodies → context_* columns stay NULL.
-	const contextComposition =
+	// Ingest-time context composition + per-tool call/error stats: walk the
+	// already-parsed body once (no second JSON.parse) for proxied /v1/messages
+	// requests only. null for other endpoints / unparseable bodies → context_*
+	// columns stay NULL and no tool-call rows are written.
+	const { composition: contextComposition, toolStats: toolCallStats } =
 		req.method === "POST" && url.pathname === "/v1/messages"
-			? computeContextComposition(parsedBody)
-			: null;
+			? computeContextAndToolStats(parsedBody)
+			: { composition: null, toolStats: null };
 	const affinity = extractRequestAffinity(req.headers);
 
 	// Conservative token estimate for context-window-aware routing (B1).
@@ -333,6 +334,7 @@ export async function handleProxy(
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
 	requestMeta.contextComposition = contextComposition;
+	requestMeta.toolCallStats = toolCallStats;
 	// Per-request reasoning effort, derived once for all failover attempts. The
 	// Codex path's translated Anthropic body loses reasoning.effort, so fall
 	// back to the value captured from the ORIGINAL Responses body (Stage A).

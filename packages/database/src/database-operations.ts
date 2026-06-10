@@ -21,6 +21,7 @@ import type {
 	RateLimitReason,
 	StorageUsageType,
 	StrategyStore,
+	ToolCallStat,
 	UsageSnapshotRow,
 } from "@clankermux/types";
 import { parsePinnedProviders } from "@clankermux/types";
@@ -244,13 +245,16 @@ const RETENTION_STORAGE_USAGE_TTL_MS = 5 * TIME_CONSTANTS.MINUTE;
  * the controls (payloads, requests, usage snapshots).
  */
 const RETENTION_USAGE_TABLES: ReadonlyArray<{
-	key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots";
+	key: StorageUsageType["key"];
 	table: string;
 }> = [
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
 	{ key: "memory_snapshots", table: "memory_snapshots" },
+	// Riders on the requests retention (FK cascade) — no control of their own.
+	{ key: "tool_calls", table: "request_tool_calls" },
+	{ key: "tool_errors", table: "request_tool_errors" },
 ];
 
 /**
@@ -1038,6 +1042,17 @@ OAuth tokens will need to be re-authenticated.
 			() => this.requests.saveRouting(data),
 			this.retryConfig,
 			"saveRequestRouting",
+		);
+	}
+
+	async saveRequestToolCalls(
+		requestId: string,
+		stats: ToolCallStat[],
+	): Promise<void> {
+		await withDatabaseRetry(
+			() => this.requests.saveToolCalls(requestId, stats),
+			this.retryConfig,
+			"saveRequestToolCalls",
 		);
 	}
 

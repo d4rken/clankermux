@@ -33,6 +33,15 @@ const GROWTH_CURVE_PROJECT_LIMIT = 5;
 const GROWTH_CURVE_POINT_LIMIT = 1000;
 const TOP_TOOL_CONTRIBUTORS_LIMIT = 10;
 
+// Tool-call error analytics limits.
+const TOOL_ERROR_BY_TOOL_LIMIT = 30;
+const TOOL_ERROR_TIME_SERIES_TOOL_LIMIT = 5;
+const TOOL_ERROR_TIME_SERIES_POINT_LIMIT = 2000;
+const TOOL_ERROR_TOP_MESSAGES_LIMIT = 100;
+// Per-tool cap inside the top-messages query so one noisy tool cannot
+// monopolize all TOOL_ERROR_TOP_MESSAGES_LIMIT rows.
+const TOOL_ERROR_MESSAGES_PER_TOOL_LIMIT = 20;
+
 // Real context-window tokens for one request: uncached input plus both cache
 // buckets. Used by every contextComposition query so the token denominator is
 // identical everywhere.
@@ -1086,6 +1095,126 @@ export function createAnalyticsHandler(context: APIContext) {
 			);
 			recordPhase(phaseTimings, "context_top_tools", phaseStartedAt);
 
+			// Tool-call error analytics (1/3): per-tool call/error totals over the
+			// filtered range. Tool rows join back to requests so the shared
+			// whereClause (range + account/model/key/project/status filters)
+			// applies identically to every block.
+			phaseStartedAt = performance.now();
+			const toolErrorByToolRows = await db.query<{
+				tool_name: string;
+				total_calls: number;
+				total_errors: number;
+				error_rate_pct: number | null;
+			}>(
+				`
+				SELECT
+					tc.tool_name,
+					SUM(tc.call_count) as total_calls,
+					SUM(tc.error_count) as total_errors,
+					SUM(tc.error_count) * 100.0 / NULLIF(SUM(tc.call_count), 0) as error_rate_pct
+				FROM request_tool_calls tc
+				JOIN requests r ON r.id = tc.request_id
+				WHERE ${whereClause}
+				GROUP BY tc.tool_name
+				ORDER BY total_errors DESC, total_calls DESC
+				LIMIT ${TOOL_ERROR_BY_TOOL_LIMIT}
+			`,
+				queryParams,
+			);
+
+			// Tool-call error analytics (2/3): bucketed calls/errors over time,
+			// restricted to the top tools by error count within the same filtered
+			// window so the chart stays readable. Params: the CTE consumes one
+			// whereClause pass first, then the bucket pair, then the outer pass —
+			// same ordering convention as growthCurveRows above.
+			const toolErrorTimeSeriesRows = await db.query<{
+				ts: number;
+				tool_name: string;
+				calls: number;
+				errors: number;
+			}>(
+				`
+				WITH top_error_tools AS (
+					SELECT tc.tool_name as tool_name
+					FROM request_tool_calls tc
+					JOIN requests r ON r.id = tc.request_id
+					WHERE ${whereClause}
+					GROUP BY tc.tool_name
+					ORDER BY SUM(tc.error_count) DESC, SUM(tc.call_count) DESC
+					LIMIT ${TOOL_ERROR_TIME_SERIES_TOOL_LIMIT}
+				)
+				SELECT
+					(r.timestamp / ?) * ? as ts,
+					tc.tool_name,
+					SUM(tc.call_count) as calls,
+					SUM(tc.error_count) as errors
+				FROM request_tool_calls tc
+				JOIN requests r ON r.id = tc.request_id
+				WHERE ${whereClause}
+					AND tc.tool_name IN (SELECT tool_name FROM top_error_tools)
+				GROUP BY ts, tc.tool_name
+				ORDER BY ts, tc.tool_name
+				LIMIT ${TOOL_ERROR_TIME_SERIES_POINT_LIMIT}
+			`,
+				[...queryParams, bucket.bucketMs, bucket.bucketMs, ...queryParams],
+			);
+
+			// Tool-call error analytics (3/3): most frequent distinct error texts
+			// per tool. error_text is pre-truncated at ingest (≤500 chars) so
+			// grouping on it is bounded; NULL texts carry no signal and are skipped.
+			// A window function caps each tool at TOOL_ERROR_MESSAGES_PER_TOOL_LIMIT
+			// rows before the global limit so one noisy tool cannot crowd out the
+			// rest of the fleet.
+			const toolErrorMessageRows = await db.query<{
+				tool_name: string;
+				error_text: string;
+				occurrences: number;
+			}>(
+				`
+				WITH ranked AS (
+					SELECT
+						te.tool_name,
+						te.error_text,
+						COUNT(*) as occurrences,
+						ROW_NUMBER() OVER (
+							PARTITION BY te.tool_name
+							ORDER BY COUNT(*) DESC
+						) as rn
+					FROM request_tool_errors te
+					JOIN requests r ON r.id = te.request_id
+					WHERE ${whereClause} AND te.error_text IS NOT NULL
+					GROUP BY te.tool_name, te.error_text
+				)
+				SELECT tool_name, error_text, occurrences
+				FROM ranked
+				WHERE rn <= ${TOOL_ERROR_MESSAGES_PER_TOOL_LIMIT}
+				ORDER BY occurrences DESC
+				LIMIT ${TOOL_ERROR_TOP_MESSAGES_LIMIT}
+			`,
+				queryParams,
+			);
+			recordPhase(phaseTimings, "tool_errors", phaseStartedAt);
+
+			const toolCallErrors = {
+				byTool: toolErrorByToolRows.map((row) => ({
+					toolName: row.tool_name,
+					totalCalls: Number(row.total_calls) || 0,
+					totalErrors: Number(row.total_errors) || 0,
+					errorRatePct: Number(row.error_rate_pct) || 0,
+				})),
+				timeSeries: toolErrorTimeSeriesRows.map((row) => ({
+					ts: Number(row.ts),
+					toolName: row.tool_name,
+					calls: Number(row.calls) || 0,
+					errors: Number(row.errors) || 0,
+				})),
+				topMessages: toolErrorMessageRows.map((row) => ({
+					toolName: row.tool_name,
+					errorText: row.error_text,
+					occurrences: Number(row.occurrences) || 0,
+				})),
+			};
+
 			const compositionTotalsRow = compositionRows.find(
 				(row) => row.row_type === "totals",
 			);
@@ -1318,6 +1447,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				cacheFlow,
 				projectBreakdown,
 				contextComposition,
+				toolCallErrors,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

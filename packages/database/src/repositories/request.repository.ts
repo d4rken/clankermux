@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import type { ContextComposition } from "@clankermux/types";
+import type { ContextComposition, ToolCallStat } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 
@@ -210,6 +210,40 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.createdAt ?? Date.now(),
 			],
 		);
+	}
+
+	/**
+	 * Persist a request's per-tool call/error stats (final-message tool_result
+	 * mining — see computeContextAndToolStats). Upserts request_tool_calls and
+	 * replaces the request's request_tool_errors sample rows (DELETE-then-INSERT)
+	 * so a withDatabaseRetry re-run after a partial write cannot duplicate
+	 * samples — the counts upsert is already idempotent, plain INSERTs are not.
+	 */
+	async saveToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void> {
+		if (stats.length === 0) return;
+
+		await this.run(`DELETE FROM request_tool_errors WHERE request_id = ?`, [
+			requestId,
+		]);
+
+		for (const stat of stats) {
+			await this.run(
+				`
+				INSERT INTO request_tool_calls (request_id, tool_name, call_count, error_count)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT (request_id, tool_name) DO UPDATE SET
+					call_count = EXCLUDED.call_count,
+					error_count = EXCLUDED.error_count
+			`,
+				[requestId, stat.toolName, stat.callCount, stat.errorCount],
+			);
+			for (const errorText of stat.errorSamples) {
+				await this.run(
+					`INSERT INTO request_tool_errors (request_id, tool_name, error_text) VALUES (?, ?, ?)`,
+					[requestId, stat.toolName, errorText],
+				);
+			}
+		}
 	}
 
 	async updateUsage(

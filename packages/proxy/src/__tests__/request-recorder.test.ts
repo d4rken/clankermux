@@ -35,11 +35,12 @@ interface SaveRequestCall {
 	reasoningEffort: string | null | undefined;
 }
 
-type EnqueuedKind = "request" | "routing" | "payload";
+type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
 
 class FakeDbOps {
 	saveRequestCalls: SaveRequestCall[] = [];
 	saveRoutingCalls: Array<Record<string, unknown>> = [];
+	saveToolCallsCalls: Array<{ requestId: string; stats: unknown[] }> = [];
 	savePayloadCalls: Array<{ id: string; json: string }> = [];
 	updateUsageCalls: Array<{ id: string; usage: unknown }> = [];
 	pauseCalls: Array<{ accountId: string; reason: string }> = [];
@@ -94,6 +95,14 @@ class FakeDbOps {
 	async saveRequestRouting(data: Record<string, unknown>): Promise<void> {
 		this.order.push("routing");
 		this.saveRoutingCalls.push(data);
+	}
+
+	async saveRequestToolCalls(
+		requestId: string,
+		stats: unknown[],
+	): Promise<void> {
+		this.order.push("tool_calls");
+		this.saveToolCallsCalls.push({ requestId, stats });
 	}
 
 	async saveRequestPayloadRaw(id: string, json: string): Promise<void> {
@@ -575,6 +584,82 @@ describe("RequestRecorder — FK-ordered persistence", () => {
 		await h.flush();
 		expect(h.writer.order).toEqual(["request", "payload"]);
 		expect(h.dbOps.saveRoutingCalls.length).toBe(0);
+	});
+});
+
+describe("RequestRecorder — tool-call stats persistence", () => {
+	const toolCallStats = [
+		{
+			toolName: "Bash",
+			callCount: 3,
+			errorCount: 1,
+			errorSamples: ["command not found"],
+		},
+		{ toolName: "Read", callCount: 2, errorCount: 0, errorSamples: [] },
+	];
+
+	it("persists tool-call stats after the routing row, in the same metadata job", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				toolCallStats,
+				routing: {
+					strategy: "ordered",
+					decision: "selected",
+					affinityScope: null,
+					affinityKeyHash: null,
+					selectedAccountId: "acct-1",
+					previousAccountId: null,
+					candidatesCount: 2,
+					failoverReason: null,
+				},
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.writer.order).toEqual([
+			"request",
+			"routing",
+			"tool_calls",
+			"payload",
+		]);
+		expect(h.dbOps.saveToolCallsCalls.length).toBe(1);
+		expect(h.dbOps.saveToolCallsCalls[0].requestId).toBe("req-1");
+		expect(h.dbOps.saveToolCallsCalls[0].stats).toEqual(toolCallStats);
+	});
+
+	it("persists tool-call stats even when there is no routing", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ toolCallStats, routing: null }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.writer.order).toEqual(["request", "tool_calls", "payload"]);
+		expect(h.dbOps.saveToolCallsCalls.length).toBe(1);
+	});
+
+	it("does not call saveRequestToolCalls when toolCallStats is absent or null", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ toolCallStats: null }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveToolCallsCalls.length).toBe(0);
+		expect(h.writer.order).toEqual(["request", "payload"]);
+	});
+
+	it("does not call saveRequestToolCalls for an empty stats array", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ toolCallStats: [] }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveToolCallsCalls.length).toBe(0);
 	});
 });
 

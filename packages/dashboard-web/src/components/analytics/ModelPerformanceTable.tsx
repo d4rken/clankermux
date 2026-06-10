@@ -1,8 +1,8 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
-import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 import { useMemo, useState } from "react";
 import { COLORS } from "../../constants";
+import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */
 export interface ModelPerformanceRow {
@@ -89,7 +89,6 @@ const METRIC_COLUMNS: MetricColumn[] = [
 ];
 
 type SortKey = "model" | MetricKey;
-type SortDir = "asc" | "desc";
 
 export function ModelPerformanceTable({
 	rows,
@@ -140,16 +139,6 @@ export function ModelPerformanceTable({
 		}
 	};
 
-	const sortIcon = (key: SortKey) => {
-		if (key !== sortKey)
-			return <ChevronsUpDown className="h-3 w-3 opacity-40" />;
-		return sortDir === "asc" ? (
-			<ArrowUp className="h-3 w-3" />
-		) : (
-			<ArrowDown className="h-3 w-3" />
-		);
-	};
-
 	if (loading) {
 		return (
 			<div className="flex items-center justify-center h-48">
@@ -172,23 +161,21 @@ export function ModelPerformanceTable({
 				<thead>
 					<tr className="border-b">
 						<th className="text-left font-medium py-2 pr-4">
-							<button
-								type="button"
+							<SortHeaderButton
+								label="Model"
+								active={sortKey === "model"}
+								dir={sortDir}
 								onClick={() => handleSort("model")}
-								className="inline-flex items-center gap-1 hover:text-foreground text-muted-foreground"
-							>
-								Model {sortIcon("model")}
-							</button>
+							/>
 						</th>
 						{METRIC_COLUMNS.map((col) => (
 							<th key={col.key} className="text-right font-medium py-2 px-3">
-								<button
-									type="button"
+								<SortHeaderButton
+									label={col.label}
+									active={sortKey === col.key}
+									dir={sortDir}
 									onClick={() => handleSort(col.key)}
-									className="inline-flex items-center gap-1 hover:text-foreground text-muted-foreground"
-								>
-									{col.label} {sortIcon(col.key)}
-								</button>
+								/>
 							</th>
 						))}
 					</tr>

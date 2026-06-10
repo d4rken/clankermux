@@ -17,6 +17,7 @@ import {
 	RoutingAnalyticsPanel,
 	TokenSpeedAnalytics,
 	TokenUsageBreakdown,
+	ToolErrorsPanel,
 } from "./analytics";
 
 export const AnalyticsTab = React.memo(() => {
@@ -302,6 +303,13 @@ export const AnalyticsTab = React.memo(() => {
 			{/* Context Composition */}
 			<ContextCompositionPanel
 				contextComposition={analytics?.contextComposition}
+				loading={loading}
+				timeRange={timeRange}
+			/>
+
+			{/* Tool Errors */}
+			<ToolErrorsPanel
+				toolCallErrors={analytics?.toolCallErrors}
 				loading={loading}
 				timeRange={timeRange}
 			/>
