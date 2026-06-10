@@ -1,7 +1,22 @@
 import { Database } from "bun:sqlite";
 
 /**
- * Dedicated worker for `PRAGMA incremental_vacuum(N)`.
+ * Dedicated worker for `PRAGMA incremental_vacuum(N)` and the periodic
+ * `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` maintenance tick.
+ *
+ * Two kinds (discriminated by `kind`, defaulting to "vacuum" for backward
+ * compatibility with kind-less messages):
+ *   - "vacuum"   — the original incremental_vacuum behavior (below).
+ *   - "optimize" — runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)`
+ *     with `busy_timeout = 0`. Previously this ran synchronously on the main
+ *     thread via `DatabaseOperations.optimize()`; when the vacuum kind (or
+ *     any other writer) held SQLite's single writer slot, `PRAGMA optimize`'s
+ *     internal ANALYZE blocked inside SQLite's C-level busy handler for the
+ *     full busy_timeout (10 s), freezing the entire event loop, then threw
+ *     "database is locked". In the worker the main thread never blocks, and
+ *     `busy_timeout = 0` turns contention into an instant, explicit skip
+ *     (`{ ok: true, skipped: true }`) — missing one 5-minute cycle while
+ *     maintenance contends is normal and harmless; the next tick retries.
  *
  * Why a worker, not the main `sqliteDb` handle:
  *   `bun:sqlite` is synchronous (blocks the JS event loop for the duration of
@@ -36,30 +51,57 @@ import { Database } from "bun:sqlite";
  * opens its own handle.
  */
 
-export type IncrementalVacuumRequest = {
-	dbPath: string;
-	pages: number;
-};
+export type IncrementalVacuumRequest =
+	| {
+			kind?: "vacuum";
+			dbPath: string;
+			pages: number;
+	  }
+	| {
+			kind: "optimize";
+			dbPath: string;
+	  };
 
 export type IncrementalVacuumResult =
 	| { ok: true; mode: number }
+	| { ok: true; skipped: boolean }
 	| { ok: false; error: string };
 
-self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
-	const { dbPath, pages } = event.data;
+/**
+ * Connection hygiene shared by both kinds — small page cache, no RAM temp
+ * spill, no mmap (see the per-PRAGMA rationale in the header comment).
+ * `busy_timeout` deliberately differs per kind and is set by the caller.
+ */
+function applyWorkerPragmas(db: Database): void {
+	db.exec("PRAGMA cache_size = -2000");
+	db.exec("PRAGMA temp_store = FILE");
+	db.exec("PRAGMA mmap_size = 0");
+}
+
+function isSqliteBusy(err: unknown): boolean {
+	return (
+		typeof err === "object" &&
+		err !== null &&
+		"code" in err &&
+		(err as { code?: unknown }).code === "SQLITE_BUSY"
+	);
+}
+
+function runIncrementalVacuum(dbPath: string, pages: number): void {
 	let db: Database | undefined;
 	try {
 		db = new Database(dbPath);
+		// Small wait to absorb a brief write burst from the post-processor
+		// flushing a batched insert — see the header comment. (Greptile #230)
 		db.exec("PRAGMA busy_timeout = 200");
-		db.exec("PRAGMA cache_size = -2000");
-		db.exec("PRAGMA temp_store = FILE");
-		db.exec("PRAGMA mmap_size = 0");
+		applyWorkerPragmas(db);
 
 		const mode = (
 			db.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number }
 		).auto_vacuum;
 		if (mode !== 2) {
 			db.close();
+			db = undefined;
 			self.postMessage({
 				ok: false,
 				error: `auto_vacuum=${mode}; expected 2 (INCREMENTAL). Run startup bootstrap migration first.`,
@@ -74,10 +116,60 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 		db = undefined;
 		self.postMessage({ ok: true, mode } satisfies IncrementalVacuumResult);
 	} catch (err) {
-		db?.close();
 		self.postMessage({
 			ok: false,
 			error: err instanceof Error ? err.message : String(err),
 		} satisfies IncrementalVacuumResult);
+	} finally {
+		db?.close();
+	}
+}
+
+function runOptimize(dbPath: string): void {
+	let db: Database | undefined;
+	try {
+		db = new Database(dbPath);
+		// Zero wait: if another connection (e.g. the hourly vacuum kind or a
+		// large retention DELETE) holds the writer slot, skip this cycle
+		// instead of parking the worker in SQLite's busy handler. Do NOT
+		// inherit the vacuum kind's busy_timeout here — the 5-minute cadence
+		// makes a skipped cycle free, whereas any wait is wasted time.
+		db.exec("PRAGMA busy_timeout = 0");
+		applyWorkerPragmas(db);
+
+		db.exec("PRAGMA optimize");
+		db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+
+		self.postMessage({
+			ok: true,
+			skipped: false,
+		} satisfies IncrementalVacuumResult);
+	} catch (err) {
+		if (isSqliteBusy(err)) {
+			// Contention during maintenance is normal — report a clean skip,
+			// the next 5-minute tick retries.
+			self.postMessage({
+				ok: true,
+				skipped: true,
+			} satisfies IncrementalVacuumResult);
+		} else {
+			self.postMessage({
+				ok: false,
+				error: err instanceof Error ? err.message : String(err),
+			} satisfies IncrementalVacuumResult);
+		}
+	} finally {
+		db?.close();
+	}
+}
+
+self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
+	const request = event.data;
+	if (request.kind === "optimize") {
+		runOptimize(request.dbPath);
+	} else {
+		// kind "vacuum" or absent (backward compat: kind-less messages
+		// predate the discriminator and always meant incremental_vacuum).
+		runIncrementalVacuum(request.dbPath, request.pages);
 	}
 };

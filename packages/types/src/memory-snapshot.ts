@@ -23,6 +23,11 @@ export interface MemorySnapshotRow {
 	heapUsedBytes: number;
 	/** JS heap total (committed) in bytes, or null when not recorded. */
 	heapTotalBytes: number | null;
+	/**
+	 * Peak event-loop lag observed during this sample interval, ms. Nullable so
+	 * rows written before the column existed read back as null.
+	 */
+	eventLoopMaxLagMs: number | null;
 }
 
 /**
@@ -39,6 +44,8 @@ export interface MemoryHistoryPoint {
 	heapUsedBytes: number;
 	/** Peak heap-total (committed) in the bucket, bytes, or null when unrecorded. */
 	heapTotalBytes: number | null;
+	/** Peak event-loop lag in the bucket, ms, or null when unrecorded. */
+	eventLoopMaxLagMs: number | null;
 }
 
 /** Wire response for `GET /api/analytics/memory-history?range=…`. */

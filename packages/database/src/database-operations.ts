@@ -45,7 +45,12 @@ import { withDatabaseRetry } from "./retry";
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
 	walMode?: boolean;
-	/** SQLite busy timeout in milliseconds */
+	/**
+	 * SQLite busy timeout in milliseconds for WORKER connections (vacuum,
+	 * integrity-check). The MAIN connection deliberately does NOT use this —
+	 * it is bounded to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} so a C-level
+	 * busy wait can never freeze the event loop for seconds.
+	 */
 	busyTimeoutMs?: number;
 	/** Cache size in pages (negative value = KB) */
 	cacheSize?: number;
@@ -69,6 +74,24 @@ export interface DatabaseRetryConfig {
 	/** Maximum delay between retries in milliseconds */
 	maxDelayMs?: number;
 }
+
+/**
+ * busy_timeout for the MAIN-thread connection only.
+ *
+ * bun:sqlite's busy handler waits at the C level (usleep) — the entire Bun
+ * event loop freezes for however long this is whenever a main-thread call
+ * hits SQLITE_BUSY (e.g. while the vacuum/integrity worker holds the write
+ * lock). Keep it just long enough to absorb a brief write burst from a
+ * worker connection; anything longer is handled asynchronously by
+ * `BunSqlAdapter.withBusyRetry`, which catches SQLITE_BUSY and retries via
+ * setTimeout (500ms cadence, up to 10 minutes) with the event loop free
+ * between attempts.
+ *
+ * The separate `dbConfig.busyTimeoutMs` (default 10 000) is still passed to
+ * WORKER connections (vacuum / integrity-check / dashboard workers), where
+ * long C-level blocking is fine — workers have no event loop to protect.
+ */
+export const MAIN_CONNECTION_BUSY_TIMEOUT_MS = 250;
 
 /**
  * Apply SQLite pragmas for optimal performance on distributed filesystems.
@@ -120,10 +143,13 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 			}
 		}
 
-		// Set busy timeout for lock handling
-		if (config.busyTimeoutMs !== undefined) {
-			db.run(`PRAGMA busy_timeout = ${config.busyTimeoutMs}`);
-		}
+		// Bound the C-level busy wait on the main connection. Deliberately NOT
+		// config.busyTimeoutMs (that value is for worker connections): a long
+		// busy_timeout here parks the whole event loop inside SQLite's busy
+		// handler whenever a worker holds the write lock. The adapter's async
+		// busy-retry layer takes over past this bound. See
+		// MAIN_CONNECTION_BUSY_TIMEOUT_MS.
+		db.run(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
 
 		// Configure cache size
 		if (config.cacheSize !== undefined) {
@@ -1136,12 +1162,6 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRecentErrors(limit);
 	}
 
-	async getTopModels(
-		limit?: number,
-	): Promise<Array<{ model: string; count: number }>> {
-		return this.requests.getTopModels(limit);
-	}
-
 	async getRequestsByAccount(since?: number): Promise<
 		Array<{
 			accountId: string;
@@ -1312,11 +1332,63 @@ OAuth tokens will need to be re-authenticated.
 		await this.close();
 	}
 
-	// Optimize database periodically to maintain performance (SQLite only)
-	optimize(): void {
-		if (this.sqliteDb) {
-			this.sqliteDb.exec("PRAGMA optimize");
-			this.sqliteDb.exec("PRAGMA wal_checkpoint(PASSIVE)");
+	/**
+	 * Periodic `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` (SQLite
+	 * only), off-loaded to the incremental-vacuum worker (kind "optimize").
+	 *
+	 * Why a worker: the previous synchronous version ran both PRAGMAs on the
+	 * main thread via `sqliteDb.exec()`. When another connection (e.g. the
+	 * hourly incremental-vacuum worker after a retention cleanup) held the
+	 * write lock, `PRAGMA optimize`'s internal ANALYZE parked inside SQLite's
+	 * C-level busy handler for the full busy_timeout (10 s) — freezing the
+	 * entire event loop — and then threw "database is locked". Even
+	 * uncontended, a large ANALYZE or a fat-WAL checkpoint does real work
+	 * that doesn't belong on the proxy's hot path.
+	 *
+	 * The worker connection uses `busy_timeout = 0`, so contention resolves
+	 * instantly as `{ ok: true, skipped: true }` — skipping one 5-minute
+	 * cycle while maintenance contends is normal; the next tick retries.
+	 *
+	 * Never throws for worker-reported failures; they come back as
+	 * `{ ok: false, error }` so the periodic tick can log without crashing.
+	 */
+	async optimizeAsync(): Promise<{
+		ok: boolean;
+		skipped: boolean;
+		durationMs?: number;
+		error?: string;
+	}> {
+		const start = Date.now();
+		const worker = this.spawnIncrementalVacuumWorker();
+		try {
+			const result = await new Promise<
+				| { ok: true; skipped: boolean }
+				| { ok: true; mode: number }
+				| { ok: false; error: string }
+			>((resolve, reject) => {
+				worker.onmessage = (event: MessageEvent) => resolve(event.data);
+				worker.onerror = (event: ErrorEvent) =>
+					reject(new Error(event.message ?? "optimize worker error"));
+				worker.postMessage({ dbPath: this.resolvedDbPath, kind: "optimize" });
+			});
+			const durationMs = Date.now() - start;
+			if (!result.ok) {
+				return { ok: false, skipped: false, durationMs, error: result.error };
+			}
+			return {
+				ok: true,
+				skipped: "skipped" in result ? result.skipped : false,
+				durationMs,
+			};
+		} catch (err) {
+			return {
+				ok: false,
+				skipped: false,
+				durationMs: Date.now() - start,
+				error: err instanceof Error ? err.message : String(err),
+			};
+		} finally {
+			worker.terminate();
 		}
 	}
 
@@ -1519,6 +1591,27 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Spawn the incremental-vacuum worker (shared by `incrementalVacuum()`
+	 * — kind "vacuum" — and `optimizeAsync()` — kind "optimize"). Uses the
+	 * embedded base64 bundle when available (production build), falling back
+	 * to the on-disk worker source (tests / fresh worktrees where the inline
+	 * file is an empty placeholder).
+	 */
+	private spawnIncrementalVacuumWorker(): Worker {
+		if (EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE) {
+			const workerCode = Buffer.from(
+				EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE,
+				"base64",
+			).toString("utf8");
+			const blob = new Blob([workerCode], { type: "text/javascript" });
+			return new Worker(URL.createObjectURL(blob), { smol: true });
+		}
+		return new Worker(
+			new URL("./incremental-vacuum-worker.ts", import.meta.url).href,
+		);
+	}
+
+	/**
 	 * Incremental vacuum — reclaims a bounded number of free pages back to the
 	 * OS. Off-loaded to a Worker thread so the main JS event loop stays free
 	 * while the operation holds the SQLite writer slot.
@@ -1572,19 +1665,7 @@ OAuth tokens will need to be re-authenticated.
 		}
 
 		const dbPath = this.resolvedDbPath;
-		let worker: Worker;
-		if (EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE) {
-			const workerCode = Buffer.from(
-				EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE,
-				"base64",
-			).toString("utf8");
-			const blob = new Blob([workerCode], { type: "text/javascript" });
-			worker = new Worker(URL.createObjectURL(blob), { smol: true });
-		} else {
-			worker = new Worker(
-				new URL("./incremental-vacuum-worker.ts", import.meta.url).href,
-			);
-		}
+		const worker = this.spawnIncrementalVacuumWorker();
 
 		try {
 			const result = await new Promise<
@@ -1593,7 +1674,7 @@ OAuth tokens will need to be re-authenticated.
 				worker.onmessage = (event: MessageEvent) => resolve(event.data);
 				worker.onerror = (event: ErrorEvent) =>
 					reject(new Error(event.message ?? "incremental-vacuum worker error"));
-				worker.postMessage({ dbPath, pages });
+				worker.postMessage({ dbPath, pages, kind: "vacuum" });
 			});
 			if (result.ok) {
 				this.incVacuumConsecutiveSkips = 0;

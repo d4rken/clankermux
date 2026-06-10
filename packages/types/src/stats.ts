@@ -46,7 +46,6 @@ export interface Stats {
 	avgResponseTime: number;
 	totalTokens: number;
 	totalCostUsd: number;
-	topModels: Array<{ model: string; count: number }>;
 	avgTokensPerSecond: number | null;
 }
 
@@ -57,7 +56,6 @@ export interface StatsResponse {
 	avgResponseTime: number;
 	totalTokens: number;
 	totalCostUsd: number;
-	topModels: Array<{ model: string; count: number }>;
 	avgTokensPerSecond: number | null;
 }
 
@@ -79,12 +77,7 @@ export interface RecentErrorGroup {
 	rateLimitedAt: number | null;
 }
 
-export interface StatsWithAccounts extends Stats {
-	accounts: Array<{
-		name: string;
-		requestCount: number;
-		successRate: number;
-	}>;
+export interface StatsWithErrors extends Stats {
 	recentErrors: RecentErrorGroup[];
 }
 

@@ -138,6 +138,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 			getStrategy,
+			getEventLoopLag,
 		} = this.context;
 
 		// Create handlers
@@ -147,7 +148,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 		);
-		const statsHandler = createStatsHandler(dbOps);
+		const statsHandler = createStatsHandler(this.context);
 		const statsResetHandler = createStatsResetHandler(dbOps);
 		const storageHandler = createStorageHandler(dbOps);
 		const storageUsageHandler = createStorageUsageHandler(dbOps);
@@ -182,8 +183,8 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
-		const usageHistoryHandler = createUsageHistoryHandler(dbOps);
-		const memoryHistoryHandler = createMemoryHistoryHandler(dbOps);
+		const usageHistoryHandler = createUsageHistoryHandler(this.context);
+		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);
@@ -206,6 +207,7 @@ export class APIRouter {
 			config,
 			getAsyncWriterHealth,
 			getIntegrityStatus,
+			getEventLoopLag,
 		);
 		const versionCheckHandler = createVersionCheckHandler();
 

@@ -302,7 +302,8 @@ export function ensureSchema(db: Database): void {
 			sampled_at INTEGER PRIMARY KEY,
 			rss_bytes INTEGER NOT NULL,
 			heap_used_bytes INTEGER NOT NULL,
-			heap_total_bytes INTEGER
+			heap_total_bytes INTEGER,
+			event_loop_max_lag_ms REAL
 		)
 	`);
 
@@ -330,6 +331,15 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "output_tokens_per_second_approx",
 		ddl: "ALTER TABLE requests ADD COLUMN output_tokens_per_second_approx INTEGER",
+	},
+	// Peak event-loop lag (ms) observed during the sample interval, from the
+	// event-loop monitor — persisted so main-thread stalls are visible
+	// historically alongside the RSS series. NULL on rows that predate the
+	// column or were written while the monitor wasn't running.
+	{
+		table: "memory_snapshots",
+		column: "event_loop_max_lag_ms",
+		ddl: "ALTER TABLE memory_snapshots ADD COLUMN event_loop_max_lag_ms REAL",
 	},
 	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
 	// or the raw reasoning.effort string (OpenAI Responses), NULL when absent.

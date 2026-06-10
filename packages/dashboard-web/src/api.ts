@@ -10,7 +10,7 @@ import type {
 	MemoryHistoryResponse,
 	RequestPayload,
 	RequestResponse,
-	StatsWithAccounts,
+	StatsWithErrors,
 	StorageUsageResponse,
 	SystemStatusResponse,
 	UsageHistoryResponse,
@@ -26,7 +26,7 @@ export type Account = AccountResponse & {
 	/** @deprecated Fallbacks are now merged into modelMappings as arrays */
 	modelFallbacks?: { [key: string]: string } | null;
 };
-export type Stats = StatsWithAccounts;
+export type Stats = StatsWithErrors;
 export type LogEntry = LogEvent;
 export type RequestSummary = RequestResponse;
 
@@ -121,7 +121,7 @@ class API extends HttpClient {
 
 	async getStats(opts?: {
 		errorsSinceHours?: number;
-	}): Promise<StatsWithAccounts> {
+	}): Promise<StatsWithErrors> {
 		const startTime = Date.now();
 		const hours = opts?.errorsSinceHours;
 		const url =
@@ -132,7 +132,7 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<StatsWithAccounts>(url);
+			const response = await this.get<StatsWithErrors>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;

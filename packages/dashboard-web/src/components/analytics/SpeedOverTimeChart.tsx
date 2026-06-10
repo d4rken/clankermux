@@ -56,7 +56,7 @@ export function SpeedOverTimeChart({
 		Array<{ time: string; [model: string]: string | number }>
 	>(() => {
 		const formatter =
-			timeRange === "30d"
+			timeRange === "30d" || timeRange === "all"
 				? (date: Date) => format(date, "MMM d")
 				: (date: Date) => format(date, "HH:mm");
 

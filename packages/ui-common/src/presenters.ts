@@ -4,13 +4,10 @@ import type {
 	AccountResponse,
 	Request,
 	RequestResponse,
-	StatsResponse,
-	StatsWithAccounts,
 } from "@clankermux/types";
 import {
 	formatCost,
 	formatDuration,
-	formatPercentage,
 	formatTimestamp,
 	formatTokens,
 } from "./formatters";
@@ -126,39 +123,5 @@ export class RequestPresenter {
 
 	get hasTokenUsage(): boolean {
 		return Boolean(this.request.inputTokens || this.request.outputTokens);
-	}
-}
-
-/**
- * Stats presenter - formats stats data for display
- */
-export class StatsPresenter {
-	constructor(private stats: StatsResponse | StatsWithAccounts) {}
-
-	get successRateDisplay(): string {
-		return formatPercentage(this.stats.successRate);
-	}
-
-	get avgResponseTimeDisplay(): string {
-		return formatDuration(this.stats.avgResponseTime);
-	}
-
-	get totalTokensDisplay(): string {
-		return formatTokens(this.stats.totalTokens);
-	}
-
-	get totalCostDisplay(): string {
-		return formatCost(this.stats.totalCostUsd);
-	}
-
-	get topModel(): string | null {
-		if (!this.stats.topModels || this.stats.topModels.length === 0) {
-			return null;
-		}
-		return this.stats.topModels[0].model;
-	}
-
-	get hasAccounts(): boolean {
-		return "accounts" in this.stats && this.stats.accounts.length > 0;
 	}
 }

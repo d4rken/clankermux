@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import type { DatabaseOperations } from "@clankermux/database";
 import type {
 	Account,
 	RankedSnapshot,
 	UsageHistoryResponse,
 } from "@clankermux/types";
-import { createUsageHistoryHandler } from "../usage-history";
+import {
+	createUsageHistoryHandlerFromSources,
+	type UsageHistorySources,
+} from "../usage-history-direct";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -14,29 +16,30 @@ function makeAccount(id: string, name: string, provider: string): Account {
 }
 
 /**
- * Build a mock DatabaseOperations exposing only the two methods the handler
- * uses. `captureOpts` lets a test assert the {sinceMs, bucketMs} the handler
- * derived from the range.
+ * Build mock UsageHistorySources (the seam the direct handler reads through;
+ * in production these are repositories on the dashboard worker's read-only
+ * connection). `captureOpts` lets a test assert the {sinceMs, bucketMs} the
+ * handler derived from the range.
  */
-function createDbOps(opts: {
+function createSources(opts: {
 	snapshots: RankedSnapshot[];
 	accounts: Account[];
 	captureOpts?: (o: { sinceMs: number; bucketMs: number }) => void;
-}): DatabaseOperations {
+}): UsageHistorySources {
 	return {
 		getUsageSnapshots: async (o: { sinceMs: number; bucketMs: number }) => {
 			opts.captureOpts?.(o);
 			return opts.snapshots;
 		},
 		getAllAccounts: async () => opts.accounts,
-	} as unknown as DatabaseOperations;
+	};
 }
 
 async function callHandler(
-	dbOps: DatabaseOperations,
+	sources: UsageHistorySources,
 	range?: string,
 ): Promise<{ status: number; body: UsageHistoryResponse }> {
-	const handler = createUsageHistoryHandler(dbOps);
+	const handler = createUsageHistoryHandlerFromSources(sources);
 	const params = new URLSearchParams();
 	if (range !== undefined) params.set("range", range);
 	const res = await handler(params);
@@ -50,14 +53,14 @@ describe("usage-history handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots: [],
 				accounts: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "6h");
+			const { body } = await callHandler(sources, "6h");
 			expect(captured?.bucketMs).toBe(300_000);
 			expect(body.bucketMs).toBe(300_000);
 			expect(body.range).toBe("6h");
@@ -65,49 +68,65 @@ describe("usage-history handler", () => {
 
 		it("maps 1h → bucketMs 60000", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots: [],
 				accounts: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "1h");
+			const { body } = await callHandler(sources, "1h");
 			expect(captured?.bucketMs).toBe(60_000);
 			expect(body.bucketMs).toBe(60_000);
 		});
 
 		it("defaults to 7d (bucketMs 3600000) when range omitted", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots: [],
 				accounts: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps);
+			const { body } = await callHandler(sources);
 			expect(body.range).toBe("7d");
 			expect(captured?.bucketMs).toBe(3_600_000);
 		});
 
 		it("falls back to the 7d default for an invalid range", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots: [],
 				accounts: [],
 				captureOpts: (o) => {
 					captured = o;
 				},
 			});
-			const { body } = await callHandler(dbOps, "bogus");
+			const { body } = await callHandler(sources, "bogus");
 			expect(body.range).toBe("7d");
 			expect(captured?.bucketMs).toBe(3_600_000);
 		});
 
+		it("maps all → sinceMs 0 with daily buckets (retention-capped)", async () => {
+			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			const sources = createSources({
+				snapshots: [],
+				accounts: [],
+				captureOpts: (o) => {
+					captured = o;
+				},
+			});
+			const { body } = await callHandler(sources, "all");
+			expect(body.range).toBe("all");
+			expect(captured?.sinceMs).toBe(0);
+			expect(captured?.bucketMs).toBe(24 * HOUR);
+			expect(body.bucketMs).toBe(24 * HOUR);
+		});
+
 		it("computes sinceMs as now - windowMs for the range", async () => {
 			let captured: { sinceMs: number; bucketMs: number } | null = null;
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots: [],
 				accounts: [],
 				captureOpts: (o) => {
@@ -115,7 +134,7 @@ describe("usage-history handler", () => {
 				},
 			});
 			const before = Date.now();
-			await callHandler(dbOps, "24h");
+			await callHandler(sources, "24h");
 			const after = Date.now();
 			const day = 24 * HOUR;
 			expect(captured?.sinceMs).toBeGreaterThanOrEqual(before - day);
@@ -157,14 +176,14 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots,
 				accounts: [
 					makeAccount("a", "Alpha", "anthropic"),
 					makeAccount("b", "Beta", "codex"),
 				],
 			});
-			const { body } = await callHandler(dbOps, "24h");
+			const { body } = await callHandler(sources, "24h");
 			expect(body.series).toHaveLength(2);
 
 			const a = body.series.find((s) => s.accountId === "a");
@@ -191,8 +210,8 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({ snapshots, accounts: [] });
-			const { body } = await callHandler(dbOps, "24h");
+			const sources = createSources({ snapshots, accounts: [] });
+			const { body } = await callHandler(sources, "24h");
 			expect(body.series).toHaveLength(1);
 			expect(body.series[0]?.name).toBe("ghost");
 			expect(body.series[0]?.provider).toBe("codex");
@@ -245,14 +264,14 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots,
 				accounts: [
 					makeAccount("a", "Alpha", "anthropic"),
 					makeAccount("b", "Beta", "codex"),
 				],
 			});
-			const { body } = await callHandler(dbOps, "24h");
+			const { body } = await callHandler(sources, "24h");
 			expect(body.pool.map((p) => p.ts)).toEqual([t1, t2]);
 
 			const p1 = body.pool[0];
@@ -318,14 +337,14 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots,
 				accounts: [
 					makeAccount("main", "Main-me", "anthropic"),
 					makeAccount("peer", "Peer", "anthropic"),
 				],
 			});
-			const { body } = await callHandler(dbOps, "24h");
+			const { body } = await callHandler(sources, "24h");
 			expect(body.pool.map((p) => p.ts)).toEqual([t1, t2, t3]);
 
 			// t1: (100 + 20) / 2 = 60.
@@ -389,14 +408,14 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots,
 				accounts: [
 					makeAccount("main", "Main-me", "anthropic"),
 					makeAccount("peer", "Peer", "anthropic"),
 				],
 			});
-			const { body } = await callHandler(dbOps, "24h");
+			const { body } = await callHandler(sources, "24h");
 
 			// t2: carried (100 + 30)/2 = 65, count 2.
 			expect(body.pool[1]?.fiveHourAvg).toBe(65);
@@ -433,14 +452,14 @@ describe("usage-history handler", () => {
 					sevenDayReset: null,
 				},
 			];
-			const dbOps = createDbOps({
+			const sources = createSources({
 				snapshots,
 				accounts: [
 					makeAccount("a", "Alpha", "anthropic"),
 					makeAccount("b", "Beta", "codex"),
 				],
 			});
-			const { body } = await callHandler(dbOps, "24h");
+			const { body } = await callHandler(sources, "24h");
 			expect(body.pool).toHaveLength(1);
 			const p = body.pool[0];
 			expect(p?.fiveHourAvg).toBeNull();
