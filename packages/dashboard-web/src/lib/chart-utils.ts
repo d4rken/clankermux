@@ -34,6 +34,12 @@ export function formatCompactCurrency(value: number | string): string {
 	return `$${formatCompactNumber(value)}`;
 }
 
+/** Truncate a node/legend label to fit fixed-width chart boxes. */
+export function shortLabel(value: string, max = 24): string {
+	if (value.length <= max) return value;
+	return `${value.slice(0, max - 1)}...`;
+}
+
 /**
  * Recharts `<Tooltip>` prop types.
  *

@@ -1,6 +1,5 @@
-// Shared human-readable labels for routing-strategy decision keys. Used by both
-// the RoutingAnalytics panel and the RoutingSummaryCard so a newly-added
-// decision only needs a label in one place.
+// Shared human-readable labels for routing-strategy decision keys, so a
+// newly-added decision only needs a label in one place.
 
 const DECISION_LABELS: Record<string, string> = {
 	affinity_hit: "Affinity hit",

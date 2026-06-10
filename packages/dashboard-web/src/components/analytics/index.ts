@@ -8,6 +8,7 @@ export {
 } from "./AnalyticsCharts";
 export { AnalyticsControls } from "./AnalyticsControls";
 export { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
+export { CacheFlowPanel } from "./CacheFlowPanel";
 export { ModelAnalytics } from "./ModelAnalytics";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";
 export { TokenSpeedAnalytics } from "./TokenSpeedAnalytics";
