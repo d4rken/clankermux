@@ -82,7 +82,14 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		if (filters.apiKey === NO_API_KEY) {
 			clauses.push("r.api_key_name IS NULL");
 		} else {
-			clauses.push("r.api_key_name = ?");
+			// Match the key's CURRENT name (api_keys.name) so a filter on the
+			// post-rename name finds requests stamped under the old one. The
+			// stamped snapshot remains the fallback for hard-deleted keys. A
+			// correlated subquery keeps the clause self-contained — it drops into
+			// any query whose requests alias is `r`, no extra JOIN required.
+			clauses.push(
+				"COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+			);
 			params.push(filters.apiKey);
 		}
 	}

@@ -67,14 +67,17 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			output_tokens_per_second_approx: number | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
+			api_key_display_name: string | null;
 			project: string | null;
 			billing_type: string | null;
 			combo_name: string | null;
 		}>(
 			`
-			SELECT r.*, a.name as account_name
+			SELECT r.*, a.name as account_name,
+				COALESCE(k.name, r.api_key_name) as api_key_display_name
 			FROM requests r
 			LEFT JOIN accounts a ON r.account_used = a.id
+			LEFT JOIN api_keys k ON k.id = r.api_key_id
 			${whereSql}
 			ORDER BY r.timestamp DESC
 			LIMIT ? OFFSET ?
@@ -110,7 +113,10 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 				? true
 				: undefined,
 			apiKeyId: request.api_key_id || undefined,
-			apiKeyName: request.api_key_name || undefined,
+			// Current key name (post-rename) with the record-time snapshot as the
+			// fallback for hard-deleted keys.
+			apiKeyName:
+				request.api_key_display_name || request.api_key_name || undefined,
 			project: request.project || undefined,
 			billingType: request.billing_type || undefined,
 			comboName: request.combo_name || undefined,
