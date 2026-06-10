@@ -24,8 +24,10 @@
  *            Rows whose envelope has `request.body: null` (capture-capped)
  *            are skipped untouched.
  *   Pass C — NULL an explicit, user-approved junk list ('.claude', '.codex',
- *            'projects', 'System', 'Harness') — EXCLUDING rows Pass A
- *            updated (payload-derived values are authoritative).
+ *            'projects', 'System', 'Harness') — EXCLUDING every row Pass A
+ *            successfully re-derived (changed or not; a payload-derived value
+ *            that happens to equal a junk entry is authoritative, e.g. a
+ *            genuine cwd of /workspace/projects).
  *
  * Deep imports below are intentional: `decryptPayload` is deliberately not
  * exported from the @clankermux/database package barrel (it is an internal
@@ -228,13 +230,19 @@ function runPassB(db: Database, dryRun: boolean): PassBResult {
 interface PassAResult {
 	counters: PassACounters;
 	samples: Sample[];
-	/** ids Pass A updated (or would update, in dry-run) */
-	updatedIds: Set<string>;
 	/**
-	 * Per (post-B) project value: how many of the updated rows carried it.
-	 * Used by dry-run Pass C to subtract A-claimed rows without writes.
+	 * ids of every row whose payload was successfully decoded and re-derived
+	 * (changed or unchanged). These values are payload-authoritative and must
+	 * be excluded from Pass C. Rows that failed decode/parse or had no stored
+	 * body are NOT included — their project value was never verified.
 	 */
-	updatedByPostBValue: Map<string | null, number>;
+	derivedIds: Set<string>;
+	/**
+	 * Per (post-B) project value: how many successfully re-derived rows
+	 * carried it. Used by dry-run Pass C to subtract A-claimed rows without
+	 * writes.
+	 */
+	derivedByPostBValue: Map<string | null, number>;
 }
 
 async function runPassA(
@@ -254,8 +262,8 @@ async function runPassA(
 		failOther: 0,
 	};
 	const samples: Sample[] = [];
-	const updatedIds = new Set<string>();
-	const updatedByPostBValue = new Map<string | null, number>();
+	const derivedIds = new Set<string>();
+	const derivedByPostBValue = new Map<string | null, number>();
 
 	// High-water mark: only process payload rows that existed when we started,
 	// so concurrent live inserts can't make keyset pagination chase a moving
@@ -268,7 +276,7 @@ async function runPassA(
 		)
 		.get();
 	if (!highWater) {
-		return { counters, samples, updatedIds, updatedByPostBValue }; // empty table
+		return { counters, samples, derivedIds, derivedByPostBValue }; // empty table
 	}
 
 	const pageStmt = db.query<PassARow, [number, string, number, string, number]>(
@@ -393,13 +401,17 @@ async function runPassA(
 				if (repaired !== undefined) currentProject = repaired;
 			}
 
+			// The payload decoded and the extractor ran: this row's project value
+			// is now payload-authoritative whether it changed or not, so Pass C
+			// must never touch it.
+			derivedIds.add(row.id);
+			derivedByPostBValue.set(
+				currentProject,
+				(derivedByPostBValue.get(currentProject) ?? 0) + 1,
+			);
+
 			if (newProject !== currentProject) {
 				counters.changed++;
-				updatedIds.add(row.id);
-				updatedByPostBValue.set(
-					currentProject,
-					(updatedByPostBValue.get(currentProject) ?? 0) + 1,
-				);
 				pending.push({ id: row.id, newProject });
 				if (samples.length < SAMPLE_LIMIT) {
 					samples.push({
@@ -428,11 +440,11 @@ async function runPassA(
 		if (rows.length < options.batchSize) break;
 	}
 
-	return { counters, samples, updatedIds, updatedByPostBValue };
+	return { counters, samples, derivedIds, derivedByPostBValue };
 }
 
 // ---------------------------------------------------------------------------
-// Pass C — NULL the explicit junk list, excluding Pass-A-updated rows
+// Pass C — NULL the explicit junk list, excluding Pass-A-derived rows
 // ---------------------------------------------------------------------------
 
 interface PassCResult {
@@ -450,11 +462,12 @@ function runPassC(
 	let rowsNulled = 0;
 
 	if (!dryRun) {
-		// Real run: temp table for the Pass-A id exclusion (connection-local).
+		// Real run: temp table for the Pass-A derived-id exclusion
+		// (connection-local).
 		db.run("CREATE TEMP TABLE backfill_pass_a (id TEXT PRIMARY KEY)");
 		const insertId = db.query("INSERT INTO backfill_pass_a (id) VALUES (?)");
 		const fill = db.transaction(() => {
-			for (const id of passA.updatedIds) insertId.run(id);
+			for (const id of passA.derivedIds) insertId.run(id);
 		});
 		fill();
 
@@ -486,7 +499,8 @@ function runPassC(
 	// Dry-run (readonly connection): nothing was written by B or A, so compute
 	// the would-be count from the ORIGINAL stored values. A row would be junk
 	// after B if its original value's post-B form is in the junk list; subtract
-	// rows Pass A would have claimed (their values are authoritative).
+	// every row Pass A successfully re-derived (changed or not — those values
+	// are payload-authoritative).
 	const junkSet = new Set<string>(JUNK_PROJECT_VALUES);
 	const countStmt = db.query<{ n: number }, [string]>(
 		"SELECT COUNT(*) AS n FROM requests WHERE project = ?",
@@ -503,7 +517,7 @@ function runPassC(
 			: original;
 		if (postB === null || postB === undefined || !junkSet.has(postB)) continue;
 		const total = countStmt.get(original)?.n ?? 0;
-		const claimedByA = passA.updatedByPostBValue.get(postB) ?? 0;
+		const claimedByA = passA.derivedByPostBValue.get(postB) ?? 0;
 		const wouldNull = Math.max(0, total - claimedByA);
 		rowsNulled += wouldNull;
 		if (wouldNull > 0 && samples.length < SAMPLE_LIMIT) {
@@ -569,7 +583,9 @@ async function main(): Promise<void> {
 		);
 		printSamples("sample changes", passA.samples, c.changed);
 
-		console.log("\nPass C — NULL explicit junk values (excluding Pass-A rows)");
+		console.log(
+			"\nPass C — NULL explicit junk values (excluding Pass-A re-derived rows)",
+		);
 		console.log(`  junk list: ${JUNK_PROJECT_VALUES.join(", ")}`);
 		const passC = runPassC(db, options.dryRun, passA, passB.repairs);
 		console.log(
