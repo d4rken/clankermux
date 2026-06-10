@@ -1,4 +1,5 @@
 import type { Config } from "@clankermux/config";
+import { getEventLoopStats } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type {
 	EventLoopLagStats,
@@ -15,13 +16,6 @@ import { computeHealthStatus, computePoolStatus } from "./health";
 type AsyncWriterHealthFn = () => { healthy: boolean };
 type IntegrityStatusFn = () => IntegrityStatus;
 type EventLoopLagFn = () => EventLoopLagStats;
-
-/** Reported when no monitor getter is wired (e.g. bare handler in tests). */
-const ZERO_EVENT_LOOP_LAG: EventLoopLagStats = {
-	lastLagMs: 0,
-	maxLagMs: 0,
-	maxRecentLagMs: 0,
-};
 
 /**
  * `GET /api/system/status` — live operational snapshot for the dashboard's
@@ -69,7 +63,10 @@ export function createSystemStatusHandler(
 					asyncWriterHealthy,
 					integrityStatus,
 				},
-				eventLoop: getEventLoopLag ? getEventLoopLag() : ZERO_EVENT_LOOP_LAG,
+				// Falls back to the process-wide monitor accessor, which reports
+				// zeros when the monitor was never started (e.g. bare handler in
+				// tests).
+				eventLoop: (getEventLoopLag ?? getEventLoopStats)(),
 				strategy: config.getStrategy(),
 				timestamp: new Date().toISOString(),
 			};

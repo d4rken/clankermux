@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
-import type { APIContext } from "../../types";
-import { createAnalyticsHandler, getRangeConfig } from "../analytics-direct";
+import { createAnalyticsHandler } from "../analytics-direct";
+import { getRangeConfig } from "../range-config";
+import { insertRequest, makeContext } from "./dashboard-test-helpers";
 
 const DAY = 24 * 60 * 60 * 1000;
 const HOUR = 60 * 60 * 1000;
@@ -22,61 +23,32 @@ afterEach(async () => {
 	rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function context(): APIContext {
-	return {
-		db: dbOps.getAdapter(),
-		config: {} as APIContext["config"],
-		dbOps,
-	};
-}
-
-async function insertRequest(id: string, timestamp: number): Promise<void> {
-	await dbOps.getAdapter().run(
-		`INSERT INTO requests (
-			id, timestamp, method, path, account_used, status_code, success,
-			response_time_ms, failover_attempts, model, total_tokens, cost_usd,
-			output_tokens_per_second, input_tokens, cache_read_input_tokens,
-			cache_creation_input_tokens, output_tokens, billing_type
-		) VALUES (?, ?, 'POST', '/v1/messages', 'account-1', 200, TRUE,
-			100, 0, 'claude-test', 10, 0.01, 5, 1, 7, 1, 1, 'plan')`,
-		[id, timestamp],
-	);
-}
-
 describe("getRangeConfig", () => {
-	it("maps 'all' to no cutoff with daily buckets", () => {
-		const { startMs, bucket } = getRangeConfig("all");
-		expect(startMs).toBeNull();
-		expect(bucket.bucketMs).toBe(DAY);
-		expect(bucket.displayName).toBe("1d");
+	it("maps 'all' to no lookback bound with daily buckets", () => {
+		const { windowMs, bucketMs, displayName } = getRangeConfig("all");
+		expect(windowMs).toBeNull();
+		expect(bucketMs).toBe(DAY);
+		expect(displayName).toBe("1d");
 	});
 
 	it("keeps the bounded ranges unchanged", () => {
-		const before = Date.now();
-		const { startMs, bucket } = getRangeConfig("30d");
-		const after = Date.now();
-		expect(startMs).not.toBeNull();
-		expect(startMs as number).toBeGreaterThanOrEqual(before - 30 * DAY);
-		expect(startMs as number).toBeLessThanOrEqual(after - 30 * DAY);
-		expect(bucket.bucketMs).toBe(DAY);
+		const { windowMs, bucketMs } = getRangeConfig("30d");
+		expect(windowMs).toBe(30 * DAY);
+		expect(bucketMs).toBe(DAY);
 	});
 
 	it("falls back to the 24h window for garbage input", () => {
-		const before = Date.now();
-		const { startMs, bucket } = getRangeConfig("bogus");
-		const after = Date.now();
-		expect(startMs).not.toBeNull();
-		expect(startMs as number).toBeGreaterThanOrEqual(before - DAY);
-		expect(startMs as number).toBeLessThanOrEqual(after - DAY);
-		expect(bucket.bucketMs).toBe(HOUR);
+		const { windowMs, bucketMs } = getRangeConfig("bogus");
+		expect(windowMs).toBe(DAY);
+		expect(bucketMs).toBe(HOUR);
 	});
 });
 
 describe("analytics range=all", () => {
 	it("counts rows older than 30d that the 30d range excludes", async () => {
-		const handler = createAnalyticsHandler(context());
-		await insertRequest("req-old", Date.now() - 60 * DAY);
-		await insertRequest("req-recent", Date.now() - HOUR);
+		const handler = createAnalyticsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-old", Date.now() - 60 * DAY);
+		await insertRequest(dbOps, "req-recent", Date.now() - HOUR);
 
 		const bounded = await (
 			await handler(new URLSearchParams({ range: "30d" }))
@@ -92,10 +64,10 @@ describe("analytics range=all", () => {
 	});
 
 	it("buckets the all-time time series daily and spans the old rows", async () => {
-		const handler = createAnalyticsHandler(context());
+		const handler = createAnalyticsHandler(makeContext(dbOps));
 		const oldTs = Date.now() - 60 * DAY;
-		await insertRequest("req-old", oldTs);
-		await insertRequest("req-recent", Date.now() - HOUR);
+		await insertRequest(dbOps, "req-old", oldTs);
+		await insertRequest(dbOps, "req-recent", Date.now() - HOUR);
 
 		const allTime = await (
 			await handler(new URLSearchParams({ range: "all" }))
@@ -106,9 +78,9 @@ describe("analytics range=all", () => {
 	});
 
 	it("still applies the non-time filters with range=all", async () => {
-		const handler = createAnalyticsHandler(context());
-		await insertRequest("req-old", Date.now() - 60 * DAY);
-		await insertRequest("req-recent", Date.now() - HOUR);
+		const handler = createAnalyticsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-old", Date.now() - 60 * DAY);
+		await insertRequest(dbOps, "req-recent", Date.now() - HOUR);
 
 		const errorsOnly = await (
 			await handler(new URLSearchParams({ range: "all", status: "error" }))

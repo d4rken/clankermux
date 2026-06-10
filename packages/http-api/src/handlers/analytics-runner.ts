@@ -99,7 +99,7 @@ function createIsolatedDashboardHandler(
 		if (cached) responseCache.delete(key);
 
 		const existing = inFlight.get(key);
-		if (existing) return cloneResponse(await existing);
+		if (existing) return (await existing).clone();
 
 		if (inFlight.size >= resolveMaxInFlightEntries()) {
 			log.warn(
@@ -113,7 +113,7 @@ function createIsolatedDashboardHandler(
 		const promise = runDashboardRequest(kind, dbPath, params, key);
 		inFlight.set(key, promise);
 		try {
-			return cloneResponse(await promise);
+			return (await promise).clone();
 		} finally {
 			inFlight.delete(key);
 		}
@@ -135,12 +135,9 @@ async function runDashboardRequest(
 	params: URLSearchParams,
 	cacheKey: string,
 ): Promise<Response> {
-	const startedAt = performance.now();
-
 	try {
 		const response = await runDashboardWorker(kind, dbPath, params);
 		await cacheIfSuccessful(kind, cacheKey, response);
-		logIfSlow(kind, cacheKey, performance.now() - startedAt);
 		return response;
 	} catch (error) {
 		log.error(`Dashboard worker failed (${kind}):`, error);
@@ -320,21 +317,6 @@ function responseFromCached(cached: CachedResponse): Response {
 			"X-ClankerMux-Analytics-Mode": "worker-cache",
 		},
 	});
-}
-
-function cloneResponse(response: Response): Response {
-	return response.clone();
-}
-
-function logIfSlow(
-	kind: DashboardWorkerKind,
-	cacheKey: string,
-	durationMs: number,
-) {
-	if (durationMs <= 500) return;
-	log.warn(
-		`Dashboard worker ${kind} request took ${Math.round(durationMs)}ms (${cacheKey || "default"})`,
-	);
 }
 
 class DashboardWorkerTimeoutError extends Error {

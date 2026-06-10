@@ -13,6 +13,7 @@ import type {
 	UsageHistoryResponse,
 	UsageHistorySeries,
 } from "@clankermux/types";
+import { getRangeConfig } from "./range-config";
 
 const log = new Logger("UsageHistoryHandler");
 
@@ -49,34 +50,6 @@ function advanceCarry(
 const ALLOWED_RANGES = ["1h", "6h", "24h", "7d", "30d", "all"] as const;
 type Range = (typeof ALLOWED_RANGES)[number];
 const DEFAULT_RANGE: Range = "7d";
-
-/**
- * Map a range to its lookback window + bucket size. Mirrors getRangeConfig in
- * analytics-direct.ts so the sawtooth chart bucketing matches the analytics
- * charts: 1h→1m, 6h→5m, 24h/7d→1h, 30d/all→1d. "all" scans from sinceMs 0 —
- * the usage_snapshots table is small and retention-capped, so an unbounded
- * lookback stays cheap.
- */
-function getRangeConfig(range: Range): { sinceMs: number; bucketMs: number } {
-	const now = Date.now();
-	const hour = 60 * 60 * 1000;
-	const day = 24 * hour;
-
-	switch (range) {
-		case "1h":
-			return { sinceMs: now - hour, bucketMs: 60 * 1000 };
-		case "6h":
-			return { sinceMs: now - 6 * hour, bucketMs: 5 * 60 * 1000 };
-		case "24h":
-			return { sinceMs: now - day, bucketMs: hour };
-		case "7d":
-			return { sinceMs: now - 7 * day, bucketMs: hour };
-		case "30d":
-			return { sinceMs: now - 30 * day, bucketMs: day };
-		case "all":
-			return { sinceMs: 0, bucketMs: day };
-	}
-}
 
 function normalizeRange(raw: string | null): Range {
 	if (raw && (ALLOWED_RANGES as readonly string[]).includes(raw)) {
@@ -115,7 +88,10 @@ export function createUsageHistoryHandler(dbOps: DatabaseOperations) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		try {
 			const range = normalizeRange(params.get("range"));
-			const { sinceMs, bucketMs } = getRangeConfig(range);
+			// "all" scans from sinceMs 0 — the usage_snapshots table is small and
+			// retention-capped, so an unbounded lookback stays cheap.
+			const { bucketMs, windowMs } = getRangeConfig(range);
+			const sinceMs = windowMs === null ? 0 : Date.now() - windowMs;
 
 			const [rows, accounts] = await Promise.all([
 				dbOps.getUsageSnapshots({ sinceMs, bucketMs }),

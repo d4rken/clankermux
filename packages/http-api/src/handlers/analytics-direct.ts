@@ -7,6 +7,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { AnalyticsResponse, APIContext, SpeedTimePoint } from "../types";
+import { getRangeConfig } from "./range-config";
 
 const log = new Logger("AnalyticsHandler");
 
@@ -55,70 +56,16 @@ export function effectiveBurnRateDays(
 	return Math.min(windowDays, Math.max(1, days));
 }
 
-interface BucketConfig {
-	bucketMs: number;
-	displayName: string;
-}
-
-/**
- * Map a range to its lookback cutoff + time-series bucket. `startMs: null`
- * means "no cutoff" (the all-time range): the timestamp predicate is omitted
- * from the WHERE clause entirely rather than degenerating to `timestamp > 0`.
- * All-time uses daily buckets like 30d — anything finer produces thousands of
- * points over months of history. Exported for unit tests.
- */
-export function getRangeConfig(range: string): {
-	startMs: number | null;
-	bucket: BucketConfig;
-} {
-	const now = Date.now();
-	const hour = 60 * 60 * 1000;
-	const day = 24 * hour;
-
-	switch (range) {
-		case "1h":
-			return {
-				startMs: now - hour,
-				bucket: { bucketMs: 60 * 1000, displayName: "1m" },
-			};
-		case "6h":
-			return {
-				startMs: now - 6 * hour,
-				bucket: { bucketMs: 5 * 60 * 1000, displayName: "5m" },
-			};
-		case "24h":
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "7d":
-			return {
-				startMs: now - 7 * day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-		case "30d":
-			return {
-				startMs: now - 30 * day,
-				bucket: { bucketMs: day, displayName: "1d" },
-			};
-		case "all":
-			return {
-				startMs: null,
-				bucket: { bucketMs: day, displayName: "1d" },
-			};
-		default:
-			return {
-				startMs: now - day,
-				bucket: { bucketMs: hour, displayName: "1h" },
-			};
-	}
-}
-
 export function createAnalyticsHandler(context: APIContext) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		const db = context.dbOps.getAdapter();
 		const range = params.get("range") ?? "24h";
-		const { startMs, bucket } = getRangeConfig(range);
+		// `startMs: null` means "no cutoff" (the all-time range): the timestamp
+		// predicate is omitted from the WHERE clause entirely rather than
+		// degenerating to `timestamp > 0`.
+		const bucket = getRangeConfig(range);
+		const startMs =
+			bucket.windowMs === null ? null : Date.now() - bucket.windowMs;
 		const mode = params.get("mode") ?? "normal";
 		const isCumulative = mode === "cumulative";
 

@@ -2,6 +2,7 @@
  * Consolidated stats repository used by http-api (formerly duplicated between the CLI and http-api)
  */
 
+import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
 import type {
 	RateLimitReason,
 	RecentErrorGroup,
@@ -28,6 +29,11 @@ export class StatsRepository {
 
 	/**
 	 * Get aggregated statistics for requests within a time window.
+	 *
+	 * avgTokensPerSecond applies the same plausibility bound as the analytics
+	 * handlers (MAX_PLAUSIBLE_TOKENS_PER_SECOND) so a single recording artifact
+	 * (e.g. 137k tok/s) can't skew the average.
+	 *
 	 * @param sinceMs - Only include requests after this timestamp (ms since epoch).
 	 *   Defaults to 30 days ago to avoid full-table scans on large deployments.
 	 */
@@ -53,7 +59,7 @@ export class StatsRepository {
 				SUM(cache_creation_input_tokens) as "cacheCreationInputTokens",
 				SUM(cache_read_input_tokens) as "cacheReadInputTokens",
 				SUM(cost_usd) as "totalCostUsd",
-				AVG(output_tokens_per_second) as "avgTokensPerSecond"
+				AVG(CASE WHEN output_tokens_per_second > 0 AND output_tokens_per_second <= ${MAX_PLAUSIBLE_TOKENS_PER_SECOND} THEN output_tokens_per_second END) as "avgTokensPerSecond"
 			FROM requests
 			WHERE timestamp > ?`,
 			[since],

@@ -10,13 +10,13 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
-import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics";
 import {
 	clearAnalyticsCachesForTests,
 	getAnalyticsCacheStatsForTests,
 	terminateAnalyticsWorker,
 } from "../analytics-runner";
+import { insertRequest, makeContext } from "./dashboard-test-helpers";
 
 let tmpDir: string;
 let dbOps: DatabaseOperations;
@@ -41,27 +41,6 @@ afterAll(() => {
 	terminateAnalyticsWorker();
 });
 
-function context(): APIContext {
-	return {
-		db: dbOps.getAdapter(),
-		config: {} as APIContext["config"],
-		dbOps,
-	};
-}
-
-async function insertRequest(id: string, timestamp: number): Promise<void> {
-	await dbOps.getAdapter().run(
-		`INSERT INTO requests (
-			id, timestamp, method, path, account_used, status_code, success,
-			response_time_ms, failover_attempts, model, total_tokens, cost_usd,
-			output_tokens_per_second, input_tokens, cache_read_input_tokens,
-			cache_creation_input_tokens, output_tokens, billing_type
-		) VALUES (?, ?, 'POST', '/v1/messages', 'account-1', 200, TRUE,
-			100, 0, 'claude-test', 10, 0.01, 5, 1, 7, 1, 1, 'plan')`,
-		[id, timestamp],
-	);
-}
-
 function countOpenFds(): number | null {
 	try {
 		return readdirSync("/proc/self/fd").length;
@@ -72,9 +51,9 @@ function countOpenFds(): number | null {
 
 describe("analytics worker isolation", () => {
 	it("runs analytics through the SQLite worker and returns data", async () => {
-		await insertRequest("req-1", Date.now());
+		await insertRequest(dbOps, "req-1", Date.now());
 
-		const response = await createAnalyticsHandler(context())(
+		const response = await createAnalyticsHandler(makeContext(dbOps))(
 			new URLSearchParams({ range: "24h" }),
 		);
 		const data = await response.json();
@@ -86,13 +65,13 @@ describe("analytics worker isolation", () => {
 	});
 
 	it("caches successful worker-backed analytics briefly", async () => {
-		const handler = createAnalyticsHandler(context());
-		await insertRequest("req-1", Date.now());
+		const handler = createAnalyticsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-1", Date.now());
 
 		const first = await (
 			await handler(new URLSearchParams({ range: "24h" }))
 		).json();
-		await insertRequest("req-2", Date.now());
+		await insertRequest(dbOps, "req-2", Date.now());
 		const cached = await (
 			await handler(new URLSearchParams({ range: "24h" }))
 		).json();
@@ -107,8 +86,8 @@ describe("analytics worker isolation", () => {
 	});
 
 	it("caps cached analytics responses across rotating filter combinations", async () => {
-		const handler = createAnalyticsHandler(context());
-		await insertRequest("req-1", Date.now());
+		const handler = createAnalyticsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-1", Date.now());
 
 		await handler(new URLSearchParams({ range: "1h" }));
 		await handler(new URLSearchParams({ range: "6h" }));
@@ -123,8 +102,8 @@ describe("analytics worker isolation", () => {
 		const before = countOpenFds();
 		if (before === null) return;
 
-		const handler = createAnalyticsHandler(context());
-		await insertRequest("req-1", Date.now());
+		const handler = createAnalyticsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-1", Date.now());
 
 		for (let i = 0; i < 4; i++) {
 			const response = await handler(

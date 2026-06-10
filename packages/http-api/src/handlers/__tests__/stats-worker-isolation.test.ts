@@ -10,7 +10,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
-import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics";
 import {
 	clearAnalyticsCachesForTests,
@@ -18,6 +17,7 @@ import {
 	terminateAnalyticsWorker,
 } from "../analytics-runner";
 import { createStatsHandler } from "../stats";
+import { insertRequest, makeContext } from "./dashboard-test-helpers";
 
 let tmpDir: string;
 let dbOps: DatabaseOperations;
@@ -40,14 +40,6 @@ afterAll(() => {
 	terminateAnalyticsWorker();
 });
 
-function context(): APIContext {
-	return {
-		db: dbOps.getAdapter(),
-		config: {} as APIContext["config"],
-		dbOps,
-	};
-}
-
 function statsUrl(query = ""): URL {
 	return new URL(`http://localhost/api/stats${query}`);
 }
@@ -62,35 +54,16 @@ async function insertAccount(name: string): Promise<string> {
 	return id;
 }
 
-async function insertRequest(
-	id: string,
-	timestamp: number,
-	opts: { success?: boolean; errorMessage?: string | null } = {},
-): Promise<void> {
-	const success = opts.success ?? true;
-	await dbOps.getAdapter().run(
-		`INSERT INTO requests (
-			id, timestamp, method, path, account_used, status_code, success,
-			error_message, response_time_ms, failover_attempts, model,
-			total_tokens, cost_usd, output_tokens_per_second, input_tokens,
-			cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
-			billing_type
-		) VALUES (?, ?, 'POST', '/v1/messages', 'account-1', ?, ?, ?,
-			100, 0, 'claude-test', 10, 0.01, 5, 1, 7, 1, 1, 'plan')`,
-		[id, timestamp, success ? 200 : 500, success, opts.errorMessage ?? null],
-	);
-}
-
 describe("stats worker isolation", () => {
 	it("serves /api/stats through the SQLite worker with the same shape", async () => {
 		await insertAccount("acct-1");
-		await insertRequest("req-ok", Date.now());
-		await insertRequest("req-err", Date.now(), {
+		await insertRequest(dbOps, "req-ok", Date.now());
+		await insertRequest(dbOps, "req-err", Date.now(), {
 			success: false,
 			errorMessage: "upstream exploded",
 		});
 
-		const response = await createStatsHandler(context())(statsUrl());
+		const response = await createStatsHandler(makeContext(dbOps))(statsUrl());
 		const data = await response.json();
 
 		expect(response.status).toBe(200);
@@ -109,14 +82,14 @@ describe("stats worker isolation", () => {
 	});
 
 	it("keeps stats and analytics cache entries isolated for identical params", async () => {
-		await insertRequest("req-1", Date.now());
+		await insertRequest(dbOps, "req-1", Date.now());
 
-		const analyticsResponse = await createAnalyticsHandler(context())(
+		const analyticsResponse = await createAnalyticsHandler(makeContext(dbOps))(
 			new URLSearchParams({ range: "24h" }),
 		);
 		expect(analyticsResponse.status).toBe(200);
 
-		const statsResponse = await createStatsHandler(context())(
+		const statsResponse = await createStatsHandler(makeContext(dbOps))(
 			statsUrl("?range=24h"),
 		);
 		const statsData = await statsResponse.json();
@@ -129,7 +102,7 @@ describe("stats worker isolation", () => {
 		expect(statsData.totals).toBeUndefined();
 
 		// A repeat stats call (served from cache) stays stats-shaped too.
-		const cachedStats = await createStatsHandler(context())(
+		const cachedStats = await createStatsHandler(makeContext(dbOps))(
 			statsUrl("?range=24h"),
 		);
 		expect(cachedStats.headers.get("x-clankermux-analytics-mode")).toBe(
@@ -139,11 +112,11 @@ describe("stats worker isolation", () => {
 	});
 
 	it("caches successful worker-backed stats briefly", async () => {
-		const handler = createStatsHandler(context());
-		await insertRequest("req-1", Date.now());
+		const handler = createStatsHandler(makeContext(dbOps));
+		await insertRequest(dbOps, "req-1", Date.now());
 
 		const first = await (await handler(statsUrl())).json();
-		await insertRequest("req-2", Date.now());
+		await insertRequest(dbOps, "req-2", Date.now());
 		const cached = await (await handler(statsUrl())).json();
 		await new Promise((resolve) => setTimeout(resolve, 80));
 		const refreshed = await (await handler(statsUrl())).json();
