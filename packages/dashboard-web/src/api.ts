@@ -704,6 +704,14 @@ class API extends HttpClient {
 		}
 	}
 
+	/**
+	 * Distinct project names stamped on past requests (sorted server-side).
+	 * Feeds the Project filter dropdown in the request explorer.
+	 */
+	async getRequestProjects(): Promise<string[]> {
+		return this.get<string[]>("/api/requests/projects");
+	}
+
 	async getAnalytics(
 		range = "24h",
 		filters?: {

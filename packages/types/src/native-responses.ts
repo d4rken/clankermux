@@ -12,6 +12,12 @@ export interface NativeResponsesContext {
 	nativeBody: string;
 	/** Whether the CLIENT asked for a streamed response (body.stream === true). */
 	clientStream: boolean;
+	/**
+	 * Raw `reasoning.effort` string from the ORIGINAL OpenAI Responses body
+	 * (captured before translation, since the translated Anthropic body loses
+	 * it), null when absent/non-string.
+	 */
+	reasoningEffort?: string | null;
 }
 
 /**

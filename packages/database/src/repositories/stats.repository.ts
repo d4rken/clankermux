@@ -223,7 +223,13 @@ export class StatsRepository {
 	}
 
 	/**
-	 * Get API key statistics with success rates
+	 * Get API key statistics with success rates.
+	 *
+	 * Each key is reported under its CURRENT name (api_keys.name) so renames are
+	 * reflected; the record-time snapshot (requests.api_key_name) is the fallback
+	 * for hard-deleted keys. Grouped by key id alone so a key renamed mid-history
+	 * still collapses to one row; MAX() picks a single deterministic name when
+	 * deleted-key snapshots vary.
 	 */
 	async getApiKeyStats(): Promise<
 		Array<{
@@ -240,12 +246,13 @@ export class StatsRepository {
 			requests: number;
 		}>(
 			`SELECT
-				api_key_id as id,
-				api_key_name as name,
+				r.api_key_id as id,
+				MAX(COALESCE(k.name, r.api_key_name)) as name,
 				COUNT(*) as requests
-			FROM requests
-			WHERE api_key_id IS NOT NULL
-			GROUP BY api_key_id, api_key_name
+			FROM requests r
+			LEFT JOIN api_keys k ON k.id = r.api_key_id
+			WHERE r.api_key_id IS NOT NULL
+			GROUP BY r.api_key_id
 			HAVING COUNT(*) > 0
 			ORDER BY requests DESC`,
 		);

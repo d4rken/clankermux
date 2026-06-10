@@ -14,6 +14,9 @@ export type StatusCategory = "all" | "success" | "error";
 /** Sentinel `apiKey` value meaning "requests that carried no API key". */
 export const NO_API_KEY = "no-api-key";
 
+/** Sentinel `project` value meaning "requests that carried no project". */
+export const NO_PROJECT = "no-project";
+
 /** Raw filter state held by the component (mirrors the form controls). */
 export interface RequestFilterState {
 	status: StatusCategory;
@@ -23,6 +26,8 @@ export interface RequestFilterState {
 	account: string;
 	/** API key name, {@link NO_API_KEY}, or "all". */
 	apiKey: string;
+	/** Project name, {@link NO_PROJECT}, or "all". */
+	project: string;
 	/** `datetime-local` string (local time), or "". */
 	from: string;
 	/** `datetime-local` string (local time), or "". */
@@ -37,6 +42,7 @@ export interface RequestQueryParams {
 	to?: number;
 	account?: string;
 	apiKey?: string;
+	project?: string;
 	limit?: number;
 	offset?: number;
 }
@@ -65,6 +71,7 @@ export function isRequestFilterActive(state: RequestFilterState): boolean {
 		state.codes.length > 0 ||
 		state.account !== "all" ||
 		state.apiKey !== "all" ||
+		state.project !== "all" ||
 		state.from !== "" ||
 		state.to !== ""
 	);
@@ -96,6 +103,7 @@ export function buildRequestQueryParams(
 
 	if (state.account !== "all") params.account = state.account;
 	if (state.apiKey !== "all") params.apiKey = state.apiKey;
+	if (state.project !== "all") params.project = state.project;
 
 	return params;
 }
@@ -117,6 +125,9 @@ export function requestQueryToSearchParams(
 		p.set("account", params.account);
 	}
 	if (params.apiKey && params.apiKey !== "all") p.set("apiKey", params.apiKey);
+	if (params.project && params.project !== "all") {
+		p.set("project", params.project);
+	}
 	return p;
 }
 

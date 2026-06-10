@@ -7,6 +7,7 @@ import {
 	localDateTimeToEpoch,
 	mergeStatusCodes,
 	NO_API_KEY,
+	NO_PROJECT,
 	presetRange,
 	type RequestFilterState,
 	requestQueryToSearchParams,
@@ -17,6 +18,7 @@ const emptyState: RequestFilterState = {
 	codes: [],
 	account: "all",
 	apiKey: "all",
+	project: "all",
 	from: "",
 	to: "",
 };
@@ -35,6 +37,12 @@ describe("isRequestFilterActive", () => {
 			true,
 		);
 		expect(isRequestFilterActive({ ...emptyState, apiKey: NO_API_KEY })).toBe(
+			true,
+		);
+		expect(isRequestFilterActive({ ...emptyState, project: NO_PROJECT })).toBe(
+			true,
+		);
+		expect(isRequestFilterActive({ ...emptyState, project: "my-proj" })).toBe(
 			true,
 		);
 		expect(
@@ -76,14 +84,21 @@ describe("buildRequestQueryParams", () => {
 		expect(params.to).toBe(new Date("2026-06-05T13:00").getTime());
 	});
 
-	it("includes account and apiKey when not 'all'", () => {
+	it("includes account, apiKey, and project when not 'all'", () => {
 		expect(
 			buildRequestQueryParams({
 				...emptyState,
 				account: "acct",
 				apiKey: NO_API_KEY,
+				project: "my-proj",
 			}),
-		).toEqual({ account: "acct", apiKey: NO_API_KEY });
+		).toEqual({ account: "acct", apiKey: NO_API_KEY, project: "my-proj" });
+	});
+
+	it("passes the no-project sentinel through", () => {
+		expect(
+			buildRequestQueryParams({ ...emptyState, project: NO_PROJECT }),
+		).toEqual({ project: NO_PROJECT });
 	});
 });
 
@@ -103,8 +118,14 @@ describe("requestQueryToSearchParams", () => {
 			codes: [429, 500],
 			account: "all",
 			apiKey: "all",
+			project: "all",
 		}).toString();
 		expect(qs).toBe("codes=429%2C500");
+	});
+
+	it("serializes the project filter", () => {
+		const qs = requestQueryToSearchParams({ project: "my-proj" }).toString();
+		expect(qs).toBe("project=my-proj");
 	});
 });
 

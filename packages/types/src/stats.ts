@@ -181,6 +181,17 @@ export interface RoutingAnalytics {
 	accountSplit: RoutingAccountSplit[];
 }
 
+/** Token sums for one (model, account) pair, used by the Cache Flow graph.
+ *  The three buckets are disjoint: `uncachedTokens` is raw input_tokens,
+ *  which Anthropic reports separately from the two cache buckets. */
+export interface CacheFlowPoint {
+	model: string;
+	accountName: string;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	uncachedTokens: number;
+}
+
 export interface AnalyticsResponse {
 	meta?: {
 		range: string;
@@ -242,6 +253,9 @@ export interface AnalyticsResponse {
 	// because an older server may not populate it; consumers should `?? []`.
 	speedTimeSeries?: SpeedTimePoint[];
 	routing: RoutingAnalytics;
+	// Cache token flow grouped by (model, account). Optional because an older
+	// server may not populate it — consumers should `?? []`.
+	cacheFlow?: CacheFlowPoint[];
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

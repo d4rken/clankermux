@@ -348,6 +348,20 @@ export const useInfiniteRequests = (
 	});
 };
 
+/**
+ * Distinct project names observed across all recorded requests. Backs the
+ * Project filter dropdown; mirrors useApiKeys' caching (the list changes
+ * rarely, so a minute of staleness is fine).
+ */
+export const useRequestProjects = () => {
+	return useQuery({
+		queryKey: queryKeys.requestProjects(),
+		queryFn: () => api.getRequestProjects(),
+		staleTime: 60000,
+		gcTime: 5 * 60 * 1000,
+	});
+};
+
 /** Total number of requests matching `params` (drives the "M of N" counter). */
 export const useRequestsCount = (
 	params: RequestQueryParams,

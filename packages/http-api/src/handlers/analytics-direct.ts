@@ -6,7 +6,12 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
-import type { AnalyticsResponse, APIContext, SpeedTimePoint } from "../types";
+import type {
+	AnalyticsResponse,
+	APIContext,
+	CacheFlowPoint,
+	SpeedTimePoint,
+} from "../types";
 import { getRangeConfig } from "./range-config";
 
 const log = new Logger("AnalyticsHandler");
@@ -109,8 +114,16 @@ export function createAnalyticsHandler(context: APIContext) {
 		}
 
 		if (apiKeysFilter.length > 0) {
+			// Match the key's CURRENT name (api_keys.name) so a filter on the
+			// post-rename name finds requests stamped under the old one; the
+			// record-time snapshot remains the fallback for hard-deleted keys.
+			// A correlated subquery keeps the shared whereClause self-contained —
+			// it's interpolated into many sub-selects whose requests alias is `r`,
+			// so it must not depend on any particular JOIN being present.
 			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(`r.api_key_name IN (${placeholders})`);
+			conditions.push(
+				`COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) IN (${placeholders})`,
+			);
 			queryParams.push(...apiKeysFilter);
 		}
 
@@ -410,19 +423,24 @@ export function createAnalyticsHandler(context: APIContext) {
 				SELECT * FROM (
 					SELECT
 						'api_key_performance' as data_type,
-						api_key_name as name,
+						-- Current key name with the record-time snapshot as fallback for
+						-- hard-deleted keys. Grouped by key id alone so a key renamed
+						-- mid-history still collapses to ONE row; MAX() picks a single
+						-- deterministic name when deleted-key snapshots vary.
+						MAX(COALESCE(k.name, r.api_key_name)) as name,
 						CAST(NULL AS TEXT) as secondary_name,
 						CAST(NULL AS BIGINT) as count,
 						COUNT(*) as requests,
-						SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
 						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
 						CAST(NULL AS BIGINT) as total_tokens
 					FROM requests r
-					WHERE ${whereClause} AND api_key_id IS NOT NULL
-					GROUP BY api_key_id, api_key_name
+					LEFT JOIN api_keys k ON k.id = r.api_key_id
+					WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+					GROUP BY r.api_key_id
 					HAVING COUNT(*) > 0
 					ORDER BY requests DESC
 					LIMIT 10
@@ -803,6 +821,46 @@ export function createAnalyticsHandler(context: APIContext) {
 			);
 			recordPhase(phaseTimings, "routing", phaseStartedAt);
 
+			// Cache token flow: per-(model, account) sums of the three disjoint
+			// input buckets (cache reads, cache writes, uncached input). Feeds
+			// the Cache Flow graph on the dashboard.
+			phaseStartedAt = performance.now();
+			const cacheFlowRows = await db.query<{
+				model: string;
+				account_name: string;
+				cache_read_tokens: number;
+				cache_write_tokens: number;
+				uncached_tokens: number;
+			}>(
+				`
+				SELECT
+					COALESCE(r.model, 'unknown') as model,
+					COALESCE(a.name, r.account_used, ?) as account_name,
+					SUM(COALESCE(r.cache_read_input_tokens, 0)) as cache_read_tokens,
+					SUM(COALESCE(r.cache_creation_input_tokens, 0)) as cache_write_tokens,
+					SUM(COALESCE(r.input_tokens, 0)) as uncached_tokens
+				FROM requests r
+				LEFT JOIN accounts a ON a.id = r.account_used
+				WHERE ${whereClause}
+				-- Positional: "GROUP BY model" would bind to the raw r.model column
+				-- (SQLite prefers source columns over aliases), splitting NULL
+				-- models from the 'unknown' label they coalesce into.
+				GROUP BY 1, 2
+				ORDER BY (cache_read_tokens + cache_write_tokens + uncached_tokens) DESC
+				LIMIT 100
+			`,
+				[NO_ACCOUNT_ID, ...queryParams],
+			);
+			recordPhase(phaseTimings, "cache_flow", phaseStartedAt);
+
+			const cacheFlow: CacheFlowPoint[] = cacheFlowRows.map((row) => ({
+				model: row.model,
+				accountName: row.account_name,
+				cacheReadTokens: Number(row.cache_read_tokens) || 0,
+				cacheWriteTokens: Number(row.cache_write_tokens) || 0,
+				uncachedTokens: Number(row.uncached_tokens) || 0,
+			}));
+
 			const routingTotalRequests = routingDecisionRows.reduce(
 				(total, row) => total + (Number(row.requests) || 0),
 				0,
@@ -979,6 +1037,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				modelPerformance,
 				speedTimeSeries,
 				routing,
+				cacheFlow,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

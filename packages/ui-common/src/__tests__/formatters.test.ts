@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { formatBytes, formatTokensPerSecond } from "../formatters";
+import {
+	formatBytes,
+	formatReasoningEffort,
+	formatTokensPerSecond,
+} from "../formatters";
 
 describe("formatBytes", () => {
 	it("returns '0 B' for zero, negative, and undefined", () => {
@@ -55,5 +59,33 @@ describe("formatTokensPerSecond", () => {
 	it("keeps the zero placeholder tilde-free even when approximate", () => {
 		expect(formatTokensPerSecond(0, true)).toBe("0 tok/s");
 		expect(formatTokensPerSecond(undefined, true)).toBe("0 tok/s");
+	});
+});
+
+describe("formatReasoningEffort", () => {
+	it("formats Anthropic thinking budgets compactly", () => {
+		expect(formatReasoningEffort("thinking:32000")).toBe("32k thinking");
+		expect(formatReasoningEffort("thinking:8000")).toBe("8k thinking");
+		expect(formatReasoningEffort("thinking:1024")).toBe("1k thinking");
+		expect(formatReasoningEffort("thinking:1500")).toBe("1.5k thinking");
+		expect(formatReasoningEffort("thinking:1000000")).toBe("1M thinking");
+	});
+
+	it("keeps sub-thousand budgets as plain numbers", () => {
+		expect(formatReasoningEffort("thinking:500")).toBe("500 thinking");
+	});
+
+	it("passes through budget-less thinking", () => {
+		expect(formatReasoningEffort("thinking")).toBe("thinking");
+	});
+
+	it("passes through raw OpenAI effort strings", () => {
+		expect(formatReasoningEffort("high")).toBe("high");
+		expect(formatReasoningEffort("medium")).toBe("medium");
+		expect(formatReasoningEffort("xhigh")).toBe("xhigh");
+	});
+
+	it("passes through malformed thinking budgets unchanged", () => {
+		expect(formatReasoningEffort("thinking:abc")).toBe("thinking:abc");
 	});
 });

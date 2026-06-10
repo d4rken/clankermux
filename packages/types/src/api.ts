@@ -18,6 +18,12 @@ export interface RequestMeta {
 	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
 	affinityPartition?: string | null;
 	project?: string | null;
+	/**
+	 * Per-request reasoning effort: `"thinking:<budget>"` / `"thinking"` for
+	 * Anthropic bodies, the raw `reasoning.effort` string for OpenAI Responses
+	 * bodies, null when absent. Derived once in handleProxy.
+	 */
+	reasoningEffort?: string | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;

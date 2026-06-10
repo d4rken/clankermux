@@ -43,7 +43,7 @@ import {
 	setForcedAccount,
 	validateProviderPath,
 } from "./handlers";
-import { sanitizeProjectName } from "./project-name";
+import { extractProjectFromRequest } from "./project-extraction";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
@@ -51,6 +51,7 @@ import {
 	isOfficialAnthropicProvider,
 	isProviderOverloaded,
 } from "./provider-overload-cooldown";
+import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
@@ -59,62 +60,6 @@ import { shouldRecordRequest } from "./should-record-request";
 export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
-
-function extractSystemPrompt(body: RequestJsonBody | null): string | null {
-	if (!body) return null;
-	const system = body.system;
-
-	if (typeof system === "string") {
-		return system;
-	}
-
-	if (Array.isArray(system)) {
-		return system
-			.filter(
-				(item): item is { type?: string; text: string } =>
-					typeof item === "object" &&
-					item !== null &&
-					(item as { type?: string }).type === "text" &&
-					typeof (item as { text?: unknown }).text === "string",
-			)
-			.map((item) => item.text)
-			.join("\n");
-	}
-
-	return null;
-}
-
-function extractProjectFromRequest(
-	method: string,
-	path: string,
-	headers: Headers,
-	body: RequestJsonBody | null,
-): string | null {
-	if (method !== "POST" || path !== "/v1/messages") return null;
-
-	const headerProject = headers.get("x-project");
-	const sanitizedHeader = sanitizeProjectName(headerProject);
-	if (sanitizedHeader) return sanitizedHeader;
-
-	const systemPrompt = extractSystemPrompt(body);
-	if (!systemPrompt) return null;
-
-	const pathMatch = systemPrompt.match(
-		/\/(?:Users|home)\/[^/]+\/(?:(?:Desktop|projects|repos|src)\/)?([^/\s]+)\//,
-	);
-	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
-	if (sanitizedPath) return sanitizedPath;
-
-	const headingMatch = systemPrompt.match(/^#\s+([^\n\r]{1,100})/m);
-	if (headingMatch) {
-		const heading = sanitizeProjectName(headingMatch[1]);
-		if (heading && !heading.toLowerCase().startsWith("claude")) {
-			return heading;
-		}
-	}
-
-	return null;
-}
 
 // ===== REQUEST RECORDER WIRING =====
 
@@ -360,6 +305,13 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	// Per-request reasoning effort, derived once for all failover attempts. The
+	// Codex path's translated Anthropic body loses reasoning.effort, so fall
+	// back to the value captured from the ORIGINAL Responses body (Stage A).
+	requestMeta.reasoningEffort =
+		parseReasoningEffort(parsedBody) ??
+		nativeResponsesCtx?.reasoningEffort ??
+		null;
 	// Unconditional floor for Codex-CLI traffic: the /v1/responses adapter sets
 	// this header on every request it forwards. When set, the request may never
 	// be routed to (or burst-held on) an official Claude account — independent of
@@ -557,6 +509,7 @@ export async function handleProxy(
 			apiKeyName: apiKeyName || null,
 			comboName: null,
 			project: project ?? null,
+			reasoningEffort: requestMeta.reasoningEffort ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,

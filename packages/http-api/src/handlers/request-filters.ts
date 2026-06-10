@@ -17,6 +17,9 @@ export type StatusFilter = "all" | "success" | "error";
 /** Sentinel `apiKey` value meaning "requests that carried no API key". */
 export const NO_API_KEY = "no-api-key";
 
+/** Sentinel `project` value meaning "requests that carried no project". */
+export const NO_PROJECT = "no-project";
+
 export interface RequestFilters {
 	/** Status-code category. Ignored when `codes` is non-empty. */
 	status?: StatusFilter;
@@ -30,6 +33,8 @@ export interface RequestFilters {
 	account?: string;
 	/** API key name, or {@link NO_API_KEY} for the "no key" bucket. */
 	apiKey?: string;
+	/** Project name, or {@link NO_PROJECT} for the "no project" bucket. */
+	project?: string;
 }
 
 /**
@@ -82,8 +87,26 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		if (filters.apiKey === NO_API_KEY) {
 			clauses.push("r.api_key_name IS NULL");
 		} else {
-			clauses.push("r.api_key_name = ?");
+			// Match the key's CURRENT name (api_keys.name) so a filter on the
+			// post-rename name finds requests stamped under the old one. The
+			// stamped snapshot remains the fallback for hard-deleted keys. A
+			// correlated subquery keeps the clause self-contained — it drops into
+			// any query whose requests alias is `r`, no extra JOIN required.
+			clauses.push(
+				"COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+			);
 			params.push(filters.apiKey);
+		}
+	}
+
+	if (filters.project) {
+		if (filters.project === NO_PROJECT) {
+			clauses.push("r.project IS NULL");
+		} else {
+			// The project name is stamped directly on the row at record time (no
+			// rename indirection like api_keys), so a plain equality match suffices.
+			clauses.push("r.project = ?");
+			params.push(filters.project);
 		}
 	}
 
@@ -131,6 +154,11 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	const apiKey = params.get("apiKey");
 	if (apiKey && apiKey !== "all") {
 		filters.apiKey = apiKey;
+	}
+
+	const project = params.get("project");
+	if (project && project !== "all") {
+		filters.project = project;
 	}
 
 	return filters;

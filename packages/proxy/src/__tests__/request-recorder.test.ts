@@ -32,6 +32,7 @@ interface SaveRequestCall {
 	project: string | null | undefined;
 	billingType: string | undefined;
 	comboName: string | null | undefined;
+	reasoningEffort: string | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "payload";
@@ -67,6 +68,7 @@ class FakeDbOps {
 		project?: string | null,
 		billingType?: string,
 		comboName?: string | null,
+		reasoningEffort?: string | null,
 	): Promise<void> {
 		this.order.push("request");
 		this.saveRequestCalls.push({
@@ -85,6 +87,7 @@ class FakeDbOps {
 			project,
 			billingType,
 			comboName,
+			reasoningEffort,
 		});
 	}
 
@@ -250,6 +253,7 @@ function makeMeta(overrides: Partial<RecordMeta> = {}): RecordMeta {
 		apiKeyName: null,
 		comboName: null,
 		project: null,
+		reasoningEffort: null,
 		routing: null,
 		timestamp: 1_700_000_000_000,
 		requestBody: makeArrayBuffer('{"model":"claude"}'),
@@ -953,6 +957,49 @@ describe("RequestRecorder — recordSynthetic", () => {
 		);
 		await h.flush();
 		expect(h.writer.order).toEqual(["request", "routing"]);
+	});
+});
+
+describe("RequestRecorder — reasoningEffort threading", () => {
+	it("persists meta.reasoningEffort into the row and the dashboard event", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ reasoningEffort: "thinking:4096" }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].reasoningEffort).toBe("thinking:4096");
+		expect(h.emitted.length).toBe(1);
+		expect(h.emitted[0].reasoningEffort).toBe("thinking:4096");
+	});
+
+	it("persists reasoningEffort for synthetic rows", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(
+			makeMeta({
+				requestId: "syn-re",
+				responseStatus: 529,
+				requestBody: null,
+				reasoningEffort: "high",
+			}),
+			"error",
+		);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].reasoningEffort).toBe("high");
+		expect(h.emitted[0].reasoningEffort).toBe("high");
+	});
+
+	it("omits reasoningEffort from the event when null", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].reasoningEffort).toBeNull();
+		expect(h.emitted[0].reasoningEffort).toBeUndefined();
 	});
 });
 

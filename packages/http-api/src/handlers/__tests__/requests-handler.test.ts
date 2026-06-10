@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { BunSqlAdapter } from "@clankermux/database";
 import {
+	createRequestProjectsHandler,
 	createRequestsCountHandler,
 	createRequestsSummaryHandler,
 } from "../requests";
@@ -59,6 +60,7 @@ describe("createRequestsSummaryHandler", () => {
 				success: 0,
 				error_message: null,
 				project: "clankermux",
+				reasoning_effort: "thinking:2048",
 			},
 		]);
 		const res = await createRequestsSummaryHandler(db)();
@@ -68,12 +70,36 @@ describe("createRequestsSummaryHandler", () => {
 			rateLimited: boolean;
 			accountUsed: string | null;
 			project?: string;
+			reasoningEffort?: string;
 		}>;
 		expect(body[0].id).toBe("r1");
 		expect(body[0].statusCode).toBe(429);
 		expect(body[0].rateLimited).toBe(true);
 		expect(body[0].accountUsed).toBe("Primary");
 		expect(body[0].project).toBe("clankermux");
+		expect(body[0].reasoningEffort).toBe("thinking:2048");
+	});
+
+	it("omits reasoningEffort when the row has none", async () => {
+		const { db } = mockDb([
+			{
+				id: "r2",
+				timestamp: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				account_used: "acc1",
+				account_name: "Primary",
+				status_code: 200,
+				success: 1,
+				error_message: null,
+				reasoning_effort: null,
+			},
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<{
+			reasoningEffort?: string;
+		}>;
+		expect(body[0].reasoningEffort).toBeUndefined();
 	});
 });
 
@@ -96,5 +122,25 @@ describe("createRequestsCountHandler", () => {
 		const res = await createRequestsCountHandler(db)();
 		const body = (await res.json()) as { total: number };
 		expect(body.total).toBe(0);
+	});
+});
+
+describe("createRequestProjectsHandler", () => {
+	it("returns the distinct non-null projects as a plain string array", async () => {
+		const { db, last } = mockDb([{ project: "alpha" }, { project: "beta" }]);
+		const res = await createRequestProjectsHandler(db)();
+		const body = (await res.json()) as string[];
+		expect(body).toEqual(["alpha", "beta"]);
+		const { sql } = last();
+		expect(normalize(sql)).toBe(
+			"SELECT DISTINCT project FROM requests WHERE project IS NOT NULL ORDER BY project LIMIT 500",
+		);
+	});
+
+	it("returns an empty array when no requests carry a project", async () => {
+		const { db } = mockDb([]);
+		const res = await createRequestProjectsHandler(db)();
+		const body = (await res.json()) as string[];
+		expect(body).toEqual([]);
 	});
 });

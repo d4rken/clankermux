@@ -28,6 +28,9 @@ export interface RequestRow {
 	project: string | null;
 	billing_type: string | null;
 	combo_name: string | null;
+	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
+	// or the raw reasoning.effort string (OpenAI Responses), NULL when absent.
+	reasoning_effort: string | null;
 }
 
 // Domain model
@@ -58,6 +61,7 @@ export interface Request {
 	project?: string;
 	billingType?: string;
 	comboName?: string;
+	reasoningEffort?: string;
 }
 
 // API response type
@@ -90,6 +94,9 @@ export interface RequestResponse {
 	project?: string;
 	billingType?: string;
 	comboName?: string;
+	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
+	// or the raw reasoning.effort string (OpenAI Responses).
+	reasoningEffort?: string;
 	// Derived from statusCode === 429 server-side so the list view can render
 	// the "Rate Limited" badge without lazy-loading the full payload.
 	rateLimited?: boolean;
@@ -180,6 +187,7 @@ export function toRequest(row: RequestRow): Request {
 		project: row.project || undefined,
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
+		reasoningEffort: row.reasoning_effort || undefined,
 	};
 }
 
@@ -211,6 +219,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		project: request.project,
 		billingType: request.billingType,
 		comboName: request.comboName,
+		reasoningEffort: request.reasoningEffort,
 		rateLimited: request.statusCode === 429,
 	};
 }

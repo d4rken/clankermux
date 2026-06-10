@@ -1,6 +1,7 @@
 import {
 	formatCost,
 	formatDuration,
+	formatReasoningEffort,
 	formatTokens,
 	formatTokensPerSecond,
 } from "@clankermux/ui-common";
@@ -27,6 +28,7 @@ import {
 	useAccounts,
 	useApiKeys,
 	useInfiniteRequests,
+	useRequestProjects,
 	useRequests,
 	useRequestsCount,
 } from "../hooks/queries";
@@ -36,15 +38,17 @@ import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
 	mergeStatusCodes,
+	NO_PROJECT,
 	presetRange,
 	type RequestFilterState,
 	type StatusCategory,
 } from "../lib/request-filters";
+import { cn } from "../lib/utils";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
-import { Badge } from "./ui/badge";
+import { Badge, badgeVariants } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
 	Card,
@@ -102,6 +106,7 @@ export function RequestsTab() {
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string>("all");
 	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
+	const [projectFilter, setProjectFilter] = useState<string>("all");
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -118,6 +123,7 @@ export function RequestsTab() {
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
 			apiKey: apiKeyFilter,
+			project: projectFilter,
 			from: dateFrom,
 			to: dateTo,
 		}),
@@ -126,6 +132,7 @@ export function RequestsTab() {
 			statusCodeFilters,
 			accountFilter,
 			apiKeyFilter,
+			projectFilter,
 			dateFrom,
 			dateTo,
 		],
@@ -153,6 +160,7 @@ export function RequestsTab() {
 
 	const { data: accounts } = useAccounts();
 	const { data: configuredApiKeys } = useApiKeys();
+	const { data: knownProjects } = useRequestProjects();
 	const zaiAccountNames = new Set(
 		(accounts ?? []).filter((a) => a.provider === "zai").map((a) => a.name),
 	);
@@ -225,6 +233,19 @@ export function RequestsTab() {
 		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
 	}, [configuredApiKeys, data]);
 
+	// Project filter: union of every project seen across recorded requests (from
+	// /api/requests/projects) and any projects observed in the loaded slice
+	// (covers brand-new projects the cached endpoint result doesn't know yet).
+	const uniqueProjects = useMemo(() => {
+		const fromEndpoint = knownProjects ?? [];
+		const fromRequests = data
+			? Array.from(data.summaries.values())
+					.map((s) => s.project)
+					.filter((v): v is string => Boolean(v))
+			: [];
+		return Array.from(new Set([...fromEndpoint, ...fromRequests])).sort();
+	}, [knownProjects, data]);
+
 	const toggleExpanded = (id: string) => {
 		setExpandedRequests((prev) => {
 			const next = new Set(prev);
@@ -269,6 +290,7 @@ export function RequestsTab() {
 		setStatusCategory("all");
 		setAccountFilter("all");
 		setApiKeyFilter("all");
+		setProjectFilter("all");
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
@@ -376,6 +398,19 @@ export function RequestsTab() {
 									<button
 										type="button"
 										onClick={() => setApiKeyFilter("all")}
+										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
+									>
+										<X className="h-3 w-3" />
+									</button>
+								</Badge>
+							)}
+							{projectFilter !== "all" && (
+								<Badge variant="outline" className="gap-1.5 pr-1">
+									<Folder className="h-3 w-3" />
+									{projectFilter === NO_PROJECT ? "No Project" : projectFilter}
+									<button
+										type="button"
+										onClick={() => setProjectFilter("all")}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -650,6 +685,31 @@ export function RequestsTab() {
 										</SelectContent>
 									</Select>
 								</div>
+
+								{/* Project Filter */}
+								<div>
+									<Label className="text-xs flex items-center gap-1 mb-2">
+										<Folder className="h-3 w-3" />
+										Project
+									</Label>
+									<Select
+										value={projectFilter}
+										onValueChange={setProjectFilter}
+									>
+										<SelectTrigger className="h-9">
+											<SelectValue placeholder="All projects" />
+										</SelectTrigger>
+										<SelectContent>
+											<SelectItem value="all">All projects</SelectItem>
+											<SelectItem value={NO_PROJECT}>No Project</SelectItem>
+											{uniqueProjects.map((project) => (
+												<SelectItem key={project} value={project || ""}>
+													{project}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -677,6 +737,25 @@ export function RequestsTab() {
 								(request.meta.accountId
 									? `${request.meta.accountId.slice(0, 8)}...`
 									: null);
+							// The default endpoint is noise — only surface unusual paths.
+							const showPath = Boolean(path && path !== "/v1/messages");
+							const retries = summary?.failoverAttempts ?? 0;
+							// Hoisted as consts so the click-to-filter chips below capture a
+							// narrowed string in their onClick closures.
+							const apiKeyName = summary?.apiKeyName;
+							const project = summary?.project;
+							// Tokens that weren't served from / written to the prompt cache.
+							// Derived from totalTokens (not input+output) because OpenAI rows
+							// count cached tokens inside inputTokens.
+							const freshTokens =
+								summary?.totalTokens != null
+									? Math.max(
+											0,
+											summary.totalTokens -
+												(summary.cacheReadInputTokens ?? 0) -
+												(summary.cacheCreationInputTokens ?? 0),
+										)
+									: null;
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
@@ -701,8 +780,9 @@ export function RequestsTab() {
 										isError ? "border-destructive/50" : "border-border"
 									} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
 								>
-									{/* Header row: single line, never wraps */}
-									<div className="flex items-center gap-2 p-3">
+									{/* Row 1 "where": single line, never wraps — time, status,
+									    method, unusual endpoint, account, retries, timing, id */}
+									<div className="flex items-center gap-2 px-3 py-1.5">
 										<button
 											type="button"
 											className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
@@ -715,7 +795,10 @@ export function RequestsTab() {
 												<ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
 											)}
 											<span className="text-xs font-mono tabular-nums text-muted-foreground shrink-0">
-												{new Date(request.meta.timestamp).toLocaleTimeString()}
+												{new Date(request.meta.timestamp).toLocaleTimeString(
+													[],
+													{ hour12: false, hourCycle: "h23" },
+												)}
 											</span>
 											{statusCode != null && (
 												<span
@@ -729,9 +812,21 @@ export function RequestsTab() {
 													{method}
 												</span>
 											)}
-											{path && (
+											{showPath && (
 												<span className="text-xs font-mono text-muted-foreground truncate min-w-0 flex-1">
 													{path}
+												</span>
+											)}
+											{accountLabel && (
+												<span className="text-xs text-muted-foreground truncate min-w-0 max-w-[12rem]">
+													via {accountLabel}
+												</span>
+											)}
+											{/* Spacer keeps timing/id right-aligned when no path is shown */}
+											{!showPath && <span className="flex-1" />}
+											{retries > 0 && (
+												<span className="text-[11px] text-muted-foreground border rounded px-1.5 py-0.5 shrink-0">
+													{retries} {retries === 1 ? "retry" : "retries"}
 												</span>
 											)}
 											{summary?.responseTimeMs != null && (
@@ -756,6 +851,7 @@ export function RequestsTab() {
 											<Button
 												variant="ghost"
 												size="icon"
+												className="h-7 w-7"
 												onClick={() => setModalRequest(request)}
 												title="View Details"
 											>
@@ -764,6 +860,7 @@ export function RequestsTab() {
 											<CopyButton
 												variant="ghost"
 												size="icon"
+												className="h-7 w-7"
 												title="Copy as JSON"
 												getValueAsync={async () => {
 													const full = request.meta.bodiesOmitted
@@ -797,23 +894,36 @@ export function RequestsTab() {
 										</div>
 									</div>
 
-									{/* Badges row: wraps freely, holds all the non-essential context */}
-									{(summary?.model ||
-										summary?.comboName ||
-										summary?.apiKeyName ||
-										summary?.totalTokens != null ||
-										summary?.costUsd != null ||
-										summary?.project ||
-										(summary?.tokensPerSecond ?? 0) > 0 ||
-										accountLabel ||
-										request.meta.rateLimited ||
-										isZaiPeak ||
-										isAnthropicPeak) && (
-										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
-											{summary?.model && (
-												<Badge variant="secondary" className="text-xs">
-													{summary.model}
-												</Badge>
+									{/* Row 2 "attribution": wraps freely — who/what triggered the request */}
+									{(apiKeyName || project || summary?.comboName) && (
+										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5 pl-9 text-xs">
+											{apiKeyName && (
+												<button
+													type="button"
+													className={cn(
+														badgeVariants({ variant: "outline" }),
+														"text-xs cursor-pointer hover:bg-accent",
+													)}
+													onClick={() => setApiKeyFilter(apiKeyName)}
+													title={`Filter by API key ${apiKeyName}`}
+												>
+													<Key className="h-3 w-3 mr-1" />
+													{apiKeyName}
+												</button>
+											)}
+											{project && (
+												<button
+													type="button"
+													className={cn(
+														badgeVariants({ variant: "outline" }),
+														"text-xs cursor-pointer hover:bg-accent",
+													)}
+													onClick={() => setProjectFilter(project)}
+													title={`Filter by project ${project}`}
+												>
+													<Folder className="h-3 w-3 mr-1" />
+													{project}
+												</button>
 											)}
 											{summary?.comboName && (
 												<Badge
@@ -823,29 +933,38 @@ export function RequestsTab() {
 													Combo: {summary.comboName}
 												</Badge>
 											)}
-											{summary?.apiKeyName && (
-												<Badge variant="outline" className="text-xs">
-													<Key className="h-3 w-3 mr-1" />
-													{summary.apiKeyName}
+										</div>
+									)}
+
+									{/* Row 3 "what/outcome": wraps freely — model, usage, cost, flags */}
+									{(summary?.model ||
+										summary?.reasoningEffort ||
+										summary?.totalTokens != null ||
+										(summary?.tokensPerSecond ?? 0) > 0 ||
+										(summary?.costUsd != null && summary.costUsd > 0) ||
+										request.meta.rateLimited ||
+										isZaiPeak ||
+										isAnthropicPeak) && (
+										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
+											{(summary?.model || summary?.reasoningEffort) && (
+												<Badge variant="secondary" className="text-xs">
+													{[
+														summary.model,
+														summary.reasoningEffort
+															? formatReasoningEffort(summary.reasoningEffort)
+															: null,
+													]
+														.filter(Boolean)
+														.join(" · ")}
 												</Badge>
 											)}
 											{summary?.totalTokens != null && (
 												<Badge variant="outline" className="text-xs">
 													{formatTokens(summary.totalTokens)} tokens
-												</Badge>
-											)}
-											{summary?.costUsd != null && summary.costUsd > 0 && (
-												<Badge
-													variant="outline"
-													{...costBadgeProps(summary.billingType)}
-												>
-													{formatCost(summary.costUsd)}
-												</Badge>
-											)}
-											{summary?.project && (
-												<Badge variant="outline" className="text-xs">
-													<Folder className="h-3 w-3 mr-1" />
-													{summary.project}
+													{freshTokens != null &&
+													freshTokens !== summary.totalTokens
+														? ` (${formatTokens(freshTokens)} fresh)`
+														: ""}
 												</Badge>
 											)}
 											{summary?.tokensPerSecond != null &&
@@ -857,10 +976,13 @@ export function RequestsTab() {
 														)}
 													</Badge>
 												)}
-											{accountLabel && (
-												<span className="text-xs text-muted-foreground">
-													via {accountLabel}
-												</span>
+											{summary?.costUsd != null && summary.costUsd > 0 && (
+												<Badge
+													variant="outline"
+													{...costBadgeProps(summary.billingType)}
+												>
+													{formatCost(summary.costUsd)}
+												</Badge>
 											)}
 											{request.meta.rateLimited && (
 												<Badge variant="warning" className="text-xs">
