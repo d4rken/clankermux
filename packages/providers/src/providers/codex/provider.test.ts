@@ -1081,6 +1081,31 @@ describe("CodexProvider native Responses passthrough", () => {
 		expect(out.headers.get(NATIVE_RESPONSES_REQUEST_HEADER)).toBeNull();
 	});
 
+	it("processResponse sets the SSE content-type when the upstream omits it (live backend quirk)", async () => {
+		// The real Codex backend frequently returns SSE WITHOUT a content-type
+		// header (the translated path's sniffing fix-up exists for exactly this).
+		// The native branch must apply the same fix-up — without it the proxy's
+		// isStreamingResponse() check fails, the response takes the non-stream
+		// path, and SSE usage collection never runs (live bug: request recorded
+		// with no model/tokens).
+		const provider = new CodexProvider();
+		const response = new Response(rawCodexSse, {
+			status: 200,
+			headers: {
+				// NO content-type — mirrors the live backend.
+				"x-clankermux-request-id": "req-native-ct",
+				"x-clankermux-request-stream": "true",
+				[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+			},
+		});
+
+		const out = await provider.processResponse(response, null);
+
+		expect(out.headers.get("content-type")).toContain("text/event-stream");
+		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBe("1");
+		expect(await out.text()).toBe(rawCodexSse);
+	});
+
 	it("processResponse falls back to the requestStreamById native entry", async () => {
 		const provider = new CodexProvider();
 		// Register the native entry via the request-side transform (request-id set).
