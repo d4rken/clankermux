@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { describePinTarget, validateRenameKey } from "./ApiKeysTab";
+import {
+	type ApiKeySortMode,
+	describePinTarget,
+	parseApiKeySortMode,
+	sortApiKeys,
+	validateRenameKey,
+} from "./ApiKeysTab";
 
 const accounts = [
 	{ id: "acc-1", name: "Primary" },
@@ -102,5 +108,113 @@ describe("validateRenameKey", () => {
 
 	it("allows a name of exactly 100 characters", () => {
 		expect(validateRenameKey("a".repeat(100), "Old Name")).toBeNull();
+	});
+});
+
+// Minimal key rows for sort tests — only the fields sortApiKeys reads, plus an
+// id so assertions can name rows unambiguously.
+function makeKey(
+	id: string,
+	overrides: Partial<{
+		name: string;
+		createdAt: string;
+		lastUsed: string | null;
+		usageCount: number;
+	}> = {},
+) {
+	return {
+		id,
+		name: overrides.name ?? id,
+		createdAt: overrides.createdAt ?? "2026-01-01T00:00:00.000Z",
+		lastUsed: overrides.lastUsed === undefined ? null : overrides.lastUsed,
+		usageCount: overrides.usageCount ?? 0,
+	};
+}
+
+const ids = (keys: { id: string }[]) => keys.map((k) => k.id);
+
+describe("sortApiKeys", () => {
+	it("sorts by created, newest first (matches the server's default order)", () => {
+		const keys = [
+			makeKey("old", { createdAt: "2026-01-01T00:00:00.000Z" }),
+			makeKey("new", { createdAt: "2026-03-01T00:00:00.000Z" }),
+			makeKey("mid", { createdAt: "2026-02-01T00:00:00.000Z" }),
+		];
+		expect(ids(sortApiKeys(keys, "created"))).toEqual(["new", "mid", "old"]);
+	});
+
+	it("sorts by name alphabetically, case-insensitively", () => {
+		const keys = [
+			makeKey("b", { name: "bravo" }),
+			makeKey("A", { name: "Alpha" }),
+			makeKey("c", { name: "Charlie" }),
+		];
+		expect(ids(sortApiKeys(keys, "name"))).toEqual(["A", "b", "c"]);
+	});
+
+	it("sorts by request count, highest first", () => {
+		const keys = [
+			makeKey("low", { usageCount: 3 }),
+			makeKey("high", { usageCount: 500 }),
+			makeKey("none", { usageCount: 0 }),
+		];
+		expect(ids(sortApiKeys(keys, "requests"))).toEqual(["high", "low", "none"]);
+	});
+
+	it("sorts by last used, most recent first, never-used keys last", () => {
+		const keys = [
+			makeKey("never", { lastUsed: null }),
+			makeKey("recent", { lastUsed: "2026-06-01T00:00:00.000Z" }),
+			makeKey("stale", { lastUsed: "2026-01-01T00:00:00.000Z" }),
+		];
+		expect(ids(sortApiKeys(keys, "lastUsed"))).toEqual([
+			"recent",
+			"stale",
+			"never",
+		]);
+	});
+
+	it("breaks ties by name so equal rows have a deterministic order", () => {
+		const keys = [
+			makeKey("z", { name: "zulu", usageCount: 7 }),
+			makeKey("a", { name: "alpha", usageCount: 7 }),
+		];
+		expect(ids(sortApiKeys(keys, "requests"))).toEqual(["a", "z"]);
+		expect(
+			ids(
+				sortApiKeys(
+					[
+						makeKey("z", { name: "zulu", lastUsed: null }),
+						makeKey("a", { name: "alpha", lastUsed: null }),
+					],
+					"lastUsed",
+				),
+			),
+		).toEqual(["a", "z"]);
+	});
+
+	it("does not mutate the input array", () => {
+		const keys = [
+			makeKey("b", { name: "bravo" }),
+			makeKey("a", { name: "alpha" }),
+		];
+		sortApiKeys(keys, "name");
+		expect(ids(keys)).toEqual(["b", "a"]);
+	});
+});
+
+describe("parseApiKeySortMode", () => {
+	it.each<ApiKeySortMode>([
+		"created",
+		"name",
+		"requests",
+		"lastUsed",
+	])("round-trips the valid mode %p", (mode) => {
+		expect(parseApiKeySortMode(mode)).toBe(mode);
+	});
+
+	it("falls back to created for unknown or missing values", () => {
+		expect(parseApiKeySortMode("garbage")).toBe("created");
+		expect(parseApiKeySortMode(null)).toBe("created");
 	});
 });

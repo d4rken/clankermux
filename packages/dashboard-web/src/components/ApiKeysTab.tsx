@@ -101,6 +101,75 @@ export function validateRenameKey(
 	return null;
 }
 
+export type ApiKeySortMode = "created" | "name" | "requests" | "lastUsed";
+
+const API_KEY_SORT_STORAGE_KEY = "clankermux-api-keys-sort";
+
+const API_KEY_SORT_MODES: ApiKeySortMode[] = [
+	"created",
+	"name",
+	"requests",
+	"lastUsed",
+];
+
+const API_KEY_SORT_LABELS: Record<ApiKeySortMode, string> = {
+	created: "Newest first",
+	name: "Name",
+	requests: "Request count",
+	lastUsed: "Last used",
+};
+
+/**
+ * Validate a persisted sort mode (from localStorage). Anything unknown falls
+ * back to "created", which mirrors the server's default ordering
+ * (created_at DESC), so a missing or corrupt preference changes nothing.
+ */
+export function parseApiKeySortMode(value: string | null): ApiKeySortMode {
+	return API_KEY_SORT_MODES.includes(value as ApiKeySortMode)
+		? (value as ApiKeySortMode)
+		: "created";
+}
+
+/**
+ * Return the keys sorted per the selected mode (input untouched). Pure and
+ * exported so it can be unit-tested without mounting the whole tab.
+ *   - created  -> newest first (the server's default order)
+ *   - name     -> alphabetical, case-insensitive
+ *   - requests -> highest usage count first
+ *   - lastUsed -> most recently used first; never-used keys last
+ * Ties fall back to name so equal rows keep a deterministic order.
+ */
+export function sortApiKeys<
+	T extends Pick<ApiKey, "name" | "createdAt" | "lastUsed" | "usageCount">,
+>(keys: T[], mode: ApiKeySortMode): T[] {
+	const byName = (a: T, b: T) =>
+		a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+	return [...keys].sort((a, b) => {
+		if (mode === "name") {
+			return byName(a, b);
+		}
+		if (mode === "requests") {
+			return b.usageCount - a.usageCount || byName(a, b);
+		}
+		if (mode === "lastUsed") {
+			// null = never used → sorts after every real timestamp. When both are
+			// never-used the subtraction is NaN (falsy), so the name tiebreak kicks in.
+			const aTime = a.lastUsed
+				? new Date(a.lastUsed).getTime()
+				: Number.NEGATIVE_INFINITY;
+			const bTime = b.lastUsed
+				? new Date(b.lastUsed).getTime()
+				: Number.NEGATIVE_INFINITY;
+			return bTime - aTime || byName(a, b);
+		}
+		// "created" — newest first, the server's default order
+		return (
+			new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() ||
+			byName(a, b)
+		);
+	});
+}
+
 type PinMode = "unpinned" | "account" | "provider";
 
 interface ApiKeysResponse {
@@ -145,6 +214,28 @@ export function ApiKeysTab() {
 	// time). The editor's draft state lives in the <PinEditor> child so opening
 	// a row starts from that key's current pin.
 	const [editingPinKeyId, setEditingPinKeyId] = useState<string | null>(null);
+	// List sort order, persisted so the choice survives reloads. localStorage
+	// can throw (e.g. Safari private mode) — degrade to the in-memory default.
+	const [sortMode, setSortMode] = useState<ApiKeySortMode>(() => {
+		if (typeof window === "undefined") return "created";
+		try {
+			return parseApiKeySortMode(
+				window.localStorage.getItem(API_KEY_SORT_STORAGE_KEY),
+			);
+		} catch {
+			return "created";
+		}
+	});
+
+	const handleSortModeChange = (value: string) => {
+		const mode = parseApiKeySortMode(value);
+		setSortMode(mode);
+		try {
+			window.localStorage.setItem(API_KEY_SORT_STORAGE_KEY, mode);
+		} catch {
+			// ignore — degrade to in-memory
+		}
+	};
 
 	const queryClient = useQueryClient();
 
@@ -375,6 +466,7 @@ export function ApiKeysTab() {
 
 	const stats = statsResponse?.data;
 	const apiKeys = apiKeysResponse?.data || [];
+	const sortedApiKeys = sortApiKeys(apiKeys, sortMode);
 
 	// Client-side rename validation, computed once for both the inline error
 	// message and the Save-button disabled state. `null` means the trimmed name
@@ -495,12 +587,38 @@ export function ApiKeysTab() {
 			{/* API Keys List */}
 			<Card>
 				<CardHeader>
-					<CardTitle>Your API Keys</CardTitle>
-					<CardDescription>
-						{apiKeys.length === 0
-							? "No API keys have been created yet."
-							: `You have ${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}.`}
-					</CardDescription>
+					<div className="flex items-start justify-between gap-4">
+						<div>
+							<CardTitle>Your API Keys</CardTitle>
+							<CardDescription className="mt-1.5">
+								{apiKeys.length === 0
+									? "No API keys have been created yet."
+									: `You have ${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}.`}
+							</CardDescription>
+						</div>
+						{apiKeys.length > 1 && (
+							<div className="flex items-center gap-2 shrink-0">
+								<Label
+									htmlFor="api-key-sort"
+									className="text-xs text-muted-foreground whitespace-nowrap"
+								>
+									Sort by
+								</Label>
+								<Select value={sortMode} onValueChange={handleSortModeChange}>
+									<SelectTrigger id="api-key-sort" className="h-9 w-[160px]">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{API_KEY_SORT_MODES.map((mode) => (
+											<SelectItem key={mode} value={mode}>
+												{API_KEY_SORT_LABELS[mode]}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						)}
+					</div>
 				</CardHeader>
 				<CardContent>
 					{isLoadingKeys ? (
@@ -516,7 +634,7 @@ export function ApiKeysTab() {
 						</div>
 					) : (
 						<div className="space-y-4">
-							{apiKeys.map((key) => (
+							{sortedApiKeys.map((key) => (
 								<div
 									key={key.id}
 									className="flex flex-col gap-3 p-4 border rounded-lg"
