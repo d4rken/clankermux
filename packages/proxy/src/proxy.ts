@@ -44,7 +44,7 @@ import {
 	setForcedAccount,
 	validateProviderPath,
 } from "./handlers";
-import { extractProjectFromRequest } from "./project-extraction";
+import { resolveProject } from "./project-extraction";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
@@ -56,6 +56,7 @@ import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
+import { sessionProjectCache } from "./session-project-cache";
 import { shouldRecordRequest } from "./should-record-request";
 
 export type { ProxyContext } from "./handlers";
@@ -237,12 +238,15 @@ export async function handleProxy(
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
-	const project = extractProjectFromRequest(
+	const resolved = resolveProject(
 		req.method,
 		url.pathname,
 		req.headers,
 		parsedBody,
+		apiKeyId ?? null,
+		sessionProjectCache,
 	);
+	const project = resolved.project;
 	// Ingest-time context composition: walk the already-parsed body once (no
 	// second JSON.parse) for proxied /v1/messages requests only. null for
 	// other endpoints / unparseable bodies → context_* columns stay NULL.
@@ -289,6 +293,21 @@ export async function handleProxy(
 		} else {
 			// If we can't parse the body, let it through and let the provider handle it
 			log.debug("Could not parse request body for validation");
+		}
+	}
+
+	// 3c. Tier-4 seed commit: the request survived validation (can no longer be
+	// 400-rejected above), so it's safe to remember session → project for
+	// signal-less sibling requests (sidechains, title generation, count_tokens).
+	if (resolved.source === "anchored" && resolved.sessionKey && project) {
+		const previousProject = sessionProjectCache.set(
+			resolved.sessionKey,
+			project,
+		);
+		if (previousProject !== null && previousProject !== project) {
+			log.debug(
+				`Session ${resolved.sessionKey} transitioned projects: ${previousProject} -> ${project}`,
+			);
 		}
 	}
 

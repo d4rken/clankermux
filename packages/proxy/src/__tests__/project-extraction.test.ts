@@ -2,10 +2,13 @@ import { describe, expect, it } from "bun:test";
 import {
 	extractProjectFromBody,
 	extractProjectFromRequest,
+	extractSessionId,
 	mapWorkingDirToProject,
 	normalizeProjectCandidate,
+	resolveProject,
 } from "../project-extraction";
 import type { RequestJsonBody } from "../request-body-context";
+import { SessionProjectCache } from "../session-project-cache";
 
 describe("normalizeProjectCandidate", () => {
 	it("rejects dot-leading names", () => {
@@ -262,7 +265,7 @@ describe("extractProjectFromRequest", () => {
 		).toBeNull();
 	});
 
-	it("returns null for POST /v1/messages/count_tokens (exact path gate)", () => {
+	it("extracts on POST /v1/messages/count_tokens (path gate widened for tier 4)", () => {
 		const headers = new Headers({ "x-project": "my-proj" });
 		expect(
 			extractProjectFromRequest(
@@ -271,6 +274,24 @@ describe("extractProjectFromRequest", () => {
 				headers,
 				bodyWithWd,
 			),
+		).toBe("my-proj");
+	});
+
+	it("extracts body tiers on POST /v1/messages/count_tokens without a header", () => {
+		expect(
+			extractProjectFromRequest(
+				"POST",
+				"/v1/messages/count_tokens",
+				new Headers(),
+				bodyWithWd,
+			),
+		).toBe("clankermux");
+	});
+
+	it("still rejects unrelated paths", () => {
+		const headers = new Headers({ "x-project": "my-proj" });
+		expect(
+			extractProjectFromRequest("POST", "/v1/complete", headers, bodyWithWd),
 		).toBeNull();
 	});
 
@@ -297,5 +318,295 @@ describe("extractProjectFromRequest", () => {
 		expect(
 			extractProjectFromRequest("POST", "/v1/messages", headers, bodyWithWd),
 		).toBe("envelope-proj");
+	});
+});
+
+const SESSION_UUID = "6fa3b1de-1234-4abc-9def-0123456789ab";
+
+function metadataWith(userId: unknown): RequestJsonBody {
+	return { metadata: { user_id: userId } };
+}
+
+function encodeUserId(sessionId: string): string {
+	return JSON.stringify({
+		device_id: "device-1",
+		account_uuid: "",
+		session_id: sessionId,
+	});
+}
+
+describe("extractSessionId", () => {
+	it("extracts the session id from valid Claude Code metadata", () => {
+		expect(extractSessionId(metadataWith(encodeUserId(SESSION_UUID)))).toBe(
+			SESSION_UUID,
+		);
+	});
+
+	it("returns null for a null body", () => {
+		expect(extractSessionId(null)).toBeNull();
+	});
+
+	it("returns null when metadata is missing", () => {
+		expect(extractSessionId({ model: "claude-opus-4-8" })).toBeNull();
+	});
+
+	it("returns null when metadata is not an object", () => {
+		expect(extractSessionId({ metadata: "nope" })).toBeNull();
+	});
+
+	it("returns null when user_id is not a string", () => {
+		expect(extractSessionId(metadataWith(42))).toBeNull();
+		expect(
+			extractSessionId(metadataWith({ session_id: SESSION_UUID })),
+		).toBeNull();
+	});
+
+	it("returns null for malformed JSON in user_id", () => {
+		expect(extractSessionId(metadataWith("{not json"))).toBeNull();
+	});
+
+	it("returns null when the parsed user_id is not an object", () => {
+		expect(extractSessionId(metadataWith('"just a string"'))).toBeNull();
+	});
+
+	it("returns null when session_id is missing or not a string", () => {
+		expect(
+			extractSessionId(metadataWith(JSON.stringify({ device_id: "d" }))),
+		).toBeNull();
+		expect(
+			extractSessionId(metadataWith(JSON.stringify({ session_id: 7 }))),
+		).toBeNull();
+	});
+
+	it("returns null for empty or whitespace-only session_id", () => {
+		expect(extractSessionId(metadataWith(encodeUserId("")))).toBeNull();
+		expect(extractSessionId(metadataWith(encodeUserId("   ")))).toBeNull();
+	});
+
+	it("returns null for a session_id longer than 64 characters", () => {
+		expect(
+			extractSessionId(metadataWith(encodeUserId("x".repeat(65)))),
+		).toBeNull();
+		expect(extractSessionId(metadataWith(encodeUserId("x".repeat(64))))).toBe(
+			"x".repeat(64),
+		);
+	});
+});
+
+describe("resolveProject", () => {
+	const anchoredBody: RequestJsonBody = {
+		system:
+			"# Environment\nPrimary working directory: /home/darken/clankermux\n",
+		messages: [{ role: "user", content: "hi" }],
+		metadata: { user_id: encodeUserId(SESSION_UUID) },
+	};
+	const signalLessBody: RequestJsonBody = {
+		system: "You are a security monitor.",
+		messages: [{ role: "user", content: "review this" }],
+		metadata: { user_id: encodeUserId(SESSION_UUID) },
+	};
+
+	it("anchored signal wins, reports sessionKey, and does NOT write the cache", () => {
+		const cache = new SessionProjectCache();
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: "clankermux",
+			source: "anchored",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+		expect(cache.size()).toBe(0);
+	});
+
+	it("inherits from a pre-seeded cache when no anchored signal exists", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			signalLessBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: "clankermux",
+			source: "inherited",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+
+	it("returns all-null project/source when no session metadata and no anchor", () => {
+		const cache = new SessionProjectCache();
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			{ messages: [{ role: "user", content: "hi" }] },
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({ project: null, source: null, sessionKey: null });
+	});
+
+	it("scopes sessionKey to 'anon' when apiKeyId is null", () => {
+		const cache = new SessionProjectCache();
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			anchoredBody,
+			null,
+			cache,
+		);
+		expect(resolved.sessionKey).toBe(`anon:${SESSION_UUID}`);
+	});
+
+	it("count_tokens path is eligible for anchored extraction", () => {
+		const cache = new SessionProjectCache();
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages/count_tokens",
+			new Headers(),
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved.project).toBe("clankermux");
+		expect(resolved.source).toBe("anchored");
+	});
+
+	it("count_tokens path is eligible for inheritance", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages/count_tokens",
+			new Headers(),
+			signalLessBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: "clankermux",
+			source: "inherited",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+
+	it("GET requests return all-null and never touch the cache", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+		const resolved = resolveProject(
+			"GET",
+			"/v1/messages",
+			new Headers(),
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({ project: null, source: null, sessionKey: null });
+		expect(cache.size()).toBe(1);
+	});
+
+	it("unrelated paths return all-null and never touch the cache", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/complete",
+			new Headers(),
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({ project: null, source: null, sessionKey: null });
+		expect(cache.size()).toBe(1);
+	});
+
+	it("does not inherit across apiKeyId boundaries for the same session id", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			signalLessBody,
+			"key-2",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: null,
+			source: null,
+			sessionKey: `key-2:${SESSION_UUID}`,
+		});
+	});
+
+	it("supports a session transitioning projects (seed A → inherit A → seed B → inherit B)", () => {
+		const cache = new SessionProjectCache();
+		const headers = new Headers();
+		const projectABody: RequestJsonBody = {
+			...anchoredBody,
+			system: "# Environment\nPrimary working directory: /home/darken/octi\n",
+		};
+
+		// Seed A: anchored resolve, caller commits the seed post-validation.
+		const seedA = resolveProject(
+			"POST",
+			"/v1/messages",
+			headers,
+			projectABody,
+			"key-1",
+			cache,
+		);
+		expect(seedA.project).toBe("octi");
+		expect(seedA.sessionKey).not.toBeNull();
+		expect(
+			cache.set(seedA.sessionKey as string, seedA.project as string),
+		).toBeNull();
+
+		// Inherit A on a signal-less sidechain request.
+		expect(
+			resolveProject(
+				"POST",
+				"/v1/messages",
+				headers,
+				signalLessBody,
+				"key-1",
+				cache,
+			).project,
+		).toBe("octi");
+
+		// Seed B: the session moved to another project; set() reports A.
+		const seedB = resolveProject(
+			"POST",
+			"/v1/messages",
+			headers,
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(seedB.project).toBe("clankermux");
+		expect(cache.set(seedB.sessionKey as string, seedB.project as string)).toBe(
+			"octi",
+		);
+
+		// Inherit B from then on.
+		expect(
+			resolveProject(
+				"POST",
+				"/v1/messages",
+				headers,
+				signalLessBody,
+				"key-1",
+				cache,
+			).project,
+		).toBe("clankermux");
 	});
 });
