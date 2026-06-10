@@ -62,12 +62,10 @@ function projectLabel(project: string | null): string {
 	return project ?? NO_PROJECT_LABEL;
 }
 
-// Stable identity for series keys — distinct from any real project name, so a
-// project literally named "(no project)" can't collide with the NULL bucket.
-const NULL_PROJECT_KEY = "__null_project__";
-
+// Stable identity for series keys. Prefixed domains so no real project name
+// (arbitrary via the x-project header) can collide with the NULL bucket.
 function projectKey(project: string | null): string {
-	return project ?? NULL_PROJECT_KEY;
+	return project === null ? "null:bucket" : `project:${project}`;
 }
 
 function EmptyState({
