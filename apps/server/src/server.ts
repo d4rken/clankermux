@@ -73,6 +73,7 @@ import {
 	type StrategyStore,
 } from "@clankermux/types";
 import { serve } from "bun";
+import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
 
 /**
@@ -222,6 +223,7 @@ let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let usageSnapshotSampler: UsageSnapshotSampler | null = null;
+let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1529,6 +1531,22 @@ Available endpoints:
 		log.error(`Failed to start usage snapshot sampler: ${err}`);
 	});
 
+	// Start the subscription-payment auto-recorder: books each subscription
+	// account's renewal due dates into the account_payments ledger (immediate
+	// catch-up tick for due dates missed while down, then hourly).
+	subscriptionPaymentRecorder = new SubscriptionPaymentRecorder({
+		getRenewalConfigs: () => dbOps.getAccountRenewalConfigs(),
+		recordPayment: (accountId, accountName, dueDate, amountUsdMicros, now) =>
+			dbOps.recordAutoPayment(
+				accountId,
+				accountName,
+				dueDate,
+				amountUsdMicros,
+				now,
+			),
+	});
+	subscriptionPaymentRecorder.start();
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -1617,6 +1635,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (usageSnapshotSampler) {
 			usageSnapshotSampler.stop();
 			usageSnapshotSampler = null;
+		}
+		if (subscriptionPaymentRecorder) {
+			subscriptionPaymentRecorder.stop();
+			subscriptionPaymentRecorder = null;
 		}
 
 		// Stop memory monitoring
