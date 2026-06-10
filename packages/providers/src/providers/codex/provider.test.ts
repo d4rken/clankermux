@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	NATIVE_RESPONSES_REQUEST_HEADER,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+} from "@clankermux/types";
 import { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 import { CodexProvider } from "./provider";
 import { parseCodexUsageHeaders } from "./usage";
@@ -917,6 +921,224 @@ describe("CodexProvider.transformRequestBody", () => {
 		const body = await transformed.json();
 
 		expect(body.model).toBe("gpt-5.4-mini");
+	});
+});
+
+describe("CodexProvider native Responses passthrough", () => {
+	const nativeBody = {
+		model: "gpt-5.5-codex",
+		instructions: "Be brief.",
+		input: [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "Hi" }],
+			},
+		],
+		tools: [
+			{ type: "web_search" },
+			{ type: "function", name: "lookup", parameters: { type: "object" } },
+		],
+		tool_choice: "auto",
+		parallel_tool_calls: false,
+		reasoning: { effort: "low" },
+		previous_response_id: "resp_prev",
+		store: true,
+		stream: false,
+	};
+
+	function makeNativeRequest(extraHeaders: Record<string, string> = {}) {
+		return new Request("https://chatgpt.com/backend-api/codex/responses", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+				...extraHeaders,
+			},
+			body: JSON.stringify(nativeBody),
+		});
+	}
+
+	const rawCodexSse = sseBody([
+		...eventLine("response.created", {
+			response: { id: "resp_1", model: "gpt-5.5-codex" },
+		}),
+		...eventLine("response.output_text.delta", { delta: "Hello" }),
+		...eventLine("response.completed", {
+			response: {
+				model: "gpt-5.5-codex",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			},
+		}),
+	]);
+
+	it("forwards a native-flagged body with ONLY the 3 patches applied", async () => {
+		const provider = new CodexProvider();
+		const transformed = await provider.transformRequestBody(
+			makeNativeRequest(),
+			undefined,
+		);
+		const body = await transformed.json();
+
+		// The 3 patches: stream forced, store forced, previous_response_id dropped.
+		expect(body.stream).toBe(true);
+		expect(body.store).toBe(false);
+		expect("previous_response_id" in body).toBe(false);
+
+		// Everything else is forwarded verbatim — no Anthropic→Codex translation,
+		// no model mapping, built-in tool types survive.
+		expect(body.model).toBe("gpt-5.5-codex");
+		expect(body.instructions).toBe("Be brief.");
+		expect(body.input).toEqual(nativeBody.input);
+		expect(body.tools).toEqual(nativeBody.tools);
+		expect(body.tool_choice).toBe("auto");
+		expect(body.parallel_tool_calls).toBe(false);
+		expect(body.reasoning).toEqual({ effort: "low" });
+
+		// Stream-intent header parity with the normal path.
+		expect(transformed.headers.get("x-clankermux-request-stream")).toBe("true");
+		// The native flag stays on the transformed request so the proxy can relay
+		// it onto the response for processResponse — the proxy strips it from the
+		// outbound request before the upstream fetch, so it never reaches the
+		// backend (see native-responses-passthrough.test.ts).
+		expect(transformed.headers.get(NATIVE_RESPONSES_REQUEST_HEADER)).toBe("1");
+	});
+
+	it("parse-failure fallback strips the native flag so the response can never be mis-marked native", async () => {
+		const provider = new CodexProvider();
+		const request = new Request(
+			"https://chatgpt.com/backend-api/codex/responses",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+				},
+				body: "{not json",
+			},
+		);
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+
+		// The flag is gone — the proxy's relay read sees a non-native request.
+		expect(transformed.headers.get(NATIVE_RESPONSES_REQUEST_HEADER)).toBeNull();
+		// Body forwarded unchanged (defensive; the proxy validates the native
+		// body before setting the flag, so this branch should never fire).
+		expect(await transformed.text()).toBe("{not json");
+	});
+
+	it("non-flagged request still runs the Anthropic→Codex translation", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				tools: [{ name: "lookup", input_schema: { type: "object" } }],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request, undefined);
+		const body = await transformed.json();
+
+		expect(body.model).toBe("gpt-5.4");
+		expect(body.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "hello" }] },
+		]);
+		expect(body.tools).toEqual([
+			{
+				type: "function",
+				name: "lookup",
+				description: undefined,
+				parameters: { type: "object" },
+			},
+		]);
+	});
+
+	it("processResponse returns the raw Codex SSE untransformed with the marker (response flag)", async () => {
+		const provider = new CodexProvider();
+		const response = new Response(rawCodexSse, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-id": "req-native-1",
+				"x-clankermux-request-stream": "true",
+				[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+			},
+		});
+
+		const out = await provider.processResponse(response, null);
+		const text = await out.text();
+
+		// Body identical to upstream — no Anthropic events synthesized.
+		expect(text).toBe(rawCodexSse);
+		expect(text).not.toContain("message_start");
+		// Stage B marker present; internal headers sanitized away.
+		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBe("1");
+		expect(out.headers.get("x-clankermux-request-id")).toBeNull();
+		expect(out.headers.get(NATIVE_RESPONSES_REQUEST_HEADER)).toBeNull();
+	});
+
+	it("processResponse falls back to the requestStreamById native entry", async () => {
+		const provider = new CodexProvider();
+		// Register the native entry via the request-side transform (request-id set).
+		await provider.transformRequestBody(
+			makeNativeRequest({ "x-clankermux-request-id": "req-native-2" }),
+			undefined,
+		);
+
+		// Response carries the request id but NOT the relayed native flag header.
+		const response = new Response(rawCodexSse, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-id": "req-native-2",
+			},
+		});
+
+		const out = await provider.processResponse(response, null);
+		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBe("1");
+		expect(await out.text()).toBe(rawCodexSse);
+	});
+
+	it("processResponse keeps the existing error path for non-200 native responses", async () => {
+		const provider = new CodexProvider();
+		const errorBody = JSON.stringify({
+			error: { type: "rate_limit_error", message: "slow down" },
+		});
+		const response = new Response(errorBody, {
+			status: 429,
+			headers: {
+				"content-type": "application/json",
+				"x-clankermux-request-id": "req-native-3",
+				[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+			},
+		});
+
+		const out = await provider.processResponse(response, null);
+
+		expect(out.status).toBe(429);
+		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+		expect(await out.text()).toBe(errorBody);
+	});
+
+	it("processResponse still transforms non-native Codex SSE to Anthropic events", async () => {
+		const provider = new CodexProvider();
+		const response = new Response(rawCodexSse, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "true",
+			},
+		});
+
+		const out = await provider.processResponse(response, null);
+		const text = await out.text();
+
+		expect(text).toContain("message_start");
+		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
 	});
 });
 

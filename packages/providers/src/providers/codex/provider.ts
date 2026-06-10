@@ -9,7 +9,11 @@ import {
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { resolveReasoningEffort } from "@clankermux/openai-formats";
-import type { Account } from "@clankermux/types";
+import {
+	type Account,
+	NATIVE_RESPONSES_REQUEST_HEADER,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+} from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 
@@ -18,6 +22,7 @@ const log = new Logger("CodexProvider");
 const INTERNAL_HEADERS = [
 	"x-clankermux-request-id",
 	"x-clankermux-request-stream",
+	NATIVE_RESPONSES_REQUEST_HEADER,
 ];
 
 function sanitizeResponseHeaders(headers: Headers): Headers {
@@ -209,9 +214,12 @@ export class CodexProvider extends BaseProvider {
 	// x-clankermux-request-stream into the upstream response before calling
 	// processResponse, so headerRequestedStream is normally set. This map covers
 	// the race where a response arrives after the 30s TTL sweep evicts the entry.
+	// `native` marks a native-Responses passthrough attempt (Stage A): the
+	// response is returned untransformed. It inherits the same ts-based cleanup;
+	// eviction degrades gracefully to today's translated behaviour.
 	private requestStreamById = new Map<
 		string,
-		{ stream: boolean; ts: number }
+		{ stream: boolean; native?: boolean; ts: number }
 	>();
 
 	private sweepRequestStreamById(): void {
@@ -340,6 +348,13 @@ export class CodexProvider extends BaseProvider {
 			return request;
 		}
 
+		// Native Responses passthrough (Stage A): the proxy forwards the client's
+		// ORIGINAL OpenAI-Responses body — do NOT run the Anthropic→Codex
+		// translator; only patch the transport invariants the backend requires.
+		if (request.headers.get(NATIVE_RESPONSES_REQUEST_HEADER) === "1") {
+			return this.transformNativeResponsesBody(request);
+		}
+
 		try {
 			this.sweepRequestStreamById();
 			const body = (await request.json()) as AnthropicRequest;
@@ -378,6 +393,69 @@ export class CodexProvider extends BaseProvider {
 		}
 	}
 
+	/**
+	 * Native Responses passthrough (Stage A): forward the original Responses
+	 * body verbatim, patching only what the Codex backend requires:
+	 * - `stream: true` — the backend always streams,
+	 * - `store: false` — stateless HTTP path,
+	 * - drop `previous_response_id` — the HTTP path always sends full history
+	 *   (mirrors the translator's handling; see the adapter's note).
+	 * Everything else — tools of ALL types (web_search etc.), reasoning,
+	 * instructions — is forwarded untouched.
+	 */
+	private async transformNativeResponsesBody(
+		request: Request,
+	): Promise<Request> {
+		let bodyText = "";
+		try {
+			this.sweepRequestStreamById();
+			bodyText = await request.text();
+			const body = JSON.parse(bodyText) as Record<string, unknown>;
+			body.stream = true;
+			body.store = false;
+			delete body.previous_response_id;
+
+			const requestId = request.headers.get("x-clankermux-request-id");
+			if (requestId) {
+				// Client stream intent is always true in native mode (guarded
+				// upstream in proxy-operations before choosing the native body).
+				this.requestStreamById.set(requestId, {
+					stream: true,
+					native: true,
+					ts: Date.now(),
+				});
+			}
+
+			const newHeaders = new Headers(request.headers);
+			newHeaders.set("content-type", "application/json");
+			newHeaders.set("x-clankermux-request-stream", "true");
+			newHeaders.delete("content-length");
+
+			// The native flag stays on the returned Request: the proxy reads it
+			// off the transformed request to tag the response, then strips it
+			// before the upstream fetch.
+			return new Request(request.url, {
+				method: request.method,
+				headers: newHeaders,
+				body: JSON.stringify(body),
+			});
+		} catch (error) {
+			log.error("Failed to prepare native Responses passthrough body:", error);
+			// Defensive fallback (the proxy validates the native body before
+			// setting the flag, so this should not fire): forward the body
+			// unchanged but STRIP the native flag so the proxy can never relay a
+			// native marker for a request that wasn't natively prepared.
+			const fallbackHeaders = new Headers(request.headers);
+			fallbackHeaders.delete(NATIVE_RESPONSES_REQUEST_HEADER);
+			fallbackHeaders.delete("content-length");
+			return new Request(request.url, {
+				method: request.method,
+				headers: fallbackHeaders,
+				body: bodyText,
+			});
+		}
+	}
+
 	async processResponse(
 		response: Response,
 		_account: Account | null,
@@ -387,17 +465,38 @@ export class CodexProvider extends BaseProvider {
 		const headerRequestedStream = response.headers.get(
 			"x-clankermux-request-stream",
 		);
+		const streamEntry = requestId
+			? this.requestStreamById.get(requestId)
+			: undefined;
 		const requestedStream =
 			headerRequestedStream === "true"
 				? true
 				: headerRequestedStream === "false"
 					? false
-					: requestId
-						? (this.requestStreamById.get(requestId)?.stream ?? true)
-						: true;
+					: (streamEntry?.stream ?? true);
 		if (requestId) {
 			this.requestStreamById.delete(requestId);
 		}
+
+		// Native Responses passthrough (Stage A): return the raw Codex-Responses
+		// stream untransformed, marked for the adapter (Stage B consumes it).
+		// SUCCESS only — non-200s keep today's error handling path below (error
+		// translation downstream expects the existing shape). Primary signal is
+		// the request-side flag the proxy copies onto the response (same channel
+		// as x-clankermux-request-stream); the map entry is the fallback.
+		const nativeMode =
+			response.headers.get(NATIVE_RESPONSES_REQUEST_HEADER) === "1" ||
+			streamEntry?.native === true;
+		if (nativeMode && response.status === 200) {
+			const headers = sanitizeResponseHeaders(response.headers);
+			headers.set(NATIVE_RESPONSES_RESPONSE_HEADER, "1");
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers,
+			});
+		}
+
 		const isEventStream = contentType?.includes("text/event-stream") ?? false;
 		if (isEventStream) {
 			if (requestedStream) {
