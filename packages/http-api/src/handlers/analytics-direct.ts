@@ -861,7 +861,10 @@ export function createAnalyticsHandler(context: APIContext) {
 				FROM requests r
 				LEFT JOIN accounts a ON a.id = r.account_used
 				WHERE ${whereClause}
-				GROUP BY model, account_name
+				-- Positional: "GROUP BY model" would bind to the raw r.model column
+				-- (SQLite prefers source columns over aliases), splitting NULL
+				-- models from the 'unknown' label they coalesce into.
+				GROUP BY 1, 2
 				ORDER BY (cache_read_tokens + cache_write_tokens + uncached_tokens) DESC
 				LIMIT 100
 			`,

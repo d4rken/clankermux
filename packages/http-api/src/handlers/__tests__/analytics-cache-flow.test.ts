@@ -138,6 +138,18 @@ describe("analytics cacheFlow", () => {
 			cacheReadTokens: 3,
 			cacheWriteTokens: 2,
 		});
+		// Literal "unknown" model × Alpha — must merge into the same group as
+		// the NULL-model row above (GROUP BY must bind to the COALESCE alias,
+		// not the raw r.model column).
+		await insertRequest({
+			id: "req-7",
+			timestamp: now - 5500,
+			model: "unknown",
+			accountUsed: "acc-1",
+			inputTokens: 1,
+			cacheReadTokens: 1,
+			cacheWriteTokens: 1,
+		});
 		// claude-sonnet × NULL account — account must get the no-account label
 		await insertRequest({
 			id: "req-6",
@@ -198,9 +210,9 @@ describe("analytics cacheFlow", () => {
 			{
 				model: "unknown",
 				accountName: "Alpha",
-				cacheReadTokens: 3,
-				cacheWriteTokens: 2,
-				uncachedTokens: 7,
+				cacheReadTokens: 4,
+				cacheWriteTokens: 3,
+				uncachedTokens: 8,
 			},
 		]);
 	});
