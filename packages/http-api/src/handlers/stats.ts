@@ -1,57 +1,20 @@
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
+import type { APIContext } from "../types";
+import { createIsolatedStatsHandler } from "./analytics-runner";
 
 /**
- * Create a stats handler
+ * Create a stats handler.
+ *
+ * Dispatches through the shared read-only dashboard worker (kind "stats")
+ * so the synchronous bun:sqlite stats queries never block the main event
+ * loop. The actual query logic lives in stats-direct.ts.
  */
-export function createStatsHandler(dbOps: DatabaseOperations) {
-	return async (url: URL): Promise<Response> => {
-		const statsRepository = dbOps.getStatsRepository();
+export function createStatsHandler(context: APIContext) {
+	const isolatedHandler = createIsolatedStatsHandler(context);
 
-		// Parse optional ?since=<days> query parameter (default: 30, max: 365)
-		const sinceRaw = Number(url.searchParams.get("since") ?? 30);
-		const sinceDays =
-			Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.min(sinceRaw, 365) : 30;
-		const sinceMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
-
-		// Parse optional ?errorsSinceHours=<n> query parameter
-		// (default: 24, max: 8760 hours = 365 days)
-		const errorsHoursRaw = Number(
-			url.searchParams.get("errorsSinceHours") ?? 24,
-		);
-		const errorsHours =
-			Number.isFinite(errorsHoursRaw) && errorsHoursRaw > 0
-				? Math.min(errorsHoursRaw, 8760)
-				: 24;
-		const errorsSinceMs = Date.now() - errorsHours * 60 * 60 * 1000;
-
-		// Get overall statistics using the consolidated repository
-		const stats = await statsRepository.getAggregatedStats(sinceMs);
-		const activeAccounts = await statsRepository.getActiveAccountCount();
-
-		const successRate =
-			stats.totalRequests > 0
-				? Math.round((stats.successfulRequests / stats.totalRequests) * 100)
-				: 0;
-
-		// Get recent errors
-		const recentErrors = await statsRepository.getRecentErrorGroups(
-			errorsSinceMs,
-			50,
-		);
-
-		const response = {
-			totalRequests: stats.totalRequests,
-			successRate,
-			activeAccounts,
-			avgResponseTime: Math.round(stats.avgResponseTime || 0),
-			totalTokens: stats.totalTokens,
-			totalCostUsd: stats.totalCostUsd,
-			avgTokensPerSecond: stats.avgTokensPerSecond,
-			recentErrors,
-		};
-
-		return jsonResponse(response);
+	return (url: URL): Promise<Response> => {
+		return isolatedHandler(url.searchParams);
 	};
 }
 

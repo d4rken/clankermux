@@ -9,7 +9,9 @@ import { createAnalyticsHandler as createDirectAnalyticsHandler } from "./analyt
 import type {
 	AnalyticsWorkerRequest,
 	AnalyticsWorkerResponse,
+	DashboardWorkerKind,
 } from "./analytics-worker";
+import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 
 const log = new Logger("AnalyticsRunner");
 
@@ -19,27 +21,63 @@ const SQLITE_BUSY_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 128;
 const DEFAULT_MAX_IN_FLIGHT_ENTRIES = 64;
 
-type CachedAnalytics = {
+type CachedResponse = {
 	expiresAt: number;
 	status: number;
 	body: string;
 };
 
-const responseCache = new Map<string, CachedAnalytics>();
+const responseCache = new Map<string, CachedResponse>();
 const inFlight = new Map<string, Promise<Response>>();
 
-type PendingAnalyticsRequest = {
+type PendingWorkerRequest = {
 	resolve: (response: Response) => void;
 	reject: (error: Error) => void;
 	timeoutHandle: ReturnType<typeof setTimeout>;
 };
 
-let analyticsWorker: Worker | undefined;
-const pendingWorkerRequests = new Map<string, PendingAnalyticsRequest>();
+let dashboardWorker: Worker | undefined;
+const pendingWorkerRequests = new Map<string, PendingWorkerRequest>();
+
+type DirectHandler = (params: URLSearchParams) => Promise<Response>;
+
+const KIND_LABELS: Record<
+	DashboardWorkerKind,
+	{ timeoutMessage: string; failureMessage: string; tooManyMessage: string }
+> = {
+	analytics: {
+		timeoutMessage: "Analytics request timed out",
+		failureMessage: "Failed to fetch analytics data",
+		tooManyMessage: "Too many analytics requests",
+	},
+	stats: {
+		timeoutMessage: "Stats request timed out",
+		failureMessage: "Failed to fetch stats data",
+		tooManyMessage: "Too many stats requests",
+	},
+};
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
-	const directHandler = createDirectAnalyticsHandler(context);
+	return createIsolatedDashboardHandler(
+		context,
+		"analytics",
+		createDirectAnalyticsHandler(context),
+	);
+}
 
+export function createIsolatedStatsHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"stats",
+		createDirectStatsHandler(context),
+	);
+}
+
+function createIsolatedDashboardHandler(
+	context: APIContext,
+	kind: DashboardWorkerKind,
+	directHandler: DirectHandler,
+) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		const dbOps = context.dbOps as Partial<APIContext["dbOps"]>;
 		const dbPath = dbOps.getResolvedDbPath?.();
@@ -47,7 +85,9 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 			return directHandler(params);
 		}
 
-		const key = `${dbPath}\0${canonicalAnalyticsKey(params)}`;
+		// The kind prefix keeps analytics and stats cache entries from
+		// colliding even when their canonical param strings are identical.
+		const key = `${kind}\0${dbPath}\0${canonicalParamsKey(params)}`;
 		const now = Date.now();
 		pruneResponseCache(now);
 		const cached = responseCache.get(key);
@@ -63,12 +103,14 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 
 		if (inFlight.size >= resolveMaxInFlightEntries()) {
 			log.warn(
-				`Rejecting analytics request: ${inFlight.size} worker requests already in flight`,
+				`Rejecting ${kind} request: ${inFlight.size} worker requests already in flight`,
 			);
-			return errorResponse(ServiceUnavailable("Too many analytics requests"));
+			return errorResponse(
+				ServiceUnavailable(KIND_LABELS[kind].tooManyMessage),
+			);
 		}
 
-		const promise = runAnalytics(dbPath, params, key);
+		const promise = runDashboardRequest(kind, dbPath, params, key);
 		inFlight.set(key, promise);
 		try {
 			return cloneResponse(await promise);
@@ -78,7 +120,7 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 	};
 }
 
-function canonicalAnalyticsKey(params: URLSearchParams): string {
+function canonicalParamsKey(params: URLSearchParams): string {
 	const copy = new URLSearchParams(params);
 	const entries = Array.from(copy.entries()).sort(
 		([aKey, aVal], [bKey, bVal]) =>
@@ -87,7 +129,8 @@ function canonicalAnalyticsKey(params: URLSearchParams): string {
 	return new URLSearchParams(entries).toString();
 }
 
-async function runAnalytics(
+async function runDashboardRequest(
+	kind: DashboardWorkerKind,
 	dbPath: string,
 	params: URLSearchParams,
 	cacheKey: string,
@@ -95,21 +138,22 @@ async function runAnalytics(
 	const startedAt = performance.now();
 
 	try {
-		const response = await runAnalyticsWorker(dbPath, params);
-		await cacheIfSuccessful(cacheKey, response);
-		logIfSlow("worker", cacheKey, performance.now() - startedAt);
+		const response = await runDashboardWorker(kind, dbPath, params);
+		await cacheIfSuccessful(kind, cacheKey, response);
+		logIfSlow(kind, cacheKey, performance.now() - startedAt);
 		return response;
 	} catch (error) {
-		log.error("Analytics worker failed:", error);
+		log.error(`Dashboard worker failed (${kind}):`, error);
 		return errorResponse(
-			error instanceof AnalyticsTimeoutError
-				? ServiceUnavailable("Analytics request timed out")
-				: InternalServerError("Failed to fetch analytics data"),
+			error instanceof DashboardWorkerTimeoutError
+				? ServiceUnavailable(KIND_LABELS[kind].timeoutMessage)
+				: InternalServerError(KIND_LABELS[kind].failureMessage),
 		);
 	}
 }
 
-function runAnalyticsWorker(
+function runDashboardWorker(
+	kind: DashboardWorkerKind,
 	dbPath: string,
 	params: URLSearchParams,
 ): Promise<Response> {
@@ -117,7 +161,7 @@ function runAnalyticsWorker(
 
 	return new Promise<Response>((resolve, reject) => {
 		const timeoutHandle = setTimeout(() => {
-			resetAnalyticsWorker(new AnalyticsTimeoutError());
+			resetDashboardWorker(new DashboardWorkerTimeoutError());
 		}, resolveWorkerTimeoutMs());
 
 		pendingWorkerRequests.set(id, {
@@ -127,8 +171,9 @@ function runAnalyticsWorker(
 		});
 
 		try {
-			getAnalyticsWorker().postMessage({
+			getDashboardWorker().postMessage({
 				id,
+				kind,
 				dbPath,
 				params: params.toString(),
 				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
@@ -142,17 +187,17 @@ function runAnalyticsWorker(
 			const err =
 				error instanceof Error
 					? error
-					: new Error(`analytics worker postMessage failed: ${String(error)}`);
-			resetAnalyticsWorker(err);
+					: new Error(`dashboard worker postMessage failed: ${String(error)}`);
+			resetDashboardWorker(err);
 			reject(err);
 		}
 	});
 }
 
-function getAnalyticsWorker(): Worker {
-	if (analyticsWorker) return analyticsWorker;
+function getDashboardWorker(): Worker {
+	if (dashboardWorker) return dashboardWorker;
 
-	analyticsWorker = new Worker(
+	dashboardWorker = new Worker(
 		new URL("./analytics-worker.ts", import.meta.url).href,
 		{
 			smol: true,
@@ -160,30 +205,30 @@ function getAnalyticsWorker(): Worker {
 	);
 
 	if (
-		"unref" in analyticsWorker &&
-		typeof (analyticsWorker as { unref?: () => void }).unref === "function"
+		"unref" in dashboardWorker &&
+		typeof (dashboardWorker as { unref?: () => void }).unref === "function"
 	) {
-		(analyticsWorker as { unref: () => void }).unref();
+		(dashboardWorker as { unref: () => void }).unref();
 	}
 
-	analyticsWorker.onmessage = (
+	dashboardWorker.onmessage = (
 		event: MessageEvent<AnalyticsWorkerResponse>,
 	) => {
-		handleAnalyticsWorkerMessage(event.data);
+		handleDashboardWorkerMessage(event.data);
 	};
-	analyticsWorker.onerror = (event: ErrorEvent) => {
-		resetAnalyticsWorker(new Error(event.message || "analytics worker error"));
+	dashboardWorker.onerror = (event: ErrorEvent) => {
+		resetDashboardWorker(new Error(event.message || "dashboard worker error"));
 	};
-	analyticsWorker.onmessageerror = () => {
-		resetAnalyticsWorker(
-			new Error("analytics worker message deserialization failed"),
+	dashboardWorker.onmessageerror = () => {
+		resetDashboardWorker(
+			new Error("dashboard worker message deserialization failed"),
 		);
 	};
 
-	return analyticsWorker;
+	return dashboardWorker;
 }
 
-function handleAnalyticsWorkerMessage(data: AnalyticsWorkerResponse): void {
+function handleDashboardWorkerMessage(data: AnalyticsWorkerResponse): void {
 	const pending = pendingWorkerRequests.get(data.id);
 	if (!pending) return;
 
@@ -192,11 +237,11 @@ function handleAnalyticsWorkerMessage(data: AnalyticsWorkerResponse): void {
 
 	if (data.timings && data.timings.totalMs > 500) {
 		log.warn(
-			`Analytics worker completed slowly in ${Math.round(data.timings.totalMs)}ms`,
+			`Dashboard worker completed slowly in ${Math.round(data.timings.totalMs)}ms`,
 		);
 	}
 	if (!data.ok && data.error) {
-		log.warn(`Analytics worker returned error: ${data.error}`);
+		log.warn(`Dashboard worker returned error: ${data.error}`);
 	}
 
 	pending.resolve(
@@ -210,9 +255,9 @@ function handleAnalyticsWorkerMessage(data: AnalyticsWorkerResponse): void {
 	);
 }
 
-function resetAnalyticsWorker(error: Error): void {
-	const worker = analyticsWorker;
-	analyticsWorker = undefined;
+function resetDashboardWorker(error: Error): void {
+	const worker = dashboardWorker;
+	dashboardWorker = undefined;
 
 	if (worker) {
 		try {
@@ -230,10 +275,11 @@ function resetAnalyticsWorker(error: Error): void {
 }
 
 export function terminateAnalyticsWorker(): void {
-	resetAnalyticsWorker(new Error("analytics worker terminated"));
+	resetDashboardWorker(new Error("dashboard worker terminated"));
 }
 
 async function cacheIfSuccessful(
+	kind: DashboardWorkerKind,
 	cacheKey: string,
 	response: Response,
 ): Promise<void> {
@@ -247,7 +293,7 @@ async function cacheIfSuccessful(
 		});
 		pruneResponseCache(Date.now());
 	} catch (error) {
-		log.warn(`Failed to cache analytics response: ${String(error)}`);
+		log.warn(`Failed to cache ${kind} response: ${String(error)}`);
 	}
 }
 
@@ -266,7 +312,7 @@ function pruneResponseCache(now: number): void {
 	}
 }
 
-function responseFromCached(cached: CachedAnalytics): Response {
+function responseFromCached(cached: CachedResponse): Response {
 	return new Response(cached.body, {
 		status: cached.status,
 		headers: {
@@ -281,20 +327,20 @@ function cloneResponse(response: Response): Response {
 }
 
 function logIfSlow(
-	mode: "direct" | "worker",
+	kind: DashboardWorkerKind,
 	cacheKey: string,
 	durationMs: number,
 ) {
 	if (durationMs <= 500) return;
 	log.warn(
-		`Analytics ${mode} request took ${Math.round(durationMs)}ms (${cacheKey || "default"})`,
+		`Dashboard worker ${kind} request took ${Math.round(durationMs)}ms (${cacheKey || "default"})`,
 	);
 }
 
-class AnalyticsTimeoutError extends Error {
+class DashboardWorkerTimeoutError extends Error {
 	constructor() {
-		super(`analytics worker timed out after ${resolveWorkerTimeoutMs()}ms`);
-		this.name = "AnalyticsTimeoutError";
+		super(`dashboard worker timed out after ${resolveWorkerTimeoutMs()}ms`);
+		this.name = "DashboardWorkerTimeoutError";
 	}
 }
 

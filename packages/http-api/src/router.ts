@@ -146,7 +146,7 @@ export class APIRouter {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 		);
-		const statsHandler = createStatsHandler(dbOps);
+		const statsHandler = createStatsHandler(this.context);
 		const statsResetHandler = createStatsResetHandler(dbOps);
 		const storageHandler = createStorageHandler(dbOps);
 		const storageUsageHandler = createStorageUsageHandler(dbOps);

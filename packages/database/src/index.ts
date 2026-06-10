@@ -22,8 +22,9 @@ export {
 	isEncryptionEnabled,
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
-// Re-export repository types
-export type { StatsRepository } from "./repositories/stats.repository";
+// Re-export repositories (StatsRepository is constructed directly by the
+// read-only dashboard worker against its own connection)
+export { StatsRepository } from "./repositories/stats.repository";
 // Re-export retry utilities for external use (from your improvements)
 export { withDatabaseRetry } from "./retry";
 export { DatabaseOperations };
