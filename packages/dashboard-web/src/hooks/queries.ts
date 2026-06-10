@@ -5,6 +5,7 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
+import { eventLoopTone } from "../lib/event-loop";
 import { queryKeys } from "../lib/query-keys";
 import type { RequestQueryParams } from "../lib/request-filters";
 
@@ -94,11 +95,17 @@ export const useSystemStatus = (refetchInterval?: number) => {
 		queryFn: () => api.getSystemStatus(),
 		// Short staleness: uptime/RSS are live signals the tile re-renders often.
 		staleTime: 5_000,
-		// Poll every 10s when healthy; tighten to 5s while degraded/unhealthy so
-		// the dashboard reflects recovery (or further trouble) promptly.
+		// Poll every 10s when healthy; tighten to 5s while degraded/unhealthy —
+		// or while the event loop is lagging (its tone isn't part of the server
+		// rollup) — so the dashboard reflects recovery (or further trouble)
+		// promptly.
 		refetchInterval: (query) => {
 			if (refetchInterval !== undefined) return refetchInterval;
-			return query.state.data?.status === "ok" ? 10_000 : 5_000;
+			const data = query.state.data;
+			const healthy =
+				data?.status === "ok" &&
+				eventLoopTone(data.eventLoop?.maxRecentLagMs) === "ok";
+			return healthy ? 10_000 : 5_000;
 		},
 		refetchIntervalInBackground: false,
 	});
