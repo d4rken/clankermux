@@ -719,7 +719,7 @@ export function RequestsTab() {
 								>
 									{/* Row 1 "where": single line, never wraps — time, status,
 									    method, unusual endpoint, account, retries, timing, id */}
-									<div className="flex items-center gap-2 p-3">
+									<div className="flex items-center gap-2 px-3 py-1.5">
 										<button
 											type="button"
 											className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
@@ -788,6 +788,7 @@ export function RequestsTab() {
 											<Button
 												variant="ghost"
 												size="icon"
+												className="h-7 w-7"
 												onClick={() => setModalRequest(request)}
 												title="View Details"
 											>
@@ -796,6 +797,7 @@ export function RequestsTab() {
 											<CopyButton
 												variant="ghost"
 												size="icon"
+												className="h-7 w-7"
 												title="Copy as JSON"
 												getValueAsync={async () => {
 													const full = request.meta.bodiesOmitted
@@ -833,7 +835,7 @@ export function RequestsTab() {
 									{(summary?.apiKeyName ||
 										summary?.project ||
 										summary?.comboName) && (
-										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
+										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5 pl-9 text-xs">
 											{summary?.apiKeyName && (
 												<Badge variant="outline" className="text-xs">
 													<Key className="h-3 w-3 mr-1" />
