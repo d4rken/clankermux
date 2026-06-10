@@ -29,6 +29,7 @@ export const queryKeys = {
 		[...queryKeys.all, "requests", "filtered", params] as const,
 	requestsCount: (params: unknown) =>
 		[...queryKeys.all, "requests", "count", params] as const,
+	requestProjects: () => [...queryKeys.all, "requests", "projects"] as const,
 	logs: () => [...queryKeys.all, "logs"] as const,
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,
