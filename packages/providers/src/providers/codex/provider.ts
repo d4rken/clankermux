@@ -34,7 +34,12 @@ export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
 export const CODEX_VERSION = "0.133.0";
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
-export const CODEX_PING_MODEL = "gpt-5-codex";
+// Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
+// CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
+// silently breaks usage sampling ("Codex returned no usage headers (status
+// 400)"). gpt-5-codex was retired and caused exactly that — keep this pinned to
+// the cheapest currently-served model.
+export const CODEX_PING_MODEL = "gpt-5.4-mini";
 
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
@@ -407,7 +412,7 @@ export class CodexProvider extends BaseProvider {
 			const isSseLike = trimmed.startsWith("event:");
 
 			if (isSseLike) {
-				log.warn(
+				log.debug(
 					`Codex returned successful response without SSE content-type (${contentType ?? "<missing>"}); transforming as ${requestedStream ? "SSE" : "JSON"}`,
 				);
 				const headers = sanitizeResponseHeaders(response.headers);

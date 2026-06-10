@@ -306,25 +306,26 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 
 describe("MODEL_CONTEXT_WINDOWS", () => {
 	test("contains expected models with positive window sizes", () => {
-		expect(MODEL_CONTEXT_WINDOWS["gpt-5.5"]).toBe(400_000);
-		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex"]).toBe(200_000);
-		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(200_000);
-		expect(MODEL_CONTEXT_WINDOWS["gpt-5-codex"]).toBe(400_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.5"]).toBe(272_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBe(272_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(272_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex-spark"]).toBe(128_000);
 	});
 
-	test("omits experimental/compaction models", () => {
-		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBeUndefined();
+	test("omits retired and experimental/compaction models", () => {
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5-codex"]).toBeUndefined();
+		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex"]).toBeUndefined();
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.2-codex"]).toBeUndefined();
 	});
 });
 
 describe("resolveModelContextWindow", () => {
 	test("returns window for known model", () => {
-		expect(resolveModelContextWindow("gpt-5.5")).toBe(400_000);
+		expect(resolveModelContextWindow("gpt-5.5")).toBe(272_000);
 	});
 
 	test("returns undefined for unknown model", () => {
-		expect(resolveModelContextWindow("gpt-5.4")).toBeUndefined();
+		expect(resolveModelContextWindow("gpt-5.2-codex")).toBeUndefined();
 		expect(resolveModelContextWindow("unknown-model")).toBeUndefined();
 	});
 });
@@ -382,11 +383,11 @@ describe("estimateRequestTokens", () => {
 
 describe("codexAccountFitsRequest", () => {
 	test("returns true when estimate is under window * SAFETY_MARGIN", () => {
-		// gpt-5.5: 400K * 0.85 = 340K → floor = 340000
+		// gpt-5.5: 272K * 0.85 = 231.2K → floor = 231200
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 340_000)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 231_200)).toBe(
 			true,
 		);
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
@@ -398,8 +399,8 @@ describe("codexAccountFitsRequest", () => {
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
-		// 400K * 0.85 = 340000
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 340_001)).toBe(
+		// 272K * 0.85 = 231200
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 231_201)).toBe(
 			false,
 		);
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 500_000)).toBe(
@@ -408,9 +409,9 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("returns true for unknown model (no false exclusion)", () => {
-		// gpt-5.4 is intentionally omitted from the table
+		// gpt-5.2-codex is intentionally omitted from the table
 		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.4" }),
+			model_mappings: JSON.stringify({ opus: "gpt-5.2-codex" }),
 		});
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
 			true,
@@ -418,22 +419,22 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("respects stored model mapping over defaults", () => {
-		// Stored mapping: opus→gpt-5.3-codex (200K window)
+		// Stored mapping: opus→gpt-5.3-codex-spark (128K window)
 		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex" }),
+			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
 		});
-		// 200K * 0.85 = 170000
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 170_000)).toBe(
+		// 128K * 0.85 = 108800
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 108_800)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 170_001)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 108_801)).toBe(
 			false,
 		);
 	});
 
 	test("resolves the family default Codex model when no stored mapping exists", () => {
 		// No account mapping → opus resolves to the gpt-5.5 family default
-		// (400K window, threshold 340K), matching what the provider actually
+		// (272K window, threshold 231200), matching what the provider actually
 		// sends, so an oversized request is correctly excluded (not "fits").
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
@@ -445,16 +446,16 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-5.5 default (400K, threshold 340K).
+		// fable → gpt-5.5 default (272K, threshold 231200).
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 340_000)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 231_200)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 340_001)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 231_201)).toBe(
 			false,
 		);
 		// mythos resolves to the same fable family default.
-		expect(codexAccountFitsRequest(account, "claude-mythos-5", 340_001)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-mythos-5", 231_201)).toBe(
 			false,
 		);
 	});
@@ -463,10 +464,10 @@ describe("codexAccountFitsRequest", () => {
 describe("resolveCodexTargetModel", () => {
 	test("prefers an explicit account mapping over the family default", () => {
 		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex" }),
+			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
 		});
 		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe(
-			"gpt-5.3-codex",
+			"gpt-5.3-codex-spark",
 		);
 	});
 
@@ -474,7 +475,7 @@ describe("resolveCodexTargetModel", () => {
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe("gpt-5.5");
 		expect(resolveCodexTargetModel("claude-sonnet-4-5", account)).toBe(
-			"gpt-5.3-codex",
+			"gpt-5.4",
 		);
 		expect(resolveCodexTargetModel("claude-haiku-4-5", account)).toBe(
 			"gpt-5.4-mini",
@@ -485,15 +486,15 @@ describe("resolveCodexTargetModel", () => {
 
 	test("returns a non-Claude model with no mapping unchanged", () => {
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(resolveCodexTargetModel("gpt-5.3-codex", account)).toBe(
-			"gpt-5.3-codex",
+		expect(resolveCodexTargetModel("gpt-5.3-codex-spark", account)).toBe(
+			"gpt-5.3-codex-spark",
 		);
 	});
 
 	test("DEFAULT_CODEX_MODEL_BY_FAMILY covers every family", () => {
 		expect(DEFAULT_CODEX_MODEL_BY_FAMILY).toEqual({
 			opus: "gpt-5.5",
-			sonnet: "gpt-5.3-codex",
+			sonnet: "gpt-5.4",
 			haiku: "gpt-5.4-mini",
 			fable: "gpt-5.5",
 		});
@@ -504,11 +505,11 @@ describe("resolveCodexTargetModel", () => {
 	});
 
 	test("boundary: exactly at floor(window * SAFETY_MARGIN) is accepted", () => {
-		// gpt-5.3-codex: 200K * 0.85 = 170000 exactly
+		// gpt-5.3-codex-spark: 128K * 0.85 = 108800 exactly
 		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
 		});
-		const boundary = Math.floor(200_000 * SAFETY_MARGIN);
+		const boundary = Math.floor(128_000 * SAFETY_MARGIN);
 		expect(
 			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary),
 		).toBe(true);

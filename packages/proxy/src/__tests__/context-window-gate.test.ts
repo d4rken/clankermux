@@ -120,7 +120,7 @@ function makeSmallRequest(): Request {
 
 describe("context-window gate", () => {
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
-		// gpt-5.5 window = 400K, threshold = floor(400K * 0.85) = 340000
+		// gpt-5.5 window = 272K, threshold = floor(272K * 0.85) = 231200
 		const codexAccount = makeAccount({
 			id: "codex-me",
 			name: "Codex-me",
@@ -129,7 +129,7 @@ describe("context-window gate", () => {
 		});
 
 		const ctx = makeContext([codexAccount]);
-		// Request estimated above 340K tokens
+		// Request estimated above the 231200 threshold
 		const req = makeLargeRequest(350_000);
 		const response = await callHandleProxy(
 			req,
@@ -149,8 +149,8 @@ describe("context-window gate", () => {
 	});
 
 	it("gates a default-config codex account (no model_mappings) on its family-default window", async () => {
-		// No model_mappings → opus resolves to the gpt-5.5 family default (400K,
-		// threshold 340K), matching what the provider actually sends. An oversized
+		// No model_mappings → opus resolves to the gpt-5.5 family default (272K,
+		// threshold 231200), matching what the provider actually sends. An oversized
 		// request must be excluded by the gate rather than slipping through.
 		const codexAccount = makeAccount({
 			id: "codex-default",
@@ -298,9 +298,9 @@ describe("context-window gate", () => {
 	});
 
 	it("gates a combo-routed codex account on the slot's model override (not the family default)", async () => {
-		// Account default mapping: opus→gpt-5.5 (400K, threshold 340K).
-		// Combo slot overrides model to gpt-5.3-codex (200K, threshold 170K).
-		// A request estimated between 170K and 340K passes the family-default
+		// Account default mapping: opus→gpt-5.5 (272K, threshold 231200).
+		// Combo slot overrides model to gpt-5.3-codex-spark (128K, threshold 108800).
+		// A request estimated between 108800 and 231200 passes the family-default
 		// gate but must be excluded by the combo slot's smaller-window model.
 		const codexAccount = makeAccount({
 			id: "codex-combo",
@@ -310,7 +310,7 @@ describe("context-window gate", () => {
 		});
 
 		const ctx = makeContext([codexAccount]);
-		// Combo returns one slot overriding the model to gpt-5.3-codex
+		// Combo returns one slot overriding the model to gpt-5.3-codex-spark
 		(
 			ctx.dbOps as unknown as {
 				getActiveComboForFamily: ReturnType<typeof mock>;
@@ -320,33 +320,33 @@ describe("context-window gate", () => {
 			slots: [
 				{
 					account_id: "codex-combo",
-					model: "gpt-5.3-codex",
+					model: "gpt-5.3-codex-spark",
 					enabled: true,
 				},
 			],
 		}));
 
-		// Estimate ~250K (above 170K threshold for gpt-5.3-codex,
-		// below 340K threshold for gpt-5.5)
-		const req = makeLargeRequest(250_000);
+		// Estimate ~150K (above 108800 threshold for gpt-5.3-codex-spark,
+		// below 231200 threshold for gpt-5.5)
+		const req = makeLargeRequest(150_000);
 		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);
 
-		// The combo slot's gpt-5.3-codex (200K) excludes the account → 400
+		// The combo slot's gpt-5.3-codex-spark (128K) excludes the account → 400
 		expect(response.status).toBe(400);
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
-		expect(error.message as string).toContain("gpt-5.3-codex");
+		expect(error.message as string).toContain("gpt-5.3-codex-spark");
 		const excluded = error.excluded_backends as Array<Record<string, unknown>>;
-		expect(excluded[0]?.model).toBe("gpt-5.3-codex");
+		expect(excluded[0]?.model).toBe("gpt-5.3-codex-spark");
 	});
 
 	it("does not gate a codex account when request is small enough", async () => {
-		// gpt-5.5 window = 400K, threshold = 340000
+		// gpt-5.5 window = 272K, threshold = 231200
 		// A small request passes the gate, then attempts to proxy and fails
 		// downstream (no real backend) — that's expected. The point is that
 		// we never see a 400 context_window_exceeded from the gate.

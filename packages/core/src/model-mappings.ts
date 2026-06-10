@@ -378,17 +378,22 @@ export function validateAndSanitizeModelMappings(
 
 /**
  * Codex (ChatGPT-auth) context windows. These are the CODEX caps, not the
- * API-key caps. gpt-5.5 is 1.05M via raw API-key but only 400K via
- * Codex/ChatGPT-auth (confirmed documented hard cap, not a bug).
+ * API-key caps. Source of truth: the codex-cli models cache
+ * (~/.codex/models_cache.json, fetched 2026-06-09 by codex 0.136) —
+ * `context_window` per slug. The previous 400K figure for gpt-5.5 was stale;
+ * the cache reports 272K. gpt-5.4's 1M `max_context_window` is the
+ * client-gated experimental tier, NOT reachable via the proxy — use 272K.
+ * Retired slugs (gpt-5-codex, gpt-5.3-codex) are no longer served and were
+ * removed.
  *
- * Omitted models (gpt-5.4, gpt-5.2-codex, compaction models) are treated as
+ * Omitted models (compaction/internal models) are treated as
  * "unknown → fits, never gated" — no false exclusion.
  */
 export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-	"gpt-5.5": 400_000,
-	"gpt-5.3-codex": 200_000,
-	"gpt-5.4-mini": 200_000,
-	"gpt-5-codex": 400_000,
+	"gpt-5.5": 272_000,
+	"gpt-5.4": 272_000,
+	"gpt-5.4-mini": 272_000,
+	"gpt-5.3-codex-spark": 128_000,
 };
 
 /** Fraction of window we actually admit — conservative guard band. */
@@ -431,7 +436,7 @@ export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	string
 > = {
 	opus: "gpt-5.5",
-	sonnet: "gpt-5.3-codex",
+	sonnet: "gpt-5.4",
 	haiku: "gpt-5.4-mini",
 	// Fable/Mythos are above Opus — route to the top Codex tier (same as opus).
 	fable: "gpt-5.5",
