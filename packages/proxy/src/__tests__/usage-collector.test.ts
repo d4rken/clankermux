@@ -790,6 +790,27 @@ describe("usage-collector", () => {
 			expect(state.providerReportedOutput).toBe(false);
 			expect(state.providerFinalOutputTokens).toBeUndefined();
 		});
+
+		it("does not attribute a post-truncation data line to a stale event type", () => {
+			const state = createUsageState();
+			// A complete event line sets currentEvent, then its data line runs away
+			// past the cap → discarded + skip armed. The event context is lost with
+			// it: we can't know what (if anything) the discarded line changed it to.
+			const head = enc.encode("event: message_delta\ndata: {");
+			const filler = enc.encode("z".repeat(MAX_SSE_LINE_BYTES));
+			feedChunk(state, new Uint8Array([...head, ...filler]), 1000);
+
+			// After resync, a data line with NO type field arrives without a fresh
+			// event: line. It must NOT inherit the stale message_delta type — the
+			// usage payload here is a message_start-style placeholder that
+			// message_delta dispatch would wrongly trust as a final output count.
+			const recovery = enc.encode(
+				`\ndata: ${JSON.stringify({ usage: { output_tokens: 999 } })}\n\n`,
+			);
+			feedChunk(state, recovery, 1010);
+			expect(state.providerReportedOutput).toBe(false);
+			expect(state.providerFinalOutputTokens).toBeUndefined();
+		});
 	});
 
 	describe("top-level usage/model on message_start (S6)", () => {

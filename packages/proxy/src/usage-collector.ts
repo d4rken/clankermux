@@ -383,6 +383,10 @@ export function feedChunk(
 	if (state.lineBuffer.length > MAX_SSE_LINE_BYTES) {
 		state.lineBuffer = "";
 		state.skippingOverlongLine = true;
+		// Event context is lost with the discarded line — it may have been a
+		// partial `event:` line, so a later `data:` line without a fresh `event:`
+		// must not inherit the stale type and miscount tokens.
+		state.currentEvent = undefined;
 	}
 }
 
