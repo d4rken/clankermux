@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
 import type { Account, RequestPayload, RequestResponse } from "../api";
 import { queryKeys } from "../lib/query-keys";
+import { handleStreamError, MAX_RETRIES } from "../lib/stream-error";
 import { toDetailsMap } from "./queries";
 
 // Connection pool management
@@ -18,7 +19,6 @@ const CONNECTION_POOL = new Map<
 // Cleanup inactive connections periodically
 const CLEANUP_INTERVAL = 30000; // 30 seconds
 const CONNECTION_TIMEOUT = 60000; // 1 minute
-const MAX_RETRIES = 10;
 const HEARTBEAT_INTERVAL = 15000; // 15 seconds
 
 // Global cleanup for connection pool
@@ -59,21 +59,31 @@ export function useRequestStream(limit = 200, enabled = true) {
 	const queryClient = useQueryClient();
 	const connectionKey = `requests-stream-${limit}`;
 	const isMountedRef = useRef(true);
+	// Retry attempts for the current connection generation; reset to 0 on a
+	// successful `open` so intermittent disconnects over a long session don't
+	// permanently exhaust MAX_RETRIES.
+	const retryCountRef = useRef(0);
 
-	// Heartbeat to keep connection alive and detect dead connections
+	// Watchdog that sweeps leftover dead pool entries.
+	//
+	// Invariant: connections die either via a network/server error — which
+	// fires our `error` handler, and that handler closes the EventSource,
+	// removes the pool entry, clears this watchdog, and schedules the
+	// reconnect itself — or via our own close() calls (pool eviction, app
+	// shutdown), which also remove the entry. The only way a CLOSED connection
+	// can linger in the pool is the unmounted-before-open path, where no
+	// reconnect is wanted. So this watchdog is pure cleanup.
+	//
+	// CONNECTING is deliberately NOT treated as dead: with fully-manual
+	// reconnects (we always close() on error) the only CONNECTING state left
+	// is a slow initial connect, which must not be killed.
 	const setupHeartbeat = useCallback((es: EventSource, key: string) => {
 		return setInterval(() => {
-			if (
-				es.readyState === EventSource.CLOSED ||
-				es.readyState === EventSource.CONNECTING
-			) {
-				console.log(`Connection ${key} is not ready, cleaning up`);
-				const pooled = CONNECTION_POOL.get(key);
-				if (pooled) {
-					clearInterval(pooled.heartbeat);
-					CONNECTION_POOL.delete(key);
-				}
-				es.close();
+			const pooled = CONNECTION_POOL.get(key);
+			if (pooled?.connection === es && es.readyState === EventSource.CLOSED) {
+				console.log(`Connection ${key} is closed, cleaning up pool entry`);
+				clearInterval(pooled.heartbeat);
+				CONNECTION_POOL.delete(key);
 			}
 		}, HEARTBEAT_INTERVAL);
 	}, []);
@@ -259,6 +269,7 @@ export function useRequestStream(limit = 200, enabled = true) {
 			}
 
 			console.log(`Creating new SSE connection: ${connectionKey}`);
+			retryCountRef.current = retryCount;
 			const es = new EventSource("/api/requests/stream");
 
 			// Setup event handlers
@@ -267,6 +278,8 @@ export function useRequestStream(limit = 200, enabled = true) {
 					es.close();
 					return;
 				}
+				// A successful open resets the backoff for future disconnects.
+				retryCountRef.current = 0;
 				console.log(`SSE connection established: ${connectionKey}`);
 			});
 
@@ -275,26 +288,22 @@ export function useRequestStream(limit = 200, enabled = true) {
 			es.addEventListener("error", (error) => {
 				console.error(`SSE connection error (${connectionKey}):`, error);
 
-				// Remove from pool
-				const pooled = CONNECTION_POOL.get(connectionKey);
-				if (pooled) {
-					clearInterval(pooled.heartbeat);
-					CONNECTION_POOL.delete(connectionKey);
-				}
+				const outcome = handleStreamError(es, CONNECTION_POOL, connectionKey, {
+					mounted: isMountedRef.current,
+					retryCount: retryCountRef.current,
+					scheduleReconnect: (nextRetryCount, delay) => {
+						console.log(
+							`Reconnecting ${connectionKey} in ${delay}ms (attempt ${nextRetryCount}/${MAX_RETRIES})`,
+						);
+						setTimeout(() => {
+							if (isMountedRef.current) {
+								connect(nextRetryCount);
+							}
+						}, delay);
+					},
+				});
 
-				// Only reconnect if component is still mounted and we haven't exceeded max retries
-				if (isMountedRef.current && retryCount < MAX_RETRIES) {
-					const delay = Math.min(1000 * 2 ** retryCount, 30000);
-					console.log(
-						`Reconnecting ${connectionKey} in ${delay}ms (attempt ${retryCount + 1}/${MAX_RETRIES})`,
-					);
-
-					setTimeout(() => {
-						if (isMountedRef.current) {
-							connect(retryCount + 1);
-						}
-					}, delay);
-				} else if (retryCount >= MAX_RETRIES) {
+				if (outcome === "gave-up") {
 					console.error(`Max retries reached for ${connectionKey}, giving up`);
 				}
 			});
