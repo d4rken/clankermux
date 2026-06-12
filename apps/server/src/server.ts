@@ -354,6 +354,46 @@ function startUsagePollingWithRefresh(
 							),
 						);
 				},
+				(accountId) => {
+					// Usage endpoint reports the subscription/seat is gone (403
+					// permission_error). Auto-pause so the router stops selecting and
+					// retrying a dead account. Guarded: never overwrites an existing
+					// pause (e.g. a manual one).
+					proxyContext.dbOps
+						.pauseAccountIfActive(accountId, "subscription_expired")
+						.then((pausedNow) => {
+							if (pausedNow) {
+								logger.warn(
+									`Auto-paused account ${account.name} (${accountId}): subscription expired (usage endpoint returned 403 permission_error)`,
+								);
+							}
+						})
+						.catch((err) =>
+							logger.warn(
+								`Failed to auto-pause account ${accountId} on expired subscription: ${err}`,
+							),
+						);
+				},
+				(accountId) => {
+					// Usage fetch works again (fired on the failure→success transition
+					// and on the first success after a restart). Lift a
+					// subscription_expired pause — the seat is back after renewal.
+					// Guarded: only that exact pause reason is resumed.
+					proxyContext.dbOps
+						.resumeAccountIfPausedWithReason(accountId, "subscription_expired")
+						.then((resumedNow) => {
+							if (resumedNow) {
+								logger.info(
+									`Auto-resumed account ${account.name} (${accountId}): usage endpoint reachable again after subscription renewal`,
+								);
+							}
+						})
+						.catch((err) =>
+							logger.warn(
+								`Failed to auto-resume account ${accountId} after subscription renewal: ${err}`,
+							),
+						);
+				},
 			);
 
 			// Reset retry count on success

@@ -213,4 +213,131 @@ describe("RateLimitProgress", () => {
 		expect(html).not.toContain("Until");
 		expect(html).toContain("Less than 1 minute");
 	});
+
+	describe("fallback rate-limit window reset label", () => {
+		it("includes the date when the reset is days away (window unknown)", () => {
+			const reset = new Date(Date.now() + 4 * 24 * 60 * 60 * 1000);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset.toISOString()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			const expectedDate = reset.toLocaleString(undefined, {
+				month: "short",
+				day: "numeric",
+				hour: "2-digit",
+				minute: "2-digit",
+			});
+			expect(html).toContain("Rate limit window");
+			expect(html).toContain(`Resets ${expectedDate} (local)`);
+		});
+
+		it("keeps the time-only label when the reset is later today", () => {
+			// 1 minute out is on the same local day in any timezone except at the
+			// stroke of midnight; accept either format at that boundary.
+			const reset = new Date(Date.now() + 60 * 1000);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset.toISOString()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			const timeOnly = reset.toLocaleTimeString(undefined, {
+				hour: "2-digit",
+				minute: "2-digit",
+			});
+			const withDate = reset.toLocaleString(undefined, {
+				month: "short",
+				day: "numeric",
+				hour: "2-digit",
+				minute: "2-digit",
+			});
+			const sameDay = new Date().getDate() === reset.getDate();
+			expect(html).toContain(
+				sameDay ? `Resets ${timeOnly} (local)` : `Resets ${withDate} (local)`,
+			);
+		});
+	});
+
+	describe("stale usage fallback", () => {
+		const staleUsage = () => {
+			const reset = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+			const asOf = new Date(Date.now() - 2 * 60 * 60 * 1000);
+			return {
+				info: {
+					sevenDayUtilization: 85,
+					sevenDayResetIso: reset.toISOString(),
+					asOfIso: asOf.toISOString(),
+				},
+				reset,
+				asOf,
+			};
+		};
+
+		it("renders the last-known weekly window with reset date when live data is gone", () => {
+			const { info, reset } = staleUsage();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset.toISOString()}
+					usageData={null}
+					staleUsage={info}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			const expectedDate = reset.toLocaleString(undefined, {
+				month: "short",
+				day: "numeric",
+				hour: "2-digit",
+				minute: "2-digit",
+			});
+			expect(html).toContain("Usage (Weekly): last known as of");
+			expect(html).toContain("85%");
+			expect(html).toContain(`Resets ${expectedDate} (local)`);
+			expect(html).toContain(
+				"Live usage unavailable — showing last known data",
+			);
+		});
+
+		it("renders even when there is no rate-limit reset at all", () => {
+			const { info } = staleUsage();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageData={null}
+					staleUsage={info}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("Usage (Weekly): last known as of");
+		});
+
+		it("prefers live usage data over the stale snapshot", () => {
+			const { info } = staleUsage();
+			const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future}
+					usageData={{
+						five_hour: { utilization: 10, resets_at: future },
+						seven_day: { utilization: 42, resets_at: future },
+					}}
+					staleUsage={info}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).not.toContain("last known as of");
+			expect(html).toContain("42%");
+		});
+	});
 });

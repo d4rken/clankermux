@@ -1,5 +1,5 @@
 import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
-import type { FullUsageData } from "@clankermux/types";
+import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
 import { useEffect, useState } from "react";
 import { hasAnthropicSecondaryWindow } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
@@ -14,6 +14,7 @@ interface RateLimitProgressProps {
 	usageUtilization?: number | null; // Actual utilization from API (0-100)
 	usageWindow?: string | null; // Window name (e.g., "five_hour")
 	usageData?: FullUsageData | null; // Full usage data from API
+	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	usageRateLimitedUntil?: number | null; // Timestamp (ms) until usage API 429 clears
 	usageThrottledUntil?: number | null; // Timestamp (ms) until proactive usage throttling clears
 	usageThrottledWindows?: string[]; // Exact usage windows currently being throttled
@@ -158,9 +159,27 @@ function shouldShowResetDate(window: string | null): boolean {
 	);
 }
 
-function formatResetText(resetTime: string, window: string | null): string {
+function isSameLocalDay(a: Date, b: Date): boolean {
+	return (
+		a.getFullYear() === b.getFullYear() &&
+		a.getMonth() === b.getMonth() &&
+		a.getDate() === b.getDate()
+	);
+}
+
+function formatResetText(
+	resetTime: string,
+	window: string | null,
+	now: number,
+): string {
 	const resetDate = new Date(resetTime);
-	if (shouldShowResetDate(window)) {
+	// A bare time-of-day is misleading for any reset that isn't today (e.g. the
+	// fallback "Rate limit window" can carry a weekly reset days away), so the
+	// date is included whenever the reset falls on a different local day.
+	if (
+		shouldShowResetDate(window) ||
+		!isSameLocalDay(resetDate, new Date(now))
+	) {
 		return `Resets ${resetDate.toLocaleString(undefined, {
 			month: "short",
 			day: "numeric",
@@ -172,6 +191,22 @@ function formatResetText(resetTime: string, window: string | null): string {
 		hour: "2-digit",
 		minute: "2-digit",
 	})} (local)`;
+}
+
+function formatAsOfText(asOfIso: string, now: number): string {
+	const asOfDate = new Date(asOfIso);
+	if (isSameLocalDay(asOfDate, new Date(now))) {
+		return asOfDate.toLocaleTimeString(undefined, {
+			hour: "2-digit",
+			minute: "2-digit",
+		});
+	}
+	return asOfDate.toLocaleString(undefined, {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
 }
 
 function formatRefreshText(windowTimeText: string): string {
@@ -191,6 +226,7 @@ export function RateLimitProgress({
 	usageUtilization,
 	usageWindow,
 	usageData,
+	staleUsage,
 	usageRateLimitedUntil,
 	usageThrottledUntil,
 	usageThrottledWindows = [],
@@ -214,7 +250,8 @@ export function RateLimitProgress({
 
 	// Allow null resetIso for providers that show usage data (e.g. PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
-	if (!resetIso && !usageData && !usageRateLimitedUntil) return null;
+	if (!resetIso && !usageData && !staleUsage && !usageRateLimitedUntil)
+		return null;
 
 	// Show explicit rate-limited state when the Anthropic usage API returned 429
 	// and we have no cached data to show.
@@ -237,6 +274,36 @@ export function RateLimitProgress({
 					<span className="text-xs text-muted-foreground">
 						Retry after {retryTimeText}
 					</span>
+				</div>
+			</div>
+		);
+	}
+
+	// Live usage data is gone (e.g. usage polling fails because the
+	// subscription lapsed, so the cache evicted) but a persisted snapshot still
+	// knows the weekly state. Show only the weekly window: a stale 5-hour
+	// reading is meaningless minutes after polling stops, while the weekly
+	// utilization and its reset date stay relevant for days.
+	if (!usageData && staleUsage) {
+		return (
+			<div className={cn(USAGE_BOX_CLASS, "space-y-2", className)}>
+				<div className="space-y-1.5">
+					<Progress value={staleUsage.sevenDayUtilization} className="h-2" />
+					<div className="flex items-center justify-between gap-2 text-xs">
+						<span className="text-muted-foreground">
+							Usage (Weekly): last known as of{" "}
+							{formatAsOfText(staleUsage.asOfIso, now)}
+						</span>
+						<span className="font-medium text-muted-foreground">
+							{staleUsage.sevenDayUtilization.toFixed(0)}%
+						</span>
+						<span className="text-right text-muted-foreground">
+							{formatResetText(staleUsage.sevenDayResetIso, "seven_day", now)}
+						</span>
+					</div>
+					<p className="text-xs text-amber-600 dark:text-amber-400">
+						Live usage unavailable — showing last known data
+					</p>
 				</div>
 			</div>
 		);
@@ -539,7 +606,7 @@ export function RateLimitProgress({
 				let rightStatus = "";
 				if (usage.resetTime) {
 					leftStatus = formatRefreshText(windowTimeText);
-					rightStatus = formatResetText(usage.resetTime, usage.window);
+					rightStatus = formatResetText(usage.resetTime, usage.window, now);
 				} else if (
 					usage.window === "seven_day" ||
 					usage.window === "seven_day_opus" ||

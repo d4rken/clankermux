@@ -874,8 +874,24 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.pause(accountId, reason);
 	}
 
+	/** Pause only if currently active; returns true when this call paused it. */
+	async pauseAccountIfActive(
+		accountId: string,
+		reason: string,
+	): Promise<boolean> {
+		return this.accounts.pauseIfActive(accountId, reason);
+	}
+
 	async resumeAccount(accountId: string): Promise<void> {
 		await this.accounts.resume(accountId);
+	}
+
+	/** Resume only if paused with `reason`; returns true when this call resumed it. */
+	async resumeAccountIfPausedWithReason(
+		accountId: string,
+		reason: string,
+	): Promise<boolean> {
+		return this.accounts.resumeIfPausedWithReason(accountId, reason);
 	}
 
 	async renameAccount(accountId: string, newName: string): Promise<void> {
@@ -2075,6 +2091,16 @@ OAuth tokens will need to be re-authenticated.
 			() => this.usageSnapshots.getSnapshots(opts),
 			this.retryConfig,
 			"getUsageSnapshots",
+		);
+	}
+
+	async getLatestUsageSnapshots(
+		accountIds: string[],
+	): Promise<RankedSnapshot[]> {
+		return withDatabaseRetry(
+			() => this.usageSnapshots.getLatestSnapshots(accountIds),
+			this.retryConfig,
+			"getLatestUsageSnapshots",
 		);
 	}
 

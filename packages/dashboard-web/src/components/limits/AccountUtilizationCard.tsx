@@ -80,6 +80,7 @@ export function AccountUtilizationCard({
 									usageUtilization={account.usageUtilization}
 									usageWindow={account.usageWindow}
 									usageData={account.usageData}
+									staleUsage={account.staleUsage}
 									usageRateLimitedUntil={account.usageRateLimitedUntil}
 									usageThrottledUntil={account.usageThrottledUntil}
 									usageThrottledWindows={account.usageThrottledWindows}

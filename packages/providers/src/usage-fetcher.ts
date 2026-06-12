@@ -86,6 +86,32 @@ export function extractWindowResetTime(
 export interface UsageFetchResult {
 	data: UsageData | null;
 	retryAfterMs: number | null; // Set when server returns retry-after on 429
+	/**
+	 * Distinguishes failures that mean "this account's subscription/seat is
+	 * gone" from transient ones. Anthropic answers the usage endpoint with
+	 * 403 permission_error ("OAuth authentication is currently not allowed
+	 * for this organization.") once a subscription lapses.
+	 */
+	failureKind: "subscription_expired" | null;
+}
+
+/**
+ * Classify a non-OK usage-endpoint response. A 403 with an Anthropic
+ * permission_error body is the expired-subscription signature.
+ */
+export function classifyUsageFetchFailure(
+	status: number,
+	errorBody: string | null,
+): "subscription_expired" | null {
+	if (status !== 403 || !errorBody) return null;
+	try {
+		const parsed = JSON.parse(errorBody) as { error?: { type?: string } };
+		return parsed.error?.type === "permission_error"
+			? "subscription_expired"
+			: null;
+	} catch {
+		return null;
+	}
 }
 
 export async function fetchUsageData(
@@ -134,8 +160,9 @@ export async function fetchUsageData(
 				}
 			}
 
+			let errorBody: string | null = null;
 			try {
-				const errorBody = await response.text();
+				errorBody = await response.text();
 				log.error(
 					`Failed to fetch usage data: ${response.status} ${errorMessage}`,
 					{
@@ -159,11 +186,15 @@ export async function fetchUsageData(
 					},
 				);
 			}
-			return { data: null, retryAfterMs };
+			return {
+				data: null,
+				retryAfterMs,
+				failureKind: classifyUsageFetchFailure(response.status, errorBody),
+			};
 		}
 
 		const data = (await response.json()) as UsageData;
-		return { data, retryAfterMs: null };
+		return { data, retryAfterMs: null, failureKind: null };
 	} catch (error) {
 		// Ensure we have a proper error object for logging
 		const errorMessage =
@@ -174,7 +205,7 @@ export async function fetchUsageData(
 					: String(error);
 
 		log.error("Error fetching usage data:", errorMessage || "Unknown error");
-		return { data: null, retryAfterMs: null };
+		return { data: null, retryAfterMs: null, failureKind: null };
 	} finally {
 		clearTimeout(timeoutId);
 	}
@@ -413,6 +444,22 @@ class UsageCache {
 		string,
 		(accountId: string) => void
 	>();
+	// Accounts whose last usage fetch failed with the expired-subscription
+	// signature. Drives the once-per-transition subscriptionExpired /
+	// usageRecovered callbacks.
+	private subscriptionExpiredAccounts = new Set<string>();
+	private subscriptionExpiredCallbacks = new Map<
+		string,
+		(accountId: string) => void
+	>();
+	private usageRecoveredCallbacks = new Map<
+		string,
+		(accountId: string) => void
+	>();
+	// Accounts that have had at least one successful fetch this process. The
+	// first success also fires usageRecovered so a subscription_expired pause
+	// persisted before a restart can still be lifted once the seat is back.
+	private hasSucceededOnce = new Set<string>();
 	private inFlightFetches = new Map<
 		string,
 		Promise<{ success: boolean; retryAfterMs: number | null }>
@@ -494,6 +541,8 @@ class UsageCache {
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
 		onCapacityRestored?: (accountId: string) => void,
+		onSubscriptionExpired?: (accountId: string) => void,
+		onUsageRecovered?: (accountId: string) => void,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -538,6 +587,16 @@ class UsageCache {
 			this.capacityRestoredCallbacks.set(accountId, onCapacityRestored);
 		} else {
 			this.capacityRestoredCallbacks.delete(accountId);
+		}
+		if (onSubscriptionExpired) {
+			this.subscriptionExpiredCallbacks.set(accountId, onSubscriptionExpired);
+		} else {
+			this.subscriptionExpiredCallbacks.delete(accountId);
+		}
+		if (onUsageRecovered) {
+			this.usageRecoveredCallbacks.set(accountId, onUsageRecovered);
+		} else {
+			this.usageRecoveredCallbacks.delete(accountId);
 		}
 
 		// Default to 90s if not provided
@@ -602,6 +661,10 @@ class UsageCache {
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
+			this.subscriptionExpiredCallbacks.delete(accountId);
+			this.usageRecoveredCallbacks.delete(accountId);
+			this.subscriptionExpiredAccounts.delete(accountId);
+			this.hasSucceededOnce.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
 			this.usageRateLimitedUntil.delete(accountId);
@@ -741,6 +804,19 @@ class UsageCache {
 				// Default to Anthropic usage data
 				const result = await fetchUsageData(token);
 				if (result.data) {
+					// Subscription-expired recovery: fire usageRecovered on the
+					// failure→success transition, and also on the FIRST success of this
+					// process so a 'subscription_expired' pause persisted before a
+					// restart is lifted once the seat works again. The callback is
+					// expected to check the account's pause_reason and no-op otherwise.
+					const wasExpired = this.subscriptionExpiredAccounts.delete(accountId);
+					const firstSuccess = !this.hasSucceededOnce.has(accountId);
+					this.hasSucceededOnce.add(accountId);
+					if (wasExpired || firstSuccess) {
+						const recoveredCallback =
+							this.usageRecoveredCallbacks.get(accountId);
+						if (recoveredCallback) recoveredCallback(accountId);
+					}
 					// Snapshot before clearing — needed for the capacity-restored guard below.
 					const wasRateLimited = this.usageRateLimitedUntil.has(accountId);
 					this.usageRateLimitedUntil.delete(accountId);
@@ -783,6 +859,20 @@ class UsageCache {
 				} else if (result.retryAfterMs == null) {
 					// Non-429 failure: clear any stale rate-limit marker
 					this.usageRateLimitedUntil.delete(accountId);
+				}
+				// Subscription-expired detection: fire the callback once per
+				// transition into the expired state (not on every failing poll).
+				if (
+					result.failureKind === "subscription_expired" &&
+					!this.subscriptionExpiredAccounts.has(accountId)
+				) {
+					this.subscriptionExpiredAccounts.add(accountId);
+					log.warn(
+						`Usage endpoint reports expired subscription for account ${accountId}`,
+					);
+					const expiredCallback =
+						this.subscriptionExpiredCallbacks.get(accountId);
+					if (expiredCallback) expiredCallback(accountId);
 				}
 				return { success: false, retryAfterMs: result.retryAfterMs };
 			}

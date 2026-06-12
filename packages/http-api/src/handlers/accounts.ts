@@ -44,6 +44,7 @@ import type {
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
+	StaleUsageInfo,
 } from "@clankermux/types";
 import {
 	microsToUsd,
@@ -391,6 +392,32 @@ export function createAccountsListHandler(
 			)
 			.catch(() => new Map());
 
+		// Read the live usage cache exactly once per account: get() evicts
+		// entries past their TTL as a side effect, so a second read later in the
+		// request could see an entry the stale-candidate filter still saw —
+		// leaving that account with neither live data nor a snapshot fallback.
+		const liveUsageByAccount = new Map(
+			accounts.map((a) => [a.id, usageCache.get(a.id)]),
+		);
+
+		// Last-known usage fallback: for Anthropic accounts whose live usage
+		// cache is empty (e.g. polling fails after the subscription lapsed),
+		// serve the most recent persisted usage snapshot so the dashboard can
+		// still show the weekly utilization and its reset date.
+		const staleCandidateIds = accounts
+			.filter(
+				(a) =>
+					(a.provider || "anthropic") === "anthropic" &&
+					!liveUsageByAccount.get(a.id),
+			)
+			.map((a) => a.id);
+		const latestSnapshotByAccount = new Map(
+			(staleCandidateIds.length
+				? await dbOps.getLatestUsageSnapshots(staleCandidateIds).catch(() => [])
+				: []
+			).map((snapshot) => [snapshot.accountId, snapshot]),
+		);
+
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
 				const provider = account.provider || "anthropic";
@@ -410,7 +437,7 @@ export function createAccountsListHandler(
 				);
 
 				// Get usage data from cache for providers that expose account-page quota or credit data
-				const cachedUsageData = usageCache.get(account.id);
+				const cachedUsageData = liveUsageByAccount.get(account.id) ?? null;
 				let usageData: FullUsageData | null =
 					cachedUsageData as FullUsageData | null;
 				if (account.provider === "codex") {
@@ -509,6 +536,26 @@ export function createAccountsListHandler(
 					}
 				}
 
+				// Only the weekly window is recovered from a stale snapshot: a 5-hour
+				// reading is meaningless minutes after polling stops, while the weekly
+				// stays relevant until its reset. Skip if the weekly already rolled.
+				let staleUsage: StaleUsageInfo | null = null;
+				if (!fullUsageData) {
+					const snapshot = latestSnapshotByAccount.get(account.id);
+					if (
+						snapshot &&
+						snapshot.sevenDayPct != null &&
+						snapshot.sevenDayReset != null &&
+						snapshot.sevenDayReset > now
+					) {
+						staleUsage = {
+							sevenDayUtilization: snapshot.sevenDayPct,
+							sevenDayResetIso: new Date(snapshot.sevenDayReset).toISOString(),
+							asOfIso: new Date(snapshot.ts).toISOString(),
+						};
+					}
+				}
+
 				const usageThrottleSettings = {
 					fiveHourEnabled: config.getUsageThrottlingFiveHourEnabled(),
 					weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
@@ -576,6 +623,7 @@ export function createAccountsListHandler(
 						: null,
 					created: new Date(Number(account.created_at)).toISOString(),
 					paused: account.paused === 1,
+					pauseReason: account.pause_reason ?? null,
 					priority: Number(account.priority) || 0,
 					tokenStatus: account.token_valid ? "valid" : "expired",
 					tokenExpiresAt: account.expires_at
@@ -608,6 +656,7 @@ export function createAccountsListHandler(
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
+					staleUsage,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,
 					usageThrottledWindows,

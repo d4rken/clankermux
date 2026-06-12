@@ -168,6 +168,20 @@ export interface SessionStats {
 	apiCostUsd: number;
 }
 
+/**
+ * Last-known weekly usage recovered from the persisted `usage_snapshots`
+ * time-series, served when the live usage cache has nothing for an account
+ * (e.g. usage polling fails because the subscription lapsed). Only the weekly
+ * window is carried: a stale 5-hour reading is meaningless minutes after
+ * polling stops, while the weekly utilization/reset stays relevant for days.
+ */
+export interface StaleUsageInfo {
+	sevenDayUtilization: number;
+	sevenDayResetIso: string;
+	/** When the snapshot was sampled — the "as of" timestamp shown in the UI. */
+	asOfIso: string;
+}
+
 // API response type - what clients receive
 export interface AccountResponse {
 	id: string;
@@ -178,6 +192,8 @@ export interface AccountResponse {
 	lastUsed: string | null;
 	created: string;
 	paused: boolean;
+	/** Why the account is paused (e.g. "manual", "overage", "failure_threshold", "subscription_expired"); null when not paused or unknown. */
+	pauseReason?: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
 	rateLimitStatus: string;
@@ -197,6 +213,7 @@ export interface AccountResponse {
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
+	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled

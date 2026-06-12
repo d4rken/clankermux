@@ -389,3 +389,30 @@ describe("deriveAccountStatus — renewal", () => {
 		expect(status.renewalUrgency).toBe("past");
 	});
 });
+
+describe("deriveAccountStatus — subscription expired", () => {
+	it("flags isSubscriptionExpired when paused with pause_reason subscription_expired", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: true, pauseReason: "subscription_expired" }),
+			NOW,
+		);
+		expect(status.isPaused).toBe(true);
+		expect(status.isSubscriptionExpired).toBe(true);
+	});
+
+	it("does not flag manually paused accounts", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: true, pauseReason: "manual" }),
+			NOW,
+		);
+		expect(status.isSubscriptionExpired).toBe(false);
+	});
+
+	it("does not flag unpaused accounts even with a stale reason", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: false, pauseReason: "subscription_expired" }),
+			NOW,
+		);
+		expect(status.isSubscriptionExpired).toBe(false);
+	});
+});

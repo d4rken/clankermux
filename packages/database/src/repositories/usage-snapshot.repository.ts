@@ -97,6 +97,48 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	}
 
 	/**
+	 * Read the single most recent snapshot per account, for the given accounts.
+	 * Backs the dashboard's "last known usage" fallback when the live usage
+	 * cache has nothing (e.g. usage polling fails after a subscription lapses).
+	 */
+	async getLatestSnapshots(accountIds: string[]): Promise<RankedSnapshot[]> {
+		if (accountIds.length === 0) return [];
+		const placeholders = accountIds.map(() => "?").join(", ");
+		const rows = await this.query<{
+			account_id: string;
+			provider: string | null;
+			sampled_at: number;
+			five_hour_pct: number | null;
+			seven_day_pct: number | null;
+			five_hour_reset: number | null;
+			seven_day_reset: number | null;
+		}>(
+			`
+			WITH ranked AS (
+				SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY sampled_at DESC) AS rn
+				FROM usage_snapshots
+				WHERE account_id IN (${placeholders})
+			)
+			SELECT account_id, provider, sampled_at, five_hour_pct, seven_day_pct, five_hour_reset, seven_day_reset
+			FROM ranked WHERE rn = 1;
+		`,
+			accountIds,
+		);
+
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			provider: row.provider ?? null,
+			ts: Number(row.sampled_at),
+			fiveHourPct: row.five_hour_pct == null ? null : Number(row.five_hour_pct),
+			sevenDayPct: row.seven_day_pct == null ? null : Number(row.seven_day_pct),
+			fiveHourReset:
+				row.five_hour_reset == null ? null : Number(row.five_hour_reset),
+			sevenDayReset:
+				row.seven_day_reset == null ? null : Number(row.seven_day_reset),
+		}));
+	}
+
+	/**
 	 * Delete snapshots strictly older than `cutoffMs`. Returns rows deleted.
 	 * Volume is tiny (a handful of accounts × a sample tick), so a single
 	 * DELETE is sufficient — no batching needed.

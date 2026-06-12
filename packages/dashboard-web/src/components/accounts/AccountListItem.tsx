@@ -514,6 +514,7 @@ export function AccountListItem({
 			)}
 			{(account.rateLimitReset ||
 				account.usageData ||
+				account.staleUsage ||
 				account.usageRateLimitedUntil ||
 				providerShowsCreditsBalance(account.provider)) && (
 				<RateLimitProgress
@@ -521,6 +522,7 @@ export function AccountListItem({
 					usageUtilization={account.usageUtilization}
 					usageWindow={account.usageWindow}
 					usageData={account.usageData}
+					staleUsage={account.staleUsage}
 					usageRateLimitedUntil={account.usageRateLimitedUntil}
 					usageThrottledUntil={account.usageThrottledUntil}
 					usageThrottledWindows={account.usageThrottledWindows}
