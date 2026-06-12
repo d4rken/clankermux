@@ -181,11 +181,41 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
+	/**
+	 * Pause only if the account is currently active. Used by automated pausing
+	 * (e.g. expired-subscription detection) so it never overwrites the reason
+	 * on an account the user (or another guard) already paused. Returns true
+	 * when the account was actually paused by this call.
+	 */
+	async pauseIfActive(accountId: string, reason: string): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET paused = 1, pause_reason = ? WHERE id = ? AND COALESCE(paused, 0) = 0`,
+			[reason, accountId],
+		);
+		return changes > 0;
+	}
+
 	async resume(accountId: string): Promise<void> {
 		await this.run(
 			`UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ?`,
 			[accountId],
 		);
+	}
+
+	/**
+	 * Resume only if the account is paused with the given reason. Used by the
+	 * automated subscription-renewal resume so it never lifts a manual pause.
+	 * Returns true when the account was actually resumed by this call.
+	 */
+	async resumeIfPausedWithReason(
+		accountId: string,
+		reason: string,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ? AND paused = 1 AND pause_reason = ?`,
+			[accountId, reason],
+		);
+		return changes > 0;
 	}
 
 	async resetSession(accountId: string, timestamp: number): Promise<void> {

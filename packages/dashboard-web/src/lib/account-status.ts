@@ -32,6 +32,8 @@ export interface AccountStatus {
 	isRateLimited: boolean;
 	/** Account is paused. */
 	isPaused: boolean;
+	/** Auto-paused because the provider reports the subscription lapsed. */
+	isSubscriptionExpired: boolean;
 	/** Unified rate-limit status string, e.g. "rate_limited (30m)" or "OK". */
 	rateLimitStatus: string;
 	/** Whether to render the colored RateLimitStatusChip (non-paused, non-OK). */
@@ -74,6 +76,8 @@ export function deriveAccountStatus(
 ): AccountStatus {
 	const presenter = new AccountPresenter(account);
 	const isPaused = presenter.isPaused;
+	const isSubscriptionExpired =
+		isPaused && account.pauseReason === "subscription_expired";
 	const rateLimitStatus = presenter.rateLimitStatus;
 
 	const isHardLimited = HARD_LIMIT_PREFIXES.some((prefix) =>
@@ -128,6 +132,7 @@ export function deriveAccountStatus(
 		hasRefreshToken: account.hasRefreshToken,
 		isRateLimited: presenter.isRateLimited,
 		isPaused,
+		isSubscriptionExpired,
 		rateLimitStatus,
 		showRateLimitChip: !isPaused && rateLimitStatus !== "OK",
 		staleLockDetected,

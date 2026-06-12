@@ -48,6 +48,15 @@ export function AccountStatusChips({
 				</span>
 			)}
 			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
+			{status.isSubscriptionExpired && (
+				<span
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					title="The provider reports this account's subscription has lapsed (OAuth no longer allowed for the organization). The account was auto-paused and will auto-resume once usage data is reachable again after renewal."
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Subscription expired
+				</span>
+			)}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip status={status.rateLimitStatus} />
 			)}

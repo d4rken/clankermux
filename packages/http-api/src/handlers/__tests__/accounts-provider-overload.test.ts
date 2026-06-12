@@ -108,6 +108,7 @@ function makeDbOps(
 		getStatsRepository: () => ({
 			getSessionStats: async () => new Map(),
 		}),
+		getLatestUsageSnapshots: async () => [],
 		forceResetAccountRateLimit:
 			options.forceResetAccountRateLimit ?? (async () => true),
 	} as unknown as DatabaseOperations;
