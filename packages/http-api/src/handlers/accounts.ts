@@ -316,6 +316,14 @@ export function createAccountsListHandler(
 			)
 			.catch(() => new Map());
 
+		// Read the live usage cache exactly once per account: get() evicts
+		// entries past their TTL as a side effect, so a second read later in the
+		// request could see an entry the stale-candidate filter still saw —
+		// leaving that account with neither live data nor a snapshot fallback.
+		const liveUsageByAccount = new Map(
+			accounts.map((a) => [a.id, usageCache.get(a.id)]),
+		);
+
 		// Last-known usage fallback: for Anthropic accounts whose live usage
 		// cache is empty (e.g. polling fails after the subscription lapsed),
 		// serve the most recent persisted usage snapshot so the dashboard can
@@ -323,7 +331,8 @@ export function createAccountsListHandler(
 		const staleCandidateIds = accounts
 			.filter(
 				(a) =>
-					(a.provider || "anthropic") === "anthropic" && !usageCache.get(a.id),
+					(a.provider || "anthropic") === "anthropic" &&
+					!liveUsageByAccount.get(a.id),
 			)
 			.map((a) => a.id);
 		const latestSnapshotByAccount = new Map(
@@ -360,7 +369,7 @@ export function createAccountsListHandler(
 				}
 
 				// Get usage data from cache for providers that expose account-page quota or credit data
-				const cachedUsageData = usageCache.get(account.id);
+				const cachedUsageData = liveUsageByAccount.get(account.id) ?? null;
 				let usageData: FullUsageData | null =
 					cachedUsageData as FullUsageData | null;
 				if (account.provider === "codex") {
