@@ -21,6 +21,53 @@ import {
 const log = new Logger("ResponseProcessor");
 
 /**
+ * Parses the provider rate-limit headers off `response` and, when the
+ * unified-status header is present, enqueues a DB write persisting
+ * status/reset/remaining (`accounts.rate_limit_status` & friends — the
+ * dashboard chip and the auto-refresh scheduler's window anchor).
+ *
+ * When the header is absent this is a no-op: the stored status is never
+ * overwritten with null by a response that carries no rate-limit info.
+ *
+ * Reads HEADERS ONLY — never the body. Callers on failover/short-circuit
+ * paths discard or forward the body elsewhere; consuming it here would break
+ * them.
+ *
+ * Must be called on every path that observes a 429 and then short-circuits
+ * before processProxyResponse/updateAccountMetadata (e.g. the
+ * `model_fallback_429` / `all_models_exhausted_429` cooldown sites in
+ * proxy-operations), otherwise `rate_limit_status` goes stale — frozen at the
+ * last successful response's status while `rate_limited_until` is active.
+ *
+ * Note the reset persisted here is the PROVIDER-PARSED reset header (window
+ * semantics, consumed by the auto-refresh scheduler) — never the locally
+ * computed backoff `cooldownUntil`, which is a short retry deadline with
+ * different semantics.
+ *
+ * @param provider - The provider whose parseRateLimit understands this
+ *   response's headers; defaults to ctx.provider. proxy-operations call sites
+ *   pass their account-specific provider.
+ */
+export function persistRateLimitStatusMeta(
+	account: Account,
+	response: Response,
+	ctx: ProxyContext,
+	provider: Pick<Provider, "parseRateLimit"> = ctx.provider,
+): void {
+	const rateLimitInfo = provider.parseRateLimit(response);
+	if (!rateLimitInfo.statusHeader) return;
+	const status = rateLimitInfo.statusHeader;
+	ctx.asyncWriter.enqueue(() =>
+		ctx.dbOps.updateAccountRateLimitMeta(
+			account.id,
+			status,
+			rateLimitInfo.resetTime ?? null,
+			rateLimitInfo.remaining,
+		),
+	);
+}
+
+/**
  * Updates account metadata in the background
  * @param account - The account to update
  * @param response - The response to extract metadata from
@@ -52,20 +99,9 @@ export function updateAccountMetadata(
 	} else {
 		ctx.asyncWriter.enqueue(() => ctx.dbOps.updateAccountUsage(account.id));
 	}
-	// Extract and update rate limit info for every response
-	const rateLimitInfo = ctx.provider.parseRateLimit(response);
-	// Only update rate limit metadata when we have actual rate limit headers
-	if (rateLimitInfo.statusHeader) {
-		const status = rateLimitInfo.statusHeader;
-		ctx.asyncWriter.enqueue(() =>
-			ctx.dbOps.updateAccountRateLimitMeta(
-				account.id,
-				status,
-				rateLimitInfo.resetTime ?? null,
-				rateLimitInfo.remaining,
-			),
-		);
-	}
+	// Extract and update rate limit info for every response. Only updates the
+	// metadata when actual rate limit headers are present (shared helper).
+	persistRateLimitStatusMeta(account, response, ctx);
 	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
 	// successful response. No need to duplicate that logic here.
 
