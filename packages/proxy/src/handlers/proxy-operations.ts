@@ -33,7 +33,11 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
-import { handleProxyError, processProxyResponse } from "./response-processor";
+import {
+	handleProxyError,
+	persistRateLimitStatusMeta,
+	processProxyResponse,
+} from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
@@ -1069,6 +1073,12 @@ export async function proxyWithAccount(
 						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 						ctx,
 					);
+					// Persist the 429's unified-status header (status/reset/remaining).
+					// This short-circuit never reaches processProxyResponse /
+					// updateAccountMetadata, so without this the dashboard's
+					// rate_limit_status chip freezes at the last successful response's
+					// value. Headers only — the body is discarded by fail() below.
+					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 					const responseTime = Date.now() - requestMeta.timestamp;
 					ctx.asyncWriter.enqueue(() =>
 						ctx.dbOps.saveRequest(
@@ -1151,6 +1161,12 @@ export async function proxyWithAccount(
 							{ resetTime: cooldownUntil, reason },
 							ctx,
 						);
+						// Persist the 429's unified-status header (status/reset/remaining).
+						// This short-circuit never reaches processProxyResponse /
+						// updateAccountMetadata, so without this the dashboard's
+						// rate_limit_status chip freezes at the last successful response's
+						// value. Headers only — the body is discarded by fail() below.
+						persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 						const responseTime = Date.now() - requestMeta.timestamp;
 						// Deliberate direct audit row (one per failed attempted
 						// account, synthetic UUID id) — NOT owned by RequestRecorder
@@ -1321,6 +1337,12 @@ export async function proxyWithAccount(
 							{ resetTime: cooldownUntil, reason },
 							ctx,
 						);
+						// Persist the 429's unified-status header (status/reset/remaining).
+						// This short-circuit never reaches processProxyResponse /
+						// updateAccountMetadata, so without this the dashboard's
+						// rate_limit_status chip freezes at the last successful response's
+						// value. Headers only — the body is discarded by fail() below.
+						persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 						const responseTime = Date.now() - requestMeta.timestamp;
 						// Deliberate direct audit row (one per failed attempted
 						// account, synthetic UUID id) — NOT owned by RequestRecorder

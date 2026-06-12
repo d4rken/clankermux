@@ -79,6 +79,82 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
 		: null;
 }
 
+/**
+ * Status prefixes that mean the account is actually blocked (vs soft warnings
+ * like "allowed_warning" / "queueing_soft" which mean it is still usable).
+ * Must mirror HARD_LIMIT_PREFIXES in
+ * packages/dashboard-web/src/lib/account-status.ts (http-api cannot depend on
+ * dashboard-web, so the list is duplicated here).
+ */
+const HARD_LIMIT_PREFIXES = [
+	"rate_limited",
+	"blocked",
+	"queueing_hard",
+	"payment_required",
+];
+
+/**
+ * Compute the display-ready rateLimitStatus string for an account.
+ *
+ * The stored `rate_limit_status` comes from upstream response headers and can
+ * go stale: once the proxy locks an account (`rate_limited_until` in the
+ * future, e.g. via the model_fallback_429 cooldown), no responses arrive to
+ * refresh it, so a soft "allowed_warning" can linger while the account is in
+ * fact blocked. When an active lock exists and the stored status is not
+ * already hard, present `rate_limited (Nm)` instead — the dashboard's
+ * RateLimitStatusChip keys on the normalized `rate_limited` base and renders
+ * the red "Rate limited" chip.
+ *
+ * Pure (caller injects `now`) so it can be unit tested directly.
+ */
+export function presentRateLimitStatus(
+	fields: {
+		rate_limit_status: string | null;
+		rate_limit_reset: number | string | null;
+		rate_limited: boolean | 0 | 1 | null;
+		rate_limited_until: number | string | null;
+	},
+	now: number,
+): string {
+	const lockMs = fields.rate_limited_until
+		? Number(fields.rate_limited_until)
+		: 0;
+	const hasActiveLock = lockMs > now;
+
+	if (fields.rate_limit_status) {
+		const storedIsHard = HARD_LIMIT_PREFIXES.some((prefix) =>
+			fields.rate_limit_status?.toLowerCase().startsWith(prefix),
+		);
+		if (hasActiveLock && !storedIsHard) {
+			// Stale soft status while the proxy lock is active — surface the lock.
+			const minutesLeft = Math.ceil((lockMs - now) / 60000);
+			return `rate_limited (${minutesLeft}m)`;
+		}
+		const resetMs = Number(fields.rate_limit_reset);
+		if (resetMs && resetMs > now) {
+			const minutesLeft = Math.ceil((resetMs - now) / 60000);
+			return `${fields.rate_limit_status} (${minutesLeft}m)`;
+		}
+		if (hasActiveLock) {
+			// Hard stored status with an active proxy lock but no usable provider
+			// reset (null or already past) — fall back to the lock-based countdown
+			// so the chip still shows when the block lifts. A provider
+			// rate_limit_reset that is set and in the future wins (above).
+			const minutesLeft = Math.ceil((lockMs - now) / 60000);
+			return `${fields.rate_limit_status} (${minutesLeft}m)`;
+		}
+		return fields.rate_limit_status;
+	}
+
+	if (fields.rate_limited && hasActiveLock) {
+		// Fall back to legacy rate limit check
+		const minutesLeft = Math.ceil((lockMs - now) / 60000);
+		return `Rate limited (${minutesLeft}m)`;
+	}
+
+	return "OK";
+}
+
 function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 	const normalized: UsageData = {
 		five_hour: { ...usage.five_hour },
@@ -317,29 +393,21 @@ export function createAccountsListHandler(
 
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
-				let rateLimitStatus = "OK";
 				const provider = account.provider || "anthropic";
 				const providerOverloadedUntil = getProviderOverloadUntil(provider, now);
 				const providerOverloadKey = providerOverloadedUntil
 					? getProviderOverloadKey(provider)
 					: null;
 
-				// Use unified rate limit status if available
-				if (account.rate_limit_status) {
-					rateLimitStatus = account.rate_limit_status;
-					const resetMs = Number(account.rate_limit_reset);
-					if (resetMs && resetMs > now) {
-						const minutesLeft = Math.ceil((resetMs - now) / 60000);
-						rateLimitStatus = `${account.rate_limit_status} (${minutesLeft}m)`;
-					}
-				} else if (account.rate_limited && account.rate_limited_until) {
-					// Fall back to legacy rate limit check
-					const limitedMs = Number(account.rate_limited_until);
-					if (limitedMs > now) {
-						const minutesLeft = Math.ceil((limitedMs - now) / 60000);
-						rateLimitStatus = `Rate limited (${minutesLeft}m)`;
-					}
-				}
+				const rateLimitStatus = presentRateLimitStatus(
+					{
+						rate_limit_status: account.rate_limit_status,
+						rate_limit_reset: account.rate_limit_reset,
+						rate_limited: account.rate_limited,
+						rate_limited_until: account.rate_limited_until,
+					},
+					now,
+				);
 
 				// Get usage data from cache for providers that expose account-page quota or credit data
 				const cachedUsageData = usageCache.get(account.id);

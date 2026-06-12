@@ -100,6 +100,7 @@ function makeContext(accounts: Account[], heldAccountId: string): ProxyContext {
 			markAccountRateLimited: mock(async () => 1),
 			saveRequest: mock(async () => {}),
 			updateAccountUsage: mock(async () => {}),
+			updateAccountRateLimitMeta: mock(async () => {}),
 			resetConsecutiveRateLimits: mock(async () => {}),
 			getAdapter: mock(() => ({
 				run: mock(async () => {}),
