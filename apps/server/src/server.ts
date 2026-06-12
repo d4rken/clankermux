@@ -74,6 +74,7 @@ import {
 } from "@clankermux/types";
 import { serve } from "bun";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
+import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
 
 /**
@@ -288,7 +289,6 @@ async function runStartupMaintenance(
 
 /**
  * Start usage polling for an account with automatic token refresh
- * Temporarily resumes paused accounts for token refresh, then restores original state
  */
 function startUsagePollingWithRefresh(
 	account: Account,
@@ -304,42 +304,10 @@ function startUsagePollingWithRefresh(
 	const pollWithRefresh = async () => {
 		try {
 			// Create a token provider function that gets a fresh token each time
-			const tokenProvider = async () => {
-				// Get the current paused state from the database to avoid stale state issues
-				// This is important because the account might be paused/resumed via API during runtime
-				const currentAccount = await proxyContext.dbOps.getAccount(account.id);
-				const wasTemporarilyResumed = currentAccount?.paused === true;
-
-				// Update in-memory account with fresh token data from DB
-				// This prevents using stale tokens after re-authentication
-				if (currentAccount) {
-					account.access_token = currentAccount.access_token;
-					account.refresh_token = currentAccount.refresh_token;
-					account.expires_at = currentAccount.expires_at;
-				}
-
-				// If account is currently paused, temporarily resume it for token refresh
-				if (wasTemporarilyResumed) {
-					logger.debug(
-						`Temporarily resuming account ${account.name} for token refresh`,
-					);
-					proxyContext.dbOps.resumeAccount(account.id);
-					account.paused = false;
-				}
-
-				try {
-					// Get a valid access token (refreshes if necessary)
-					const accessToken = await getValidAccessToken(account, proxyContext);
-					return accessToken;
-				} finally {
-					// Restore paused state ONLY if we temporarily resumed it above
-					if (wasTemporarilyResumed) {
-						logger.debug(`Restoring paused state for account ${account.name}`);
-						proxyContext.dbOps.pauseAccount(account.id);
-						account.paused = true;
-					}
-				}
-			};
+			const tokenProvider = createUsagePollingTokenProvider(
+				account,
+				proxyContext,
+			);
 
 			// Start usage polling with the token provider
 			usageCache.startPolling(
