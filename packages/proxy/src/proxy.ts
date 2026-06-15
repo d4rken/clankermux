@@ -260,7 +260,10 @@ export async function handleProxy(
 	// Conservative token estimate for context-window-aware routing (B1).
 	// Computed once; used to gate Codex accounts whose mapped model can't fit
 	// the request (B3) and to build the context_window_exceeded error (B4).
-	const requestTokenEstimate = estimateRequestTokens(parsedBody);
+	const requestTokenEstimate = estimateRequestTokens(
+		parsedBody,
+		contextComposition,
+	);
 
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {

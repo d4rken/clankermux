@@ -13,7 +13,7 @@ import {
 	resolveModelContextWindow,
 	SAFETY_MARGIN,
 } from "@clankermux/core";
-import type { Account } from "@clankermux/types";
+import type { Account, ContextComposition } from "@clankermux/types";
 
 describe("Model Mapping", () => {
 	test("parseModelMappings handles valid JSON", () => {
@@ -378,6 +378,52 @@ describe("estimateRequestTokens", () => {
 		);
 		const inputOnly = Math.ceil(JSON.stringify(bodyWithBadMax).length / 3.0);
 		expect(est).toBe(inputOnly);
+	});
+
+	test("uses composition when provided (chars/4.0), giving a much lower estimate than fallback JSON.stringify/3.0", () => {
+		// Simulate a large Claude Code session: lots of newlines and structural
+		// JSON overhead inflate the raw JSON far beyond the actual token count.
+		const largeContent = "line\n".repeat(200_000); // 200k newlines → inflate when JSON-encoded
+		const body = {
+			messages: [{ role: "user", content: largeContent }],
+			max_tokens: 0,
+		};
+		const composition: ContextComposition = {
+			systemChars: 0,
+			toolsChars: 0,
+			// context-composition.ts counts text.length (raw chars, not JSON-escaped)
+			messagesChars: largeContent.length,
+			messageCount: 1,
+			toolResultChars: 0,
+			largestToolResultChars: 0,
+			largestToolName: null,
+			toolCount: 0,
+		};
+
+		const withComposition = estimateRequestTokens(body, composition);
+		const fallback = estimateRequestTokens(body); // old path, no composition
+
+		// Composition path: raw text chars / 4.0 ≈ 250k tokens
+		expect(withComposition).toBe(Math.ceil(largeContent.length / 4.0));
+		// Fallback path counts JSON-escaped chars (each \n→\\n doubles newlines):
+		// should be roughly 2× higher for newline-heavy content
+		expect(fallback).toBeGreaterThan(withComposition * 1.5);
+	});
+
+	test("composition path includes max_tokens reserve", () => {
+		const composition: ContextComposition = {
+			systemChars: 4000,
+			toolsChars: 0,
+			messagesChars: 0,
+			messageCount: 0,
+			toolResultChars: 0,
+			largestToolResultChars: 0,
+			largestToolName: null,
+			toolCount: 0,
+		};
+		const body = { messages: [], max_tokens: 8192 };
+		const est = estimateRequestTokens(body, composition);
+		expect(est).toBe(Math.ceil(4000 / 4.0) + 8192);
 	});
 });
 

@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import type { Account } from "@clankermux/types";
+import type { Account, ContextComposition } from "@clankermux/types";
 import { safeJsonParse, validateModelMappings } from "./validation";
 
 const log = new Logger("ModelMappings");
@@ -409,16 +409,36 @@ export function resolveModelContextWindow(model: string): number | undefined {
 
 /**
  * Conservative token-count estimate for a request body.
- * Uses char-count / 3.0 (deliberately over-counts) + max_tokens output reserve.
- * No tiktoken — hot path, and we use a wide guard band anyway.
+ *
+ * When a ContextComposition is provided (preferred), uses the already-walked
+ * content-char counts (system + tools + messages) divided by 4.0.  This is
+ * far more accurate than re-serialising the whole body because it avoids the
+ * JSON-escaping inflation: every `\n` in bash/file output becomes `\\n` in
+ * JSON (2 chars → 1 effective char for tokenisation), and structural envelope
+ * bytes ("role","content","type","text"…) tokenise far more efficiently than
+ * 3 chars/token.  Real sessions show ~3× overcount without the composition.
+ *
+ * Without a composition (e.g. non-messages endpoints), falls back to
+ * JSON.stringify(body).length / 3.0 — deliberately over-counts, but that is
+ * acceptable as a last resort.
+ *
+ * No tiktoken — hot path.
  */
 export function estimateRequestTokens(
 	parsedBody: Record<string, unknown> | null | undefined,
+	composition?: ContextComposition | null,
 ): number {
 	if (!parsedBody) return 0;
-	const inputTokens = Math.ceil(JSON.stringify(parsedBody).length / 3.0);
 	const maxTokens =
 		typeof parsedBody.max_tokens === "number" ? parsedBody.max_tokens : 0;
+	if (composition) {
+		const contentChars =
+			composition.systemChars +
+			composition.toolsChars +
+			composition.messagesChars;
+		return Math.ceil(contentChars / 4.0) + maxTokens;
+	}
+	const inputTokens = Math.ceil(JSON.stringify(parsedBody).length / 3.0);
 	return inputTokens + maxTokens;
 }
 
