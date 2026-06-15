@@ -58,6 +58,7 @@ export {
 	unregisterCodexUsageRefresher,
 } from "./token-manager";
 export {
+	abortableSleep,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	HOLD_OVERFLOW,
 	type HoldResult,

@@ -17,6 +17,7 @@ import {
 import { cacheBodyStore } from "./cache-body-store";
 import { computeContextAndToolStats } from "./context-composition";
 import {
+	abortableSleep,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
@@ -62,6 +63,14 @@ import { shouldRecordRequest } from "./should-record-request";
 export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
+
+// Max time (ms) the proxy will hold an open connection waiting for a
+// rate-limited large-context (non-Codex) account to become available before
+// falling back to a 400 context_window_exceeded. Matches BURST_RETRY_MAX_HOLD_MS
+// (120s) — both are bounds on how long we hold a live client connection.
+const CW_HOLD_MAX_MS = 120_000;
+// Small jitter (ms) added to each CW hold sleep to avoid thundering herd.
+const CW_HOLD_JITTER_MS = 500;
 
 // ===== REQUEST RECORDER WIRING =====
 
@@ -997,8 +1006,94 @@ export async function handleProxy(
 
 		// If the pool was emptied specifically by the context-window gate
 		// (and there were Codex accounts that would have been available
-		// otherwise), return a 400 context_window_exceeded instead of 503.
+		// otherwise), hold the connection until a large-context account becomes
+		// available — up to CW_HOLD_MAX_MS — before returning 400.
 		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
+			const cwHoldStart = Date.now();
+
+			while (true) {
+				const nowMs = Date.now();
+				const elapsed = nowMs - cwHoldStart;
+				if (elapsed >= CW_HOLD_MAX_MS) break;
+				const remaining = CW_HOLD_MAX_MS - elapsed;
+
+				// Find non-Codex, non-paused, actively rate-limited accounts.
+				const allAccs = await ctx.dbOps.getAllAccounts();
+				const cwRateLimited = allAccs.filter(
+					(a) =>
+						!a.paused &&
+						a.provider !== "codex" &&
+						a.rate_limited_until !== null &&
+						a.rate_limited_until > nowMs,
+				);
+
+				if (cwRateLimited.length === 0) break; // nothing to wait for
+
+				const soonest = Math.min(
+					...cwRateLimited.map((a) => a.rate_limited_until as number),
+				);
+				const waitMs =
+					Math.max(0, soonest - nowMs) +
+					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+
+				if (waitMs > remaining) break; // soonest expiry is beyond budget
+
+				log.info(
+					`CW hold: waiting ${waitMs}ms for large-context account(s): ${cwRateLimited.map((a) => a.name).join(", ")}`,
+				);
+
+				const completed = await abortableSleep(waitMs, req.signal);
+				if (!completed) {
+					log.info("CW hold: client disconnected during wait");
+					return createClientAbortResponse();
+				}
+
+				// Re-run full account selection with the same gates.
+				const cwSelected = await selectAccountsForRequest(
+					requestMeta,
+					ctx,
+					effectiveRequestModel ?? undefined,
+				);
+				const { available: cwAvailable } =
+					applyProviderOverloadGate(cwSelected);
+				const { available: cwPostThrottle } = applyUsageThrottling(cwAvailable);
+				// Non-Codex accounts always pass the context-window gate.
+				const cwCandidates = cwPostThrottle.filter(
+					(a) => a.provider !== "codex",
+				);
+
+				if (cwCandidates.length === 0) continue; // still unavailable
+
+				log.info(
+					`CW hold: ${cwCandidates.length} non-Codex account(s) now available, retrying`,
+				);
+
+				for (let i = 0; i < cwCandidates.length; i++) {
+					const r = await proxyWithAccount(
+						req,
+						url,
+						cwCandidates[i],
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						i,
+						ctx,
+						undefined,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						// Don't forward rate-limit response on last candidate —
+						// loop back instead to check for another available account.
+						false,
+					);
+					if (r) return r;
+				}
+				// All candidates returned null — loop back to recheck.
+			}
+
+			// Budget exhausted or no eligible accounts: discard any staged body
+			// and return the original context_window_exceeded 400.
+			cacheBodyStore.discardStaged(requestMeta.id);
 			return createContextWindowExceededResponse(
 				requestTokenEstimate,
 				contextExcludedAccounts,

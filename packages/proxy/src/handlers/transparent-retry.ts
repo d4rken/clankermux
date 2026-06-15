@@ -207,7 +207,10 @@ export type ReprobeFn = (
  * `signal.aborted` to decide what to do. A non-positive `ms` resolves on the
  * next microtask after an abort check.
  */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
+export function abortableSleep(
+	ms: number,
+	signal: AbortSignal,
+): Promise<boolean> {
 	if (signal.aborted) return Promise.resolve(false);
 	return new Promise<boolean>((resolve) => {
 		const timer = setTimeout(
