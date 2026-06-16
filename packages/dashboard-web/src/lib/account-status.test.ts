@@ -388,6 +388,54 @@ describe("deriveAccountStatus — renewal", () => {
 		expect(status.renewalDaysLeft).toBe(-2);
 		expect(status.renewalUrgency).toBe("past");
 	});
+
+	it("shows the renewal chip when an anchor is set and the account is healthy", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ renewalAnchor: "2024-01-08", renewalCadence: "none" }),
+			NOW,
+		);
+		expect(status.renewalNextDate).not.toBeNull();
+		expect(status.showRenewalChip).toBe(true);
+	});
+
+	it("does not show the renewal chip without an anchor", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.showRenewalChip).toBe(false);
+	});
+
+	it("suppresses the renewal chip while the subscription is expired", () => {
+		// Real provider state (expired) must dominate static renewal metadata: a
+		// past one-time date would otherwise render a misleading renewal chip
+		// alongside the red "Subscription expired" badge.
+		const status = deriveAccountStatus(
+			makeAccount({
+				paused: true,
+				pauseReason: "subscription_expired",
+				renewalAnchor: "2024-01-01",
+				renewalCadence: "none",
+			}),
+			NOW,
+		);
+		expect(status.isSubscriptionExpired).toBe(true);
+		// The underlying renewal facts are still derived…
+		expect(status.renewalNextDate).not.toBeNull();
+		// …but the chip is suppressed.
+		expect(status.showRenewalChip).toBe(false);
+	});
+
+	it("suppresses the renewal chip while expired even with a future renewal date", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				paused: true,
+				pauseReason: "subscription_expired",
+				renewalAnchor: "2024-02-01",
+				renewalCadence: "monthly",
+			}),
+			NOW,
+		);
+		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.showRenewalChip).toBe(false);
+	});
 });
 
 describe("deriveAccountStatus — subscription expired", () => {

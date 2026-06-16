@@ -101,7 +101,7 @@ export function AccountStatusChips({
 					{status.peakChipLabel}
 				</span>
 			)}
-			{status.renewalNextDate && (
+			{status.showRenewalChip && (
 				<RenewalChip account={account} status={status} />
 			)}
 		</div>
@@ -117,8 +117,9 @@ const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
 
 /**
  * Subscription-renewal chip. Amber when renewal is near, red when imminent,
- * muted for far-off or already-elapsed one-time dates. Only rendered when a
- * renewal date is set (`status.renewalNextDate` is non-null).
+ * muted for far-off or already-elapsed one-time dates. Only rendered when
+ * `status.showRenewalChip` is true (a renewal date is set and the subscription
+ * is not reported expired — see `deriveAccountStatus`).
  */
 function RenewalChip({
 	account,
@@ -144,7 +145,11 @@ function RenewalChip({
 
 	let label: string;
 	if (isPast) {
-		label = `Renewed ${shortDate}`;
+		// A past one-time date only means the configured date has elapsed — the
+		// system never verifies the provider actually renewed, so don't claim
+		// "Renewed". (`past` only occurs for cadence='none'; recurring cadences
+		// always resolve to a future date.)
+		label = `Renewal date passed (${shortDate})`;
 	} else if (daysLeft === 0) {
 		label = `Renews ${shortDate} (today)`;
 	} else {
@@ -157,7 +162,7 @@ function RenewalChip({
 			: "";
 	const title =
 		(isPast
-			? `Subscription renewed ${isoDate} (${cadence})`
+			? `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`
 			: `Subscription renews ${isoDate} (${cadence})`) + priceSuffix;
 
 	const colorClasses =

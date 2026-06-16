@@ -64,6 +64,13 @@ export interface AccountStatus {
 	renewalDaysLeft: number | null;
 	/** Renewal urgency level driving the chip color. */
 	renewalUrgency: RenewalUrgency;
+	/**
+	 * Whether to render the renewal chip. False when no anchor is set, and also
+	 * suppressed while `isSubscriptionExpired` — real provider state (OAuth
+	 * refused) dominates static, unverified renewal metadata, so we don't show a
+	 * reassuring renewal chip next to the red "Subscription expired" badge.
+	 */
+	showRenewalChip: boolean;
 }
 
 /**
@@ -148,5 +155,6 @@ export function deriveAccountStatus(
 		renewalNextDate: renewal.nextDate,
 		renewalDaysLeft: renewal.daysLeft,
 		renewalUrgency: renewal.urgency,
+		showRenewalChip: renewal.nextDate !== null && !isSubscriptionExpired,
 	};
 }
