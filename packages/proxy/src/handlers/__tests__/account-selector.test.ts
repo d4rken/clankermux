@@ -366,6 +366,61 @@ describe("selectAccountsForRequest — x-clankermux-account-id header", () => {
 		expect(result[0]?.id).toBe("acc-rl");
 	});
 
+	it("internal force-route returns [] when the DB throws (fail closed)", async () => {
+		// A transient DB error during the forced-account lookup must NOT let an
+		// internal (synthetic) force-route fall through to a sibling account.
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => {
+					throw new Error("synthetic-db-failure");
+				}),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({ "x-clankermux-account-id": "acc-target" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toEqual([]);
+	});
+
+	it("NON-internal force-route falls through to normal selection when the DB throws (unchanged)", async () => {
+		// For a hand-typed force-route header, a DB error still degrades to normal
+		// selection (getAllAccounts is called again by selectByStrategy and succeeds
+		// here via a separate mock).
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		let calls = 0;
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				// First call (forced lookup) throws; later calls succeed so the
+				// fall-through to normal selection can resolve an account.
+				getAllAccounts: mock(async () => {
+					calls += 1;
+					if (calls === 1) throw new Error("synthetic-db-failure");
+					return [activeAcc];
+				}),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			// no internal flag => hand-typed testing header
+			headers: new Headers({ "x-clankermux-account-id": "acc-target" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-active");
+	});
+
 	it("NON-internal force-route to a paused account still falls through to normal selection (unchanged)", async () => {
 		const pausedAcc = makeAccount({
 			id: "acc-paused",

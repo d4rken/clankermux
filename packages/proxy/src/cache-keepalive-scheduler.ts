@@ -196,14 +196,9 @@ export class CacheKeepaliveScheduler {
 					await new Promise((r) =>
 						setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
 					);
-					try {
-						await this.replaySessionKeepalive(slot);
-					} catch (error) {
-						log.error(
-							`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
-							error,
-						);
-					}
+					// replaySessionKeepalive records its own failure (including on a
+					// thrown dispatch) so a zombie slot backs off and eventually evicts.
+					await this.replaySessionKeepalive(slot);
 				}),
 			);
 		}
@@ -215,6 +210,32 @@ export class CacheKeepaliveScheduler {
 	 * inspects the response for cache hit/miss to charge the spend budget.
 	 */
 	private async replaySessionKeepalive(slot: SessionCacheSlot): Promise<void> {
+		try {
+			await this.dispatchSessionKeepalive(slot);
+		} catch (error) {
+			// A thrown dispatch (network/exception) is a failed keepalive: back the
+			// slot off and count it toward eviction so a persistently broken account
+			// doesn't leave a zombie slot re-attempted every tick.
+			log.error(
+				`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
+				error,
+			);
+			sessionCacheStore.recordKeepaliveFailure(
+				slot.accountId,
+				slot.sessionKey,
+				Date.now(),
+			);
+		}
+	}
+
+	/**
+	 * Build and dispatch the keepalive replay, then charge the hit/miss outcome.
+	 * On a non-ok response it records a failure (backoff + eventual eviction); a
+	 * thrown error is handled by the caller {@link replaySessionKeepalive}.
+	 */
+	private async dispatchSessionKeepalive(
+		slot: SessionCacheSlot,
+	): Promise<void> {
 		// Reconstruct headers from the stored snapshot. Auth and internal proxy
 		// headers were stripped at capture time and are injected fresh here.
 		const replayHeaders = new Headers(slot.headers);
@@ -264,9 +285,18 @@ export class CacheKeepaliveScheduler {
 
 		if (!response.ok) {
 			// A 429/5xx is neither a consumed keepalive nor a proven cache miss —
-			// don't charge it against the budget.
+			// don't charge it against the budget. But it IS a failed keepalive: a
+			// non-routable force-route (deleted/manual-paused/failure-paused account)
+			// resolves to no account and returns non-ok, so record the failure to
+			// back the slot off and evict it after MAX_KEEPALIVE_FAILURES — otherwise
+			// the slot stays perpetually due and is re-attempted every tick.
 			log.warn(
 				`Cache warming keepalive returned ${response.status} for ${slot.accountId}:${slot.sessionKey}`,
+			);
+			sessionCacheStore.recordKeepaliveFailure(
+				slot.accountId,
+				slot.sessionKey,
+				Date.now(),
 			);
 			return;
 		}

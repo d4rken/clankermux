@@ -574,6 +574,16 @@ async function selectCandidates(
 					"Failed to get accounts from database for forced account lookup:",
 					error,
 				);
+				// For a SYNTHETIC, internally-dispatched force-route (meta.internal),
+				// a transient DB error must NOT let the request fall through to a
+				// sibling account — that would dirty an unrelated account's
+				// session/cache (e.g. the cache keepalive scheduler) or probe the
+				// wrong account. Fail closed: return no candidates (the caller turns an
+				// empty list into a terminal error the keepalive replay treats as a
+				// no-op). Only non-internal (hand-typed) force-routes fall through.
+				if (meta.internal === true) {
+					return [];
+				}
 				console.error("\n❌ DATABASE ERROR DETECTED");
 				console.error("═".repeat(50));
 				console.error(

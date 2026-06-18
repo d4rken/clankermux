@@ -65,6 +65,9 @@ export const MAX_SESSION_BRIDGE_BYTES = 64 * 1024 * 1024;
 /** Per-body size cap; bodies larger than this are not stored. */
 export const MAX_SESSION_BODY_BYTES = 2 * 1024 * 1024;
 
+/** Evict a warm slot after this many consecutive non-routable/failed keepalive attempts — the account is gone or persistently paused. */
+export const MAX_KEEPALIVE_FAILURES = 3;
+
 /**
  * Max random decorrelation delay (≤1s) between SEQUENTIAL keepalive dispatches.
  * Anti-burst: a small per-dispatch jitter spreads replays across the per-IP

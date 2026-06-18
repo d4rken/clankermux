@@ -59,7 +59,7 @@ mock.module("../dispatch", () => ({
 	dispatchProxyRequest: mockDispatchProxyRequest,
 }));
 
-import { KEEPALIVE_REFRESH_MS } from "../bridge-policy";
+import { KEEPALIVE_REFRESH_MS, MAX_KEEPALIVE_FAILURES } from "../bridge-policy";
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
 // and dispatchProxyRequest.
@@ -171,6 +171,14 @@ function resetMocks(): void {
 	mockRegisterHeartbeat.mockClear();
 	mockUnregister.mockClear();
 	mockDispatchProxyRequest.mockClear();
+	// Restore the default 200/empty-body implementation so a persistent
+	// mockImplementation set by one test doesn't leak into the next.
+	mockDispatchProxyRequest.mockImplementation(
+		async (req: Request, url: URL) => {
+			capturedDispatchCalls.push({ req, url });
+			return new Response("", { status: 200 });
+		},
+	);
 	capturedCallback = null;
 	capturedSeconds = null;
 	capturedId = null;
@@ -495,7 +503,7 @@ describe("CacheKeepaliveScheduler", () => {
 			scheduler.stop();
 		});
 
-		it("non-ok response records nothing (no spend charged)", async () => {
+		it("non-ok response charges no spend but records a failure (backoff)", async () => {
 			mockDispatchProxyRequest.mockImplementationOnce(
 				async (req: Request, url: URL) => {
 					capturedDispatchCalls.push({ req, url });
@@ -514,13 +522,54 @@ describe("CacheKeepaliveScheduler", () => {
 			const slot = sessionCacheStore
 				.getAllSlots()
 				.find((s) => s.sessionKey === "session-429");
+			// Non-ok is not charged against the budget...
 			expect(slot?.spentUsd).toBe(0);
-			expect(slot?.lastKeepaliveTs).toBeNull();
+			// ...but IS a failed keepalive: backed off (lastKeepaliveTs set) and counted.
+			expect(slot?.lastKeepaliveTs).not.toBeNull();
+			expect(slot?.keepaliveFailures).toBe(1);
 
 			scheduler.stop();
 		});
 
-		it("dispatch throws — error does not propagate out of the callback", async () => {
+		it("a slot is evicted after MAX consecutive non-ok responses across ticks", async () => {
+			mockDispatchProxyRequest.mockImplementation(
+				async (req: Request, url: URL) => {
+					capturedDispatchCalls.push({ req, url });
+					return new Response("gone", { status: 500 });
+				},
+			);
+
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedSessionEntry("acc-zombie", "session-zombie");
+
+			// Each tick: re-backdate so the slot is due again, then fire.
+			for (let i = 0; i < MAX_KEEPALIVE_FAILURES; i++) {
+				const slot = sessionCacheStore
+					.getAllSlots()
+					.find((s) => s.sessionKey === "session-zombie");
+				if (slot) {
+					(slot as { lastKeepaliveTs: number }).lastKeepaliveTs =
+						Date.now() - (KEEPALIVE_REFRESH_MS + 60_000);
+					(slot as { lastActivityTs: number }).lastActivityTs =
+						Date.now() - (KEEPALIVE_REFRESH_MS + 60_000);
+				}
+				await capturedCallback?.();
+			}
+
+			// After MAX consecutive non-ok keepalives the zombie slot is gone.
+			expect(
+				sessionCacheStore
+					.getAllSlots()
+					.find((s) => s.sessionKey === "session-zombie"),
+			).toBeUndefined();
+
+			scheduler.stop();
+		});
+
+		it("dispatch throws — error does not propagate and records a failure", async () => {
 			mockDispatchProxyRequest.mockImplementationOnce(async () => {
 				throw new Error("synthetic-dispatch-failure");
 			});
@@ -533,6 +582,14 @@ describe("CacheKeepaliveScheduler", () => {
 
 			await expect(capturedCallback?.()).resolves.toBeUndefined();
 			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
+
+			// A thrown dispatch is a failed keepalive: backed off and counted.
+			const slot = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-conn-error");
+			expect(slot?.keepaliveFailures).toBe(1);
+			expect(slot?.lastKeepaliveTs).not.toBeNull();
+			expect(slot?.spentUsd).toBe(0);
 
 			scheduler.stop();
 		});
