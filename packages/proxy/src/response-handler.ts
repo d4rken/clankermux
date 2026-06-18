@@ -101,6 +101,8 @@ function trackFinalize(
 				requestId,
 				summary.usage.cacheCreationInputTokens ??
 					summary.cacheCreationInputTokens,
+				summary.usage.cacheReadInputTokens,
+				summary.usage.model,
 			);
 			ctx.requestRecorder.attachUsageSummary(requestId, {
 				...summary,

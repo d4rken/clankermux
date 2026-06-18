@@ -1595,55 +1595,14 @@ class API extends HttpClient {
 		}
 	}
 
-	async getCacheKeepaliveTtl(): Promise<{ ttlMinutes: number }> {
+	async getCacheWarming(): Promise<{ enabled: boolean; minTokens: number }> {
 		const startTime = Date.now();
-		const url = "/api/config/keepalive";
+		const url = "/api/config/cache-warming";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<{ ttlMinutes: number }>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async setCacheKeepaliveTtl(body: { ttlMinutes: number }): Promise<void> {
-		const startTime = Date.now();
-		const url = "/api/config/keepalive";
-
-		this.logger.debug(`→ POST ${url}`, { body });
-
-		try {
-			await this.post(url, body);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async getSystemCacheTtl(): Promise<{ system_prompt_cache_ttl_1h: boolean }> {
-		const startTime = Date.now();
-		const url = "/api/config/cache-ttl";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<{ system_prompt_cache_ttl_1h: boolean }>(
+			const response = await this.get<{ enabled: boolean; minTokens: number }>(
 				url,
 			);
 			const duration = Date.now() - startTime;
@@ -1659,16 +1618,23 @@ class API extends HttpClient {
 		}
 	}
 
-	async setSystemCacheTtl(enabled: boolean): Promise<void> {
+	async setCacheWarming(body: {
+		enabled?: boolean;
+		minTokens?: number;
+	}): Promise<{ enabled: boolean; minTokens: number }> {
 		const startTime = Date.now();
-		const url = "/api/config/cache-ttl";
+		const url = "/api/config/cache-warming";
 
-		this.logger.debug(`→ POST ${url}`, { enabled });
+		this.logger.debug(`→ POST ${url}`, { body });
 
 		try {
-			await this.post(url, { enabled });
+			const response = await this.post<{
+				enabled: boolean;
+				minTokens: number;
+			}>(url, body);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
 		} catch (error) {
 			const duration = Date.now() - startTime;
 			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {

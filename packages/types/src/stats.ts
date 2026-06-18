@@ -460,7 +460,6 @@ export interface ConfigResponse {
 	port: number;
 	sessionDurationMs: number;
 	tls_enabled: boolean;
-	system_prompt_cache_ttl_1h: boolean;
 	usage_throttling_five_hour_enabled: boolean;
 	usage_throttling_weekly_enabled: boolean;
 }

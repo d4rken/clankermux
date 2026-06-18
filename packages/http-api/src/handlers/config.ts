@@ -39,7 +39,6 @@ export function createConfigHandlers(
 					TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_FALLBACK,
 				// Include actual TLS status
 				tls_enabled: runtime?.tlsEnabled || false,
-				system_prompt_cache_ttl_1h: config.getSystemPromptCacheTtl1h(),
 				usage_throttling_five_hour_enabled:
 					config.getUsageThrottlingFiveHourEnabled(),
 				usage_throttling_weekly_enabled:
@@ -175,37 +174,39 @@ export function createConfigHandlers(
 			return new Response(null, { status: 204 });
 		},
 
-		getCacheKeepaliveTtl: (): Response => {
-			return jsonResponse({ ttlMinutes: config.getCacheKeepaliveTtlMinutes() });
-		},
-
-		setCacheKeepaliveTtl: async (req: Request): Promise<Response> => {
-			const body = await req.json();
-			const ttlMinutes = validateNumber(body.ttlMinutes, "ttlMinutes", {
-				min: 0,
-				max: 60,
-				integer: true,
-			});
-			if (typeof ttlMinutes !== "number") {
-				return errorResponse(BadRequest("Invalid 'ttlMinutes': must be 0-60"));
-			}
-			config.setCacheKeepaliveTtlMinutes(ttlMinutes);
-			return new Response(null, { status: 204 });
-		},
-
-		getCacheTtl: (): Response => {
+		getCacheWarming: (): Response => {
 			return jsonResponse({
-				system_prompt_cache_ttl_1h: config.getSystemPromptCacheTtl1h(),
+				enabled: config.getCacheWarmingEnabled(),
+				minTokens: config.getCacheWarmingMinTokens(),
 			});
 		},
 
-		setCacheTtl: async (req: Request): Promise<Response> => {
+		setCacheWarming: async (req: Request): Promise<Response> => {
 			const body = await req.json();
-			if (typeof body.enabled !== "boolean") {
-				return errorResponse(BadRequest("Invalid 'enabled': must be boolean"));
+			if (body.enabled !== undefined) {
+				if (typeof body.enabled !== "boolean") {
+					return errorResponse(
+						BadRequest("Invalid 'enabled': must be boolean"),
+					);
+				}
+				config.setCacheWarmingEnabled(body.enabled);
 			}
-			config.setSystemPromptCacheTtl1h(body.enabled);
-			return new Response(null, { status: 204 });
+			if (body.minTokens !== undefined) {
+				const minTokens = validateNumber(body.minTokens, "minTokens", {
+					min: 0,
+					integer: true,
+				});
+				if (typeof minTokens !== "number") {
+					return errorResponse(
+						BadRequest("Invalid 'minTokens': must be a number >= 0"),
+					);
+				}
+				config.setCacheWarmingMinTokens(minTokens);
+			}
+			return jsonResponse({
+				enabled: config.getCacheWarmingEnabled(),
+				minTokens: config.getCacheWarmingMinTokens(),
+			});
 		},
 
 		getUsageThrottling: (): Response => {

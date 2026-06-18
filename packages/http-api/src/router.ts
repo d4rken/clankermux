@@ -368,17 +368,11 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/retention", (req) =>
 			configHandlers.setRetention(req),
 		);
-		this.handlers.set("GET:/api/config/keepalive", () =>
-			configHandlers.getCacheKeepaliveTtl(),
+		this.handlers.set("GET:/api/config/cache-warming", () =>
+			configHandlers.getCacheWarming(),
 		);
-		this.handlers.set("POST:/api/config/keepalive", (req) =>
-			configHandlers.setCacheKeepaliveTtl(req),
-		);
-		this.handlers.set("GET:/api/config/cache-ttl", () =>
-			configHandlers.getCacheTtl(),
-		);
-		this.handlers.set("POST:/api/config/cache-ttl", (req) =>
-			configHandlers.setCacheTtl(req),
+		this.handlers.set("POST:/api/config/cache-warming", (req) =>
+			configHandlers.setCacheWarming(req),
 		);
 		this.handlers.set("GET:/api/config/usage-throttling", () =>
 			configHandlers.getUsageThrottling(),

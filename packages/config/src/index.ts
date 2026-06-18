@@ -57,8 +57,8 @@ export interface ConfigData {
 	memory_snapshot_retention_days?: number;
 	store_payloads?: boolean;
 	usage_poll_interval_ms?: number;
-	cache_keepalive_ttl_minutes?: number;
-	system_prompt_cache_ttl_1h?: boolean;
+	cache_warming_enabled?: boolean;
+	cache_warming_min_tokens?: number;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
 	// Database configuration
@@ -354,34 +354,36 @@ export class Config extends EventEmitter {
 		this.set("usage_poll_interval_ms", clamped);
 	}
 
-	getCacheKeepaliveTtlMinutes(): number {
-		const fromEnv = process.env.CACHE_KEEPALIVE_TTL_MINUTES;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 0, 60);
-		}
-		const fromFile = this.data.cache_keepalive_ttl_minutes;
-		if (typeof fromFile === "number") return this.clamp(fromFile, 0, 60);
-		return 0; // default: disabled
-	}
-
-	setCacheKeepaliveTtlMinutes(minutes: number): void {
-		const clamped = this.clamp(minutes, 0, 60);
-		this.set("cache_keepalive_ttl_minutes", clamped);
-	}
-
-	getSystemPromptCacheTtl1h(): boolean {
-		const fromEnv = process.env.SYSTEM_PROMPT_CACHE_TTL_1H;
+	getCacheWarmingEnabled(): boolean {
+		const fromEnv = process.env.CACHE_WARMING_ENABLED;
 		if (fromEnv) {
 			return fromEnv !== "false" && fromEnv !== "0";
 		}
-		const fromFile = this.data.system_prompt_cache_ttl_1h;
+		const fromFile = this.data.cache_warming_enabled;
 		if (typeof fromFile === "boolean") return fromFile;
 		return false; // default: disabled
 	}
 
-	setSystemPromptCacheTtl1h(value: boolean): void {
-		this.set("system_prompt_cache_ttl_1h", value);
+	setCacheWarmingEnabled(value: boolean): void {
+		this.set("cache_warming_enabled", value);
+	}
+
+	getCacheWarmingMinTokens(): number {
+		// Default mirrors bridge-policy's DEFAULT_MIN_CACHE_TOKENS (duplicated here
+		// because the config package must not depend on the proxy package).
+		const DEFAULT_CACHE_WARMING_MIN_TOKENS = 100_000;
+		const fromEnv = process.env.CACHE_WARMING_MIN_TOKENS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return Math.max(0, n);
+		}
+		const fromFile = this.data.cache_warming_min_tokens;
+		if (typeof fromFile === "number") return Math.max(0, fromFile);
+		return DEFAULT_CACHE_WARMING_MIN_TOKENS;
+	}
+
+	setCacheWarmingMinTokens(tokens: number): void {
+		this.set("cache_warming_min_tokens", Math.max(0, tokens));
 	}
 
 	getUsageThrottlingFiveHourEnabled(): boolean {
@@ -427,8 +429,8 @@ export class Config extends EventEmitter {
 			memory_snapshot_retention_days: this.getMemorySnapshotRetentionDays(),
 			store_payloads: this.getStorePayloads(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
-			cache_keepalive_ttl_minutes: this.getCacheKeepaliveTtlMinutes(),
-			system_prompt_cache_ttl_1h: this.getSystemPromptCacheTtl1h(),
+			cache_warming_enabled: this.getCacheWarmingEnabled(),
+			cache_warming_min_tokens: this.getCacheWarmingMinTokens(),
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),

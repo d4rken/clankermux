@@ -697,6 +697,7 @@ export async function proxyWithAccount(
 				baseBodyContext.getBuffer(),
 				req.headers,
 				url.pathname,
+				requestMeta.affinityKey ?? null,
 			);
 		}
 

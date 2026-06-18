@@ -40,7 +40,6 @@ import {
 	proxyForcedAccount,
 	proxyWithAccount,
 	RequestBodyContext,
-	type RequestJsonBody,
 	selectAccountsForRequest,
 	setForcedAccount,
 	validateProviderPath,
@@ -237,11 +236,6 @@ export async function handleProxy(
 	// 3. Prepare request body
 	const { buffer: requestBodyBuffer } = await prepareRequestBody(req);
 	const requestBodyContext = new RequestBodyContext(requestBodyBuffer);
-
-	// 3b. Optionally inject 1h TTL into system prompt cache_control blocks
-	if (ctx.config.getSystemPromptCacheTtl1h() && requestBodyBuffer) {
-		injectSystemCacheTtl(requestBodyContext);
-	}
 
 	// Extract model from request body for family detection (used by combo routing)
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
@@ -1564,48 +1558,4 @@ export async function handleProxy(
 		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
 		ctx.provider.name,
 	);
-}
-
-/**
- * Injects `ttl: "1h"` into system-level cache_control blocks that are missing a TTL.
- * ArrayBuffer overload: returns modified buffer or null (no changes).
- * RequestBodyContext overload: mutates in-place via markDirty(); return value unused.
- */
-export function injectSystemCacheTtl(buf: ArrayBuffer): ArrayBuffer | null;
-export function injectSystemCacheTtl(context: RequestBodyContext): void;
-export function injectSystemCacheTtl(
-	input: ArrayBuffer | RequestBodyContext,
-): ArrayBuffer | null {
-	const bodyContext =
-		input instanceof RequestBodyContext ? input : new RequestBodyContext(input);
-	try {
-		const body = bodyContext.getParsedJson() as
-			| (RequestJsonBody & {
-					system?: Array<{ cache_control?: { type?: string; ttl?: string } }>;
-			  })
-			| null;
-		if (!body) return null;
-		if (!Array.isArray(body.system)) return null;
-		const blocksToUpdate = body.system.filter(
-			(block) =>
-				block.cache_control?.type === "ephemeral" && !block.cache_control.ttl,
-		);
-		if (blocksToUpdate.length === 0) return null;
-		bodyContext.mutateParsedJson((b) => {
-			const typedBody = b as RequestJsonBody & {
-				system: Array<{ cache_control?: { type?: string; ttl?: string } }>;
-			};
-			for (const block of typedBody.system) {
-				if (
-					block.cache_control?.type === "ephemeral" &&
-					!block.cache_control.ttl
-				) {
-					block.cache_control.ttl = "1h";
-				}
-			}
-		});
-		return bodyContext.getBuffer();
-	} catch {
-		return null;
-	}
 }
