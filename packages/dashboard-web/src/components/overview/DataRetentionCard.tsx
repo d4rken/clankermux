@@ -23,13 +23,13 @@ export function DataRetentionCard() {
 	const cleanupNow = useCleanupNow();
 	const { data: usage } = useStorageUsage();
 	const [payloadDays, setPayloadDays] = useState<number>(
-		data?.payloadDays ?? 3,
+		data?.payloadDays ?? 1,
 	);
 	const [requestDays, setRequestDays] = useState<number>(
-		data?.requestDays ?? 90,
+		data?.requestDays ?? 3650,
 	);
 	const [usageSnapshotDays, setUsageSnapshotDays] = useState<number>(
-		data?.usageSnapshotDays ?? 90,
+		data?.usageSnapshotDays ?? 3650,
 	);
 	const [memorySnapshotDays, setMemorySnapshotDays] = useState<number>(
 		data?.memorySnapshotDays ?? 14,

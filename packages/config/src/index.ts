@@ -267,7 +267,7 @@ export class Config extends EventEmitter {
 		}
 		const fromFile = this.data.data_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 365);
-		return 3; // Reduced from 7 to 3 days to reduce database size
+		return 1; // default payload retention (1 day — payloads are large, kept only for short-term debugging)
 	}
 
 	setDataRetentionDays(days: number): void {
@@ -283,7 +283,7 @@ export class Config extends EventEmitter {
 		}
 		const fromFile = this.data.request_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		return 90; // default metadata retention (90 days for analytics and troubleshooting)
+		return 3650; // default metadata retention (10 years for analytics and troubleshooting)
 	}
 
 	setRequestRetentionDays(days: number): void {
@@ -299,7 +299,7 @@ export class Config extends EventEmitter {
 		}
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		return 90; // default usage snapshot retention (90 days for the Limits graph)
+		return 3650; // default usage snapshot retention (10 years for the Limits graph)
 	}
 
 	setUsageSnapshotRetentionDays(days: number): void {

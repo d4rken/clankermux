@@ -32,11 +32,11 @@ describe("usage snapshot retention days", () => {
 		}
 	});
 
-	it("defaults to 90 days", () => {
+	it("defaults to 3650 days", () => {
 		delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
-			expect(config.getUsageSnapshotRetentionDays()).toBe(90);
+			expect(config.getUsageSnapshotRetentionDays()).toBe(3650);
 		} finally {
 			cleanup();
 		}
