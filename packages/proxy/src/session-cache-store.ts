@@ -8,6 +8,7 @@ import {
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
 	keepaliveMissCostUsd,
+	MAX_KEEPALIVE_FAILURES,
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
@@ -88,6 +89,8 @@ export interface SessionCacheSlot {
 	lastActivityTs: number;
 	/** Last keepalive dispatch time, or null if none sent yet. */
 	lastKeepaliveTs: number | null;
+	/** Consecutive non-routable/failed keepalive attempts; resets on success. */
+	keepaliveFailures: number;
 }
 
 function sanitizeHeaders(headers: Headers): Record<string, string> {
@@ -232,6 +235,7 @@ class SessionCacheStore {
 			spentUsd: 0,
 			lastActivityTs: Date.now(),
 			lastKeepaliveTs: null,
+			keepaliveFailures: 0,
 		};
 
 		// Upsert: subtract any prior slot's bytes before replacing.
@@ -329,6 +333,33 @@ class SessionCacheStore {
 			: keepaliveMissCostUsd(slot.cachedTokens, slot.cacheWritePer1M);
 		slot.spentUsd += cost;
 		slot.lastKeepaliveTs = now;
+		// A successful keepalive clears the consecutive-failure streak.
+		slot.keepaliveFailures = 0;
+	}
+
+	/**
+	 * Record a FAILED keepalive (non-routable force-route, non-ok response, or a
+	 * thrown dispatch). Backs the slot off so it isn't immediately due again
+	 * (lastKeepaliveTs = now) and increments the consecutive-failure counter. Once
+	 * {@link MAX_KEEPALIVE_FAILURES} consecutive failures accumulate, the slot is
+	 * evicted: the account is gone or persistently paused, so re-attempting it
+	 * every tick only wastes the per-tick cap and crowds out healthy sessions.
+	 * No-op when no slot exists for the key.
+	 */
+	recordKeepaliveFailure(
+		accountId: string,
+		sessionKey: string,
+		now: number,
+	): void {
+		const key = SessionCacheStore.key(accountId, sessionKey);
+		const slot = this.slots.get(key);
+		if (!slot) return;
+		// Back off so the slot isn't immediately due again on the next tick.
+		slot.lastKeepaliveTs = now;
+		slot.keepaliveFailures += 1;
+		if (slot.keepaliveFailures >= MAX_KEEPALIVE_FAILURES) {
+			this.deleteKey(key);
+		}
 	}
 
 	/**

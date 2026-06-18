@@ -5,6 +5,7 @@ import {
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
+	MAX_KEEPALIVE_FAILURES,
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_SLOTS,
 } from "../bridge-policy";
@@ -228,6 +229,77 @@ describe("SessionCacheStore — spend budget exhaustion", () => {
 		expect(() =>
 			sessionCacheStore.recordKeepaliveResult("nope", "nope", true, Date.now()),
 		).not.toThrow();
+	});
+});
+
+describe("SessionCacheStore — recordKeepaliveFailure backoff + eviction", () => {
+	it("sets lastKeepaliveTs (slot no longer immediately due) and increments failures", () => {
+		register({ cacheReadTokens: 150_000 });
+		const now = FUTURE();
+		// Due before the failure.
+		expect(sessionCacheStore.getEligibleSessions(now).length).toBe(1);
+
+		sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+		const slot = sessionCacheStore.getAllSlots()[0];
+		expect(slot.keepaliveFailures).toBe(1);
+		expect(slot.lastKeepaliveTs).toBe(now);
+		// Backed off: not immediately due again.
+		expect(sessionCacheStore.getEligibleSessions(now + 1).length).toBe(0);
+		// Due again after the refresh window.
+		expect(
+			sessionCacheStore.getEligibleSessions(now + KEEPALIVE_REFRESH_MS).length,
+		).toBe(1);
+	});
+
+	it("evicts the slot after MAX_KEEPALIVE_FAILURES consecutive failures", () => {
+		register({ cacheReadTokens: 150_000 });
+		let now = FUTURE();
+		for (let i = 0; i < MAX_KEEPALIVE_FAILURES - 1; i++) {
+			sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+			now += KEEPALIVE_REFRESH_MS;
+		}
+		// Still present, just below the threshold.
+		expect(sessionCacheStore.getSize()).toBe(1);
+		expect(sessionCacheStore.getAllSlots()[0].keepaliveFailures).toBe(
+			MAX_KEEPALIVE_FAILURES - 1,
+		);
+
+		// The MAX-th consecutive failure evicts the slot.
+		sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+		expect(sessionCacheStore.getSize()).toBe(0);
+		expect(sessionCacheStore.getTotalBytes()).toBe(0);
+	});
+
+	it("a successful keepalive between failures resets the streak", () => {
+		register({ cacheReadTokens: 150_000 });
+		let now = FUTURE();
+		sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+		now += KEEPALIVE_REFRESH_MS;
+		sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+		expect(sessionCacheStore.getAllSlots()[0].keepaliveFailures).toBe(2);
+
+		// A success clears the streak.
+		now += KEEPALIVE_REFRESH_MS;
+		sessionCacheStore.recordKeepaliveResult("acc-1", "sess-1", true, now);
+		expect(sessionCacheStore.getAllSlots()[0].keepaliveFailures).toBe(0);
+
+		// MAX more failures are now required to evict (no carry-over from before).
+		now += KEEPALIVE_REFRESH_MS;
+		for (let i = 0; i < MAX_KEEPALIVE_FAILURES - 1; i++) {
+			sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+			now += KEEPALIVE_REFRESH_MS;
+		}
+		expect(sessionCacheStore.getSize()).toBe(1);
+		sessionCacheStore.recordKeepaliveFailure("acc-1", "sess-1", now);
+		expect(sessionCacheStore.getSize()).toBe(0);
+	});
+
+	it("is a no-op on a missing slot", () => {
+		expect(sessionCacheStore.getSize()).toBe(0);
+		expect(() =>
+			sessionCacheStore.recordKeepaliveFailure("nope", "nope", Date.now()),
+		).not.toThrow();
+		expect(sessionCacheStore.getSize()).toBe(0);
 	});
 });
 

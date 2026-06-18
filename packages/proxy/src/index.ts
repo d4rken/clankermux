@@ -73,4 +73,5 @@ export {
 	forwardToClient,
 	type ResponseHandlerOptions,
 } from "./response-handler";
+export { sessionCacheStore } from "./session-cache-store";
 export type { ProxyRequest, ProxyResponse } from "./types";

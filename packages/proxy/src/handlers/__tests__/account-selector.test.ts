@@ -233,6 +233,220 @@ describe("selectAccountsForRequest — x-clankermux-account-id header", () => {
 		expect(result).toHaveLength(1);
 		expect(result[0]?.id).toBe("acc-active");
 	});
+
+	// ── synthetic/internal force-routes must NOT fall through to a sibling ──────
+
+	it("internal force-route to a manual-paused account returns [] (no fallthrough)", async () => {
+		const pausedAcc = makeAccount({
+			id: "acc-paused",
+			name: "paused",
+			paused: true,
+			pause_reason: "manual",
+		});
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [pausedAcc, activeAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({ "x-clankermux-account-id": "acc-paused" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		// Synthetic force-route must resolve to exactly the forced account or nothing —
+		// never a sibling. Paused + internal => no candidates.
+		expect(result).toEqual([]);
+	});
+
+	it("internal force-route to a non-existent/deleted account returns [] (no fallthrough)", async () => {
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [activeAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({ "x-clankermux-account-id": "deleted-id" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toEqual([]);
+	});
+
+	it("internal force-route to an available account returns exactly that account", async () => {
+		const targetAcc = makeAccount({ id: "acc-target", name: "target" });
+		const otherAcc = makeAccount({ id: "acc-other", name: "other" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [otherAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [targetAcc, otherAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({ "x-clankermux-account-id": "acc-target" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-target");
+	});
+
+	it("internal bypass-session force-route to an overage-paused account STILL returns it (auto-refresh probe preserved)", async () => {
+		const overageAcc = makeAccount({
+			id: "acc-overage",
+			name: "overage",
+			paused: true,
+			pause_reason: "overage",
+			auto_pause_on_overage_enabled: true,
+		});
+		const otherAcc = makeAccount({ id: "acc-other", name: "other" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [otherAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [overageAcc, otherAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({
+				"x-clankermux-account-id": "acc-overage",
+				"x-clankermux-bypass-session": "true",
+			}),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-overage");
+	});
+
+	it("internal bypass-session force-route to a rate-limited account STILL returns it (auto-refresh probe preserved)", async () => {
+		const rlAcc = makeAccount({
+			id: "acc-rl",
+			name: "rate-limited",
+			rate_limited_until: Date.now() + 3_600_000,
+		});
+		const otherAcc = makeAccount({ id: "acc-other", name: "other" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [otherAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [rlAcc, otherAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({
+				"x-clankermux-account-id": "acc-rl",
+				"x-clankermux-bypass-session": "true",
+			}),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-rl");
+	});
+
+	it("internal force-route returns [] when the DB throws (fail closed)", async () => {
+		// A transient DB error during the forced-account lookup must NOT let an
+		// internal (synthetic) force-route fall through to a sibling account.
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => {
+					throw new Error("synthetic-db-failure");
+				}),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			internal: true,
+			headers: new Headers({ "x-clankermux-account-id": "acc-target" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toEqual([]);
+	});
+
+	it("NON-internal force-route falls through to normal selection when the DB throws (unchanged)", async () => {
+		// For a hand-typed force-route header, a DB error still degrades to normal
+		// selection (getAllAccounts is called again by selectByStrategy and succeeds
+		// here via a separate mock).
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		let calls = 0;
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				// First call (forced lookup) throws; later calls succeed so the
+				// fall-through to normal selection can resolve an account.
+				getAllAccounts: mock(async () => {
+					calls += 1;
+					if (calls === 1) throw new Error("synthetic-db-failure");
+					return [activeAcc];
+				}),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			// no internal flag => hand-typed testing header
+			headers: new Headers({ "x-clankermux-account-id": "acc-target" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-active");
+	});
+
+	it("NON-internal force-route to a paused account still falls through to normal selection (unchanged)", async () => {
+		const pausedAcc = makeAccount({
+			id: "acc-paused",
+			name: "paused",
+			paused: true,
+			pause_reason: "manual",
+		});
+		const activeAcc = makeAccount({ id: "acc-active", name: "active" });
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [activeAcc]) },
+			dbOps: {
+				getAllAccounts: mock(async () => [pausedAcc, activeAcc]),
+				getActiveComboForFamily: mock(async () => null),
+			},
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			// no internal flag => hand-typed testing header
+			headers: new Headers({ "x-clankermux-account-id": "acc-paused" }),
+		});
+
+		const result = await selectAccountsForRequest(meta, ctx);
+		expect(result).toHaveLength(1);
+		expect(result[0]?.id).toBe("acc-active");
+	});
 });
 
 // ── selectAccountsForRequest — combo routing ──────────────────────────────────
@@ -686,9 +900,10 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
-		// Manual pause is not overage → not allowed through; falls back to strategy
-		expect(result).toHaveLength(1);
-		expect(result[0]?.id).toBe("acc-active");
+		// Manual pause is not overage → not allowed through. Because this is an
+		// internal force-route, it must NOT fall through to a sibling — it resolves
+		// to the forced account or to nothing. Manual-paused + internal => [].
+		expect(result).toEqual([]);
 	});
 
 	it("allows rate-limited (non-paused) account when bypass-session header is present", async () => {
@@ -752,9 +967,10 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		});
 
 		const result = await selectAccountsForRequest(meta, ctx);
-		// Failure-paused accounts must NOT be bypassed — the endpoint is broken
-		expect(result).toHaveLength(1);
-		expect(result[0]?.id).toBe("acc-active");
+		// Failure-paused accounts must NOT be bypassed — the endpoint is broken.
+		// And since this is an internal force-route, it must NOT fall through to a
+		// sibling either: it resolves to the forced account or to nothing => [].
+		expect(result).toEqual([]);
 	});
 });
 

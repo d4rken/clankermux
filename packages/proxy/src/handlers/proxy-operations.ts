@@ -698,6 +698,7 @@ export async function proxyWithAccount(
 				req.headers,
 				url.pathname,
 				requestMeta.affinityKey ?? null,
+				account.provider,
 			);
 		}
 

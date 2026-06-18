@@ -549,12 +549,41 @@ async function selectCandidates(
 						return [forcedAccount];
 					}
 				}
-				// If forced account not found or unavailable (paused/rate-limited), fall back to normal selection
+				// Reaching here means the forced account was either not found
+				// (e.g. deleted) OR found but not allowed through (manual / failure /
+				// peak_hours paused, or rate-limited without the auto-refresh bypass).
+				//
+				// For a SYNTHETIC, internally-dispatched force-route (meta.internal),
+				// falling through to normal selection would replay the request against
+				// a DIFFERENT account than the one targeted. The cache keepalive
+				// scheduler relies on force-routing a session's body to the exact
+				// account that warmed it; sending it elsewhere would dirty an unrelated
+				// account's session/cache and record spend on the wrong account. So an
+				// internal force-route must resolve to EXACTLY the forced account or to
+				// nothing — never a sibling. Return no candidates (the caller turns an
+				// empty candidate list into a terminal error Response; the keepalive
+				// replay treats a non-ok response as a no-op, recording no spend).
+				if (meta.internal === true) {
+					return [];
+				}
+				// Otherwise this is a hand-typed x-clankermux-account-id testing header
+				// from a real client: keep the legacy behavior and fall back to normal
+				// selection when the forced account is missing/unavailable.
 			} catch (error) {
 				log.error(
 					"Failed to get accounts from database for forced account lookup:",
 					error,
 				);
+				// For a SYNTHETIC, internally-dispatched force-route (meta.internal),
+				// a transient DB error must NOT let the request fall through to a
+				// sibling account — that would dirty an unrelated account's
+				// session/cache (e.g. the cache keepalive scheduler) or probe the
+				// wrong account. Fail closed: return no candidates (the caller turns an
+				// empty list into a terminal error the keepalive replay treats as a
+				// no-op). Only non-internal (hand-typed) force-routes fall through.
+				if (meta.internal === true) {
+					return [];
+				}
 				console.error("\n❌ DATABASE ERROR DETECTED");
 				console.error("═".repeat(50));
 				console.error(

@@ -22,6 +22,17 @@ const log = new Logger("CacheKeepaliveScheduler");
 const MAX_BRIDGE_KEEPALIVES_PER_TICK = 20;
 
 /**
+ * Number of keepalive replays dispatched concurrently within a tick. The capped
+ * eligible batch is drained in chunks of this size (each chunk via
+ * Promise.allSettled) so a full batch of MAX_BRIDGE_KEEPALIVES_PER_TICK drains in
+ * ~ceil(batch / KEEPALIVE_CONCURRENCY) waves instead of one serial await per
+ * session. This keeps the last sessions in a large batch from drifting toward
+ * Anthropic's ~5-min prompt-cache TTL under upstream latency, while keeping the
+ * per-IP burst modest (and keepalive 429s are already cooldown-exempt).
+ */
+const KEEPALIVE_CONCURRENCY = 4;
+
+/**
  * Heartbeat tick cadence (2 min). The scheduler wakes this often; per-session
  * due-ness is decided inside the store by {@link KEEPALIVE_REFRESH_MS}, so the
  * tick only needs to be comfortably under the cache TTL.
@@ -138,10 +149,12 @@ export class CacheKeepaliveScheduler {
 
 	/**
 	 * Dispatch keepalives for the most valuable idle sessions in the per-session
-	 * warm-body store. Sessions are dispatched SEQUENTIALLY (with a small
-	 * decorrelation jitter between each) — sequential dispatch is the anti-burst
-	 * mechanism that avoids per-IP 429 storms, so we deliberately do NOT use
-	 * Promise.allSettled here.
+	 * warm-body store. The (already per-tick-capped) eligible batch is drained in
+	 * chunks of KEEPALIVE_CONCURRENCY, each chunk dispatched concurrently via
+	 * Promise.allSettled with a small pre-dispatch decorrelation jitter per replay.
+	 * Bounded concurrency caps batch-position lateness (so the last sessions in a
+	 * full batch don't drift toward the prompt-cache TTL) while keeping the per-IP
+	 * burst modest; keepalive 429s are already cooldown-exempt.
 	 */
 	private async sendKeepalives(): Promise<void> {
 		// Reap orphaned in-flight staged bodies (defense-in-depth for idle periods).
@@ -169,20 +182,25 @@ export class CacheKeepaliveScheduler {
 			log.info(`Sending cache warming keepalive to ${batch.length} session(s)`);
 		}
 
-		for (const slot of batch) {
-			// Small decorrelation jitter (<=1s) between dispatches to keep ticks
-			// bounded while still spreading replays across the per-IP window.
-			await new Promise((r) =>
-				setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
+		// Drain the batch in bounded-concurrency chunks. Each chunk runs
+		// concurrently (Promise.allSettled) so one slow upstream doesn't stall the
+		// rest, with a small per-replay pre-dispatch jitter to spread replays across
+		// the per-IP window. Per-replay errors are caught so one failure never
+		// rejects the chunk.
+		for (let i = 0; i < batch.length; i += KEEPALIVE_CONCURRENCY) {
+			const chunk = batch.slice(i, i + KEEPALIVE_CONCURRENCY);
+			await Promise.allSettled(
+				chunk.map(async (slot) => {
+					// Small decorrelation jitter (<=1s) before each dispatch to keep
+					// ticks bounded while still spreading replays across the per-IP window.
+					await new Promise((r) =>
+						setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
+					);
+					// replaySessionKeepalive records its own failure (including on a
+					// thrown dispatch) so a zombie slot backs off and eventually evicts.
+					await this.replaySessionKeepalive(slot);
+				}),
 			);
-			try {
-				await this.replaySessionKeepalive(slot);
-			} catch (error) {
-				log.error(
-					`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
-					error,
-				);
-			}
 		}
 	}
 
@@ -192,6 +210,32 @@ export class CacheKeepaliveScheduler {
 	 * inspects the response for cache hit/miss to charge the spend budget.
 	 */
 	private async replaySessionKeepalive(slot: SessionCacheSlot): Promise<void> {
+		try {
+			await this.dispatchSessionKeepalive(slot);
+		} catch (error) {
+			// A thrown dispatch (network/exception) is a failed keepalive: back the
+			// slot off and count it toward eviction so a persistently broken account
+			// doesn't leave a zombie slot re-attempted every tick.
+			log.error(
+				`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
+				error,
+			);
+			sessionCacheStore.recordKeepaliveFailure(
+				slot.accountId,
+				slot.sessionKey,
+				Date.now(),
+			);
+		}
+	}
+
+	/**
+	 * Build and dispatch the keepalive replay, then charge the hit/miss outcome.
+	 * On a non-ok response it records a failure (backoff + eventual eviction); a
+	 * thrown error is handled by the caller {@link replaySessionKeepalive}.
+	 */
+	private async dispatchSessionKeepalive(
+		slot: SessionCacheSlot,
+	): Promise<void> {
 		// Reconstruct headers from the stored snapshot. Auth and internal proxy
 		// headers were stripped at capture time and are injected fresh here.
 		const replayHeaders = new Headers(slot.headers);
@@ -241,9 +285,18 @@ export class CacheKeepaliveScheduler {
 
 		if (!response.ok) {
 			// A 429/5xx is neither a consumed keepalive nor a proven cache miss —
-			// don't charge it against the budget.
+			// don't charge it against the budget. But it IS a failed keepalive: a
+			// non-routable force-route (deleted/manual-paused/failure-paused account)
+			// resolves to no account and returns non-ok, so record the failure to
+			// back the slot off and evict it after MAX_KEEPALIVE_FAILURES — otherwise
+			// the slot stays perpetually due and is re-attempted every tick.
 			log.warn(
 				`Cache warming keepalive returned ${response.status} for ${slot.accountId}:${slot.sessionKey}`,
+			);
+			sessionCacheStore.recordKeepaliveFailure(
+				slot.accountId,
+				slot.sessionKey,
+				Date.now(),
 			);
 			return;
 		}
