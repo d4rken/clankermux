@@ -39,8 +39,12 @@ const log = new Logger("SessionCacheStore");
  *  2. The keepalive scheduler reads getEligibleSessions() at tick time, dispatches
  *     a keepalive replay for the most valuable due sessions, then calls
  *     recordKeepaliveResult() to charge the hit/miss cost against the budget.
- *  3. A real cache-read turn calls touchActivity() to reset the budget for the
- *     next idle period (a real hit proves the cache is warm).
+ *  3. A real resume turn books the warm-resume WIN (the payoff: we avoided the
+ *     resume re-cache penalty) and resets the budget for the next idle period.
+ *     The common resume shape reads the warm prefix AND appends a new breakpoint
+ *     (cache_read>0 AND cache_creation>0), so it lands in register(), which books
+ *     the win against the prior slot before replacing it. A rarer PURE read (no
+ *     creation) lands in touchActivity(), which books the win and resets in place.
  *
  * Spend-budget model (see bridge-policy.ts): each keepalive charges its hit or
  * miss cost to spentUsd; a session stays eligible while spentUsd < budgetUsd.
@@ -202,6 +206,21 @@ class SessionCacheStore {
 		const key = SessionCacheStore.key(accountId, sessionKey);
 		const cachedTokens = cacheReadTokens + cacheCreationTokens;
 
+		// Capture the prior slot BEFORE the reject gates / upsert below. A real cache
+		// READ on this turn means the warm prefix we maintained was reused — and if we
+		// spent keepalive budget keeping it warm, that is the warm-resume WIN the bridge
+		// exists to produce. Book it now, before the gates can drop the slot, so a
+		// genuine resume still counts even when this turn's NEW (grown) body is rejected
+		// for size/min-token/premium reasons. The common resume turn carries BOTH
+		// cache_read>0 and a small cache_creation>0, so onSummary routes it HERE (a pure
+		// read with no creation goes through touchActivity instead). The slot is always
+		// discarded later in this method (replaced on success, deleteKey'd on reject),
+		// so booking here never double-counts a subsequent turn.
+		const prev = this.slots.get(key);
+		if (prev && cacheReadTokens > 0) {
+			this.bookWarmResume(prev, cacheReadTokens);
+		}
+
 		// Token-count gate: too small to be worth bridging. Drop any stale slot.
 		if (!isEligibleByTokens(cachedTokens, this.minTokens)) {
 			this.deleteKey(key);
@@ -272,10 +291,10 @@ class SessionCacheStore {
 			// Non-JSON body — treat as the default 5m TTL.
 		}
 
-		// Capture the prior slot (if any) before the upsert to detect warm /
-		// re-warm / ttl-change transitions for logging.
-		const prev = this.slots.get(key);
-
+		// `prev` (captured at the top, before the gates) also drives the warm /
+		// re-warm / ttl-change transition logging below. Nothing between here and the
+		// upsert mutates this.slots for the key on the success path, so it's still the
+		// current slot.
 		const cacheWriteEffectivePer1M = isOneHour
 			? rates.inputPer1M * 2
 			: rates.cacheWritePer1M;
@@ -497,12 +516,45 @@ class SessionCacheStore {
 	}
 
 	/**
-	 * Mark a session as freshly active on a confirmed cache-READ turn (a real
-	 * request that HIT the cache without re-creating it). Cache-read turns prove
+	 * Book a warm-resume WIN for a slot whose maintained warm prefix was just re-read
+	 * by a real request — the payoff the bridge exists to produce. Only counts when we
+	 * actually spent keepalive budget on this slot (`spentUsd > 0`); a normal active
+	 * turn that never went idle spent nothing and books nothing. Valued at the slot's
+	 * ACTUAL TTL write rate (`cacheWriteEffectivePer1M` — a 1h slot would have cost 2x
+	 * input to recreate, not the 5-minute rate the LRU `priorityUsd` deliberately
+	 * keeps) times the prefix tokens actually re-read, capped at the slot's stored
+	 * cached-token count so we never attribute reads beyond the prefix we maintained.
+	 * Does NOT mutate the slot — callers own the lifecycle (register replaces it,
+	 * touchActivity resets it).
+	 */
+	private bookWarmResume(slot: SessionCacheSlot, readTokens: number): void {
+		if (slot.spentUsd <= 0) return;
+		const tokens =
+			readTokens > 0
+				? Math.min(readTokens, slot.cachedTokens)
+				: slot.cachedTokens;
+		const savedUsd =
+			((slot.cacheWriteEffectivePer1M - slot.cacheReadPer1M) / 1_000_000) *
+			tokens;
+		bridgeStats.recordWarmResume(savedUsd);
+		log.info(
+			`[CacheBridge] warm-resume WIN session=${SessionCacheStore.key(slot.accountId, slot.sessionKey)} savedUsd=${savedUsd.toFixed(4)} spentUsd=${slot.spentUsd.toFixed(4)} netUsd=${(savedUsd - slot.spentUsd).toFixed(4)} keepalives=${slot.keepaliveCount}`,
+		);
+	}
+
+	/**
+	 * Mark a session as freshly active on a confirmed PURE cache-READ turn (a real
+	 * request that HIT the cache without re-creating any of it). Cache-read turns prove
 	 * the prompt cache is still warm, so we bump lastActivityTs (the session is
 	 * not idle) and RESET the spend budget (spentUsd, lastKeepaliveTs) — a real
 	 * hit restores full confidence the same way a fresh cache-CREATING request
-	 * does, so the session can bridge again through the next idle period.
+	 * does, so the session can bridge again through the next idle period. A warm
+	 * resume is booked first via {@link bookWarmResume}. (The common resume turn that
+	 * ALSO creates cache is booked in {@link register} instead — it carries
+	 * cache_creation>0, so onSummary routes it there, not here.)
+	 *
+	 * `readTokens` is the cache_read token count for this turn (the prefix actually
+	 * re-read); 0/omitted falls back to the slot's full stored cached-token count.
 	 *
 	 * No-op when no slot exists for the key: only cache-CREATING requests
 	 * establish a slot, so a read-only session we never stored stays unstored
@@ -510,24 +562,16 @@ class SessionCacheStore {
 	 * stored body — the last cache-creating body is still a valid warm prefix,
 	 * and re-copying it every read turn would churn memory for no benefit.
 	 */
-	touchActivity(accountId: string, sessionKey: string, now: number): void {
+	touchActivity(
+		accountId: string,
+		sessionKey: string,
+		now: number,
+		readTokens = 0,
+	): void {
 		const key = SessionCacheStore.key(accountId, sessionKey);
 		const slot = this.slots.get(key);
 		if (!slot) return;
-		// A real warm resume after we'd spent keepalive budget is the WIN the bridge
-		// exists to produce: we avoided the resume re-cache penalty. Value it at the
-		// slot's ACTUAL TTL write rate (cacheWriteEffectivePer1M) — a 1h slot would
-		// have cost 2x input to recreate, not the 5-minute rate priorityUsd uses
-		// (priorityUsd stays the 5m-rate LRU key, deliberately TTL-independent).
-		if (slot.spentUsd > 0) {
-			const savedUsd =
-				((slot.cacheWriteEffectivePer1M - slot.cacheReadPer1M) / 1_000_000) *
-				slot.cachedTokens;
-			bridgeStats.recordWarmResume(savedUsd);
-			log.info(
-				`[CacheBridge] warm-resume WIN session=${key} savedUsd=${savedUsd.toFixed(4)} spentUsd=${slot.spentUsd.toFixed(4)} netUsd=${(savedUsd - slot.spentUsd).toFixed(4)} keepalives=${slot.keepaliveCount}`,
-			);
-		}
+		this.bookWarmResume(slot, readTokens);
 		slot.lastActivityTs = now;
 		slot.spentUsd = 0;
 		slot.lastKeepaliveTs = null;
