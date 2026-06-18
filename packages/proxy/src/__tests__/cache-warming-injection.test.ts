@@ -91,6 +91,11 @@ function makeConfig(enabled: boolean, minTokens = DEFAULT_MIN_CACHE_TOKENS) {
 /**
  * Verbatim mirror of the handleProxy injection-decision block (proxy.ts §3b).
  * Returns the (possibly mutated) context's buffer so the test can assert TTLs.
+ *
+ * `globalForcedActive` mirrors `!isInternal && getForcedAccount() !== null`: a
+ * request that will route to proxyForcedAccount (which forwards the injected body
+ * but never stages a warm slot). When set, the whole block is skipped — no observe,
+ * no inject — so the 2x 1h-write premium is never paid with no bridging benefit.
  */
 function decideAndInject(
 	config: {
@@ -101,8 +106,9 @@ function decideAndInject(
 	context: RequestBodyContext,
 	requestTokenEstimate: number,
 	now: number,
+	globalForcedActive = false,
 ): void {
-	if (config.getCacheWarmingEnabled() && affinityKey) {
+	if (config.getCacheWarmingEnabled() && affinityKey && !globalForcedActive) {
 		if (
 			sessionPromotionTracker.observeAndShouldInject(
 				affinityKey,
@@ -199,6 +205,51 @@ describe("request-path injection decision", () => {
 
 		expect(ttlValues(ctx.getBuffer()).every((t) => t === undefined)).toBe(true);
 		expect(sessionPromotionTracker.getSize()).toBe(0);
+	});
+
+	it("GLOBAL forced account active → promoted+large request is NOT injected and is NOT observed", () => {
+		// A session already promoted by prior (non-forced) turns. With a global forced
+		// account active, the request routes to proxyForcedAccount, which never stages
+		// a warm slot — so injecting ttl:1h would pay the 2x premium for nothing.
+		const key = "forced-sess";
+		promote(key);
+		const sizeBefore = sessionPromotionTracker.getSize();
+		const ctx = new RequestBodyContext(makeBodyBuffer());
+		decideAndInject(
+			makeConfig(true, 100_000),
+			key,
+			ctx,
+			500_000,
+			Date.now(),
+			/* globalForcedActive */ true,
+		);
+
+		// No 1h injection despite being promoted + large.
+		expect(ttlValues(ctx.getBuffer()).every((t) => t === undefined)).toBe(true);
+		expect(ctx.isDirty).toBe(false);
+		// The block short-circuits before observe → tracker is untouched.
+		expect(sessionPromotionTracker.getSize()).toBe(sizeBefore);
+	});
+
+	it("HEADER force-route (no global forced account) → promoted+large request IS injected", () => {
+		// The x-clankermux-account-id header force goes through proxyWithAccount, which
+		// DOES stage a warm slot, so injection + staging are still wanted. In the gate
+		// this is exactly the non-globally-forced path (globalForcedActive=false).
+		const key = "header-forced-sess";
+		promote(key);
+		const ctx = new RequestBodyContext(makeBodyBuffer());
+		decideAndInject(
+			makeConfig(true, 100_000),
+			key,
+			ctx,
+			200_000,
+			Date.now(),
+			/* globalForcedActive */ false,
+		);
+
+		const ttls = ttlValues(ctx.getBuffer());
+		expect(ttls.length).toBe(2);
+		expect(ttls.every((t) => t === "1h")).toBe(true);
 	});
 });
 

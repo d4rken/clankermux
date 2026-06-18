@@ -823,11 +823,13 @@ describe("CacheKeepaliveScheduler", () => {
 				dispatches += mockDispatchProxyRequest.mock.calls.length - before;
 			}
 
-			// ~4-5 hourly refreshes → a multi-HOUR bridge from a single session.
-			expect(dispatches).toBeGreaterThanOrEqual(4);
-			expect(dispatches).toBeLessThanOrEqual(5);
+			// With the TRUE 1h write rate (2x input), a promoted slot's budget is larger
+			// than on the old 5m cache_write rate, so ~7-8 hourly refreshes fit → an even
+			// longer multi-HOUR bridge from a single session.
+			expect(dispatches).toBeGreaterThanOrEqual(6);
+			expect(dispatches).toBeLessThanOrEqual(8);
 			const hoursBridged = (dispatches * KEEPALIVE_REFRESH_1H_MS) / 3_600_000;
-			expect(hoursBridged).toBeGreaterThanOrEqual(3);
+			expect(hoursBridged).toBeGreaterThanOrEqual(5);
 
 			scheduler.stop();
 		});
