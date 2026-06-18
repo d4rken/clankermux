@@ -571,6 +571,39 @@ describe("CacheKeepaliveScheduler", () => {
 			scheduler.stop();
 		});
 
+		it("dispatches more sessions than KEEPALIVE_CONCURRENCY via chunked concurrency, recording each result", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			// 10 eligible sessions — well above KEEPALIVE_CONCURRENCY (4) but under
+			// the per-tick cap (20). All should be dispatched (drained across ~3
+			// chunks) and each should record a result (default 200/empty body => hit,
+			// which charges a small spend).
+			const count = 10;
+			for (let i = 0; i < count; i++) {
+				seedSessionEntry("acc-conc", `session-${i}`, {
+					cachedTokens: 150_000,
+				});
+			}
+
+			await capturedCallback?.();
+
+			// Every eligible session was dispatched (chunked concurrency drains the
+			// whole capped batch, not just the first chunk).
+			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(count);
+
+			// Each session recorded a hit/miss result (spend charged).
+			for (let i = 0; i < count; i++) {
+				const slot = sessionCacheStore
+					.getAllSlots()
+					.find((s) => s.sessionKey === `session-${i}`);
+				expect(slot?.spentUsd).toBeGreaterThan(0);
+			}
+
+			scheduler.stop();
+		});
+
 		it("does not dispatch sessions that are not idle long enough", async () => {
 			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);

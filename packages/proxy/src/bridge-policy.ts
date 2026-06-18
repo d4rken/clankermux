@@ -27,6 +27,28 @@
  * gates / tuning knobs).
  */
 
+/**
+ * Providers whose explicit-breakpoint prompt cache has a write premium worth
+ * keeping warm. Bridging is gated on this so an unknown model id (which
+ * getModelCacheRates resolves to a Sonnet-rate fallback) can't make a
+ * non-Anthropic provider look bridgeable. To support a new such provider, add it
+ * here AND ensure its model cache rates are in BUNDLED_PRICING.
+ */
+export const PREMIUM_CACHE_PROVIDERS = new Set(["anthropic"]);
+
+/**
+ * Whether an account's provider is one we bridge (keepalive) at all. The
+ * provider-identity gate that complements {@link hasCacheWritePremium}: it
+ * excludes non-Anthropic providers up front, so a request with an unrecognized
+ * model id (resolved to a Sonnet-rate fallback by getModelCacheRates) can never
+ * be staged and bridged from a non-Anthropic provider.
+ */
+export function isBridgeableProvider(
+	provider: string | null | undefined,
+): boolean {
+	return provider != null && PREMIUM_CACHE_PROVIDERS.has(provider);
+}
+
 /** Derate factor on the resume-penalty budget — hedges abandoned sessions. */
 export const RISK_FACTOR = 0.4;
 

@@ -3,6 +3,7 @@ import {
 	BRIDGE_JITTER_MAX_MS,
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
+	isBridgeableProvider,
 	isEligibleByTokens,
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
@@ -11,6 +12,7 @@ import {
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
+	PREMIUM_CACHE_PROVIDERS,
 	RISK_FACTOR,
 	resumePenaltyUsd,
 } from "../bridge-policy";
@@ -28,6 +30,29 @@ describe("bridge-policy constants", () => {
 		expect(MAX_SESSION_BODY_BYTES).toBe(2 * 1024 * 1024);
 		expect(BRIDGE_JITTER_MAX_MS).toBe(1_000);
 		expect(KEEPALIVE_REFRESH_MS).toBe(3 * 60_000);
+	});
+});
+
+describe("PREMIUM_CACHE_PROVIDERS / isBridgeableProvider", () => {
+	it("contains exactly anthropic", () => {
+		expect(PREMIUM_CACHE_PROVIDERS.has("anthropic")).toBe(true);
+		expect(PREMIUM_CACHE_PROVIDERS.size).toBe(1);
+	});
+
+	it("is true for anthropic", () => {
+		expect(isBridgeableProvider("anthropic")).toBe(true);
+	});
+
+	it("is false for non-Anthropic providers", () => {
+		for (const p of ["codex", "openai", "zai"]) {
+			expect(isBridgeableProvider(p)).toBe(false);
+		}
+	});
+
+	it("is false for null, undefined, and empty string", () => {
+		expect(isBridgeableProvider(null)).toBe(false);
+		expect(isBridgeableProvider(undefined)).toBe(false);
+		expect(isBridgeableProvider("")).toBe(false);
 	});
 });
 

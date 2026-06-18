@@ -22,6 +22,17 @@ const log = new Logger("CacheKeepaliveScheduler");
 const MAX_BRIDGE_KEEPALIVES_PER_TICK = 20;
 
 /**
+ * Number of keepalive replays dispatched concurrently within a tick. The capped
+ * eligible batch is drained in chunks of this size (each chunk via
+ * Promise.allSettled) so a full batch of MAX_BRIDGE_KEEPALIVES_PER_TICK drains in
+ * ~ceil(batch / KEEPALIVE_CONCURRENCY) waves instead of one serial await per
+ * session. This keeps the last sessions in a large batch from drifting toward
+ * Anthropic's ~5-min prompt-cache TTL under upstream latency, while keeping the
+ * per-IP burst modest (and keepalive 429s are already cooldown-exempt).
+ */
+const KEEPALIVE_CONCURRENCY = 4;
+
+/**
  * Heartbeat tick cadence (2 min). The scheduler wakes this often; per-session
  * due-ness is decided inside the store by {@link KEEPALIVE_REFRESH_MS}, so the
  * tick only needs to be comfortably under the cache TTL.
@@ -138,10 +149,12 @@ export class CacheKeepaliveScheduler {
 
 	/**
 	 * Dispatch keepalives for the most valuable idle sessions in the per-session
-	 * warm-body store. Sessions are dispatched SEQUENTIALLY (with a small
-	 * decorrelation jitter between each) — sequential dispatch is the anti-burst
-	 * mechanism that avoids per-IP 429 storms, so we deliberately do NOT use
-	 * Promise.allSettled here.
+	 * warm-body store. The (already per-tick-capped) eligible batch is drained in
+	 * chunks of KEEPALIVE_CONCURRENCY, each chunk dispatched concurrently via
+	 * Promise.allSettled with a small pre-dispatch decorrelation jitter per replay.
+	 * Bounded concurrency caps batch-position lateness (so the last sessions in a
+	 * full batch don't drift toward the prompt-cache TTL) while keeping the per-IP
+	 * burst modest; keepalive 429s are already cooldown-exempt.
 	 */
 	private async sendKeepalives(): Promise<void> {
 		// Reap orphaned in-flight staged bodies (defense-in-depth for idle periods).
@@ -169,20 +182,30 @@ export class CacheKeepaliveScheduler {
 			log.info(`Sending cache warming keepalive to ${batch.length} session(s)`);
 		}
 
-		for (const slot of batch) {
-			// Small decorrelation jitter (<=1s) between dispatches to keep ticks
-			// bounded while still spreading replays across the per-IP window.
-			await new Promise((r) =>
-				setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
+		// Drain the batch in bounded-concurrency chunks. Each chunk runs
+		// concurrently (Promise.allSettled) so one slow upstream doesn't stall the
+		// rest, with a small per-replay pre-dispatch jitter to spread replays across
+		// the per-IP window. Per-replay errors are caught so one failure never
+		// rejects the chunk.
+		for (let i = 0; i < batch.length; i += KEEPALIVE_CONCURRENCY) {
+			const chunk = batch.slice(i, i + KEEPALIVE_CONCURRENCY);
+			await Promise.allSettled(
+				chunk.map(async (slot) => {
+					// Small decorrelation jitter (<=1s) before each dispatch to keep
+					// ticks bounded while still spreading replays across the per-IP window.
+					await new Promise((r) =>
+						setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
+					);
+					try {
+						await this.replaySessionKeepalive(slot);
+					} catch (error) {
+						log.error(
+							`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
+							error,
+						);
+					}
+				}),
 			);
-			try {
-				await this.replaySessionKeepalive(slot);
-			} catch (error) {
-				log.error(
-					`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
-					error,
-				);
-			}
 		}
 	}
 

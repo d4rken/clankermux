@@ -1,5 +1,6 @@
 import { TIME_CONSTANTS } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { isBridgeableProvider } from "./bridge-policy";
 import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
 import { sessionCacheStore } from "./session-cache-store";
 
@@ -162,8 +163,17 @@ class CacheBodyStore {
 		headers: Headers,
 		path: string,
 		sessionKey: string | null = null,
+		provider: string | null = null,
 	): void {
 		if (!this.enabled || !accountId || !body || body.byteLength === 0) return;
+
+		// Provider-identity gate: only bridge providers whose explicit-breakpoint
+		// cache has a real write premium (Anthropic). This excludes non-Anthropic
+		// providers up front, so an unrecognized model id (which getModelCacheRates
+		// resolves to a Sonnet-rate fallback) can never make a non-Anthropic
+		// provider look bridgeable. The hasCacheWritePremium check in
+		// sessionCacheStore.register() remains as defense-in-depth.
+		if (!isBridgeableProvider(provider)) return;
 
 		// Only cache prompt-cache-relevant endpoint.
 		if (path !== CACHEABLE_PATH) return;

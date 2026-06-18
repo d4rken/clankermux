@@ -86,6 +86,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 
@@ -112,6 +114,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -123,6 +127,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -134,6 +140,8 @@ describe("CacheBodyStore", () => {
 				null,
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -145,6 +153,8 @@ describe("CacheBodyStore", () => {
 				makeEmptyBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -156,6 +166,8 @@ describe("CacheBodyStore", () => {
 				makeBodyWithoutCacheHint(),
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -167,6 +179,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/completions",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
@@ -178,6 +192,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 		});
@@ -191,6 +207,8 @@ describe("CacheBodyStore", () => {
 				),
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 		});
@@ -245,6 +263,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ ...sensitiveHeaders, ...safeHeaders }),
 				"/v1/messages",
 				"session-strip",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary(
 				"req-strip",
@@ -277,6 +296,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 			cacheBodyStore.onSummary("req-del", 0);
@@ -310,6 +331,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-abc",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary(
 				"req-keyed",
@@ -336,6 +358,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				null,
+				"anthropic",
 			);
 			cacheBodyStore.onSummary(
 				"req-unkeyed",
@@ -359,6 +382,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-read",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary(
 				"req-seed",
@@ -386,6 +410,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-read",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary("req-read", 0, 150_000, PREMIUM_MODEL);
 
@@ -406,6 +431,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-noslot",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary("req-read-noslot", 0, 150_000, PREMIUM_MODEL);
 
@@ -422,6 +448,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-small",
+				"anthropic",
 			);
 			// 5_000 + 1_000 = 6_000 cached tokens, well under 100k.
 			cacheBodyStore.onSummary("req-small", 5_000, 1_000, PREMIUM_MODEL);
@@ -437,6 +464,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-nopremium",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary(
 				"req-nopremium",
@@ -456,10 +484,79 @@ describe("CacheBodyStore", () => {
 				makeHeaders({ "content-type": "application/json" }),
 				"/v1/messages",
 				"session-zero",
+				"anthropic",
 			);
 			cacheBodyStore.onSummary("req-zero", 0, 0, PREMIUM_MODEL);
 
 			expect(sessionCacheStore.getSize()).toBe(0);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// stageRequest — provider-identity gate
+	//
+	// Bridging is gated on the account PROVIDER, not just the model's cache
+	// rates: an unrecognized model id resolves to a Sonnet-rate fallback in
+	// getModelCacheRates, which would otherwise let a non-Anthropic provider
+	// pass the cache-write-premium check. Only "anthropic" stages.
+	// -----------------------------------------------------------------------
+
+	describe("stageRequest provider gate", () => {
+		it("stages and registers an anthropic provider request", () => {
+			cacheBodyStore.stageRequest(
+				"req-prov-anthropic",
+				"account-anthropic",
+				makeBodyWithModel(PREMIUM_MODEL),
+				makeHeaders({ "content-type": "application/json" }),
+				"/v1/messages",
+				"session-anthropic",
+				"anthropic",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(1);
+
+			cacheBodyStore.onSummary(
+				"req-prov-anthropic",
+				BIG_CREATION,
+				BIG_READ,
+				PREMIUM_MODEL,
+			);
+			expect(sessionCacheStore.getSize()).toBe(1);
+		});
+
+		for (const provider of ["codex", "openai", "zai", null] as const) {
+			it(`does NOT stage or register for provider=${String(provider)}`, () => {
+				cacheBodyStore.stageRequest(
+					"req-prov-other",
+					"account-other",
+					makeBodyWithModel(PREMIUM_MODEL),
+					makeHeaders({ "content-type": "application/json" }),
+					"/v1/messages",
+					"session-other",
+					provider,
+				);
+				// Never staged.
+				expect(cacheBodyStore.getStagingSize()).toBe(0);
+
+				// A subsequent summary therefore stores nothing.
+				cacheBodyStore.onSummary(
+					"req-prov-other",
+					BIG_CREATION,
+					BIG_READ,
+					PREMIUM_MODEL,
+				);
+				expect(sessionCacheStore.getSize()).toBe(0);
+			});
+		}
+
+		it("does NOT stage when provider arg is omitted (defaults to null)", () => {
+			cacheBodyStore.stageRequest(
+				"req-prov-default",
+				"account-default",
+				makeBodyWithModel(PREMIUM_MODEL),
+				makeHeaders({ "content-type": "application/json" }),
+				"/v1/messages",
+			);
+			expect(cacheBodyStore.getStagingSize()).toBe(0);
 		});
 	});
 
@@ -476,6 +573,7 @@ describe("CacheBodyStore", () => {
 				makeHeaders(),
 				"/v1/messages",
 				"session-discard",
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 
@@ -510,6 +608,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 			cacheBodyStore.onSummary("req-size", 1);
@@ -526,6 +626,8 @@ describe("CacheBodyStore", () => {
 					makeBody(),
 					makeHeaders(),
 					"/v1/messages",
+					null,
+					"anthropic",
 				);
 			}
 			expect(cacheBodyStore.getStagingSize()).toBe(MAX_STAGING_ENTRIES);
@@ -543,6 +645,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 
@@ -554,6 +658,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			// Old orphan swept, only the fresh one remains.
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
@@ -567,6 +673,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			setSystemTime(new Date(t0 + STAGING_MAX_AGE_MS - 60_000));
 			cacheBodyStore.stageRequest(
@@ -575,6 +683,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(2);
 		});
@@ -587,6 +697,8 @@ describe("CacheBodyStore", () => {
 				makeBody(),
 				makeHeaders(),
 				"/v1/messages",
+				null,
+				"anthropic",
 			);
 			expect(cacheBodyStore.getStagingSize()).toBe(1);
 

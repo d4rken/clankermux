@@ -37,6 +37,7 @@ import {
 	getUsageThrottleStatus,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
+	sessionCacheStore,
 	setForcedAccount,
 } from "@clankermux/proxy";
 import type {
@@ -918,22 +919,28 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = await removeAccount(dbOps, accountName);
-
-			if (!result.success) {
-				return errorResponse(NotFound(result.message));
-			}
-
-			// Find the account ID to clean up usage cache (check before deletion)
+			// Resolve the account ID BEFORE deletion — removeAccount deletes the row,
+			// after which a name lookup would return nothing and the in-memory
+			// cleanup below would silently never run (leaking the usage cache entry
+			// and any warm session-cache slots for the deleted account).
 			const db = dbOps.getAdapter();
 			const account = await db.get<{ id: string }>(
 				"SELECT id FROM accounts WHERE name = ?",
 				[accountName],
 			);
 
+			const result = await removeAccount(dbOps, accountName);
+
+			if (!result.success) {
+				return errorResponse(NotFound(result.message));
+			}
+
 			if (account) {
 				// Clear usage cache for removed account to prevent memory leaks
 				usageCache.delete(account.id);
+				// Evict any warm session-cache slots owned by the removed account so
+				// the keepalive scheduler never tries to replay against a deleted id.
+				sessionCacheStore.evictAccount(account.id);
 			}
 
 			return jsonResponse({
