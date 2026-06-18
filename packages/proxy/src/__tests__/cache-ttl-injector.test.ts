@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { injectCacheTtl1h } from "../cache-ttl-injector";
+import { bodyCacheTtlIsOneHour, injectCacheTtl1h } from "../cache-ttl-injector";
 import { RequestBodyContext } from "../request-body-context";
 
 const enc = new TextEncoder();
@@ -182,5 +182,47 @@ describe("injectCacheTtl1h", () => {
 			cache_control: { ttl: string };
 		};
 		expect(block.cache_control.ttl).toBe("1h");
+	});
+});
+
+describe("bodyCacheTtlIsOneHour", () => {
+	const eph = (ttl?: string) => ({
+		type: "text",
+		text: "x",
+		cache_control: ttl ? { type: "ephemeral", ttl } : { type: "ephemeral" },
+	});
+
+	it("true when the only ephemeral breakpoint is ttl:1h (system)", () => {
+		expect(bodyCacheTtlIsOneHour({ system: [eph("1h")] })).toBe(true);
+	});
+
+	it("true when every ephemeral breakpoint across system+messages is 1h", () => {
+		expect(
+			bodyCacheTtlIsOneHour({
+				system: [eph("1h")],
+				messages: [{ role: "user", content: [eph("1h"), { type: "text" }] }],
+			}),
+		).toBe(true);
+	});
+
+	it("false (conservative) for a mixed body — a 5m breakpoint alongside a 1h one", () => {
+		expect(
+			bodyCacheTtlIsOneHour({
+				system: [eph("1h")],
+				messages: [{ role: "user", content: [eph()] }], // default 5m
+			}),
+		).toBe(false);
+	});
+
+	it("false when the breakpoint has no ttl (default 5m)", () => {
+		expect(bodyCacheTtlIsOneHour({ system: [eph()] })).toBe(false);
+	});
+
+	it("false when there are no ephemeral breakpoints at all", () => {
+		expect(
+			bodyCacheTtlIsOneHour({ system: [{ type: "text", text: "x" }] }),
+		).toBe(false);
+		expect(bodyCacheTtlIsOneHour({})).toBe(false);
+		expect(bodyCacheTtlIsOneHour(null)).toBe(false);
 	});
 });

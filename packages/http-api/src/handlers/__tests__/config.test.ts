@@ -2,8 +2,9 @@ import { describe, expect, it, mock } from "bun:test";
 import { createConfigHandlers } from "../config";
 
 function makeConfig() {
-	let cacheWarmingEnabled = false;
+	let cacheWarmingMode: "off" | "static" | "dynamic" = "off";
 	let cacheWarmingMinTokens = 100_000;
+	let cacheKeepaliveSnapshotDays = 30;
 	return {
 		getAllSettings: () => ({
 			lb_strategy: "session",
@@ -20,13 +21,25 @@ function makeConfig() {
 		setStrategy: mock(() => {}),
 		getDataRetentionDays: () => 3,
 		getRequestRetentionDays: () => 90,
+		getUsageSnapshotRetentionDays: () => 90,
+		getMemorySnapshotRetentionDays: () => 30,
+		getCacheKeepaliveSnapshotRetentionDays: () => cacheKeepaliveSnapshotDays,
+		setCacheKeepaliveSnapshotRetentionDays: mock((v: number) => {
+			cacheKeepaliveSnapshotDays = v;
+		}),
 		getStorePayloads: () => true,
 		setDataRetentionDays: mock(() => {}),
 		setRequestRetentionDays: mock(() => {}),
+		setUsageSnapshotRetentionDays: mock(() => {}),
+		setMemorySnapshotRetentionDays: mock(() => {}),
 		setStorePayloads: mock(() => {}),
-		getCacheWarmingEnabled: () => cacheWarmingEnabled,
+		getCacheWarmingMode: () => cacheWarmingMode,
+		setCacheWarmingMode: mock((v: "off" | "static" | "dynamic") => {
+			cacheWarmingMode = v;
+		}),
+		getCacheWarmingEnabled: () => cacheWarmingMode !== "off",
 		setCacheWarmingEnabled: mock((v: boolean) => {
-			cacheWarmingEnabled = v;
+			cacheWarmingMode = v ? "dynamic" : "off";
 		}),
 		getCacheWarmingMinTokens: () => cacheWarmingMinTokens,
 		setCacheWarmingMinTokens: mock((v: number) => {
@@ -74,7 +87,7 @@ describe("createConfigHandlers", () => {
 		expect(config.setUsageThrottlingWeeklyEnabled).toHaveBeenCalledWith(true);
 	});
 
-	it("returns current cache-warming settings", async () => {
+	it("returns current cache-warming settings (mode + minTokens + enabled)", async () => {
 		const handlers = createConfigHandlers(makeConfig(), {
 			port: 8080,
 			tlsEnabled: false,
@@ -82,15 +95,17 @@ describe("createConfigHandlers", () => {
 
 		const response = handlers.getCacheWarming();
 		const body = (await response.json()) as {
+			mode: string;
 			enabled: boolean;
 			minTokens: number;
 		};
 
+		expect(body.mode).toBe("off");
 		expect(body.enabled).toBe(false);
 		expect(body.minTokens).toBe(100_000);
 	});
 
-	it("updates cache-warming settings and returns the new values", async () => {
+	it("persists a valid mode and returns the new mode-aware shape", async () => {
 		const config = makeConfig();
 		const handlers = createConfigHandlers(config, {
 			port: 8080,
@@ -101,18 +116,65 @@ describe("createConfigHandlers", () => {
 			new Request("http://localhost/api/config/cache-warming", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ enabled: true, minTokens: 50_000 }),
+				body: JSON.stringify({ mode: "static", minTokens: 50_000 }),
 			}),
 		);
 		const body = (await response.json()) as {
+			mode: string;
+			enabled: boolean;
+			minTokens: number;
+		};
+
+		expect(response.status).toBe(200);
+		expect(config.setCacheWarmingMode).toHaveBeenCalledWith("static");
+		expect(config.setCacheWarmingMinTokens).toHaveBeenCalledWith(50_000);
+		expect(body).toEqual({ mode: "static", enabled: true, minTokens: 50_000 });
+	});
+
+	it("rejects an invalid mode with a 400", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setCacheWarming(
+			new Request("http://localhost/api/config/cache-warming", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ mode: "turbo" }),
+			}),
+		);
+
+		expect(response.status).toBe(400);
+		expect(config.setCacheWarmingMode).not.toHaveBeenCalled();
+	});
+
+	it("still honors the legacy {enabled:true} toggle", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setCacheWarming(
+			new Request("http://localhost/api/config/cache-warming", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ enabled: true }),
+			}),
+		);
+		const body = (await response.json()) as {
+			mode: string;
 			enabled: boolean;
 			minTokens: number;
 		};
 
 		expect(response.status).toBe(200);
 		expect(config.setCacheWarmingEnabled).toHaveBeenCalledWith(true);
-		expect(config.setCacheWarmingMinTokens).toHaveBeenCalledWith(50_000);
-		expect(body).toEqual({ enabled: true, minTokens: 50_000 });
+		expect(config.setCacheWarmingMode).not.toHaveBeenCalled();
+		expect(body.mode).toBe("dynamic");
+		expect(body.enabled).toBe(true);
 	});
 
 	it("rejects a negative minTokens (router maps the thrown ValidationError to 400)", async () => {
@@ -153,5 +215,62 @@ describe("createConfigHandlers", () => {
 
 		expect(response.status).toBe(400);
 		expect(config.setCacheWarmingEnabled).not.toHaveBeenCalled();
+	});
+
+	it("includes cacheKeepaliveSnapshotDays in the retention payload", async () => {
+		const handlers = createConfigHandlers(makeConfig(), {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = handlers.getRetention();
+		const body = (await response.json()) as Record<string, unknown>;
+
+		expect(body.cacheKeepaliveSnapshotDays).toBe(30);
+		expect(body.memorySnapshotDays).toBe(30);
+	});
+
+	it("persists cacheKeepaliveSnapshotDays from the retention setter", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setRetention(
+			new Request("http://localhost/api/config/retention", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ cacheKeepaliveSnapshotDays: 14 }),
+			}),
+		);
+
+		expect(response.status).toBe(204);
+		expect(config.setCacheKeepaliveSnapshotRetentionDays).toHaveBeenCalledWith(
+			14,
+		);
+	});
+
+	it("rejects an out-of-range cacheKeepaliveSnapshotDays", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		// validateNumber throws ValidationError (400) for out-of-range; the
+		// router's try/catch surfaces it as a 400.
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ cacheKeepaliveSnapshotDays: 0 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(
+			config.setCacheKeepaliveSnapshotRetentionDays,
+		).not.toHaveBeenCalled();
 	});
 });

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { BunSqlAdapter } from "@clankermux/database";
 import type { APIContext } from "@clankermux/types";
 import { createAnalyticsHandler } from "./analytics-direct";
+import { createCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createStatsHandler } from "./stats-direct";
@@ -18,6 +19,7 @@ export type DashboardWorkerKind =
 	| "stats"
 	| "usage-history"
 	| "memory-history"
+	| "cache-keepalive-history"
 	| "payments-summary";
 
 export interface AnalyticsWorkerRequest {
@@ -68,9 +70,11 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 					? createUsageHistoryHandler(context)
 					: kind === "memory-history"
 						? createMemoryHistoryHandler(context)
-						: kind === "payments-summary"
-							? createPaymentsSummaryDataHandler(context)
-							: createAnalyticsHandler(context);
+						: kind === "cache-keepalive-history"
+							? createCacheKeepaliveHistoryHandler(context)
+							: kind === "payments-summary"
+								? createPaymentsSummaryDataHandler(context)
+								: createAnalyticsHandler(context);
 		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();

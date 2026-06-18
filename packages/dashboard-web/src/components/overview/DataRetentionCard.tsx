@@ -34,6 +34,8 @@ export function DataRetentionCard() {
 	const [memorySnapshotDays, setMemorySnapshotDays] = useState<number>(
 		data?.memorySnapshotDays ?? 14,
 	);
+	const [cacheKeepaliveSnapshotDays, setCacheKeepaliveSnapshotDays] =
+		useState<number>(data?.cacheKeepaliveSnapshotDays ?? 30);
 
 	useEffect(() => {
 		if (typeof data?.payloadDays === "number") setPayloadDays(data.payloadDays);
@@ -42,11 +44,14 @@ export function DataRetentionCard() {
 			setUsageSnapshotDays(data.usageSnapshotDays);
 		if (typeof data?.memorySnapshotDays === "number")
 			setMemorySnapshotDays(data.memorySnapshotDays);
+		if (typeof data?.cacheKeepaliveSnapshotDays === "number")
+			setCacheKeepaliveSnapshotDays(data.cacheKeepaliveSnapshotDays);
 	}, [
 		data?.payloadDays,
 		data?.requestDays,
 		data?.usageSnapshotDays,
 		data?.memorySnapshotDays,
+		data?.cacheKeepaliveSnapshotDays,
 	]);
 
 	const disabled = isLoading || setRetention.isPending;
@@ -62,6 +67,10 @@ export function DataRetentionCard() {
 		Number.isFinite(memorySnapshotDays) &&
 		memorySnapshotDays >= 1 &&
 		memorySnapshotDays <= 3650;
+	const validCacheKeepaliveSnapshots =
+		Number.isFinite(cacheKeepaliveSnapshotDays) &&
+		cacheKeepaliveSnapshotDays >= 1 &&
+		cacheKeepaliveSnapshotDays <= 3650;
 
 	// Per-data-type storage usage, keyed for inline lookup next to each control.
 	const usageByKey = new Map((usage?.types ?? []).map((t) => [t.key, t]));
@@ -201,6 +210,42 @@ export function DataRetentionCard() {
 					<p className="text-xs text-muted-foreground mt-1">
 						How long process memory history (RSS + heap) is kept for the
 						Overview Memory Usage graph.
+					</p>
+				</div>
+
+				<div className="pt-2">
+					<div className="flex items-center gap-2">
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">
+								Cache keep-alive snapshots
+							</span>
+							<Input
+								type="number"
+								min={1}
+								max={3650}
+								value={cacheKeepaliveSnapshotDays}
+								onChange={(e) =>
+									setCacheKeepaliveSnapshotDays(
+										parseInt(e.target.value || "0", 10),
+									)
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">days</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validCacheKeepaliveSnapshots}
+							onClick={() =>
+								setRetention.mutate({ cacheKeepaliveSnapshotDays })
+							}
+						>
+							Save
+						</Button>
+					</div>
+					<p className="text-xs text-muted-foreground mt-1">
+						How long cache keep-alive history is kept for the Analytics Cache
+						Keep-Alive graph.
 					</p>
 				</div>
 

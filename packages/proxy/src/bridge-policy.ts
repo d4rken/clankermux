@@ -100,6 +100,12 @@ export const PROMOTE_AFTER_TURNS = 3;
  */
 export const IDLE_GAP_FOR_PROMOTION_MS = 3 * 60_000;
 
+/** De-stick: demote a promoted (dynamic-mode) session after this many CONSECUTIVE
+ * non-idle (actively-worked) turns — at that point the 1h-TTL write premium is
+ * being paid with no idle benefit, so drop it back to the cheap 5m TTL. A fresh
+ * idle gap re-promotes. Dynamic mode only. */
+export const DESTICK_AFTER_ACTIVE_TURNS = 5;
+
 /**
  * Refresh cadence (50 min) for 1h-promoted keepalive slots — comfortably under
  * the 1-hour cache TTL. The per-slot interval the scheduler uses for promoted

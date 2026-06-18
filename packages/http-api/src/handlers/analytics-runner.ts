@@ -11,6 +11,7 @@ import type {
 	AnalyticsWorkerResponse,
 	DashboardWorkerKind,
 } from "./analytics-worker";
+import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
@@ -95,6 +96,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch memory history data",
 		tooManyMessage: "Too many memory history requests",
 	},
+	"cache-keepalive-history": {
+		timeoutMessage: "Cache keepalive history request timed out",
+		failureMessage: "Failed to fetch cache keepalive history data",
+		tooManyMessage: "Too many cache keepalive history requests",
+	},
 	"payments-summary": {
 		timeoutMessage: "Payments summary request timed out",
 		failureMessage: "Failed to fetch payments summary data",
@@ -131,6 +137,16 @@ export function createIsolatedMemoryHistoryHandler(context: APIContext) {
 		context,
 		"memory-history",
 		createDirectMemoryHistoryHandler(context),
+	);
+}
+
+export function createIsolatedCacheKeepaliveHistoryHandler(
+	context: APIContext,
+) {
+	return createIsolatedDashboardHandler(
+		context,
+		"cache-keepalive-history",
+		createDirectCacheKeepaliveHistoryHandler(context),
 	);
 }
 

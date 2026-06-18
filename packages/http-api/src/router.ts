@@ -46,6 +46,8 @@ import {
 	createApiKeysListHandler,
 	createApiKeysStatsHandler,
 } from "./handlers/api-keys";
+import { createCacheKeepaliveHandler } from "./handlers/cache-keepalive";
+import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-history";
 import {
 	createComboCreateHandler,
 	createComboDeleteHandler,
@@ -191,6 +193,10 @@ export class APIRouter {
 		const analyticsHandler = createAnalyticsHandler(this.context);
 		const usageHistoryHandler = createUsageHistoryHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
+		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
+		const cacheKeepaliveHistoryHandler = createCacheKeepaliveHistoryHandler(
+			this.context,
+		);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);
@@ -408,6 +414,13 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics/memory-history", (_req, url) => {
 			return memoryHistoryHandler(url.searchParams);
 		});
+		this.handlers.set("GET:/api/analytics/cache-keepalive", () =>
+			cacheKeepaliveHandler(),
+		);
+		this.handlers.set(
+			"GET:/api/analytics/cache-keepalive-history",
+			(_req, url) => cacheKeepaliveHistoryHandler(url.searchParams),
+		);
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());
 		this.handlers.set("GET:/api/debug/snapshot", () => heapSnapshotHandler());

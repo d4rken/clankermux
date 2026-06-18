@@ -93,6 +93,8 @@ export function createConfigHandlers(
 				requestDays: config.getRequestRetentionDays(),
 				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
 				memorySnapshotDays: config.getMemorySnapshotRetentionDays(),
+				cacheKeepaliveSnapshotDays:
+					config.getCacheKeepaliveSnapshotRetentionDays(),
 				storePayloads: config.getStorePayloads(),
 			});
 		},
@@ -159,6 +161,26 @@ export function createConfigHandlers(
 				config.setMemorySnapshotRetentionDays(memorySnapshotDays);
 				updated = true;
 			}
+			if (body.cacheKeepaliveSnapshotDays !== undefined) {
+				const cacheKeepaliveSnapshotDays = validateNumber(
+					body.cacheKeepaliveSnapshotDays,
+					"cacheKeepaliveSnapshotDays",
+					{
+						min: 1,
+						max: 3650,
+						integer: true,
+					},
+				);
+				if (typeof cacheKeepaliveSnapshotDays !== "number") {
+					return errorResponse(
+						BadRequest("Invalid 'cacheKeepaliveSnapshotDays'"),
+					);
+				}
+				config.setCacheKeepaliveSnapshotRetentionDays(
+					cacheKeepaliveSnapshotDays,
+				);
+				updated = true;
+			}
 			if (body.storePayloads !== undefined) {
 				if (typeof body.storePayloads !== "boolean") {
 					return errorResponse(
@@ -176,14 +198,27 @@ export function createConfigHandlers(
 
 		getCacheWarming: (): Response => {
 			return jsonResponse({
-				enabled: config.getCacheWarmingEnabled(),
+				mode: config.getCacheWarmingMode(),
 				minTokens: config.getCacheWarmingMinTokens(),
+				enabled: config.getCacheWarmingEnabled(),
 			});
 		},
 
 		setCacheWarming: async (req: Request): Promise<Response> => {
 			const body = await req.json();
-			if (body.enabled !== undefined) {
+			if (body.mode !== undefined) {
+				if (
+					body.mode !== "off" &&
+					body.mode !== "static" &&
+					body.mode !== "dynamic"
+				) {
+					return errorResponse(
+						BadRequest("Invalid 'mode': must be off|static|dynamic"),
+					);
+				}
+				config.setCacheWarmingMode(body.mode);
+			} else if (body.enabled !== undefined) {
+				// Legacy boolean toggle (maps to dynamic/off in config).
 				if (typeof body.enabled !== "boolean") {
 					return errorResponse(
 						BadRequest("Invalid 'enabled': must be boolean"),
@@ -204,8 +239,9 @@ export function createConfigHandlers(
 				config.setCacheWarmingMinTokens(minTokens);
 			}
 			return jsonResponse({
-				enabled: config.getCacheWarmingEnabled(),
+				mode: config.getCacheWarmingMode(),
 				minTokens: config.getCacheWarmingMinTokens(),
+				enabled: config.getCacheWarmingEnabled(),
 			});
 		},
 

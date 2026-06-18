@@ -2,6 +2,8 @@ import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	AnalyticsResponse,
+	CacheKeepaliveHistoryResponse,
+	CacheKeepaliveLiveResponse,
 	Combo,
 	ComboFamilyAssignment,
 	ComboSlot,
@@ -1541,6 +1543,7 @@ class API extends HttpClient {
 		requestDays: number;
 		usageSnapshotDays: number;
 		memorySnapshotDays: number;
+		cacheKeepaliveSnapshotDays: number;
 		storePayloads: boolean;
 	}> {
 		const startTime = Date.now();
@@ -1554,6 +1557,7 @@ class API extends HttpClient {
 				requestDays: number;
 				usageSnapshotDays: number;
 				memorySnapshotDays: number;
+				cacheKeepaliveSnapshotDays: number;
 				storePayloads: boolean;
 			}>(url);
 			const duration = Date.now() - startTime;
@@ -1574,6 +1578,7 @@ class API extends HttpClient {
 		requestDays?: number;
 		usageSnapshotDays?: number;
 		memorySnapshotDays?: number;
+		cacheKeepaliveSnapshotDays?: number;
 		storePayloads?: boolean;
 	}): Promise<void> {
 		const startTime = Date.now();
@@ -1595,16 +1600,22 @@ class API extends HttpClient {
 		}
 	}
 
-	async getCacheWarming(): Promise<{ enabled: boolean; minTokens: number }> {
+	async getCacheWarming(): Promise<{
+		mode: "off" | "static" | "dynamic";
+		minTokens: number;
+		enabled: boolean;
+	}> {
 		const startTime = Date.now();
 		const url = "/api/config/cache-warming";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<{ enabled: boolean; minTokens: number }>(
-				url,
-			);
+			const response = await this.get<{
+				mode: "off" | "static" | "dynamic";
+				minTokens: number;
+				enabled: boolean;
+			}>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
@@ -1619,9 +1630,13 @@ class API extends HttpClient {
 	}
 
 	async setCacheWarming(body: {
-		enabled?: boolean;
+		mode?: "off" | "static" | "dynamic";
 		minTokens?: number;
-	}): Promise<{ enabled: boolean; minTokens: number }> {
+	}): Promise<{
+		mode: "off" | "static" | "dynamic";
+		minTokens: number;
+		enabled: boolean;
+	}> {
 		const startTime = Date.now();
 		const url = "/api/config/cache-warming";
 
@@ -1629,8 +1644,9 @@ class API extends HttpClient {
 
 		try {
 			const response = await this.post<{
-				enabled: boolean;
+				mode: "off" | "static" | "dynamic";
 				minTokens: number;
+				enabled: boolean;
 			}>(url, body);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
@@ -1640,6 +1656,50 @@ class API extends HttpClient {
 			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
 				error: error instanceof Error ? error.message : String(error),
 				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	// Live cache-keepalive bridge gauges + cumulative-since-restart counters for
+	// the Analytics-tab "Cache Keep-Alive" panel. Read straight off the proxy
+	// singletons on the main thread (fast).
+	async getCacheKeepalive(): Promise<CacheKeepaliveLiveResponse> {
+		const startTime = Date.now();
+		const url = "/api/analytics/cache-keepalive";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<CacheKeepaliveLiveResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Bucketed cache-keepalive history (per-bucket deltas for counters,
+	// peak-per-bucket for gauges) for the "Cache Keep-Alive" chart. Backed by the
+	// cache_keepalive_snapshots table; mirrors getMemoryHistory.
+	async getCacheKeepaliveHistory(
+		range: string,
+	): Promise<CacheKeepaliveHistoryResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/cache-keepalive-history?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<CacheKeepaliveHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
 			});
 			throw error;
 		}

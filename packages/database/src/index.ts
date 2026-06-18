@@ -27,6 +27,11 @@ export { AccountRepository } from "./repositories/account.repository";
 // dashboard worker against its own connection — stats, usage-history,
 // memory-history and payments-summary all run there)
 export { AccountPaymentRepository } from "./repositories/account-payment.repository";
+export {
+	type CacheKeepaliveHistoryPoint,
+	CacheKeepaliveSnapshotRepository,
+	type CacheKeepaliveSnapshotRow,
+} from "./repositories/cache-keepalive-snapshot.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";

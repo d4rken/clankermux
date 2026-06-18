@@ -41,6 +41,49 @@ export function injectCacheTtl1h(context: RequestBodyContext): void {
 	}
 }
 
+/**
+ * True iff the body's prompt cache is UNIFORMLY 1-hour: it has at least one
+ * ephemeral cache breakpoint and EVERY ephemeral breakpoint (system + message
+ * content) carries `ttl:"1h"`. This is the reality signal for the cache's TTL —
+ * whatever the body sent upstream is what Anthropic actually wrote, regardless of
+ * whether WE injected it (the injector upgrades uniformly) or the client set it.
+ *
+ * The session-cache store uses this — not the promotion tracker — to pick a warm
+ * slot's refresh cadence and write rate, so the slot's economics match the cache
+ * that actually exists. The "every" rule is deliberately CONSERVATIVE: a mixed
+ * body (some breakpoints still default 5m) must be refreshed on the 5-minute
+ * cadence to keep the shortest-lived breakpoint warm, so it is treated as 5m.
+ * Malformed/parse-failed or breakpoint-less bodies return false (default 5m).
+ */
+export function bodyCacheTtlIsOneHour(body: unknown): boolean {
+	if (!body || typeof body !== "object") return false;
+	let sawEphemeral = false;
+	const check = (blocks: unknown): boolean => {
+		if (!Array.isArray(blocks)) return true; // no breakpoints here → no violation
+		for (const block of blocks) {
+			if (isEphemeral(block)) {
+				sawEphemeral = true;
+				if (getTtl(block) !== "1h") return false; // a non-1h breakpoint → not uniform
+			}
+		}
+		return true;
+	};
+	if (!check((body as { system?: unknown }).system)) return false;
+	const messages = (body as { messages?: unknown }).messages;
+	if (Array.isArray(messages)) {
+		for (const message of messages) {
+			if (
+				message &&
+				typeof message === "object" &&
+				!check((message as { content?: unknown }).content)
+			) {
+				return false;
+			}
+		}
+	}
+	return sawEphemeral;
+}
+
 /** True if any ephemeral breakpoint (system or message content) lacks ttl:1h. */
 function needsUpgrade(body: Readonly<Record<string, unknown>>): boolean {
 	if (arrayNeedsUpgrade((body as { system?: unknown }).system)) return true;

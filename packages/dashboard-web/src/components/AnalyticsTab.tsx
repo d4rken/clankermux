@@ -6,6 +6,7 @@ import { formatAxisTime } from "../lib/time-format";
 import {
 	AnalyticsControls,
 	CacheFlowPanel,
+	CacheKeepalivePanel,
 	ContextCompositionPanel,
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
@@ -299,6 +300,9 @@ export const AnalyticsTab = React.memo(() => {
 
 			{/* Cache Flow */}
 			<CacheFlowPanel cacheFlow={analytics?.cacheFlow} loading={loading} />
+
+			{/* Cache Keep-Alive (self-contained: own live + history hooks + range) */}
+			<CacheKeepalivePanel />
 
 			{/* Context Composition */}
 			<ContextCompositionPanel

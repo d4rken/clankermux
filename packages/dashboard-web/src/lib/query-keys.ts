@@ -21,6 +21,9 @@ export const queryKeys = {
 		[...queryKeys.all, "usage-history", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
+	cacheKeepalive: () => [...queryKeys.all, "cache-keepalive"] as const,
+	cacheKeepaliveHistory: (range?: string) =>
+		[...queryKeys.all, "cache-keepalive-history", { range }] as const,
 	// Prefix key — invalidating this hits every range-keyed payments summary.
 	paymentsSummaries: () => [...queryKeys.all, "payments-summary"] as const,
 	paymentsSummary: (range?: string) =>
