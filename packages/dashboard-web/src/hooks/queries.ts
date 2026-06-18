@@ -510,37 +510,20 @@ export const useSetRetention = () => {
 	});
 };
 
-export const useKeepaliveTtl = () => {
+export const useCacheWarming = () => {
 	return useQuery({
-		queryKey: ["keepalive"],
-		queryFn: () => api.getCacheKeepaliveTtl(),
+		queryKey: ["cache-warming"],
+		queryFn: () => api.getCacheWarming(),
 	});
 };
 
-export const useSetKeepaliveTtl = () => {
+export const useSetCacheWarming = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (body: { ttlMinutes: number }) =>
-			api.setCacheKeepaliveTtl(body),
+		mutationFn: (body: { enabled?: boolean; minTokens?: number }) =>
+			api.setCacheWarming(body),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["keepalive"] });
-		},
-	});
-};
-
-export const useSystemCacheTtl = () => {
-	return useQuery({
-		queryKey: ["system-cache-ttl"],
-		queryFn: () => api.getSystemCacheTtl(),
-	});
-};
-
-export const useSetSystemCacheTtl = () => {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (enabled: boolean) => api.setSystemCacheTtl(enabled),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["system-cache-ttl"] });
+			queryClient.invalidateQueries({ queryKey: ["cache-warming"] });
 		},
 	});
 };

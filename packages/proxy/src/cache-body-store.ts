@@ -1,20 +1,28 @@
 import { TIME_CONSTANTS } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
+import { sessionCacheStore } from "./session-cache-store";
 
 const log = new Logger("CacheBodyStore");
 
 /**
- * In-memory store for the last request body per account that created a cache entry.
+ * In-memory staging store that routes cache-using requests into the per-SESSION
+ * {@link sessionCacheStore} for the Session Cache Bridge.
  *
  * Flow:
- *  1. When a request body is buffered in the proxy, stageRequest() is called.
+ *  1. When a request body is buffered in the proxy, stageRequest() is called
+ *     (only for /v1/messages bodies carrying a cache_control hint — that hint is
+ *     how we identify explicit-breakpoint providers and skip Codex etc.).
  *  2. When the inline usage collector finalizes a request, onSummary() is
- *     called (on every successful finalize, including zero-usage).
- *     - If cacheCreationInputTokens > 0, the staged entry is promoted to the
- *       per-account "last cached request" slot.
- *     - The staging entry is always deleted (request is complete).
- *  3. The keepalive scheduler reads getLastCachedRequest() at tick time and
- *     replays the body through the proxy.
+ *     called (on every successful finalize, including zero-usage). The staged
+ *     entry is always deleted, and:
+ *     - If cacheCreationInputTokens > 0, the body is registered into the
+ *       per-session store (which applies the cache-write-premium + min-token
+ *       gates itself; sub-threshold / no-premium requests store nothing).
+ *     - Else if a cache-READ occurred, the session's activity is touched (the
+ *       read proves the prompt cache is still warm).
+ *  3. The keepalive scheduler reads sessionCacheStore.getEligibleSessions() at
+ *     tick time and replays the warm body through the proxy.
  *
  * Memory bounds:
  *  - staging: one entry per in-flight request. Primarily cleared on completion
@@ -25,7 +33,6 @@ const log = new Logger("CacheBodyStore");
  *    (STAGING_MAX_AGE_MS) and a hard size cap (MAX_STAGING_ENTRIES) — otherwise
  *    orphaned ~0.5–1.5 MB bodies leak (cf. oven-sh/bun#5709: off-heap buffers
  *    the allocator never returns while still referenced).
- *  - lastCachedRequest: one entry per account → bounded by account count.
  *
  * Note: client headers ARE stored because some providers (e.g. Anthropic) copy
  * incoming headers in prepareHeaders() and augment them, so the replay needs to
@@ -79,41 +86,6 @@ export interface CachedRequestEntry {
 	timestamp: number;
 }
 
-// Strip sensitive and internal headers before storing.
-// Auth headers are injected by prepareHeaders() from account credentials.
-// Internal x-clankermux-* headers are injected fresh by the scheduler.
-const STRIP_HEADERS = new Set([
-	"authorization",
-	"x-api-key",
-	"cookie",
-	"x-claude-code-session-id",
-	"thread-id",
-	"session-id",
-	"x-client-request-id",
-	"x-codex-installation-id",
-	"x-codex-window-id",
-	"x-codex-turn-state",
-	"chatgpt-account-id",
-	"traceparent",
-	"tracestate",
-	"x-clankermux-account-id",
-	// Legacy alias still accepted on inbound requests (dual-accept), strip it too.
-	"x-better-ccflare-account-id",
-	"x-clankermux-bypass-session",
-	"x-clankermux-skip-cache",
-	"x-clankermux-keepalive",
-	"content-length",
-	"transfer-encoding",
-	"accept-encoding",
-	"content-encoding",
-	"connection",
-	"keep-alive",
-	"upgrade",
-	"proxy-authorization",
-	"proxy-authenticate",
-	"host",
-]);
-
 /**
  * Hard cap on concurrently-staged request bodies. A safety net: if orphaned
  * entries (requests that complete without onSummary/discardStaged) ever
@@ -166,11 +138,8 @@ class CacheBodyStore {
 	 */
 	private staging = new Map<
 		string,
-		{ accountId: string; entry: CachedRequestEntry }
+		{ accountId: string; sessionKey: string | null; entry: CachedRequestEntry }
 	>();
-
-	/** accountId → last request that created a cache entry. */
-	private lastCachedRequest = new Map<string, CachedRequestEntry>();
 
 	/** Whether the feature is enabled — skip staging entirely when false. */
 	private enabled = false;
@@ -179,7 +148,6 @@ class CacheBodyStore {
 		this.enabled = enabled;
 		if (!enabled) {
 			this.staging.clear();
-			this.lastCachedRequest.clear();
 		}
 	}
 
@@ -193,6 +161,7 @@ class CacheBodyStore {
 		body: ArrayBuffer | null,
 		headers: Headers,
 		path: string,
+		sessionKey: string | null = null,
 	): void {
 		if (!this.enabled || !accountId || !body || body.byteLength === 0) return;
 
@@ -205,13 +174,14 @@ class CacheBodyStore {
 
 		const sanitizedHeaders: Record<string, string> = {};
 		headers.forEach((value, key) => {
-			if (!STRIP_HEADERS.has(key.toLowerCase())) {
+			if (!CACHE_REPLAY_STRIP_HEADERS.has(key.toLowerCase())) {
 				sanitizedHeaders[key] = value;
 			}
 		});
 
 		this.staging.set(requestId, {
 			accountId,
+			sessionKey,
 			entry: {
 				body: Buffer.from(body),
 				headers: sanitizedHeaders,
@@ -230,20 +200,46 @@ class CacheBodyStore {
 
 	/**
 	 * Called when the inline usage collector finalizes a request (every
-	 * successful finalize, including zero-usage). Promotes to the per-account
-	 * slot if caching was used; always cleans up staging.
+	 * successful finalize, including zero-usage). Routes a cache-using request
+	 * into the per-session bridge store; always cleans up staging.
+	 *
+	 * The session key falls back to a synthetic per-account key for unkeyed
+	 * requests so they still get a (single) warm slot. {@link sessionCacheStore}
+	 * applies the cache-write-premium and min-token gates internally, so a
+	 * sub-threshold or no-premium summary stores nothing.
+	 *  - cacheCreation > 0 → register the body (a new/refreshed warm prefix).
+	 *  - else cacheRead > 0 → touchActivity (the read proves the cache is warm;
+	 *    no-op if no slot exists for the key).
 	 */
 	onSummary(
 		requestId: string,
 		cacheCreationInputTokens: number | undefined,
+		cacheReadInputTokens?: number,
+		model?: string,
 	): void {
 		const staged = this.staging.get(requestId);
 		this.staging.delete(requestId);
 
 		if (!staged) return;
 
+		const sessionKey = staged.sessionKey ?? `__account__:${staged.accountId}`;
+
 		if (cacheCreationInputTokens && cacheCreationInputTokens > 0) {
-			this.lastCachedRequest.set(staged.accountId, staged.entry);
+			sessionCacheStore.register({
+				accountId: staged.accountId,
+				sessionKey,
+				body: staged.entry.body,
+				headers: new Headers(staged.entry.headers),
+				path: staged.entry.path,
+				model,
+				cacheReadTokens: cacheReadInputTokens ?? 0,
+				cacheCreationTokens: cacheCreationInputTokens,
+			});
+		} else if ((cacheReadInputTokens ?? 0) > 0) {
+			// Cache-READ turn (a hit, no creation): no new body to register, but the
+			// read proves the cache is warm, so touch the existing slot's activity
+			// (no-op if we never stored one for this key).
+			sessionCacheStore.touchActivity(staged.accountId, sessionKey, Date.now());
 		}
 	}
 
@@ -262,53 +258,11 @@ class CacheBodyStore {
 	}
 
 	/**
-	 * Returns the last request body that created a cache entry for this account,
-	 * or null if none is recorded.
+	 * Reap orphaned in-flight staged entries. Called at keepalive tick time as
+	 * defense-in-depth for idle periods where no new stageRequest arrives to
+	 * trigger the inline sweep, so a staged ~0.5–1.5 MB body can never leak.
 	 */
-	getLastCachedRequest(accountId: string): CachedRequestEntry | null {
-		return this.lastCachedRequest.get(accountId) ?? null;
-	}
-
-	/** Returns all accounts that have a recorded cached request. */
-	getAllCachedAccounts(): string[] {
-		return Array.from(this.lastCachedRequest.keys());
-	}
-
-	/** Remove a specific account's cached entry (e.g. account deleted). */
-	evict(accountId: string): void {
-		this.lastCachedRequest.delete(accountId);
-	}
-
-	/**
-	 * Evicts cached request entries older than the specified age threshold.
-	 * Called at keepalive tick time to prevent replaying stale requests whose
-	 * underlying prompt cache has long expired.
-	 *
-	 * @param ttlMinutes The configured cache TTL in minutes
-	 * @param ageMultiplier Multiplier for TTL to determine max age (default: 3)
-	 *                      e.g. TTL 5min with multiplier 3 = evict entries older than 15min
-	 */
-	evictStaleEntries(ttlMinutes: number, ageMultiplier = 3): void {
-		const maxAgeMs = ttlMinutes * 60_000 * ageMultiplier;
-		const cutoffTime = Date.now() - maxAgeMs;
-		let evictedCount = 0;
-
-		for (const [accountId, entry] of this.lastCachedRequest.entries()) {
-			if (entry.timestamp < cutoffTime) {
-				this.lastCachedRequest.delete(accountId);
-				evictedCount++;
-			}
-		}
-
-		if (evictedCount > 0) {
-			const maxAgeMinutes = Math.round(maxAgeMs / 60_000);
-			log.info(
-				`Evicted ${evictedCount} stale cached request(s) older than ${maxAgeMinutes}min (TTL: ${ttlMinutes}min × ${ageMultiplier})`,
-			);
-		}
-
-		// Also reap orphaned in-flight staged entries. Defense-in-depth for idle
-		// periods where no new stageRequest arrives to trigger the inline sweep.
+	evictStaleEntries(): void {
 		const stagingEvicted = this.sweepStaleStaging();
 		if (stagingEvicted > 0) {
 			log.info(

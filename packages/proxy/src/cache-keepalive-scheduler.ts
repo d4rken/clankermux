@@ -1,17 +1,59 @@
 import type { Config } from "@clankermux/config";
 import { registerHeartbeat } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { BRIDGE_JITTER_MAX_MS } from "./bridge-policy";
 import { cacheBodyStore } from "./cache-body-store";
 import { dispatchProxyRequest } from "./dispatch";
 import type { ProxyContext } from "./proxy";
+import {
+	type SessionCacheSlot,
+	sessionCacheStore,
+} from "./session-cache-store";
 
 const log = new Logger("CacheKeepaliveScheduler");
+
+/**
+ * Operational cap on how many session keepalives a single tick may dispatch.
+ * Bounds tick duration and protects against a burst of replays when many
+ * sessions become eligible at once. Sessions over the cap are deferred to the
+ * next tick (highest-priority first). Kept here (not in bridge-policy) as a
+ * scheduler-local operational knob rather than cost math.
+ */
+const MAX_BRIDGE_KEEPALIVES_PER_TICK = 20;
+
+/**
+ * Heartbeat tick cadence (2 min). The scheduler wakes this often; per-session
+ * due-ness is decided inside the store by {@link KEEPALIVE_REFRESH_MS}, so the
+ * tick only needs to be comfortably under the cache TTL.
+ */
+// Poll often enough that a slot crossing the KEEPALIVE_REFRESH_MS (3 min)
+// threshold is picked up within one tick, keeping the replay well under
+// Anthropic's 5-min cache TTL even with upstream latency.
+const KEEPALIVE_TICK_SECONDS = 60;
+
+/**
+ * Parse the first `cache_creation_input_tokens` value from a keepalive response.
+ *
+ * Works for both response shapes the proxy may return: a JSON envelope (the
+ * `usage` object embeds the field) and an SSE stream (the field appears inside a
+ * `message_start` event's serialized `data:` line). In both cases the raw text
+ * contains the literal `"cache_creation_input_tokens": <n>` token, so a single
+ * regex over the body text covers both without parsing the stream. Returns the
+ * matched count, or null when the field is absent (e.g. an error body) — null
+ * means "unknown", so the caller does not treat it as a proven hit or miss.
+ */
+export function extractCacheCreationTokens(text: string): number | null {
+	const match = text.match(/"cache_creation_input_tokens"\s*:\s*(\d+)/);
+	if (!match) return null;
+	const parsed = Number(match[1]);
+	return Number.isFinite(parsed) ? parsed : null;
+}
 
 export class CacheKeepaliveScheduler {
 	private proxyContext: ProxyContext;
 	private config: Config;
 	private unregisterInterval: (() => void) | null = null;
-	private currentTtlMinutes = 0;
+	private enabled = false;
 	private boundConfigChangeHandler:
 		| ((event: { key: string; newValue: unknown }) => void)
 		| null = null;
@@ -22,10 +64,14 @@ export class CacheKeepaliveScheduler {
 	}
 
 	start(): void {
-		this.currentTtlMinutes = this.config.getCacheKeepaliveTtlMinutes();
-		cacheBodyStore.setEnabled(this.currentTtlMinutes > 0);
+		this.enabled = this.config.getCacheWarmingEnabled();
+		// Cache warming drives both the staging store (which routes bodies) and the
+		// per-session warm-body store.
+		cacheBodyStore.setEnabled(this.enabled);
+		sessionCacheStore.setEnabled(this.enabled);
+		sessionCacheStore.setMinTokens(this.config.getCacheWarmingMinTokens());
 
-		// Adjust dynamically when TTL config changes
+		// React dynamically to cache-warming config changes.
 		this.boundConfigChangeHandler = ({
 			key,
 			newValue,
@@ -33,12 +79,17 @@ export class CacheKeepaliveScheduler {
 			key: string;
 			newValue: unknown;
 		}) => {
-			if (key === "cache_keepalive_ttl_minutes") {
-				const newTtl = typeof newValue === "number" ? newValue : 0;
-				if (newTtl !== this.currentTtlMinutes) {
-					this.currentTtlMinutes = newTtl;
-					cacheBodyStore.setEnabled(newTtl > 0);
+			if (key === "cache_warming_enabled") {
+				const next = newValue === true;
+				if (next !== this.enabled) {
+					this.enabled = next;
+					cacheBodyStore.setEnabled(next);
+					sessionCacheStore.setEnabled(next);
 					this.restart();
+				}
+			} else if (key === "cache_warming_min_tokens") {
+				if (typeof newValue === "number") {
+					sessionCacheStore.setMinTokens(newValue);
 				}
 			}
 		};
@@ -68,127 +119,151 @@ export class CacheKeepaliveScheduler {
 	}
 
 	private startInterval(): void {
-		if (this.currentTtlMinutes <= 0) {
-			log.info("Cache keepalive disabled (ttl = 0)");
+		if (!this.enabled) {
+			log.info("Cache warming disabled");
 			return;
 		}
 
-		// Fire (ttl - 1) minutes before the cache would expire, minimum 60 seconds
-		const intervalMs = Math.max(60_000, (this.currentTtlMinutes - 1) * 60_000);
-		const intervalSeconds = Math.floor(intervalMs / 1_000);
-
 		log.info(
-			`Starting cache keepalive scheduler, interval: ${intervalSeconds}s (ttl: ${this.currentTtlMinutes}min)`,
+			`Starting cache warming scheduler, tick interval: ${KEEPALIVE_TICK_SECONDS}s`,
 		);
 
 		this.unregisterInterval = registerHeartbeat({
 			id: "cache-keepalive-scheduler",
 			callback: () => this.sendKeepalives(),
-			seconds: intervalSeconds,
-			description: `Cache keepalive scheduler (TTL ${this.currentTtlMinutes}min)`,
+			seconds: KEEPALIVE_TICK_SECONDS,
+			description: "Cache warming scheduler",
 		});
 	}
 
+	/**
+	 * Dispatch keepalives for the most valuable idle sessions in the per-session
+	 * warm-body store. Sessions are dispatched SEQUENTIALLY (with a small
+	 * decorrelation jitter between each) — sequential dispatch is the anti-burst
+	 * mechanism that avoids per-IP 429 storms, so we deliberately do NOT use
+	 * Promise.allSettled here.
+	 */
 	private async sendKeepalives(): Promise<void> {
-		// Evict stale cached requests before sending keepalives.
-		// This prevents replaying requests that are clearly no longer warm
-		// (e.g., from days ago when the underlying prompt cache has long expired).
-		cacheBodyStore.evictStaleEntries(this.currentTtlMinutes);
-
-		const accounts = cacheBodyStore.getAllCachedAccounts();
+		// Reap orphaned in-flight staged bodies (defense-in-depth for idle periods).
+		cacheBodyStore.evictStaleEntries();
 
 		// Observability: in-flight staged bodies should stay small and flat. A
 		// climbing number here means the staging leak has resurfaced.
 		log.debug(
-			`Cache body store: ${cacheBodyStore.getStagingSize()} in-flight staged, ${accounts.length} promoted`,
+			`Cache body store: ${cacheBodyStore.getStagingSize()} in-flight staged, ${sessionCacheStore.getSize()} warm session(s)`,
 		);
 
-		if (accounts.length === 0) {
-			log.debug(
-				"No accounts with cached requests in memory, skipping keepalive",
+		const eligible = sessionCacheStore.getEligibleSessions(Date.now());
+
+		if (eligible.length === 0) {
+			log.debug("No eligible sessions for cache warming");
+			return;
+		}
+
+		const batch = eligible.slice(0, MAX_BRIDGE_KEEPALIVES_PER_TICK);
+		if (eligible.length > batch.length) {
+			log.info(
+				`Sending cache warming keepalive to ${batch.length} session(s); ${eligible.length - batch.length} deferred to next tick (cap ${MAX_BRIDGE_KEEPALIVES_PER_TICK})`,
+			);
+		} else {
+			log.info(`Sending cache warming keepalive to ${batch.length} session(s)`);
+		}
+
+		for (const slot of batch) {
+			// Small decorrelation jitter (<=1s) between dispatches to keep ticks
+			// bounded while still spreading replays across the per-IP window.
+			await new Promise((r) =>
+				setTimeout(r, Math.random() * BRIDGE_JITTER_MAX_MS),
+			);
+			try {
+				await this.replaySessionKeepalive(slot);
+			} catch (error) {
+				log.error(
+					`Error replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey}:`,
+					error,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Replay a single session's warm body as a keepalive, then detect whether the
+	 * prompt cache was still alive. Force-routes to the session's account and
+	 * inspects the response for cache hit/miss to charge the spend budget.
+	 */
+	private async replaySessionKeepalive(slot: SessionCacheSlot): Promise<void> {
+		// Reconstruct headers from the stored snapshot. Auth and internal proxy
+		// headers were stripped at capture time and are injected fresh here.
+		const replayHeaders = new Headers(slot.headers);
+		replayHeaders.set("content-type", "application/json");
+		replayHeaders.set("x-clankermux-account-id", slot.accountId);
+		replayHeaders.set("x-clankermux-bypass-session", "true");
+		// Tag as keepalive: visibility in the request logger + loop prevention
+		// (the proxy skips staging synthetic keepalive replays).
+		replayHeaders.set("x-clankermux-keepalive", "true");
+
+		log.debug(
+			`Replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey} (${slot.body.length} bytes)`,
+		);
+
+		// Patch max_tokens to 1 to minimize quota consumption — the keepalive only
+		// needs to warm the cache. Do NOT touch tools/tool_choice: altering the
+		// cached prefix would guarantee a cache miss. Invalid JSON → send as-is.
+		let bodyToSend: BodyInit = new Uint8Array(slot.body);
+		try {
+			const bodyJson = JSON.parse(new TextDecoder().decode(slot.body));
+			if (typeof bodyJson === "object" && bodyJson !== null) {
+				bodyJson.max_tokens = 1;
+				bodyToSend = JSON.stringify(bodyJson);
+			}
+		} catch {
+			// Body isn't valid JSON — skip patching and use original.
+		}
+
+		// Dispatch in-process through the proxy pipeline. The URL is only for
+		// handleProxy's parsing — routing is driven by x-clankermux-account-id.
+		const url = new URL(`http://internal.clankermux${slot.path}`);
+		const req = new Request(url, {
+			method: "POST",
+			headers: replayHeaders,
+			body: bodyToSend,
+		});
+		const response = await dispatchProxyRequest(
+			req,
+			url,
+			this.proxyContext,
+			null,
+			null,
+			true,
+		);
+
+		const text = await response.text().catch(() => "");
+
+		if (!response.ok) {
+			// A 429/5xx is neither a consumed keepalive nor a proven cache miss —
+			// don't charge it against the budget.
+			log.warn(
+				`Cache warming keepalive returned ${response.status} for ${slot.accountId}:${slot.sessionKey}`,
 			);
 			return;
 		}
 
-		log.info(`Sending cache keepalive to ${accounts.length} account(s)`);
-
-		await Promise.allSettled(
-			accounts.map((accountId) => this.replayRequest(accountId)),
+		// created > 0 means the cached prefix had to be re-created → the cache had
+		// already died → a miss (≈ whole budget). created === 0 → still warm (hit).
+		// created === null (no field, e.g. unexpected body) is treated as a hit so
+		// the small read cost is charged rather than the large miss cost.
+		const created = extractCacheCreationTokens(text);
+		const hit = created === null || created === 0;
+		sessionCacheStore.recordKeepaliveResult(
+			slot.accountId,
+			slot.sessionKey,
+			hit,
+			Date.now(),
 		);
-	}
-
-	private async replayRequest(accountId: string): Promise<void> {
-		const cached = cacheBodyStore.getLastCachedRequest(accountId);
-		if (!cached) return;
-
-		try {
-			// Reconstruct headers from the stored snapshot.
-			// Anthropic's prepareHeaders() copies incoming client headers and augments
-			// them, so we need to replay them faithfully. Providers that build from
-			// scratch (Qwen) simply ignore whatever we send here.
-			// Auth and internal proxy headers were stripped at capture time.
-			const replayHeaders = new Headers(cached.headers);
-			replayHeaders.set("content-type", "application/json");
-			// Inject routing headers fresh — these were stripped from the snapshot
-			replayHeaders.set("x-clankermux-account-id", accountId);
-			replayHeaders.set("x-clankermux-bypass-session", "true");
-
-			// Tag as keepalive for dual purpose:
-			//  1. Visibility: request logger can identify synthetic requests
-			//  2. Loop prevention: proxy skips staging to avoid infinite replay cycle
-			replayHeaders.set("x-clankermux-keepalive", "true");
-
-			log.debug(
-				`Replaying cached request for account ${accountId} (${cached.body.length} bytes, recorded ${Math.round((Date.now() - cached.timestamp) / 1000)}s ago)`,
+		if (created != null && created > 0) {
+			log.info(
+				`Cache warming ${slot.accountId}:${slot.sessionKey} cache MISS — expired (cache_creation=${created}), spend exhausted`,
 			);
-
-			// Patch max_tokens to 1 to minimize quota consumption.
-			// The keepalive only needs to warm the cache, not generate a full completion.
-			// Parsing errors are handled gracefully - if body isn't valid JSON, we skip
-			// the patching and use the original body as-is.
-			let bodyToSend: BodyInit = new Uint8Array(cached.body);
-			try {
-				const bodyJson = JSON.parse(new TextDecoder().decode(cached.body));
-				if (typeof bodyJson === "object" && bodyJson !== null) {
-					bodyJson.max_tokens = 1;
-					bodyToSend = JSON.stringify(bodyJson);
-				}
-			} catch {
-				// Body isn't valid JSON - skip patching and use original
-			}
-
-			// Dispatch in-process through the proxy pipeline. No HTTP self-loop,
-			// no TLS, no port. The URL is just for handleProxy's parsing — the
-			// real routing is driven by x-clankermux-account-id above.
-			const url = new URL(`http://internal.clankermux${cached.path}`);
-			const req = new Request(url, {
-				method: "POST",
-				headers: replayHeaders,
-				body: bodyToSend,
-			});
-			const response = await dispatchProxyRequest(
-				req,
-				url,
-				this.proxyContext,
-				null,
-				null,
-				true,
-			);
-
-			// Drain the response so the connection is released
-			await response.text().catch(() => {});
-
-			if (response.ok) {
-				log.info(
-					`Cache keepalive replayed successfully for account ${accountId}`,
-				);
-			} else {
-				log.warn(
-					`Cache keepalive replay returned ${response.status} for account ${accountId}`,
-				);
-			}
-		} catch (error) {
-			log.error(`Error replaying keepalive for account ${accountId}:`, error);
 		}
 	}
 }

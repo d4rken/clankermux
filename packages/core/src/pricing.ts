@@ -598,6 +598,52 @@ export const __pricingTestHooks = {
 };
 
 /**
+ * Resolve a model id to its bundled ModelCost entry, synchronously, by searching
+ * every provider in BUNDLED_PRICING for an exact id match. This mirrors the exact
+ * lookup `getCostRate` uses (`provider.models?.[modelId]`) — no normalization,
+ * family matching, or case folding — so callers resolve models identically.
+ * Returns null when the id is not in the bundled table.
+ */
+function resolveBundledCost(modelId: string): ModelCost | null {
+	for (const provider of Object.values(BUNDLED_PRICING)) {
+		const model = provider.models?.[modelId];
+		if (model?.cost) {
+			return model.cost;
+		}
+	}
+	return null;
+}
+
+/**
+ * Get the per-1M-token input and cache rates for a model, synchronously, from the
+ * in-process BUNDLED_PRICING table (NOT the async remote catalogue).
+ *
+ * For a known model, returns its real input rate and its cache rates, using 0 for
+ * any cache rate the model's ModelCost omits (e.g. MiniMax-M2 has no cache pricing
+ * — it is known, so we report 0 rather than the unknown-model fallback).
+ *
+ * For an unknown model, falls back to Sonnet-4 rates. Anthropic's cache ratios are
+ * stable across models (cache write ≈ 1.25× input, cache read ≈ 0.1× input), so
+ * Sonnet-4's mid-tier rates are a safe default for estimating cache economics.
+ */
+export function getModelCacheRates(modelId: string): {
+	inputPer1M: number;
+	cacheReadPer1M: number;
+	cacheWritePer1M: number;
+} {
+	const cost = resolveBundledCost(modelId);
+	if (!cost) {
+		// Unknown model: Sonnet-4 rates (input 3, cache_read 0.3, cache_write 3.75).
+		return { inputPer1M: 3, cacheReadPer1M: 0.3, cacheWritePer1M: 3.75 };
+	}
+	return {
+		inputPer1M: cost.input,
+		cacheReadPer1M: cost.cache_read ?? 0,
+		cacheWritePer1M: cost.cache_write ?? 0,
+	};
+}
+
+/**
  * Get the cost rate for a specific model and token type
  * @returns Cost in dollars per token (NOT per million)
  * @throws If model or cost type is unknown

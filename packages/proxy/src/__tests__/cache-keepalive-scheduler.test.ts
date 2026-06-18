@@ -1,5 +1,5 @@
 /**
- * Tests for CacheKeepaliveScheduler.
+ * Tests for CacheKeepaliveScheduler (unified cache-warming path).
  *
  * Strategy:
  *   1. mock.module("@clankermux/core") intercepts registerHeartbeat so we
@@ -39,8 +39,6 @@ const mockRegisterHeartbeat = mock((opts: HeartbeatOpts) => {
 
 mock.module("@clankermux/core", () => ({
 	registerHeartbeat: mockRegisterHeartbeat,
-	// Re-export other things that the proxy module tree may need (none required
-	// by the scheduler itself, but avoids any import-time crash).
 	registerCleanup: mock(() => () => {}),
 	registerUIRefresh: mock(() => () => {}),
 	intervalManager: {
@@ -61,10 +59,15 @@ mock.module("../dispatch", () => ({
 	dispatchProxyRequest: mockDispatchProxyRequest,
 }));
 
+import { KEEPALIVE_REFRESH_MS } from "../bridge-policy";
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
 // and dispatchProxyRequest.
-import { CacheKeepaliveScheduler } from "../cache-keepalive-scheduler";
+import {
+	CacheKeepaliveScheduler,
+	extractCacheCreationTokens,
+} from "../cache-keepalive-scheduler";
+import { sessionCacheStore } from "../session-cache-store";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,16 +80,25 @@ function makeProxyContext(port = 8081): ProxyContext {
 
 type ConfigChangeListener = (evt: { key: string; newValue: unknown }) => void;
 
-/** Minimal Config mock with a simple event emitter for "change". */
-function makeConfig(initialTtl: number): {
+/**
+ * Minimal Config mock with a simple event emitter for "change", driving the new
+ * cache-warming getters (enabled + min tokens).
+ */
+function makeConfig(
+	initialEnabled: boolean,
+	initialMinTokens = 100_000,
+): {
 	config: Config;
-	fireTtlChange: (newTtl: number) => void;
+	fireEnabledChange: (next: boolean) => void;
+	fireMinTokensChange: (next: number) => void;
 } {
-	let ttl = initialTtl;
+	let enabled = initialEnabled;
+	let minTokens = initialMinTokens;
 	const listeners: ConfigChangeListener[] = [];
 
 	const config = {
-		getCacheKeepaliveTtlMinutes: () => ttl,
+		getCacheWarmingEnabled: () => enabled,
+		getCacheWarmingMinTokens: () => minTokens,
 		on: (event: string, cb: ConfigChangeListener) => {
 			if (event === "change") listeners.push(cb);
 		},
@@ -96,34 +108,59 @@ function makeConfig(initialTtl: number): {
 				if (idx !== -1) listeners.splice(idx, 1);
 			}
 		},
-		// Allow tests to mutate TTL and fire the event.
-		_setTtl: (v: number) => {
-			ttl = v;
-		},
 	} as unknown as Config;
 
-	const fireTtlChange = (newTtl: number) => {
-		(config as unknown as { _setTtl: (v: number) => void })._setTtl(newTtl);
+	const fireEnabledChange = (next: boolean) => {
+		enabled = next;
 		for (const l of listeners) {
-			l({ key: "cache_keepalive_ttl_minutes", newValue: newTtl });
+			l({ key: "cache_warming_enabled", newValue: next });
+		}
+	};
+	const fireMinTokensChange = (next: number) => {
+		minTokens = next;
+		for (const l of listeners) {
+			l({ key: "cache_warming_min_tokens", newValue: next });
 		}
 	};
 
-	return { config, fireTtlChange };
+	return { config, fireEnabledChange, fireMinTokensChange };
 }
 
-/** Stage + promote a cached request entry for a given accountId. */
-function seedCacheEntry(
+/**
+ * Register a session slot for (accountId, sessionKey) and backdate its
+ * lastActivityTs so it clears the idle (KEEPALIVE_REFRESH_MS) threshold and is
+ * immediately eligible. Uses a premium Anthropic model (claude-opus-4-5) with
+ * cachedTokens above the 100k default min-token threshold.
+ */
+function seedSessionEntry(
 	accountId: string,
-	path = "/v1/messages",
-	bodyText = '{"model":"claude-opus-4-5","messages":[],"system":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}',
+	sessionKey: string,
+	opts: { cachedTokens?: number; path?: string; bodyText?: string } = {},
 ): void {
-	const requestId = `req-${accountId}-${Date.now()}`;
+	const {
+		cachedTokens = 150_000,
+		path = "/v1/messages",
+		bodyText = '{"model":"claude-opus-4-5","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}]}',
+	} = opts;
 	const bodyBuffer = new TextEncoder().encode(bodyText).buffer;
-	const headers = new Headers({ "content-type": "application/json" });
-	cacheBodyStore.stageRequest(requestId, accountId, bodyBuffer, headers, path);
-	// Promote by simulating a successful cache creation (cacheCreationInputTokens > 0).
-	cacheBodyStore.onSummary(requestId, 42);
+	sessionCacheStore.register({
+		accountId,
+		sessionKey,
+		body: bodyBuffer,
+		headers: new Headers({ "content-type": "application/json" }),
+		path,
+		model: "claude-opus-4-5",
+		cacheReadTokens: cachedTokens,
+		cacheCreationTokens: 0,
+	});
+	// Backdate lastActivityTs past the idle threshold so the slot is due now.
+	const slot = sessionCacheStore
+		.getAllSlots()
+		.find((s) => s.accountId === accountId && s.sessionKey === sessionKey);
+	if (slot) {
+		(slot as { lastActivityTs: number }).lastActivityTs =
+			Date.now() - (KEEPALIVE_REFRESH_MS + 60_000);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +178,10 @@ function resetMocks(): void {
 }
 
 function resetStore(): void {
-	// Disable then re-enable to clear internal maps.
 	cacheBodyStore.setEnabled(false);
-	// Leave disabled — individual tests opt-in via setEnabled(true) or via
-	// scheduler.start() which calls setEnabled based on TTL.
+	sessionCacheStore.setEnabled(false);
+	sessionCacheStore.clear();
+	sessionCacheStore.setMinTokens(100_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,52 +203,44 @@ describe("CacheKeepaliveScheduler", () => {
 	// -------------------------------------------------------------------------
 
 	describe("start()", () => {
-		it("TTL=0 — does NOT register a heartbeat and disables the store", () => {
-			const { config } = makeConfig(0);
+		it("disabled — does NOT register a heartbeat and leaves the stores disabled", () => {
+			const { config } = makeConfig(false);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).not.toHaveBeenCalled();
-			// Seeding should be a no-op when the store is disabled.
-			const requestId = "req-ttl0";
-			cacheBodyStore.stageRequest(
-				requestId,
-				"acc-1",
-				new TextEncoder().encode("{}").buffer,
-				new Headers(),
-				"/v1/messages",
-			);
-			cacheBodyStore.onSummary(requestId, 10);
-			expect(cacheBodyStore.getAllCachedAccounts()).toHaveLength(0);
+			// Seeding should be a no-op when the session store is disabled.
+			seedSessionEntry("acc-off", "session-off");
+			expect(sessionCacheStore.getSize()).toBe(0);
 		});
 
-		it("TTL=5 — registers heartbeat with intervalSeconds=240 and enables store", () => {
-			const { config } = makeConfig(5);
+		it("enabled — registers heartbeat with a 60s tick and enables stores", () => {
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
-			expect(capturedSeconds).toBe(240); // (5 - 1) * 60 = 240
+			expect(capturedSeconds).toBe(60);
 			expect(capturedId).toBe("cache-keepalive-scheduler");
 
-			// Store must be enabled — seeding should work.
-			seedCacheEntry("acc-5min");
-			expect(cacheBodyStore.getAllCachedAccounts()).toContain("acc-5min");
+			// Session store must be enabled — seeding should work.
+			seedSessionEntry("acc-on", "session-on");
+			expect(sessionCacheStore.getSize()).toBe(1);
 
 			scheduler.stop();
 		});
 
-		it("TTL=1 — interval clamped to 60 s minimum", () => {
-			const { config } = makeConfig(1);
+		it("propagates the configured min-token threshold to the session store", () => {
+			const { config } = makeConfig(true, 200_000);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
-			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
-			// (1 - 1) * 60_000 = 0 ms → clamped to 60_000 ms → 60 s
-			expect(capturedSeconds).toBe(60);
+			// 150k cached tokens are below the 200k threshold → not stored.
+			seedSessionEntry("acc-min", "session-min", { cachedTokens: 150_000 });
+			expect(sessionCacheStore.getSize()).toBe(0);
 
 			scheduler.stop();
 		});
@@ -223,7 +252,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 	describe("stop()", () => {
 		it("calls the unregister function returned by registerHeartbeat", () => {
-			const { config } = makeConfig(5);
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 
 			scheduler.start();
@@ -233,8 +262,8 @@ describe("CacheKeepaliveScheduler", () => {
 			expect(mockUnregister).toHaveBeenCalledTimes(1);
 		});
 
-		it("stop() when TTL=0 (no interval registered) does not throw", () => {
-			const { config } = makeConfig(0);
+		it("stop() when disabled (no interval registered) does not throw", () => {
+			const { config } = makeConfig(false);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
@@ -248,85 +277,74 @@ describe("CacheKeepaliveScheduler", () => {
 	// -------------------------------------------------------------------------
 
 	describe("config 'change' events", () => {
-		it("change to TTL=0 — unregisters interval and disables the store", () => {
-			const { config, fireTtlChange } = makeConfig(5);
+		it("disable — unregisters the interval and disables the stores", () => {
+			const { config, fireEnabledChange } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
 
-			fireTtlChange(0);
+			fireEnabledChange(false);
 
-			// The original interval should have been unregistered.
 			expect(mockUnregister).toHaveBeenCalledTimes(1);
-			// No new interval should have been registered.
+			// No new interval registered.
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
-			// Store should be disabled.
-			seedCacheEntry("acc-disabled");
-			expect(cacheBodyStore.getAllCachedAccounts()).toHaveLength(0);
+			// Session store disabled.
+			seedSessionEntry("acc-disabled", "session-disabled");
+			expect(sessionCacheStore.getSize()).toBe(0);
 
 			scheduler.stop();
 		});
 
-		it("change to TTL=10 — re-registers with new interval (9*60=540 s)", () => {
-			const { config, fireTtlChange } = makeConfig(5);
+		it("enable after disabled — registers a new interval and enables stores", () => {
+			const { config, fireEnabledChange } = makeConfig(false);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			expect(capturedSeconds).toBe(240); // initial
+			expect(mockRegisterHeartbeat).not.toHaveBeenCalled();
 
-			fireTtlChange(10);
+			fireEnabledChange(true);
 
-			// Old interval unregistered, new one registered.
-			expect(mockUnregister).toHaveBeenCalledTimes(1);
-			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(2);
-			expect(capturedSeconds).toBe(540); // (10 - 1) * 60
+			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
+			expect(capturedSeconds).toBe(60);
+
+			seedSessionEntry("acc-enabled", "session-enabled");
+			expect(sessionCacheStore.getSize()).toBe(1);
 
 			scheduler.stop();
 		});
 
-		it("change to the SAME TTL — does NOT restart (no-op)", () => {
-			const { config, fireTtlChange } = makeConfig(5);
+		it("same enabled value — does NOT restart (no-op)", () => {
+			const { config, fireEnabledChange } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
 
-			fireTtlChange(5); // same value
+			fireEnabledChange(true);
 
-			// Nothing should have changed.
 			expect(mockUnregister).not.toHaveBeenCalled();
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
 
 			scheduler.stop();
 		});
 
-		it("multiple sequential TTL changes — each triggers a restart without losing the listener", () => {
-			// This test would have caught the restart() listener-removal bug:
-			// the original restart() called stop() which nulled boundConfigChangeHandler,
-			// so the second config change was silently dropped.
-			const { config, fireTtlChange } = makeConfig(5);
+		it("min-token change propagates to the session store", () => {
+			const { config, fireMinTokensChange } = makeConfig(true, 100_000);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
-			expect(capturedSeconds).toBe(240); // (5-1)*60
+			// 150k clears the initial 100k threshold.
+			seedSessionEntry("acc-a", "session-a", { cachedTokens: 150_000 });
+			expect(sessionCacheStore.getSize()).toBe(1);
 
-			// First TTL change: 5 → 10
-			fireTtlChange(10);
-
-			expect(mockUnregister).toHaveBeenCalledTimes(1);
-			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(2);
-			expect(capturedSeconds).toBe(540); // (10-1)*60
-
-			// Second TTL change: 10 → 30
-			// Before the fix, the listener was removed after the first change and
-			// this would be a no-op.
-			fireTtlChange(30);
-
-			expect(mockUnregister).toHaveBeenCalledTimes(2);
-			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(3);
-			expect(capturedSeconds).toBe(1740); // (30-1)*60
+			// Raise the threshold to 200k → a new 150k session no longer qualifies.
+			fireMinTokensChange(200_000);
+			seedSessionEntry("acc-b", "session-b", { cachedTokens: 150_000 });
+			// acc-b not stored; acc-a still present.
+			expect(
+				sessionCacheStore.getAllSlots().find((s) => s.accountId === "acc-b"),
+			).toBeUndefined();
 
 			scheduler.stop();
 		});
@@ -334,7 +352,8 @@ describe("CacheKeepaliveScheduler", () => {
 		it("unrelated config key change is ignored", () => {
 			let listener: ConfigChangeListener | null = null;
 			const config = {
-				getCacheKeepaliveTtlMinutes: () => 5,
+				getCacheWarmingEnabled: () => true,
+				getCacheWarmingMinTokens: () => 100_000,
 				on: (_event: string, cb: ConfigChangeListener) => {
 					listener = cb;
 				},
@@ -346,7 +365,6 @@ describe("CacheKeepaliveScheduler", () => {
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
 
-			// Fire a change for a different key.
 			listener?.({ key: "some_other_key", newValue: 99 });
 
 			expect(mockUnregister).not.toHaveBeenCalled();
@@ -361,12 +379,26 @@ describe("CacheKeepaliveScheduler", () => {
 	// -------------------------------------------------------------------------
 
 	describe("sendKeepalives() (triggered via heartbeat callback)", () => {
-		it("with no cached accounts — dispatchProxyRequest is NOT called", async () => {
-			const { config } = makeConfig(5);
+		// The bridge dispatch adds a <=1s real-time decorrelation jitter between
+		// sends. Stub setTimeout so the jitter resolves immediately.
+		const realSetTimeout = globalThis.setTimeout;
+		beforeEach(() => {
+			// biome-ignore lint/suspicious/noExplicitAny: minimal timer stub for tests
+			(globalThis as any).setTimeout = ((fn: () => void) => {
+				fn();
+				return 0 as unknown as ReturnType<typeof setTimeout>;
+				// biome-ignore lint/suspicious/noExplicitAny: minimal timer stub for tests
+			}) as any;
+		});
+		afterEach(() => {
+			globalThis.setTimeout = realSetTimeout;
+		});
+
+		it("with no eligible sessions — dispatchProxyRequest is NOT called", async () => {
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			// Store is enabled but no entries seeded.
 			await capturedCallback?.();
 
 			expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
@@ -374,84 +406,116 @@ describe("CacheKeepaliveScheduler", () => {
 			scheduler.stop();
 		});
 
-		it("with one cached account — dispatched once with correct headers", async () => {
-			const { config } = makeConfig(5);
+		it("dispatches an eligible session force-routed to its account with max_tokens=1", async () => {
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			// cacheBodyStore is now enabled (TTL=5 > 0).
-			const accountId = "acc-single";
-			const path = "/v1/messages";
-			seedCacheEntry(accountId, path);
+			seedSessionEntry("acc-sess", "session-1");
 
 			await capturedCallback?.();
 
 			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
-
 			const { req, url } = capturedDispatchCalls[0];
+			expect(url.pathname).toBe("/v1/messages");
 			expect(req.method).toBe("POST");
-			expect(url.pathname).toBe(path);
-
-			// Verify routing headers were injected.
-			expect(req.headers.get("x-clankermux-account-id")).toBe(accountId);
+			expect(req.headers.get("x-clankermux-account-id")).toBe("acc-sess");
 			expect(req.headers.get("x-clankermux-bypass-session")).toBe("true");
 			expect(req.headers.get("x-clankermux-keepalive")).toBe("true");
 			expect(req.headers.get("content-type")).toBe("application/json");
 
-			scheduler.stop();
-		});
-
-		it("with one cached account — body matches the stored body", async () => {
-			const { config } = makeConfig(5);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
-			scheduler.start();
-
-			const bodyText =
-				'{"model":"claude-opus-4-5","messages":[{"role":"user","content":"hello"}],"system":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}';
-			seedCacheEntry("acc-body-check", "/v1/messages", bodyText);
-
-			await capturedCallback?.();
-
-			expect(capturedDispatchCalls).toHaveLength(1);
-			const dispatchedBody = await capturedDispatchCalls[0].req.text();
-			const decoded = JSON.parse(dispatchedBody);
-			// Scheduler patches max_tokens: 1 to minimise quota on replay
-			expect(decoded.model).toBe("claude-opus-4-5");
-			expect(decoded.messages).toEqual([{ role: "user", content: "hello" }]);
+			const decoded = JSON.parse(await req.text());
 			expect(decoded.max_tokens).toBe(1);
 
 			scheduler.stop();
 		});
 
-		it("with two cached accounts — dispatched twice", async () => {
-			const { config } = makeConfig(5);
+		it("cache_creation_input_tokens:0 records a hit (small spend, stays eligible after refresh)", async () => {
+			mockDispatchProxyRequest.mockImplementationOnce(
+				async (req: Request, url: URL) => {
+					capturedDispatchCalls.push({ req, url });
+					return new Response('{"usage":{"cache_creation_input_tokens":0}}', {
+						status: 200,
+					});
+				},
+			);
+
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			seedCacheEntry("acc-alpha");
-			seedCacheEntry("acc-beta");
+			seedSessionEntry("acc-hit", "session-hit");
 
 			await capturedCallback?.();
 
-			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(2);
+			const slot = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-hit");
+			expect(slot).toBeDefined();
+			// A hit charges only the small read cost — well under budget.
+			expect(slot?.spentUsd).toBeGreaterThan(0);
+			expect(slot?.spentUsd).toBeLessThan(slot?.budgetUsd ?? 0);
+			expect(slot?.lastKeepaliveTs).not.toBeNull();
+			// After its refresh window elapses again, it is eligible once more.
+			const future =
+				(slot?.lastKeepaliveTs ?? 0) + KEEPALIVE_REFRESH_MS + 1_000;
+			expect(sessionCacheStore.getEligibleSessions(future)).toHaveLength(1);
 
 			scheduler.stop();
 		});
 
-		it("dispatch returns non-ok status — does not throw, handles gracefully", async () => {
+		it("cache_creation_input_tokens > 0 records a miss (spend jumps, drops out)", async () => {
 			mockDispatchProxyRequest.mockImplementationOnce(
-				async () => new Response("Rate limited", { status: 429 }),
+				async (req: Request, url: URL) => {
+					capturedDispatchCalls.push({ req, url });
+					return new Response(
+						'{"usage":{"cache_creation_input_tokens":5000}}',
+						{ status: 200 },
+					);
+				},
 			);
 
-			const { config } = makeConfig(5);
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			seedCacheEntry("acc-rate-limited");
+			seedSessionEntry("acc-miss", "session-miss");
 
-			// Should resolve without throwing.
-			await expect(capturedCallback?.()).resolves.toBeUndefined();
+			await capturedCallback?.();
 			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
+
+			const slot = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-miss");
+			// A miss charges ~the whole budget → spentUsd >= budgetUsd → ineligible.
+			expect(slot?.spentUsd).toBeGreaterThanOrEqual(slot?.budgetUsd ?? 0);
+			const future = Date.now() + KEEPALIVE_REFRESH_MS + 1_000;
+			expect(sessionCacheStore.getEligibleSessions(future)).toHaveLength(0);
+
+			scheduler.stop();
+		});
+
+		it("non-ok response records nothing (no spend charged)", async () => {
+			mockDispatchProxyRequest.mockImplementationOnce(
+				async (req: Request, url: URL) => {
+					capturedDispatchCalls.push({ req, url });
+					return new Response("rate limited", { status: 429 });
+				},
+			);
+
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedSessionEntry("acc-429", "session-429");
+
+			await capturedCallback?.();
+
+			const slot = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-429");
+			expect(slot?.spentUsd).toBe(0);
+			expect(slot?.lastKeepaliveTs).toBeNull();
 
 			scheduler.stop();
 		});
@@ -461,103 +525,115 @@ describe("CacheKeepaliveScheduler", () => {
 				throw new Error("synthetic-dispatch-failure");
 			});
 
-			const { config } = makeConfig(5);
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			seedCacheEntry("acc-conn-error");
+			seedSessionEntry("acc-conn-error", "session-conn-error");
 
-			// The scheduler must swallow the error internally.
 			await expect(capturedCallback?.()).resolves.toBeUndefined();
 			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
 
 			scheduler.stop();
 		});
 
-		it("skips account when getLastCachedRequest returns null", async () => {
-			const { config } = makeConfig(5);
+		it("caps dispatches at MAX_BRIDGE_KEEPALIVES_PER_TICK, highest-priority first", async () => {
+			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			// Seed a staging entry (body has cache_control so stageRequest succeeds),
-			// but do NOT call onSummary — staged but never promoted → getLastCachedRequest returns null.
-			cacheBodyStore.stageRequest(
-				"req-no-promote",
-				"acc-no-promote",
-				new TextEncoder().encode(
-					JSON.stringify({
-						model: "claude-opus-4-5",
-						messages: [],
-						system: [
-							{
-								type: "text",
-								text: "hi",
-								cache_control: { type: "ephemeral" },
-							},
-						],
-					}),
-				).buffer,
-				new Headers(),
-				"/v1/messages",
-			);
-			// Do not call onSummary → getLastCachedRequest will return null for this account.
+			// 25 eligible sessions; priority scales with cachedTokens so we can
+			// assert the highest-priority ones are the ones dispatched.
+			for (let i = 0; i < 25; i++) {
+				seedSessionEntry("acc-cap", `session-${i}`, {
+					cachedTokens: 100_000 + i * 10_000,
+				});
+			}
 
 			await capturedCallback?.();
 
-			// No promoted entries → dispatch should not be called.
+			// Only the cap (20) dispatched this tick.
+			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(20);
+
+			// The lowest-priority 5 (i=0..4) were deferred → spentUsd still 0.
+			for (let i = 0; i < 5; i++) {
+				const slot = sessionCacheStore
+					.getAllSlots()
+					.find((s) => s.sessionKey === `session-${i}`);
+				expect(slot?.spentUsd).toBe(0);
+			}
+			// The top-priority session was dispatched.
+			const top = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-24");
+			expect(top?.spentUsd).toBeGreaterThan(0);
+
+			scheduler.stop();
+		});
+
+		it("does not dispatch sessions that are not idle long enough", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			// Fresh lastActivityTs (register stamps Date.now()) → not yet due.
+			sessionCacheStore.register({
+				accountId: "acc-fresh",
+				sessionKey: "session-fresh",
+				body: new TextEncoder().encode("{}").buffer,
+				headers: new Headers(),
+				path: "/v1/messages",
+				model: "claude-opus-4-5",
+				cacheReadTokens: 150_000,
+				cacheCreationTokens: 0,
+			});
+
+			await capturedCallback?.();
+
 			expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
 
 			scheduler.stop();
 		});
 	});
+});
 
-	// -------------------------------------------------------------------------
-	// cacheBodyStore interaction details
-	// -------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// extractCacheCreationTokens — JSON envelope vs SSE stream vs absent
+// ---------------------------------------------------------------------------
 
-	describe("cacheBodyStore interaction", () => {
-		it("setEnabled(false) is called when TTL changes from >0 to 0 (clears existing entries)", () => {
-			const { config, fireTtlChange } = makeConfig(5);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
-			scheduler.start();
+describe("extractCacheCreationTokens", () => {
+	it("parses the field from a JSON envelope body", () => {
+		expect(
+			extractCacheCreationTokens(
+				'{"usage":{"cache_creation_input_tokens":1234,"cache_read_input_tokens":9}}',
+			),
+		).toBe(1234);
+	});
 
-			// Seed an entry while enabled.
-			seedCacheEntry("acc-pre-disable");
-			expect(cacheBodyStore.getAllCachedAccounts()).toHaveLength(1);
+	it("parses the field from an SSE message_start data line", () => {
+		const sse =
+			'event: message_start\ndata: {"type":"message_start","message":{"usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":50000}}}\n\n';
+		expect(extractCacheCreationTokens(sse)).toBe(0);
+	});
 
-			// Change TTL to 0 — should disable the store and clear all entries.
-			fireTtlChange(0);
+	it("tolerates whitespace around the colon", () => {
+		expect(
+			extractCacheCreationTokens('"cache_creation_input_tokens" : 42'),
+		).toBe(42);
+	});
 
-			expect(cacheBodyStore.getAllCachedAccounts()).toHaveLength(0);
+	it("returns null when the field is absent (e.g. an error body)", () => {
+		expect(
+			extractCacheCreationTokens('{"error":{"message":"boom"}}'),
+		).toBeNull();
+		expect(extractCacheCreationTokens("")).toBeNull();
+	});
 
-			scheduler.stop();
-		});
-
-		it("setEnabled(true) is called on re-enable after TTL was 0", () => {
-			const { config, fireTtlChange } = makeConfig(0);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
-			scheduler.start();
-
-			// TTL=0 → store disabled.
-			const requestId = "req-disabled";
-			cacheBodyStore.stageRequest(
-				requestId,
-				"acc-disabled",
-				new TextEncoder().encode("{}").buffer,
-				new Headers(),
-				"/v1/messages",
-			);
-			cacheBodyStore.onSummary(requestId, 10);
-			expect(cacheBodyStore.getAllCachedAccounts()).toHaveLength(0);
-
-			// Change TTL to 5 → store should be re-enabled.
-			fireTtlChange(5);
-
-			// Now seeding should work.
-			seedCacheEntry("acc-re-enabled");
-			expect(cacheBodyStore.getAllCachedAccounts()).toContain("acc-re-enabled");
-
-			scheduler.stop();
-		});
+	it("returns the FIRST match when multiple are present", () => {
+		expect(
+			extractCacheCreationTokens(
+				'"cache_creation_input_tokens":7 ... "cache_creation_input_tokens":99',
+			),
+		).toBe(7);
 	});
 });

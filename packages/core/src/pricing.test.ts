@@ -2,7 +2,11 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { estimateCostUSD, type TokenBreakdown } from "./pricing";
+import {
+	estimateCostUSD,
+	getModelCacheRates,
+	type TokenBreakdown,
+} from "./pricing";
 
 // Make pricing deterministic: never hit the network, and point the disk cache
 // at a fresh empty dir so a stale/remote models.dev cache can't leak in. This
@@ -126,5 +130,44 @@ describe("bundled Mythos-class pricing (offline fallback)", () => {
 			60,
 			6,
 		);
+	});
+});
+
+describe("getModelCacheRates", () => {
+	it("returns Opus 4.8 rates from bundled data", () => {
+		expect(getModelCacheRates("claude-opus-4-8")).toEqual({
+			inputPer1M: 5,
+			cacheReadPer1M: 0.5,
+			cacheWritePer1M: 6.25,
+		});
+	});
+
+	it("returns Sonnet 4.5 rates from bundled data", () => {
+		// Resolution is exact-match (mirroring estimateCostUSD), so use the real
+		// bundled id, which is dated: "claude-sonnet-4-5-20250929".
+		expect(getModelCacheRates("claude-sonnet-4-5-20250929")).toEqual({
+			inputPer1M: 3,
+			cacheReadPer1M: 0.3,
+			cacheWritePer1M: 3.75,
+		});
+	});
+
+	it("falls back to Sonnet-4 rates for an unknown model", () => {
+		expect(getModelCacheRates("this-model-does-not-exist")).toEqual({
+			inputPer1M: 3,
+			cacheReadPer1M: 0.3,
+			cacheWritePer1M: 3.75,
+		});
+	});
+
+	it("returns 0 for cache rates a known model lacks", () => {
+		// MiniMax-M2 is in the bundled table with input/output but no cache pricing.
+		// It IS known, so we return its real input rate and 0 for the missing
+		// cache rates — NOT the unknown-model Sonnet-4 fallback.
+		expect(getModelCacheRates("MiniMax-M2")).toEqual({
+			inputPer1M: 0.3,
+			cacheReadPer1M: 0,
+			cacheWritePer1M: 0,
+		});
 	});
 });

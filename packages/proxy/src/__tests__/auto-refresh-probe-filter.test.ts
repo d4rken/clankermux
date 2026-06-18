@@ -223,7 +223,6 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
-				getSystemPromptCacheTtl1h: () => false,
 			} as never,
 			provider: {
 				name: "anthropic",
@@ -292,7 +291,6 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
-				getSystemPromptCacheTtl1h: () => false,
 			} as never,
 			provider: {
 				name: "anthropic",

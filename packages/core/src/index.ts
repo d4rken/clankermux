@@ -89,6 +89,7 @@ export {
 } from "./models";
 export {
 	estimateCostUSD,
+	getModelCacheRates,
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";

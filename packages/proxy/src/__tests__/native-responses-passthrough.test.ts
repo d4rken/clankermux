@@ -109,7 +109,6 @@ function makeContext(accounts: Account[]): ProxyContext {
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
-			getSystemPromptCacheTtl1h: () => false,
 			getStorePayloads: () => false,
 		} as never,
 		// Fallback provider for unregistered provider names ("test-provider"):

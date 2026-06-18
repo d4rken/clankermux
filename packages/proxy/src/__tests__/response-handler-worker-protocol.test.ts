@@ -395,7 +395,15 @@ describe("forwardToClient inline usage collection", () => {
 		);
 
 		await waitFor(() => attached.length > 0);
-		expect(onSummary).toHaveBeenCalledWith("req-cache-summary", 7);
+		// onSummary now also receives cacheRead tokens (none in this body → 0,
+		// the usage-collector default) and the model, used to route keyed sessions
+		// into the session bridge.
+		expect(onSummary).toHaveBeenCalledWith(
+			"req-cache-summary",
+			7,
+			0,
+			"claude-opus-4-8",
+		);
 	});
 });
 
