@@ -223,6 +223,8 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
+				getCacheWarmingEnabled: () => false,
+				getCacheWarmingMinTokens: () => 100_000,
 			} as never,
 			provider: {
 				name: "anthropic",
@@ -291,6 +293,8 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			config: {
 				getUsageThrottlingFiveHourEnabled: () => false,
 				getUsageThrottlingWeeklyEnabled: () => false,
+				getCacheWarmingEnabled: () => false,
+				getCacheWarmingMinTokens: () => 100_000,
 			} as never,
 			provider: {
 				name: "anthropic",

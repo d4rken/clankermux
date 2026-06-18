@@ -3,16 +3,20 @@ import {
 	BRIDGE_JITTER_MAX_MS,
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
+	IDLE_GAP_FOR_PROMOTION_MS,
 	isBridgeableProvider,
 	isEligibleByTokens,
+	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
 	keepaliveMissCostUsd,
+	MAX_PROMOTION_TRACKER_ENTRIES,
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
 	PREMIUM_CACHE_PROVIDERS,
+	PROMOTE_AFTER_TURNS,
 	RISK_FACTOR,
 	resumePenaltyUsd,
 } from "../bridge-policy";
@@ -30,6 +34,13 @@ describe("bridge-policy constants", () => {
 		expect(MAX_SESSION_BODY_BYTES).toBe(2 * 1024 * 1024);
 		expect(BRIDGE_JITTER_MAX_MS).toBe(1_000);
 		expect(KEEPALIVE_REFRESH_MS).toBe(3 * 60_000);
+	});
+
+	it("exposes the Phase 2 predictive-promotion tuning values", () => {
+		expect(PROMOTE_AFTER_TURNS).toBe(3);
+		expect(IDLE_GAP_FOR_PROMOTION_MS).toBe(3 * 60_000);
+		expect(KEEPALIVE_REFRESH_1H_MS).toBe(50 * 60_000);
+		expect(MAX_PROMOTION_TRACKER_ENTRIES).toBe(500);
 	});
 });
 

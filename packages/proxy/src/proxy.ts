@@ -15,6 +15,7 @@ import {
 	setNativeResponsesMetaContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
+import { injectCacheTtl1h } from "./cache-ttl-injector";
 import { computeContextAndToolStats } from "./context-composition";
 import {
 	abortableSleep,
@@ -57,6 +58,7 @@ import { extractRequestAffinity } from "./request-affinity";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { sessionProjectCache } from "./session-project-cache";
+import { sessionPromotionTracker } from "./session-promotion";
 import { shouldRecordRequest } from "./should-record-request";
 
 export type { ProxyContext } from "./handlers";
@@ -267,6 +269,28 @@ export async function handleProxy(
 		parsedBody,
 		contextComposition,
 	);
+
+	// 3b. Predictive 1-hour-TTL promotion (Session Cache Bridge, Phase 2).
+	// For a real (session-keyed) request, observe the session in the promotion
+	// tracker and, once it's promoted AND large enough, rewrite its ephemeral
+	// cache breakpoints to ttl:"1h". This mutates requestBodyContext in place, so
+	// the finalBodyBuffer below — and the staged keepalive body downstream — both
+	// carry the 1h injection, letting ~50-min keepalives bridge an idle session
+	// for HOURS instead of ~15 min. Synthetic keepalive/auto-refresh requests strip
+	// the session header so affinity.key is null → naturally excluded. Gated on the
+	// cache-warming feature (same switch the keepalive scheduler uses).
+	if (ctx.config.getCacheWarmingEnabled() && affinity.key) {
+		if (
+			sessionPromotionTracker.observeAndShouldInject(
+				affinity.key,
+				Date.now(),
+				requestTokenEstimate,
+				ctx.config.getCacheWarmingMinTokens(),
+			)
+		) {
+			injectCacheTtl1h(requestBodyContext);
+		}
+	}
 
 	// 3a. Validate request body for /v1/messages endpoint
 	if (url.pathname === "/v1/messages" && requestBodyBuffer) {

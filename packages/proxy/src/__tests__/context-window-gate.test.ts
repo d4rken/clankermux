@@ -66,6 +66,8 @@ function makeContext(accounts: Account[]): ProxyContext {
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
+			getCacheWarmingEnabled: () => false,
+			getCacheWarmingMinTokens: () => 100_000,
 		} as never,
 		provider: {
 			name: "codex",

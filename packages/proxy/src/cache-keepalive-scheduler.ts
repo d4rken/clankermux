@@ -9,6 +9,7 @@ import {
 	type SessionCacheSlot,
 	sessionCacheStore,
 } from "./session-cache-store";
+import { sessionPromotionTracker } from "./session-promotion";
 
 const log = new Logger("CacheKeepaliveScheduler");
 
@@ -80,6 +81,9 @@ export class CacheKeepaliveScheduler {
 		// per-session warm-body store.
 		cacheBodyStore.setEnabled(this.enabled);
 		sessionCacheStore.setEnabled(this.enabled);
+		// The predictive 1h-TTL promotion tracker shares the cache-warming switch, so
+		// it clears its per-session state when the feature is turned off.
+		sessionPromotionTracker.setEnabled(this.enabled);
 		sessionCacheStore.setMinTokens(this.config.getCacheWarmingMinTokens());
 
 		// React dynamically to cache-warming config changes.
@@ -96,6 +100,7 @@ export class CacheKeepaliveScheduler {
 					this.enabled = next;
 					cacheBodyStore.setEnabled(next);
 					sessionCacheStore.setEnabled(next);
+					sessionPromotionTracker.setEnabled(next);
 					this.restart();
 				}
 			} else if (key === "cache_warming_min_tokens") {

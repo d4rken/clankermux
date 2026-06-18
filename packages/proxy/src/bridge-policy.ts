@@ -87,6 +87,34 @@ export const BRIDGE_JITTER_MAX_MS = 1_000;
 export const KEEPALIVE_REFRESH_MS = 3 * 60_000;
 
 /**
+ * A session with at least this many cache-relevant turns is "established" and
+ * likely to be juggled/forgotten by the user (left idle between turns) → eligible
+ * for predictive 1-hour-TTL promotion. Part of the hybrid promotion policy.
+ */
+export const PROMOTE_AFTER_TURNS = 3;
+
+/**
+ * A gap this long (3 min) between a session's consecutive turns signals
+ * idle-proneness — it approaches Anthropic's 5-min prompt-cache expiry — so the
+ * session is promoted to 1-hour TTL even before it reaches PROMOTE_AFTER_TURNS.
+ */
+export const IDLE_GAP_FOR_PROMOTION_MS = 3 * 60_000;
+
+/**
+ * Refresh cadence (50 min) for 1h-promoted keepalive slots — comfortably under
+ * the 1-hour cache TTL. The per-slot interval the scheduler uses for promoted
+ * sessions; KEEPALIVE_REFRESH_MS (3 min) remains the cadence for 5m-mode slots.
+ */
+export const KEEPALIVE_REFRESH_1H_MS = 50 * 60_000;
+
+/**
+ * Hard cap on the number of sessions the promotion tracker holds (memory bound).
+ * Over cap, the entry with the oldest lastSeenTs is LRU-evicted. Entries are tiny
+ * metadata only (no request bodies).
+ */
+export const MAX_PROMOTION_TRACKER_ENTRIES = 500;
+
+/**
  * Whether a model's cache rates carry a real WRITE premium worth bridging: both
  * rates finite, a positive cache-read rate, and a cache-write rate strictly above
  * it. This is the provider economic gate — it returns false for OpenAI/Codex and

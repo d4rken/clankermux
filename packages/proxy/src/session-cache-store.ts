@@ -4,6 +4,7 @@ import {
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
 	isEligibleByTokens,
+	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
@@ -15,6 +16,7 @@ import {
 	resumePenaltyUsd,
 } from "./bridge-policy";
 import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
+import { sessionPromotionTracker } from "./session-promotion";
 
 const log = new Logger("SessionCacheStore");
 
@@ -91,6 +93,14 @@ export interface SessionCacheSlot {
 	lastKeepaliveTs: number | null;
 	/** Consecutive non-routable/failed keepalive attempts; resets on success. */
 	keepaliveFailures: number;
+	/**
+	 * Per-slot refresh cadence (ms). A promoted session (1h-TTL cache) refreshes on
+	 * the slow {@link KEEPALIVE_REFRESH_1H_MS} (~50 min) cadence; a non-promoted
+	 * (default 5m-TTL) session uses {@link KEEPALIVE_REFRESH_MS} (3 min). Decided at
+	 * register() time from the promotion tracker (the staged sessionKey is the real
+	 * affinity key, or the never-promoted `__account__:<id>` fallback → 3 min).
+	 */
+	refreshMs: number;
 }
 
 function sanitizeHeaders(headers: Headers): Record<string, string> {
@@ -236,6 +246,12 @@ class SessionCacheStore {
 			lastActivityTs: Date.now(),
 			lastKeepaliveTs: null,
 			keepaliveFailures: 0,
+			// Promoted (1h-TTL) sessions refresh on the slow ~50-min cadence; everyone
+			// else uses the 3-min default. The fallback `__account__:<id>` sessionKey is
+			// never promoted, so it correctly resolves to KEEPALIVE_REFRESH_MS.
+			refreshMs: sessionPromotionTracker.isPromoted(sessionKey)
+				? KEEPALIVE_REFRESH_1H_MS
+				: KEEPALIVE_REFRESH_MS,
 		};
 
 		// Upsert: subtract any prior slot's bytes before replacing.
@@ -294,8 +310,9 @@ class SessionCacheStore {
 	 *
 	 * A slot is eligible iff it has a positive budget, has not yet exhausted that
 	 * budget (spentUsd < budgetUsd), and has been untouched (no real activity or
-	 * keepalive) for at least {@link KEEPALIVE_REFRESH_MS} — so a keepalive lands
-	 * before Anthropic's 5-min cache TTL expires.
+	 * keepalive) for at least its per-slot {@link SessionCacheSlot.refreshMs} — 3 min
+	 * for default 5m-TTL slots, ~50 min for promoted 1h-TTL slots — so a keepalive
+	 * lands before the slot's prompt-cache TTL expires.
 	 */
 	getEligibleSessions(now: number): SessionCacheSlot[] {
 		const eligible: SessionCacheSlot[] = [];
@@ -306,7 +323,7 @@ class SessionCacheStore {
 				slot.lastActivityTs,
 				slot.lastKeepaliveTs ?? 0,
 			);
-			if (now - lastTouch < KEEPALIVE_REFRESH_MS) continue;
+			if (now - lastTouch < slot.refreshMs) continue;
 			eligible.push(slot);
 		}
 
