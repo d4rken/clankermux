@@ -2,14 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { getModelCacheRates } from "@clankermux/core";
 import {
 	DEFAULT_MIN_CACHE_TOKENS,
+	IDLE_GAP_FOR_PROMOTION_MS,
+	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
 	MAX_KEEPALIVE_FAILURES,
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_SLOTS,
+	PROMOTE_AFTER_TURNS,
 } from "../bridge-policy";
 import { sessionCacheStore } from "../session-cache-store";
+import { sessionPromotionTracker } from "../session-promotion";
 
 // Real model ids. Opus 4.8 has a cache-write premium (read 0.5, write 6.25);
 // zai/GLM-4.5 has cache_write: 0 → no premium (the provider gate must skip it).
@@ -61,13 +65,33 @@ beforeEach(() => {
 	sessionCacheStore.setEnabled(true);
 	sessionCacheStore.setMinTokens(DEFAULT_MIN_CACHE_TOKENS);
 	sessionCacheStore.clear();
+	// Isolate the shared promotion tracker singleton across tests.
+	sessionPromotionTracker.setEnabled(true);
+	sessionPromotionTracker.clear();
 });
 
 afterEach(() => {
 	sessionCacheStore.clear();
 	sessionCacheStore.setMinTokens(DEFAULT_MIN_CACHE_TOKENS);
 	sessionCacheStore.setEnabled(false);
+	sessionPromotionTracker.clear();
+	sessionPromotionTracker.setEnabled(false);
 });
+
+/**
+ * Drive the promotion tracker to a promoted (sticky) state for `sessionKey` by
+ * observing PROMOTE_AFTER_TURNS turns. Tokens/minTokens are irrelevant to the
+ * sticky flag, so we pass a clearing pair.
+ */
+function promote(sessionKey: string): void {
+	const now = Date.now();
+	for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
+		sessionPromotionTracker.observeAndShouldInject(sessionKey, now + i, 0, 0);
+	}
+	if (!sessionPromotionTracker.isPromoted(sessionKey)) {
+		throw new Error(`expected ${sessionKey} to be promoted`);
+	}
+}
 
 describe("SessionCacheStore — register provider/token gating", () => {
 	it("stores a premium model session above the token threshold", () => {
@@ -485,5 +509,153 @@ describe("SessionCacheStore — header sanitization", () => {
 		expect(keys).not.toContain("x-claude-code-session-id");
 		expect(keys).toContain("anthropic-version");
 		expect(keys).toContain("content-type");
+	});
+});
+
+describe("SessionCacheStore — per-slot refresh cadence (1h promotion)", () => {
+	it("a non-promoted slot gets the 3-min cadence and is due at 3 min", () => {
+		register({ sessionKey: "plain", cacheReadTokens: 150_000 });
+		const slot = sessionCacheStore.getAllSlots()[0];
+		expect(slot.refreshMs).toBe(KEEPALIVE_REFRESH_MS);
+
+		const base = slot.lastActivityTs;
+		// Not due just under 3 min.
+		expect(
+			sessionCacheStore.getEligibleSessions(base + KEEPALIVE_REFRESH_MS - 1)
+				.length,
+		).toBe(0);
+		// Due at 3 min.
+		expect(
+			sessionCacheStore.getEligibleSessions(base + KEEPALIVE_REFRESH_MS).length,
+		).toBe(1);
+	});
+
+	it("a promoted slot gets the ~50-min cadence: NOT due at 3 min, IS due at 50 min", () => {
+		promote("hot");
+		register({ sessionKey: "hot", cacheReadTokens: 150_000 });
+		const slot = sessionCacheStore.getAllSlots()[0];
+		expect(slot.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
+
+		const base = slot.lastActivityTs;
+		// A promoted slot must NOT fire on the 3-min cadence...
+		expect(
+			sessionCacheStore.getEligibleSessions(base + KEEPALIVE_REFRESH_MS).length,
+		).toBe(0);
+		// ...nor just under its own 50-min window...
+		expect(
+			sessionCacheStore.getEligibleSessions(base + KEEPALIVE_REFRESH_1H_MS - 1)
+				.length,
+		).toBe(0);
+		// ...but IS due at 50 min.
+		expect(
+			sessionCacheStore.getEligibleSessions(base + KEEPALIVE_REFRESH_1H_MS)
+				.length,
+		).toBe(1);
+	});
+
+	it("an idle-gap promotion also yields the ~50-min cadence", () => {
+		const key = "idler";
+		const now = Date.now();
+		// Two turns separated by > IDLE_GAP_FOR_PROMOTION_MS → promoted on the 2nd.
+		sessionPromotionTracker.observeAndShouldInject(key, now, 0, 0);
+		sessionPromotionTracker.observeAndShouldInject(
+			key,
+			now + IDLE_GAP_FOR_PROMOTION_MS,
+			0,
+			0,
+		);
+		expect(sessionPromotionTracker.isPromoted(key)).toBe(true);
+
+		register({ sessionKey: key, cacheReadTokens: 150_000 });
+		expect(sessionCacheStore.getAllSlots()[0].refreshMs).toBe(
+			KEEPALIVE_REFRESH_1H_MS,
+		);
+	});
+
+	it("the __account__ fallback key is never promoted → 3-min cadence", () => {
+		const fallback = "__account__:acc-1";
+		// Even after many observes the fallback key is promoted by turn count, BUT
+		// the proxy never observes it (synthetic keepalives strip the session key),
+		// so in practice it's never in the tracker. Assert the un-observed key.
+		expect(sessionPromotionTracker.isPromoted(fallback)).toBe(false);
+		register({ sessionKey: fallback, cacheReadTokens: 150_000 });
+		expect(sessionCacheStore.getAllSlots()[0].refreshMs).toBe(
+			KEEPALIVE_REFRESH_MS,
+		);
+	});
+
+	it("a promoted slot's spend budget supports multiple hourly hits before exhaustion", () => {
+		promote("multi");
+		register({ sessionKey: "multi", cacheReadTokens: 100_000 });
+		const slot = sessionCacheStore.getAllSlots()[0];
+		expect(slot.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
+
+		let hits = 0;
+		let now = slot.lastActivityTs + KEEPALIVE_REFRESH_1H_MS;
+		// Each iteration: due → record a hit → advance one ~50-min window.
+		while (sessionCacheStore.getEligibleSessions(now).length > 0) {
+			sessionCacheStore.recordKeepaliveResult("acc-1", "multi", true, now);
+			hits++;
+			now += KEEPALIVE_REFRESH_1H_MS;
+			if (hits > 20) break; // safety
+		}
+		// With the TRUE 1h write rate (2x input = 10/M for Opus), the budget is
+		// (10-0.5)/1e6*100000*0.4 = $0.38 and each hit is $0.05, so ~7-8 hourly
+		// refreshes fit → a multi-HOUR bridge (~5h, vs ~3.3h on the 5m write rate).
+		expect(hits).toBeGreaterThanOrEqual(6);
+		expect(hits).toBeLessThanOrEqual(8);
+		// Total wall-clock bridged spans well over the ~3.3h a 5m-rate budget gives.
+		const hoursBridged = (hits * KEEPALIVE_REFRESH_1H_MS) / 3_600_000;
+		expect(hoursBridged).toBeGreaterThanOrEqual(5);
+	});
+});
+
+describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x input)", () => {
+	// Opus 4.8: input 5, cache_read 0.5, 5m cache_write 6.25. A promoted (1h) slot's
+	// real write is 2x input = 10/M, which is LARGER than the 5m cache_write rate.
+	it("a promoted slot's budget reflects the 2x write rate and exceeds a 5m slot's", () => {
+		// 5-minute (non-promoted) slot.
+		register({ sessionKey: "plain", cacheReadTokens: 100_000 });
+		const plain = sessionCacheStore.getAllSlots()[0];
+		expect(plain.cacheWriteEffectivePer1M).toBe(6.25); // = cacheWritePer1M
+		// (6.25 - 0.5)/1e6 * 100000 * 0.4 = $0.23
+		expect(plain.budgetUsd).toBeCloseTo(0.23, 10);
+
+		sessionCacheStore.clear();
+
+		// 1h (promoted) slot, same tokens/model.
+		promote("hot");
+		register({ sessionKey: "hot", cacheReadTokens: 100_000 });
+		const hot = sessionCacheStore.getAllSlots()[0];
+		// Effective write = inputPer1M (5) * 2 = 10/M, NOT the 5m cache_write 6.25.
+		expect(hot.cacheWriteEffectivePer1M).toBe(10);
+		expect(hot.cacheWritePer1M).toBe(6.25); // raw 5m rate is still recorded
+		// (10 - 0.5)/1e6 * 100000 * 0.4 = $0.38 — larger than the 5m slot's $0.23.
+		expect(hot.budgetUsd).toBeCloseTo(0.38, 10);
+		expect(hot.budgetUsd).toBeGreaterThan(plain.budgetUsd);
+	});
+
+	it("a promoted slot charges a MISS at the 2x rate (not the 5m cache_write rate)", () => {
+		promote("missy");
+		register({ sessionKey: "missy", cacheReadTokens: 100_000 });
+		const now = FUTURE();
+		sessionCacheStore.recordKeepaliveResult("acc-1", "missy", false, now);
+		const slot = sessionCacheStore.getAllSlots()[0];
+		// Miss cost = effective write (10/M) * 100k = $1.00, the true 1h recreate
+		// cost (a 5m-rate charge would understate it at 6.25/M = $0.625).
+		expect(slot.spentUsd).toBeCloseTo(1.0, 10);
+		expect(slot.spentUsd).toBeGreaterThan((6.25 / 1_000_000) * 100_000);
+		// One miss still exhausts the budget in one shot.
+		expect(slot.spentUsd).toBeGreaterThan(slot.budgetUsd);
+	});
+
+	it("a non-promoted slot is unchanged: effective write equals the 5m cache_write rate", () => {
+		register({ sessionKey: "plain2", cacheReadTokens: 100_000 });
+		const slot = sessionCacheStore.getAllSlots()[0];
+		expect(slot.cacheWriteEffectivePer1M).toBe(slot.cacheWritePer1M);
+		const now = FUTURE();
+		sessionCacheStore.recordKeepaliveResult("acc-1", "plain2", false, now);
+		// Miss charged at the 5m rate: 6.25/M * 100k = $0.625 (unchanged behavior).
+		expect(sessionCacheStore.getAllSlots()[0].spentUsd).toBeCloseTo(0.625, 10);
 	});
 });

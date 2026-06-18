@@ -97,6 +97,8 @@ function makeSimpleContext(accounts: Account[]): ProxyContext {
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
+			getCacheWarmingEnabled: () => false,
+			getCacheWarmingMinTokens: () => 100_000,
 			getStorePayloads: () => false,
 		} as never,
 		provider: {
@@ -142,6 +144,8 @@ function makeFullContext(accounts: Account[]): ProxyContext {
 		config: {
 			getUsageThrottlingFiveHourEnabled: () => false,
 			getUsageThrottlingWeeklyEnabled: () => false,
+			getCacheWarmingEnabled: () => false,
+			getCacheWarmingMinTokens: () => 100_000,
 			getStorePayloads: () => false,
 		} as never,
 		provider: {

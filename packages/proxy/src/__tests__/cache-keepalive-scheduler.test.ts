@@ -59,7 +59,12 @@ mock.module("../dispatch", () => ({
 	dispatchProxyRequest: mockDispatchProxyRequest,
 }));
 
-import { KEEPALIVE_REFRESH_MS, MAX_KEEPALIVE_FAILURES } from "../bridge-policy";
+import {
+	KEEPALIVE_REFRESH_1H_MS,
+	KEEPALIVE_REFRESH_MS,
+	MAX_KEEPALIVE_FAILURES,
+	PROMOTE_AFTER_TURNS,
+} from "../bridge-policy";
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
 // and dispatchProxyRequest.
@@ -68,6 +73,7 @@ import {
 	extractCacheCreationTokens,
 } from "../cache-keepalive-scheduler";
 import { sessionCacheStore } from "../session-cache-store";
+import { sessionPromotionTracker } from "../session-promotion";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -190,6 +196,35 @@ function resetStore(): void {
 	sessionCacheStore.setEnabled(false);
 	sessionCacheStore.clear();
 	sessionCacheStore.setMinTokens(100_000);
+	// Isolate the shared promotion tracker singleton across tests.
+	sessionPromotionTracker.clear();
+	sessionPromotionTracker.setEnabled(true);
+}
+
+/**
+ * Drive the promotion tracker to promoted for `sessionKey` (so a slot registered
+ * for it gets the ~50-min 1h cadence), then seed an eligible slot and backdate it
+ * past its 1h refresh window so it is due now.
+ */
+function seedPromotedSessionEntry(
+	accountId: string,
+	sessionKey: string,
+	opts: { cachedTokens?: number } = {},
+): void {
+	const now = Date.now();
+	for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
+		sessionPromotionTracker.observeAndShouldInject(sessionKey, now + i, 0, 0);
+	}
+	seedSessionEntry(accountId, sessionKey, opts);
+	const slot = sessionCacheStore
+		.getAllSlots()
+		.find((s) => s.accountId === accountId && s.sessionKey === sessionKey);
+	if (slot) {
+		// Backdate past the 1h refresh window so the promoted slot is due now.
+		(slot as { lastActivityTs: number }).lastActivityTs =
+			now - (KEEPALIVE_REFRESH_1H_MS + 60_000);
+		(slot as { lastKeepaliveTs: number | null }).lastKeepaliveTs = null;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +716,120 @@ describe("CacheKeepaliveScheduler", () => {
 			await capturedCallback?.();
 
 			expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
+
+			scheduler.stop();
+		});
+	});
+
+	// -------------------------------------------------------------------------
+	// 1h-promoted slots — slow (~50-min) cadence, multi-hour bridge
+	// -------------------------------------------------------------------------
+
+	describe("promoted (1h) slots", () => {
+		const realSetTimeout = globalThis.setTimeout;
+		beforeEach(() => {
+			// biome-ignore lint/suspicious/noExplicitAny: minimal timer stub for tests
+			(globalThis as any).setTimeout = ((fn: () => void) => {
+				fn();
+				return 0 as unknown as ReturnType<typeof setTimeout>;
+				// biome-ignore lint/suspicious/noExplicitAny: minimal timer stub for tests
+			}) as any;
+		});
+		afterEach(() => {
+			globalThis.setTimeout = realSetTimeout;
+		});
+
+		it("a promoted slot is NOT dispatched on the 3-min cadence (only ~50 min)", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			// Promote, register, then backdate only past the 3-min window — a 1h slot
+			// must NOT be due yet (its window is ~50 min).
+			const now = Date.now();
+			for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
+				sessionPromotionTracker.observeAndShouldInject(
+					"session-1h-early",
+					now + i,
+					0,
+					0,
+				);
+			}
+			seedSessionEntry("acc-1h-early", "session-1h-early");
+			const slot = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-1h-early");
+			expect(slot?.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
+			// seedSessionEntry backdated only by KEEPALIVE_REFRESH_MS+60s → under 50 min.
+			(slot as { lastActivityTs: number }).lastActivityTs =
+				now - (KEEPALIVE_REFRESH_MS + 60_000);
+
+			await capturedCallback?.();
+
+			expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
+
+			scheduler.stop();
+		});
+
+		it("a promoted slot IS dispatched once its ~50-min window elapses", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedPromotedSessionEntry("acc-1h", "session-1h");
+
+			await capturedCallback?.();
+
+			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
+			expect(
+				capturedDispatchCalls[0].req.headers.get("x-clankermux-keepalive"),
+			).toBe("true");
+
+			scheduler.stop();
+		});
+
+		it("bridges for HOURS: multiple hits across simulated hourly ticks until the budget exhausts", async () => {
+			// Default 200/empty-body dispatch => cache_creation absent => treated as a
+			// hit (small read-cost charge). Each tick we re-backdate the slot past its
+			// 1h window so it is due, then fire — counting how many hourly refreshes the
+			// budget supports before exhaustion.
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedPromotedSessionEntry("acc-hours", "session-hours", {
+				cachedTokens: 100_000,
+			});
+			const slot0 = sessionCacheStore
+				.getAllSlots()
+				.find((s) => s.sessionKey === "session-hours");
+			expect(slot0?.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
+
+			let dispatches = 0;
+			for (let tick = 0; tick < 12; tick++) {
+				const slot = sessionCacheStore
+					.getAllSlots()
+					.find((s) => s.sessionKey === "session-hours");
+				if (!slot) break;
+				// Make it due: backdate past the 1h window.
+				(slot as { lastActivityTs: number }).lastActivityTs =
+					Date.now() - (KEEPALIVE_REFRESH_1H_MS + 60_000);
+				(slot as { lastKeepaliveTs: number | null }).lastKeepaliveTs = null;
+				if (sessionCacheStore.getEligibleSessions(Date.now()).length === 0) {
+					break; // budget exhausted
+				}
+				const before = mockDispatchProxyRequest.mock.calls.length;
+				await capturedCallback?.();
+				dispatches += mockDispatchProxyRequest.mock.calls.length - before;
+			}
+
+			// With the TRUE 1h write rate (2x input), a promoted slot's budget is larger
+			// than on the old 5m cache_write rate, so ~7-8 hourly refreshes fit → an even
+			// longer multi-HOUR bridge from a single session.
+			expect(dispatches).toBeGreaterThanOrEqual(6);
+			expect(dispatches).toBeLessThanOrEqual(8);
+			const hoursBridged = (dispatches * KEEPALIVE_REFRESH_1H_MS) / 3_600_000;
+			expect(hoursBridged).toBeGreaterThanOrEqual(5);
 
 			scheduler.stop();
 		});

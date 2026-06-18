@@ -4,6 +4,7 @@ import {
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
 	isEligibleByTokens,
+	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
@@ -15,6 +16,7 @@ import {
 	resumePenaltyUsd,
 } from "./bridge-policy";
 import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
+import { sessionPromotionTracker } from "./session-promotion";
 
 const log = new Logger("SessionCacheStore");
 
@@ -77,8 +79,16 @@ export interface SessionCacheSlot {
 	cachedTokens: number;
 	/** Cache-read rate (USD per 1M) of the model — used to charge hit costs. */
 	cacheReadPer1M: number;
-	/** Cache-write rate (USD per 1M) of the model — used to charge miss costs. */
+	/** Cache-write rate (USD per 1M) of the model — the 5-minute rate (1.25x input). */
 	cacheWritePer1M: number;
+	/**
+	 * Effective cache-write rate (USD per 1M) for THIS slot's TTL — used to size the
+	 * spend budget and charge miss costs. For a PROMOTED (1h-TTL) slot the real write
+	 * is 2x input (vs the 5-minute 1.25x), so the budget stretches further and a miss
+	 * is charged at the true recreate cost. For a non-promoted (5m-TTL) slot this
+	 * equals {@link cacheWritePer1M}.
+	 */
+	cacheWriteEffectivePer1M: number;
 	/** resumePenaltyUsd — LRU priority (higher = keep). */
 	priorityUsd: number;
 	/** Derated keepalive spend budget in USD; bridging stops at spentUsd >= this. */
@@ -91,6 +101,14 @@ export interface SessionCacheSlot {
 	lastKeepaliveTs: number | null;
 	/** Consecutive non-routable/failed keepalive attempts; resets on success. */
 	keepaliveFailures: number;
+	/**
+	 * Per-slot refresh cadence (ms). A promoted session (1h-TTL cache) refreshes on
+	 * the slow {@link KEEPALIVE_REFRESH_1H_MS} (~50 min) cadence; a non-promoted
+	 * (default 5m-TTL) session uses {@link KEEPALIVE_REFRESH_MS} (3 min). Decided at
+	 * register() time from the promotion tracker (the staged sessionKey is the real
+	 * affinity key, or the never-promoted `__account__:<id>` fallback → 3 min).
+	 */
+	refreshMs: number;
 }
 
 function sanitizeHeaders(headers: Headers): Record<string, string> {
@@ -208,6 +226,21 @@ class SessionCacheStore {
 			return;
 		}
 
+		// Promoted (1h-TTL) sessions refresh on the slow ~50-min cadence; everyone
+		// else uses the 3-min default. The fallback `__account__:<id>` sessionKey is
+		// never promoted, so it correctly resolves to KEEPALIVE_REFRESH_MS.
+		const isPromoted = sessionPromotionTracker.isPromoted(sessionKey);
+
+		// For a promoted slot the cache is written with ttl:"1h", whose real write
+		// rate is 2x input (Anthropic) — NOT the 5-minute cache_write rate (1.25x
+		// input) that getModelCacheRates() returns. Use the true 1h write rate to
+		// size the spend budget (a larger premium → a larger budget → the multi-hour
+		// bridge stretches further) and to charge a miss (a recreate at 1h costs 2x).
+		// A non-promoted (5m-TTL) slot keeps the 5-minute rate unchanged.
+		const cacheWriteEffectivePer1M = isPromoted
+			? rates.inputPer1M * 2
+			: rates.cacheWritePer1M;
+
 		const slot: SessionCacheSlot = {
 			accountId,
 			sessionKey,
@@ -222,6 +255,7 @@ class SessionCacheStore {
 			cachedTokens,
 			cacheReadPer1M: rates.cacheReadPer1M,
 			cacheWritePer1M: rates.cacheWritePer1M,
+			cacheWriteEffectivePer1M,
 			priorityUsd: resumePenaltyUsd(
 				cachedTokens,
 				rates.cacheReadPer1M,
@@ -230,12 +264,13 @@ class SessionCacheStore {
 			budgetUsd: keepaliveBudgetUsd(
 				cachedTokens,
 				rates.cacheReadPer1M,
-				rates.cacheWritePer1M,
+				cacheWriteEffectivePer1M,
 			),
 			spentUsd: 0,
 			lastActivityTs: Date.now(),
 			lastKeepaliveTs: null,
 			keepaliveFailures: 0,
+			refreshMs: isPromoted ? KEEPALIVE_REFRESH_1H_MS : KEEPALIVE_REFRESH_MS,
 		};
 
 		// Upsert: subtract any prior slot's bytes before replacing.
@@ -294,8 +329,9 @@ class SessionCacheStore {
 	 *
 	 * A slot is eligible iff it has a positive budget, has not yet exhausted that
 	 * budget (spentUsd < budgetUsd), and has been untouched (no real activity or
-	 * keepalive) for at least {@link KEEPALIVE_REFRESH_MS} — so a keepalive lands
-	 * before Anthropic's 5-min cache TTL expires.
+	 * keepalive) for at least its per-slot {@link SessionCacheSlot.refreshMs} — 3 min
+	 * for default 5m-TTL slots, ~50 min for promoted 1h-TTL slots — so a keepalive
+	 * lands before the slot's prompt-cache TTL expires.
 	 */
 	getEligibleSessions(now: number): SessionCacheSlot[] {
 		const eligible: SessionCacheSlot[] = [];
@@ -306,7 +342,7 @@ class SessionCacheStore {
 				slot.lastActivityTs,
 				slot.lastKeepaliveTs ?? 0,
 			);
-			if (now - lastTouch < KEEPALIVE_REFRESH_MS) continue;
+			if (now - lastTouch < slot.refreshMs) continue;
 			eligible.push(slot);
 		}
 
@@ -328,9 +364,12 @@ class SessionCacheStore {
 	): void {
 		const slot = this.slots.get(SessionCacheStore.key(accountId, sessionKey));
 		if (!slot) return;
+		// A miss re-creates the cache at THIS slot's TTL: a promoted (1h) slot's
+		// recreate costs 2x input, so charge the effective write rate, not the
+		// 5-minute cache_write rate. The hit cost is cache_read regardless of TTL.
 		const cost = cacheHit
 			? keepaliveHitCostUsd(slot.cachedTokens, slot.cacheReadPer1M)
-			: keepaliveMissCostUsd(slot.cachedTokens, slot.cacheWritePer1M);
+			: keepaliveMissCostUsd(slot.cachedTokens, slot.cacheWriteEffectivePer1M);
 		slot.spentUsd += cost;
 		slot.lastKeepaliveTs = now;
 		// A successful keepalive clears the consecutive-failure streak.
