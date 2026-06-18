@@ -15,8 +15,9 @@ import {
 	MAX_SESSION_SLOTS,
 	resumePenaltyUsd,
 } from "./bridge-policy";
+import { bridgeStats } from "./bridge-stats";
 import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
-import { sessionPromotionTracker } from "./session-promotion";
+import { bodyCacheTtlIsOneHour } from "./cache-ttl-injector";
 
 const log = new Logger("SessionCacheStore");
 
@@ -101,6 +102,9 @@ export interface SessionCacheSlot {
 	lastKeepaliveTs: number | null;
 	/** Consecutive non-routable/failed keepalive attempts; resets on success. */
 	keepaliveFailures: number;
+	/** Total keepalives charged during the current idle period; resets on a real
+	 * warm resume (touchActivity). */
+	keepaliveCount: number;
 	/**
 	 * Per-slot refresh cadence (ms). A promoted session (1h-TTL cache) refreshes on
 	 * the slow {@link KEEPALIVE_REFRESH_1H_MS} (~50 min) cadence; a non-promoted
@@ -160,10 +164,19 @@ class SessionCacheStore {
 		}
 	}
 
-	/** Set the minimum cached-token eligibility threshold (clamped to >= 0). */
+	/**
+	 * Set the minimum cached-token eligibility threshold (clamped to >= 0). Raising
+	 * the threshold evicts any already-stored slot that no longer clears it, so a
+	 * mid-session increase doesn't leave below-threshold sessions being bridged.
+	 */
 	setMinTokens(minTokens: number): void {
 		this.minTokens =
 			Number.isFinite(minTokens) && minTokens > 0 ? minTokens : 0;
+		for (const [key, slot] of this.slots) {
+			if (slot.cachedTokens < this.minTokens) {
+				this.deleteKey(key);
+			}
+		}
 	}
 
 	/**
@@ -192,6 +205,9 @@ class SessionCacheStore {
 		// Token-count gate: too small to be worth bridging. Drop any stale slot.
 		if (!isEligibleByTokens(cachedTokens, this.minTokens)) {
 			this.deleteKey(key);
+			log.debug(
+				`[CacheBridge] skip session=${key} reason=below-min tokens=${cachedTokens} min=${this.minTokens}`,
+			);
 			return;
 		}
 
@@ -212,6 +228,9 @@ class SessionCacheStore {
 		const rates = getModelCacheRates(model ?? "");
 		if (!hasCacheWritePremium(rates.cacheReadPer1M, rates.cacheWritePer1M)) {
 			this.deleteKey(key);
+			log.debug(
+				`[CacheBridge] skip session=${key} reason=no-premium model=${model ?? "?"}`,
+			);
 			return;
 		}
 
@@ -221,34 +240,50 @@ class SessionCacheStore {
 		if (bodyBytes > MAX_SESSION_BODY_BYTES) {
 			this.deleteKey(key);
 			log.debug(
-				`Skipping session ${key}: body ${bodyBytes}B exceeds per-body cap ${MAX_SESSION_BODY_BYTES}B`,
+				`[CacheBridge] Skipping session ${key}: body ${bodyBytes}B exceeds per-body cap ${MAX_SESSION_BODY_BYTES}B`,
 			);
 			return;
 		}
 
-		// Promoted (1h-TTL) sessions refresh on the slow ~50-min cadence; everyone
-		// else uses the 3-min default. The fallback `__account__:<id>` sessionKey is
-		// never promoted, so it correctly resolves to KEEPALIVE_REFRESH_MS.
-		const isPromoted = sessionPromotionTracker.isPromoted(sessionKey);
+		// Detach a private copy of the request bytes (used for both the stored body
+		// and the TTL inspection below).
+		const bytes =
+			body instanceof ArrayBuffer
+				? new Uint8Array(body)
+				: new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
 
-		// For a promoted slot the cache is written with ttl:"1h", whose real write
-		// rate is 2x input (Anthropic) — NOT the 5-minute cache_write rate (1.25x
-		// input) that getModelCacheRates() returns. Use the true 1h write rate to
-		// size the spend budget (a larger premium → a larger budget → the multi-hour
-		// bridge stretches further) and to charge a miss (a recreate at 1h costs 2x).
-		// A non-promoted (5m-TTL) slot keeps the 5-minute rate unchanged.
-		const cacheWriteEffectivePer1M = isPromoted
+		// A slot's TTL is whatever the request body ACTUALLY wrote upstream — i.e.
+		// whether its ephemeral cache breakpoints carry ttl:"1h" — NOT what the
+		// promotion tracker currently thinks. The proxy injects ttl:"1h" before
+		// staging, so the staged body is the single source of truth: this stays in
+		// lockstep with the real cache regardless of the estimate-vs-observed token
+		// straddle, a mid-session minTokens change, or a client that set ttl itself.
+		// A 1h cache is written at 2x input (Anthropic), NOT the 5-minute cache_write
+		// rate (1.25x input) getModelCacheRates() returns — so a 1h slot uses the true
+		// 1h write rate to size the budget (a larger premium → larger budget → the
+		// multi-hour bridge stretches further) and to charge a miss (a recreate at 1h
+		// costs 2x). A 5m slot keeps the 5-minute rate. Malformed body → 5m default.
+		let isOneHour = false;
+		try {
+			isOneHour = bodyCacheTtlIsOneHour(
+				JSON.parse(new TextDecoder().decode(bytes)),
+			);
+		} catch {
+			// Non-JSON body — treat as the default 5m TTL.
+		}
+
+		// Capture the prior slot (if any) before the upsert to detect warm /
+		// re-warm / ttl-change transitions for logging.
+		const prev = this.slots.get(key);
+
+		const cacheWriteEffectivePer1M = isOneHour
 			? rates.inputPer1M * 2
 			: rates.cacheWritePer1M;
 
 		const slot: SessionCacheSlot = {
 			accountId,
 			sessionKey,
-			body: Buffer.from(
-				body instanceof ArrayBuffer
-					? new Uint8Array(body)
-					: new Uint8Array(body.buffer, body.byteOffset, body.byteLength),
-			),
+			body: Buffer.from(bytes),
 			headers: sanitizeHeaders(headers),
 			path,
 			model,
@@ -270,13 +305,28 @@ class SessionCacheStore {
 			lastActivityTs: Date.now(),
 			lastKeepaliveTs: null,
 			keepaliveFailures: 0,
-			refreshMs: isPromoted ? KEEPALIVE_REFRESH_1H_MS : KEEPALIVE_REFRESH_MS,
+			keepaliveCount: 0,
+			refreshMs: isOneHour ? KEEPALIVE_REFRESH_1H_MS : KEEPALIVE_REFRESH_MS,
 		};
 
 		// Upsert: subtract any prior slot's bytes before replacing.
 		this.deleteKey(key);
 		this.slots.set(key, slot);
 		this.totalBytes += slot.body.byteLength;
+
+		const ttlLabel = (ms: number): string =>
+			ms === KEEPALIVE_REFRESH_1H_MS ? "1h" : "5m";
+		if (!prev) {
+			log.info(
+				`[CacheBridge] warm session=${key} tokens=${cachedTokens} ttl=${ttlLabel(slot.refreshMs)} budgetUsd=${slot.budgetUsd.toFixed(4)} writeRate=${slot.cacheWriteEffectivePer1M}`,
+			);
+		} else if (prev.refreshMs !== slot.refreshMs) {
+			log.info(
+				`[CacheBridge] re-warm ttl-change session=${key} tokens=${cachedTokens} ttl=${ttlLabel(slot.refreshMs)} (was ${ttlLabel(prev.refreshMs)}) budgetUsd=${slot.budgetUsd.toFixed(4)} writeRate=${slot.cacheWriteEffectivePer1M}`,
+			);
+		} else {
+			log.debug(`[CacheBridge] re-warm session=${key} tokens=${cachedTokens}`);
+		}
 
 		this.enforceBounds();
 	}
@@ -361,19 +411,50 @@ class SessionCacheStore {
 		sessionKey: string,
 		cacheHit: boolean,
 		now: number,
+		expectedLastActivityTs?: number,
 	): void {
-		const slot = this.slots.get(SessionCacheStore.key(accountId, sessionKey));
+		const key = SessionCacheStore.key(accountId, sessionKey);
+		const slot = this.slots.get(key);
 		if (!slot) return;
-		// A miss re-creates the cache at THIS slot's TTL: a promoted (1h) slot's
-		// recreate costs 2x input, so charge the effective write rate, not the
-		// 5-minute cache_write rate. The hit cost is cache_read regardless of TTL.
+		// Stale-outcome guard: if a real request touched (touchActivity) or
+		// re-registered the slot while this keepalive was in flight, lastActivityTs
+		// will differ from what it was at dispatch. The fresh activity already reset
+		// the budget, so charging this now-stale result would corrupt the new idle
+		// period — drop it. (Omitted by direct unit tests → no guard.)
+		if (
+			expectedLastActivityTs !== undefined &&
+			slot.lastActivityTs !== expectedLastActivityTs
+		) {
+			return;
+		}
+		// A miss re-creates the cache at THIS slot's TTL: a 1h slot's recreate costs
+		// 2x input, so charge the effective write rate, not the 5-minute cache_write
+		// rate. The hit cost is cache_read regardless of TTL.
 		const cost = cacheHit
 			? keepaliveHitCostUsd(slot.cachedTokens, slot.cacheReadPer1M)
 			: keepaliveMissCostUsd(slot.cachedTokens, slot.cacheWriteEffectivePer1M);
+		// Whether the spend was under budget BEFORE this charge (for the
+		// budget-exhausted edge log below — log only on the crossing charge).
+		const wasUnderBudget = slot.spentUsd < slot.budgetUsd;
 		slot.spentUsd += cost;
 		slot.lastKeepaliveTs = now;
+		slot.keepaliveCount += 1;
 		// A successful keepalive clears the consecutive-failure streak.
 		slot.keepaliveFailures = 0;
+		bridgeStats.recordResult(cacheHit, cost);
+		if (cacheHit) {
+			log.debug(
+				`[CacheBridge] keepalive HIT session=${key} costUsd=${cost.toFixed(5)} spent=${slot.spentUsd.toFixed(4)}/${slot.budgetUsd.toFixed(4)}`,
+			);
+		}
+		// Budget-exhaustion edge: the cache is now warm server-side but no real
+		// resume has happened yet — surface the spend that didn't (yet) pay off.
+		// (No MISS line here — the scheduler logs the cache_creation MISS detail.)
+		if (slot.spentUsd >= slot.budgetUsd && wasUnderBudget) {
+			log.info(
+				`[CacheBridge] budget-exhausted session=${key} spent=${slot.spentUsd.toFixed(4)} budget=${slot.budgetUsd.toFixed(4)} keepalives=${slot.keepaliveCount} (no resume yet)`,
+			);
+		}
 	}
 
 	/**
@@ -389,14 +470,28 @@ class SessionCacheStore {
 		accountId: string,
 		sessionKey: string,
 		now: number,
+		expectedLastActivityTs?: number,
 	): void {
 		const key = SessionCacheStore.key(accountId, sessionKey);
 		const slot = this.slots.get(key);
 		if (!slot) return;
+		// Stale-outcome guard (see recordKeepaliveResult): a real request that
+		// touched/re-registered the slot mid-flight makes this failure stale — the
+		// slot is healthy now, so don't back it off or count it toward eviction.
+		if (
+			expectedLastActivityTs !== undefined &&
+			slot.lastActivityTs !== expectedLastActivityTs
+		) {
+			return;
+		}
+		bridgeStats.recordFailure();
 		// Back off so the slot isn't immediately due again on the next tick.
 		slot.lastKeepaliveTs = now;
 		slot.keepaliveFailures += 1;
 		if (slot.keepaliveFailures >= MAX_KEEPALIVE_FAILURES) {
+			log.debug(
+				`[CacheBridge] evicting session=${key} after ${slot.keepaliveFailures} consecutive keepalive failures`,
+			);
 			this.deleteKey(key);
 		}
 	}
@@ -416,11 +511,27 @@ class SessionCacheStore {
 	 * and re-copying it every read turn would churn memory for no benefit.
 	 */
 	touchActivity(accountId: string, sessionKey: string, now: number): void {
-		const slot = this.slots.get(SessionCacheStore.key(accountId, sessionKey));
+		const key = SessionCacheStore.key(accountId, sessionKey);
+		const slot = this.slots.get(key);
 		if (!slot) return;
+		// A real warm resume after we'd spent keepalive budget is the WIN the bridge
+		// exists to produce: we avoided the resume re-cache penalty. Value it at the
+		// slot's ACTUAL TTL write rate (cacheWriteEffectivePer1M) — a 1h slot would
+		// have cost 2x input to recreate, not the 5-minute rate priorityUsd uses
+		// (priorityUsd stays the 5m-rate LRU key, deliberately TTL-independent).
+		if (slot.spentUsd > 0) {
+			const savedUsd =
+				((slot.cacheWriteEffectivePer1M - slot.cacheReadPer1M) / 1_000_000) *
+				slot.cachedTokens;
+			bridgeStats.recordWarmResume(savedUsd);
+			log.info(
+				`[CacheBridge] warm-resume WIN session=${key} savedUsd=${savedUsd.toFixed(4)} spentUsd=${slot.spentUsd.toFixed(4)} netUsd=${(savedUsd - slot.spentUsd).toFixed(4)} keepalives=${slot.keepaliveCount}`,
+			);
+		}
 		slot.lastActivityTs = now;
 		slot.spentUsd = 0;
 		slot.lastKeepaliveTs = null;
+		slot.keepaliveCount = 0;
 	}
 
 	/** Remove all slots belonging to an account (e.g. account deleted). */
@@ -439,6 +550,15 @@ class SessionCacheStore {
 
 	getTotalBytes(): number {
 		return this.totalBytes;
+	}
+
+	/** Number of warm slots on the 1h-TTL (promoted) refresh cadence. */
+	getPromotedSessions(): number {
+		let count = 0;
+		for (const slot of this.slots.values()) {
+			if (slot.refreshMs === KEEPALIVE_REFRESH_1H_MS) count++;
+		}
+		return count;
 	}
 
 	getAllSlots(): SessionCacheSlot[] {

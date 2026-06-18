@@ -63,7 +63,6 @@ import {
 	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
 	MAX_KEEPALIVE_FAILURES,
-	PROMOTE_AFTER_TURNS,
 } from "../bridge-policy";
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
@@ -87,8 +86,10 @@ function makeProxyContext(port = 8081): ProxyContext {
 type ConfigChangeListener = (evt: { key: string; newValue: unknown }) => void;
 
 /**
- * Minimal Config mock with a simple event emitter for "change", driving the new
- * cache-warming getters (enabled + min tokens).
+ * Minimal Config mock with a simple event emitter for "change", driving the
+ * cache-warming getters (mode + min tokens). `enabled` is derived from mode
+ * (mode !== "off"); the legacy boolean helpers map enabled↔dynamic so the
+ * existing enable/disable assertions keep their meaning under the 3-mode API.
  */
 function makeConfig(
 	initialEnabled: boolean,
@@ -96,14 +97,16 @@ function makeConfig(
 ): {
 	config: Config;
 	fireEnabledChange: (next: boolean) => void;
+	fireModeChange: (next: "off" | "static" | "dynamic") => void;
 	fireMinTokensChange: (next: number) => void;
 } {
-	let enabled = initialEnabled;
+	let mode: "off" | "static" | "dynamic" = initialEnabled ? "dynamic" : "off";
 	let minTokens = initialMinTokens;
 	const listeners: ConfigChangeListener[] = [];
 
 	const config = {
-		getCacheWarmingEnabled: () => enabled,
+		getCacheWarmingMode: () => mode,
+		getCacheWarmingEnabled: () => mode !== "off",
 		getCacheWarmingMinTokens: () => minTokens,
 		on: (event: string, cb: ConfigChangeListener) => {
 			if (event === "change") listeners.push(cb);
@@ -116,11 +119,14 @@ function makeConfig(
 		},
 	} as unknown as Config;
 
-	const fireEnabledChange = (next: boolean) => {
-		enabled = next;
+	const fireModeChange = (next: "off" | "static" | "dynamic") => {
+		mode = next;
 		for (const l of listeners) {
-			l({ key: "cache_warming_enabled", newValue: next });
+			l({ key: "cache_warming_mode", newValue: next });
 		}
+	};
+	const fireEnabledChange = (next: boolean) => {
+		fireModeChange(next ? "dynamic" : "off");
 	};
 	const fireMinTokensChange = (next: number) => {
 		minTokens = next;
@@ -129,7 +135,7 @@ function makeConfig(
 		}
 	};
 
-	return { config, fireEnabledChange, fireMinTokensChange };
+	return { config, fireEnabledChange, fireModeChange, fireMinTokensChange };
 }
 
 /**
@@ -198,13 +204,13 @@ function resetStore(): void {
 	sessionCacheStore.setMinTokens(100_000);
 	// Isolate the shared promotion tracker singleton across tests.
 	sessionPromotionTracker.clear();
-	sessionPromotionTracker.setEnabled(true);
+	sessionPromotionTracker.setMode("dynamic");
 }
 
 /**
- * Drive the promotion tracker to promoted for `sessionKey` (so a slot registered
- * for it gets the ~50-min 1h cadence), then seed an eligible slot and backdate it
- * past its 1h refresh window so it is due now.
+ * Seed a 1h-TTL ("promoted") slot: its stored body carries ttl:"1h" (what the
+ * proxy injects when promoting a session), which is what register() reads to pick
+ * the ~50-min 1h cadence. Then backdate it past its 1h refresh window so it is due.
  */
 function seedPromotedSessionEntry(
 	accountId: string,
@@ -212,10 +218,9 @@ function seedPromotedSessionEntry(
 	opts: { cachedTokens?: number } = {},
 ): void {
 	const now = Date.now();
-	for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
-		sessionPromotionTracker.observeAndShouldInject(sessionKey, now + i, 0, 0);
-	}
-	seedSessionEntry(accountId, sessionKey, opts);
+	const oneHourBody =
+		'{"model":"claude-opus-4-5","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}]}';
+	seedSessionEntry(accountId, sessionKey, { ...opts, bodyText: oneHourBody });
 	const slot = sessionCacheStore
 		.getAllSlots()
 		.find((s) => s.accountId === accountId && s.sessionKey === sessionKey);
@@ -395,6 +400,7 @@ describe("CacheKeepaliveScheduler", () => {
 		it("unrelated config key change is ignored", () => {
 			let listener: ConfigChangeListener | null = null;
 			const config = {
+				getCacheWarmingMode: () => "dynamic" as const,
 				getCacheWarmingEnabled: () => true,
 				getCacheWarmingMinTokens: () => 100_000,
 				on: (_event: string, cb: ConfigChangeListener) => {
@@ -744,23 +750,19 @@ describe("CacheKeepaliveScheduler", () => {
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
 			scheduler.start();
 
-			// Promote, register, then backdate only past the 3-min window — a 1h slot
-			// must NOT be due yet (its window is ~50 min).
+			// Seed a 1h slot (body carries ttl:"1h"), then backdate only past the
+			// 3-min window — a 1h slot must NOT be due yet (its window is ~50 min).
 			const now = Date.now();
-			for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
-				sessionPromotionTracker.observeAndShouldInject(
-					"session-1h-early",
-					now + i,
-					0,
-					0,
-				);
-			}
-			seedSessionEntry("acc-1h-early", "session-1h-early");
+			const oneHourBody =
+				'{"model":"claude-opus-4-5","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}]}';
+			seedSessionEntry("acc-1h-early", "session-1h-early", {
+				bodyText: oneHourBody,
+			});
 			const slot = sessionCacheStore
 				.getAllSlots()
 				.find((s) => s.sessionKey === "session-1h-early");
 			expect(slot?.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
-			// seedSessionEntry backdated only by KEEPALIVE_REFRESH_MS+60s → under 50 min.
+			// Backdate only by KEEPALIVE_REFRESH_MS+60s → under 50 min.
 			(slot as { lastActivityTs: number }).lastActivityTs =
 				now - (KEEPALIVE_REFRESH_MS + 60_000);
 

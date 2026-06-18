@@ -10,6 +10,7 @@ export {
 	registerProvider,
 } from "@clankermux/providers";
 export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
+export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { dispatchProxyRequest } from "./dispatch";
 export {
@@ -74,4 +75,5 @@ export {
 	type ResponseHandlerOptions,
 } from "./response-handler";
 export { sessionCacheStore } from "./session-cache-store";
+export { sessionPromotionTracker } from "./session-promotion";
 export type { ProxyRequest, ProxyResponse } from "./types";

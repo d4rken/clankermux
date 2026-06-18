@@ -73,6 +73,11 @@ import {
 	type StrategyStore,
 } from "@clankermux/types";
 import { serve } from "bun";
+import {
+	CacheKeepaliveSnapshotSampler,
+	liveGauges,
+	liveStats,
+} from "./cache-keepalive-snapshot-sampler";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
@@ -224,6 +229,7 @@ let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let usageSnapshotSampler: UsageSnapshotSampler | null = null;
+let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
@@ -257,6 +263,19 @@ async function runStartupMaintenance(
 		log.info(
 			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadDays}d, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
 		);
+		// Prune the cache-keepalive economics time-series (separate table, separate
+		// retention). Mirrors the memory/usage snapshot cutoff math above.
+		const keepaliveSnapshotDays =
+			config.getCacheKeepaliveSnapshotRetentionDays();
+		const removedKeepaliveSnapshots =
+			await dbOps.deleteCacheKeepaliveSnapshotsOlderThan(
+				Date.now() - keepaliveSnapshotDays * 24 * 60 * 60 * 1000,
+			);
+		if (removedKeepaliveSnapshots > 0) {
+			log.info(
+				`Startup cleanup removed ${removedKeepaliveSnapshots} cache keepalive snapshots (keepalive=${keepaliveSnapshotDays}d)`,
+			);
+		}
 	} catch (err) {
 		log.error(`Startup cleanup error: ${err}`);
 	}
@@ -767,14 +786,23 @@ export default async function startServer(options?: {
 				snapshotDays * TIME_CONSTANTS.DAY,
 				memorySnapshotDays * TIME_CONSTANTS.DAY,
 			);
+			// Prune the cache-keepalive economics time-series (separate table,
+			// separate retention). Mirrors the memory/usage snapshot cutoff math.
+			const keepaliveSnapshotDays =
+				config.getCacheKeepaliveSnapshotRetentionDays();
+			const removedKeepaliveSnapshots =
+				await dbOps.deleteCacheKeepaliveSnapshotsOlderThan(
+					Date.now() - keepaliveSnapshotDays * TIME_CONSTANTS.DAY,
+				);
 			if (
 				removedRequests > 0 ||
 				removedPayloads > 0 ||
 				removedSnapshots > 0 ||
-				removedMemorySnapshots > 0
+				removedMemorySnapshots > 0 ||
+				removedKeepaliveSnapshots > 0
 			) {
 				log.info(
-					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots in ${Date.now() - startTime}ms`,
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots in ${Date.now() - startTime}ms`,
 				);
 				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
 				// per tick, off-thread via the incremental-vacuum worker. Small N
@@ -1539,6 +1567,18 @@ Available endpoints:
 		log.error(`Failed to start usage snapshot sampler: ${err}`);
 	});
 
+	// Start the cache-keepalive snapshot sampler: records the Session Cache
+	// Bridge's live gauges + cumulative economics into the
+	// cache_keepalive_snapshots time-series (the dashboard keepalive analytics
+	// panel). Same 2-minute cadence and deferred first tick as the usage sampler.
+	cacheKeepaliveSnapshotSampler = new CacheKeepaliveSnapshotSampler({
+		getGauges: liveGauges,
+		getStats: liveStats,
+		insertSnapshot: (row) => dbOps.insertCacheKeepaliveSnapshot(row),
+		getPollIntervalMs: () => config.getUsagePollIntervalMs(),
+	});
+	cacheKeepaliveSnapshotSampler.start();
+
 	// Start the subscription-payment auto-recorder: books each subscription
 	// account's renewal due dates into the account_payments ledger (immediate
 	// catch-up tick for due dates missed while down, then hourly).
@@ -1643,6 +1683,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (usageSnapshotSampler) {
 			usageSnapshotSampler.stop();
 			usageSnapshotSampler = null;
+		}
+		if (cacheKeepaliveSnapshotSampler) {
+			cacheKeepaliveSnapshotSampler.stop();
+			cacheKeepaliveSnapshotSampler = null;
 		}
 		if (subscriptionPaymentRecorder) {
 			subscriptionPaymentRecorder.stop();

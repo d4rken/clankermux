@@ -33,6 +33,11 @@ import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
+import {
+	type CacheKeepaliveHistoryPoint,
+	CacheKeepaliveSnapshotRepository,
+	type CacheKeepaliveSnapshotRow,
+} from "./repositories/cache-keepalive-snapshot.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
@@ -345,6 +350,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
+	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
 
 	constructor(
@@ -407,6 +413,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.combo = new ComboRepository(this.adapter);
 		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
 		this.memorySnapshots = new MemorySnapshotRepository(this.adapter);
+		this.cacheKeepaliveSnapshots = new CacheKeepaliveSnapshotRepository(
+			this.adapter,
+		);
 		this.accountPayments = new AccountPaymentRepository(this.adapter);
 	}
 
@@ -2138,6 +2147,39 @@ OAuth tokens will need to be re-authenticated.
 			() => this.memorySnapshots.deleteOlderThan(cutoffMs),
 			this.retryConfig,
 			"deleteMemorySnapshotsOlderThan",
+		);
+	}
+
+	// ── Cache-keepalive snapshot operations delegated to repository ────────────
+
+	async insertCacheKeepaliveSnapshot(
+		row: CacheKeepaliveSnapshotRow,
+	): Promise<void> {
+		await withDatabaseRetry(
+			() => this.cacheKeepaliveSnapshots.insertSnapshot(row),
+			this.retryConfig,
+			"insertCacheKeepaliveSnapshot",
+		);
+	}
+
+	async getCacheKeepaliveSnapshots(opts: {
+		sinceMs: number;
+		bucketMs: number;
+	}): Promise<CacheKeepaliveHistoryPoint[]> {
+		return withDatabaseRetry(
+			() => this.cacheKeepaliveSnapshots.getSnapshots(opts),
+			this.retryConfig,
+			"getCacheKeepaliveSnapshots",
+		);
+	}
+
+	async deleteCacheKeepaliveSnapshotsOlderThan(
+		cutoffMs: number,
+	): Promise<number> {
+		return withDatabaseRetry(
+			() => this.cacheKeepaliveSnapshots.deleteOlderThan(cutoffMs),
+			this.retryConfig,
+			"deleteCacheKeepaliveSnapshotsOlderThan",
 		);
 	}
 

@@ -502,6 +502,7 @@ export const useSetRetention = () => {
 			requestDays?: number;
 			usageSnapshotDays?: number;
 			memorySnapshotDays?: number;
+			cacheKeepaliveSnapshotDays?: number;
 			storePayloads?: boolean;
 		}) => api.setRetention(partial),
 		onSuccess: () => {
@@ -520,11 +521,44 @@ export const useCacheWarming = () => {
 export const useSetCacheWarming = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (body: { enabled?: boolean; minTokens?: number }) =>
-			api.setCacheWarming(body),
+		mutationFn: (body: {
+			mode?: "off" | "static" | "dynamic";
+			minTokens?: number;
+		}) => api.setCacheWarming(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["cache-warming"] });
 		},
+	});
+};
+
+/**
+ * Live cache-keepalive bridge gauges + cumulative-since-restart counters for the
+ * Analytics-tab "Cache Keep-Alive" headline tiles. Read off the proxy singletons
+ * on the main thread, so it's cheap — short staleness + a 15s poll like the
+ * other live stat hooks. Paused in the background.
+ */
+export const useCacheKeepalive = () => {
+	return useQuery({
+		queryKey: queryKeys.cacheKeepalive(),
+		queryFn: () => api.getCacheKeepalive(),
+		staleTime: 10_000,
+		refetchInterval: 15_000,
+		refetchIntervalInBackground: false,
+	});
+};
+
+/**
+ * Bucketed cache-keepalive history for the "Cache Keep-Alive" chart. Same
+ * polling cadence as useMemoryHistory (45s stale, 60s refetch, paused in the
+ * background) since both feed time-series charts.
+ */
+export const useCacheKeepaliveHistory = (range: string) => {
+	return useQuery({
+		queryKey: queryKeys.cacheKeepaliveHistory(range),
+		queryFn: () => api.getCacheKeepaliveHistory(range),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
 	});
 };
 

@@ -97,6 +97,7 @@ export interface RetentionGetResponse {
 	requestDays: number;
 	usageSnapshotDays: number;
 	memorySnapshotDays: number;
+	cacheKeepaliveSnapshotDays: number;
 	storePayloads: boolean;
 }
 
@@ -105,6 +106,7 @@ export interface RetentionSetRequest {
 	requestDays?: number;
 	usageSnapshotDays?: number;
 	memorySnapshotDays?: number;
+	cacheKeepaliveSnapshotDays?: number;
 	storePayloads?: boolean;
 }
 

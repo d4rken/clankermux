@@ -2,6 +2,7 @@ import type { Config } from "@clankermux/config";
 import { registerHeartbeat } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { BRIDGE_JITTER_MAX_MS } from "./bridge-policy";
+import { bridgeStats } from "./bridge-stats";
 import { cacheBodyStore } from "./cache-body-store";
 import { dispatchProxyRequest } from "./dispatch";
 import type { ProxyContext } from "./proxy";
@@ -81,9 +82,9 @@ export class CacheKeepaliveScheduler {
 		// per-session warm-body store.
 		cacheBodyStore.setEnabled(this.enabled);
 		sessionCacheStore.setEnabled(this.enabled);
-		// The predictive 1h-TTL promotion tracker shares the cache-warming switch, so
-		// it clears its per-session state when the feature is turned off.
-		sessionPromotionTracker.setEnabled(this.enabled);
+		// The predictive 1h-TTL promotion tracker is mode-aware (off/static/dynamic),
+		// so hand it the configured mode rather than a boolean.
+		sessionPromotionTracker.setMode(this.config.getCacheWarmingMode());
 		sessionCacheStore.setMinTokens(this.config.getCacheWarmingMinTokens());
 
 		// React dynamically to cache-warming config changes.
@@ -94,13 +95,17 @@ export class CacheKeepaliveScheduler {
 			key: string;
 			newValue: unknown;
 		}) => {
-			if (key === "cache_warming_enabled") {
-				const next = newValue === true;
+			// Both the mode field and the legacy boolean resolve through
+			// getCacheWarmingMode(); recompute from config so either key is handled
+			// (setCacheWarmingMode emits "cache_warming_mode").
+			if (key === "cache_warming_mode" || key === "cache_warming_enabled") {
+				const mode = this.config.getCacheWarmingMode();
+				const next = mode !== "off";
+				cacheBodyStore.setEnabled(next);
+				sessionCacheStore.setEnabled(next);
+				sessionPromotionTracker.setMode(mode);
 				if (next !== this.enabled) {
 					this.enabled = next;
-					cacheBodyStore.setEnabled(next);
-					sessionCacheStore.setEnabled(next);
-					sessionPromotionTracker.setEnabled(next);
 					this.restart();
 				}
 			} else if (key === "cache_warming_min_tokens") {
@@ -171,6 +176,16 @@ export class CacheKeepaliveScheduler {
 			`Cache body store: ${cacheBodyStore.getStagingSize()} in-flight staged, ${sessionCacheStore.getSize()} warm session(s)`,
 		);
 
+		// Per-tick bridge economics heartbeat. INFO when there are warm sessions to
+		// report on, DEBUG when idle (keeps the journal quiet while inactive).
+		const s = bridgeStats.snapshot();
+		const summary = `[CacheBridge] summary mode=${this.config.getCacheWarmingMode()} warm=${sessionCacheStore.getSize()} promoted=${sessionCacheStore.getPromotedSessions()} hits=${s.hits} misses=${s.misses} hitRate=${(s.hitRate * 100).toFixed(0)}% failures=${s.failures} resumes=${s.warmResumes} spentUsd=${s.spentUsd.toFixed(4)} savedUsd=${s.savedUsd.toFixed(4)} netUsd=${s.netUsd.toFixed(4)}`;
+		if (sessionCacheStore.getSize() > 0) {
+			log.info(summary);
+		} else {
+			log.debug(summary);
+		}
+
 		const eligible = sessionCacheStore.getEligibleSessions(Date.now());
 
 		if (eligible.length === 0) {
@@ -178,7 +193,13 @@ export class CacheKeepaliveScheduler {
 			return;
 		}
 
-		const batch = eligible.slice(0, MAX_BRIDGE_KEEPALIVES_PER_TICK);
+		// Snapshot each slot's activity stamp NOW, at batch-selection time — before
+		// the per-chunk jitter delay below. If a real request touches a slot during
+		// that delay, replaySessionKeepalive sees the changed stamp and skips it (the
+		// session is no longer idle), and the same stamp guards outcome recording.
+		const batch = eligible
+			.slice(0, MAX_BRIDGE_KEEPALIVES_PER_TICK)
+			.map((slot) => ({ slot, expectedActivityTs: slot.lastActivityTs }));
 		if (eligible.length > batch.length) {
 			log.info(
 				`Sending cache warming keepalive to ${batch.length} session(s); ${eligible.length - batch.length} deferred to next tick (cap ${MAX_BRIDGE_KEEPALIVES_PER_TICK})`,
@@ -195,7 +216,7 @@ export class CacheKeepaliveScheduler {
 		for (let i = 0; i < batch.length; i += KEEPALIVE_CONCURRENCY) {
 			const chunk = batch.slice(i, i + KEEPALIVE_CONCURRENCY);
 			await Promise.allSettled(
-				chunk.map(async (slot) => {
+				chunk.map(async ({ slot, expectedActivityTs }) => {
 					// Small decorrelation jitter (<=1s) before each dispatch to keep
 					// ticks bounded while still spreading replays across the per-IP window.
 					await new Promise((r) =>
@@ -203,7 +224,7 @@ export class CacheKeepaliveScheduler {
 					);
 					// replaySessionKeepalive records its own failure (including on a
 					// thrown dispatch) so a zombie slot backs off and eventually evicts.
-					await this.replaySessionKeepalive(slot);
+					await this.replaySessionKeepalive(slot, expectedActivityTs);
 				}),
 			);
 		}
@@ -213,10 +234,24 @@ export class CacheKeepaliveScheduler {
 	 * Replay a single session's warm body as a keepalive, then detect whether the
 	 * prompt cache was still alive. Force-routes to the session's account and
 	 * inspects the response for cache hit/miss to charge the spend budget.
+	 *
+	 * `expectedActivityTs` is the slot's lastActivityTs captured at batch-selection
+	 * time. If a real request touched the slot during the inter-dispatch jitter the
+	 * stamp will have changed — the session is active again, so we skip the replay
+	 * entirely. The same stamp is threaded into outcome recording so a touch that
+	 * lands AFTER dispatch (mid-flight) is also dropped by the store.
 	 */
-	private async replaySessionKeepalive(slot: SessionCacheSlot): Promise<void> {
+	private async replaySessionKeepalive(
+		slot: SessionCacheSlot,
+		expectedActivityTs: number,
+	): Promise<void> {
+		if (slot.lastActivityTs !== expectedActivityTs) {
+			// A real request touched this slot between batch selection and now — it's
+			// no longer idle, so don't send a keepalive for the stale idle period.
+			return;
+		}
 		try {
-			await this.dispatchSessionKeepalive(slot);
+			await this.dispatchSessionKeepalive(slot, expectedActivityTs);
 		} catch (error) {
 			// A thrown dispatch (network/exception) is a failed keepalive: back the
 			// slot off and count it toward eviction so a persistently broken account
@@ -229,6 +264,7 @@ export class CacheKeepaliveScheduler {
 				slot.accountId,
 				slot.sessionKey,
 				Date.now(),
+				expectedActivityTs,
 			);
 		}
 	}
@@ -240,6 +276,7 @@ export class CacheKeepaliveScheduler {
 	 */
 	private async dispatchSessionKeepalive(
 		slot: SessionCacheSlot,
+		dispatchedActivityTs: number,
 	): Promise<void> {
 		// Reconstruct headers from the stored snapshot. Auth and internal proxy
 		// headers were stripped at capture time and are injected fresh here.
@@ -302,6 +339,7 @@ export class CacheKeepaliveScheduler {
 				slot.accountId,
 				slot.sessionKey,
 				Date.now(),
+				dispatchedActivityTs,
 			);
 			return;
 		}
@@ -317,6 +355,7 @@ export class CacheKeepaliveScheduler {
 			slot.sessionKey,
 			hit,
 			Date.now(),
+			dispatchedActivityTs,
 		);
 		if (created != null && created > 0) {
 			log.info(

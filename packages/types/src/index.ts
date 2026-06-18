@@ -3,6 +3,7 @@ export * from "./account";
 // Keep existing exports for backward compatibility
 export * from "./api";
 export * from "./api-key";
+export * from "./cache-keepalive";
 export * from "./combo";
 export * from "./constants";
 export * from "./context";

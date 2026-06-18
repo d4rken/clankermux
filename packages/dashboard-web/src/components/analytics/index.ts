@@ -9,6 +9,7 @@ export {
 export { AnalyticsControls } from "./AnalyticsControls";
 export { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
 export { CacheFlowPanel } from "./CacheFlowPanel";
+export { CacheKeepalivePanel } from "./CacheKeepalivePanel";
 export { ContextCompositionPanel } from "./ContextCompositionPanel";
 export { ModelAnalytics } from "./ModelAnalytics";
 export { ProjectAnalytics } from "./ProjectAnalytics";

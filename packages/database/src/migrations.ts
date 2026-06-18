@@ -345,6 +345,30 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
+	// Create cache_keepalive_snapshots table — append-only time-series of the
+	// cache-keepalive feature's health, backing the dashboard analytics panel.
+	// One row per sample tick (no account dimension); sampled_at is the INTEGER
+	// PRIMARY KEY (rowid alias) so range scans and retention pruning are served
+	// without a secondary index, exactly like memory_snapshots.
+	//
+	// Gauges (warm_sessions/promoted_sessions/total_bytes) are point-in-time;
+	// the counters (keepalives_sent/hits/misses/failures/spent_usd/saved_usd) are
+	// CUMULATIVE-since-process-restart values captured at sample time.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS cache_keepalive_snapshots (
+			sampled_at INTEGER PRIMARY KEY,
+			warm_sessions INTEGER NOT NULL,
+			promoted_sessions INTEGER NOT NULL,
+			total_bytes INTEGER NOT NULL,
+			keepalives_sent INTEGER NOT NULL,
+			hits INTEGER NOT NULL,
+			misses INTEGER NOT NULL,
+			failures INTEGER NOT NULL,
+			spent_usd REAL NOT NULL,
+			saved_usd REAL NOT NULL
+		)
+	`);
+
 	// Create account_payments table — the per-account payments ledger
 	// (subscription renewals + ad-hoc usage-credit purchases) backing the
 	// dashboard's real out-of-pocket cost view. Deliberately NO foreign key

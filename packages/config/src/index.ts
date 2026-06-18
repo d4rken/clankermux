@@ -17,6 +17,10 @@ import { resolveConfigPath } from "./paths";
 
 const log = new Logger("Config");
 
+/** Cache Keep-Alive operating mode: off, static (token-threshold) or dynamic
+ * (predictive promotion + de-stick). */
+export type CacheWarmingMode = "off" | "static" | "dynamic";
+
 function parseEnabledEnvFlag(value: string | undefined): boolean | undefined {
 	if (value === undefined) return undefined;
 	return value === "true" || value === "1";
@@ -58,6 +62,8 @@ export interface ConfigData {
 	store_payloads?: boolean;
 	usage_poll_interval_ms?: number;
 	cache_warming_enabled?: boolean;
+	cache_warming_mode?: CacheWarmingMode;
+	cache_keepalive_snapshot_retention_days?: number;
 	cache_warming_min_tokens?: number;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
@@ -323,6 +329,22 @@ export class Config extends EventEmitter {
 		this.set("memory_snapshot_retention_days", clamped);
 	}
 
+	getCacheKeepaliveSnapshotRetentionDays(): number {
+		const fromEnv = process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
+		}
+		const fromFile = this.data.cache_keepalive_snapshot_retention_days;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
+		return 30; // default cache keepalive snapshot retention (30 days)
+	}
+
+	setCacheKeepaliveSnapshotRetentionDays(days: number): void {
+		const clamped = this.clamp(days, 1, 3650);
+		this.set("cache_keepalive_snapshot_retention_days", clamped);
+	}
+
 	getStorePayloads(): boolean {
 		const fromEnv = process.env.STORE_PAYLOADS;
 		if (fromEnv) {
@@ -354,18 +376,51 @@ export class Config extends EventEmitter {
 		this.set("usage_poll_interval_ms", clamped);
 	}
 
-	getCacheWarmingEnabled(): boolean {
-		const fromEnv = process.env.CACHE_WARMING_ENABLED;
-		if (fromEnv) {
-			return fromEnv !== "false" && fromEnv !== "0";
+	getCacheWarmingMode(): CacheWarmingMode {
+		// 1. Explicit mode env (only if it names a valid mode).
+		const fromModeEnv = process.env.CACHE_WARMING_MODE;
+		if (
+			fromModeEnv === "off" ||
+			fromModeEnv === "static" ||
+			fromModeEnv === "dynamic"
+		) {
+			return fromModeEnv;
 		}
-		const fromFile = this.data.cache_warming_enabled;
-		if (typeof fromFile === "boolean") return fromFile;
-		return false; // default: disabled
+		// 2. Legacy boolean env: truthy → dynamic, otherwise off.
+		const fromEnabledEnv = process.env.CACHE_WARMING_ENABLED;
+		if (fromEnabledEnv) {
+			return fromEnabledEnv !== "false" && fromEnabledEnv !== "0"
+				? "dynamic"
+				: "off";
+		}
+		// 3. File mode field (only if valid).
+		const fromModeFile = this.data.cache_warming_mode;
+		if (
+			fromModeFile === "off" ||
+			fromModeFile === "static" ||
+			fromModeFile === "dynamic"
+		) {
+			return fromModeFile;
+		}
+		// 4. Legacy file boolean: true → dynamic, false → off.
+		const fromEnabledFile = this.data.cache_warming_enabled;
+		if (typeof fromEnabledFile === "boolean") {
+			return fromEnabledFile ? "dynamic" : "off";
+		}
+		// 5. Default: disabled.
+		return "off";
+	}
+
+	setCacheWarmingMode(mode: CacheWarmingMode): void {
+		this.set("cache_warming_mode", mode);
+	}
+
+	getCacheWarmingEnabled(): boolean {
+		return this.getCacheWarmingMode() !== "off";
 	}
 
 	setCacheWarmingEnabled(value: boolean): void {
-		this.set("cache_warming_enabled", value);
+		this.setCacheWarmingMode(value ? "dynamic" : "off");
 	}
 
 	getCacheWarmingMinTokens(): number {
@@ -430,6 +485,9 @@ export class Config extends EventEmitter {
 			store_payloads: this.getStorePayloads(),
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 			cache_warming_enabled: this.getCacheWarmingEnabled(),
+			cache_warming_mode: this.getCacheWarmingMode(),
+			cache_keepalive_snapshot_retention_days:
+				this.getCacheKeepaliveSnapshotRetentionDays(),
 			cache_warming_min_tokens: this.getCacheWarmingMinTokens(),
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),

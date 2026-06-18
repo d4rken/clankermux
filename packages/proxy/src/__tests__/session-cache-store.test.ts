@@ -37,11 +37,32 @@ function body(bytes: number): Uint8Array {
 	return new Uint8Array(bytes);
 }
 
+/**
+ * A JSON body whose ephemeral cache breakpoint carries ttl:"1h" (what the proxy
+ * injects when promoting a session). register() reads the body's TTL to pick the
+ * 1h vs 5m cadence/rate, so a "promoted" slot in tests is one staged with this body.
+ */
+function oneHourBody(): Uint8Array {
+	return new TextEncoder().encode(
+		JSON.stringify({
+			system: [
+				{
+					type: "text",
+					text: "s",
+					cache_control: { type: "ephemeral", ttl: "1h" },
+				},
+			],
+		}),
+	);
+}
+
 interface RegisterOpts {
 	accountId?: string;
 	sessionKey?: string;
 	bodyBytes?: number;
 	body?: Uint8Array;
+	/** Stage a body with ttl:"1h" so register() picks the 1h cadence/rate. */
+	oneHour?: boolean;
 	model?: string;
 	cacheReadTokens?: number;
 	cacheCreationTokens?: number;
@@ -52,7 +73,9 @@ function register(opts: RegisterOpts = {}): void {
 	sessionCacheStore.register({
 		accountId: opts.accountId ?? "acc-1",
 		sessionKey: opts.sessionKey ?? "sess-1",
-		body: opts.body ?? body(opts.bodyBytes ?? 1024),
+		body:
+			opts.body ??
+			(opts.oneHour ? oneHourBody() : body(opts.bodyBytes ?? 1024)),
 		headers: opts.headers ?? makeHeaders(),
 		path: "/v1/messages",
 		model: opts.model ?? OPUS,
@@ -532,7 +555,7 @@ describe("SessionCacheStore — per-slot refresh cadence (1h promotion)", () => 
 
 	it("a promoted slot gets the ~50-min cadence: NOT due at 3 min, IS due at 50 min", () => {
 		promote("hot");
-		register({ sessionKey: "hot", cacheReadTokens: 150_000 });
+		register({ sessionKey: "hot", cacheReadTokens: 150_000, oneHour: true });
 		const slot = sessionCacheStore.getAllSlots()[0];
 		expect(slot.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
 
@@ -566,7 +589,7 @@ describe("SessionCacheStore — per-slot refresh cadence (1h promotion)", () => 
 		);
 		expect(sessionPromotionTracker.isPromoted(key)).toBe(true);
 
-		register({ sessionKey: key, cacheReadTokens: 150_000 });
+		register({ sessionKey: key, cacheReadTokens: 150_000, oneHour: true });
 		expect(sessionCacheStore.getAllSlots()[0].refreshMs).toBe(
 			KEEPALIVE_REFRESH_1H_MS,
 		);
@@ -586,7 +609,7 @@ describe("SessionCacheStore — per-slot refresh cadence (1h promotion)", () => 
 
 	it("a promoted slot's spend budget supports multiple hourly hits before exhaustion", () => {
 		promote("multi");
-		register({ sessionKey: "multi", cacheReadTokens: 100_000 });
+		register({ sessionKey: "multi", cacheReadTokens: 100_000, oneHour: true });
 		const slot = sessionCacheStore.getAllSlots()[0];
 		expect(slot.refreshMs).toBe(KEEPALIVE_REFRESH_1H_MS);
 
@@ -625,7 +648,7 @@ describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x in
 
 		// 1h (promoted) slot, same tokens/model.
 		promote("hot");
-		register({ sessionKey: "hot", cacheReadTokens: 100_000 });
+		register({ sessionKey: "hot", cacheReadTokens: 100_000, oneHour: true });
 		const hot = sessionCacheStore.getAllSlots()[0];
 		// Effective write = inputPer1M (5) * 2 = 10/M, NOT the 5m cache_write 6.25.
 		expect(hot.cacheWriteEffectivePer1M).toBe(10);
@@ -637,7 +660,7 @@ describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x in
 
 	it("a promoted slot charges a MISS at the 2x rate (not the 5m cache_write rate)", () => {
 		promote("missy");
-		register({ sessionKey: "missy", cacheReadTokens: 100_000 });
+		register({ sessionKey: "missy", cacheReadTokens: 100_000, oneHour: true });
 		const now = FUTURE();
 		sessionCacheStore.recordKeepaliveResult("acc-1", "missy", false, now);
 		const slot = sessionCacheStore.getAllSlots()[0];
