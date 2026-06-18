@@ -32,6 +32,34 @@ function register(
 	});
 }
 
+// Models a real resume turn: it READS the warm prefix (cacheReadTokens) AND appends
+// a new breakpoint (cacheCreationTokens) — the common shape onSummary routes through
+// register(). `bodyText` lets a test inflate the body past the per-body size cap.
+function registerTurn(
+	accountId: string,
+	sessionKey: string,
+	readTokens: number,
+	creationTokens: number,
+	bodyText = "sys",
+): void {
+	const body = {
+		model: "claude-sonnet-4-5-20250929",
+		system: [
+			{ type: "text", text: bodyText, cache_control: { type: "ephemeral" } },
+		],
+	};
+	sessionCacheStore.register({
+		accountId,
+		sessionKey,
+		body: new TextEncoder().encode(JSON.stringify(body)),
+		headers: new Headers({ "content-type": "application/json" }),
+		path: "/v1/messages",
+		model: "claude-sonnet-4-5-20250929",
+		cacheReadTokens: readTokens,
+		cacheCreationTokens: creationTokens,
+	});
+}
+
 describe("sessionCacheStore telemetry", () => {
 	beforeEach(() => {
 		sessionCacheStore.setEnabled(false);
@@ -179,5 +207,109 @@ describe("sessionCacheStore telemetry", () => {
 		expect(s.savedUsd).toBeCloseTo(expectedSaved, 10);
 		// The 1h effective rate (2x input) exceeds the 5m-rate LRU priority.
 		expect(s.savedUsd).toBeGreaterThan(slot?.priorityUsd ?? 0);
+	});
+
+	it("register books a warm resume on the common read+create resume after keepalive spend", () => {
+		register("acc1", "resume1", 200_000);
+		const now = Date.now();
+		sessionCacheStore.recordKeepaliveResult("acc1", "resume1", true, now);
+		const before = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "resume1");
+		expect((before?.spentUsd ?? 0) > 0).toBe(true);
+
+		bridgeStats.reset();
+		// Real resume turn: reads the warm prefix AND appends a small new breakpoint.
+		registerTurn("acc1", "resume1", 200_000, 5_000);
+
+		const s = bridgeStats.snapshot();
+		expect(s.warmResumes).toBe(1);
+		expect(s.savedUsd).toBeGreaterThan(0);
+		// The slot was replaced fresh, so the spend budget reset for the next gap.
+		const after = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "resume1");
+		expect(after?.spentUsd).toBe(0);
+	});
+
+	it("register does not book a warm resume without prior keepalive spend", () => {
+		register("acc1", "noresume", 200_000);
+		bridgeStats.reset();
+		// A normal active turn (read+create) that never went idle / never cost us.
+		registerTurn("acc1", "noresume", 200_000, 5_000);
+		expect(bridgeStats.snapshot().warmResumes).toBe(0);
+	});
+
+	it("register does not book a warm resume on a pure-creation turn (no read)", () => {
+		register("acc1", "create1", 200_000);
+		const now = Date.now();
+		sessionCacheStore.recordKeepaliveResult("acc1", "create1", true, now);
+		bridgeStats.reset();
+		// cacheReadTokens=0 → nothing was read warm → no win.
+		registerTurn("acc1", "create1", 0, 200_000);
+		expect(bridgeStats.snapshot().warmResumes).toBe(0);
+	});
+
+	it("register books the resume win even when the new (grown) body is rejected by the size cap", () => {
+		register("acc1", "big1", 200_000);
+		const now = Date.now();
+		sessionCacheStore.recordKeepaliveResult("acc1", "big1", true, now);
+		expect(
+			(sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "big1")
+				?.spentUsd ?? 0) > 0,
+		).toBe(true);
+
+		bridgeStats.reset();
+		// Resume reads the warm prefix, but its new body exceeds MAX_SESSION_BODY_BYTES
+		// (2 MiB) so it can't keep bridging — the WIN already happened regardless.
+		registerTurn("acc1", "big1", 200_000, 5_000, "x".repeat(2_200_000));
+
+		expect(bridgeStats.snapshot().warmResumes).toBe(1);
+		// Oversized body was not stored — the slot is dropped.
+		expect(
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "big1"),
+		).toBeUndefined();
+	});
+
+	it("warm-resume valuation caps read tokens at the slot's stored cachedTokens", () => {
+		register("acc1", "cap1", 200_000);
+		const now = Date.now();
+		sessionCacheStore.recordKeepaliveResult("acc1", "cap1", true, now);
+		const slot = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "cap1");
+		// Capped at the stored prefix (200k), NOT the inflated 500k read count.
+		const expectedSaved =
+			(((slot?.cacheWriteEffectivePer1M ?? 0) - (slot?.cacheReadPer1M ?? 0)) /
+				1_000_000) *
+			200_000;
+
+		bridgeStats.reset();
+		sessionCacheStore.touchActivity("acc1", "cap1", now + 5, 500_000);
+
+		const s = bridgeStats.snapshot();
+		expect(s.warmResumes).toBe(1);
+		expect(s.savedUsd).toBeCloseTo(expectedSaved, 10);
+	});
+
+	it("register books the resume win even when the resume turn is dropped by the min-token gate", () => {
+		register("acc1", "min1", 200_000);
+		const now = Date.now();
+		sessionCacheStore.recordKeepaliveResult("acc1", "min1", true, now);
+		expect(
+			(sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "min1")
+				?.spentUsd ?? 0) > 0,
+		).toBe(true);
+
+		bridgeStats.reset();
+		// Resume re-reads a (partial) warm prefix, but this turn's total tokens
+		// (50k + 5k) fall below the 100k min → the slot is dropped. The WIN already
+		// happened on the read, so it must still be booked (before the gate).
+		registerTurn("acc1", "min1", 50_000, 5_000);
+
+		expect(bridgeStats.snapshot().warmResumes).toBe(1);
+		expect(
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "min1"),
+		).toBeUndefined();
 	});
 });

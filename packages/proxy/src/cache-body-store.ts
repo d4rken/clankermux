@@ -217,9 +217,11 @@ class CacheBodyStore {
 	 * requests so they still get a (single) warm slot. {@link sessionCacheStore}
 	 * applies the cache-write-premium and min-token gates internally, so a
 	 * sub-threshold or no-premium summary stores nothing.
-	 *  - cacheCreation > 0 → register the body (a new/refreshed warm prefix).
-	 *  - else cacheRead > 0 → touchActivity (the read proves the cache is warm;
-	 *    no-op if no slot exists for the key).
+	 *  - cacheCreation > 0 → register the body (a new/refreshed warm prefix). When
+	 *    this turn ALSO read cache (the common resume+append shape), register() books
+	 *    the warm-resume WIN against the prior slot first.
+	 *  - else cacheRead > 0 → touchActivity (a pure read proves the cache is warm;
+	 *    books the warm-resume WIN too; no-op if no slot exists for the key).
 	 */
 	onSummary(
 		requestId: string,
@@ -246,10 +248,18 @@ class CacheBodyStore {
 				cacheCreationTokens: cacheCreationInputTokens,
 			});
 		} else if ((cacheReadInputTokens ?? 0) > 0) {
-			// Cache-READ turn (a hit, no creation): no new body to register, but the
-			// read proves the cache is warm, so touch the existing slot's activity
-			// (no-op if we never stored one for this key).
-			sessionCacheStore.touchActivity(staged.accountId, sessionKey, Date.now());
+			// Pure cache-READ turn (a hit, no creation): no new body to register, but
+			// the read proves the cache is warm, so touch the existing slot's activity
+			// (no-op if we never stored one for this key). Pass the read-token count so
+			// a warm resume is valued on the prefix actually re-read. (The common resume
+			// turn that ALSO creates cache takes the register() branch above, which books
+			// its own warm resume.)
+			sessionCacheStore.touchActivity(
+				staged.accountId,
+				sessionKey,
+				Date.now(),
+				cacheReadInputTokens ?? 0,
+			);
 		}
 	}
 
