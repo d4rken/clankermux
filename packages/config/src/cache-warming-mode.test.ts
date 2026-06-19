@@ -213,3 +213,53 @@ describe("cache keepalive snapshot retention days", () => {
 		}
 	});
 });
+
+describe("cache warming risk factor", () => {
+	it("defaults to 0.4", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			expect(config.getCacheWarmingRiskFactor()).toBe(0.4);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("round-trips a set value", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setCacheWarmingRiskFactor(0.6);
+			expect(config.getCacheWarmingRiskFactor()).toBeCloseTo(0.6, 10);
+			expect(config.getAllSettings().cache_warming_risk_factor).toBeCloseTo(
+				0.6,
+				10,
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("clamps out-of-range and non-finite values to [0, 1]", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setCacheWarmingRiskFactor(5);
+			expect(config.getCacheWarmingRiskFactor()).toBe(1);
+			config.setCacheWarmingRiskFactor(-2);
+			expect(config.getCacheWarmingRiskFactor()).toBe(0);
+			config.setCacheWarmingRiskFactor(Number.NaN);
+			expect(config.getCacheWarmingRiskFactor()).toBe(0.4);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("clamps a corrupt on-disk value on read", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			// Simulate a hand-edited file value above the cap.
+			config.set("cache_warming_risk_factor", 99);
+			expect(config.getCacheWarmingRiskFactor()).toBe(1);
+		} finally {
+			cleanup();
+		}
+	});
+});

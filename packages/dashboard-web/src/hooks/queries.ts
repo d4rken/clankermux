@@ -524,6 +524,8 @@ export const useSetCacheWarming = () => {
 		mutationFn: (body: {
 			mode?: "off" | "static" | "dynamic";
 			minTokens?: number;
+			bridgeHours?: number;
+			riskFactor?: number;
 		}) => api.setCacheWarming(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["cache-warming"] });

@@ -11,6 +11,7 @@ import {
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_SLOTS,
 	PROMOTE_AFTER_TURNS,
+	RISK_FACTOR,
 } from "../bridge-policy";
 import { sessionCacheStore } from "../session-cache-store";
 import { sessionPromotionTracker } from "../session-promotion";
@@ -87,6 +88,7 @@ function register(opts: RegisterOpts = {}): void {
 beforeEach(() => {
 	sessionCacheStore.setEnabled(true);
 	sessionCacheStore.setMinTokens(DEFAULT_MIN_CACHE_TOKENS);
+	sessionCacheStore.setRiskFactor(RISK_FACTOR);
 	sessionCacheStore.clear();
 	// Isolate the shared promotion tracker singleton across tests.
 	sessionPromotionTracker.setEnabled(true);

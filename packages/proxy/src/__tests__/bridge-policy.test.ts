@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	BRIDGE_HOURS_PER_RISK_UNIT,
 	BRIDGE_JITTER_MAX_MS,
+	bridgeHoursToRiskFactor,
+	CACHE_READ_MULT,
+	clampBridgeHours,
+	clampRiskFactor,
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
 	IDLE_GAP_FOR_PROMOTION_MS,
@@ -11,14 +16,18 @@ import {
 	keepaliveBudgetUsd,
 	keepaliveHitCostUsd,
 	keepaliveMissCostUsd,
+	MAX_BRIDGE_HOURS,
 	MAX_PROMOTION_TRACKER_ENTRIES,
+	MAX_RISK_FACTOR,
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
+	ONE_HOUR_WRITE_MULT,
 	PREMIUM_CACHE_PROVIDERS,
 	PROMOTE_AFTER_TURNS,
 	RISK_FACTOR,
 	resumePenaltyUsd,
+	riskFactorToBridgeHours,
 } from "../bridge-policy";
 
 // Real Opus 4.8 cache rates (USD per 1M tokens): read 0.5, write 6.25.
@@ -240,5 +249,102 @@ describe("isEligibleByTokens", () => {
 	it("honors a custom (lower) threshold", () => {
 		expect(isEligibleByTokens(50_000, 20_000)).toBe(true);
 		expect(isEligibleByTokens(50_000, 60_000)).toBe(false);
+	});
+});
+
+describe("bridge-horizon conversion", () => {
+	it("BRIDGE_HOURS_PER_RISK_UNIT matches the derived rate-ratio × cadence", () => {
+		const expected =
+			((ONE_HOUR_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
+			(KEEPALIVE_REFRESH_1H_MS / 3_600_000);
+		expect(BRIDGE_HOURS_PER_RISK_UNIT).toBeCloseTo(expected, 10);
+		// Sanity: ~15.83h per 1.0 risk.
+		expect(BRIDGE_HOURS_PER_RISK_UNIT).toBeCloseTo(15.8333, 3);
+	});
+
+	it("RISK_FACTOR default (0.4) maps to ~6.3h", () => {
+		expect(riskFactorToBridgeHours(RISK_FACTOR)).toBeCloseTo(6.3333, 3);
+	});
+
+	it("hours↔risk round-trips", () => {
+		for (const rf of [0, 0.4, 0.6, 1.0]) {
+			expect(bridgeHoursToRiskFactor(riskFactorToBridgeHours(rf))).toBeCloseTo(
+				rf,
+				10,
+			);
+		}
+	});
+
+	it("MAX_BRIDGE_HOURS corresponds to MAX_RISK_FACTOR", () => {
+		expect(MAX_BRIDGE_HOURS).toBeCloseTo(
+			MAX_RISK_FACTOR * BRIDGE_HOURS_PER_RISK_UNIT,
+			10,
+		);
+		expect(bridgeHoursToRiskFactor(MAX_BRIDGE_HOURS)).toBeCloseTo(
+			MAX_RISK_FACTOR,
+			10,
+		);
+	});
+});
+
+describe("clampRiskFactor", () => {
+	it("clamps into [0, MAX_RISK_FACTOR]", () => {
+		expect(clampRiskFactor(-1)).toBe(0);
+		expect(clampRiskFactor(0.5)).toBe(0.5);
+		expect(clampRiskFactor(5)).toBe(MAX_RISK_FACTOR);
+	});
+
+	it("falls back to RISK_FACTOR on non-finite", () => {
+		expect(clampRiskFactor(Number.NaN)).toBe(RISK_FACTOR);
+		expect(clampRiskFactor(Number.POSITIVE_INFINITY)).toBe(RISK_FACTOR);
+	});
+});
+
+describe("clampBridgeHours", () => {
+	it("clamps into [0, MAX_BRIDGE_HOURS]", () => {
+		expect(clampBridgeHours(-3)).toBe(0);
+		expect(clampBridgeHours(9)).toBe(9);
+		expect(clampBridgeHours(1000)).toBe(MAX_BRIDGE_HOURS);
+	});
+
+	it("falls back to the default horizon on non-finite", () => {
+		expect(clampBridgeHours(Number.NaN)).toBeCloseTo(
+			riskFactorToBridgeHours(RISK_FACTOR),
+			10,
+		);
+	});
+
+	it("hours beyond the cap convert to MAX_RISK_FACTOR", () => {
+		expect(bridgeHoursToRiskFactor(9999)).toBe(MAX_RISK_FACTOR);
+	});
+});
+
+describe("keepaliveBudgetUsd riskFactor param", () => {
+	it("defaults to RISK_FACTOR", () => {
+		const def = keepaliveBudgetUsd(200_000, OPUS_READ, OPUS_WRITE);
+		const explicit = keepaliveBudgetUsd(
+			200_000,
+			OPUS_READ,
+			OPUS_WRITE,
+			RISK_FACTOR,
+		);
+		expect(def).toBeCloseTo(explicit, 10);
+	});
+
+	it("scales linearly with riskFactor", () => {
+		const base = keepaliveBudgetUsd(200_000, OPUS_READ, OPUS_WRITE, 0.4);
+		const dbl = keepaliveBudgetUsd(200_000, OPUS_READ, OPUS_WRITE, 0.8);
+		expect(dbl).toBeCloseTo(base * 2, 10);
+	});
+
+	it("clamps an out-of-range riskFactor", () => {
+		const capped = keepaliveBudgetUsd(200_000, OPUS_READ, OPUS_WRITE, 99);
+		const atMax = keepaliveBudgetUsd(
+			200_000,
+			OPUS_READ,
+			OPUS_WRITE,
+			MAX_RISK_FACTOR,
+		);
+		expect(capped).toBeCloseTo(atMax, 10);
 	});
 });

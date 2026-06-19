@@ -12,7 +12,33 @@ import {
 	errorResponse,
 	jsonResponse,
 } from "@clankermux/http-common";
+import {
+	BRIDGE_HOURS_PER_RISK_UNIT,
+	bridgeHoursToRiskFactor,
+	clampBridgeHours,
+	clampRiskFactor,
+	KEEPALIVE_REFRESH_1H_MS,
+	MAX_BRIDGE_HOURS,
+	riskFactorToBridgeHours,
+} from "@clankermux/proxy";
 import type { ConfigResponse, RetentionSetRequest } from "../types";
+
+/** The bridge horizon (hours/risk factor) only describes the promoted 1h-TTL slots.
+ * The conversion + clamps live in @clankermux/proxy (bridge-policy) — the single
+ * source of truth — and are surfaced to the dashboard so the UI never hardcodes them. */
+function cacheWarmingResponse(config: Config): Record<string, unknown> {
+	const riskFactor = config.getCacheWarmingRiskFactor();
+	return {
+		mode: config.getCacheWarmingMode(),
+		minTokens: config.getCacheWarmingMinTokens(),
+		enabled: config.getCacheWarmingEnabled(),
+		riskFactor,
+		bridgeHours: riskFactorToBridgeHours(riskFactor),
+		maxBridgeHours: MAX_BRIDGE_HOURS,
+		hoursPerRiskUnit: BRIDGE_HOURS_PER_RISK_UNIT,
+		refreshMinutes: KEEPALIVE_REFRESH_1H_MS / 60_000,
+	};
+}
 
 /**
  * Create config handlers
@@ -197,11 +223,7 @@ export function createConfigHandlers(
 		},
 
 		getCacheWarming: (): Response => {
-			return jsonResponse({
-				mode: config.getCacheWarmingMode(),
-				minTokens: config.getCacheWarmingMinTokens(),
-				enabled: config.getCacheWarmingEnabled(),
-			});
+			return jsonResponse(cacheWarmingResponse(config));
 		},
 
 		setCacheWarming: async (req: Request): Promise<Response> => {
@@ -238,11 +260,32 @@ export function createConfigHandlers(
 				}
 				config.setCacheWarmingMinTokens(minTokens);
 			}
-			return jsonResponse({
-				mode: config.getCacheWarmingMode(),
-				minTokens: config.getCacheWarmingMinTokens(),
-				enabled: config.getCacheWarmingEnabled(),
-			});
+			// Bridge horizon: accept `bridgeHours` (user units, preferred) OR the raw
+			// `riskFactor`. We type-validate only (a non-numeric value is a 400) and then
+			// CLAMP out-of-range numbers via the bridge-policy helpers rather than
+			// rejecting them — the conversion + bounds are owned by bridge-policy. Clamp
+			// (not reject) also avoids any partial-update hazard from a late throw after
+			// mode/minTokens were already applied above.
+			if (body.bridgeHours !== undefined) {
+				const hours = validateNumber(body.bridgeHours, "bridgeHours");
+				if (typeof hours !== "number") {
+					return errorResponse(
+						BadRequest("Invalid 'bridgeHours': must be a number"),
+					);
+				}
+				config.setCacheWarmingRiskFactor(
+					bridgeHoursToRiskFactor(clampBridgeHours(hours)),
+				);
+			} else if (body.riskFactor !== undefined) {
+				const rf = validateNumber(body.riskFactor, "riskFactor");
+				if (typeof rf !== "number") {
+					return errorResponse(
+						BadRequest("Invalid 'riskFactor': must be a number"),
+					);
+				}
+				config.setCacheWarmingRiskFactor(clampRiskFactor(rf));
+			}
+			return jsonResponse(cacheWarmingResponse(config));
 		},
 
 		getUsageThrottling: (): Response => {

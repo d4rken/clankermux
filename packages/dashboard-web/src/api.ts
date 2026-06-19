@@ -37,6 +37,22 @@ export type RequestSummary = RequestResponse;
 // Re-export types directly
 export type { RequestPayload, RequestResponse } from "@clankermux/types";
 
+export interface CacheWarmingResponse {
+	mode: "off" | "static" | "dynamic";
+	minTokens: number;
+	enabled: boolean;
+	/** Spend-budget derate factor (the bridge-horizon knob, 0..1). */
+	riskFactor: number;
+	/** Derived horizon in hours for promoted 1h sessions (riskFactor × hoursPerRiskUnit). */
+	bridgeHours: number;
+	/** Break-even ceiling on the horizon in hours (riskFactor 1.0). */
+	maxBridgeHours: number;
+	/** Hours of bridging per 1.0 of riskFactor — server-owned conversion constant. */
+	hoursPerRiskUnit: number;
+	/** Keepalive refresh cadence (minutes) for promoted 1h slots. */
+	refreshMinutes: number;
+}
+
 export interface StorageInfoResponse {
 	db_bytes: number;
 	wal_bytes: number;
@@ -1600,22 +1616,14 @@ class API extends HttpClient {
 		}
 	}
 
-	async getCacheWarming(): Promise<{
-		mode: "off" | "static" | "dynamic";
-		minTokens: number;
-		enabled: boolean;
-	}> {
+	async getCacheWarming(): Promise<CacheWarmingResponse> {
 		const startTime = Date.now();
 		const url = "/api/config/cache-warming";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<{
-				mode: "off" | "static" | "dynamic";
-				minTokens: number;
-				enabled: boolean;
-			}>(url);
+			const response = await this.get<CacheWarmingResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
@@ -1632,22 +1640,16 @@ class API extends HttpClient {
 	async setCacheWarming(body: {
 		mode?: "off" | "static" | "dynamic";
 		minTokens?: number;
-	}): Promise<{
-		mode: "off" | "static" | "dynamic";
-		minTokens: number;
-		enabled: boolean;
-	}> {
+		bridgeHours?: number;
+		riskFactor?: number;
+	}): Promise<CacheWarmingResponse> {
 		const startTime = Date.now();
 		const url = "/api/config/cache-warming";
 
 		this.logger.debug(`→ POST ${url}`, { body });
 
 		try {
-			const response = await this.post<{
-				mode: "off" | "static" | "dynamic";
-				minTokens: number;
-				enabled: boolean;
-			}>(url, body);
+			const response = await this.post<CacheWarmingResponse>(url, body);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
 			return response;

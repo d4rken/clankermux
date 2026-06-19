@@ -10,6 +10,17 @@ export {
 	registerProvider,
 } from "@clankermux/providers";
 export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
+export {
+	BRIDGE_HOURS_PER_RISK_UNIT,
+	bridgeHoursToRiskFactor,
+	clampBridgeHours,
+	clampRiskFactor,
+	KEEPALIVE_REFRESH_1H_MS,
+	MAX_BRIDGE_HOURS,
+	MAX_RISK_FACTOR,
+	RISK_FACTOR,
+	riskFactorToBridgeHours,
+} from "./bridge-policy";
 export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export { dispatchProxyRequest } from "./dispatch";
