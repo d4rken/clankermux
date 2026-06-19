@@ -97,6 +97,42 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	}
 
 	/**
+	 * Per-account PEAK (MAX) utilization since `sinceMs` — the true high-water mark
+	 * over the window, computed in SQL so it captures spikes that reset before a
+	 * bucket's final sample (which a last-value-per-bucket read would miss). Used by
+	 * the cache-effectiveness report. Accounts with no samples in the window are
+	 * absent from the result.
+	 */
+	async getPeaksSince(sinceMs: number): Promise<
+		Array<{
+			accountId: string;
+			peakFiveHourPct: number;
+			peakSevenDayPct: number;
+		}>
+	> {
+		const rows = await this.query<{
+			account_id: string;
+			peak_five_hour: number | null;
+			peak_seven_day: number | null;
+		}>(
+			`SELECT account_id,
+			        MAX(five_hour_pct) AS peak_five_hour,
+			        MAX(seven_day_pct) AS peak_seven_day
+			 FROM usage_snapshots
+			 WHERE sampled_at >= ?
+			 GROUP BY account_id`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			peakFiveHourPct:
+				row.peak_five_hour == null ? 0 : Number(row.peak_five_hour),
+			peakSevenDayPct:
+				row.peak_seven_day == null ? 0 : Number(row.peak_seven_day),
+		}));
+	}
+
+	/**
 	 * Read the single most recent snapshot per account, for the given accounts.
 	 * Backs the dashboard's "last known usage" fallback when the live usage
 	 * cache has nothing (e.g. usage polling fails after a subscription lapses).

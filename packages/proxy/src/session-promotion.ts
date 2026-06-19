@@ -198,18 +198,16 @@ class SessionPromotionTracker {
 		this.entries.clear();
 	}
 
-	/** Evict the entry with the oldest lastSeenTs while over the cap. */
+	/**
+	 * Evict the oldest entry while over the cap. Every observe() does delete()+set()
+	 * before calling this, so the Map's insertion order IS recency order (oldest
+	 * first) — the least-recently-seen entry is the first key. O(1) per eviction, no
+	 * full scan.
+	 */
 	private enforceCap(): void {
 		while (this.entries.size > MAX_PROMOTION_TRACKER_ENTRIES) {
-			let oldestKey: string | null = null;
-			let oldestTs = Number.POSITIVE_INFINITY;
-			for (const [key, entry] of this.entries) {
-				if (entry.lastSeenTs < oldestTs) {
-					oldestTs = entry.lastSeenTs;
-					oldestKey = key;
-				}
-			}
-			if (oldestKey === null) break;
+			const oldestKey = this.entries.keys().next().value;
+			if (oldestKey === undefined) break;
 			this.entries.delete(oldestKey);
 		}
 	}

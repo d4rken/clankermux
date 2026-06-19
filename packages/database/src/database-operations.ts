@@ -2183,6 +2183,15 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	/** Most-recent cache-keepalive snapshot (for seeding bridgeStats at boot), or null. */
+	async getLatestCacheKeepaliveSnapshot(): Promise<CacheKeepaliveSnapshotRow | null> {
+		return withDatabaseRetry(
+			() => this.cacheKeepaliveSnapshots.getLatestSnapshot(),
+			this.retryConfig,
+			"getLatestCacheKeepaliveSnapshot",
+		);
+	}
+
 	// ── Account payment (ledger) operations delegated to repository ───────────
 
 	async recordAutoPayment(

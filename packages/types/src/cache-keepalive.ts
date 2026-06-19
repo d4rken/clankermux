@@ -37,10 +37,14 @@ export interface CacheKeepaliveLiveResponse {
 	warmResumes: number;
 	/** USD spent on keepalive hit+miss costs (cumulative). */
 	spentUsd: number;
-	/** USD of resume penalties avoided on real warm resumes (cumulative). */
+	/** Optimistic USD saved, valued at the 1h write rate (cumulative). */
 	savedUsd: number;
-	/** savedUsd - spentUsd (cumulative). */
+	/** Honest USD saved, valued at the 5m write rate — the no-bridge counterfactual (cumulative). */
+	savedUsdConservative: number;
+	/** savedUsd - spentUsd (optimistic, cumulative). */
 	netUsd: number;
+	/** savedUsdConservative - spentUsd (honest, cumulative). */
+	netUsdConservative: number;
 	/** hits / (hits + misses), 0 when none decided. */
 	hitRate: number;
 }
@@ -65,6 +69,10 @@ export interface CacheKeepaliveHistoryPointDelta {
 	failures: number;
 	spentUsd: number;
 	savedUsd: number;
+	/** Per-bucket delta of honest (5m-rate) savings. */
+	savedUsdConservative: number;
+	/** Per-bucket delta of real warm resumes. */
+	warmResumes: number;
 	hitRate: number;
 }
 

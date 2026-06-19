@@ -88,6 +88,8 @@ function toDeltaPoints(
 			failures: delta(cur.failures, prev?.failures),
 			spentUsd: delta(cur.spentUsd, prev?.spentUsd),
 			savedUsd: delta(cur.savedUsd, prev?.savedUsd),
+			savedUsdConservative: delta(cur.savedUsd5m, prev?.savedUsd5m),
+			warmResumes: delta(cur.warmResumes, prev?.warmResumes),
 			hitRate: decided > 0 ? hits / decided : 0,
 		});
 	}

@@ -14,7 +14,23 @@ import { ensureSchema } from "../migrations";
 import {
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
+	sumCounterDeltas,
 } from "./cache-keepalive-snapshot.repository";
+
+/** Minimal CounterRow for the sumCounterDeltas fold tests. */
+function counter(over: Partial<Record<string, number>> = {}) {
+	return {
+		keepalives_sent: 0,
+		hits: 0,
+		misses: 0,
+		failures: 0,
+		spent_usd: 0,
+		saved_usd: 0,
+		warm_resumes: 0,
+		saved_usd_5m: 0,
+		...over,
+	} as Parameters<typeof sumCounterDeltas>[1][number];
+}
 
 function makeDb(): Database {
 	const db = new Database(":memory:");
@@ -40,6 +56,8 @@ function row(
 		failures: 1,
 		spentUsd: 0.05,
 		savedUsd: 0.25,
+		warmResumes: 2,
+		savedUsd5m: 0.15,
 		...overrides,
 	};
 }
@@ -85,6 +103,35 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 			expect(result[0].failures).toBe(3);
 			expect(result[0].spentUsd).toBe(1.5);
 			expect(result[0].savedUsd).toBe(9.75);
+		});
+
+		it("round-trips the warm_resumes + saved_usd_5m columns", async () => {
+			await repo.insertSnapshot(
+				row({ sampledAt: 1_000, warmResumes: 7, savedUsd5m: 3.25 }),
+			);
+			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
+			expect(result).toHaveLength(1);
+			expect(result[0].warmResumes).toBe(7);
+			expect(result[0].savedUsd5m).toBe(3.25);
+		});
+	});
+
+	describe("getLatestSnapshot", () => {
+		it("returns null on an empty table", async () => {
+			expect(await repo.getLatestSnapshot()).toBeNull();
+		});
+
+		it("returns the row with the greatest sampled_at", async () => {
+			await repo.insertSnapshot(row({ sampledAt: 1_000, hits: 5 }));
+			await repo.insertSnapshot(
+				row({ sampledAt: 9_000, hits: 42, warmResumes: 9, savedUsd5m: 6.5 }),
+			);
+			await repo.insertSnapshot(row({ sampledAt: 3_000, hits: 20 }));
+			const latest = await repo.getLatestSnapshot();
+			expect(latest?.sampledAt).toBe(9_000);
+			expect(latest?.hits).toBe(42);
+			expect(latest?.warmResumes).toBe(9);
+			expect(latest?.savedUsd5m).toBe(6.5);
 		});
 	});
 
@@ -212,6 +259,70 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 			const result = await repo.getSnapshots({ sinceMs: 0, bucketMs: 1_000 });
 			expect(result).toHaveLength(1);
 			expect(result[0].warmSessions).toBe(99);
+		});
+	});
+
+	describe("sumCounterDeltas (window-total fold)", () => {
+		it("with no anchor, counts the first sample in full + later increments", () => {
+			const t = sumCounterDeltas(null, [
+				counter({ hits: 3, saved_usd_5m: 1.5 }),
+				counter({ hits: 8, saved_usd_5m: 4.0 }),
+			]);
+			// 3 (full first) + (8-3)=5 → 8; 1.5 + 2.5 → 4.0
+			expect(t.hits).toBe(8);
+			expect(t.savedUsd5m).toBeCloseTo(4.0, 10);
+		});
+
+		it("with an anchor, the first in-window sample counts only its increment", () => {
+			const anchor = counter({ hits: 10, saved_usd_5m: 5 });
+			const t = sumCounterDeltas(anchor, [
+				counter({ hits: 12, saved_usd_5m: 6 }), // +2 / +1
+				counter({ hits: 15, saved_usd_5m: 7.5 }), // +3 / +1.5
+			]);
+			expect(t.hits).toBe(5);
+			expect(t.savedUsd5m).toBeCloseTo(2.5, 10);
+		});
+
+		it("clamps a restart reset within the window (counts the post-reset value)", () => {
+			const t = sumCounterDeltas(null, [
+				counter({ hits: 5 }),
+				counter({ hits: 9 }), // +4
+				counter({ hits: 2 }), // reset → +2 (not negative)
+				counter({ hits: 6 }), // +4
+			]);
+			// 5 + 4 + 2 + 4 = 15
+			expect(t.hits).toBe(15);
+		});
+
+		it("returns all-zero for an empty window", () => {
+			expect(sumCounterDeltas(null, []).hits).toBe(0);
+		});
+	});
+
+	describe("getWindowCounterTotals", () => {
+		it("sums in-window activity, anchored on the sample before the window", async () => {
+			// Pre-window anchor at 500, in-window samples at 1000/2000.
+			await repo.insertSnapshot(
+				row({ sampledAt: 500, hits: 10, warmResumes: 1 }),
+			);
+			await repo.insertSnapshot(
+				row({ sampledAt: 1_000, hits: 14, warmResumes: 2 }),
+			);
+			await repo.insertSnapshot(
+				row({ sampledAt: 2_000, hits: 20, warmResumes: 5 }),
+			);
+			// Window [1000, ∞): anchored on the 500 sample → (14-10)+(20-14)=10 hits,
+			// (2-1)+(5-2)=4 resumes.
+			const t = await repo.getWindowCounterTotals(1_000);
+			expect(t.hits).toBe(10);
+			expect(t.warmResumes).toBe(4);
+		});
+
+		it("counts the first-ever sample in full when there is no anchor", async () => {
+			await repo.insertSnapshot(row({ sampledAt: 1_000, hits: 7 }));
+			await repo.insertSnapshot(row({ sampledAt: 2_000, hits: 12 }));
+			const t = await repo.getWindowCounterTotals(0);
+			expect(t.hits).toBe(12); // 7 (full) + 5
 		});
 	});
 

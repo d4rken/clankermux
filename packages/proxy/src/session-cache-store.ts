@@ -19,7 +19,7 @@ import {
 	resumePenaltyUsd,
 } from "./bridge-policy";
 import { bridgeStats } from "./bridge-stats";
-import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
+import { sanitizeHeadersForReplay } from "./cache-header-strip";
 import { bodyCacheTtlIsOneHour } from "./cache-ttl-injector";
 
 const log = new Logger("SessionCacheStore");
@@ -120,16 +120,6 @@ export interface SessionCacheSlot {
 	 * affinity key, or the never-promoted `__account__:<id>` fallback → 3 min).
 	 */
 	refreshMs: number;
-}
-
-function sanitizeHeaders(headers: Headers): Record<string, string> {
-	const out: Record<string, string> = {};
-	headers.forEach((value, key) => {
-		if (!CACHE_REPLAY_STRIP_HEADERS.has(key.toLowerCase())) {
-			out[key] = value;
-		}
-	});
-	return out;
 }
 
 function byteLengthOf(body: ArrayBuffer | ArrayBufferView): number {
@@ -331,17 +321,21 @@ class SessionCacheStore {
 			accountId,
 			sessionKey,
 			body: Buffer.from(bytes),
-			headers: sanitizeHeaders(headers),
+			headers: sanitizeHeadersForReplay(headers),
 			path,
 			model,
 			cachedTokens,
 			cacheReadPer1M: rates.cacheReadPer1M,
 			cacheWritePer1M: rates.cacheWritePer1M,
 			cacheWriteEffectivePer1M,
+			// LRU priority = the real re-cache cost avoided by keeping this slot. Use the
+			// slot's EFFECTIVE write rate so a promoted (1h, 2x-input) session is valued
+			// above a 5m session of the same size under eviction pressure (it's costlier
+			// to rebuild). For a 5m slot this is the 5-minute rate, unchanged.
 			priorityUsd: resumePenaltyUsd(
 				cachedTokens,
 				rates.cacheReadPer1M,
-				rates.cacheWritePer1M,
+				cacheWriteEffectivePer1M,
 			),
 			budgetUsd: keepaliveBudgetUsd(
 				cachedTokens,
@@ -562,12 +556,21 @@ class SessionCacheStore {
 			readTokens > 0
 				? Math.min(readTokens, slot.cachedTokens)
 				: slot.cachedTokens;
+		// Two valuations of the avoided re-cache penalty:
+		//  - savedUsd (optimistic): at this slot's effective TTL write rate. For a
+		//    promoted 1h slot that's 2x input — what a 1h recreate would have cost.
+		//  - savedUsdConservative (honest): at the 5-minute write rate (1.25x input),
+		//    Claude Code's NATIVE counterfactual when the bridge is off (it never asks
+		//    for a 1h TTL itself). For a 5m slot the two are identical; for a promoted
+		//    slot the conservative figure is lower and is the one to headline.
 		const savedUsd =
 			((slot.cacheWriteEffectivePer1M - slot.cacheReadPer1M) / 1_000_000) *
 			tokens;
-		bridgeStats.recordWarmResume(savedUsd);
+		const savedUsdConservative =
+			((slot.cacheWritePer1M - slot.cacheReadPer1M) / 1_000_000) * tokens;
+		bridgeStats.recordWarmResume(savedUsd, savedUsdConservative);
 		log.info(
-			`[CacheBridge] warm-resume WIN session=${SessionCacheStore.key(slot.accountId, slot.sessionKey)} savedUsd=${savedUsd.toFixed(4)} spentUsd=${slot.spentUsd.toFixed(4)} netUsd=${(savedUsd - slot.spentUsd).toFixed(4)} keepalives=${slot.keepaliveCount}`,
+			`[CacheBridge] warm-resume WIN session=${SessionCacheStore.key(slot.accountId, slot.sessionKey)} savedUsd=${savedUsd.toFixed(4)} savedUsd5m=${savedUsdConservative.toFixed(4)} spentUsd=${slot.spentUsd.toFixed(4)} netUsd5m=${(savedUsdConservative - slot.spentUsd).toFixed(4)} keepalives=${slot.keepaliveCount}`,
 		);
 	}
 

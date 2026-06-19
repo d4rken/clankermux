@@ -195,19 +195,30 @@ describe("sessionCacheStore telemetry", () => {
 		const slot = sessionCacheStore
 			.getAllSlots()
 			.find((s) => s.sessionKey === "sess1h");
+		// Optimistic (1h effective, 2x) and conservative (5m, 1.25x) savings.
 		const expectedSaved =
 			(((slot?.cacheWriteEffectivePer1M ?? 0) - (slot?.cacheReadPer1M ?? 0)) /
 				1_000_000) *
 			(slot?.cachedTokens ?? 0);
+		const expectedConservative =
+			(((slot?.cacheWritePer1M ?? 0) - (slot?.cacheReadPer1M ?? 0)) /
+				1_000_000) *
+			(slot?.cachedTokens ?? 0);
+		const priorityUsd = slot?.priorityUsd ?? 0;
 
 		bridgeStats.reset();
 		sessionCacheStore.touchActivity("acc1", "sess1h", now + 5);
 
 		const s = bridgeStats.snapshot();
 		expect(s.warmResumes).toBe(1);
+		// Optimistic savedUsd uses the 1h effective (2x) write rate...
 		expect(s.savedUsd).toBeCloseTo(expectedSaved, 10);
-		// The 1h effective rate (2x input) exceeds the 5m-rate LRU priority.
-		expect(s.savedUsd).toBeGreaterThan(slot?.priorityUsd ?? 0);
+		// ...while the conservative figure uses the 5m rate and is strictly lower.
+		expect(s.savedUsdConservative).toBeCloseTo(expectedConservative, 10);
+		expect(s.savedUsdConservative).toBeLessThan(s.savedUsd);
+		// priorityUsd now also uses the effective (1h) rate, so a promoted slot is
+		// valued for LRU at its true recreate cost — matching the optimistic saving.
+		expect(priorityUsd).toBeCloseTo(s.savedUsd, 10);
 	});
 
 	it("register books a warm resume on the common read+create resume after keepalive spend", () => {

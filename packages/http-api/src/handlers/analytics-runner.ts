@@ -11,6 +11,7 @@ import type {
 	AnalyticsWorkerResponse,
 	DashboardWorkerKind,
 } from "./analytics-worker";
+import { createCacheEffectivenessHandler as createDirectCacheEffectivenessHandler } from "./cache-effectiveness-direct";
 import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
@@ -101,6 +102,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch cache keepalive history data",
 		tooManyMessage: "Too many cache keepalive history requests",
 	},
+	"cache-effectiveness": {
+		timeoutMessage: "Cache effectiveness request timed out",
+		failureMessage: "Failed to fetch cache effectiveness data",
+		tooManyMessage: "Too many cache effectiveness requests",
+	},
 	"payments-summary": {
 		timeoutMessage: "Payments summary request timed out",
 		failureMessage: "Failed to fetch payments summary data",
@@ -147,6 +153,14 @@ export function createIsolatedCacheKeepaliveHistoryHandler(
 		context,
 		"cache-keepalive-history",
 		createDirectCacheKeepaliveHistoryHandler(context),
+	);
+}
+
+export function createIsolatedCacheEffectivenessHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"cache-effectiveness",
+		createDirectCacheEffectivenessHandler(context),
 	);
 }
 

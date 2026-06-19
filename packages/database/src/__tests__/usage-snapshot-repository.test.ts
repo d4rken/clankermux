@@ -255,4 +255,31 @@ describe("UsageSnapshotRepository", () => {
 			expect(remaining[0].account_id).toBe("acct-b");
 		});
 	});
+
+	describe("getPeaksSince", () => {
+		it("returns the per-account MAX (true peak, not last-value)", async () => {
+			// A spike (90) then a lower later value (20) — last-value would miss 90.
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000, sevenDayPct: 90 }),
+				row({ accountId: "acct-a", sampledAt: 2_000, sevenDayPct: 20 }),
+				row({ accountId: "acct-b", sampledAt: 1_500, fiveHourPct: 70 }),
+			]);
+			const peaks = await repo.getPeaksSince(0);
+			const a = peaks.find((p) => p.accountId === "acct-a");
+			const b = peaks.find((p) => p.accountId === "acct-b");
+			expect(a?.peakSevenDayPct).toBe(90); // the spike, not the later 20
+			expect(b?.peakFiveHourPct).toBe(70);
+		});
+
+		it("excludes samples older than sinceMs", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 500, sevenDayPct: 99 }),
+				row({ accountId: "acct-a", sampledAt: 5_000, sevenDayPct: 30 }),
+			]);
+			const peaks = await repo.getPeaksSince(1_000);
+			expect(peaks.find((p) => p.accountId === "acct-a")?.peakSevenDayPct).toBe(
+				30,
+			);
+		});
+	});
 });

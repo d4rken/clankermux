@@ -51,3 +51,21 @@ export const CACHE_REPLAY_STRIP_HEADERS = new Set([
 	"proxy-authenticate",
 	"host",
 ]);
+
+/**
+ * Project a client request's headers into the plain record stored on a warm
+ * replay body, dropping every header in {@link CACHE_REPLAY_STRIP_HEADERS}
+ * (case-insensitive). Single source of truth shared by both warm-body stores so
+ * the sanitization can never drift between them.
+ */
+export function sanitizeHeadersForReplay(
+	headers: Headers,
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	headers.forEach((value, key) => {
+		if (!CACHE_REPLAY_STRIP_HEADERS.has(key.toLowerCase())) {
+			out[key] = value;
+		}
+	});
+	return out;
+}

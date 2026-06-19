@@ -23,10 +23,24 @@ export interface BridgeStatsSnapshot {
 	warmResumes: number;
 	/** Sum of all keepalive hit+miss costs charged, in USD. */
 	spentUsd: number;
-	/** Sum of resume penalties avoided on real warm resumes, in USD. */
+	/**
+	 * Sum of resume penalties avoided on real warm resumes, valued at the slot's
+	 * effective (1h, 2x-input) write rate — the OPTIMISTIC figure (kept for
+	 * continuity / the live heartbeat). For promoted slots this overstates the real
+	 * benefit, because the no-bridge counterfactual re-creates at the native 5m rate.
+	 */
 	savedUsd: number;
-	/** savedUsd - spentUsd. */
+	/**
+	 * Honest savings: resume penalties avoided valued at the 5-minute write rate
+	 * (1.25x input) — Claude Code's NATIVE counterfactual when the bridge is off. This
+	 * is the conservative number to headline in reports. Equals {@link savedUsd} for
+	 * 5m (non-promoted) slots; lower for promoted (1h) slots.
+	 */
+	savedUsdConservative: number;
+	/** savedUsd - spentUsd (optimistic). */
 	netUsd: number;
+	/** savedUsdConservative - spentUsd (honest). */
+	netUsdConservative: number;
 	/** hits / (hits + misses), or 0 when nothing has been decided. */
 	hitRate: number;
 }
@@ -37,7 +51,8 @@ class BridgeStats {
 	private misses = 0;
 	private failures = 0;
 	private spentUsd = 0; // sum of all keepalive hit+miss costs charged
-	private savedUsd = 0; // sum of resume penalties avoided on real warm resumes
+	private savedUsd = 0; // resume penalties avoided, valued at the 1h (effective) write rate
+	private savedUsdConservative = 0; // same, valued at the 5m (native counterfactual) write rate
 	private warmResumes = 0; // count of real cache-read turns that resumed a kept-warm session
 
 	/** A dispatched keepalive whose hit/miss was determined. cost = the USD charged. */
@@ -53,10 +68,18 @@ class BridgeStats {
 		this.failures++;
 	}
 
-	/** A real cache-read turn resumed a session we'd spent keepalive budget on. */
-	recordWarmResume(savedUsd: number): void {
+	/**
+	 * A real cache-read turn resumed a session we'd spent keepalive budget on.
+	 * `savedUsd` is the optimistic (1h-rate) saving; `savedUsdConservative` is the
+	 * honest (5m-rate) saving — pass both. Each is clamped to finite/positive.
+	 */
+	recordWarmResume(savedUsd: number, savedUsdConservative: number): void {
 		this.warmResumes++;
 		this.savedUsd += Number.isFinite(savedUsd) && savedUsd > 0 ? savedUsd : 0;
+		this.savedUsdConservative +=
+			Number.isFinite(savedUsdConservative) && savedUsdConservative > 0
+				? savedUsdConservative
+				: 0;
 	}
 
 	snapshot(): BridgeStatsSnapshot {
@@ -69,9 +92,38 @@ class BridgeStats {
 			warmResumes: this.warmResumes,
 			spentUsd: this.spentUsd,
 			savedUsd: this.savedUsd,
+			savedUsdConservative: this.savedUsdConservative,
 			netUsd: this.savedUsd - this.spentUsd,
+			netUsdConservative: this.savedUsdConservative - this.spentUsd,
 			hitRate: decided > 0 ? this.hits / decided : 0,
 		};
+	}
+
+	/**
+	 * Seed the cumulative counters from a persisted snapshot at boot, so the live
+	 * ledger continues across restarts instead of dropping to zero (the gauges —
+	 * warm/promoted/bytes — are NOT seeded; they re-warm from the live store). Only
+	 * positive finite values are taken. Call once, before the sampler starts.
+	 */
+	seed(prior: {
+		keepalivesSent: number;
+		hits: number;
+		misses: number;
+		failures: number;
+		warmResumes: number;
+		spentUsd: number;
+		savedUsd: number;
+		savedUsdConservative: number;
+	}): void {
+		const n = (v: number): number => (Number.isFinite(v) && v > 0 ? v : 0);
+		this.keepalivesSent = n(prior.keepalivesSent);
+		this.hits = n(prior.hits);
+		this.misses = n(prior.misses);
+		this.failures = n(prior.failures);
+		this.warmResumes = n(prior.warmResumes);
+		this.spentUsd = n(prior.spentUsd);
+		this.savedUsd = n(prior.savedUsd);
+		this.savedUsdConservative = n(prior.savedUsdConservative);
 	}
 
 	reset(): void {
@@ -81,6 +133,7 @@ class BridgeStats {
 		this.failures = 0;
 		this.spentUsd = 0;
 		this.savedUsd = 0;
+		this.savedUsdConservative = 0;
 		this.warmResumes = 0;
 	}
 }

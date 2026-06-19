@@ -132,6 +132,23 @@ describe("shouldRecordRequest — auto-refresh probe header", () => {
 		expect(shouldRecordRequest(makeInput())).toBe(true);
 	});
 
+	it("excludes a synthetic cache-keepalive replay (x-clankermux-keepalive === 'true')", () => {
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					getHeader: headersAccessor({ "x-clankermux-keepalive": "true" }),
+				}),
+			),
+		).toBe(false);
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					getHeader: objectAccessor({ "x-clankermux-keepalive": "true" }),
+				}),
+			),
+		).toBe(false);
+	});
+
 	it("records when the probe header has a non-'true' value", () => {
 		expect(
 			shouldRecordRequest(
