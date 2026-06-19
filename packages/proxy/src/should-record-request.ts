@@ -89,6 +89,14 @@ export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 		return false;
 	}
 
+	// (2b) Synthetic cache-keepalive replays — same rationale as auto-refresh
+	//      probes: internal scheduler traffic that would otherwise inflate request
+	//      counts, cost, and the cache-effectiveness "real work" volume. Keepalive
+	//      activity is tracked separately in bridgeStats, not the requests table.
+	if (getHeader("x-clankermux-keepalive") === "true") {
+		return false;
+	}
+
 	// (3) Worker-side ignored paths: `.well-known` 404s.
 	if (path.startsWith("/.well-known/") && responseStatus === 404) {
 		return false;

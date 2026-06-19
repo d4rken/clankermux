@@ -36,9 +36,10 @@ export interface CacheKeepaliveGauges {
 
 /**
  * PURE projection: map the live gauges + the cumulative bridge-stats snapshot
- * into a single write-ready row stamped with `now`. Only the fields the row
- * actually persists are copied — `netUsd`, `warmResumes`, and `hitRate` from the
- * snapshot are intentionally dropped (derivable on read).
+ * into a single write-ready row stamped with `now`. The derived `netUsd` /
+ * `netUsdConservative` / `hitRate` are dropped (recomputable on read);
+ * `warmResumes` and `savedUsdConservative` ARE persisted (they cannot be derived
+ * from the other columns and are the report's headline ROI signals).
  */
 export function buildCacheKeepaliveSnapshotRow(
 	now: number,
@@ -56,6 +57,8 @@ export function buildCacheKeepaliveSnapshotRow(
 		failures: stats.failures,
 		spentUsd: stats.spentUsd,
 		savedUsd: stats.savedUsd,
+		warmResumes: stats.warmResumes,
+		savedUsd5m: stats.savedUsdConservative,
 	};
 }
 

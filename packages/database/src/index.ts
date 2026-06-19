@@ -31,6 +31,8 @@ export {
 	type CacheKeepaliveHistoryPoint,
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
+	type CacheKeepaliveWindowTotals,
+	sumCounterDeltas,
 } from "./repositories/cache-keepalive-snapshot.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export { StatsRepository } from "./repositories/stats.repository";

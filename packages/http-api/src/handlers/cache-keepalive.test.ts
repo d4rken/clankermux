@@ -35,7 +35,7 @@ describe("cache-keepalive live handler", () => {
 		bridgeStats.recordResult(true, 0.02); // hit
 		bridgeStats.recordResult(false, 0.05); // miss
 		bridgeStats.recordFailure();
-		bridgeStats.recordWarmResume(0.5);
+		bridgeStats.recordWarmResume(0.5, 0.3); // optimistic, conservative
 
 		const handler = createCacheKeepaliveHandler(
 			makeContext({ mode: "dynamic", minTokens: 25_000 }),
@@ -55,6 +55,8 @@ describe("cache-keepalive live handler", () => {
 		expect(body.warmResumes).toBe(1);
 		expect(body.hitRate).toBeCloseTo(0.5);
 		expect(body.savedUsd).toBeCloseTo(0.5);
+		expect(body.savedUsdConservative).toBeCloseTo(0.3);
+		expect(body.netUsdConservative).toBeCloseTo(0.3 - 0.07);
 
 		// Live gauges from the session cache store (empty store ⇒ zeros).
 		expect(body.warmSessions).toBe(sessionCacheStore.getSize());

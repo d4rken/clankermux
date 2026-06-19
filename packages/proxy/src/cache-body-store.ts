@@ -1,7 +1,7 @@
 import { TIME_CONSTANTS } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { isBridgeableProvider } from "./bridge-policy";
-import { CACHE_REPLAY_STRIP_HEADERS } from "./cache-header-strip";
+import { sanitizeHeadersForReplay } from "./cache-header-strip";
 import { sessionCacheStore } from "./session-cache-store";
 
 const log = new Logger("CacheBodyStore");
@@ -182,12 +182,7 @@ class CacheBodyStore {
 		// prompt-cache markers won't create cache entries, nothing to keep alive.
 		if (!hasCacheControlHint(body)) return;
 
-		const sanitizedHeaders: Record<string, string> = {};
-		headers.forEach((value, key) => {
-			if (!CACHE_REPLAY_STRIP_HEADERS.has(key.toLowerCase())) {
-				sanitizedHeaders[key] = value;
-			}
-		});
+		const sanitizedHeaders = sanitizeHeadersForReplay(headers);
 
 		this.staging.set(requestId, {
 			accountId,

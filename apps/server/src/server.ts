@@ -47,6 +47,7 @@ import {
 } from "@clankermux/providers";
 import {
 	AutoRefreshScheduler,
+	bridgeStats,
 	CacheKeepaliveScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
@@ -1566,6 +1567,31 @@ Available endpoints:
 	usageSnapshotSampler.start().catch((err) => {
 		log.error(`Failed to start usage snapshot sampler: ${err}`);
 	});
+
+	// Seed the in-memory bridge counters from the last persisted snapshot so the
+	// live ledger (and the dashboard's cumulative figures) continues across restarts
+	// instead of resetting to zero. Gauges are NOT seeded — they re-warm from the
+	// live store. Best-effort: any failure just leaves the counters at zero.
+	try {
+		const prior = await dbOps.getLatestCacheKeepaliveSnapshot();
+		if (prior) {
+			bridgeStats.seed({
+				keepalivesSent: prior.keepalivesSent,
+				hits: prior.hits,
+				misses: prior.misses,
+				failures: prior.failures,
+				warmResumes: prior.warmResumes,
+				spentUsd: prior.spentUsd,
+				savedUsd: prior.savedUsd,
+				savedUsdConservative: prior.savedUsd5m,
+			});
+			log.info(
+				`Seeded bridge stats from last snapshot: hits=${prior.hits} resumes=${prior.warmResumes} spentUsd=${prior.spentUsd.toFixed(4)} savedUsd5m=${prior.savedUsd5m.toFixed(4)}`,
+			);
+		}
+	} catch (err) {
+		log.warn(`Could not seed bridge stats from DB (starting at zero): ${err}`);
+	}
 
 	// Start the cache-keepalive snapshot sampler: records the Session Cache
 	// Bridge's live gauges + cumulative economics into the

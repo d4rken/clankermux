@@ -564,6 +564,21 @@ export const useCacheKeepaliveHistory = (range: string) => {
 	});
 };
 
+/**
+ * Per-range cache-warming EFFECTIVENESS summary for the "Cache Keep-Alive
+ * Effectiveness" panel. Same polling cadence as useCacheKeepaliveHistory (45s
+ * stale, 60s refetch, paused in the background).
+ */
+export const useCacheEffectiveness = (range: string) => {
+	return useQuery({
+		queryKey: queryKeys.cacheEffectiveness(range),
+		queryFn: () => api.getCacheEffectiveness(range),
+		staleTime: 45000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+	});
+};
+
 export const useUsageThrottling = () => {
 	return useQuery({
 		queryKey: ["usage-throttling"],

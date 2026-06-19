@@ -46,6 +46,7 @@ import {
 	createApiKeysListHandler,
 	createApiKeysStatsHandler,
 } from "./handlers/api-keys";
+import { createCacheEffectivenessHandler } from "./handlers/cache-effectiveness";
 import { createCacheKeepaliveHandler } from "./handlers/cache-keepalive";
 import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-history";
 import {
@@ -195,6 +196,9 @@ export class APIRouter {
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
 		const cacheKeepaliveHistoryHandler = createCacheKeepaliveHistoryHandler(
+			this.context,
+		);
+		const cacheEffectivenessHandler = createCacheEffectivenessHandler(
 			this.context,
 		);
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
@@ -420,6 +424,9 @@ export class APIRouter {
 		this.handlers.set(
 			"GET:/api/analytics/cache-keepalive-history",
 			(_req, url) => cacheKeepaliveHistoryHandler(url.searchParams),
+		);
+		this.handlers.set("GET:/api/analytics/cache-effectiveness", (_req, url) =>
+			cacheEffectivenessHandler(url.searchParams),
 		);
 		// Debug/profiling routes
 		this.handlers.set("GET:/api/debug/heap", () => heapStatsHandler());

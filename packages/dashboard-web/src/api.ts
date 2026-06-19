@@ -2,6 +2,7 @@ import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	AnalyticsResponse,
+	CacheEffectivenessResponse,
 	CacheKeepaliveHistoryResponse,
 	CacheKeepaliveLiveResponse,
 	Combo,
@@ -1695,6 +1696,30 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<CacheKeepaliveHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Cache-warming EFFECTIVENESS report — a per-range summary that answers "did
+	// keeping caches warm actually reduce quota pressure?" by joining the bridge
+	// ledger, real work volume, and per-account quota peaks over the window.
+	// Mirrors getCacheKeepaliveHistory.
+	async getCacheEffectiveness(
+		range: string,
+	): Promise<CacheEffectivenessResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/cache-effectiveness?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<CacheEffectivenessResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;

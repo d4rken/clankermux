@@ -365,7 +365,9 @@ export function ensureSchema(db: Database): void {
 			misses INTEGER NOT NULL,
 			failures INTEGER NOT NULL,
 			spent_usd REAL NOT NULL,
-			saved_usd REAL NOT NULL
+			saved_usd REAL NOT NULL,
+			warm_resumes INTEGER NOT NULL DEFAULT 0,
+			saved_usd_5m REAL NOT NULL DEFAULT 0
 		)
 	`);
 
@@ -514,6 +516,23 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "renewal_auto_start_date",
 		ddl: "ALTER TABLE accounts ADD COLUMN renewal_auto_start_date TEXT",
+	},
+	// Cache-bridge: count of real warm resumes captured at sample time (CUMULATIVE,
+	// like the other counters). Previously dropped from the snapshot, so the bridge's
+	// headline ROI signal was lost on every restart; now persisted. DEFAULT 0 for old
+	// rows (they predate the column — treated as "unknown", reads back as 0).
+	{
+		table: "cache_keepalive_snapshots",
+		column: "warm_resumes",
+		ddl: "ALTER TABLE cache_keepalive_snapshots ADD COLUMN warm_resumes INTEGER NOT NULL DEFAULT 0",
+	},
+	// Cache-bridge: honest (conservative) cumulative savings valued at the 5-minute
+	// write rate — the no-bridge counterfactual — vs the optimistic saved_usd (1h
+	// rate). DEFAULT 0 for old rows.
+	{
+		table: "cache_keepalive_snapshots",
+		column: "saved_usd_5m",
+		ddl: "ALTER TABLE cache_keepalive_snapshots ADD COLUMN saved_usd_5m REAL NOT NULL DEFAULT 0",
 	},
 ];
 

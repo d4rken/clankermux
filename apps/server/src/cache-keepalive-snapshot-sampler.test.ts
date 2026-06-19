@@ -28,7 +28,9 @@ function stats(
 		warmResumes: 0,
 		spentUsd: 0,
 		savedUsd: 0,
+		savedUsdConservative: 0,
 		netUsd: 0,
+		netUsdConservative: 0,
 		hitRate: 0,
 		...overrides,
 	};
@@ -44,10 +46,12 @@ describe("buildCacheKeepaliveSnapshotRow", () => {
 			failures: 1,
 			spentUsd: 0.12,
 			savedUsd: 0.9,
-			// netUsd / warmResumes / hitRate are present on the snapshot but NOT
-			// part of the persisted row — they must be ignored by the mapper.
-			netUsd: 0.78,
+			savedUsdConservative: 0.55,
 			warmResumes: 11,
+			// netUsd / netUsdConservative / hitRate are present on the snapshot but
+			// derivable on read, so the mapper must NOT carry them into the row.
+			netUsd: 0.78,
+			netUsdConservative: 0.43,
 			hitRate: 0.8,
 		});
 
@@ -64,6 +68,8 @@ describe("buildCacheKeepaliveSnapshotRow", () => {
 			failures: 1,
 			spentUsd: 0.12,
 			savedUsd: 0.9,
+			warmResumes: 11,
+			savedUsd5m: 0.55,
 		} satisfies CacheKeepaliveSnapshotRow);
 	});
 
@@ -85,17 +91,29 @@ describe("buildCacheKeepaliveSnapshotRow", () => {
 			failures: 0,
 			spentUsd: 0,
 			savedUsd: 0,
+			warmResumes: 0,
+			savedUsd5m: 0,
 		});
 	});
 
-	it("does not carry netUsd, warmResumes, or hitRate into the row", () => {
+	it("persists warmResumes + savedUsd5m but not the derived net/hitRate fields", () => {
 		const row = buildCacheKeepaliveSnapshotRow(
 			NOW,
 			{ warmSessions: 1, promotedSessions: 1, totalBytes: 8 },
-			stats({ netUsd: 5, warmResumes: 7, hitRate: 0.5 }),
+			stats({
+				netUsd: 5,
+				netUsdConservative: 3,
+				warmResumes: 7,
+				savedUsdConservative: 2.5,
+				hitRate: 0.5,
+			}),
 		);
+		// Persisted (cannot be derived from the other columns):
+		expect(row.warmResumes).toBe(7);
+		expect(row.savedUsd5m).toBe(2.5);
+		// Derived on read → not stored:
 		expect(row).not.toHaveProperty("netUsd");
-		expect(row).not.toHaveProperty("warmResumes");
+		expect(row).not.toHaveProperty("netUsdConservative");
 		expect(row).not.toHaveProperty("hitRate");
 	});
 });
