@@ -4,6 +4,7 @@ import { createConfigHandlers } from "../config";
 function makeConfig() {
 	let cacheWarmingMode: "off" | "static" | "dynamic" = "off";
 	let cacheWarmingMinTokens = 100_000;
+	let cacheWarmingRiskFactor = 0.4;
 	let cacheKeepaliveSnapshotDays = 30;
 	return {
 		getAllSettings: () => ({
@@ -44,6 +45,10 @@ function makeConfig() {
 		getCacheWarmingMinTokens: () => cacheWarmingMinTokens,
 		setCacheWarmingMinTokens: mock((v: number) => {
 			cacheWarmingMinTokens = Math.max(0, v);
+		}),
+		getCacheWarmingRiskFactor: () => cacheWarmingRiskFactor,
+		setCacheWarmingRiskFactor: mock((v: number) => {
+			cacheWarmingRiskFactor = Math.min(Math.max(v, 0), 1);
 		}),
 	} as unknown as import("@clankermux/config").Config;
 }
@@ -128,7 +133,120 @@ describe("createConfigHandlers", () => {
 		expect(response.status).toBe(200);
 		expect(config.setCacheWarmingMode).toHaveBeenCalledWith("static");
 		expect(config.setCacheWarmingMinTokens).toHaveBeenCalledWith(50_000);
-		expect(body).toEqual({ mode: "static", enabled: true, minTokens: 50_000 });
+		expect(body).toMatchObject({
+			mode: "static",
+			enabled: true,
+			minTokens: 50_000,
+		});
+	});
+
+	it("GET exposes bridge-horizon fields (riskFactor, bridgeHours, conversion constants)", async () => {
+		const handlers = createConfigHandlers(makeConfig(), {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = handlers.getCacheWarming();
+		const body = (await response.json()) as {
+			riskFactor: number;
+			bridgeHours: number;
+			maxBridgeHours: number;
+			hoursPerRiskUnit: number;
+			refreshMinutes: number;
+		};
+
+		expect(body.riskFactor).toBe(0.4);
+		// 0.4 × ~15.83 ≈ 6.33h.
+		expect(body.bridgeHours).toBeCloseTo(6.3333, 2);
+		expect(body.hoursPerRiskUnit).toBeCloseTo(15.8333, 2);
+		expect(body.maxBridgeHours).toBeCloseTo(15.8333, 2);
+		expect(body.refreshMinutes).toBe(50);
+	});
+
+	it("accepts bridgeHours and stores the derived risk factor", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setCacheWarming(
+			new Request("http://localhost/api/config/cache-warming", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				// ~9.5h ≈ risk factor 0.6.
+				body: JSON.stringify({ bridgeHours: 9.5 }),
+			}),
+		);
+		const body = (await response.json()) as {
+			riskFactor: number;
+			bridgeHours: number;
+		};
+
+		expect(response.status).toBe(200);
+		const rf = (config.setCacheWarmingRiskFactor as ReturnType<typeof mock>)
+			.mock.calls[0][0] as number;
+		expect(rf).toBeCloseTo(0.6, 2);
+		expect(body.bridgeHours).toBeCloseTo(9.5, 1);
+	});
+
+	it("accepts a raw riskFactor when bridgeHours is absent", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setCacheWarming(
+			new Request("http://localhost/api/config/cache-warming", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ riskFactor: 0.7 }),
+			}),
+		);
+
+		expect(response.status).toBe(200);
+		expect(config.setCacheWarmingRiskFactor).toHaveBeenCalledWith(0.7);
+	});
+
+	it("clamps an out-of-range bridgeHours to the max (risk factor 1.0) instead of rejecting", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setCacheWarming(
+			new Request("http://localhost/api/config/cache-warming", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ bridgeHours: 999 }),
+			}),
+		);
+
+		expect(response.status).toBe(200);
+		const rf = (config.setCacheWarmingRiskFactor as ReturnType<typeof mock>)
+			.mock.calls[0][0] as number;
+		expect(rf).toBeCloseTo(1.0, 6); // clamped to MAX_RISK_FACTOR
+	});
+
+	it("rejects a non-numeric bridgeHours (router maps the thrown ValidationError to 400)", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		await expect(
+			handlers.setCacheWarming(
+				new Request("http://localhost/api/config/cache-warming", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ bridgeHours: "soon" }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setCacheWarmingRiskFactor).not.toHaveBeenCalled();
 	});
 
 	it("rejects an invalid mode with a 400", async () => {

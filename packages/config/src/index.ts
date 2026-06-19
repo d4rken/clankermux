@@ -65,6 +65,7 @@ export interface ConfigData {
 	cache_warming_mode?: CacheWarmingMode;
 	cache_keepalive_snapshot_retention_days?: number;
 	cache_warming_min_tokens?: number;
+	cache_warming_risk_factor?: number;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
 	// Database configuration
@@ -441,6 +442,33 @@ export class Config extends EventEmitter {
 		this.set("cache_warming_min_tokens", Math.max(0, tokens));
 	}
 
+	/**
+	 * Cache-warming spend-budget derate factor (the bridge-horizon knob; the UI
+	 * surfaces it as hours). NaN-safe, clamped to [0, 1]. Default 0.4 mirrors
+	 * bridge-policy's RISK_FACTOR (duplicated here because the config package must not
+	 * depend on the proxy package; the hours↔factor conversion lives in bridge-policy
+	 * and is applied by the proxy/HTTP layers, not here). No env var — new settings
+	 * are dashboard-only per the repo's no-env-knob rule.
+	 */
+	getCacheWarmingRiskFactor(): number {
+		// Mirror of bridge-policy.RISK_FACTOR / MAX_RISK_FACTOR (see note above).
+		const DEFAULT_CACHE_WARMING_RISK_FACTOR = 0.4;
+		const MAX_CACHE_WARMING_RISK_FACTOR = 1.0;
+		const fromFile = this.data.cache_warming_risk_factor;
+		if (typeof fromFile === "number" && Number.isFinite(fromFile)) {
+			return Math.min(Math.max(fromFile, 0), MAX_CACHE_WARMING_RISK_FACTOR);
+		}
+		return DEFAULT_CACHE_WARMING_RISK_FACTOR;
+	}
+
+	setCacheWarmingRiskFactor(riskFactor: number): void {
+		const MAX_CACHE_WARMING_RISK_FACTOR = 1.0;
+		const safe = Number.isFinite(riskFactor)
+			? Math.min(Math.max(riskFactor, 0), MAX_CACHE_WARMING_RISK_FACTOR)
+			: 0.4;
+		this.set("cache_warming_risk_factor", safe);
+	}
+
 	getUsageThrottlingFiveHourEnabled(): boolean {
 		const fromEnv = parseEnabledEnvFlag(
 			process.env.USAGE_THROTTLING_FIVE_HOUR_ENABLED,
@@ -489,6 +517,7 @@ export class Config extends EventEmitter {
 			cache_keepalive_snapshot_retention_days:
 				this.getCacheKeepaliveSnapshotRetentionDays(),
 			cache_warming_min_tokens: this.getCacheWarmingMinTokens(),
+			cache_warming_risk_factor: this.getCacheWarmingRiskFactor(),
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),

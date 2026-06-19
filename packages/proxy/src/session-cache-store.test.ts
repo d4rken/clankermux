@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import { KEEPALIVE_REFRESH_1H_MS } from "./bridge-policy";
+import { KEEPALIVE_REFRESH_1H_MS, RISK_FACTOR } from "./bridge-policy";
 import { bridgeStats } from "./bridge-stats";
 import { sessionCacheStore } from "./session-cache-store";
 import { sessionPromotionTracker } from "./session-promotion";
@@ -66,6 +66,7 @@ describe("sessionCacheStore telemetry", () => {
 		sessionPromotionTracker.setMode("off");
 		sessionCacheStore.setEnabled(true);
 		sessionCacheStore.setMinTokens(100_000);
+		sessionCacheStore.setRiskFactor(RISK_FACTOR);
 		bridgeStats.reset();
 	});
 
@@ -311,5 +312,74 @@ describe("sessionCacheStore telemetry", () => {
 		expect(
 			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "min1"),
 		).toBeUndefined();
+	});
+
+	it("setRiskFactor recomputes existing slots' budget (scales linearly)", () => {
+		register("acc1", "rf1", 200_000);
+		const before = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "rf1");
+		const baseBudget = before?.budgetUsd ?? 0;
+		expect(baseBudget).toBeGreaterThan(0);
+
+		sessionCacheStore.setRiskFactor(RISK_FACTOR * 2);
+
+		const after = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "rf1");
+		expect(after?.budgetUsd).toBeCloseTo(baseBudget * 2, 10);
+	});
+
+	it("new registrations use the current risk factor", () => {
+		register("acc1", "rfBase", 200_000);
+		const base =
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "rfBase")
+				?.budgetUsd ?? 0;
+
+		sessionCacheStore.setRiskFactor(RISK_FACTOR / 2);
+		register("acc1", "rfHalf", 200_000);
+		const half =
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "rfHalf")
+				?.budgetUsd ?? 0;
+		expect(half).toBeCloseTo(base / 2, 10);
+	});
+
+	it("lowering risk factor below spend makes a slot ineligible without resetting spend or deleting it", () => {
+		register("acc1", "rfDrop", 200_000);
+		const now = Date.now();
+		// Accrue some spend via a keepalive hit.
+		sessionCacheStore.recordKeepaliveResult("acc1", "rfDrop", true, now);
+		const spent =
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "rfDrop")
+				?.spentUsd ?? 0;
+		expect(spent).toBeGreaterThan(0);
+
+		// Collapse the budget below what's already spent.
+		sessionCacheStore.setRiskFactor(0);
+
+		const slot = sessionCacheStore
+			.getAllSlots()
+			.find((s) => s.sessionKey === "rfDrop");
+		expect(slot).toBeDefined(); // not deleted
+		expect(slot?.spentUsd).toBeCloseTo(spent, 10); // spend preserved
+		expect(slot?.budgetUsd).toBe(0);
+		// budget(0) <= spent → no longer eligible for further keepalives.
+		const eligible = sessionCacheStore
+			.getEligibleSessions(now + KEEPALIVE_REFRESH_1H_MS + 1)
+			.some((s) => s.sessionKey === "rfDrop");
+		expect(eligible).toBe(false);
+	});
+
+	it("setRiskFactor clamps out-of-range input", () => {
+		register("acc1", "rfClamp", 200_000);
+		sessionCacheStore.setRiskFactor(999);
+		const capped =
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "rfClamp")
+				?.budgetUsd ?? 0;
+		sessionCacheStore.setRiskFactor(1.0); // MAX_RISK_FACTOR
+		const atMax =
+			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "rfClamp")
+				?.budgetUsd ?? 0;
+		expect(capped).toBeCloseTo(atMax, 10);
 	});
 });

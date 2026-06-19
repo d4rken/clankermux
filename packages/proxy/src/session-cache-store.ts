@@ -1,6 +1,7 @@
 import { getModelCacheRates } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	clampRiskFactor,
 	DEFAULT_MIN_CACHE_TOKENS,
 	hasCacheWritePremium,
 	isEligibleByTokens,
@@ -13,6 +14,8 @@ import {
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
+	ONE_HOUR_WRITE_MULT,
+	RISK_FACTOR,
 	resumePenaltyUsd,
 } from "./bridge-policy";
 import { bridgeStats } from "./bridge-stats";
@@ -157,6 +160,10 @@ class SessionCacheStore {
 	/** Minimum cached-token count for a session to be worth bridging. */
 	private minTokens = DEFAULT_MIN_CACHE_TOKENS;
 
+	/** Live spend-budget derate factor (the bridge-horizon knob). Configurable via
+	 * the dashboard; see {@link setRiskFactor}. Defaults to the bundled RISK_FACTOR. */
+	private riskFactor = RISK_FACTOR;
+
 	private static key(accountId: string, sessionKey: string): string {
 		return `${accountId}:${sessionKey}`;
 	}
@@ -180,6 +187,27 @@ class SessionCacheStore {
 			if (slot.cachedTokens < this.minTokens) {
 				this.deleteKey(key);
 			}
+		}
+	}
+
+	/**
+	 * Set the spend-budget derate factor (the bridge-horizon knob, surfaced in the UI
+	 * as hours). NaN-safe-clamped to [0, MAX_RISK_FACTOR]. Existing slots have their
+	 * budgetUsd recomputed at the new factor against their OWN effective write rate
+	 * (5m vs 1h), so a change takes effect immediately. We deliberately do NOT reset
+	 * spentUsd: lowering the budget below what a slot already spent makes it
+	 * immediately ineligible (it gives up now), while leaving the slot in place so a
+	 * still-warm cache can still book a warm-resume win.
+	 */
+	setRiskFactor(riskFactor: number): void {
+		this.riskFactor = clampRiskFactor(riskFactor);
+		for (const slot of this.slots.values()) {
+			slot.budgetUsd = keepaliveBudgetUsd(
+				slot.cachedTokens,
+				slot.cacheReadPer1M,
+				slot.cacheWriteEffectivePer1M,
+				this.riskFactor,
+			);
 		}
 	}
 
@@ -296,7 +324,7 @@ class SessionCacheStore {
 		// upsert mutates this.slots for the key on the success path, so it's still the
 		// current slot.
 		const cacheWriteEffectivePer1M = isOneHour
-			? rates.inputPer1M * 2
+			? rates.inputPer1M * ONE_HOUR_WRITE_MULT
 			: rates.cacheWritePer1M;
 
 		const slot: SessionCacheSlot = {
@@ -319,6 +347,7 @@ class SessionCacheStore {
 				cachedTokens,
 				rates.cacheReadPer1M,
 				cacheWriteEffectivePer1M,
+				this.riskFactor,
 			),
 			spentUsd: 0,
 			lastActivityTs: Date.now(),

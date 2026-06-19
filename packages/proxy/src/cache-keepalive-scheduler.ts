@@ -86,6 +86,7 @@ export class CacheKeepaliveScheduler {
 		// so hand it the configured mode rather than a boolean.
 		sessionPromotionTracker.setMode(this.config.getCacheWarmingMode());
 		sessionCacheStore.setMinTokens(this.config.getCacheWarmingMinTokens());
+		sessionCacheStore.setRiskFactor(this.config.getCacheWarmingRiskFactor());
 
 		// React dynamically to cache-warming config changes.
 		this.boundConfigChangeHandler = ({
@@ -111,6 +112,10 @@ export class CacheKeepaliveScheduler {
 			} else if (key === "cache_warming_min_tokens") {
 				if (typeof newValue === "number") {
 					sessionCacheStore.setMinTokens(newValue);
+				}
+			} else if (key === "cache_warming_risk_factor") {
+				if (typeof newValue === "number") {
+					sessionCacheStore.setRiskFactor(newValue);
 				}
 			}
 		};

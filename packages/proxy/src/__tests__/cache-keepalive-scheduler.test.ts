@@ -99,15 +99,18 @@ function makeConfig(
 	fireEnabledChange: (next: boolean) => void;
 	fireModeChange: (next: "off" | "static" | "dynamic") => void;
 	fireMinTokensChange: (next: number) => void;
+	fireRiskFactorChange: (next: number) => void;
 } {
 	let mode: "off" | "static" | "dynamic" = initialEnabled ? "dynamic" : "off";
 	let minTokens = initialMinTokens;
+	let riskFactor = 0.4;
 	const listeners: ConfigChangeListener[] = [];
 
 	const config = {
 		getCacheWarmingMode: () => mode,
 		getCacheWarmingEnabled: () => mode !== "off",
 		getCacheWarmingMinTokens: () => minTokens,
+		getCacheWarmingRiskFactor: () => riskFactor,
 		on: (event: string, cb: ConfigChangeListener) => {
 			if (event === "change") listeners.push(cb);
 		},
@@ -134,8 +137,20 @@ function makeConfig(
 			l({ key: "cache_warming_min_tokens", newValue: next });
 		}
 	};
+	const fireRiskFactorChange = (next: number) => {
+		riskFactor = next;
+		for (const l of listeners) {
+			l({ key: "cache_warming_risk_factor", newValue: next });
+		}
+	};
 
-	return { config, fireEnabledChange, fireModeChange, fireMinTokensChange };
+	return {
+		config,
+		fireEnabledChange,
+		fireModeChange,
+		fireMinTokensChange,
+		fireRiskFactorChange,
+	};
 }
 
 /**
@@ -397,12 +412,34 @@ describe("CacheKeepaliveScheduler", () => {
 			scheduler.stop();
 		});
 
+		it("risk-factor change propagates to the session store budgets", () => {
+			const { config, fireRiskFactorChange } = makeConfig(true, 100_000);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedSessionEntry("acc-rf", "session-rf", { cachedTokens: 200_000 });
+			const base =
+				sessionCacheStore.getAllSlots().find((s) => s.accountId === "acc-rf")
+					?.budgetUsd ?? 0;
+			expect(base).toBeGreaterThan(0);
+
+			// Doubling the risk factor doubles the live budget on the existing slot.
+			fireRiskFactorChange(0.8);
+			const doubled =
+				sessionCacheStore.getAllSlots().find((s) => s.accountId === "acc-rf")
+					?.budgetUsd ?? 0;
+			expect(doubled).toBeCloseTo(base * 2, 8);
+
+			scheduler.stop();
+		});
+
 		it("unrelated config key change is ignored", () => {
 			let listener: ConfigChangeListener | null = null;
 			const config = {
 				getCacheWarmingMode: () => "dynamic" as const,
 				getCacheWarmingEnabled: () => true,
 				getCacheWarmingMinTokens: () => 100_000,
+				getCacheWarmingRiskFactor: () => 0.4,
 				on: (_event: string, cb: ConfigChangeListener) => {
 					listener = cb;
 				},

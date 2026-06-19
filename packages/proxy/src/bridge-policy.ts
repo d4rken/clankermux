@@ -49,7 +49,12 @@ export function isBridgeableProvider(
 	return provider != null && PREMIUM_CACHE_PROVIDERS.has(provider);
 }
 
-/** Derate factor on the resume-penalty budget — hedges abandoned sessions. */
+/**
+ * DEFAULT derate factor on the resume-penalty budget — hedges abandoned sessions.
+ * Configurable at runtime via the dashboard (stored as `cache_warming_risk_factor`,
+ * surfaced in the UI as a bridge horizon in hours; see {@link riskFactorToBridgeHours}).
+ * 0.4 ≈ a ~6.3h horizon for promoted 1h sessions. The store holds the live value.
+ */
 export const RISK_FACTOR = 0.4;
 
 /** Default eligibility threshold: sessions below this cached-token count aren't
@@ -114,6 +119,65 @@ export const DESTICK_AFTER_ACTIVE_TURNS = 5;
 export const KEEPALIVE_REFRESH_1H_MS = 50 * 60_000;
 
 /**
+ * Anthropic cache-rate multipliers relative to the model's input rate
+ * (model-independent ratios): a 1-hour cache WRITE costs 2× input, a cache READ
+ * costs 0.1× input. ONE_HOUR_WRITE_MULT is also the effective-write multiplier a
+ * promoted (1h-TTL) slot uses — keep session-cache-store's effective-rate calc in
+ * terms of this constant so the two never drift.
+ */
+export const ONE_HOUR_WRITE_MULT = 2;
+export const CACHE_READ_MULT = 0.1;
+
+/**
+ * How many hours an idle, promoted (1h-TTL) session stays bridged per 1.0 of
+ * RISK_FACTOR. Derived, not magic: a slot keeps bridging while spend < budget, so
+ *   keepalives-to-exhaust = budget / hitCost
+ *                         = RISK_FACTOR·(write−read)·tokens / (read·tokens)
+ *                         = RISK_FACTOR · (ONE_HOUR_WRITE_MULT − CACHE_READ_MULT)/CACHE_READ_MULT
+ * and hours = keepalives · (KEEPALIVE_REFRESH_1H_MS / 1h). The token count cancels,
+ * so the horizon in hours depends only on the rate ratio and the refresh cadence —
+ * NOT on session size. Only valid for the 1h-promoted bridge (5m slots use the
+ * 3-min cadence and the 1.25× write rate, a much shorter horizon).
+ */
+export const BRIDGE_HOURS_PER_RISK_UNIT =
+	((ONE_HOUR_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
+	(KEEPALIVE_REFRESH_1H_MS / 3_600_000);
+
+/**
+ * Upper bound on RISK_FACTOR. At 1.0 the budget equals the whole avoided-rewrite
+ * penalty, so even in the all-hit model a successful resume only breaks even (and a
+ * budget-crossing keepalive or a single miss tips it slightly negative). Treat it
+ * as a "never budget more than the rewrite you're avoiding" cap, not a guarantee.
+ */
+export const MAX_RISK_FACTOR = 1.0;
+
+/** Break-even ceiling on the bridge horizon in hours (RISK_FACTOR = MAX_RISK_FACTOR). */
+export const MAX_BRIDGE_HOURS = MAX_RISK_FACTOR * BRIDGE_HOURS_PER_RISK_UNIT;
+
+/** NaN-safe clamp of a risk factor into [0, MAX_RISK_FACTOR]; non-finite → default. */
+export function clampRiskFactor(riskFactor: number): number {
+	if (!Number.isFinite(riskFactor)) return RISK_FACTOR;
+	return Math.min(Math.max(riskFactor, 0), MAX_RISK_FACTOR);
+}
+
+/** NaN-safe clamp of a bridge-horizon hours value into [0, MAX_BRIDGE_HOURS]. */
+export function clampBridgeHours(hours: number): number {
+	if (!Number.isFinite(hours)) return riskFactorToBridgeHours(RISK_FACTOR);
+	return Math.min(Math.max(hours, 0), MAX_BRIDGE_HOURS);
+}
+
+/** Convert a target bridge horizon (hours, promoted 1h slots) → RISK_FACTOR, clamped. */
+export function bridgeHoursToRiskFactor(hours: number): number {
+	if (!Number.isFinite(hours)) return RISK_FACTOR;
+	return clampRiskFactor(hours / BRIDGE_HOURS_PER_RISK_UNIT);
+}
+
+/** Convert a RISK_FACTOR → its bridge horizon in hours (promoted 1h slots), clamped. */
+export function riskFactorToBridgeHours(riskFactor: number): number {
+	return clampRiskFactor(riskFactor) * BRIDGE_HOURS_PER_RISK_UNIT;
+}
+
+/**
  * Hard cap on the number of sessions the promotion tracker holds (memory bound).
  * Over cap, the entry with the oldest lastSeenTs is LRU-evicted. Entries are tiny
  * metadata only (no request bodies).
@@ -148,6 +212,7 @@ export function keepaliveBudgetUsd(
 	cachedTokens: number,
 	cacheReadPer1M: number,
 	cacheWritePer1M: number,
+	riskFactor: number = RISK_FACTOR,
 ): number {
 	if (
 		!Number.isFinite(cachedTokens) ||
@@ -159,7 +224,7 @@ export function keepaliveBudgetUsd(
 	return (
 		((cacheWritePer1M - cacheReadPer1M) / 1_000_000) *
 		cachedTokens *
-		RISK_FACTOR
+		clampRiskFactor(riskFactor)
 	);
 }
 
