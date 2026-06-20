@@ -67,6 +67,29 @@ export function isAnthropicHardLimitStatus(response: Response): boolean {
 	return statusHeader !== null && HARD_LIMIT_STATUSES.has(statusHeader);
 }
 
+/**
+ * The value Anthropic sets on `anthropic-ratelimit-unified-overage-disabled-reason`
+ * when an account's credits / overage allowance are exhausted.
+ */
+export const OUT_OF_CREDITS_REASON = "out_of_credits";
+
+/**
+ * Returns `true` iff the response is an out-of-credits depletion signal:
+ * `anthropic-ratelimit-unified-overage-disabled-reason: out_of_credits`.
+ *
+ * Such a 429 carries `x-should-retry: true` and NO reset header, so without
+ * special handling it falls into the short no-reset probe-cooldown loop and
+ * storms the depleted account (issue #261). Comparison is exact and
+ * case-sensitive, matching {@link isAnthropicHardLimitStatus}.
+ */
+export function isAnthropicOutOfCredits(response: Response): boolean {
+	return (
+		response.headers.get(
+			"anthropic-ratelimit-unified-overage-disabled-reason",
+		) === OUT_OF_CREDITS_REASON
+	);
+}
+
 // Maximum allowed reset time: 24 hours from now.
 // Prevents a pathological Retry-After value from keeping an account
 // cooled down for days (or effectively forever with "Infinity").

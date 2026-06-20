@@ -61,6 +61,14 @@ const KNOWN_ERROR_META: Record<
 			"Cooldown defaults to 60s. Set `CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS` in your environment to change it.",
 		severity: "warning",
 	},
+	out_of_credits: {
+		title: "Account out of credits",
+		description:
+			"Anthropic returned 429 with `overage-disabled-reason: out_of_credits` — the account's credits/overage allowance is depleted. A long cooldown (≥1h, or until the usage-window reset) is applied so fallback providers take over instead of storming the depleted account.",
+		suggestion:
+			"Top up the account's credits or increase its overage allowance. Until then, traffic shifts to other configured accounts automatically.",
+		severity: "error",
+	},
 };
 
 function getModelFallbackMeta(context?: ErrorContext): ErrorMeta {
