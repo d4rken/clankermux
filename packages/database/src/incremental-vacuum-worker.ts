@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { isTransientLockError } from "./sqlite-error";
 
 /**
  * Dedicated worker for `PRAGMA incremental_vacuum(N)` and the periodic
@@ -78,15 +79,6 @@ function applyWorkerPragmas(db: Database): void {
 	db.exec("PRAGMA mmap_size = 0");
 }
 
-function isSqliteBusy(err: unknown): boolean {
-	return (
-		typeof err === "object" &&
-		err !== null &&
-		"code" in err &&
-		(err as { code?: unknown }).code === "SQLITE_BUSY"
-	);
-}
-
 function runIncrementalVacuum(dbPath: string, pages: number): void {
 	let db: Database | undefined;
 	try {
@@ -145,9 +137,12 @@ function runOptimize(dbPath: string): void {
 			skipped: false,
 		} satisfies IncrementalVacuumResult);
 	} catch (err) {
-		if (isSqliteBusy(err)) {
+		if (isTransientLockError(err)) {
 			// Contention during maintenance is normal — report a clean skip,
-			// the next 5-minute tick retries.
+			// the next 5-minute tick retries. Matches the whole BUSY/LOCKED
+			// family, including the extended `SQLITE_BUSY_SNAPSHOT` (517) that a
+			// WAL snapshot-vs-checkpoint race throws — an exact `SQLITE_BUSY`
+			// match would mislabel that benign skip as a WARN. See sqlite-error.ts.
 			self.postMessage({
 				ok: true,
 				skipped: true,
