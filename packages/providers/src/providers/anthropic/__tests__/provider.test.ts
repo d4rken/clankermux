@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { OAuthRefreshTokenError } from "@clankermux/core";
 import type { Account } from "@clankermux/types";
 import { AnthropicProvider } from "../provider";
 
@@ -295,6 +296,68 @@ describe("AnthropicProvider", () => {
 			);
 			const opusBody = await opusResult.json();
 			expect(opusBody.model).toBe("mapped-opus");
+		});
+	});
+
+	describe("refreshToken", () => {
+		const origFetch = globalThis.fetch;
+
+		function mockTokenResponse(status: number, body: unknown) {
+			globalThis.fetch = (async () =>
+				new Response(typeof body === "string" ? body : JSON.stringify(body), {
+					status,
+					headers: { "Content-Type": "application/json" },
+				})) as unknown as typeof fetch;
+		}
+
+		afterEach(() => {
+			globalThis.fetch = origFetch;
+		});
+
+		it("throws OAuthRefreshTokenError on HTTP 400 invalid_grant", async () => {
+			mockTokenResponse(400, {
+				error: "invalid_grant",
+				error_description: "Refresh token not found or invalid",
+			});
+			await expect(
+				provider.refreshToken(mockAccount, "client-id"),
+			).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+		});
+
+		it("throws OAuthRefreshTokenError on HTTP 401 invalid_grant", async () => {
+			mockTokenResponse(401, {
+				error: "invalid_grant",
+				error_description: "invalid_grant",
+			});
+			await expect(
+				provider.refreshToken(mockAccount, "client-id"),
+			).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+		});
+
+		it("throws OAuthRefreshTokenError on invalid_refresh_token", async () => {
+			mockTokenResponse(400, {
+				error: "invalid_refresh_token",
+				error_description: "The refresh token is invalid",
+			});
+			await expect(
+				provider.refreshToken(mockAccount, "client-id"),
+			).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+		});
+
+		it("detects invalid_grant in a non-JSON body", async () => {
+			mockTokenResponse(400, "error: invalid_grant — please reauthenticate");
+			await expect(
+				provider.refreshToken(mockAccount, "client-id"),
+			).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+		});
+
+		it("throws a generic Error (not OAuthRefreshTokenError) on a 500", async () => {
+			mockTokenResponse(500, { error: "internal_error" });
+			const err = await provider
+				.refreshToken(mockAccount, "client-id")
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(Error);
+			expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
 		});
 	});
 });

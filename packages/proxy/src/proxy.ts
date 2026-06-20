@@ -1,5 +1,7 @@
 import {
 	codexAccountFitsRequest,
+	codexAccountFitsRequestUnmargined,
+	estimateContextWindowTokens,
 	estimateRequestTokens,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
@@ -262,10 +264,19 @@ export async function handleProxy(
 			: { composition: null, toolStats: null };
 	const affinity = extractRequestAffinity(req.headers);
 
-	// Conservative token estimate for context-window-aware routing (B1).
-	// Computed once; used to gate Codex accounts whose mapped model can't fit
-	// the request (B3) and to build the context_window_exceeded error (B4).
+	// Coarse request-size estimate for the cache-warming session-promotion path
+	// (below). Kept on the legacy formula so promotion behavior is unchanged.
 	const requestTokenEstimate = estimateRequestTokens(
+		parsedBody,
+		contextComposition,
+	);
+
+	// Calibrated token estimate for the context-window gate (B1): gates Codex
+	// accounts whose mapped model can't fit the request (B3) and builds the
+	// context_window_exceeded error (B4). Distinct from the promotion estimate —
+	// see estimateContextWindowTokens for why (accurate divisor + capped output
+	// reservation).
+	const gateTokenEstimate = estimateContextWindowTokens(
 		parsedBody,
 		contextComposition,
 	);
@@ -782,15 +793,13 @@ export async function handleProxy(
 				}
 			}
 
-			if (
-				!codexAccountFitsRequest(account, modelForGate, requestTokenEstimate)
-			) {
+			if (!codexAccountFitsRequest(account, modelForGate, gateTokenEstimate)) {
 				const target = resolveCodexTargetModel(modelForGate, account);
 				const window = resolveModelContextWindow(target);
 				log.info(
 					`Context-window gate: excluding Codex account "${account.name}" ` +
 						`(model=${modelForGate}, target=${target}, window=${window ?? "unknown"}, ` +
-						`estimate=${requestTokenEstimate})`,
+						`estimate=${gateTokenEstimate})`,
 				);
 				// Track for error-response purposes (deduplicate by id)
 				if (
@@ -1040,7 +1049,14 @@ export async function handleProxy(
 		// If the pool was emptied specifically by the context-window gate
 		// (and there were Codex accounts that would have been available
 		// otherwise), hold the connection until a large-context account becomes
-		// available — up to CW_HOLD_MAX_MS — before returning 400.
+		// available — up to CW_HOLD_MAX_MS — before returning 400, then (E) fall
+		// back to attempting an excluded Codex account against its full window.
+		//
+		// Deliberately gated on `throttledAccounts.length === 0`: a usage-throttle
+		// terminal (the user is over their quota window) takes precedence and is
+		// surfaced below. We only reach the CW hold / last-resort path when the
+		// large-context accounts are unavailable for non-throttle reasons (paused,
+		// rate-limited) — which is the incident this path was built for.
 		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
 			const cwHoldStart = Date.now();
 
@@ -1124,14 +1140,84 @@ export async function handleProxy(
 				// All candidates returned null — loop back to recheck.
 			}
 
-			// Budget exhausted or no eligible accounts: discard any staged body
-			// and return the original context_window_exceeded 400.
-			cacheBodyStore.discardStaged(requestMeta.id);
-			return createContextWindowExceededResponse(
-				requestTokenEstimate,
-				contextExcludedAccounts,
-				effectiveRequestModel ?? "unknown",
+			// Last-resort relaxation (E): the CW hold found no large-context account
+			// and the only backends that could serve are the Codex accounts the gate
+			// excluded. Rather than 400 a request that may actually fit the real
+			// window, re-admit any excluded Codex account whose estimate fits the
+			// FULL window (no SAFETY_MARGIN) and attempt it. Codex is the genuine
+			// last resort here, so we drop the guard band; if the estimate still
+			// undercounts, Codex returns its own context-length error.
+			if (req.signal?.aborted) {
+				cacheBodyStore.discardStaged(requestMeta.id);
+				return createClientAbortResponse();
+			}
+			const relaxCandidates = contextExcludedAccounts.filter(
+				({ account, model }) =>
+					codexAccountFitsRequestUnmargined(account, model, gateTokenEstimate),
 			);
+			let relaxAttempted = false;
+			for (let i = 0; i < relaxCandidates.length; i++) {
+				const { account } = relaxCandidates[i];
+				// Re-derive the combo slot's model override exactly as the gate did,
+				// so we send the same model the unmargined check sized against.
+				const slot = initialComboInfo?.slots.find(
+					(s) => s.accountId === account.id,
+				);
+				log.info(
+					`Context-window last-resort: attempting excluded Codex account ` +
+						`"${account.name}" against full window (estimate=${gateTokenEstimate})`,
+				);
+				relaxAttempted = true;
+				const r = await proxyWithAccount(
+					req,
+					url,
+					account,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					i,
+					ctx,
+					slot?.modelOverride,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					// On the last candidate, forward a real upstream rate-limit/overload
+					// as the honest terminal rather than collapsing it to null.
+					i === relaxCandidates.length - 1,
+					// Thread the client signal so a disconnect aborts the in-flight
+					// attempt instead of waiting for the upstream timeout.
+					{ signal: req.signal },
+				);
+				if (r) return r;
+				// A null here can mean the client disconnected mid-attempt (the
+				// threaded signal aborts the fetch, which proxyWithAccount reports as
+				// a network_error null). Surface that as a client abort rather than
+				// continuing to the next candidate or the fall-through terminal.
+				if (req.signal?.aborted) {
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
+			}
+
+			// Done with the staged body either way (a successful attempt already
+			// returned above).
+			cacheBodyStore.discardStaged(requestMeta.id);
+
+			if (!relaxAttempted) {
+				// No excluded Codex account fit even the full window → the request is
+				// genuinely too big for every backend. The size 400 is correct.
+				return createContextWindowExceededResponse(
+					gateTokenEstimate,
+					contextExcludedAccounts,
+					effectiveRequestModel ?? "unknown",
+				);
+			}
+			// The request fit the true window but every last-resort Codex attempt
+			// failed for availability (429/5xx/network → null). That is NOT a size
+			// problem, so fall through to the generic terminals below — pool_exhausted
+			// / provider-overloaded, or pinned_target_unavailable when a pin / Codex-
+			// CLI floor is active (all honest, retryable 503s) — rather than a
+			// misleading context_window_exceeded 400.
 		}
 
 		if (throttledAccounts.length > 0) {

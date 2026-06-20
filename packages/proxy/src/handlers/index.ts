@@ -49,6 +49,7 @@ export {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	getValidAccessToken,
+	pauseAccountForReauthIfInvalidGrant,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
 	registerCodexUsageRefresher,

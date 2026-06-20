@@ -13,8 +13,11 @@ export {
 } from "./constants";
 
 export {
+	isInvalidGrantMessage,
 	logError,
 	OAuthError,
+	OAuthRefreshTokenError,
+	PAUSE_REASON_NEEDS_REAUTH,
 	ProviderError,
 	RateLimitError,
 	ServiceUnavailableError,
@@ -52,9 +55,13 @@ export {
 } from "./interval-manager";
 export {
 	codexAccountFitsRequest,
+	codexAccountFitsRequestUnmargined,
 	createCustomEndpointData,
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
+	estimateContextWindowTokens,
 	estimateRequestTokens,
+	GATE_CHARS_PER_TOKEN,
+	GATE_OUTPUT_RESERVE_CAP,
 	getAllowedModelsMessage,
 	getEndpointUrl,
 	getModelFamily,

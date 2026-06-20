@@ -186,8 +186,25 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * (e.g. expired-subscription detection) so it never overwrites the reason
 	 * on an account the user (or another guard) already paused. Returns true
 	 * when the account was actually paused by this call.
+	 *
+	 * When `expectedRefreshToken` is provided the pause is additionally gated on
+	 * the account still holding that exact refresh token. This guards the
+	 * OAuth-invalid-grant pause against a stale/in-flight refresh (using an old
+	 * token) re-pausing an account that was just re-authenticated — after reauth
+	 * the stored refresh token differs, so the guarded UPDATE no-ops.
 	 */
-	async pauseIfActive(accountId: string, reason: string): Promise<boolean> {
+	async pauseIfActive(
+		accountId: string,
+		reason: string,
+		expectedRefreshToken?: string | null,
+	): Promise<boolean> {
+		if (expectedRefreshToken != null) {
+			const changes = await this.runWithChanges(
+				`UPDATE accounts SET paused = 1, pause_reason = ? WHERE id = ? AND COALESCE(paused, 0) = 0 AND refresh_token = ?`,
+				[reason, accountId, expectedRefreshToken],
+			);
+			return changes > 0;
+		}
 		const changes = await this.runWithChanges(
 			`UPDATE accounts SET paused = 1, pause_reason = ? WHERE id = ? AND COALESCE(paused, 0) = 0`,
 			[reason, accountId],

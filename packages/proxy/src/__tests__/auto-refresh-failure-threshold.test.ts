@@ -10,27 +10,37 @@ import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/** Build a minimal mock DB adapter with a spy on `run`. */
+/** Build a minimal mock DB adapter with spies on `run`/`runWithChanges`. */
 function makeDb() {
 	const runCalls: Array<[string, unknown[]]> = [];
 	return {
 		run: mock(async (sql: string, params: unknown[]) => {
 			runCalls.push([sql, params]);
 		}),
+		// The failure-threshold pause uses runWithChanges (guarded UPDATE); record
+		// it in runCalls too and report a row changed so the "paused" branch fires.
+		runWithChanges: mock(async (sql: string, params: unknown[]) => {
+			runCalls.push([sql, params]);
+			return 1;
+		}),
 		query: mock(async () => []),
 		runCalls,
 	};
 }
 
-/** Build a mock DB whose `run` throws on the first call, then succeeds. */
+/** Build a mock DB whose pause `runWithChanges` throws on the first call. */
 function makeDbWithRunError(error: Error) {
 	const runCalls: Array<[string, unknown[]]> = [];
 	let callCount = 0;
 	return {
 		run: mock(async (sql: string, params: unknown[]) => {
+			runCalls.push([sql, params]);
+		}),
+		runWithChanges: mock(async (sql: string, params: unknown[]) => {
 			callCount++;
 			if (callCount === 1) throw error;
 			runCalls.push([sql, params]);
+			return 1;
 		}),
 		query: mock(async () => []),
 		runCalls,

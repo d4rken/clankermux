@@ -111,7 +111,7 @@ export interface AccountRow {
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
-	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes?: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
@@ -152,7 +152,7 @@ export interface Account {
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
-	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage
+	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
@@ -196,7 +196,7 @@ export interface AccountResponse {
 	lastUsed: string | null;
 	created: string;
 	paused: boolean;
-	/** Why the account is paused (e.g. "manual", "overage", "failure_threshold", "subscription_expired"); null when not paused or unknown. */
+	/** Why the account is paused (e.g. "manual", "overage", "failure_threshold", "subscription_expired", "oauth_invalid_grant"); null when not paused or unknown. */
 	pauseReason?: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
