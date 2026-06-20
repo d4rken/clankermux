@@ -66,6 +66,16 @@ export const TIME_CONSTANTS = {
 	RATE_LIMIT_BACKOFF_BASE_MS: 30 * 1000, // 30s: cooldown for the 1st 429 in a streak
 	RATE_LIMIT_BACKOFF_MAX_MS: 5 * 60 * 1000, // 5min: ceiling for the exponential ramp
 	RATE_LIMIT_RESET_STABILITY_MS: 5 * 60 * 1000, // 5min: healthy operation needed to reset the streak counter
+
+	// Long cooldown applied when an Anthropic account returns 429 with
+	// `anthropic-ratelimit-unified-overage-disabled-reason: out_of_credits` — the
+	// account's credits/overage are depleted, NOT a transient burst. Such a 429
+	// ships no retry-after/reset header and `x-should-retry: true`, so the generic
+	// no-reset path pins it at the 60s probe interval and storms the depleted
+	// account ~1/min (issue #261). We instead exclude it for a long window (until
+	// the usage-window reset if known, else this value) so fallback providers take
+	// over. No env override by design.
+	OUT_OF_CREDITS_COOLDOWN_MS: 60 * 60 * 1000, // 1 hour
 } as const;
 
 /**

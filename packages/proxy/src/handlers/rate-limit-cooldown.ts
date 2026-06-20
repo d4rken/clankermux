@@ -54,6 +54,15 @@ export function applyRateLimitCooldown(
 		resetTime?: number;
 		remaining?: number;
 		reason?: RateLimitReason;
+		/**
+		 * Hard minimum cooldown deadline (epoch ms). After the normal
+		 * `min(resetTime, now + backoff)` computation the cooldown is raised to
+		 * `floorUntil` if it is larger — letting a deliberately LONG cooldown (e.g.
+		 * out-of-credits depletion) survive the exponential-backoff cap, which would
+		 * otherwise pin every no-reset 429 at the backoff ceiling. Omitted on all
+		 * normal paths (no behavioural change). Ignored in `reprobe` mode.
+		 */
+		floorUntil?: number;
 	},
 	ctx: ProxyContext,
 	options?: { reprobe?: boolean },
@@ -84,9 +93,15 @@ export function applyRateLimitCooldown(
 	const nextCount = account.consecutive_rate_limits + 1;
 	const backoffMs = computeRateLimitBackoffMs(nextCount);
 	const candidateUntil = now + backoffMs;
-	const cooldownUntil = rateLimitInfo.resetTime
+	let cooldownUntil = rateLimitInfo.resetTime
 		? Math.min(rateLimitInfo.resetTime, candidateUntil)
 		: candidateUntil;
+	// A hard floor (e.g. out-of-credits depletion) overrides the backoff cap
+	// upward so a deliberately long cooldown is not shortened by the exponential
+	// ramp's min(resetTime, backoff).
+	if (rateLimitInfo.floorUntil && rateLimitInfo.floorUntil > cooldownUntil) {
+		cooldownUntil = rateLimitInfo.floorUntil;
+	}
 	const reason: RateLimitReason =
 		rateLimitInfo.reason ??
 		(rateLimitInfo.resetTime

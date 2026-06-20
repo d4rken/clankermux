@@ -13,7 +13,11 @@ export type RateLimitReason =
 	/** Anthropic 529 overloaded_error with a Retry-After reset time. */
 	| "upstream_529_overloaded_with_reset"
 	/** Anthropic 529 overloaded_error with no Retry-After header; probe cooldown applied. */
-	| "upstream_529_overloaded_no_reset";
+	| "upstream_529_overloaded_no_reset"
+	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
+	 *  depleted; a long cooldown (≥1h, or until window reset) is applied instead of
+	 *  the short no-reset probe loop. */
+	| "out_of_credits";
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {

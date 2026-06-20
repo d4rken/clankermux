@@ -12,6 +12,7 @@ import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
 	getFreshCapacity,
 	getProvider,
+	isAnthropicOutOfCredits,
 	usageCache,
 } from "@clankermux/providers";
 import {
@@ -961,13 +962,30 @@ export async function proxyWithAccount(
 				);
 			}
 
+			// Resolve the requested model up front so every 429 audit row below
+			// (reprobe, out_of_credits, burst-intercept, model-fallback, exhausted)
+			// can record it. Previously this was computed only just before the
+			// model-fallback block, leaving the failover-429 audit rows with a
+			// NULL model.
+			let requestedModel: string | null = null;
+			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
+
 			// ── Transparent burst-retry: re-probe mode ──────────────────────────
 			// A re-probe of a held account that came back 429 (still throttled):
 			// apply the no-streak/no-anchor cooldown and signal "still throttled"
 			// to the hold orchestrator WITHOUT cycling model fallbacks at the
 			// throttled IP. The orchestrator decides whether to wait and re-probe
 			// again or give up. Non-429 responses fall through to the normal path.
-			if (options?.reprobe && rawResponse.status === 429) {
+			// An out_of_credits 429 that surfaces mid-hold (credits deplete while
+			// the account is held) is deliberately EXCLUDED here so it falls
+			// through to the out_of_credits block below and gets the long cooldown
+			// rather than the short reprobe cooldown — it is a hard depletion,
+			// never a transient burst worth re-probing.
+			if (
+				options?.reprobe &&
+				rawResponse.status === 429 &&
+				!isAnthropicOutOfCredits(rawResponse)
+			) {
 				const cooldownUntil = extractCooldownUntil(
 					rawResponse,
 					account.id,
@@ -990,6 +1008,65 @@ export async function proxyWithAccount(
 						confidence: "fresh_headroom",
 						cooldownUntil,
 					},
+					rawResponse,
+				);
+			}
+
+			// ── Out-of-credits: hard depletion, NOT a transient burst ───────
+			// Anthropic returns 429 + `overage-disabled-reason: out_of_credits`
+			// with NO reset header and `x-should-retry: true`. Left to the generic
+			// path this pins the account at the 60s no-reset probe cooldown and
+			// storms it ~1/min (issue #261); the burst-retry intercept below would
+			// even hold-and-re-probe the depleted account. Short-circuit FIRST:
+			// apply a long cooldown (until the usage-window reset if known, else
+			// OUT_OF_CREDITS_COOLDOWN_MS) so fallback providers take over, skipping
+			// burst-retry and model-fallback cycling. Synthetic keepalive/internal
+			// replays are excluded (handled by their own keepalive cooldown-skip).
+			if (
+				rawResponse.status === 429 &&
+				isAnthropicOutOfCredits(rawResponse) &&
+				!isSyntheticInternalRequest(req.headers)
+			) {
+				const now = Date.now();
+				const windowReset = usageCache.getRateLimitedUntil(account.id);
+				const floorUntil = Math.max(
+					now + TIME_CONSTANTS.OUT_OF_CREDITS_COOLDOWN_MS,
+					windowReset && windowReset > now ? windowReset : 0,
+				);
+				const reason: RateLimitReason = "out_of_credits";
+				// floorUntil bypasses the exponential-backoff min() cap so the long
+				// cooldown actually sticks (see applyRateLimitCooldown.floorUntil).
+				applyRateLimitCooldown(account, { floorUntil, reason }, ctx);
+				// Persist the 429's unified-status header so the dashboard chip
+				// doesn't freeze at the last successful response's value.
+				persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+				const responseTime = Date.now() - requestMeta.timestamp;
+				// Deliberate direct audit row (synthetic UUID id), NOT recorder-owned.
+				ctx.asyncWriter.enqueue(() =>
+					ctx.dbOps.saveRequest(
+						crypto.randomUUID(),
+						req.method,
+						url.pathname,
+						account.id,
+						429,
+						false,
+						reason,
+						responseTime,
+						failoverAttempts,
+						requestedModel ? { model: requestedModel } : undefined,
+						apiKeyId ?? undefined,
+						apiKeyName ?? undefined,
+						requestMeta.project ?? null,
+						undefined,
+						requestMeta.comboName ?? null,
+						requestMeta.reasoningEffort ?? null,
+					),
+				);
+				log.warn(
+					`Account ${account.name} out_of_credits (429) — long cooldown until ${new Date(floorUntil).toISOString()}, failing over (no burst-retry, no model cycling)`,
+				);
+				return await fail(
+					{ kind: "hard_429", cooldownUntil: floorUntil },
 					rawResponse,
 				);
 			}
@@ -1093,7 +1170,7 @@ export async function proxyWithAccount(
 							"model_fallback_429",
 							responseTime,
 							failoverAttempts,
-							undefined,
+							requestedModel ? { model: requestedModel } : undefined,
 							apiKeyId ?? undefined,
 							apiKeyName ?? undefined,
 							requestMeta.project ?? null,
@@ -1115,9 +1192,6 @@ export async function proxyWithAccount(
 					);
 				}
 			}
-
-			let requestedModel: string | null = null;
-			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
 			if (requestedModel) {
 				const modelList = getModelList(requestedModel, account);
@@ -1185,7 +1259,7 @@ export async function proxyWithAccount(
 								reason,
 								responseTime,
 								failoverAttempts,
-								undefined,
+								requestedModel ? { model: requestedModel } : undefined,
 								apiKeyId ?? undefined,
 								apiKeyName ?? undefined,
 								requestMeta.project ?? null,
@@ -1361,7 +1435,7 @@ export async function proxyWithAccount(
 								reason,
 								responseTime,
 								failoverAttempts,
-								undefined,
+								requestedModel ? { model: requestedModel } : undefined,
 								apiKeyId ?? undefined,
 								apiKeyName ?? undefined,
 								requestMeta.project ?? null,
