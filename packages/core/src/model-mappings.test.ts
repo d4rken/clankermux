@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
 	codexAccountFitsRequest,
+	codexAccountFitsRequestUnmargined,
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
+	estimateContextWindowTokens,
 	estimateRequestTokens,
+	GATE_CHARS_PER_TOKEN,
+	GATE_OUTPUT_RESERVE_CAP,
 	getAllowedModelsMessage,
 	getModelFamily,
 	isValidClaudeModel,
@@ -429,11 +433,11 @@ describe("estimateRequestTokens", () => {
 
 describe("codexAccountFitsRequest", () => {
 	test("returns true when estimate is under window * SAFETY_MARGIN", () => {
-		// gpt-5.5: 272K * 0.85 = 231.2K → floor = 231200
+		// gpt-5.5: floor(272000 * 0.97) = 263840
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 231_200)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 263_840)).toBe(
 			true,
 		);
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
@@ -445,8 +449,8 @@ describe("codexAccountFitsRequest", () => {
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
-		// 272K * 0.85 = 231200
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 231_201)).toBe(
+		// floor(272000 * 0.97) = 263840
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 263_841)).toBe(
 			false,
 		);
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 500_000)).toBe(
@@ -469,18 +473,18 @@ describe("codexAccountFitsRequest", () => {
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
 		});
-		// 128K * 0.85 = 108800
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 108_800)).toBe(
+		// floor(128000 * 0.97) = 124160
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 124_160)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 108_801)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 124_161)).toBe(
 			false,
 		);
 	});
 
 	test("resolves the family default Codex model when no stored mapping exists", () => {
 		// No account mapping → opus resolves to the gpt-5.5 family default
-		// (272K window, threshold 231200), matching what the provider actually
+		// (272K window, threshold 263840), matching what the provider actually
 		// sends, so an oversized request is correctly excluded (not "fits").
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
@@ -492,18 +496,152 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-5.5 default (272K, threshold 231200).
+		// fable → gpt-5.5 default (272K, threshold 263840).
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 231_200)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_840)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 231_201)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_841)).toBe(
 			false,
 		);
 		// mythos resolves to the same fable family default.
-		expect(codexAccountFitsRequest(account, "claude-mythos-5", 231_201)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-mythos-5", 263_841)).toBe(
 			false,
 		);
+	});
+});
+
+describe("constants are calibrated", () => {
+	test("gate constants hold their data-derived values", () => {
+		expect(SAFETY_MARGIN).toBe(0.97);
+		expect(GATE_CHARS_PER_TOKEN).toBe(3.0);
+		expect(GATE_OUTPUT_RESERVE_CAP).toBe(4_000);
+	});
+});
+
+describe("estimateContextWindowTokens", () => {
+	const composition = (
+		systemChars: number,
+		toolsChars: number,
+		messagesChars: number,
+	): ContextComposition => ({
+		systemChars,
+		toolsChars,
+		toolCount: 0,
+		messagesChars,
+		messageCount: 1,
+		toolResultChars: 0,
+		largestToolResultChars: 0,
+		largestToolName: null,
+	});
+
+	test("null/undefined body → 0", () => {
+		expect(estimateContextWindowTokens(null)).toBe(0);
+		expect(estimateContextWindowTokens(undefined)).toBe(0);
+	});
+
+	test("composition path divides content chars by GATE_CHARS_PER_TOKEN (3.0)", () => {
+		// 30,000 content chars → 10,000 tokens at 3.0; no max_tokens → no reserve.
+		const body = { max_tokens: 0 };
+		const comp = composition(6_000, 9_000, 15_000); // 30,000 chars
+		expect(estimateContextWindowTokens(body, comp)).toBe(10_000);
+	});
+
+	test("caps the output reservation at GATE_OUTPUT_RESERVE_CAP (4,000)", () => {
+		const comp = composition(0, 0, 30_000); // 10,000 input tokens
+		// max_tokens 64,000 → reserve clamped to 4,000.
+		expect(estimateContextWindowTokens({ max_tokens: 64_000 }, comp)).toBe(
+			14_000,
+		);
+		// max_tokens 3,000 (< cap) → reserve only 3,000.
+		expect(estimateContextWindowTokens({ max_tokens: 3_000 }, comp)).toBe(
+			13_000,
+		);
+	});
+
+	test("the incident request (~675k chars, max_tokens 64k) now fits gpt-5.5", () => {
+		// Reproduces the reported 400: old estimate was 232,859 = 675,436/4 + 64,000.
+		const comp = composition(6_601, 134_827, 534_008); // 675,436 chars total
+		const est = estimateContextWindowTokens({ max_tokens: 64_000 }, comp);
+		// 675,436 / 3.0 = 225,146 (ceil) + min(64000, 4000) = 229,146.
+		expect(est).toBe(229_146);
+		const account = makeCodexAccount({ model_mappings: null });
+		// Admitted by the gate (threshold floor(272000 * 0.97) = 263,840).
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
+	});
+
+	test("fallback path (no composition) caps the reserve too", () => {
+		const body = { model: "x", max_tokens: 64_000 };
+		const jsonLen = JSON.stringify(body).length;
+		const expected = Math.ceil(jsonLen / 3.0) + GATE_OUTPUT_RESERVE_CAP;
+		expect(estimateContextWindowTokens(body)).toBe(expected);
+	});
+});
+
+describe("estimateRequestTokens is unchanged (cache-warming promotion regression guard)", () => {
+	test("composition path still divides by 4.0 and adds full max_tokens", () => {
+		const comp: ContextComposition = {
+			systemChars: 0,
+			toolsChars: 0,
+			toolCount: 0,
+			messagesChars: 40_000,
+			messageCount: 1,
+			toolResultChars: 0,
+			largestToolResultChars: 0,
+			largestToolName: null,
+		};
+		// 40,000 / 4.0 = 10,000 + full 64,000 max_tokens = 74,000 (NOT capped).
+		expect(estimateRequestTokens({ max_tokens: 64_000 }, comp)).toBe(74_000);
+		// The gate estimator for the same input is materially different.
+		expect(estimateContextWindowTokens({ max_tokens: 64_000 }, comp)).not.toBe(
+			74_000,
+		);
+	});
+});
+
+describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
+	test("admits up to the FULL window (the margin band is re-admitted)", () => {
+		const account = makeCodexAccount({ model_mappings: null }); // opus→gpt-5.5
+		// In the (floor(272000*0.97)=263840, 272000] band: margined gate rejects,
+		// unmargined admits.
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 270_000)).toBe(
+			false,
+		);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 270_000),
+		).toBe(true);
+		// Exactly at the window: admitted.
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
+		).toBe(true);
+	});
+
+	test("rejects beyond the full window", () => {
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
+		).toBe(false);
+	});
+
+	test("unknown model → fits (no false exclusion), matching the margined gate", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.2-codex" }),
+		});
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 9_999_999),
+		).toBe(true);
+	});
+
+	test("respects the 128k spark window", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
+		});
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 128_000),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 128_001),
+		).toBe(false);
 	});
 });
 
@@ -546,8 +684,8 @@ describe("resolveCodexTargetModel", () => {
 		});
 	});
 
-	test("SAFETY_MARGIN is 0.85", () => {
-		expect(SAFETY_MARGIN).toBe(0.85);
+	test("SAFETY_MARGIN is 0.97", () => {
+		expect(SAFETY_MARGIN).toBe(0.97);
 	});
 
 	test("boundary: exactly at floor(window * SAFETY_MARGIN) is accepted", () => {

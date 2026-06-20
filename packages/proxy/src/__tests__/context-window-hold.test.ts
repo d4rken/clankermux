@@ -60,10 +60,28 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	};
 }
 
-// gpt-5.5 window = 272K, threshold = floor(272K * 0.85) = 231200
-// A request estimated above 231200 tokens exceeds the Codex window.
+// gpt-5.5 window = 272K, gate threshold = floor(272K * 0.97) = 263840; the
+// last-resort (unmargined) ceiling is the full 272000.
+// A request estimated above 272000 tokens exceeds even the true Codex window.
 function makeLargeRequest(signal?: AbortSignal): Request {
 	const neededChars = Math.ceil((350_000 - 16) * 3.0);
+	return new Request("https://proxy.local/v1/messages", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			model: "claude-opus-4-7",
+			messages: [{ role: "user", content: "x".repeat(neededChars) }],
+			max_tokens: 16,
+		}),
+		signal,
+	});
+}
+
+// A request whose gate estimate (contentChars/3.0 + min(max_tokens,4000)) lands
+// in the relax band (263840, 272000]: the margined gate excludes the Codex
+// account, but the unmargined last-resort admits it. Target ≈ 268,000.
+function makeRelaxBandRequest(signal?: AbortSignal): Request {
+	const neededChars = Math.ceil((268_000 - 16) * 3.0);
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -366,5 +384,215 @@ describe("context-window hold", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
+	});
+
+	// ── Last-resort relaxation (E) ──────────────────────────────────────────
+	it("last-resort: attempts the excluded Codex account when it is the only option and the request fits the true window", async () => {
+		// Relax-band request (gate excludes at 0.97 margin, but it fits the full
+		// 272k window). With Codex the only account and nothing to hold for, the
+		// last-resort path must ATTEMPT Codex upstream rather than pre-rejecting.
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			access_token: "cx-token",
+			refresh_token: "cx-refresh",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const ctx = makeFullContext([codex]);
+
+		let fetchCount = 0;
+		globalThis.fetch = mock(async () => {
+			fetchCount++;
+			return ok200();
+		}) as never;
+
+		const response = await callHandleProxy(
+			makeRelaxBandRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// E attempted the upstream Codex call (the gate would have skipped it).
+		expect(fetchCount).toBeGreaterThanOrEqual(1);
+		// And the response is NOT the pre-emptive size 400.
+		if (response.status === 400) {
+			const body = (await response.json()) as Record<string, unknown>;
+			const error = body.error as Record<string, unknown>;
+			expect(error.type).not.toBe("context_window_exceeded");
+		}
+	});
+
+	it("last-resort: still returns 400 (no upstream attempt) when the request exceeds even the true window", async () => {
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			access_token: "cx-token",
+			refresh_token: "cx-refresh",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const ctx = makeFullContext([codex]);
+
+		let fetchCount = 0;
+		globalThis.fetch = mock(async () => {
+			fetchCount++;
+			return ok200();
+		}) as never;
+
+		const response = await callHandleProxy(
+			makeLargeRequest(), // ~350k, exceeds the full 272k window
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The unmargined check also fails → E never attempts upstream.
+		expect(fetchCount).toBe(0);
+		expect(response.status).toBe(400);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("context_window_exceeded");
+	});
+
+	it("last-resort: an upstream Codex 429 does NOT become a misleading size 400", async () => {
+		// The request fits the true window (relax band) and E attempts Codex, but
+		// Codex returns 429 → proxyWithAccount yields null. That's an availability
+		// failure, not a size problem, so the terminal must NOT be
+		// context_window_exceeded (it falls through to pool_exhausted).
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			access_token: "cx-token",
+			refresh_token: "cx-refresh",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const ctx = makeFullContext([codex]);
+
+		let fetchCount = 0;
+		globalThis.fetch = mock(async () => {
+			fetchCount++;
+			return new Response(
+				JSON.stringify({ error: { message: "rate limited" } }),
+				{
+					status: 429,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		}) as never;
+
+		const response = await callHandleProxy(
+			makeRelaxBandRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(fetchCount).toBeGreaterThanOrEqual(1); // E attempted upstream
+		// Unpinned path → falls through to pool_exhausted (503), the honest,
+		// retryable terminal — never the misleading size 400.
+		expect(response.status).toBe(503);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("pool_exhausted");
+	});
+
+	it("last-resort: a client disconnect mid-attempt returns client_closed_request, not a fall-through terminal", async () => {
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			access_token: "cx-token",
+			refresh_token: "cx-refresh",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const ctx = makeFullContext([codex]);
+
+		const controller = new AbortController();
+		let fetchCount = 0;
+		globalThis.fetch = mock(async () => {
+			fetchCount++;
+			// Simulate the client disconnecting while the E attempt is in flight.
+			controller.abort();
+			throw new DOMException("The operation was aborted.", "AbortError");
+		}) as never;
+
+		const response = await callHandleProxy(
+			makeRelaxBandRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(fetchCount).toBeGreaterThanOrEqual(1); // E attempted before the abort
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("client_closed_request");
+	});
+
+	it("last-resort: checks the combo slot's smaller window, not the family default", async () => {
+		// Account default opus→gpt-5.5 (272k), combo slot overrides to
+		// gpt-5.3-codex-spark (128k). A ~150k request is excluded by the gate and
+		// also exceeds spark's FULL 128k window → the unmargined check must reject
+		// (using the override, not the 272k family default) and NOT attempt Codex.
+		const codex = makeAccount({
+			id: "codex-combo",
+			name: "Codex-combo",
+			provider: "codex",
+			access_token: "cx-token",
+			refresh_token: "cx-refresh",
+			expires_at: Date.now() + 3_600_000,
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const ctx = makeFullContext([codex]);
+		(
+			ctx.dbOps as unknown as {
+				getActiveComboForFamily: ReturnType<typeof mock>;
+			}
+		).getActiveComboForFamily = mock(async () => ({
+			name: "test-combo",
+			slots: [
+				{
+					account_id: "codex-combo",
+					model: "gpt-5.3-codex-spark",
+					enabled: true,
+				},
+			],
+		}));
+
+		let fetchCount = 0;
+		globalThis.fetch = mock(async () => {
+			fetchCount++;
+			return ok200();
+		}) as never;
+
+		// ~150k estimate: > spark's 128k window, but < gpt-5.5's 272k. If E wrongly
+		// used the family default it would attempt; with the override it must not.
+		const neededChars = Math.ceil((150_000 - 16) * 3.0);
+		const req = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-7",
+				messages: [{ role: "user", content: "x".repeat(neededChars) }],
+				max_tokens: 16,
+			}),
+		});
+
+		const response = await callHandleProxy(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(fetchCount).toBe(0); // override window rejected → no upstream attempt
+		expect(response.status).toBe(400);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("context_window_exceeded");
+		expect(error.message as string).toContain("gpt-5.3-codex-spark");
 	});
 });
