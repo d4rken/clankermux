@@ -121,7 +121,7 @@ function makeSmallRequest(): Request {
 
 describe("context-window gate", () => {
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
-		// gpt-5.5 window = 272K, threshold = floor(272K * 0.85) = 231200
+		// gpt-5.5 window = 272K, threshold = floor(272K * 0.97) = 263840
 		const codexAccount = makeAccount({
 			id: "codex-me",
 			name: "Codex-me",
@@ -130,7 +130,7 @@ describe("context-window gate", () => {
 		});
 
 		const ctx = makeContext([codexAccount]);
-		// Request estimated above the 231200 threshold
+		// Request estimated above the 263840 threshold
 		const req = makeLargeRequest(350_000);
 		const response = await callHandleProxy(
 			req,
@@ -151,7 +151,7 @@ describe("context-window gate", () => {
 
 	it("gates a default-config codex account (no model_mappings) on its family-default window", async () => {
 		// No model_mappings → opus resolves to the gpt-5.5 family default (272K,
-		// threshold 231200), matching what the provider actually sends. An oversized
+		// threshold 263840), matching what the provider actually sends. An oversized
 		// request must be excluded by the gate rather than slipping through.
 		const codexAccount = makeAccount({
 			id: "codex-default",
@@ -299,9 +299,9 @@ describe("context-window gate", () => {
 	});
 
 	it("gates a combo-routed codex account on the slot's model override (not the family default)", async () => {
-		// Account default mapping: opus→gpt-5.5 (272K, threshold 231200).
-		// Combo slot overrides model to gpt-5.3-codex-spark (128K, threshold 108800).
-		// A request estimated between 108800 and 231200 passes the family-default
+		// Account default mapping: opus→gpt-5.5 (272K, threshold 263840).
+		// Combo slot overrides model to gpt-5.3-codex-spark (128K, threshold 124160).
+		// A request estimated between 124160 and 263840 passes the family-default
 		// gate but must be excluded by the combo slot's smaller-window model.
 		const codexAccount = makeAccount({
 			id: "codex-combo",
@@ -327,8 +327,8 @@ describe("context-window gate", () => {
 			],
 		}));
 
-		// Estimate ~150K (above 108800 threshold for gpt-5.3-codex-spark,
-		// below 231200 threshold for gpt-5.5)
+		// Estimate ~150K (above 124160 threshold for gpt-5.3-codex-spark,
+		// below 263840 threshold for gpt-5.5)
 		const req = makeLargeRequest(150_000);
 		const response = await callHandleProxy(
 			req,
@@ -347,7 +347,7 @@ describe("context-window gate", () => {
 	});
 
 	it("does not gate a codex account when request is small enough", async () => {
-		// gpt-5.5 window = 272K, threshold = 231200
+		// gpt-5.5 window = 272K, threshold = 263840
 		// A small request passes the gate, then attempts to proxy and fails
 		// downstream (no real backend) — that's expected. The point is that
 		// we never see a 400 context_window_exceeded from the gate.
