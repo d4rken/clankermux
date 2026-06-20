@@ -464,3 +464,38 @@ describe("deriveAccountStatus — subscription expired", () => {
 		expect(status.isSubscriptionExpired).toBe(false);
 	});
 });
+
+describe("deriveAccountStatus — needs reauth", () => {
+	it("flags isNeedsReauth when paused with pause_reason oauth_invalid_grant", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: true, pauseReason: "oauth_invalid_grant" }),
+			NOW,
+		);
+		expect(status.isPaused).toBe(true);
+		expect(status.isNeedsReauth).toBe(true);
+		// Distinct from the subscription-expired state.
+		expect(status.isSubscriptionExpired).toBe(false);
+	});
+
+	it("does not flag other pause reasons", () => {
+		for (const reason of [
+			"manual",
+			"failure_threshold",
+			"subscription_expired",
+		]) {
+			const status = deriveAccountStatus(
+				makeAccount({ paused: true, pauseReason: reason }),
+				NOW,
+			);
+			expect(status.isNeedsReauth).toBe(false);
+		}
+	});
+
+	it("does not flag unpaused accounts even with a stale reason", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: false, pauseReason: "oauth_invalid_grant" }),
+			NOW,
+		);
+		expect(status.isNeedsReauth).toBe(false);
+	});
+});

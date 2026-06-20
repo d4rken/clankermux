@@ -1,6 +1,8 @@
 import {
 	BUFFER_SIZES,
+	isInvalidGrantMessage,
 	mapModelName,
+	OAuthRefreshTokenError,
 	validateEndpointUrl,
 } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
@@ -169,8 +171,9 @@ export class AnthropicProvider extends BaseProvider {
 		if (!response.ok) {
 			let errorMessage = response.statusText;
 			let errorData: unknown = null;
+			let responseText = "";
 			try {
-				const responseText = await response.text();
+				responseText = await response.text();
 				log.debug("Error response body:", responseText);
 				errorData = JSON.parse(responseText);
 				const errorObj = errorData as {
@@ -213,9 +216,20 @@ export class AnthropicProvider extends BaseProvider {
 				`Token refresh failed for ${account.name}: Status ${response.status}, Error: ${errorMessage}`,
 				errorData,
 			);
-			throw new Error(
-				`Failed to refresh token for account ${account.name}: ${errorMessage}`,
-			);
+			const failureMessage = `Failed to refresh token for account ${account.name}: ${errorMessage}`;
+			// A revoked/invalid refresh token is terminal (not retryable) and is
+			// reported with varying status codes (Anthropic returned HTTP 400 for
+			// `invalid_grant`, not 401). Detect it from the parsed message *or* the
+			// raw body (non-JSON bodies never reach `errorMessage`) and throw a typed
+			// error so callers can pause the account for re-authentication instead of
+			// treating it as a transient refresh failure.
+			if (
+				isInvalidGrantMessage(errorMessage) ||
+				isInvalidGrantMessage(responseText)
+			) {
+				throw new OAuthRefreshTokenError(account.id, failureMessage);
+			}
+			throw new Error(failureMessage);
 		}
 
 		const json = (await response.json()) as {

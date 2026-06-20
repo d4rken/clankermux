@@ -17,10 +17,14 @@ function makeAdapter(runSpy: ReturnType<typeof mock>) {
 	};
 }
 
-function makeDbOps(runSpy: ReturnType<typeof mock>): DatabaseOperations {
+function makeDbOps(
+	runSpy: ReturnType<typeof mock>,
+	resumeSpy: ReturnType<typeof mock> = mock(async () => true),
+): DatabaseOperations {
 	return {
 		getAdapter: () => makeAdapter(runSpy),
 		getAllAccounts: mock(async () => []),
+		resumeAccountIfNeedsReauth: resumeSpy,
 	} as unknown as DatabaseOperations;
 }
 
@@ -186,5 +190,46 @@ describe("OAuthFlow.completeReauth", () => {
 
 		// No DB write should have happened
 		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("auto-resumes a needs-reauth pause after claude-oauth reauth", async () => {
+		mockExchangeCode.mockImplementation(async () => ({
+			accessToken: "new-access-token",
+			refreshToken: "new-refresh-token",
+			expiresAt: Date.now() + 3_600_000,
+		}));
+		const resumeSpy = mock(async () => true);
+		const flow = new OAuthFlow(makeDbOps(runSpy, resumeSpy), makeConfig());
+		const accountId = "cccccccc-0000-0000-0000-000000000003";
+
+		await flow.completeReauth(
+			{ sessionId: "s4", code: "auth-code", name: "acct", id: accountId },
+			testFlowData,
+		);
+
+		expect(resumeSpy).toHaveBeenCalledTimes(1);
+		expect(resumeSpy.mock.calls[0][0]).toBe(accountId);
+	});
+
+	it("does not fail reauth when the auto-resume throws", async () => {
+		mockExchangeCode.mockImplementation(async () => ({
+			accessToken: "new-access-token",
+			refreshToken: "new-refresh-token",
+			expiresAt: Date.now() + 3_600_000,
+		}));
+		const resumeSpy = mock(async () => {
+			throw new Error("db locked");
+		});
+		const flow = new OAuthFlow(makeDbOps(runSpy, resumeSpy), makeConfig());
+		const accountId = "dddddddd-0000-0000-0000-000000000004";
+
+		// Should resolve despite the resume failure (tokens were already updated).
+		await flow.completeReauth(
+			{ sessionId: "s5", code: "auth-code", name: "acct", id: accountId },
+			testFlowData,
+		);
+
+		expect(runSpy).toHaveBeenCalled();
+		expect(resumeSpy).toHaveBeenCalledTimes(1);
 	});
 });

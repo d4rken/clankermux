@@ -57,6 +57,15 @@ export function AccountStatusChips({
 					Subscription expired
 				</span>
 			)}
+			{status.isNeedsReauth && (
+				<span
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					title="This account's OAuth refresh token was rejected (invalid_grant). It was auto-paused and removed from rotation. Re-authenticate it from the Accounts tab — it will auto-resume on success."
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Needs re-authentication
+				</span>
+			)}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip status={status.rateLimitStatus} />
 			)}

@@ -14,7 +14,10 @@ import {
 import type { Account } from "@clankermux/types";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
-import { getValidAccessToken } from "./handlers";
+import {
+	getValidAccessToken,
+	pauseAccountForReauthIfInvalidGrant,
+} from "./handlers";
 import type { ProxyContext } from "./proxy";
 
 const log = new Logger("AutoRefreshScheduler");
@@ -729,20 +732,26 @@ export class AutoRefreshScheduler {
 		);
 
 		if (newFailures >= this.FAILURE_THRESHOLD) {
-			log.error(
-				`Account ${accountName} has failed ${newFailures} consecutive auto-refresh attempts — pausing account to prevent routing to a broken endpoint.`,
-			);
 			try {
-				await this.db.run(
-					`UPDATE accounts SET paused = 1, pause_reason = 'failure_threshold' WHERE id = ?`,
+				// Guarded on the account still being active so this generic
+				// failure_threshold reason never overwrites a more specific reason
+				// (e.g. oauth_invalid_grant) already set by the token-refresh chokepoint.
+				const changes = await this.db.runWithChanges(
+					`UPDATE accounts SET paused = 1, pause_reason = 'failure_threshold' WHERE id = ? AND COALESCE(paused, 0) = 0`,
 					[accountId],
 				);
-				// Clear the counter so subsequent scheduler cycles don't fire redundant DB
-				// writes and log entries — the account is already paused.
+				// Clear the counter regardless so subsequent scheduler cycles don't fire
+				// redundant DB writes and log entries — the account is paused either way.
 				this.consecutiveFailures.delete(accountId);
-				log.error(
-					`Account "${accountName}" has been PAUSED. Resume it from the dashboard (Accounts tab) or via POST /api/accounts/:id/resume.`,
-				);
+				if (changes > 0) {
+					log.error(
+						`Account "${accountName}" has failed ${newFailures} consecutive auto-refresh attempts — PAUSED (failure_threshold). Resume it from the dashboard (Accounts tab) or via POST /api/accounts/:id/resume.`,
+					);
+				} else {
+					log.warn(
+						`Account "${accountName}" hit the auto-refresh failure threshold but was already paused — leaving the existing pause reason intact.`,
+					);
+				}
 			} catch (dbErr) {
 				log.error(`Failed to pause account ${accountName} in database:`, dbErr);
 			}
@@ -879,6 +888,13 @@ export class AutoRefreshScheduler {
 					`Failed to proactively refresh Qwen token for ${row.name}:`,
 					error,
 				);
+				// This proactive path calls provider.refreshToken directly (bypassing
+				// refreshAccessTokenSafe), so pause-for-reauth on a revoked token here too.
+				await pauseAccountForReauthIfInvalidGrant(
+					error,
+					{ id: row.id, name: row.name, refresh_token: row.refresh_token },
+					this.proxyContext.dbOps,
+				);
 			}
 		}
 	}
@@ -1011,6 +1027,13 @@ export class AutoRefreshScheduler {
 				log.error(
 					`Failed to proactively refresh Codex token for ${row.name}:`,
 					error,
+				);
+				// This proactive path calls provider.refreshToken directly (bypassing
+				// refreshAccessTokenSafe), so pause-for-reauth on a revoked token here too.
+				await pauseAccountForReauthIfInvalidGrant(
+					error,
+					{ id: row.id, name: row.name, refresh_token: row.refresh_token },
+					this.proxyContext.dbOps,
 				);
 			}
 		}

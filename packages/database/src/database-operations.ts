@@ -3,8 +3,11 @@ import { mkdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RuntimeConfig } from "@clankermux/config";
-import type { Disposable } from "@clankermux/core";
-import { TIME_CONSTANTS } from "@clankermux/core";
+import {
+	type Disposable,
+	PAUSE_REASON_NEEDS_REAUTH,
+	TIME_CONSTANTS,
+} from "@clankermux/core";
 import type {
 	Account,
 	AccountPaymentRow,
@@ -883,12 +886,17 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.pause(accountId, reason);
 	}
 
-	/** Pause only if currently active; returns true when this call paused it. */
+	/**
+	 * Pause only if currently active; returns true when this call paused it.
+	 * When `expectedRefreshToken` is provided, also requires the account to still
+	 * hold that exact refresh token (guards against stale re-pauses after reauth).
+	 */
 	async pauseAccountIfActive(
 		accountId: string,
 		reason: string,
+		expectedRefreshToken?: string | null,
 	): Promise<boolean> {
-		return this.accounts.pauseIfActive(accountId, reason);
+		return this.accounts.pauseIfActive(accountId, reason, expectedRefreshToken);
 	}
 
 	async resumeAccount(accountId: string): Promise<void> {
@@ -901,6 +909,19 @@ OAuth tokens will need to be re-authenticated.
 		reason: string,
 	): Promise<boolean> {
 		return this.accounts.resumeIfPausedWithReason(accountId, reason);
+	}
+
+	/**
+	 * Resume an account only if it is paused specifically for needing re-auth
+	 * (`oauth_invalid_grant`). Called after a successful reauth so the account
+	 * returns to rotation automatically, without lifting a manual/overage/
+	 * subscription pause. Returns true when this call resumed it.
+	 */
+	async resumeAccountIfNeedsReauth(accountId: string): Promise<boolean> {
+		return this.accounts.resumeIfPausedWithReason(
+			accountId,
+			PAUSE_REASON_NEEDS_REAUTH,
+		);
 	}
 
 	async renameAccount(accountId: string, newName: string): Promise<void> {
