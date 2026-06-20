@@ -216,6 +216,7 @@ export class OAuthFlow {
 				apiKey,
 				id,
 			]);
+			await this.clearNeedsReauthPause(id);
 			return;
 		}
 
@@ -230,6 +231,25 @@ export class OAuthFlow {
 				id,
 			],
 		);
+		await this.clearNeedsReauthPause(id);
+	}
+
+	/**
+	 * After a successful reauth, automatically lift an `oauth_invalid_grant`
+	 * (needs-reauth) pause so the account returns to rotation without a separate
+	 * manual resume. Best-effort: a guarded no-op for accounts paused for any
+	 * other reason (or not paused), and a failure here must not fail the reauth —
+	 * the tokens were already updated successfully.
+	 */
+	private async clearNeedsReauthPause(id: string): Promise<void> {
+		try {
+			await this.dbOps.resumeAccountIfNeedsReauth(id);
+		} catch (err) {
+			console.error(
+				`[OAuthFlow] Failed to auto-resume needs-reauth pause for account ${id}:`,
+				err,
+			);
+		}
 	}
 
 	/**

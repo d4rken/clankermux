@@ -53,6 +53,60 @@ export class TokenRefreshError extends AuthError {
 }
 
 /**
+ * Canonical `pause_reason` value for an account whose OAuth refresh token was
+ * rejected by the provider (terminal — needs re-authentication, will not
+ * self-heal). Surfaced on the dashboard as "Needs re-authentication" and
+ * auto-cleared by a successful reauth. Kept here so producers (token refresh)
+ * and consumers (oauth-flow resume, dashboard) agree on the exact string.
+ */
+export const PAUSE_REASON_NEEDS_REAUTH = "oauth_invalid_grant";
+
+/**
+ * Terminal OAuth markers returned by a token endpoint when a refresh token has
+ * been revoked/rotated/invalidated. These are NOT retryable network conditions
+ * — the only fix is re-authentication.
+ */
+const INVALID_GRANT_MARKERS = [
+	"invalid_grant",
+	"invalid_refresh_token",
+	// Codex uses rotating refresh tokens; a reused/rotated token is terminal and
+	// equally requires re-authentication.
+	"refresh_token_reused",
+	"refresh token not found or invalid",
+	"oauth authentication is currently not supported",
+] as const;
+
+/**
+ * True when an OAuth token-refresh error message/body indicates the refresh
+ * token itself was rejected (terminal — needs reauth). Case-insensitive; pass
+ * either the parsed error description or the raw response body, since some
+ * providers return a non-JSON body that never reaches the parsed message.
+ */
+export function isInvalidGrantMessage(
+	message: string | null | undefined,
+): boolean {
+	if (!message) return false;
+	const lower = message.toLowerCase();
+	return INVALID_GRANT_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/**
+ * Thrown by a provider's `refreshToken` when the OAuth token endpoint rejects
+ * the refresh token (e.g. HTTP 400/401 `invalid_grant`). Distinct, typed error
+ * so callers can pause the account for re-auth instead of treating it as a
+ * generic/transient refresh failure. Extends `AppError` directly (not
+ * `AuthError`, which hardcodes the `AUTH_ERROR` code) to carry its own code.
+ */
+export class OAuthRefreshTokenError extends AppError {
+	constructor(
+		public readonly accountId: string,
+		message = "OAuth refresh token rejected — re-authentication required",
+	) {
+		super(message, "OAUTH_INVALID_GRANT", 401, { accountId });
+	}
+}
+
+/**
  * Rate limiting errors
  */
 export class RateLimitError extends AppError {

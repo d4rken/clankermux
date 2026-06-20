@@ -34,6 +34,11 @@ export interface AccountStatus {
 	isPaused: boolean;
 	/** Auto-paused because the provider reports the subscription lapsed. */
 	isSubscriptionExpired: boolean;
+	/**
+	 * Auto-paused because the OAuth refresh token was rejected (`invalid_grant`).
+	 * Terminal — requires re-authentication; auto-resumes once reauth succeeds.
+	 */
+	isNeedsReauth: boolean;
 	/** Unified rate-limit status string, e.g. "rate_limited (30m)" or "OK". */
 	rateLimitStatus: string;
 	/** Whether to render the colored RateLimitStatusChip (non-paused, non-OK). */
@@ -85,6 +90,8 @@ export function deriveAccountStatus(
 	const isPaused = presenter.isPaused;
 	const isSubscriptionExpired =
 		isPaused && account.pauseReason === "subscription_expired";
+	const isNeedsReauth =
+		isPaused && account.pauseReason === "oauth_invalid_grant";
 	const rateLimitStatus = presenter.rateLimitStatus;
 
 	const isHardLimited = HARD_LIMIT_PREFIXES.some((prefix) =>
@@ -140,6 +147,7 @@ export function deriveAccountStatus(
 		isRateLimited: presenter.isRateLimited,
 		isPaused,
 		isSubscriptionExpired,
+		isNeedsReauth,
 		rateLimitStatus,
 		showRateLimitChip: !isPaused && rateLimitStatus !== "OK",
 		staleLockDetected,

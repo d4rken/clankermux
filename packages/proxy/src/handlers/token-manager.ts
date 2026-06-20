@@ -1,4 +1,7 @@
 import {
+	isInvalidGrantMessage,
+	OAuthRefreshTokenError,
+	PAUSE_REASON_NEEDS_REAUTH,
 	registerDisposable,
 	ServiceUnavailableError,
 	TokenRefreshError,
@@ -14,6 +17,57 @@ import {
 } from "./token-health-monitor";
 
 const log = new Logger("TokenManager");
+
+/** Minimal slice of DatabaseOperations needed to pause an account for reauth. */
+interface ReauthPauser {
+	pauseAccountIfActive(
+		accountId: string,
+		reason: string,
+		expectedRefreshToken?: string | null,
+	): Promise<boolean>;
+}
+
+/**
+ * If `error` is a terminal OAuth refresh failure (revoked/invalid refresh token),
+ * pause the account with the dedicated `oauth_invalid_grant` reason so the load
+ * balancer fails over and the dashboard prompts for re-auth. Guarded on the
+ * account still being active *and* still holding the refresh token that failed,
+ * so it never clobbers a manual pause or re-pauses a freshly re-authenticated
+ * account. Detection covers both the typed `OAuthRefreshTokenError` (Anthropic)
+ * and the message string (other OAuth providers). Returns true if it paused.
+ *
+ * Shared by every refresh path: `refreshAccessTokenSafe` (real requests +
+ * Anthropic auto-refresh probes) and the proactive Qwen/Codex refreshers.
+ */
+export async function pauseAccountForReauthIfInvalidGrant(
+	error: unknown,
+	account: { id: string; name: string; refresh_token: string | null },
+	dbOps: ReauthPauser,
+): Promise<boolean> {
+	const message = error instanceof Error ? error.message : String(error);
+	const isInvalidGrant =
+		error instanceof OAuthRefreshTokenError || isInvalidGrantMessage(message);
+	if (!isInvalidGrant) return false;
+	try {
+		const paused = await dbOps.pauseAccountIfActive(
+			account.id,
+			PAUSE_REASON_NEEDS_REAUTH,
+			account.refresh_token ?? undefined,
+		);
+		if (paused) {
+			log.error(
+				`Account "${account.name}" PAUSED — OAuth refresh token rejected (needs re-authentication). Reauth from the dashboard (Accounts tab); it will auto-resume on success.`,
+			);
+		}
+		return paused;
+	} catch (pauseErr) {
+		log.error(
+			`Failed to pause account ${account.name} after invalid_grant:`,
+			pauseErr,
+		);
+		return false;
+	}
+}
 
 // Track refresh failures for backoff with TTL cleanup
 const refreshFailures = new Map<string, number>();
@@ -264,7 +318,7 @@ export async function refreshAccessTokenSafe(
 				});
 				return result.accessToken;
 			})
-			.catch((error) => {
+			.catch(async (error) => {
 				// Record the failure timestamp for backoff
 				refreshFailures.set(account.id, Date.now());
 				// Enforce size limit after adding a new entry
@@ -278,6 +332,12 @@ export async function refreshAccessTokenSafe(
 					`Token refresh failed for account ${account.name}: ${enhancedMessage}`,
 					error,
 				);
+				// Terminal auth failure (revoked/invalid refresh token): pause the
+				// account for re-auth immediately so the LB fails over instead of
+				// leaving it in rotation to fail every request. Awaited so the pause
+				// lands before any caller (e.g. the auto-refresh scheduler) records a
+				// generic failure that could otherwise mask the specific reason.
+				await pauseAccountForReauthIfInvalidGrant(error, account, ctx.dbOps);
 				throw new TokenRefreshError(account.id, new Error(enhancedMessage));
 			})
 			.finally(() => {
@@ -459,6 +519,11 @@ export function registerRefreshClearer(
  * Clear refresh cache for an account across all registered servers
  */
 export function clearAccountRefreshCache(accountId: string): void {
+	// Clear module-level backoff/failure state for this account (not per-server)
+	// so a just-re-authenticated account can immediately attempt a fresh refresh
+	// instead of waiting out the backoff window.
+	refreshFailures.delete(accountId);
+	backoffCounters.delete(accountId);
 	for (const [serverId, clearer] of refreshClearers) {
 		try {
 			clearer(accountId);
