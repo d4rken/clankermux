@@ -140,6 +140,30 @@ export class AccountRepository extends BaseRepository<Account> {
 		return row?.consecutive_rate_limits ?? 0;
 	}
 
+	/**
+	 * Set a rate-limit deadline WITHOUT escalating the consecutive-streak counter.
+	 *
+	 * Identical to {@link setRateLimited} except it omits the
+	 * `consecutive_rate_limits = COALESCE(...) + 1` clause. Used for
+	 * server-directed 429s that carry an explicit reset time (the upstream told us
+	 * exactly when to retry) — those should honor the deadline but must not inflate
+	 * the adaptive-backoff streak (Lever B).
+	 */
+	async setRateLimitedDeadlineOnly(
+		accountId: string,
+		until: number,
+		reason: RateLimitReason,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts
+			   SET rate_limited_until  = ?,
+			       rate_limited_reason = ?,
+			       rate_limited_at     = ?
+			 WHERE id = ?`,
+			[until, reason, Date.now(), accountId],
+		);
+	}
+
 	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
 		await this.run(
 			`UPDATE accounts SET consecutive_rate_limits = 0, rate_limited_at = NULL WHERE id = ?`,

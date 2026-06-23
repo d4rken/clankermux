@@ -96,6 +96,12 @@ function makeProxyContext() {
 					return Promise.resolve(1);
 				},
 			),
+			markAccountRateLimitedDeadlineOnly: mock(
+				(accountId: string, until: number, reason: string) => {
+					markCalls.push({ id: accountId, until, reason });
+					return Promise.resolve();
+				},
+			),
 			saveRequest: mock((...args: unknown[]) => {
 				saveRequestCalls.push(args);
 				return Promise.resolve();

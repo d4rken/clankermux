@@ -135,7 +135,19 @@ export const NETWORK = {
 	DEFAULT_PORT: 8080,
 
 	// Timeouts
-	IDLE_TIMEOUT_MAX: 255, // Max allowed by Bun
+	// Bun's HARD per-connection idle cap (uint8 seconds). We no longer run AT this
+	// ceiling: the global Bun `idleTimeout` is set to SERVER_IDLE_TIMEOUT_SECONDS
+	// (below) and long holds / long quiet streaming gaps are kept alive by
+	// re-arming the per-connection timer via `server.timeout(req, N)` on the
+	// IDLE_REARM_INTERVAL_MS cadence. Each `server.timeout` call must still be
+	// ≤ this cap (oven-sh/bun#15589).
+	IDLE_TIMEOUT_MAX: 255,
+	// Global Bun `idleTimeout` (seconds). Held connections (CW hold, streaming
+	// quiet gaps) re-arm this per-connection via `server.timeout(req, N)`.
+	SERVER_IDLE_TIMEOUT_SECONDS: 180,
+	// Re-arm cadence (ms) — fires ~30s before the 180s timer would expire so a
+	// silent gap never reaps a held/streaming connection.
+	IDLE_REARM_INTERVAL_MS: 150_000,
 } as const;
 
 // Cache control headers

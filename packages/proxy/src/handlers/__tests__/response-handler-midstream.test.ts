@@ -90,6 +90,14 @@ function makeCtxWithReason() {
 				calls.markRateLimited.push({ accountId, resetTime, reason });
 				return Promise.resolve(1);
 			},
+			markAccountRateLimitedDeadlineOnly: (
+				accountId: string,
+				resetTime: number,
+				reason: string,
+			) => {
+				calls.markRateLimited.push({ accountId, resetTime, reason });
+				return Promise.resolve();
+			},
 			updateAccountUsage: () => {},
 			updateAccountRateLimitMeta: () => {},
 			getAdapter: () => ({
@@ -217,6 +225,7 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 			strategy: {},
 			dbOps: {
 				markAccountRateLimited: () => Promise.resolve(1),
+				markAccountRateLimitedDeadlineOnly: () => Promise.resolve(),
 				updateAccountUsage: () => {},
 				updateAccountRateLimitMeta: () => {},
 				getAdapter: () => ({

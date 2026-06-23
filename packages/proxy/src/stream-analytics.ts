@@ -14,6 +14,10 @@
  * buffer, and the per-chunk worker postMessage is rate-limited to client pace.
  */
 
+import { NETWORK } from "@clankermux/core";
+
+const { IDLE_REARM_INTERVAL_MS } = NETWORK;
+
 export interface StreamAnalyticsOptions {
 	/** Called for each chunk AFTER it is enqueued to the client. Forward to worker + sniff here. */
 	onChunk?: (chunk: Uint8Array) => void;
@@ -25,16 +29,56 @@ export interface StreamAnalyticsOptions {
 	totalTimeoutMs: number;
 	/** Per-read inactivity cap (no data received). */
 	chunkTimeoutMs: number;
+	/**
+	 * Best-effort re-arm of the client connection's Bun idle timer. When
+	 * provided, an interval fires it on the IDLE_REARM_INTERVAL_MS cadence for the
+	 * lifetime of the stream so a single silent gap longer than the 180s base
+	 * idleTimeout (agentic sub-call pauses can exceed it) doesn't reap the
+	 * connection. An interval — not a post-chunk re-arm — is required precisely
+	 * because the gap can be longer than the timeout. Cleared on every stream-end
+	 * path (normal completion, total-timeout, per-chunk-timeout, error, cancel).
+	 */
+	bumpIdleTimeout?: () => void;
 }
 
 export function createStreamAnalyticsPassthrough(
 	upstream: ReadableStream<Uint8Array>,
 	options: StreamAnalyticsOptions,
 ): ReadableStream<Uint8Array> {
-	const { onChunk, onEnd, onError, totalTimeoutMs, chunkTimeoutMs } = options;
+	const {
+		onChunk,
+		onEnd,
+		onError,
+		totalTimeoutMs,
+		chunkTimeoutMs,
+		bumpIdleTimeout,
+	} = options;
 	const reader = upstream.getReader();
 	const startTime = Date.now();
 	let finalized = false; // guard so onEnd/onError fire at most once total
+
+	// Re-arm the connection's idle timer for the lifetime of the stream so long
+	// quiet gaps between chunks don't trip the base idleTimeout. Started here (not
+	// in pull) so a silent gap before the first chunk is also covered. Cleared in
+	// finalize(), invoked on every end path below.
+	const rearmInterval = bumpIdleTimeout
+		? setInterval(bumpIdleTimeout, IDLE_REARM_INTERVAL_MS)
+		: null;
+
+	// Single place that runs the at-most-once analytics finalizer AND stops the
+	// idle re-arm. Idempotent via the `finalized` guard.
+	const finalize = (kind: "end" | "error", err?: Error): void => {
+		if (rearmInterval !== null) {
+			clearInterval(rearmInterval);
+		}
+		if (finalized) return;
+		finalized = true;
+		if (kind === "end") {
+			onEnd?.();
+		} else {
+			onError?.(err as Error);
+		}
+	};
 
 	return new ReadableStream<Uint8Array>({
 		async pull(controller) {
@@ -48,10 +92,7 @@ export function createStreamAnalyticsPassthrough(
 				} catch {
 					// reader may already be released/cancelled
 				}
-				if (!finalized) {
-					finalized = true;
-					onError?.(err);
-				}
+				finalize("error", err);
 				controller.error(err);
 				return;
 			}
@@ -80,10 +121,7 @@ export function createStreamAnalyticsPassthrough(
 				}
 
 				if (done) {
-					if (!finalized) {
-						finalized = true;
-						onEnd?.();
-					}
+					finalize("end");
 					controller.close();
 					return;
 				}
@@ -105,10 +143,7 @@ export function createStreamAnalyticsPassthrough(
 				} catch {
 					// reader may already be released/cancelled
 				}
-				if (!finalized) {
-					finalized = true;
-					onError?.(err as Error);
-				}
+				finalize("error", err as Error);
 				controller.error(err);
 			}
 		},
@@ -120,10 +155,7 @@ export function createStreamAnalyticsPassthrough(
 			} catch {
 				// reader may already be released/cancelled
 			}
-			if (!finalized) {
-				finalized = true;
-				onError?.(new Error("client disconnected"));
-			}
+			finalize("error", new Error("client disconnected"));
 		},
 	});
 }
