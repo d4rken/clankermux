@@ -76,6 +76,12 @@ export interface AccountStatus {
 	 * reassuring renewal chip next to the red "Subscription expired" badge.
 	 */
 	showRenewalChip: boolean;
+	/** Codex account is on purchased credits past its weekly limit (real spend). */
+	isOnCredits: boolean;
+	/** Remaining credit balance (unverified units), null when unknown/unlimited. */
+	creditsBalance: number | null;
+	/** Codex plan tier, e.g. "prolite". Null when unknown. */
+	creditsPlanType: string | null;
 }
 
 /**
@@ -140,6 +146,22 @@ export function deriveAccountStatus(
 		now,
 	);
 
+	// On-credits predicate — mirrors the server's exactly so the chip and the
+	// pause/failover logic agree on when a codex account is drawing on purchased
+	// credits past its weekly limit (real spend).
+	const c = account.codexCredits;
+	const isOnCredits =
+		account.provider === "codex" &&
+		!!c &&
+		c.hasCredits &&
+		!c.unlimited &&
+		c.weeklyUsedPct !== null &&
+		c.weeklyUsedPct >= 100;
+	// Both only consumed by the chip, which renders only when isOnCredits — gate
+	// them together so neither surfaces a stale value outside that state.
+	const creditsBalance = isOnCredits ? (c?.balance ?? null) : null;
+	const creditsPlanType = isOnCredits ? (c?.planType ?? null) : null;
+
 	return {
 		isPrimary: account.isPrimary,
 		priority: account.priority,
@@ -164,5 +186,8 @@ export function deriveAccountStatus(
 		renewalDaysLeft: renewal.daysLeft,
 		renewalUrgency: renewal.urgency,
 		showRenewalChip: renewal.nextDate !== null && !isSubscriptionExpired,
+		isOnCredits,
+		creditsBalance,
+		creditsPlanType,
 	};
 }

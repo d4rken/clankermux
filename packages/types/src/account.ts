@@ -217,6 +217,19 @@ export interface AccountResponse {
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
+	/**
+	 * Codex-only: credits state from the most recent response/stored payload.
+	 * Null for non-codex or when unknown. Shape mirrors `CodexCreditsInfo` in
+	 * `@clankermux/providers` — kept inline because `@clankermux/types` is a leaf
+	 * package and must not depend on `providers`. Keep the two in sync.
+	 */
+	codexCredits?: {
+		hasCredits: boolean;
+		balance: number | null;
+		unlimited: boolean;
+		planType: string | null;
+		weeklyUsedPct: number | null;
+	} | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
@@ -446,6 +459,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
+		codexCredits: null, // Will be filled in by API handler from cache (codex only)
 		usageRateLimitedUntil: null, // Will be filled in by API handler from cache
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],

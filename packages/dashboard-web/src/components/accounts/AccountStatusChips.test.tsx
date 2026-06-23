@@ -114,3 +114,41 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 		expect(html).not.toContain("Renews");
 	});
 });
+
+describe("AccountStatusChips — on-credits chip", () => {
+	it("renders 'On credits' with balance and plan for a codex account on credits", () => {
+		const html = render(
+			makeAccount({
+				provider: "codex",
+				codexCredits: {
+					hasCredits: true,
+					balance: 2430.25,
+					unlimited: false,
+					planType: "prolite",
+					weeklyUsedPct: 100,
+				},
+			}),
+		);
+		expect(html).toContain("On credits");
+		expect(html).toContain("2430.25");
+		expect(html).toContain("prolite");
+		// Units are unverified — never present the balance as USD.
+		expect(html).not.toContain("$2430.25");
+	});
+
+	it("does not render the chip for an unlimited codex account", () => {
+		const html = render(
+			makeAccount({
+				provider: "codex",
+				codexCredits: {
+					hasCredits: true,
+					balance: null,
+					unlimited: true,
+					planType: "pro",
+					weeklyUsedPct: 100,
+				},
+			}),
+		);
+		expect(html).not.toContain("On credits");
+	});
+});

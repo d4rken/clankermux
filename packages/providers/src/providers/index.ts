@@ -12,12 +12,17 @@ export {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,
 } from "./anthropic-compatible/index";
-export type { CodexUsageRefreshFetchResult } from "./codex/index";
+export type {
+	CodexCreditsInfo,
+	CodexUsageRefreshFetchResult,
+} from "./codex/index";
 export {
 	CODEX_DEFAULT_ENDPOINT,
 	CodexOAuthProvider,
 	CodexProvider,
 	fetchCodexUsageOnDemand,
+	isCodexOnCredits,
+	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 } from "./codex/index";
 export { KiloProvider } from "./kilo/index";

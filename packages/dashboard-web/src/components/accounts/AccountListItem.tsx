@@ -125,7 +125,8 @@ export function AccountListItem({
 	const hasAutomationToggles =
 		providerSupportsAutoFeatures(account.provider) ||
 		providerSupportsCustomBilling(account.provider) ||
-		(account.provider === "anthropic" && !!onAutoPauseOnOverageToggle) ||
+		((account.provider === "anthropic" || account.provider === "codex") &&
+			!!onAutoPauseOnOverageToggle) ||
 		(account.provider === "zai" && !!onPeakHoursPauseToggle);
 
 	return (
@@ -228,17 +229,29 @@ export function AccountListItem({
 											Plan billing
 										</DropdownMenuCheckboxItem>
 									)}
-									{account.provider === "anthropic" &&
+									{(account.provider === "anthropic" ||
+										account.provider === "codex") &&
 										onAutoPauseOnOverageToggle && (
 											<DropdownMenuCheckboxItem
-												checked={account.autoPauseOnOverageEnabled ?? false}
+												// Inverted polarity: this reads as an "allow extra spend"
+												// toggle. Checked = allowed to spend extra (NOT protected);
+												// the default (unchecked) means protected / no extra cost.
+												// The handler flips the stored protected flag, so the
+												// rendered `checked` is the negation of it.
+												checked={!account.autoPauseOnOverageEnabled}
 												onCheckedChange={() =>
 													onAutoPauseOnOverageToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically pause account when overage usage is detected. Note: detection only happens when Anthropic API reports overage, so some overage usage may occur before pausing. Account resumes when usage window resets."
+												title={
+													account.provider === "codex"
+														? "When the weekly Codex limit is reached, allow this account to keep running on purchased credits. When OFF (default), the account pauses and traffic fails over to other accounts, then auto-resumes when the weekly window resets."
+														: "Allow this account to incur overage charges past its plan limit. When OFF (default), the account auto-pauses when overage usage is detected and resumes when the usage window resets. Note: detection relies on Anthropic reporting overage, so some overage may occur before pausing."
+												}
 											>
-												Auto-pause on overage
+												{account.provider === "codex"
+													? "Allow credits past weekly limit"
+													: "Allow overage spend"}
 											</DropdownMenuCheckboxItem>
 										)}
 									{account.provider === "zai" && onPeakHoursPauseToggle && (

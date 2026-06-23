@@ -309,8 +309,8 @@ export class OAuthFlow {
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
 				created_at, request_count, total_requests, priority, custom_endpoint,
-				refresh_token_issued_at
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+				refresh_token_issued_at, auto_pause_on_overage_enabled
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, 1)
 			`,
 			[
 				id,
@@ -361,8 +361,9 @@ export class OAuthFlow {
 			`
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
-				created_at, request_count, total_requests, priority, custom_endpoint
-			) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?)
+				created_at, request_count, total_requests, priority, custom_endpoint,
+				auto_pause_on_overage_enabled
+			) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, 1)
 			`,
 			[
 				id,

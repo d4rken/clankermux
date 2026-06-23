@@ -4,6 +4,7 @@ import {
 	getFreshCapacity,
 	isGenuineWindowRoll,
 	type Provider,
+	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	toEpochMs,
 	usageCache,
@@ -127,6 +128,17 @@ export function updateAccountMetadata(
 				newResetMs,
 				Date.now(),
 			);
+
+			// Attach Codex credits state (x-codex-credits-* / secondary-used-pct)
+			// so the live usageCache carries whether the account is on paid credits
+			// past its weekly limit. The dashboard reads this; the auto-refresh
+			// resume guard also consults it to avoid resuming a still-on-credits
+			// account on a 5h reset. Only overwrite when the header is present —
+			// absence signals a non-credits-aware response, not "off credits".
+			const creditsInfo = parseCodexCreditsHeaders(response.headers);
+			if (creditsInfo !== null) {
+				codexUsage.codexCredits = creditsInfo;
+			}
 
 			usageCache.set(account.id, codexUsage);
 			log.debug(

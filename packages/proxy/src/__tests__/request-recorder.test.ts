@@ -500,6 +500,61 @@ describe("RequestRecorder — billingType derivation", () => {
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("plan");
 	});
+
+	it("marks overage when a codex account is on credits past its weekly limit", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				providerName: "codex",
+				responseHeaders: {
+					"x-codex-credits-has-credits": "true",
+					"x-codex-credits-unlimited": "false",
+					"x-codex-secondary-used-percent": "100",
+				},
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("overage");
+	});
+
+	it("keeps codex on plan when it has credits but is below the weekly limit", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				providerName: "codex",
+				responseHeaders: {
+					"x-codex-credits-has-credits": "true",
+					"x-codex-credits-unlimited": "false",
+					"x-codex-secondary-used-percent": "42",
+				},
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("plan");
+	});
+
+	it("does not apply the codex credits branch to non-codex providers", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				providerName: "anthropic",
+				responseHeaders: {
+					"x-codex-credits-has-credits": "true",
+					"x-codex-credits-unlimited": "false",
+					"x-codex-secondary-used-percent": "100",
+				},
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		// anthropic with no overage headers → plan provider default.
+		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("plan");
+	});
 });
 
 describe("RequestRecorder — account side-effects fire in begin()", () => {
@@ -514,6 +569,25 @@ describe("RequestRecorder — account side-effects fire in begin()", () => {
 			}),
 		);
 		// No finishTransport yet — pause must already have been enqueued in begin().
+		await h.flush();
+		expect(h.dbOps.pauseCalls).toEqual([
+			{ accountId: "acct-1", reason: "overage" },
+		]);
+	});
+
+	it("auto-pauses a codex account on credits BEFORE any finishTransport", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				providerName: "codex",
+				accountAutoPauseOnOverageEnabled: 1,
+				responseHeaders: {
+					"x-codex-credits-has-credits": "true",
+					"x-codex-credits-unlimited": "false",
+					"x-codex-secondary-used-percent": "100",
+				},
+			}),
+		);
 		await h.flush();
 		expect(h.dbOps.pauseCalls).toEqual([
 			{ accountId: "acct-1", reason: "overage" },

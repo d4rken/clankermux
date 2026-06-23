@@ -99,6 +99,64 @@ function readWindow(
 	};
 }
 
+export interface CodexCreditsInfo {
+	hasCredits: boolean;
+	balance: number | null; // rounded to 2 decimals; null when absent/unlimited-only/malformed
+	unlimited: boolean;
+	planType: string | null;
+	weeklyUsedPct: number | null; // x-codex-secondary-used-percent as a finite number, else null
+}
+
+function readHeader(
+	headers: Headers | Record<string, string>,
+	key: string,
+): string | null {
+	if (headers instanceof Headers) return headers.get(key);
+	return headers[key] ?? null;
+}
+
+function parseBoolean(value: string | null): boolean {
+	return value != null && value.toLowerCase() === "true";
+}
+
+export function parseCodexCreditsHeaders(
+	headers: Headers | Record<string, string>,
+): CodexCreditsInfo | null {
+	const hasCreditsRaw = readHeader(headers, "x-codex-credits-has-credits");
+	// Absent header signals a non-credits-aware response.
+	if (hasCreditsRaw === null) return null;
+
+	const balanceRaw = parseNumber(
+		readHeader(headers, "x-codex-credits-balance"),
+	);
+	const balance =
+		balanceRaw === null ? null : Math.round(balanceRaw * 100) / 100;
+
+	return {
+		hasCredits: parseBoolean(hasCreditsRaw),
+		balance,
+		unlimited: parseBoolean(readHeader(headers, "x-codex-credits-unlimited")),
+		planType: readHeader(headers, "x-codex-plan-type"),
+		weeklyUsedPct: parseNumber(
+			readHeader(headers, "x-codex-secondary-used-percent"),
+		),
+	};
+}
+
+/** True when the account is on paid credits past its weekly limit (real financial risk). */
+export function isCodexOnCredits(info: CodexCreditsInfo | null): boolean {
+	// Early return (not `info !== null && …`) so biome's --unsafe optional-chain
+	// rule can't rewrite this into `info?.hasCredits`, which would widen the
+	// result to `boolean | undefined` and break the return type.
+	if (info === null) return false;
+	return (
+		info.hasCredits &&
+		!info.unlimited &&
+		info.weeklyUsedPct !== null &&
+		info.weeklyUsedPct >= 100
+	);
+}
+
 export function parseCodexUsageHeaders(
 	headers: Headers,
 	options: ParseCodexUsageHeadersOptions = {},
