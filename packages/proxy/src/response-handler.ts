@@ -191,6 +191,13 @@ export interface ResponseHandlerOptions {
 	 * included) as-is without touching cooldown state.
 	 */
 	disableCooldown?: boolean;
+	/**
+	 * Best-effort re-arm of the client connection's Bun idle timer, threaded into
+	 * the streaming passthrough so long quiet gaps between chunks don't reap the
+	 * connection at the 180s base idleTimeout. No-op when omitted (non-streaming
+	 * responses, or callers without a Server handle).
+	 */
+	bumpIdleTimeout?: () => void;
 }
 
 /**
@@ -369,6 +376,7 @@ export async function forwardToClient(
 		const clientStream = createStreamAnalyticsPassthrough(response.body, {
 			totalTimeoutMs: STREAM_TIMEOUT_MS,
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
+			bumpIdleTimeout: options.bumpIdleTimeout,
 			onChunk: (value) => {
 				if (usageState) {
 					// Feed the chunk to the inline usage collector (decode + cheap

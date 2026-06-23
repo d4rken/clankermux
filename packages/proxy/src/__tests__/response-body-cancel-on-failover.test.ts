@@ -96,6 +96,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			updateRequestUsage: mock(async () => undefined),
 			resetAccountSession: mock(async () => undefined),
 			markAccountRateLimited: mock(async () => 1),
+			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => undefined),
 			getAdapter: mock(() => ({
 				run: mock(async () => undefined),

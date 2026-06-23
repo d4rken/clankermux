@@ -252,6 +252,96 @@ describe("AccountRepository — setRateLimited with reason audit (issue #178)", 
 		});
 	});
 
+	describe("setRateLimitedDeadlineOnly(id, until, reason)", () => {
+		it("sets the deadline + reason without bumping consecutive_rate_limits", async () => {
+			insertAccount(db, "acc-deadline-1");
+			const until = Date.now() + 30 * 60 * 1000;
+
+			await repo.setRateLimitedDeadlineOnly(
+				"acc-deadline-1",
+				until,
+				"upstream_429_with_reset",
+			);
+
+			const row = getAudit(db, "acc-deadline-1");
+			expect(row.rate_limited_until).toBe(until);
+			expect(row.rate_limited_reason).toBe("upstream_429_with_reset");
+			expect(row.rate_limited_at).not.toBeNull();
+			// The counter must remain at its initial 0 — no escalation.
+			expect(row.consecutive_rate_limits).toBe(0);
+		});
+
+		it("does NOT increment the counter even on repeated calls", async () => {
+			insertAccount(db, "acc-deadline-2");
+			const until = Date.now() + 30 * 60 * 1000;
+
+			await repo.setRateLimitedDeadlineOnly(
+				"acc-deadline-2",
+				until,
+				"upstream_429_with_reset",
+			);
+			await repo.setRateLimitedDeadlineOnly(
+				"acc-deadline-2",
+				until,
+				"upstream_429_with_reset",
+			);
+
+			expect(getAudit(db, "acc-deadline-2").consecutive_rate_limits).toBe(0);
+		});
+
+		it("preserves an existing streak counter (leaves it untouched)", async () => {
+			insertAccount(db, "acc-deadline-3");
+			const until = Date.now() + 30 * 60 * 1000;
+
+			// Establish a streak of 2 via the incrementing setter.
+			await repo.setRateLimited(
+				"acc-deadline-3",
+				until,
+				"upstream_429_no_reset_probe_cooldown",
+			);
+			await repo.setRateLimited(
+				"acc-deadline-3",
+				until,
+				"upstream_429_no_reset_probe_cooldown",
+			);
+			expect(getAudit(db, "acc-deadline-3").consecutive_rate_limits).toBe(2);
+
+			const newUntil = Date.now() + 60 * 60 * 1000;
+			await repo.setRateLimitedDeadlineOnly(
+				"acc-deadline-3",
+				newUntil,
+				"upstream_429_with_reset",
+			);
+
+			const row = getAudit(db, "acc-deadline-3");
+			// Deadline + reason advanced, but the streak counter is unchanged.
+			expect(row.rate_limited_until).toBe(newUntil);
+			expect(row.rate_limited_reason).toBe("upstream_429_with_reset");
+			expect(row.consecutive_rate_limits).toBe(2);
+		});
+
+		it("sets rate_limited_at approximately equal to Date.now()", async () => {
+			insertAccount(db, "acc-deadline-4");
+			const until = Date.now() + 30 * 60 * 1000;
+			const before = Date.now();
+
+			await repo.setRateLimitedDeadlineOnly(
+				"acc-deadline-4",
+				until,
+				"upstream_429_with_reset",
+			);
+
+			const after = Date.now();
+			const row = getAudit(db, "acc-deadline-4");
+			expect(row.rate_limited_at).not.toBeNull();
+			const rateLimitedAt = row.rate_limited_at;
+			if (rateLimitedAt === null)
+				throw new Error("rate_limited_at should not be null");
+			expect(rateLimitedAt).toBeGreaterThanOrEqual(before);
+			expect(rateLimitedAt).toBeLessThanOrEqual(after + 100);
+		});
+	});
+
 	describe("resetConsecutiveRateLimits", () => {
 		it("zeros the counter", async () => {
 			insertAccount(db, "acc-reset-1");

@@ -98,6 +98,7 @@ function makeContext(accounts: Account[], heldAccountId: string): ProxyContext {
 			getAccount: mock(async (id: string) => byId.get(id) ?? null),
 			getActiveComboForFamily: mock(async () => null),
 			markAccountRateLimited: mock(async () => 1),
+			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
 			updateAccountUsage: mock(async () => {}),
 			updateAccountRateLimitMeta: mock(async () => {}),

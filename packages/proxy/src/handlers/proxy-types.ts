@@ -20,6 +20,14 @@ export interface ProxyContext {
 	 * request-recorder.ts.
 	 */
 	requestRecorder: RequestRecorder;
+	/**
+	 * The live Bun `Server` for this listener. Optional so existing ctx
+	 * constructors/tests are unaffected. When present, the proxy uses
+	 * `server.timeout(req, N)` to re-arm a held/streaming connection's
+	 * per-connection idle timer (see bumpIdleTimeout in proxy.ts) so long CW
+	 * holds and long quiet streaming gaps aren't reaped by the 180s base timeout.
+	 */
+	server?: import("bun").Server<undefined>;
 }
 
 /** Error messages used throughout the proxy module */

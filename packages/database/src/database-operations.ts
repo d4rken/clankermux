@@ -836,6 +836,18 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async markAccountRateLimitedDeadlineOnly(
+		accountId: string,
+		until: number,
+		reason: RateLimitReason,
+	): Promise<void> {
+		await withDatabaseRetry(
+			() => this.accounts.setRateLimitedDeadlineOnly(accountId, until, reason),
+			this.retryConfig,
+			"markAccountRateLimitedDeadlineOnly",
+		);
+	}
+
 	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
 		await withDatabaseRetry(
 			() => this.accounts.resetConsecutiveRateLimits(accountId),

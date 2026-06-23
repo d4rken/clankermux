@@ -85,6 +85,7 @@ function makeContext(
 			),
 			getActiveComboForFamily: mock(async () => null),
 			markAccountRateLimited: mock(async () => {}),
+			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
 			getAdapter: mock(() => ({
 				run: mock(async () => {}),

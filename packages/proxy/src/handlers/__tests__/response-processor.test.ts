@@ -59,7 +59,11 @@ function makeCtx(opts: {
 	resetTime?: number;
 }) {
 	const calls = {
-		markRateLimited: [] as Array<{ accountId: string; resetTime: number }>,
+		markRateLimited: [] as Array<{
+			accountId: string;
+			resetTime: number;
+			deadlineOnly?: boolean;
+		}>,
 		resetConsecutive: [] as string[],
 		enqueueCount: 0,
 		updateAccountUsage: 0,
@@ -89,6 +93,18 @@ function makeCtx(opts: {
 				calls.markRateLimited.push({ accountId, resetTime });
 				persistedCounter += 1;
 				return persistedCounter;
+			},
+			// Lever B: non-incrementing deadline setter for server-directed resets.
+			markAccountRateLimitedDeadlineOnly: async (
+				accountId: string,
+				resetTime: number,
+				_reason: string,
+			) => {
+				calls.markRateLimited.push({
+					accountId,
+					resetTime,
+					deadlineOnly: true,
+				});
 			},
 			resetConsecutiveRateLimits: async (accountId: string) => {
 				calls.resetConsecutive.push(accountId);
@@ -132,6 +148,7 @@ function makeCtxWithReason(opts: {
 			accountId: string;
 			resetTime: number;
 			reason: string;
+			deadlineOnly?: boolean;
 		}>,
 		resetConsecutive: [] as string[],
 		enqueueCount: 0,
@@ -160,6 +177,19 @@ function makeCtxWithReason(opts: {
 				calls.markRateLimited.push({ accountId, resetTime, reason });
 				persistedCounter += 1;
 				return persistedCounter;
+			},
+			// Lever B: non-incrementing deadline setter for server-directed resets.
+			markAccountRateLimitedDeadlineOnly: async (
+				accountId: string,
+				resetTime: number,
+				reason: string,
+			) => {
+				calls.markRateLimited.push({
+					accountId,
+					resetTime,
+					reason,
+					deadlineOnly: true,
+				});
 			},
 			resetConsecutiveRateLimits: async (accountId: string) => {
 				calls.resetConsecutive.push(accountId);
@@ -203,13 +233,12 @@ describe("processProxyResponse — rate limit audit trail (issue #178)", () => {
 
 		expect(calls.markRateLimited).toHaveLength(1);
 		expect(calls.markRateLimited[0]?.accountId).toBe(account.id);
-		// New behavior: applyRateLimitCooldown caps the upstream resetTime via
-		// `min(resetTime, now + backoff)`. With a 30-minute upstream reset and
-		// a 30-second BASE backoff on the first 429, the backoff wins.
+		// Lever B: a server-directed reset is honored verbatim (no backoff cap) and
+		// goes through the non-incrementing deadline-only setter.
+		expect(calls.markRateLimited[0]?.deadlineOnly).toBe(true);
 		const reset = calls.markRateLimited[0]?.resetTime ?? 0;
-		expect(reset).toBeGreaterThanOrEqual(before + 30 * 1000 - 1000);
-		expect(reset).toBeLessThanOrEqual(Date.now() + 30 * 1000 + 1000);
-		expect(reset).toBeLessThan(resetTime); // backoff capped the upstream
+		expect(reset).toBe(resetTime);
+		expect(before).toBeLessThanOrEqual(reset); // reset is in the future
 		expect(calls.markRateLimited[0]?.reason).toBe("upstream_429_with_reset");
 	});
 
@@ -467,14 +496,15 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 
 		await processProxyResponse(response, account, ctx);
 
-		// New behavior: capped at min(upstream, now + backoff). With a 30-minute
-		// upstream and a 30-second BASE backoff, the backoff wins.
-		expect(account.rate_limited_until).not.toBeNull();
+		// Lever B: a server-directed reset is honored verbatim (no backoff cap) and
+		// does NOT escalate the streak.
+		expect(account.rate_limited_until).toBe(resetTime);
+		expect(account.consecutive_rate_limits).toBe(0);
 		expect(account.rate_limited_until ?? 0).toBeGreaterThanOrEqual(
-			before + 30 * 1000 - 1000,
+			before, // reset is in the future
 		);
 		expect(account.rate_limited_until ?? 0).toBeLessThanOrEqual(
-			Date.now() + 30 * 1000 + 1000,
+			resetTime + 1000,
 		);
 	});
 

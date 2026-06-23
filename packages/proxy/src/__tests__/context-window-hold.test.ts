@@ -12,7 +12,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
+import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+} from "../provider-overload-cooldown";
 
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
 
@@ -149,6 +152,7 @@ function makeFullContext(accounts: Account[]): ProxyContext {
 			),
 			getActiveComboForFamily: mock(async () => null),
 			markAccountRateLimited: mock(async () => 1),
+			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
 			updateAccountUsage: mock(async () => {}),
 			updateAccountRateLimitMeta: mock(async () => {}),
@@ -251,7 +255,9 @@ describe("context-window hold", () => {
 	});
 
 	it("returns 400 immediately when rate-limited non-Codex account's cooldown exceeds the hold budget", async () => {
-		// CW_HOLD_MAX_MS = 120s; 200s cooldown > 120s budget → skip hold entirely.
+		// makeLargeRequest (~350k) exceeds Codex's full window → no relax candidate →
+		// the extended 330s budget applies. A 400s cooldown still exceeds it, so the
+		// hold is skipped entirely and a 400 is returned immediately.
 		const codex = makeAccount({
 			id: "codex-1",
 			name: "Codex",
@@ -263,8 +269,8 @@ describe("context-window hold", () => {
 			id: "opus-1",
 			name: "Opus",
 			provider: "anthropic",
-			// 200s cooldown — beyond the 120s hold budget
-			rate_limited_until: Date.now() + 200_000,
+			// 400s cooldown — beyond the extended 330s no-Codex-fallback budget
+			rate_limited_until: Date.now() + 400_000,
 		});
 		const ctx = makeSimpleContext([codex, anthropic]);
 
@@ -351,6 +357,45 @@ describe("context-window hold", () => {
 		expect(error.type).toBe("client_closed_request");
 	});
 
+	it("holds for a provider-overloaded (529) non-Codex account, not just rate-limited ones", async () => {
+		// Regression: a "Provider overloaded" 529 cooldown is tracked separately
+		// (getProviderOverloadUntil), NOT via rate_limited_until. The CW hold must
+		// wait for it too — otherwise a big request that only Anthropic can serve
+		// 400s the moment Anthropic is overloaded (the exact incident this covers).
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			api_key: "cx-key",
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		// Anthropic NOT rate-limited, but its provider is on a 529 overload cooldown.
+		const anthropic = makeAccount({
+			id: "opus-1",
+			name: "Opus",
+			provider: "anthropic",
+			rate_limited_until: null,
+		});
+		applyProviderOverloadCooldown("anthropic", Date.now() + 5_000);
+		const ctx = makeSimpleContext([codex, anthropic]);
+
+		// Abort mid-wait: a 499 proves the hold engaged (waited) for an account
+		// that is unavailable only via the provider-overload signal.
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 100);
+
+		const response = await callHandleProxy(
+			makeLargeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("client_closed_request");
+	});
+
 	it("does not hold for paused non-Codex accounts (only waits for rate-limited ones)", async () => {
 		const codex = makeAccount({
 			id: "codex-1",
@@ -384,6 +429,95 @@ describe("context-window hold", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
+	});
+
+	// ── Extended budget when Codex cannot fall back (Lever A) ───────────────
+	it("extends the hold beyond 120s when no Codex account fits even the full window", async () => {
+		// makeLargeRequest (~350k) exceeds Codex's FULL 272k window, so there is NO
+		// relax candidate → the extended CW_HOLD_MAX_MS_NO_CODEX_FALLBACK (330s)
+		// budget applies. A non-Codex account rate-limited 200s out sits BEYOND the
+		// old 120s budget but WITHIN 330s. Under the old budget the hold would be
+		// skipped (instant 400); under the extended budget the hold is ENTERED and
+		// the connection sleeps — which we prove by aborting mid-wait and asserting
+		// a 499 (client_closed_request), not a 400.
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			api_key: "cx-key",
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const anthropic = makeAccount({
+			id: "opus-1",
+			name: "Opus",
+			provider: "anthropic",
+			// 200s — beyond the 120s base budget, within the 330s extended budget.
+			rate_limited_until: Date.now() + 200_000,
+		});
+		const ctx = makeSimpleContext([codex, anthropic]);
+
+		// Spy on the idle-timer re-arm. The hold bumps it once immediately on entry,
+		// so a single call proves the hold region was entered with ctx.server set.
+		const timeoutSpy = mock(() => {});
+		(ctx as ProxyContext).server = { timeout: timeoutSpy } as never;
+
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 100);
+
+		const start = Date.now();
+		const response = await callHandleProxy(
+			makeLargeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		const elapsed = Date.now() - start;
+
+		// Entered the hold and was sleeping when aborted → client abort, not 400.
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		const error = body.error as Record<string, unknown>;
+		expect(error.type).toBe("client_closed_request");
+		// It actually waited (didn't bail instantly at 120s like the old budget).
+		expect(elapsed).toBeGreaterThanOrEqual(90);
+		// The connection's idle timer was re-armed on hold entry (best-effort bump).
+		expect(timeoutSpy).toHaveBeenCalled();
+	});
+
+	it("still 400s immediately at the 120s budget when Codex CAN fall back and the cooldown exceeds it", async () => {
+		// makeRelaxBandRequest fits Codex's full window → a relax candidate exists →
+		// the base 120s budget applies (unchanged behavior). A 200s cooldown is
+		// beyond 120s, so the hold is skipped. The request fits the true window, so
+		// the last-resort path attempts Codex rather than pre-rejecting; with Codex
+		// unreachable (no token) it falls through — the point is it does NOT enter a
+		// long hold (returns quickly), proving the budget stayed at 120s.
+		const codex = makeAccount({
+			id: "codex-1",
+			name: "Codex",
+			provider: "codex",
+			api_key: "cx-key",
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const anthropic = makeAccount({
+			id: "opus-1",
+			name: "Opus",
+			provider: "anthropic",
+			rate_limited_until: Date.now() + 200_000,
+		});
+		const ctx = makeSimpleContext([codex, anthropic]);
+
+		const start = Date.now();
+		const _response = await callHandleProxy(
+			makeRelaxBandRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		const elapsed = Date.now() - start;
+
+		// No long hold entered: returns well before the 200s cooldown would elapse
+		// (the cooldown exceeds the unchanged 120s budget because Codex can serve as
+		// last resort, so the hold is skipped). The last-resort path may make a
+		// quick upstream attempt, so allow generous headroom under a real hold.
+		expect(elapsed).toBeLessThan(3_000);
 	});
 
 	// ── Last-resort relaxation (E) ──────────────────────────────────────────

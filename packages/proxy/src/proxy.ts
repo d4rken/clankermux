@@ -3,6 +3,7 @@ import {
 	codexAccountFitsRequestUnmargined,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
+	NETWORK,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
@@ -72,6 +73,14 @@ const log = new Logger("Proxy");
 // falling back to a 400 context_window_exceeded. Matches BURST_RETRY_MAX_HOLD_MS
 // (120s) — both are bounds on how long we hold a live client connection.
 const CW_HOLD_MAX_MS = 120_000;
+// Extended CW-hold budget used when NO Codex account can serve the request even
+// against its full (unmargined) window — i.e. the only backends that can hold
+// the request are the rate-limited large-context (Anthropic) accounts, so a 400
+// is the only alternative to waiting. 330s covers one full 300s 429 backoff
+// ceiling cooldown plus a re-probe, and stays under the Anthropic SDK's ~600s
+// client request timeout. When Codex *can* fall back, the shorter
+// CW_HOLD_MAX_MS (120s) is used and behavior is unchanged.
+const CW_HOLD_MAX_MS_NO_CODEX_FALLBACK = 330_000;
 // Small jitter (ms) added to each CW hold sleep to avoid thundering herd.
 const CW_HOLD_JITTER_MS = 500;
 
@@ -233,6 +242,22 @@ export async function handleProxy(
 
 	// 1. Track client version from user-agent for use in auto-refresh
 	trackClientVersion(req.headers.get("user-agent"));
+
+	// Best-effort re-arm of this connection's Bun idle timer. Called on a
+	// timer during long holds (CW hold) and long quiet streaming gaps so a
+	// connection held without bytes isn't reaped by the 180s base idleTimeout.
+	// Best-effort by design: on the Codex /v1/responses translation path the
+	// `req` handed to handleProxy may not map to the original socket, so
+	// server.timeout is a no-op there and the connection degrades to the 180s
+	// base — acceptable, since Codex requests are the ones being *excluded*
+	// from the hold, not held. ctx.server is unset in unit tests (optional).
+	const bumpIdleTimeout = () => {
+		try {
+			ctx.server?.timeout(req, NETWORK.SERVER_IDLE_TIMEOUT_SECONDS);
+		} catch {
+			// server.timeout can throw if the req isn't a tracked connection
+		}
+	};
 
 	// 2. Validate provider can handle path
 	validateProviderPath(ctx.provider, url.pathname);
@@ -1060,164 +1085,205 @@ export async function handleProxy(
 		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
 			const cwHoldStart = Date.now();
 
-			while (true) {
-				const nowMs = Date.now();
-				const elapsed = nowMs - cwHoldStart;
-				if (elapsed >= CW_HOLD_MAX_MS) break;
-				const remaining = CW_HOLD_MAX_MS - elapsed;
+			// Pre-compute the last-resort relaxation candidates (Codex accounts that
+			// fit the FULL/unmargined window) so we can both (a) pick the hold budget
+			// and (b) reuse them in the relaxation block below without re-filtering.
+			const relaxCandidates = contextExcludedAccounts.filter(
+				({ account, model }) =>
+					codexAccountFitsRequestUnmargined(account, model, gateTokenEstimate),
+			);
+			// If a Codex account can serve as last resort, keep the original 120s
+			// behavior (Codex is the fallback). If NOT, the only path to success is
+			// waiting out the rate-limited large-context accounts, so hold longer.
+			const cwHoldBudget =
+				relaxCandidates.length > 0
+					? CW_HOLD_MAX_MS
+					: CW_HOLD_MAX_MS_NO_CODEX_FALLBACK;
 
-				// Find non-Codex, non-paused, actively rate-limited accounts.
-				const allAccs = await ctx.dbOps.getAllAccounts();
-				const cwRateLimited = allAccs.filter(
-					(a) =>
-						!a.paused &&
-						a.provider !== "codex" &&
-						a.rate_limited_until !== null &&
-						a.rate_limited_until > nowMs,
-				);
+			// Re-arm the connection's idle timer while we wait (the base 180s timeout
+			// would otherwise reap a connection held silently for up to 330s). An
+			// immediate bump keeps the timer fresh before the first sleep too.
+			bumpIdleTimeout();
+			const cwRearm = setInterval(
+				bumpIdleTimeout,
+				NETWORK.IDLE_REARM_INTERVAL_MS,
+			);
+			try {
+				while (true) {
+					const nowMs = Date.now();
+					const elapsed = nowMs - cwHoldStart;
+					if (elapsed >= cwHoldBudget) break;
+					const remaining = cwHoldBudget - elapsed;
 
-				if (cwRateLimited.length === 0) break; // nothing to wait for
+					// Find non-Codex, non-paused accounts that are temporarily
+					// unavailable, and when each becomes available again. An account is
+					// blocked by EITHER a per-account 429 cooldown (`rate_limited_until`)
+					// OR a provider-wide 529 overload cooldown (`getProviderOverloadUntil`,
+					// e.g. the shared `anthropic-upstream` cooldown). It's available again
+					// only once BOTH have cleared, so its recovery time is the max of the
+					// two active deadlines. Waiting on the 429 signal alone missed the
+					// 529-overload case entirely (all Anthropic accounts share one overload
+					// cooldown, with `rate_limited_until` null) — the exact scenario where a
+					// big request that only Anthropic can serve would 400 instead of hold.
+					const allAccs = await ctx.dbOps.getAllAccounts();
+					const cwUnavailable = allAccs
+						.filter((a) => !a.paused && a.provider !== "codex")
+						.map((a) => {
+							const rl =
+								a.rate_limited_until && a.rate_limited_until > nowMs
+									? a.rate_limited_until
+									: 0;
+							const ov = getProviderOverloadUntil(a.provider, nowMs) ?? 0;
+							return { account: a, availableAt: Math.max(rl, ov) };
+						})
+						.filter((x) => x.availableAt > nowMs);
 
-				const soonest = Math.min(
-					...cwRateLimited.map((a) => a.rate_limited_until as number),
-				);
-				const waitMs =
-					Math.max(0, soonest - nowMs) +
-					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+					if (cwUnavailable.length === 0) break; // nothing to wait for
 
-				if (waitMs > remaining) break; // soonest expiry is beyond budget
+					const soonest = Math.min(...cwUnavailable.map((x) => x.availableAt));
+					const waitMs =
+						Math.max(0, soonest - nowMs) +
+						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 
-				log.info(
-					`CW hold: waiting ${waitMs}ms for large-context account(s): ${cwRateLimited.map((a) => a.name).join(", ")}`,
-				);
+					if (waitMs > remaining) break; // soonest expiry is beyond budget
 
-				const completed = await abortableSleep(waitMs, req.signal);
-				if (!completed) {
-					log.info("CW hold: client disconnected during wait");
-					return createClientAbortResponse();
+					log.info(
+						`CW hold: waiting ${waitMs}ms for large-context account(s): ${cwUnavailable.map((x) => x.account.name).join(", ")}`,
+					);
+
+					const completed = await abortableSleep(waitMs, req.signal);
+					if (!completed) {
+						log.info("CW hold: client disconnected during wait");
+						return createClientAbortResponse();
+					}
+
+					// Re-run full account selection with the same gates.
+					const cwSelected = await selectAccountsForRequest(
+						requestMeta,
+						ctx,
+						effectiveRequestModel ?? undefined,
+					);
+					const { available: cwAvailable } =
+						applyProviderOverloadGate(cwSelected);
+					const { available: cwPostThrottle } =
+						applyUsageThrottling(cwAvailable);
+					// Non-Codex accounts always pass the context-window gate.
+					const cwCandidates = cwPostThrottle.filter(
+						(a) => a.provider !== "codex",
+					);
+
+					if (cwCandidates.length === 0) continue; // still unavailable
+
+					log.info(
+						`CW hold: ${cwCandidates.length} non-Codex account(s) now available, retrying`,
+					);
+
+					for (let i = 0; i < cwCandidates.length; i++) {
+						const r = await proxyWithAccount(
+							req,
+							url,
+							cwCandidates[i],
+							requestMeta,
+							finalBodyBuffer,
+							finalCreateBodyStream,
+							i,
+							ctx,
+							undefined,
+							apiKeyId,
+							apiKeyName,
+							requestBodyContext,
+							// Don't forward rate-limit response on last candidate —
+							// loop back instead to check for another available account.
+							false,
+						);
+						if (r) return r;
+					}
+					// All candidates returned null — loop back to recheck.
 				}
 
-				// Re-run full account selection with the same gates.
-				const cwSelected = await selectAccountsForRequest(
-					requestMeta,
-					ctx,
-					effectiveRequestModel ?? undefined,
-				);
-				const { available: cwAvailable } =
-					applyProviderOverloadGate(cwSelected);
-				const { available: cwPostThrottle } = applyUsageThrottling(cwAvailable);
-				// Non-Codex accounts always pass the context-window gate.
-				const cwCandidates = cwPostThrottle.filter(
-					(a) => a.provider !== "codex",
-				);
-
-				if (cwCandidates.length === 0) continue; // still unavailable
-
-				log.info(
-					`CW hold: ${cwCandidates.length} non-Codex account(s) now available, retrying`,
-				);
-
-				for (let i = 0; i < cwCandidates.length; i++) {
+				// Last-resort relaxation (E): the CW hold found no large-context
+				// account and the only backends that could serve are the Codex
+				// accounts the gate excluded. Rather than 400 a request that may
+				// actually fit the real window, attempt any excluded Codex account
+				// whose estimate fits the FULL window (no SAFETY_MARGIN —
+				// pre-computed as relaxCandidates above). Codex is the genuine last
+				// resort here, so we drop the guard band; if the estimate still
+				// undercounts, Codex returns its own context-length error.
+				if (req.signal?.aborted) {
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
+				let relaxAttempted = false;
+				for (let i = 0; i < relaxCandidates.length; i++) {
+					const { account } = relaxCandidates[i];
+					// Re-derive the combo slot's model override exactly as the gate
+					// did, so we send the same model the unmargined check sized
+					// against.
+					const slot = initialComboInfo?.slots.find(
+						(s) => s.accountId === account.id,
+					);
+					log.info(
+						`Context-window last-resort: attempting excluded Codex account ` +
+							`"${account.name}" against full window (estimate=${gateTokenEstimate})`,
+					);
+					relaxAttempted = true;
 					const r = await proxyWithAccount(
 						req,
 						url,
-						cwCandidates[i],
+						account,
 						requestMeta,
 						finalBodyBuffer,
 						finalCreateBodyStream,
 						i,
 						ctx,
-						undefined,
+						slot?.modelOverride,
 						apiKeyId,
 						apiKeyName,
 						requestBodyContext,
-						// Don't forward rate-limit response on last candidate —
-						// loop back instead to check for another available account.
-						false,
+						// On the last candidate, forward a real upstream
+						// rate-limit/overload as the honest terminal rather than
+						// collapsing it to null.
+						i === relaxCandidates.length - 1,
+						// Thread the client signal so a disconnect aborts the in-flight
+						// attempt instead of waiting for the upstream timeout.
+						{ signal: req.signal },
 					);
 					if (r) return r;
+					// A null here can mean the client disconnected mid-attempt (the
+					// threaded signal aborts the fetch, which proxyWithAccount reports
+					// as a network_error null). Surface that as a client abort rather
+					// than continuing to the next candidate or the fall-through
+					// terminal.
+					if (req.signal?.aborted) {
+						cacheBodyStore.discardStaged(requestMeta.id);
+						return createClientAbortResponse();
+					}
 				}
-				// All candidates returned null — loop back to recheck.
-			}
 
-			// Last-resort relaxation (E): the CW hold found no large-context account
-			// and the only backends that could serve are the Codex accounts the gate
-			// excluded. Rather than 400 a request that may actually fit the real
-			// window, re-admit any excluded Codex account whose estimate fits the
-			// FULL window (no SAFETY_MARGIN) and attempt it. Codex is the genuine
-			// last resort here, so we drop the guard band; if the estimate still
-			// undercounts, Codex returns its own context-length error.
-			if (req.signal?.aborted) {
+				// Done with the staged body either way (a successful attempt already
+				// returned above).
 				cacheBodyStore.discardStaged(requestMeta.id);
-				return createClientAbortResponse();
-			}
-			const relaxCandidates = contextExcludedAccounts.filter(
-				({ account, model }) =>
-					codexAccountFitsRequestUnmargined(account, model, gateTokenEstimate),
-			);
-			let relaxAttempted = false;
-			for (let i = 0; i < relaxCandidates.length; i++) {
-				const { account } = relaxCandidates[i];
-				// Re-derive the combo slot's model override exactly as the gate did,
-				// so we send the same model the unmargined check sized against.
-				const slot = initialComboInfo?.slots.find(
-					(s) => s.accountId === account.id,
-				);
-				log.info(
-					`Context-window last-resort: attempting excluded Codex account ` +
-						`"${account.name}" against full window (estimate=${gateTokenEstimate})`,
-				);
-				relaxAttempted = true;
-				const r = await proxyWithAccount(
-					req,
-					url,
-					account,
-					requestMeta,
-					finalBodyBuffer,
-					finalCreateBodyStream,
-					i,
-					ctx,
-					slot?.modelOverride,
-					apiKeyId,
-					apiKeyName,
-					requestBodyContext,
-					// On the last candidate, forward a real upstream rate-limit/overload
-					// as the honest terminal rather than collapsing it to null.
-					i === relaxCandidates.length - 1,
-					// Thread the client signal so a disconnect aborts the in-flight
-					// attempt instead of waiting for the upstream timeout.
-					{ signal: req.signal },
-				);
-				if (r) return r;
-				// A null here can mean the client disconnected mid-attempt (the
-				// threaded signal aborts the fetch, which proxyWithAccount reports as
-				// a network_error null). Surface that as a client abort rather than
-				// continuing to the next candidate or the fall-through terminal.
-				if (req.signal?.aborted) {
-					cacheBodyStore.discardStaged(requestMeta.id);
-					return createClientAbortResponse();
+
+				if (!relaxAttempted) {
+					// No excluded Codex account fit even the full window → the request
+					// is genuinely too big for every backend. The size 400 is correct.
+					return createContextWindowExceededResponse(
+						gateTokenEstimate,
+						contextExcludedAccounts,
+						effectiveRequestModel ?? "unknown",
+					);
 				}
+				// The request fit the true window but every last-resort Codex attempt
+				// failed for availability (429/5xx/network → null). That is NOT a size
+				// problem, so fall through to the generic terminals below —
+				// pool_exhausted / provider-overloaded, or pinned_target_unavailable
+				// when a pin / Codex-CLI floor is active (all honest, retryable 503s)
+				// — rather than a misleading context_window_exceeded 400.
+			} finally {
+				// Stop re-arming on EVERY exit path: success returns, relaxation
+				// returns, the 400, client-abort returns, and the fall-through.
+				clearInterval(cwRearm);
 			}
-
-			// Done with the staged body either way (a successful attempt already
-			// returned above).
-			cacheBodyStore.discardStaged(requestMeta.id);
-
-			if (!relaxAttempted) {
-				// No excluded Codex account fit even the full window → the request is
-				// genuinely too big for every backend. The size 400 is correct.
-				return createContextWindowExceededResponse(
-					gateTokenEstimate,
-					contextExcludedAccounts,
-					effectiveRequestModel ?? "unknown",
-				);
-			}
-			// The request fit the true window but every last-resort Codex attempt
-			// failed for availability (429/5xx/network → null). That is NOT a size
-			// problem, so fall through to the generic terminals below — pool_exhausted
-			// / provider-overloaded, or pinned_target_unavailable when a pin / Codex-
-			// CLI floor is active (all honest, retryable 503s) — rather than a
-			// misleading context_window_exceeded 400.
 		}
 
 		if (throttledAccounts.length > 0) {

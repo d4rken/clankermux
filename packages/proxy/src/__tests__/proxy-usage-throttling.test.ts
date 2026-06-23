@@ -154,6 +154,13 @@ function makeProcessCtx(opts: { rateLimited: boolean; resetTime?: number }) {
 				persistedCounter += 1;
 				return persistedCounter;
 			},
+			markAccountRateLimitedDeadlineOnly: async (
+				accountId: string,
+				until: number,
+				reason: string,
+			) => {
+				calls.markRateLimited.push({ accountId, until, reason });
+			},
 			resetConsecutiveRateLimits: async (accountId: string) => {
 				calls.resetConsecutive.push(accountId);
 				persistedCounter = 0;

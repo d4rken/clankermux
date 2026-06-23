@@ -45,8 +45,18 @@ const log = new Logger("RateLimitCooldown");
  *     a fresh deadline. With no `resetTime`, in-memory state is left untouched
  *     entirely (the orchestrator computes its own bounded wait).
  *
- * The default (no `options`, or `reprobe` falsy) path is byte-for-byte identical
- * to the original behaviour.
+ * ### Server-directed reset semantics (Lever B)
+ *
+ * When the 429 carries an explicit `resetTime` in the future (and no `floorUntil`
+ * out-of-credits override), the upstream has told us exactly when to retry. We
+ * honor that deadline but DO NOT escalate `consecutive_rate_limits` — only
+ * no-reset 429s should ramp the adaptive backoff streak. The DB write goes through
+ * the non-incrementing `markAccountRateLimitedDeadlineOnly`. `rate_limited_at` is
+ * still refreshed so a later genuine success can reset the streak via the
+ * stability window.
+ *
+ * The no-reset path and the `floorUntil` (out-of-credits depletion) path keep the
+ * original escalating behaviour verbatim.
  */
 export function applyRateLimitCooldown(
 	account: Account,
@@ -81,6 +91,50 @@ export function applyRateLimitCooldown(
 		const rateLimitError = new RateLimitError(
 			account.id,
 			account.rate_limited_until ?? now,
+			rateLimitInfo.remaining,
+		);
+		logError(rateLimitError, log);
+		return;
+	}
+
+	// Lever B: the upstream gave us an explicit reset time (it told us exactly when
+	// to retry). Honor that deadline WITHOUT escalating the adaptive-backoff streak
+	// — only no-reset 429s should ramp the streak. The `floorUntil` override is
+	// reserved for out-of-credits depletion (which never carries a reset), so it
+	// takes precedence: if both are somehow present, fall through to the escalating
+	// path below to preserve the existing out-of-credits semantics.
+	if (
+		rateLimitInfo.resetTime &&
+		rateLimitInfo.resetTime > now &&
+		!rateLimitInfo.floorUntil
+	) {
+		const reason: RateLimitReason =
+			rateLimitInfo.reason ?? "upstream_429_with_reset";
+
+		// In-memory update: honor the server-directed deadline; refresh
+		// rate_limited_at so a later genuine success can still reset the streak via
+		// the stability window; leave consecutive_rate_limits UNTOUCHED.
+		account.rate_limited_until = rateLimitInfo.resetTime;
+		account.rate_limited_at = now;
+
+		const cooldownUntil = rateLimitInfo.resetTime;
+		ctx.asyncWriter.enqueue(async () => {
+			await ctx.dbOps.markAccountRateLimitedDeadlineOnly(
+				account.id,
+				cooldownUntil,
+				reason,
+			);
+			// Audit log: report the UNCHANGED streak so the no-escalation behaviour
+			// is visible in the operational trail.
+			log.warn(
+				`[clankermux] account=${account.name} cooldown_applied reason=${reason} until=${new Date(cooldownUntil).toISOString()} consecutive=${account.consecutive_rate_limits} (server-directed reset, streak not escalated)`,
+			);
+		});
+
+		// Still emit the RateLimitError for observability, as before.
+		const rateLimitError = new RateLimitError(
+			account.id,
+			cooldownUntil,
 			rateLimitInfo.remaining,
 		);
 		logError(rateLimitError, log);

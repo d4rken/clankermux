@@ -83,6 +83,10 @@ function makeProxyContext(): ProxyContext {
 				(_accountId: string, _until: number, _reason: string) =>
 					Promise.resolve(1),
 			),
+			markAccountRateLimitedDeadlineOnly: mock(
+				(_accountId: string, _until: number, _reason: string) =>
+					Promise.resolve(),
+			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
 			updateAccountRateLimitMeta: mock(() => Promise.resolve()),

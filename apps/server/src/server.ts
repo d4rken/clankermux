@@ -73,7 +73,7 @@ import {
 	StrategyName,
 	type StrategyStore,
 } from "@clankermux/types";
-import { serve } from "bun";
+import { type Server, serve } from "bun";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -1132,7 +1132,9 @@ export default async function startServer(options?: {
 		const serverConfig = {
 			port: runtime.port,
 			hostname,
-			idleTimeout: NETWORK.IDLE_TIMEOUT_MAX, // Max allowed by Bun
+			// Run below Bun's 255s hard cap; long holds/streams re-arm their own
+			// per-connection idle timer via server.timeout(req, N) (see proxy.ts).
+			idleTimeout: NETWORK.SERVER_IDLE_TIMEOUT_SECONDS,
 			...(tlsEnabled && validatedSslKeyPath && validatedSslCertPath
 				? {
 						tls: {
@@ -1141,7 +1143,11 @@ export default async function startServer(options?: {
 						},
 					}
 				: {}),
-			async fetch(req: Request) {
+			async fetch(req: Request, server: Server<undefined>) {
+				// Stash the live Bun Server so the proxy can re-arm a held/streaming
+				// connection's idle timer via server.timeout(req, N). Assigned here
+				// (not just after serve()) so it's set even on the very first request.
+				proxyContext.server = server;
 				const url = new URL(req.url);
 
 				// Try API routes first
@@ -1301,6 +1307,11 @@ export default async function startServer(options?: {
 		};
 
 		serverInstance = serve(serverConfig);
+		// Make the live Server reachable from the proxy for idle-timer re-arming.
+		// The fetch handler also assigns this per-request (covers the type), but
+		// stashing it here too keeps non-request callers (e.g. schedulers driving
+		// internal proxy dispatch) able to re-arm.
+		proxyContext.server = serverInstance;
 	} catch (error) {
 		if (
 			typeof error === "object" &&

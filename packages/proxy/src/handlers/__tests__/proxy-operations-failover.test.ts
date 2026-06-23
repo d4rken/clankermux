@@ -83,6 +83,10 @@ function makeProxyContext(): ProxyContext {
 				(_accountId: string, _until: number, _reason: string) =>
 					Promise.resolve(),
 			),
+			markAccountRateLimitedDeadlineOnly: mock(
+				(_accountId: string, _until: number, _reason: string) =>
+					Promise.resolve(),
+			),
 			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
 			updateAccountUsage: mock(() => Promise.resolve()),
 			updateAccountRateLimitMeta: mock(() => Promise.resolve()),
@@ -427,16 +431,22 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 			ctx,
 		);
 
-		// The asyncWriter.enqueue mock captures calls; markAccountRateLimited
-		// is called inside the enqueued job. Since asyncWriter.enqueue is mocked
-		// (does not execute the job), we verify via markAccountRateLimited directly.
-		// The feature requires markAccountRateLimited to receive a third `reason` arg.
-		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
-			typeof mock
-		>;
-		expect(markMock.mock.calls.length).toBeGreaterThan(0);
-		const [, , reason] = markMock.mock.calls[0] as [string, number, string];
-		expect(reason).toBe("model_fallback_429");
+		// The asyncWriter.enqueue mock captures calls; the cooldown setter is
+		// called inside the enqueued job. Since asyncWriter.enqueue is mocked
+		// (does not execute the job), we verify via the setter mocks directly.
+		// Lever B: a 429 carrying a server-directed reset routes through the
+		// non-incrementing deadline-only setter; a no-reset 429 routes through the
+		// incrementing one. Either way the `reason` arg must be plumbed through.
+		const calls = [
+			...(ctx.dbOps.markAccountRateLimited as ReturnType<typeof mock>).mock
+				.calls,
+			...(
+				ctx.dbOps.markAccountRateLimitedDeadlineOnly as ReturnType<typeof mock>
+			).mock.calls,
+		];
+		expect(calls.length).toBeGreaterThan(0);
+		const reasons = calls.map((args: unknown[]) => args[2] as string);
+		expect(reasons).toContain("model_fallback_429");
 	});
 
 	it("calls markAccountRateLimited with reason='all_models_exhausted_429' when all models fail", async () => {
@@ -475,13 +485,17 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 			ctx,
 		);
 
-		const markMock = ctx.dbOps.markAccountRateLimited as ReturnType<
-			typeof mock
-		>;
-		// At least one call should carry the all_models_exhausted_429 reason
-		const reasons = markMock.mock.calls.map(
-			(args: unknown[]) => args[2] as string,
-		);
+		// At least one cooldown call should carry the all_models_exhausted_429
+		// reason. Lever B may route a reset-bearing 429 through the deadline-only
+		// setter, so check both setters' calls.
+		const calls = [
+			...(ctx.dbOps.markAccountRateLimited as ReturnType<typeof mock>).mock
+				.calls,
+			...(
+				ctx.dbOps.markAccountRateLimitedDeadlineOnly as ReturnType<typeof mock>
+			).mock.calls,
+		];
+		const reasons = calls.map((args: unknown[]) => args[2] as string);
 		expect(reasons).toContain("all_models_exhausted_429");
 	});
 });

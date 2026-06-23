@@ -1,6 +1,7 @@
 import {
 	getModelList,
 	logError,
+	NETWORK,
 	ProviderError,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
@@ -612,6 +613,18 @@ export async function proxyWithAccount(
 	returnRateLimitedResponseOnExhaustion = false,
 	options?: ProxyAttemptOptions,
 ): Promise<Response | null> {
+	// Best-effort re-arm of this connection's Bun idle timer, threaded into
+	// forwardToClient so long quiet gaps mid-stream don't reap the connection at
+	// the 180s base idleTimeout. ctx.server is unset in tests / non-HTTP callers
+	// (optional), in which case this is a no-op.
+	const bumpIdleTimeout = () => {
+		try {
+			ctx.server?.timeout(req, NETWORK.SERVER_IDLE_TIMEOUT_SECONDS);
+		} catch {
+			// server.timeout can throw if req isn't a tracked connection
+		}
+	};
+
 	// Single helper that records a categorical outcome into the optional sink AND
 	// cancels the upstream body, so the many failover (`return null`) paths can't
 	// let recording and body-cancel drift apart (Codex's anti-drift requirement).
@@ -1530,6 +1543,7 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
+						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
 				);
@@ -1591,6 +1605,7 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
+						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
 				);
@@ -1628,6 +1643,7 @@ export async function proxyWithAccount(
 				apiKeyId,
 				apiKeyName,
 				routing: requestMeta.routing ?? null,
+				bumpIdleTimeout,
 			},
 			{ ...ctx, provider },
 		);
