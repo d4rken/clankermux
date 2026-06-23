@@ -1698,6 +1698,92 @@ describe("SessionStrategy", () => {
 			expect(mockStore.resumeCalls).toEqual([]);
 		});
 	});
+
+	describe("peekRanked", () => {
+		it("returns the FULL ordered list of available accounts", () => {
+			const accounts = [
+				makeAccount({ id: "p2", priority: 2 }),
+				makeAccount({ id: "p0", priority: 0 }),
+				makeAccount({ id: "p1", priority: 1 }),
+			];
+			expect(strategy.peekRanked(accounts).map((a) => a.id)).toEqual([
+				"p0",
+				"p1",
+				"p2",
+			]);
+		});
+
+		it("filters out unavailable accounts but keeps the rest ordered", () => {
+			const accounts = [
+				makeAccount({ id: "p0", priority: 0 }),
+				makeAccount({
+					id: "rl",
+					priority: 1,
+					rate_limited_until: Date.now() + 60_000,
+				}),
+				makeAccount({ id: "p2", priority: 2 }),
+			];
+			expect(strategy.peekRanked(accounts).map((a) => a.id)).toEqual([
+				"p0",
+				"p2",
+			]);
+		});
+
+		it("returns [] when all accounts are unavailable", () => {
+			expect(
+				strategy.peekRanked([
+					makeAccount({ id: "p0", paused: true }),
+					makeAccount({
+						id: "rl",
+						rate_limited_until: Date.now() + 60_000,
+					}),
+				]),
+			).toEqual([]);
+		});
+
+		it("peek equals peekRanked()[0]?.id", () => {
+			const accounts = [
+				makeAccount({ id: "p1", priority: 1 }),
+				makeAccount({ id: "p0", priority: 0 }),
+			];
+			expect(strategy.peek(accounts)).toBe(
+				strategy.peekRanked(accounts)[0]?.id ?? null,
+			);
+		});
+
+		it("does not change ordering across repeated calls (no mutation)", () => {
+			const accounts = [
+				makeAccount({ id: "p2", priority: 2 }),
+				makeAccount({ id: "p0", priority: 0 }),
+				makeAccount({ id: "p1", priority: 1 }),
+			];
+			const first = strategy.peekRanked(accounts).map((a) => a.id);
+			const second = strategy.peekRanked(accounts).map((a) => a.id);
+			const third = strategy.peekRanked(accounts).map((a) => a.id);
+			expect(second).toEqual(first);
+			expect(third).toEqual(first);
+			expect(mockStore.resumeCalls).toEqual([]);
+		});
+
+		it("includes a paused-but-auto-unpausable account (parity with peek/select)", () => {
+			const past = Date.now() - 60_000;
+			const paused = makeAccount({
+				id: "p0-paused",
+				priority: 0,
+				paused: true,
+				pause_reason: null,
+				auto_fallback_enabled: true,
+				rate_limit_reset: past,
+			});
+			const ready = makeAccount({ id: "p1-ready", priority: 1 });
+			const ranked = strategy.peekRanked([paused, ready]).map((a) => a.id);
+			expect(ranked[0]).toBe("p0-paused");
+			expect(ranked).toContain("p1-ready");
+			// And does not mutate state.
+			expect(paused.paused).toBe(true);
+			expect(mockStore.resumeCalls).toEqual([]);
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

@@ -291,4 +291,104 @@ describe("LeastUsedStrategy", () => {
 			expect(store.resumeCalls).toEqual([]);
 		});
 	});
+
+	describe("peekRanked", () => {
+		it("returns all available accounts sorted by priority then score", () => {
+			store.setUtil("p0", 40);
+			store.setUtil("p1", 10);
+			store.setUtil("p2", 90);
+			const accounts = [
+				makeAccount({ id: "p2", priority: 2 }),
+				makeAccount({ id: "p0", priority: 0 }),
+				makeAccount({ id: "p1", priority: 1 }),
+			];
+			// priority dominates; util is the within-priority tiebreak (none here).
+			expect(strategy.peekRanked(accounts).map((a) => a.id)).toEqual([
+				"p0",
+				"p1",
+				"p2",
+			]);
+		});
+
+		it("orders same-priority accounts by utilization ASC", () => {
+			store.setUtil("hi", 90);
+			store.setUtil("lo", 10);
+			store.setUtil("mid", 50);
+			const accounts = [
+				makeAccount({ id: "hi", priority: 0 }),
+				makeAccount({ id: "lo", priority: 0 }),
+				makeAccount({ id: "mid", priority: 0 }),
+			];
+			expect(strategy.peekRanked(accounts).map((a) => a.id)).toEqual([
+				"lo",
+				"mid",
+				"hi",
+			]);
+		});
+
+		it("filters out unavailable accounts", () => {
+			const accounts = [
+				makeAccount({ id: "ok", priority: 0 }),
+				makeAccount({ id: "paused", priority: 0, paused: true }),
+				makeAccount({
+					id: "rl",
+					priority: 0,
+					rate_limited_until: Date.now() + 60_000,
+				}),
+			];
+			expect(strategy.peekRanked(accounts).map((a) => a.id)).toEqual(["ok"]);
+		});
+
+		it("returns [] when all accounts are unavailable", () => {
+			expect(
+				strategy.peekRanked([
+					makeAccount({ id: "p1", paused: true }),
+					makeAccount({ id: "rl1", rate_limited_until: Date.now() + 60_000 }),
+				]),
+			).toEqual([]);
+		});
+
+		it("peek equals peekRanked()[0]?.id", () => {
+			store.setUtil("p0", 40);
+			store.setUtil("p1", 10);
+			const accounts = [
+				makeAccount({ id: "p1", priority: 1 }),
+				makeAccount({ id: "p0", priority: 0 }),
+			];
+			expect(strategy.peek(accounts)).toBe(
+				strategy.peekRanked(accounts)[0]?.id ?? null,
+			);
+		});
+
+		it("includes a paused-but-auto-unpausable account (parity with select)", () => {
+			const past = Date.now() - 60_000;
+			const accounts = [
+				makeAccount({
+					id: "p0-paused",
+					priority: 0,
+					paused: true,
+					pause_reason: null,
+					auto_fallback_enabled: true,
+					rate_limit_reset: past,
+				}),
+				makeAccount({ id: "p1-ready", priority: 1 }),
+			];
+			const ranked = strategy.peekRanked(accounts).map((a) => a.id);
+			expect(ranked[0]).toBe("p0-paused");
+			expect(ranked).toContain("p1-ready");
+		});
+
+		it("does NOT mutate state across repeated calls", () => {
+			store.setUtil("a", 10);
+			store.setUtil("b", 20);
+			const accounts = [
+				makeAccount({ id: "a", priority: 0 }),
+				makeAccount({ id: "b", priority: 0 }),
+			];
+			const first = strategy.peekRanked(accounts).map((a) => a.id);
+			const second = strategy.peekRanked(accounts).map((a) => a.id);
+			expect(second).toEqual(first);
+			expect(store.resumeCalls).toEqual([]);
+		});
+	});
 });

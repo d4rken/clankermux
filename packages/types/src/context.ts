@@ -41,6 +41,14 @@ export interface LoadBalancingStrategy {
 	select(accounts: Account[], meta: RequestMeta): Account[];
 
 	/**
+	 * Side-effect-free preview: the filtered & ordered accounts a fresh,
+	 * no-affinity request would consider, BEFORE proxy-level gates (provider
+	 * overload, usage throttling, context-window, burst). MUST NOT mutate
+	 * routing state. `peek` returns peekRanked()[0]?.id ?? null.
+	 */
+	peekRanked(accounts: Account[]): Account[];
+
+	/**
 	 * Side-effect-free preview: return the ID of the account that would
 	 * be picked first by select() given the current state, or null if
 	 * no account is available. MUST NOT mutate any state (no DB writes,

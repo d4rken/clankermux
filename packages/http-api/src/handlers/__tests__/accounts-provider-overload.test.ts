@@ -7,11 +7,34 @@ import {
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
 } from "@clankermux/proxy";
-import type { AccountResponse } from "@clankermux/types";
+import type {
+	Account,
+	AccountResponse,
+	LoadBalancingStrategy,
+} from "@clankermux/types";
 import {
 	createAccountForceResetRateLimitHandler,
 	createAccountsListHandler,
 } from "../accounts";
+
+// Strategy stub that ranks accounts in the order given and never mutates state.
+function rankingStrategy(order: string[]): LoadBalancingStrategy {
+	return {
+		select: () => {
+			throw new Error("select() must not be called by the badge");
+		},
+		peekRanked: (accounts: Account[]) =>
+			order
+				.map((id) => accounts.find((a) => a.id === id))
+				.filter((a): a is Account => a != null),
+		peek: (accounts: Account[]) => {
+			const ranked = order
+				.map((id) => accounts.find((a) => a.id === id))
+				.filter((a): a is Account => a != null);
+			return ranked[0]?.id ?? null;
+		},
+	};
+}
 
 interface AccountRow {
 	id: string;
@@ -174,6 +197,40 @@ describe("accounts list provider overload state", () => {
 		expect(consoleApi?.providerOverloadedUntil).toBe(overloadedUntil);
 		expect(codex?.providerOverloadKey).toBeNull();
 		expect(codex?.providerOverloadedUntil).toBeNull();
+	});
+
+	it("moves the Primary badge to Codex when Anthropic is provider-overloaded", async () => {
+		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
+
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id: "anthropic-oauth",
+					name: "Anthropic OAuth",
+					provider: "anthropic",
+				}),
+				makeAccountRow({
+					id: "codex",
+					name: "Codex",
+					provider: "codex",
+				}),
+			]),
+			config,
+			// Strategy ranks Anthropic first; the overload gate must skip it and
+			// the badge fall through to Codex.
+			() => rankingStrategy(["anthropic-oauth", "codex"]),
+		);
+
+		const response = await handler();
+		const body = (await response.json()) as AccountResponse[];
+
+		expect(response.status).toBe(200);
+
+		const anthropic = body.find((account) => account.id === "anthropic-oauth");
+		const codex = body.find((account) => account.id === "codex");
+
+		expect(anthropic?.isPrimary).toBe(false);
+		expect(codex?.isPrimary).toBe(true);
 	});
 
 	it("force reset clears the shared provider overload cooldown", async () => {
