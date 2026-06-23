@@ -6,8 +6,10 @@ import {
 import type { BunSqlAdapter } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import {
+	type CodexCreditsInfo,
 	fetchUsageData,
 	getProvider,
+	isCodexOnCredits,
 	toEpochMs,
 	usageCache,
 } from "@clankermux/providers";
@@ -616,10 +618,19 @@ export class AutoRefreshScheduler {
 
 				// Auto-resume on window reset: if account was auto-paused due to overage, resume it now.
 				// Never auto-resume accounts paused manually or due to failure threshold.
+				//
+				// Codex correctness guard: a codex account paused for "overage" is
+				// actually on paid credits because its WEEKLY (seven_day) window hit
+				// 100%. Codex returns HTTP 200 while on credits, so this success path
+				// fires on every ~5h window probe. Resuming on a 5h reset would
+				// immediately re-pause on the next request (flapping) and each probe
+				// spends credits. shouldResumeFromOverage only allows the resume once
+				// the account is no longer on credits (weekly window has room again).
 				if (
 					accountRow.auto_pause_on_overage_enabled === 1 &&
 					accountRow.paused === 1 &&
-					(!accountRow.pause_reason || accountRow.pause_reason === "overage")
+					(!accountRow.pause_reason || accountRow.pause_reason === "overage") &&
+					this.shouldResumeFromOverage(accountRow)
 				) {
 					log.debug(
 						`Auto-resuming account '${accountRow.name}' after window reset (auto-pause-on-overage enabled)`,
@@ -711,6 +722,47 @@ export class AutoRefreshScheduler {
 
 			return false;
 		}
+	}
+
+	/**
+	 * Decide whether an overage-paused account may be auto-resumed by the current
+	 * successful probe.
+	 *
+	 * For every provider EXCEPT codex this is unconditionally true — a successful
+	 * window-reset probe is the resume signal (unchanged behaviour). It also
+	 * returns true for any non-overage pause reason (those are filtered upstream
+	 * by the caller, but the guard stays self-consistent).
+	 *
+	 * For codex, "overage" means the account is spending paid credits because its
+	 * WEEKLY (seven_day) window is at 100%. Codex returns HTTP 200 while on
+	 * credits, so the success path alone is not proof the weekly window reset.
+	 * We consult the freshly-updated usageCache.codexCredits — populated
+	 * synchronously by updateAccountMetadata (response-processor) during THIS
+	 * probe's dispatch — and only resume when the account is no longer on credits
+	 * (i.e. the weekly window has room again). This avoids resume/re-pause
+	 * flapping on every 5h reset and stops the probe from burning more credits.
+	 *
+	 * Data source: usageCache (not the probe Response headers). The cache is
+	 * updated deterministically inside this probe's own pipeline and does not
+	 * depend on the x-codex-* headers surviving the multiple response rebuilds
+	 * (model-mapping transform, codex processResponse, streaming transform) between
+	 * upstream and the client-facing Response we hold here.
+	 */
+	private shouldResumeFromOverage(account: {
+		id: string;
+		provider: string;
+		pause_reason: string | null;
+	}): boolean {
+		if (account.provider !== "codex") return true;
+		if (account.pause_reason && account.pause_reason !== "overage") return true;
+		const cached = usageCache.get(account.id) as {
+			codexCredits?: CodexCreditsInfo | null;
+		} | null;
+		// Resume only when no longer on credits (weekly has room again). If the
+		// cache lacks credits info (null/undefined → isCodexOnCredits(null) is
+		// false), we resume — we have no evidence the account is still on credits,
+		// and a stale pause is worse than an extra probe that re-pauses if needed.
+		return !isCodexOnCredits(cached?.codexCredits ?? null);
 	}
 
 	/**

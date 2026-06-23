@@ -1,6 +1,10 @@
 import { BUFFER_SIZES } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	isCodexOnCredits,
+	parseCodexCreditsHeaders,
+} from "@clankermux/providers";
+import {
 	type ContextComposition,
 	NO_ACCOUNT_ID,
 	type RequestResponse,
@@ -350,8 +354,9 @@ export class RequestRecorder {
 		) {
 			const accountId = meta.accountId;
 			const accountName = meta.accountName || "unknown";
+			const overageKind = meta.providerName === "codex" ? "credits" : "overage";
 			log.info(
-				`Auto-pausing account '${accountName}' (${accountId}) due to overage detection (auto-pause-on-overage enabled)`,
+				`Auto-pausing account '${accountName}' (${accountId}) due to ${overageKind} detection (auto-pause-on-overage enabled)`,
 			);
 			this.asyncWriter.enqueue(async () => {
 				await this.dbOps.pauseAccount(accountId, "overage");
@@ -600,6 +605,18 @@ export class RequestRecorder {
 			overageStatus === "org_level_disabled"
 		) {
 			return "plan";
+		}
+		// Codex equivalent of overage: the account has burned through its weekly
+		// limit and is now spending purchased credits. Reuse the "overage"
+		// billingType so the existing auto-pause-on-overage machinery in begin()
+		// fires (and the dashboard can surface it) — no new pause reason / column.
+		// Positioned BEFORE the accountBillingType/PLAN_PROVIDERS fallback so a
+		// codex account on credits returns "overage" instead of "plan".
+		if (
+			meta.providerName === "codex" &&
+			isCodexOnCredits(parseCodexCreditsHeaders(meta.responseHeaders))
+		) {
+			return "overage";
 		}
 		if (meta.accountBillingType) {
 			return meta.accountBillingType;

@@ -13,6 +13,7 @@ import {
 	getRepresentativeKiloWindow,
 	type KiloUsageData,
 } from "./kilo-usage-fetcher";
+import type { CodexCreditsInfo } from "./providers/codex/usage";
 import { isGenuineWindowRoll } from "./window-reset";
 import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
 
@@ -40,6 +41,8 @@ export interface UsageData {
 	seven_day_sonnet?: UsageWindow | null;
 	iguana_necktie?: unknown; // Unknown purpose, keep as flexible type
 	extra_usage?: ExtraUsage;
+	/** Codex-only: in-response credits state. Absent for other providers. */
+	codexCredits?: CodexCreditsInfo | null;
 	// Allow any additional fields Anthropic might add in the future
 	[key: string]: UsageWindow | ExtraUsage | unknown;
 }

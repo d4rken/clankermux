@@ -499,3 +499,91 @@ describe("deriveAccountStatus — needs reauth", () => {
 		expect(status.isNeedsReauth).toBe(false);
 	});
 });
+
+describe("deriveAccountStatus — codex on-credits", () => {
+	it("flags a codex account drawing on purchased credits past its weekly limit", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				provider: "codex",
+				codexCredits: {
+					hasCredits: true,
+					balance: 2430.25,
+					unlimited: false,
+					planType: "prolite",
+					weeklyUsedPct: 100,
+				},
+			}),
+			NOW,
+		);
+		expect(status.isOnCredits).toBe(true);
+		expect(status.creditsBalance).toBe(2430.25);
+		expect(status.creditsPlanType).toBe("prolite");
+	});
+
+	it("does not flag an unlimited codex account", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				provider: "codex",
+				codexCredits: {
+					hasCredits: true,
+					balance: null,
+					unlimited: true,
+					planType: "pro",
+					weeklyUsedPct: 100,
+				},
+			}),
+			NOW,
+		);
+		expect(status.isOnCredits).toBe(false);
+		expect(status.creditsBalance).toBeNull();
+		// balance and plan are both gated on isOnCredits — neither surfaces when
+		// the account is not actually drawing on credits (e.g. unlimited).
+		expect(status.creditsPlanType).toBeNull();
+	});
+
+	it("does not flag a codex account below its weekly limit", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				provider: "codex",
+				codexCredits: {
+					hasCredits: true,
+					balance: 100,
+					unlimited: false,
+					planType: "prolite",
+					weeklyUsedPct: 42,
+				},
+			}),
+			NOW,
+		);
+		expect(status.isOnCredits).toBe(false);
+		expect(status.creditsBalance).toBeNull();
+	});
+
+	it("does not flag a non-codex account even with credit-like data", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				provider: "anthropic",
+				codexCredits: {
+					hasCredits: true,
+					balance: 500,
+					unlimited: false,
+					planType: "prolite",
+					weeklyUsedPct: 100,
+				},
+			}),
+			NOW,
+		);
+		expect(status.isOnCredits).toBe(false);
+		expect(status.creditsBalance).toBeNull();
+	});
+
+	it("does not flag a codex account with null codexCredits", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ provider: "codex", codexCredits: null }),
+			NOW,
+		);
+		expect(status.isOnCredits).toBe(false);
+		expect(status.creditsBalance).toBeNull();
+		expect(status.creditsPlanType).toBeNull();
+	});
+});

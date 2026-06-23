@@ -23,6 +23,7 @@ import {
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
+	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	type UsageData,
 	usageCache,
@@ -81,6 +82,13 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
 		? (v as RateLimitReason)
 		: null;
 }
+
+/**
+ * Providers that support the auto-pause-on-overage/credits toggle. Anthropic
+ * has subscription-overage detection; Codex has credits/overage detection.
+ * Module-level to avoid per-request allocation.
+ */
+const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
 
 /**
  * Status prefixes that mean the account is actually blocked (vs soft warnings
@@ -190,6 +198,10 @@ async function getCachedOrPersistedCodexUsage(
 	if (cacheData) {
 		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
 		if (normalizedCache) {
+			// Preserve live credits state through normalization (which only
+			// carries the 5h/7d windows).
+			const cacheCredits = (cacheData as UsageData).codexCredits;
+			if (cacheCredits) normalizedCache.codexCredits = cacheCredits;
 			return normalizedCache as FullUsageData;
 		}
 	}
@@ -225,6 +237,11 @@ async function getCachedOrPersistedCodexUsage(
 
 			const normalizedUsage = normalizeCodexUsageData(usage);
 			if (!normalizedUsage) continue;
+
+			// Recover credits state from the same stored headers so the chip
+			// survives a server restart / cache eviction.
+			const credits = parseCodexCreditsHeaders(new Headers(headerEntries));
+			if (credits) normalizedUsage.codexCredits = credits;
 
 			usageCache.set(accountId, normalizedUsage);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
@@ -450,6 +467,18 @@ export function createAccountsListHandler(
 						usageData,
 					);
 				}
+				// Codex-only credits state for the response chip; null for other
+				// providers or when unknown. Prefer the resolved usage object, but
+				// fall back to the live cache directly: normalizeCodexUsageData
+				// returns null when both windows have no reset time (fresh account /
+				// just after a window roll), which would otherwise drop the credits
+				// chip even though the cache knows the account is on credits.
+				const codexCredits =
+					account.provider === "codex"
+						? ((usageData as UsageData | null)?.codexCredits ??
+							(usageCache.get(account.id) as UsageData | null)?.codexCredits ??
+							null)
+						: null;
 				let usageUtilization: number | null = null;
 				let usageWindow: string | null = null;
 				let fullUsageData: FullUsageData | null = null;
@@ -658,6 +687,7 @@ export function createAccountsListHandler(
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
+					codexCredits, // Codex-only credits state (null otherwise)
 					staleUsage,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,
@@ -860,8 +890,9 @@ export function createAccountAddHandler(
 				await dbOps.getAdapter().run(
 					`INSERT INTO accounts (
 						id, name, provider, refresh_token, access_token,
-						created_at, request_count, total_requests, priority, custom_endpoint
-					) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+						created_at, request_count, total_requests, priority, custom_endpoint,
+						auto_pause_on_overage_enabled
+					) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1)`,
 					[
 						accountId,
 						name,
@@ -2196,11 +2227,11 @@ export function createAccountAutoPauseOnOverageHandler(
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Check if account is Anthropic provider (only Anthropic accounts have overage detection)
-			if (account.provider !== "anthropic") {
+			// Only providers with credit/overage detection support this toggle.
+			if (!OVERAGE_PAUSE_PROVIDERS.has(account.provider)) {
 				return errorResponse(
 					BadRequest(
-						"Auto-pause on overage is only available for Anthropic accounts",
+						"Auto-pause on overage/credits is only available for Anthropic and Codex accounts",
 					),
 				);
 			}

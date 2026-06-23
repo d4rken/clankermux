@@ -13,4 +13,9 @@ export {
 	CODEX_VERSION,
 	CodexProvider,
 } from "./provider";
-export { parseCodexUsageHeaders } from "./usage";
+export type { CodexCreditsInfo } from "./usage";
+export {
+	isCodexOnCredits,
+	parseCodexCreditsHeaders,
+	parseCodexUsageHeaders,
+} from "./usage";

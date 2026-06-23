@@ -96,6 +96,23 @@ export function AccountStatusChips({
 					Provider overloaded ({status.providerOverloadMinutes}m)
 				</span>
 			)}
+			{status.isOnCredits && (
+				<span
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					title={`Weekly limit reached — account is drawing on purchased credits.${
+						status.creditsBalance != null
+							? ` Remaining balance: ${status.creditsBalance.toFixed(2)} (credits).`
+							: ""
+					}${status.creditsPlanType ? ` Plan: ${status.creditsPlanType}.` : ""}`}
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					On credits
+					{status.creditsBalance != null
+						? ` · ${status.creditsBalance.toFixed(2)}`
+						: ""}
+					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
+				</span>
+			)}
 			{status.showPeakChip && (
 				<span
 					className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${

@@ -55,7 +55,7 @@ export function ensureSchema(db: Database): void {
 			model_fallbacks TEXT,
 			billing_type TEXT DEFAULT NULL,
 			refresh_token_issued_at INTEGER,
-			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
+			auto_pause_on_overage_enabled INTEGER DEFAULT 1,
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
 			rate_limited_reason TEXT,
