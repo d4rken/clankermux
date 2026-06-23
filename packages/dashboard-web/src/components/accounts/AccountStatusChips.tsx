@@ -8,6 +8,21 @@ import {
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
 
+/**
+ * Codex sells credits at a flat €0.04 each — the rate card is perfectly linear
+ * across every tier (1000 cr = €40, 5000 cr = €200, …), so credits→EUR is an
+ * exact conversion, not an estimate. Update this one constant if OpenAI ever
+ * reprices. (Codex balances are credits; Anthropic overage is billed in USD and
+ * is not surfaced as a balance here.)
+ */
+const EUR_PER_CODEX_CREDIT = 0.04;
+
+/** "2430 cr (€97.21)" — native credits remaining plus their exact EUR value. */
+function formatCodexCreditBalance(credits: number): string {
+	const eur = (credits * EUR_PER_CODEX_CREDIT).toFixed(2);
+	return `${Math.round(credits)} cr (€${eur})`;
+}
+
 interface AccountStatusChipsProps {
 	account: AccountResponse;
 	/** Pre-derived status; falls back to deriving from `account` when omitted. */
@@ -101,14 +116,16 @@ export function AccountStatusChips({
 					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
 					title={`Weekly limit reached — account is drawing on purchased credits.${
 						status.creditsBalance != null
-							? ` Remaining balance: ${status.creditsBalance.toFixed(2)} (credits).`
+							? ` ${Math.round(status.creditsBalance)} credits remaining ≈ €${(
+									status.creditsBalance * EUR_PER_CODEX_CREDIT
+								).toFixed(2)} (€${EUR_PER_CODEX_CREDIT.toFixed(2)}/credit).`
 							: ""
 					}${status.creditsPlanType ? ` Plan: ${status.creditsPlanType}.` : ""}`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					On credits
 					{status.creditsBalance != null
-						? ` · ${status.creditsBalance.toFixed(2)}`
+						? ` · ${formatCodexCreditBalance(status.creditsBalance)}`
 						: ""}
 					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
 				</span>
