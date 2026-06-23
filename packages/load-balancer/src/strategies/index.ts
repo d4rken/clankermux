@@ -570,66 +570,37 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		this.lastPickedSeq.set(account.id, ++this.pickSeq);
 	}
 
-	peek(accounts: Account[]): string | null {
+	/**
+	 * Side-effect-free preview of the filtered & ordered accounts a fresh,
+	 * no-affinity request would consider, BEFORE the proxy applies its own
+	 * gates (provider overload, usage throttling, context-window, burst).
+	 *
+	 * isPeekAvailable simulates the auto-unpause that select() performs on
+	 * safe-reason paused accounts (auto_fallback_enabled + window elapsed).
+	 * Without it, peekRanked() and select() disagree whenever such an account
+	 * is the would-be Primary, flagging the wrong row on the dashboard while
+	 * real traffic goes to the auto-unpaused one.
+	 *
+	 * peekRanked() has no RequestMeta, so it has no per-request affinity. The
+	 * ranking it produces = where a FRESH request would harvest = the FEFO
+	 * order. We deliberately do NOT mirror select()'s global active-session
+	 * stickiness here: real client traffic is affinity-keyed and routes via
+	 * FEFO on a miss, and keying off session_start made it stick to whichever
+	 * account most recently STARTED a session — including a 0-request session
+	 * opened on an idle account during post-restart warm-up — instead of the
+	 * actual harvest target.
+	 */
+	peekRanked(accounts: Account[]): Account[] {
 		const now = Date.now();
-
-		// isPeekAvailable simulates the auto-unpause that select() performs on
-		// safe-reason paused accounts (auto_fallback_enabled + window elapsed).
-		// Without it, peek() and select() disagree whenever such an account is
-		// the would-be Primary, flagging the wrong row on the dashboard while
-		// real traffic goes to the auto-unpaused one.
-		const isAvailable = (account: Account): boolean =>
-			isPeekAvailable(account, now);
-
-		// peek() has no RequestMeta, so it has no per-request affinity. The
-		// dashboard "Primary" badge it produces = where a FRESH request would
-		// harvest = the FEFO pick. We deliberately do NOT mirror select()'s
-		// global active-session stickiness here: real client traffic is
-		// affinity-keyed and routes via FEFO on a miss, and keying the badge off
-		// session_start made it stick to whichever account most recently STARTED a
-		// session — including a 0-request session opened on an idle account during
-		// post-restart warm-up — instead of the actual harvest target.
-		const available = this.sortAvailableAccounts(accounts, isAvailable, now);
-		const result = available[0]?.id ?? null;
-
-		// Diagnostic: log the badge value ONLY when it changes (so we capture
-		// every transition without spamming on each dashboard poll), with the
-		// per-account buckets that drove it.
-		this.logPeekChange(result, accounts, isAvailable, now);
-
-		return result;
+		return this.sortAvailableAccounts(
+			accounts,
+			(account) => isPeekAvailable(account, now),
+			now,
+		);
 	}
 
-	private lastPeekPrimary: string | null | undefined = undefined;
-
-	private logPeekChange(
-		result: string | null,
-		accounts: Account[],
-		isAvailable: (account: Account) => boolean,
-		now: number,
-	): void {
-		if (result === this.lastPeekPrimary) return;
-		const prev = this.lastPeekPrimary;
-		this.lastPeekPrimary = result;
-		if (this.log.getLevel() > LogLevel.DEBUG) return;
-		const parts = accounts.map((a) => {
-			const m = this.capacityMetricFor(a, now);
-			const bucket = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
-			const wk =
-				m.harvestDeadline === Number.POSITIVE_INFINITY
-					? "none"
-					: `${Math.round((m.harvestDeadline - now) / 60000)}m`;
-			const sess =
-				this.hasActiveSession(a, now) && a.session_start
-					? `sess@${Math.round((now - a.session_start) / 60000)}m`
-					: "no-sess";
-			const avail = isAvailable(a) ? "" : " UNAVAIL";
-			const mark = a.id === result ? "*" : "";
-			return `${a.name}${mark}[${bucket} wk=${wk} util=${Math.round(m.util)}% ${sess}${avail}]`;
-		});
-		this.log.debug(
-			`Peek primary changed ${prev ?? "none"} -> ${result ?? "none"} (* marks chosen): ${parts.join(" ")}`,
-		);
+	peek(accounts: Account[]): string | null {
+		return this.peekRanked(accounts)[0]?.id ?? null;
 	}
 
 	select(accounts: Account[], meta: RequestMeta): Account[] {

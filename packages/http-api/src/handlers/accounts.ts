@@ -36,6 +36,7 @@ import {
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
+	peekPrimaryAccountId,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
 	sessionCacheStore,
@@ -365,38 +366,43 @@ export function createAccountsListHandler(
 			[now, now, now, sessionDuration],
 		);
 
-		// Ask the active load-balancing strategy which account it would pick
-		// next from the same in-memory snapshot we use to build the response —
-		// querying again would open a race window where isPrimary could land
-		// on a row whose paused/rate-limited fields the same response shows
-		// as blocked. Only the fields peek reads are mapped here; the rest of
-		// the Account interface is unused at peek time.
-		const primaryId = strategy
-			? strategy.peek(
-					accounts.map(
-						(a) =>
-							({
-								id: a.id,
-								provider: a.provider ?? "",
-								paused: !!a.paused,
-								// pause_reason and rate_limit_reset feed wouldAutoUnpause —
-								// without them peek() can't simulate the auto-unpause that
-								// select() performs on safe-reason paused accounts whose
-								// upstream window has reset.
-								pause_reason: a.pause_reason ?? null,
-								rate_limited_until: a.rate_limited_until
-									? Number(a.rate_limited_until)
-									: null,
-								rate_limit_reset: a.rate_limit_reset
-									? Number(a.rate_limit_reset)
-									: null,
-								session_start: a.session_start ? Number(a.session_start) : null,
-								priority: a.priority,
-								auto_fallback_enabled: !!a.auto_fallback_enabled,
-							}) as Account,
-					),
-				)
-			: null;
+		// Predict where a fresh, nominal-size request would route RIGHT NOW from
+		// the same in-memory snapshot we use to build the response — querying
+		// again would open a race window where isPrimary could land on a row
+		// whose paused/rate-limited fields the same response shows as blocked.
+		// peekPrimaryAccountId() applies the proxy's provider-overload +
+		// usage-throttle gates over the strategy ranking (so the badge follows
+		// real routing, incl. cross-provider Codex fallback), returning null
+		// when everything is gated. Only the fields peekRanked + both gates read
+		// are mapped here; the rest of the Account interface is unused.
+		const primaryCandidates = accounts.map(
+			(a) =>
+				({
+					id: a.id,
+					provider: a.provider ?? "",
+					paused: !!a.paused,
+					// pause_reason and rate_limit_reset feed wouldAutoUnpause —
+					// without them peekRanked() can't simulate the auto-unpause that
+					// select() performs on safe-reason paused accounts whose
+					// upstream window has reset.
+					pause_reason: a.pause_reason ?? null,
+					rate_limited_until: a.rate_limited_until
+						? Number(a.rate_limited_until)
+						: null,
+					rate_limit_reset: a.rate_limit_reset
+						? Number(a.rate_limit_reset)
+						: null,
+					session_start: a.session_start ? Number(a.session_start) : null,
+					priority: a.priority,
+					auto_fallback_enabled: !!a.auto_fallback_enabled,
+				}) as Account,
+		);
+		const primaryId = peekPrimaryAccountId(
+			primaryCandidates,
+			strategy,
+			config,
+			now,
+		);
 
 		// Fetch session-window token stats only for providers with session-based limits
 		const sessionStatsMap = await dbOps

@@ -59,15 +59,14 @@ export class LeastUsedStrategy implements LoadBalancingStrategy {
 		this.store = store;
 	}
 
-	peek(accounts: Account[]): string | null {
+	peekRanked(accounts: Account[]): Account[] {
 		const now = Date.now();
 		// Use isPeekAvailable so accounts that select() would auto-unpause on its
 		// next call (paused with safe pause_reason + auto_fallback + elapsed
-		// window) surface as candidates here. Without this, peek() flags a
+		// window) surface as candidates here. Without this, peekRanked() flags a
 		// lower-priority account as Primary while real traffic goes to the
 		// auto-unpaused higher-priority one.
 		const available = accounts.filter((a) => isPeekAvailable(a, now));
-		if (available.length === 0) return null;
 
 		const scored = available.map((a) => {
 			const util = this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
@@ -84,7 +83,11 @@ export class LeastUsedStrategy implements LoadBalancingStrategy {
 			return a.score - b.score;
 		});
 
-		return scored[0]?.account.id ?? null;
+		return scored.map((s) => s.account);
+	}
+
+	peek(accounts: Account[]): string | null {
+		return this.peekRanked(accounts)[0]?.id ?? null;
 	}
 
 	select(accounts: Account[], _meta: RequestMeta): Account[] {
