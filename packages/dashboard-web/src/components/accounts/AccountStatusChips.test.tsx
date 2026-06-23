@@ -130,10 +130,12 @@ describe("AccountStatusChips — on-credits chip", () => {
 			}),
 		);
 		expect(html).toContain("On credits");
-		expect(html).toContain("2430.25");
+		// Native credits (rounded) + exact EUR value at €0.04/credit.
+		expect(html).toContain("2430 cr");
+		expect(html).toContain("€97.21");
 		expect(html).toContain("prolite");
-		// Units are unverified — never present the balance as USD.
-		expect(html).not.toContain("$2430.25");
+		// Codex balances are credits/EUR, never USD.
+		expect(html).not.toContain("$");
 	});
 
 	it("does not render the chip for an unlimited codex account", () => {
