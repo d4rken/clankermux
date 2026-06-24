@@ -154,6 +154,31 @@ describe("makeProxyRequest — synthetic local response", () => {
 		expect(fetchCalled).toBeTrue();
 	});
 
+	it("does NOT unwrap a host that merely prefixes the trusted origin", async () => {
+		let fetchCalled = false;
+		globalThis.fetch = (async () => {
+			fetchCalled = true;
+			return new Response("{}", { status: 200 });
+		}) as typeof globalThis.fetch;
+
+		const headers = new Headers();
+		headers.set("content-type", "application/json");
+		headers.set("x-clankermux-synthetic-response", "true");
+		headers.set("x-clankermux-synthetic-status", "200");
+		// clankermux.local.evil begins with the trusted string but is a different
+		// (attacker-controlled) host — exact-origin matching must reject it.
+		const req = new Request(
+			"https://clankermux.local.evil/codex/count_tokens",
+			{
+				method: "POST",
+				headers,
+				body: "{}",
+			},
+		);
+		await makeProxyRequest(req).catch(() => {});
+		expect(fetchCalled).toBeTrue();
+	});
+
 	it("clamps invalid synthetic-status to 200", async () => {
 		const headers = new Headers();
 		headers.set("content-type", "application/json");

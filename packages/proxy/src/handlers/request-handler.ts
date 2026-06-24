@@ -20,8 +20,17 @@ const SYNTHETIC_LOCAL_ORIGIN = "https://clankermux.local";
 async function tryUnwrapSyntheticResponse(
 	request: Request,
 ): Promise<Response | null> {
+	// Exact-origin match, NOT startsWith: a prefix check would also trust a
+	// hostile host like https://clankermux.local.evil/… that merely begins with
+	// the trusted string.
+	let origin: string;
+	try {
+		origin = new URL(request.url).origin;
+	} catch {
+		return null;
+	}
 	if (
-		!request.url.startsWith(SYNTHETIC_LOCAL_ORIGIN) ||
+		origin !== SYNTHETIC_LOCAL_ORIGIN ||
 		request.headers.get("x-clankermux-synthetic-response") !== "true"
 	) {
 		return null;
