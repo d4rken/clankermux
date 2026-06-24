@@ -1807,20 +1807,31 @@ export async function proxyForcedAccount(
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
+		// Synthetic Codex count_tokens never reaches upstream, so — exactly as on
+		// the normal path — it must not require or refresh OAuth credentials just
+		// to return an advisory local estimate. Without this, force-routing a
+		// Codex account with an expired token would return a local auth error
+		// instead of the synthesized 200/400.
+		const isCodexCountTokens =
+			account.provider === "codex" &&
+			url.pathname === "/v1/messages/count_tokens";
+
 		// Resolve the access token via the same path the normal flow uses. If it
 		// throws (expired/unrefreshable token), map to a local error Response —
 		// NOT null/failover (R2). Routed through forwardToClient so the local
 		// failure is recorded under the forced account (history intact).
-		let accessToken: string;
-		try {
-			accessToken = await getValidAccessToken(account, ctx);
-		} catch (tokenErr) {
-			const reason =
-				tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
-			log.warn(
-				`Forced account ${account.name}: token resolution failed — returning local error (no failover): ${reason}`,
-			);
-			return await recordLocalError(reason);
+		let accessToken = "";
+		if (!isCodexCountTokens) {
+			try {
+				accessToken = await getValidAccessToken(account, ctx);
+			} catch (tokenErr) {
+				const reason =
+					tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
+				log.warn(
+					`Forced account ${account.name}: token resolution failed — returning local error (no failover): ${reason}`,
+				);
+				return await recordLocalError(reason);
+			}
 		}
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
@@ -1833,6 +1844,10 @@ export async function proxyForcedAccount(
 			accessToken,
 			account.api_key || undefined,
 		);
+		// Strip client-supplied synthetic-response markers (same as the normal
+		// path) so a client cannot forge a synthetic count_tokens response.
+		headers.delete("x-clankermux-synthetic-response");
+		headers.delete("x-clankermux-synthetic-status");
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
