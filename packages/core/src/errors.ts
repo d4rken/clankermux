@@ -44,11 +44,26 @@ export class AuthError extends AppError {
 }
 
 export class TokenRefreshError extends AuthError {
-	constructor(accountId: string, originalError?: Error) {
+	/**
+	 * True when the underlying failure was a terminal `invalid_grant` (the
+	 * refresh token was revoked/expired/invalid) rather than a transient error.
+	 * Set by the refresh chokepoint from the RAW provider error before it is
+	 * wrapped here, so downstream consumers (e.g. usage polling) can reliably
+	 * distinguish "needs reauth" from "retry later" without re-parsing messages.
+	 */
+	public readonly isInvalidGrant: boolean;
+
+	constructor(
+		accountId: string,
+		originalError?: Error,
+		isInvalidGrant = false,
+	) {
 		super("Failed to refresh access token", {
 			accountId,
 			originalError: originalError?.message,
+			isInvalidGrant,
 		});
+		this.isInvalidGrant = isInvalidGrant;
 	}
 }
 

@@ -459,6 +459,14 @@ class UsageCache {
 		string,
 		(accountId: string) => void
 	>();
+	// Optional per-account hook invoked when the token provider throws during a
+	// poll tick. Returning true tells the loop to STOP polling this account
+	// (e.g. the refresh token is dead AND the account is paused → unrecoverable
+	// without a manual reauth). Absent/false → normal retry-with-backoff.
+	private tokenRefreshFailureHandlers = new Map<
+		string,
+		(accountId: string, error: unknown) => boolean | Promise<boolean>
+	>();
 	// Accounts that have had at least one successful fetch this process. The
 	// first success also fires usageRecovered so a subscription_expired pause
 	// persisted before a restart can still be lifted once the seat is back.
@@ -546,6 +554,10 @@ class UsageCache {
 		onCapacityRestored?: (accountId: string) => void,
 		onSubscriptionExpired?: (accountId: string) => void,
 		onUsageRecovered?: (accountId: string) => void,
+		onTokenRefreshFailure?: (
+			accountId: string,
+			error: unknown,
+		) => boolean | Promise<boolean>,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -600,6 +612,11 @@ class UsageCache {
 			this.usageRecoveredCallbacks.set(accountId, onUsageRecovered);
 		} else {
 			this.usageRecoveredCallbacks.delete(accountId);
+		}
+		if (onTokenRefreshFailure) {
+			this.tokenRefreshFailureHandlers.set(accountId, onTokenRefreshFailure);
+		} else {
+			this.tokenRefreshFailureHandlers.delete(accountId);
 		}
 
 		// Default to 90s if not provided
@@ -666,6 +683,7 @@ class UsageCache {
 			this.capacityRestoredCallbacks.delete(accountId);
 			this.subscriptionExpiredCallbacks.delete(accountId);
 			this.usageRecoveredCallbacks.delete(accountId);
+			this.tokenRefreshFailureHandlers.delete(accountId);
 			this.subscriptionExpiredAccounts.delete(accountId);
 			this.hasSucceededOnce.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
@@ -732,6 +750,33 @@ class UsageCache {
 						: typeof tokenError === "object" && tokenError !== null
 							? JSON.stringify(tokenError)
 							: String(tokenError);
+
+				// Give the owner a chance to halt polling on an unrecoverable
+				// failure (dead refresh token on a paused account → manual reauth
+				// required). stopPolling() removes the token provider so neither the
+				// immediate-fetch nor scheduleNextPoll will reschedule this account.
+				const halt = this.tokenRefreshFailureHandlers.get(accountId);
+				if (halt) {
+					let shouldStop = false;
+					try {
+						shouldStop = await halt(accountId, tokenError);
+					} catch (handlerError) {
+						log.warn(
+							`onTokenRefreshFailure handler threw for account ${accountId}: ${
+								handlerError instanceof Error
+									? handlerError.message
+									: String(handlerError)
+							}`,
+						);
+					}
+					if (shouldStop) {
+						log.info(
+							`Halting usage polling for account ${accountId}: refresh token unrecoverable and account paused — reauth to resume`,
+						);
+						this.stopPolling(accountId);
+						return { success: false, retryAfterMs: null };
+					}
+				}
 
 				log.warn(
 					`Token provider failed for account ${accountId}: ${tokenErrorMessage || "Unknown error"}`,

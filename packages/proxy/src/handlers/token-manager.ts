@@ -338,7 +338,17 @@ export async function refreshAccessTokenSafe(
 				// lands before any caller (e.g. the auto-refresh scheduler) records a
 				// generic failure that could otherwise mask the specific reason.
 				await pauseAccountForReauthIfInvalidGrant(error, account, ctx.dbOps);
-				throw new TokenRefreshError(account.id, new Error(enhancedMessage));
+				// Carry the invalid_grant classification (from the RAW error, before
+				// getOAuthErrorMessage may strip the marker) on the wrapped error so
+				// downstream consumers can reliably tell "needs reauth" from transient.
+				const isInvalidGrant =
+					error instanceof OAuthRefreshTokenError ||
+					isInvalidGrantMessage(originalError);
+				throw new TokenRefreshError(
+					account.id,
+					new Error(enhancedMessage),
+					isInvalidGrant,
+				);
 			})
 			.finally(() => {
 				// Clean up the map when done (success or failure)
