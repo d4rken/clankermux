@@ -67,7 +67,7 @@ describe("shouldRecordRequest — count_tokens on openai-compatible", () => {
 		).toBe(false);
 	});
 
-	it("records count_tokens on a NON-openai-compatible provider", () => {
+	it("records count_tokens on a non-openai-compatible, non-codex provider (e.g. anthropic)", () => {
 		expect(
 			shouldRecordRequest(
 				makeInput({
@@ -76,6 +76,17 @@ describe("shouldRecordRequest — count_tokens on openai-compatible", () => {
 				}),
 			),
 		).toBe(true);
+	});
+
+	it("does NOT record count_tokens for codex provider", () => {
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					providerName: "codex",
+					path: "/v1/messages/count_tokens",
+				}),
+			),
+		).toBe(false);
 	});
 
 	it("records a normal /v1/messages request on openai-compatible", () => {

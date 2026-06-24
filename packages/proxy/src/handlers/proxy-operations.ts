@@ -722,8 +722,14 @@ export async function proxyWithAccount(
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
-		// Get valid access token
-		const accessToken = await getValidAccessToken(account, ctx);
+		// Skip token refresh for synthetic paths (e.g. Codex count_tokens) that
+		// never reach the upstream network.
+		const isCodexCountTokens =
+			account.provider === "codex" &&
+			url.pathname === "/v1/messages/count_tokens";
+		const accessToken = isCodexCountTokens
+			? undefined
+			: await getValidAccessToken(account, ctx);
 
 		// Pre-process request if provider supports it (e.g., to extract model for URL)
 		if (provider.prepareRequest) {
@@ -736,6 +742,11 @@ export async function proxyWithAccount(
 			accessToken,
 			account.api_key || undefined,
 		);
+		// Strip client-supplied synthetic-response markers: a client cannot forge
+		// a synthetic count_tokens response by injecting these headers. The provider
+		// is the only code that may legitimately set them (on a trusted internal URL).
+		headers.delete("x-clankermux-synthetic-response");
+		headers.delete("x-clankermux-synthetic-status");
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────

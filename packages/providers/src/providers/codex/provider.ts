@@ -23,6 +23,8 @@ const log = new Logger("CodexProvider");
 const INTERNAL_HEADERS = [
 	"x-clankermux-request-id",
 	"x-clankermux-request-stream",
+	"x-clankermux-synthetic-response",
+	"x-clankermux-synthetic-status",
 	NATIVE_RESPONSES_REQUEST_HEADER,
 ];
 
@@ -239,7 +241,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	canHandle(path: string): boolean {
-		return path === "/v1/messages";
+		return path === "/v1/messages" || path === "/v1/messages/count_tokens";
 	}
 
 	async refreshToken(
@@ -313,6 +315,9 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	buildUrl(_path: string, _query: string, account?: Account): string {
+		if (_path === "/v1/messages/count_tokens") {
+			return "https://clankermux.local/codex/count_tokens";
+		}
 		if (account?.custom_endpoint) {
 			try {
 				return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
@@ -353,6 +358,17 @@ export class CodexProvider extends BaseProvider {
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
+		// count_tokens is handled synthetically regardless of content-type.
+		// Match both the client path (/v1/messages/count_tokens) and the internal
+		// URL that buildUrl() produces (https://clankermux.local/codex/count_tokens).
+		const pathname = new URL(request.url).pathname;
+		if (
+			pathname === "/v1/messages/count_tokens" ||
+			pathname === "/codex/count_tokens"
+		) {
+			return this.buildSyntheticCountTokensRequest(request);
+		}
+
 		const contentType = request.headers.get("content-type");
 		if (!contentType?.includes("application/json")) {
 			return request;
@@ -596,6 +612,67 @@ export class CodexProvider extends BaseProvider {
 	getOAuthProvider() {
 		const { CodexOAuthProvider } = require("./oauth.js");
 		return new CodexOAuthProvider();
+	}
+
+	private async buildSyntheticCountTokensRequest(
+		request: Request,
+	): Promise<Request> {
+		const contentType = request.headers.get("content-type");
+		if (!contentType?.includes("application/json")) {
+			// Non-JSON content-type → 400 error
+			const errorBody = JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "Content-Type must be application/json for count_tokens",
+				},
+			});
+			const errorHeaders = new Headers(request.headers);
+			errorHeaders.set("content-type", "application/json");
+			errorHeaders.set("x-clankermux-synthetic-response", "true");
+			errorHeaders.set("x-clankermux-synthetic-status", "400");
+			return new Request(request.url, {
+				method: request.method,
+				headers: errorHeaders,
+				body: errorBody,
+			});
+		}
+
+		let body: unknown;
+		try {
+			body = await request.json();
+		} catch {
+			// Malformed JSON → 400 error
+			const errorBody = JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "Request body must be valid JSON",
+				},
+			});
+			const errorHeaders = new Headers(request.headers);
+			errorHeaders.set("content-type", "application/json");
+			errorHeaders.set("x-clankermux-synthetic-response", "true");
+			errorHeaders.set("x-clankermux-synthetic-status", "400");
+			return new Request(request.url, {
+				method: request.method,
+				headers: errorHeaders,
+				body: errorBody,
+			});
+		}
+
+		// Conservative token estimate: same heuristic used elsewhere in ClankerMux
+		const inputTokens = Math.max(1, Math.ceil(JSON.stringify(body).length / 3));
+		const responseBody = JSON.stringify({ input_tokens: inputTokens });
+		const successHeaders = new Headers(request.headers);
+		successHeaders.set("content-type", "application/json");
+		successHeaders.set("x-clankermux-synthetic-response", "true");
+		successHeaders.set("x-clankermux-synthetic-status", "200");
+		return new Request(request.url, {
+			method: request.method,
+			headers: successHeaders,
+			body: responseBody,
+		});
 	}
 
 	// ── Private helpers ──────────────────────────────────────────────────────

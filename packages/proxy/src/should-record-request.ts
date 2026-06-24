@@ -74,10 +74,10 @@ export interface ShouldRecordRequestInput {
 export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 	const { path, providerName, responseStatus, getHeader } = input;
 
-	// (1) count_tokens probes on the openai-compatible provider are not
+	// (1) count_tokens probes on the openai-compatible or codex provider are not
 	//     billable user traffic.
 	if (
-		providerName === "openai-compatible" &&
+		(providerName === "openai-compatible" || providerName === "codex") &&
 		path === "/v1/messages/count_tokens"
 	) {
 		return false;

@@ -15,10 +15,11 @@ const eventLine = (name: string, data: unknown) => [
 ];
 
 describe("CodexProvider request conversion", () => {
-	it("handles only /v1/messages path", () => {
+	it("handles /v1/messages and /v1/messages/count_tokens paths", () => {
 		const provider = new CodexProvider();
 		expect(provider.canHandle("/v1/messages")).toBeTrue();
-		expect(provider.canHandle("/v1/messages/count_tokens")).toBeFalse();
+		expect(provider.canHandle("/v1/messages/count_tokens")).toBeTrue();
+		expect(provider.canHandle("/v1/other")).toBeFalse();
 	});
 
 	it("forwards Claude reasoning effort to Codex reasoning.effort", async () => {
@@ -1528,5 +1529,68 @@ describe("fetchCodexUsageOnDemand", () => {
 			/non-empty access token/,
 		);
 		expect(called).toBe(false);
+	});
+});
+
+describe("count_tokens synthetic response", () => {
+	it("returns synthetic 200 with input_tokens for valid JSON body", async () => {
+		const provider = new CodexProvider();
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				messages: [{ role: "user", content: "hello" }],
+				model: "claude-opus-4-5",
+				max_tokens: 100,
+			}),
+		});
+		const result = await provider.transformRequestBody(req);
+		expect(result.headers.get("x-clankermux-synthetic-response")).toBe("true");
+		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("200");
+		const body = (await result.json()) as { input_tokens: number };
+		expect(body.input_tokens).toBeGreaterThanOrEqual(1);
+		expect(typeof body.input_tokens).toBe("number");
+	});
+
+	it("returns synthetic 400 for malformed JSON", async () => {
+		const provider = new CodexProvider();
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: "not-json{",
+		});
+		const result = await provider.transformRequestBody(req);
+		expect(result.headers.get("x-clankermux-synthetic-response")).toBe("true");
+		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("400");
+		const body = (await result.json()) as {
+			type: string;
+			error: { type: string };
+		};
+		expect(body.type).toBe("error");
+		expect(body.error.type).toBe("invalid_request_error");
+	});
+
+	it("returns synthetic 400 for non-JSON content-type", async () => {
+		const provider = new CodexProvider();
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "text/plain" },
+			body: "hello",
+		});
+		const result = await provider.transformRequestBody(req);
+		expect(result.headers.get("x-clankermux-synthetic-response")).toBe("true");
+		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("400");
+	});
+
+	it("returns at least 1 input_token even for tiny body", async () => {
+		const provider = new CodexProvider();
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({}),
+		});
+		const result = await provider.transformRequestBody(req);
+		const body = (await result.json()) as { input_tokens: number };
+		expect(body.input_tokens).toBeGreaterThanOrEqual(1);
 	});
 });

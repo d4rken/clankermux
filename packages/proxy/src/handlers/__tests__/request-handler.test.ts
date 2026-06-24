@@ -18,10 +18,10 @@ describe("validateProviderPath", () => {
 		).not.toThrow();
 	});
 
-	it("rejects count_tokens for Codex provider", () => {
+	it("accepts count_tokens for Codex provider", () => {
 		expect(() =>
 			validateProviderPath(new CodexProvider(), "/v1/messages/count_tokens"),
-		).toThrow();
+		).not.toThrow();
 	});
 });
 
@@ -98,5 +98,73 @@ describe("makeProxyRequest — signal composition (Finding 3)", () => {
 		);
 		caller.abort();
 		await expect(promise).rejects.toThrow();
+	});
+});
+
+describe("makeProxyRequest — synthetic local response", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("unwraps synthetic response without calling fetch", async () => {
+		let fetchCalled = false;
+		globalThis.fetch = (async () => {
+			fetchCalled = true;
+			return new Response("{}", { status: 200 });
+		}) as typeof globalThis.fetch;
+
+		const syntheticHeaders = new Headers();
+		syntheticHeaders.set("content-type", "application/json");
+		syntheticHeaders.set("x-clankermux-synthetic-response", "true");
+		syntheticHeaders.set("x-clankermux-synthetic-status", "200");
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: syntheticHeaders,
+			body: JSON.stringify({ input_tokens: 42 }),
+		});
+		const resp = await makeProxyRequest(req);
+		expect(fetchCalled).toBeFalse();
+		expect(resp.status).toBe(200);
+		const body = (await resp.json()) as { input_tokens: number };
+		expect(body.input_tokens).toBe(42);
+	});
+
+	it("does NOT unwrap a non-clankermux.local request even with synthetic markers", async () => {
+		let fetchCalled = false;
+		globalThis.fetch = (async () => {
+			fetchCalled = true;
+			return new Response("{}", { status: 200 });
+		}) as typeof globalThis.fetch;
+
+		const headers = new Headers();
+		headers.set("content-type", "application/json");
+		headers.set("x-clankermux-synthetic-response", "true");
+		headers.set("x-clankermux-synthetic-status", "200");
+		const req = new Request("https://api.anthropic.com/v1/messages", {
+			method: "POST",
+			headers,
+			body: "{}",
+		});
+		await makeProxyRequest(req).catch(() => {}); // may throw on network; we just want to verify fetch was called
+		expect(fetchCalled).toBeTrue();
+	});
+
+	it("clamps invalid synthetic-status to 200", async () => {
+		const headers = new Headers();
+		headers.set("content-type", "application/json");
+		headers.set("x-clankermux-synthetic-response", "true");
+		headers.set("x-clankermux-synthetic-status", "999");
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers,
+			body: "{}",
+		});
+		const resp = await makeProxyRequest(req);
+		expect(resp.status).toBe(200);
 	});
 });
