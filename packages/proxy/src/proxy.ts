@@ -987,6 +987,67 @@ export async function handleProxy(
 			return pinnedResponse;
 		}
 
+		// count_tokens last-resort: it is advisory and answered LOCALLY by Codex
+		// (CodexProvider synthesizes { input_tokens } with no upstream call). When
+		// every account has been gated out — provider-overload, usage-throttle, or
+		// the context-window gate — a count_tokens probe would otherwise return a
+		// capacity terminal (503 pool_exhausted / 429 throttled / 400 context). That
+		// is wrong for a purely local "how big is this?" call; ironically the
+		// context-window gate could 400 it for being too big. Synthesize from any
+		// non-paused Codex account instead. We DON'T do this for openai-compatible
+		// (its count_tokens may hit a real upstream) or respect a pin failure
+		// (handled above) — and we honor operator pause, but ignore rate-limit /
+		// throttle / context state because local synthesis needs no capacity.
+		if (url.pathname === "/v1/messages/count_tokens") {
+			// `selectedAccounts` is already filtered by the API-key pin (an
+			// Anthropic-pinned key never contains a Codex account here), so it is
+			// always a safe source. The broader getAllAccounts() net IGNORES pins,
+			// so only consult it for UNPINNED requests — otherwise an Anthropic-
+			// pinned key whose candidates were gated out would be wrongly answered
+			// from an unrelated Codex account instead of falling through to the
+			// pinned terminal below.
+			//
+			// Known, intentional limitation: a key pinned to a *specific* Codex
+			// account that is itself rate-limited gets `pinFailure` set during
+			// selection and returns the pinned terminal above (line ~982) before
+			// reaching here, so count_tokens yields 503 rather than a local
+			// estimate in that one config. Honoring it would require a second
+			// synthesis site BEFORE the fail-closed pinFailure boundary; that
+			// boundary's job is to never answer a pinned key from the wrong place,
+			// and the edge (specific-Codex pin + that account rate-limited +
+			// count_tokens, a 503 the client already handles) does not justify
+			// reordering it.
+			const isPinned = Boolean(requestMeta.pin);
+			const codexForSynthesis =
+				selectedAccounts.find((a) => !a.paused && a.provider === "codex") ??
+				(isPinned
+					? undefined
+					: (await ctx.dbOps.getAllAccounts()).find(
+							(a) => !a.paused && a.provider === "codex",
+						));
+			if (codexForSynthesis) {
+				log.info(
+					`count_tokens: all accounts gated out — synthesizing a local estimate from Codex account ${codexForSynthesis.name} instead of a capacity terminal`,
+				);
+				const syntheticResponse = await proxyWithAccount(
+					req,
+					url,
+					codexForSynthesis,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					0,
+					ctx,
+					null,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					true,
+				);
+				if (syntheticResponse) return syntheticResponse;
+			}
+		}
+
 		// STORM-DEGRADE hold (Finding 1): in the worst burst moment the pinned
 		// cache account AND every sibling are cooled, so the strategy returned ZERO
 		// candidates. Before degrading to the pool_exhausted / throttled / context
