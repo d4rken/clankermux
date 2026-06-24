@@ -509,8 +509,12 @@ class UsageCache {
 
 		const timeoutId = setTimeout(async () => {
 			this.pollTimeouts.delete(accountId);
-			// Bail if polling was stopped
-			if (!this.tokenProviders.has(accountId)) return;
+			// Bail if polling was stopped OR restarted with a new provider since this
+			// tick was scheduled. Identity (not mere presence) guards against a
+			// zombie loop: stopPolling()+startPolling() (e.g. reauth) installs a new
+			// provider, and the old in-flight loop must not keep polling with its
+			// stale closure alongside the new one.
+			if (this.tokenProviders.get(accountId) !== tokenProvider) return;
 
 			const { success, retryAfterMs: nextRetryAfterMs } =
 				await this.fetchAndCache(
@@ -525,8 +529,9 @@ class UsageCache {
 				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
 				this.failureCounts.set(accountId, count);
 			}
-			// Schedule the next poll if still active
-			if (this.tokenProviders.has(accountId)) {
+			// Schedule the next poll only if this provider is still the active one
+			// (identity guard — see the bail check above).
+			if (this.tokenProviders.get(accountId) === tokenProvider) {
 				this.scheduleNextPoll(
 					accountId,
 					tokenProvider,
@@ -628,7 +633,9 @@ class UsageCache {
 				if (!success) {
 					this.failureCounts.set(accountId, 1);
 				}
-				if (this.tokenProviders.has(accountId)) {
+				// Identity guard: only start the loop if this provider is still the
+				// active one (a concurrent restart may have swapped it).
+				if (this.tokenProviders.get(accountId) === tokenProvider) {
 					this.scheduleNextPoll(
 						accountId,
 						tokenProvider,
@@ -726,7 +733,12 @@ class UsageCache {
 		);
 		this.inFlightFetches.set(accountId, promise);
 		promise.finally(() => {
-			this.inFlightFetches.delete(accountId);
+			// Identity-guarded: a restart (stopPolling + startPolling) during this
+			// fetch may have installed a newer in-flight entry for the same account;
+			// only clear our own so we don't wipe the current generation's dedup.
+			if (this.inFlightFetches.get(accountId) === promise) {
+				this.inFlightFetches.delete(accountId);
+			}
 		});
 		return promise;
 	}
