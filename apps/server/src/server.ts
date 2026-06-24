@@ -80,6 +80,7 @@ import {
 	liveStats,
 } from "./cache-keepalive-snapshot-sampler";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
+import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
 
@@ -413,6 +414,17 @@ function startUsagePollingWithRefresh(
 								`Failed to auto-resume account ${accountId} after subscription renewal: ${err}`,
 							),
 						);
+				},
+				async (accountId, error) => {
+					// The refresh just failed this tick. Halt polling only if the
+					// account is paused AND the failure is terminal (refresh token
+					// rejected → needs a manual reauth, which restarts polling via the
+					// registered polling-restarter). Re-read live state; the captured
+					// `account` may be stale. See shouldStopPollingPausedAccount.
+					const current = await proxyContext.dbOps
+						.getAccount(accountId)
+						.catch(() => null);
+					return shouldStopPollingPausedAccount(current, error);
 				},
 			);
 
