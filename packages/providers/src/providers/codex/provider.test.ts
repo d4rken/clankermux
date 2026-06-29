@@ -41,6 +41,269 @@ describe("CodexProvider request conversion", () => {
 		expect(body.reasoning).toEqual({ effort: "high" });
 	});
 
+	it("adds a continuation nudge after Skill tool results", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(body.input).toContainEqual({
+			role: "user",
+			content: [
+				{
+					type: "input_text",
+					text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+				},
+			],
+		});
+	});
+
+	it("does not add a continuation nudge after non-Skill tool results", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "search" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_search_1",
+								name: "WebSearch",
+								input: { query: "news" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_search_1",
+								content: [{ type: "text", text: "results" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
+	it("does not inject a Skill continuation nudge into replayed mid-history", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+					{ role: "assistant", content: "I will apply the plan skill." },
+					{ role: "user", content: "continue" },
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
+	it("does not nudge when a block follows the Skill tool_result in the final message", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+							{ type: "text", text: "actually, do something else" },
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
+	it("adds a continuation nudge when the Skill tool_use and result span separate messages", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "load /ce-plan" },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "call_skill_1",
+								name: "Skill",
+								input: { skill: "ce-plan" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_skill_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		// The nudge must be the final item so Codex resumes the request.
+		expect(body.input[body.input.length - 1]).toEqual({
+			role: "user",
+			content: [
+				{
+					type: "input_text",
+					text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+				},
+			],
+		});
+	});
+
+	it("does not nudge for an orphaned Skill tool_result with no matching tool_use", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [
+					{ role: "user", content: "hello" },
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_unknown_1",
+								content: [{ type: "text", text: "Successfully loaded skill" }],
+							},
+						],
+					},
+				],
+			}),
+		});
+
+		const transformed = await provider.transformRequestBody(request);
+		const body = await transformed.json();
+
+		expect(JSON.stringify(body.input)).not.toContain(
+			"Continue the user's original request now",
+		);
+	});
+
 	it("forwards xhigh reasoning effort to Codex unchanged", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
