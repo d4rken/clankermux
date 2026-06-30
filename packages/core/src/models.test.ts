@@ -6,7 +6,30 @@ import {
 	isValidModelId,
 	LATEST_FABLE_MODEL,
 	LATEST_OPUS_MODEL,
+	LATEST_SONNET_MODEL,
 } from "./models";
+
+describe("Claude Sonnet 5 registration", () => {
+	it("exposes the claude-sonnet-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.SONNET_5).toBe("claude-sonnet-5");
+	});
+
+	it("is the latest sonnet model", () => {
+		expect(LATEST_SONNET_MODEL).toBe("claude-sonnet-5");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-sonnet-5")).toBe("Claude Sonnet 5");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		expect(getModelShortName("claude-sonnet-5")).toBe("claude-sonnet-5");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-sonnet-5")).toBe(true);
+	});
+});
 
 describe("Claude Opus 4.8 registration", () => {
 	it("exposes the claude-opus-4-8 model id", () => {

@@ -99,6 +99,34 @@ describe("bundled Opus pricing (offline fallback)", () => {
 	});
 });
 
+describe("bundled Sonnet 5 pricing (offline fallback)", () => {
+	// Sonnet 5 prices at $3/M input, $15/M output, $0.30/M cache read,
+	// $3.75/M cache write — same tier as Sonnet 4.5/4.6 (standard, post
+	// introductory-period pricing).
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+	const cacheTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	it("prices claude-sonnet-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-sonnet-5", ioTokens)).toBeCloseTo(
+			18,
+			6,
+		);
+	});
+
+	it("prices claude-sonnet-5 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-sonnet-5", cacheTokens)).toBeCloseTo(
+			4.05,
+			6,
+		);
+	});
+});
+
 describe("bundled Mythos-class pricing (offline fallback)", () => {
 	// Fable 5 and Mythos 5 both price at $10/M input, $50/M output,
 	// $1.00/M cache read, $12.50/M cache write.
@@ -146,6 +174,14 @@ describe("getModelCacheRates", () => {
 		// Resolution is exact-match (mirroring estimateCostUSD), so use the real
 		// bundled id, which is dated: "claude-sonnet-4-5-20250929".
 		expect(getModelCacheRates("claude-sonnet-4-5-20250929")).toEqual({
+			inputPer1M: 3,
+			cacheReadPer1M: 0.3,
+			cacheWritePer1M: 3.75,
+		});
+	});
+
+	it("returns Sonnet 5 rates from bundled data", () => {
+		expect(getModelCacheRates("claude-sonnet-5")).toEqual({
 			inputPer1M: 3,
 			cacheReadPer1M: 0.3,
 			cacheWritePer1M: 3.75,
