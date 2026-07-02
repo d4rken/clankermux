@@ -1,7 +1,7 @@
 import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
 import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
 import { useEffect, useState } from "react";
-import { hasAnthropicSecondaryWindow } from "../../lib/secondary-limits";
+import { getScopedWeeklyLimits } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
 import {
 	providerShowsCreditsBalance,
@@ -128,6 +128,8 @@ function formatWindowName(window: string | null): string {
 			return "Opus (Weekly)";
 		case "seven_day_sonnet":
 			return "Sonnet (Weekly)";
+		case "seven_day_scoped":
+			return "Weekly";
 		case "daily":
 			return "Daily";
 		case "weekly":
@@ -143,8 +145,9 @@ function formatWindowName(window: string | null): string {
 	}
 }
 
-function formatUsageTitle(window: string | null): string {
-	return window ? `Usage (${formatWindowName(window)})` : "Rate limit window";
+function formatUsageTitle(window: string | null, label?: string): string {
+	const resolvedName = label ?? (window ? formatWindowName(window) : null);
+	return resolvedName ? `Usage (${resolvedName})` : "Rate limit window";
 }
 
 function shouldShowResetDate(window: string | null): boolean {
@@ -152,6 +155,7 @@ function shouldShowResetDate(window: string | null): boolean {
 		window === "seven_day" ||
 		window === "seven_day_opus" ||
 		window === "seven_day_sonnet" ||
+		window === "seven_day_scoped" ||
 		window === "weekly" ||
 		window === "monthly" ||
 		window === "time_limit" ||
@@ -219,6 +223,7 @@ interface UsageDisplay {
 	utilization: number | null;
 	window: string | null;
 	resetTime: string | null;
+	label?: string;
 }
 
 export function RateLimitProgress({
@@ -461,30 +466,19 @@ export function RateLimitProgress({
 			});
 		}
 
-		// Model-specific weekly windows (Opus/Sonnet) are "secondary": shown only
-		// when opted in, and only when the window would actually render. The
-		// eligibility check is shared with the overflow-menu gate via
-		// hasAnthropicSecondaryWindow so the two never drift apart.
-		if (
-			showSecondaryWeekly &&
-			hasAnthropicSecondaryWindow(anthropicData?.seven_day_opus)
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day_opus?.utilization ?? null,
-				window: "seven_day_opus",
-				resetTime: anthropicData.seven_day_opus?.resets_at ?? null,
-			});
-		}
-
-		if (
-			showSecondaryWeekly &&
-			hasAnthropicSecondaryWindow(anthropicData?.seven_day_sonnet)
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day_sonnet?.utilization ?? null,
-				window: "seven_day_sonnet",
-				resetTime: anthropicData.seven_day_sonnet?.resets_at ?? null,
-			});
+		// Model-specific weekly windows (e.g. "Fable") are "secondary": shown
+		// only when opted in, and only when the window would actually render.
+		// The eligibility check is shared with the overflow-menu gate via
+		// getScopedWeeklyLimits so the two never drift apart.
+		if (showSecondaryWeekly) {
+			for (const limit of getScopedWeeklyLimits(usageData)) {
+				usages.push({
+					utilization: limit.utilization,
+					window: "seven_day_scoped",
+					resetTime: limit.resetsAt,
+					label: limit.label,
+				});
+			}
 		}
 	} else if (
 		providerShowsWeeklyUsage(provider) &&
@@ -537,8 +531,7 @@ export function RateLimitProgress({
 					}
 				} else if (
 					usage.window === "seven_day" ||
-					usage.window === "seven_day_opus" ||
-					usage.window === "seven_day_sonnet"
+					usage.window === "seven_day_scoped"
 				) {
 					// Weekly window with no reset timestamp — keyed on utilization so the
 					// copy is precise and non-alarming (0 = window hasn't started yet).
@@ -560,7 +553,14 @@ export function RateLimitProgress({
 					!usage.resetTime
 				) {
 					return (
-						<div key={usage.window || "default"} className="space-y-1.5">
+						<div
+							key={
+								usage.label
+									? `${usage.window}-${usage.label}`
+									: usage.window || "default"
+							}
+							className="space-y-1.5"
+						>
 							<div className="flex items-center justify-between">
 								<span className="text-xs text-muted-foreground">
 									No subscription (PayG mode)
@@ -589,9 +589,9 @@ export function RateLimitProgress({
 						)
 					: null;
 				const throttleDisplayUntil = windowThrottleUntil ?? usageThrottledUntil;
-				const windowLabel = usage.window
-					? formatWindowName(usage.window)
-					: "Rate limit";
+				const windowLabel =
+					usage.label ??
+					(usage.window ? formatWindowName(usage.window) : "Rate limit");
 				const projectedMessage = computeProjectedMessage(
 					usage.resetTime,
 					usage.window,
@@ -609,8 +609,7 @@ export function RateLimitProgress({
 					rightStatus = formatResetText(usage.resetTime, usage.window, now);
 				} else if (
 					usage.window === "seven_day" ||
-					usage.window === "seven_day_opus" ||
-					usage.window === "seven_day_sonnet" ||
+					usage.window === "seven_day_scoped" ||
 					usage.window === "daily" ||
 					usage.window === "monthly"
 				) {
@@ -623,11 +622,18 @@ export function RateLimitProgress({
 								: "No reset data available";
 				}
 				const titleText = leftStatus
-					? `${formatUsageTitle(usage.window)}: ${leftStatus}`
-					: formatUsageTitle(usage.window);
+					? `${formatUsageTitle(usage.window, usage.label)}: ${leftStatus}`
+					: formatUsageTitle(usage.window, usage.label);
 
 				return (
-					<div key={usage.window || "default"} className="space-y-1.5">
+					<div
+						key={
+							usage.label
+								? `${usage.window}-${usage.label}`
+								: usage.window || "default"
+						}
+						className="space-y-1.5"
+					>
 						<div className={cn(!inlineProjection && "group", "relative")}>
 							{!inlineProjection && (
 								<div

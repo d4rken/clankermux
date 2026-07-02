@@ -106,10 +106,10 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
-	// The model-specific weekly bars (Opus/Sonnet) are hidden by default on the
-	// Accounts page and revealed per-account via the overflow-menu toggle below.
-	// The hook is always called (Rules of Hooks); the checkbox only renders when
-	// those bars exist for this account.
+	// The model-specific weekly bars (e.g. a named model family like "Fable")
+	// are hidden by default on the Accounts page and revealed per-account via
+	// the overflow-menu toggle below. The hook is always called (Rules of
+	// Hooks); the checkbox only renders when those bars exist for this account.
 	const canShowSecondary = hasSecondaryWeeklyWindows(account.usageData);
 	const [showSecondaryLimits, toggleSecondaryLimits] = useShowSecondaryLimits(
 		account.id,
@@ -274,7 +274,7 @@ export function AccountListItem({
 										checked={showSecondaryLimits}
 										onCheckedChange={toggleSecondaryLimits}
 										onSelect={(e) => e.preventDefault()}
-										title="Show the per-model weekly limits (Opus, Sonnet) in addition to the 5-hour and overall weekly limits."
+										title="Show the per-model weekly limits in addition to the 5-hour and overall weekly limits."
 									>
 										Show secondary limits
 									</DropdownMenuCheckboxItem>
