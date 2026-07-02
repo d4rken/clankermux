@@ -22,6 +22,7 @@ export const FIXED_WINDOW_DURATION_MS: Record<string, number> = {
 	seven_day: 7 * 24 * 60 * 60 * 1000,
 	seven_day_opus: 7 * 24 * 60 * 60 * 1000,
 	seven_day_sonnet: 7 * 24 * 60 * 60 * 1000,
+	seven_day_scoped: 7 * 24 * 60 * 60 * 1000,
 	weekly: 7 * 24 * 60 * 60 * 1000,
 	daily: 24 * 60 * 60 * 1000,
 	// time_limit intentionally omitted — ZAI's TIME_LIMIT window duration is unknown

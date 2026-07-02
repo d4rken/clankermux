@@ -128,11 +128,46 @@ describe("RateLimitProgress", () => {
 		const usageData = () => ({
 			five_hour: { utilization: 10, resets_at: future() },
 			seven_day: { utilization: 20, resets_at: future() },
-			seven_day_opus: { utilization: 30, resets_at: future() },
-			seven_day_sonnet: { utilization: 5, resets_at: future() },
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 0,
+					resets_at: future(),
+					scope: null,
+					is_active: false,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 20,
+					resets_at: future(),
+					scope: null,
+					is_active: false,
+				},
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 30,
+					resets_at: future(),
+					scope: { model: { id: null, display_name: "Opus" }, surface: null },
+					is_active: false,
+				},
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 5,
+					resets_at: future(),
+					scope: {
+						model: { id: null, display_name: "Sonnet" },
+						surface: null,
+					},
+					is_active: false,
+				},
+			],
 		});
 
-		it("hides the Opus/Sonnet weekly bars when showSecondaryWeekly is false", () => {
+		it("hides the scoped weekly bars when showSecondaryWeekly is false", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -147,11 +182,11 @@ describe("RateLimitProgress", () => {
 
 			expect(html).toContain("5-hour");
 			expect(html).toContain("Weekly");
-			expect(html).not.toContain("Opus (Weekly)");
-			expect(html).not.toContain("Sonnet (Weekly)");
+			expect(html).not.toContain("Opus");
+			expect(html).not.toContain("Sonnet");
 		});
 
-		it("shows the Opus/Sonnet weekly bars when showSecondaryWeekly is true", () => {
+		it("shows the scoped weekly bars when showSecondaryWeekly is true", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -164,11 +199,13 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("Opus (Weekly)");
-			expect(html).toContain("Sonnet (Weekly)");
+			expect(html).toContain("Opus");
+			expect(html).toContain("30%");
+			expect(html).toContain("Sonnet");
+			expect(html).toContain("5%");
 		});
 
-		it("shows the Opus/Sonnet weekly bars by default (prop omitted)", () => {
+		it("shows the scoped weekly bars by default (prop omitted)", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -180,8 +217,42 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("Opus (Weekly)");
-			expect(html).toContain("Sonnet (Weekly)");
+			expect(html).toContain("Opus");
+			expect(html).toContain("Sonnet");
+		});
+
+		it("shows a weekly_scoped limit for a model family other than Opus/Sonnet (regression for the Fable bug)", () => {
+			const resetsAt = future();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 10, resets_at: future() },
+						seven_day: { utilization: 20, resets_at: future() },
+						limits: [
+							{
+								kind: "weekly_scoped",
+								group: "weekly",
+								percent: 69,
+								resets_at: resetsAt,
+								scope: {
+									model: { id: null, display_name: "Fable" },
+									surface: null,
+								},
+								is_active: true,
+							},
+						],
+					}}
+					provider="anthropic"
+					showWeekly
+					showSecondaryWeekly
+				/>,
+			);
+
+			expect(html).toContain("Fable");
+			expect(html).toContain("69%");
 		});
 	});
 

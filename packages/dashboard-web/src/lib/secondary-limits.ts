@@ -1,46 +1,56 @@
-import type {
-	AnthropicUsageData,
-	FullUsageData,
-	UsageWindowData,
-} from "@clankermux/types";
+import type { AnthropicUsageData, FullUsageData } from "@clankermux/types";
 
 /** localStorage key for the per-account "show secondary limits" preference. */
 export const SECONDARY_LIMITS_STORAGE_KEY = "clankermux:show-secondary-limits";
 
-/**
- * True iff a model-specific weekly window (`seven_day_opus`/`seven_day_sonnet`)
- * has a numeric utilization AND a non-null reset — i.e. it would render as its
- * own bar. Shared by {@link hasSecondaryWeeklyWindows} and the push blocks in
- * RateLimitProgress.tsx so the gate and the actual rendering stay in lockstep.
- */
-export function hasAnthropicSecondaryWindow(
-	window: UsageWindowData | null | undefined,
-): boolean {
-	return (
-		window != null &&
-		typeof window.utilization === "number" &&
-		window.resets_at != null
-	);
+export interface ScopedWeeklyLimit {
+	key: string;
+	label: string;
+	utilization: number;
+	resetsAt: string;
 }
 
 /**
- * True iff the account's usage data is Anthropic-shaped (the only shape with
- * model-specific weekly windows) AND has at least one secondary window that
- * would render. The `five_hour`/`seven_day` presence check mirrors
- * `hasAnthropicStyleData` in RateLimitProgress.tsx — the branch that renders
- * the Opus/Sonnet bars — so the "Show secondary limits" toggle is never offered
- * when toggling it would be a no-op. Zai/Alibaba/Kilo and null data return false.
+ * Extract per-model-family weekly quotas (e.g. "Fable") from Anthropic's
+ * generic `limits[]` array. Replaces the old `seven_day_opus`/`seven_day_sonnet`
+ * flat-field reads, which are always null under Anthropic's current API shape.
+ * Does not filter on `is_active` — mirrors the old "any window with data
+ * renders" rule; scoped windows are mutual fallbacks so in practice only one
+ * is populated at a time.
+ */
+export function getScopedWeeklyLimits(
+	usageData: FullUsageData | null | undefined,
+): ScopedWeeklyLimit[] {
+	if (!usageData) return [];
+	if (!("five_hour" in usageData) || !("seven_day" in usageData)) return [];
+	const anthropicData = usageData as AnthropicUsageData;
+	const results: ScopedWeeklyLimit[] = [];
+	for (const entry of anthropicData.limits ?? []) {
+		if (entry.kind !== "weekly_scoped") continue;
+		if (typeof entry.percent !== "number") continue;
+		if (entry.resets_at == null) continue;
+		const displayName = entry.scope?.model?.display_name;
+		if (!displayName) continue;
+		results.push({
+			key: entry.scope?.model?.id ?? displayName,
+			label: displayName,
+			utilization: entry.percent,
+			resetsAt: entry.resets_at,
+		});
+	}
+	return results;
+}
+
+/**
+ * True iff the account's usage data is Anthropic-shaped AND has at least one
+ * scoped weekly window that would render. Gates the "Show secondary limits"
+ * toggle in AccountListItem.tsx so it's never offered when toggling it would
+ * be a no-op.
  */
 export function hasSecondaryWeeklyWindows(
 	usageData: FullUsageData | null | undefined,
 ): boolean {
-	if (!usageData) return false;
-	if (!("five_hour" in usageData) || !("seven_day" in usageData)) return false;
-	const anthropicData = usageData as AnthropicUsageData;
-	return (
-		hasAnthropicSecondaryWindow(anthropicData.seven_day_opus) ||
-		hasAnthropicSecondaryWindow(anthropicData.seven_day_sonnet)
-	);
+	return getScopedWeeklyLimits(usageData).length > 0;
 }
 
 /**

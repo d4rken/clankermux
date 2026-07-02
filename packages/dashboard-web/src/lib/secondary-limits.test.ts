@@ -1,30 +1,211 @@
 import { describe, expect, it } from "bun:test";
 import type { FullUsageData } from "@clankermux/types";
 import {
-	hasAnthropicSecondaryWindow,
+	getScopedWeeklyLimits,
 	hasSecondaryWeeklyWindows,
 	parseSecondaryLimitIds,
 } from "./secondary-limits";
 
 const ISO = "2024-01-03T12:00:00.000Z";
 
-describe("hasSecondaryWeeklyWindows", () => {
-	it("is true when seven_day_opus has a numeric utilization and a reset string", () => {
+const sessionEntry = {
+	kind: "session",
+	group: "session",
+	percent: 0,
+	resets_at: ISO,
+	scope: null,
+	is_active: false,
+};
+
+const weeklyAllEntry = {
+	kind: "weekly_all",
+	group: "weekly",
+	percent: 41,
+	resets_at: ISO,
+	scope: null,
+	is_active: false,
+};
+
+function scopedEntry(overrides: Record<string, unknown> = {}) {
+	return {
+		kind: "weekly_scoped",
+		group: "weekly",
+		percent: 69,
+		resets_at: ISO,
+		scope: { model: { id: null, display_name: "Fable" }, surface: null },
+		is_active: true,
+		...overrides,
+	};
+}
+
+describe("getScopedWeeklyLimits", () => {
+	it("returns the scoped weekly window with correct key/label/utilization/resetsAt", () => {
 		expect(
-			hasSecondaryWeeklyWindows({
+			getScopedWeeklyLimits({
 				five_hour: { utilization: 10, resets_at: ISO },
 				seven_day: { utilization: 20, resets_at: ISO },
-				seven_day_opus: { utilization: 30, resets_at: ISO },
+				limits: [scopedEntry()],
 			} as unknown as FullUsageData),
-		).toBe(true);
+		).toEqual([
+			{ key: "Fable", label: "Fable", utilization: 69, resetsAt: ISO },
+		]);
 	});
 
-	it("is true when seven_day_sonnet has a numeric utilization and a reset string", () => {
+	it("prefers scope.model.id as the key when present", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [
+					scopedEntry({
+						scope: {
+							model: { id: "model-fable", display_name: "Fable" },
+							surface: null,
+						},
+					}),
+				],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{
+				key: "model-fable",
+				label: "Fable",
+				utilization: 69,
+				resetsAt: ISO,
+			},
+		]);
+	});
+
+	it("returns multiple scoped entries", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [
+					scopedEntry({
+						percent: 30,
+						scope: { model: { id: null, display_name: "Opus" }, surface: null },
+					}),
+					scopedEntry({
+						percent: 5,
+						scope: {
+							model: { id: null, display_name: "Sonnet" },
+							surface: null,
+						},
+					}),
+				],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{ key: "Opus", label: "Opus", utilization: 30, resetsAt: ISO },
+			{ key: "Sonnet", label: "Sonnet", utilization: 5, resetsAt: ISO },
+		]);
+	});
+
+	it("excludes entries with missing or null percent", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [scopedEntry({ percent: null })],
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("excludes entries with missing or null resets_at", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [scopedEntry({ resets_at: null })],
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("excludes entries with a missing scope", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [scopedEntry({ scope: null })],
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("excludes entries with a missing scope.model", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [scopedEntry({ scope: { model: null, surface: null } })],
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("excludes entries with a missing scope.model.display_name", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [
+					scopedEntry({
+						scope: { model: { id: "x", display_name: null }, surface: null },
+					}),
+				],
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("ignores non-weekly_scoped kinds (session, weekly_all present but not returned)", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [sessionEntry, weeklyAllEntry, scopedEntry()],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{ key: "Fable", label: "Fable", utilization: 69, resetsAt: ISO },
+		]);
+	});
+
+	it("still renders a scoped entry with is_active: false (no filtering on is_active)", () => {
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 10, resets_at: ISO },
+				seven_day: { utilization: 20, resets_at: ISO },
+				limits: [scopedEntry({ is_active: false })],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{ key: "Fable", label: "Fable", utilization: 69, resetsAt: ISO },
+		]);
+	});
+
+	it("returns [] for non-Anthropic-shaped data", () => {
+		expect(
+			getScopedWeeklyLimits({
+				tokens_limit: {
+					used: 0,
+					remaining: 0,
+					percentage: 0,
+					resetAt: null,
+					type: "tokens",
+				},
+				time_limit: null,
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
+
+	it("returns [] for null and undefined usageData", () => {
+		expect(getScopedWeeklyLimits(null)).toEqual([]);
+		expect(getScopedWeeklyLimits(undefined)).toEqual([]);
+	});
+});
+
+describe("hasSecondaryWeeklyWindows", () => {
+	it("is true when a weekly_scoped limit entry would render", () => {
 		expect(
 			hasSecondaryWeeklyWindows({
 				five_hour: { utilization: 10, resets_at: ISO },
 				seven_day: { utilization: 20, resets_at: ISO },
-				seven_day_sonnet: { utilization: 5, resets_at: ISO },
+				limits: [scopedEntry()],
 			} as unknown as FullUsageData),
 		).toBe(true);
 	});
@@ -38,22 +219,12 @@ describe("hasSecondaryWeeklyWindows", () => {
 		).toBe(false);
 	});
 
-	it("is false when seven_day_opus.resets_at is null even if utilization is a number", () => {
+	it("is false when limits has no weekly_scoped entries", () => {
 		expect(
 			hasSecondaryWeeklyWindows({
 				five_hour: { utilization: 10, resets_at: ISO },
 				seven_day: { utilization: 20, resets_at: ISO },
-				seven_day_opus: { utilization: 30, resets_at: null },
-			} as unknown as FullUsageData),
-		).toBe(false);
-	});
-
-	it("is false when seven_day_opus.utilization is null even if resets_at is present", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				five_hour: { utilization: 10, resets_at: ISO },
-				seven_day: { utilization: 20, resets_at: ISO },
-				seven_day_opus: { utilization: null, resets_at: ISO },
+				limits: [sessionEntry, weeklyAllEntry],
 			} as unknown as FullUsageData),
 		).toBe(false);
 	});
@@ -82,30 +253,8 @@ describe("hasSecondaryWeeklyWindows", () => {
 		expect(
 			hasSecondaryWeeklyWindows({
 				five_hour: { utilization: 10, resets_at: ISO },
-				seven_day_opus: { utilization: 30, resets_at: ISO },
+				limits: [scopedEntry()],
 			} as unknown as FullUsageData),
-		).toBe(false);
-	});
-});
-
-describe("hasAnthropicSecondaryWindow", () => {
-	it("is true for a numeric utilization with a non-null reset", () => {
-		expect(
-			hasAnthropicSecondaryWindow({ utilization: 30, resets_at: ISO }),
-		).toBe(true);
-	});
-
-	it("is false for null / undefined windows", () => {
-		expect(hasAnthropicSecondaryWindow(null)).toBe(false);
-		expect(hasAnthropicSecondaryWindow(undefined)).toBe(false);
-	});
-
-	it("is false when utilization is null or reset is null", () => {
-		expect(
-			hasAnthropicSecondaryWindow({ utilization: null, resets_at: ISO }),
-		).toBe(false);
-		expect(
-			hasAnthropicSecondaryWindow({ utilization: 30, resets_at: null }),
 		).toBe(false);
 	});
 });

@@ -25,12 +25,25 @@ export interface UsageWindowData {
 	resets_at: string | null;
 }
 
+export interface AnthropicLimitEntry {
+	kind: string;
+	group: string;
+	percent: number | null;
+	resets_at: string | null;
+	scope: {
+		model?: { id: string | null; display_name: string | null } | null;
+		surface?: string | null;
+	} | null;
+	is_active: boolean;
+}
+
 export interface AnthropicUsageData {
 	five_hour?: UsageWindowData;
 	seven_day?: UsageWindowData;
 	seven_day_oauth_apps?: UsageWindowData;
 	seven_day_opus?: UsageWindowData;
 	seven_day_sonnet?: UsageWindowData;
+	limits?: AnthropicLimitEntry[];
 }
 
 // Usage data types for Zai accounts
