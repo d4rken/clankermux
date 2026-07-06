@@ -13,6 +13,7 @@ import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
 	getFreshCapacity,
 	getProvider,
+	isAnthropicHardLimitStatus,
 	isAnthropicOutOfCredits,
 	usageCache,
 } from "@clankermux/providers";
@@ -32,6 +33,10 @@ import {
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
+import {
+	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+	resolveFamilyWeeklyExclusion,
+} from "./family-weekly-gate";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
@@ -1093,6 +1098,82 @@ export async function proxyWithAccount(
 					{ kind: "hard_429", cooldownUntil: floorUntil },
 					rawResponse,
 				);
+			}
+
+			// ── Reactive family-weekly safety net ───────────────────────────
+			// A family-scoped weekly 429 that slipped past the proactive gate (e.g.
+			// the usage poll lagged behind the exhaustion). If limits[] confirms the
+			// REQUESTED family is weekly-exhausted while unified 5h/7d headroom
+			// remains, do NOT apply an account-wide cooldown — that would sideline
+			// the account for EVERY family until the weekly reset (the exact bug
+			// this feature fixes). Record an audit row and fail over so a sibling
+			// serves it; the proactive gate re-excludes this account for the family
+			// on the next request from the same cache. Placed BEFORE the burst-retry
+			// intercept so a family-exhausted 429 (which keeps unified headroom) is
+			// never misclassified as a holdable transient burst. Skipped for
+			// synthetic keepalive/internal replays.
+			//
+			// The LIVE response's unified-status header is authoritative and beats
+			// the cache: if it reports a hard ACCOUNT-LEVEL limit (rate_limited /
+			// blocked / payment_required), this is a genuine account-wide 429 and we
+			// must NOT skip the cooldown, however stale/fresh the cache looks. A true
+			// family-scoped weekly 429 keeps unified headroom, so it carries a
+			// non-hard unified status — the guard still fires for it.
+			if (
+				rawResponse.status === 429 &&
+				requestedModel &&
+				!options?.reprobe &&
+				!isSyntheticInternalRequest(req.headers) &&
+				!isAnthropicHardLimitStatus(rawResponse)
+			) {
+				const now = Date.now();
+				const familyExclusion = resolveFamilyWeeklyExclusion(
+					account,
+					requestedModel,
+					usageCache.get(account.id),
+					getFreshCapacity(
+						usageCache,
+						account.id,
+						account.provider,
+						now,
+						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+					),
+					now,
+				);
+				if (familyExclusion) {
+					const reason: RateLimitReason = "family_weekly_exhausted_429";
+					// Persist the 429's unified-status header so the dashboard chip
+					// reflects the live value rather than the last success.
+					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+					const responseTime = Date.now() - requestMeta.timestamp;
+					// Direct audit row (synthetic UUID id), NOT recorder-owned — mirrors
+					// the out_of_credits path. No applyRateLimitCooldown: the account
+					// keeps its account-wide availability for other families.
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest(
+							crypto.randomUUID(),
+							req.method,
+							url.pathname,
+							account.id,
+							429,
+							false,
+							reason,
+							responseTime,
+							failoverAttempts,
+							requestedModel ? { model: requestedModel } : undefined,
+							apiKeyId ?? undefined,
+							apiKeyName ?? undefined,
+							requestMeta.project ?? null,
+							undefined,
+							requestMeta.comboName ?? null,
+							requestMeta.reasoningEffort ?? null,
+						),
+					);
+					log.warn(
+						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present) — failing over WITHOUT account-wide cooldown`,
+					);
+					return await fail({ kind: "other" }, rawResponse);
+				}
 			}
 
 			// ── Transparent burst-retry: first-attempt early intercept ──────────

@@ -69,6 +69,14 @@ const KNOWN_ERROR_META: Record<
 			"Top up the account's credits or increase its overage allowance. Until then, traffic shifts to other configured accounts automatically.",
 		severity: "error",
 	},
+	family_weekly_exhausted_429: {
+		title: "Model family weekly limit reached",
+		description:
+			"Anthropic returned 429 for a model family whose weekly quota is exhausted, while the account still has unified 5h/7d headroom. The request was failed over WITHOUT an account-wide cooldown, so the account stays available for other model families until this family's weekly window resets.",
+		suggestion:
+			"No action needed — other families on this account keep serving, and this family recovers at its weekly reset. Traffic for this family shifts to other accounts meanwhile.",
+		severity: "warning",
+	},
 };
 
 function getModelFallbackMeta(context?: ErrorContext): ErrorMeta {
