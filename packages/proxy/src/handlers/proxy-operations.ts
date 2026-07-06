@@ -45,7 +45,11 @@ import {
 	persistRateLimitStatusMeta,
 	processProxyResponse,
 } from "./response-processor";
-import { getValidAccessToken } from "./token-manager";
+import {
+	canAttemptStaleTokenRefresh,
+	getValidAccessToken,
+	refreshAccessTokenSafe,
+} from "./token-manager";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	classify429Transient,
@@ -120,6 +124,33 @@ export interface ProxyAttemptOptions {
 	 */
 	signal?: AbortSignal;
 }
+
+/**
+ * Max reactive stale-token refresh+retry attempts on the SAME account after an
+ * upstream 401, before failing over. One is enough: a healthy stale token is
+ * fixed on the single retry; a genuinely-dead account 401s again and fails over.
+ * Bounding to one keeps a revoked account from looping against the same upstream.
+ */
+const STALE_TOKEN_MAX_RETRY = 1;
+
+/**
+ * Minimum gap between reactive stale-token refreshes for the SAME account. The
+ * per-request cap (STALE_TOKEN_MAX_RETRY) bounds a single request, but a
+ * successful refresh clears the token-manager backoff — so without this, an
+ * account whose OAuth endpoint keeps issuing tokens the upstream still rejects
+ * would trigger one fresh refresh per incoming request, hammering the token
+ * endpoint under load. Within this window a 401 fails over directly. The common
+ * case is unaffected: a genuinely stale token is fixed on the first retry, and
+ * subsequent requests use the now-valid token and never reach this path.
+ */
+const STALE_TOKEN_REFRESH_COOLDOWN_MS = 60_000;
+
+/**
+ * Per-account epoch ms of the last reactive stale-token refresh, enforcing
+ * STALE_TOKEN_REFRESH_COOLDOWN_MS. Module-level (like refreshFailures /
+ * cacheControlRejectors) and bounded by the account count.
+ */
+const lastStaleTokenRefreshAt = new Map<string, number>();
 
 export function isSyntheticInternalRequest(headers: Headers): boolean {
 	return (
@@ -617,6 +648,7 @@ export async function proxyWithAccount(
 	requestBodyContext?: RequestBodyContext | null,
 	returnRateLimitedResponseOnExhaustion = false,
 	options?: ProxyAttemptOptions,
+	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
 	// Best-effort re-arm of this connection's Bun idle timer, threaded into
 	// forwardToClient so long quiet gaps mid-stream don't reap the connection at
@@ -1595,8 +1627,75 @@ export async function proxyWithAccount(
 		);
 		liveUpstream = response;
 
-		// Failover to next account on upstream 401 — credentials are invalid/expired
+		// Upstream 401 — the access token was rejected. An OAuth access token can be
+		// rejected even though it still looks valid by its expiry timestamp (server-
+		// side revocation, clock skew, or a refresh that landed a token the upstream
+		// won't accept), so the proactive 30-min refresh window never caught it.
+		// Failing straight over loses this account's per-request prompt cache and can
+		// needlessly burn a healthy sibling. Refresh the token ONCE and retry the SAME
+		// account before failing over; only fail over if the retry also 401s or the
+		// refresh fails. Skipped for synthetic internal requests (keepalive replays,
+		// auto-refresh probes) and for accounts with no refreshable OAuth token.
 		if (response.status === 401) {
+			const now = Date.now();
+			const cooledDown =
+				now - (lastStaleTokenRefreshAt.get(account.id) ?? 0) >=
+				STALE_TOKEN_REFRESH_COOLDOWN_MS;
+			if (
+				staleTokenRetryAttempt < STALE_TOKEN_MAX_RETRY &&
+				canAttemptStaleTokenRefresh(account) &&
+				!isSyntheticInternalRequest(req.headers) &&
+				cooledDown
+			) {
+				// The 401 error body is abandoned the moment we choose the refresh
+				// path — release it now, BEFORE awaiting the refresh, so a slow or
+				// deduped refresh can't pin the socket + ~512 KB native read buffer.
+				// discardUpstreamBody is idempotent, so the failover path below can
+				// safely discard again.
+				await discardUpstreamBody(response);
+				liveUpstream = null;
+				lastStaleTokenRefreshAt.set(account.id, now);
+				const tokenBefore = account.access_token;
+				let refreshedToken: string | null = null;
+				try {
+					// Unconditional refresh (dedup + backoff guarded in token-manager);
+					// on success it mutates account.access_token in place so the
+					// recursion's getValidAccessToken picks up the fresh token. On a
+					// terminal invalid_grant it pauses the account and throws → fall over.
+					refreshedToken = await refreshAccessTokenSafe(account, ctx);
+				} catch (err) {
+					log.warn(
+						`Stale-token refresh failed for account ${account.name}: ${
+							err instanceof Error ? err.message : String(err)
+						}; failing over`,
+					);
+				}
+				// Only retry if the refresh actually produced a DIFFERENT token. A
+				// provider that returns a static credential (or an unchanged token)
+				// would just 401 again — fail over instead of burning a round-trip.
+				if (refreshedToken && refreshedToken !== tokenBefore) {
+					log.info(
+						`Refreshed token for account ${account.name} after 401; retrying same account`,
+					);
+					return await proxyWithAccount(
+						req,
+						url,
+						account,
+						requestMeta,
+						requestBodyBuffer,
+						_createBodyStream,
+						failoverAttempts,
+						ctx,
+						modelOverride,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						returnRateLimitedResponseOnExhaustion,
+						options,
+						staleTokenRetryAttempt + 1,
+					);
+				}
+			}
 			log.warn(
 				`Authentication failed (401) for account ${account.name}, failing over to next account`,
 			);

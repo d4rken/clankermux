@@ -18,6 +18,42 @@ import {
 
 const log = new Logger("TokenManager");
 
+/**
+ * Providers whose `refreshToken()` performs a genuine OAuth access-token exchange
+ * — a real network round-trip that returns a NEW, usable bearer token. Only these
+ * are eligible for a reactive stale-token refresh after an upstream 401.
+ *
+ * Deliberately a positive ALLOWLIST, not a denylist. Several providers carry a
+ * `refresh_token` and/or report `supportsOAuth() === true`, yet inherit
+ * `OpenAICompatibleProvider.refreshToken`, which just echoes `account.refresh_token`
+ * back as the access token (no exchange) — Qwen is the notable case. Reactively
+ * "refreshing" one of those would overwrite the stored access token with the
+ * refresh token and retry upstream with the wrong bearer (credential corruption),
+ * so a denylist that forgets one is a security bug. An allowlist fails safe: an
+ * unlisted provider simply falls over on 401 as before. `anthropic` and `codex`
+ * are the only providers with a real OAuth refresh; `claude-oauth` is the legacy
+ * alias for anthropic OAuth accounts.
+ */
+const OAUTH_REACTIVE_REFRESH_PROVIDERS: ReadonlySet<string> = new Set([
+	"anthropic",
+	"claude-oauth",
+	"codex",
+]);
+
+/**
+ * Whether an account is eligible for a reactive access-token refresh after an
+ * upstream 401. True only for accounts that hold a refresh token AND whose
+ * provider does a genuine OAuth token exchange (see
+ * OAUTH_REACTIVE_REFRESH_PROVIDERS). Used by the proxy's stale-token 401 recovery
+ * to decide whether to refresh + retry the same account before failing over.
+ */
+export function canAttemptStaleTokenRefresh(account: Account): boolean {
+	return (
+		Boolean(account.refresh_token) &&
+		OAUTH_REACTIVE_REFRESH_PROVIDERS.has(account.provider)
+	);
+}
+
 /** Minimal slice of DatabaseOperations needed to pause an account for reauth. */
 interface ReauthPauser {
 	pauseAccountIfActive(
