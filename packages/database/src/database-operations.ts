@@ -26,6 +26,7 @@ import type {
 	StrategyStore,
 	ToolCallStat,
 	UsageSnapshotRow,
+	UsageSnapshotSample,
 } from "@clankermux/types";
 import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
@@ -2143,6 +2144,18 @@ OAuth tokens will need to be re-authenticated.
 			() => this.usageSnapshots.getLatestSnapshots(accountIds),
 			this.retryConfig,
 			"getLatestUsageSnapshots",
+		);
+	}
+
+	async getRecentUsageSnapshotsForAccounts(
+		accountIds: string[],
+		sinceMs: number,
+	): Promise<UsageSnapshotSample[]> {
+		return withDatabaseRetry(
+			() =>
+				this.usageSnapshots.getRecentSnapshotsForAccounts(accountIds, sinceMs),
+			this.retryConfig,
+			"getRecentUsageSnapshotsForAccounts",
 		);
 	}
 

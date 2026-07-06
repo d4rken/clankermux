@@ -542,6 +542,7 @@ export function AccountListItem({
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					showSecondaryWeekly={showSecondaryLimits}
+					prediction={account.prediction}
 				/>
 			)}
 		</div>

@@ -1,4 +1,5 @@
 import { microsToUsd } from "./payment";
+import type { AccountUsagePrediction } from "./usage-prediction";
 
 export type RateLimitReason =
 	| "upstream_429_with_reset"
@@ -244,6 +245,7 @@ export interface AccountResponse {
 		weeklyUsedPct: number | null;
 	} | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
+	prediction?: AccountUsagePrediction | null; // Server-computed regression-backed exhaustion prediction per window
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled

@@ -1,6 +1,16 @@
 import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
-import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
+import type {
+	AccountUsagePrediction,
+	FullUsageData,
+	StaleUsageInfo,
+	UsagePrediction,
+} from "@clankermux/types";
+import { isUsablePrediction } from "@clankermux/types";
 import { useEffect, useState } from "react";
+import {
+	formatDuration,
+	formatPredictionMessage,
+} from "../../lib/format-prediction";
 import { getScopedWeeklyLimits } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
 import {
@@ -23,6 +33,21 @@ interface RateLimitProgressProps {
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	showSecondaryWeekly?: boolean; // Show the model-specific weekly windows (Opus/Sonnet). Defaults true so callers that don't opt into the compact view are unaffected.
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
+	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
+}
+
+// Maps a render-loop window name to its server-computed prediction. Only the
+// primary Anthropic 5-hour and (unscoped) weekly windows have a server
+// prediction; scoped-weekly and all non-Anthropic windows return undefined and
+// fall through to the legacy single-snapshot projection.
+function predictionForWindow(
+	prediction: AccountUsagePrediction | null | undefined,
+	window: string | null,
+): UsagePrediction | undefined {
+	if (!prediction || !window) return undefined;
+	if (window === "five_hour") return prediction.fiveHour;
+	if (window === "seven_day") return prediction.sevenDay;
+	return undefined;
 }
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
@@ -71,14 +96,6 @@ function computeWindowThrottleUntil(
 
 	const resumeAt = Math.min(startMs + (percentage / 100) * durationMs, resetMs);
 	return resumeAt > now ? resumeAt : null;
-}
-
-function formatDuration(ms: number): string {
-	const totalMinutes = Math.round(ms / 60000);
-	const hours = Math.floor(totalMinutes / 60);
-	const minutes = totalMinutes % 60;
-	if (hours > 0) return `${hours}h ${minutes}m`;
-	return `${minutes}m`;
 }
 
 function formatThrottledUntil(throttledUntilMs: number, now: number): string {
@@ -240,6 +257,7 @@ export function RateLimitProgress({
 	showWeekly = false,
 	showSecondaryWeekly = true,
 	inlineProjection = false,
+	prediction = null,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -592,12 +610,27 @@ export function RateLimitProgress({
 				const windowLabel =
 					usage.label ??
 					(usage.window ? formatWindowName(usage.window) : "Rate limit");
-				const projectedMessage = computeProjectedMessage(
-					usage.resetTime,
-					usage.window,
-					percentage ?? null,
-					now,
-				);
+				// Prefer the server-computed regression prediction when it's
+				// trustworthy (recent slope, not lifetime average) AND we have a live
+				// reading to anchor it. When usable, its message is authoritative —
+				// including a `null` message for a "stable" recent trend, which
+				// deliberately SUPPRESSES the alarming projection rather than reverting
+				// to the lifetime-average burn-rate copy. Only when the prediction is
+				// not usable do we fall back to the legacy single-snapshot message.
+				const windowPrediction = predictionForWindow(prediction, usage.window);
+				const liveResetMs = usage.resetTime
+					? new Date(usage.resetTime).getTime()
+					: null;
+				const projectedMessage =
+					percentage !== null &&
+					isUsablePrediction(windowPrediction, liveResetMs)
+						? formatPredictionMessage(windowPrediction, liveResetMs, now)
+						: computeProjectedMessage(
+								usage.resetTime,
+								usage.window,
+								percentage ?? null,
+								now,
+							);
 
 				// Two-row layout: the progress bar sits on top; below it a single
 				// text row reads "Usage (<window>): <time> until refresh" (start),

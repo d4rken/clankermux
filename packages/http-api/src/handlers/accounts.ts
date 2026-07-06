@@ -44,6 +44,8 @@ import {
 } from "@clankermux/proxy";
 import type {
 	Account,
+	AccountUsagePrediction,
+	AnthropicUsageData,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
@@ -59,6 +61,10 @@ import {
 	removeAccount,
 	resumeAccount,
 } from "../services/admin/accounts";
+import {
+	type AccountPredictionInput,
+	buildAccountUsagePredictions,
+} from "../services/build-account-predictions";
 import type { AccountResponse } from "../types";
 import { invalidateDashboardCache } from "./analytics-runner";
 
@@ -90,6 +96,14 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
  * Module-level to avoid per-request allocation.
  */
 const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
+
+/**
+ * How far back to pull stored usage snapshots when computing the per-account
+ * exhaustion prediction. 24h gives the 7-day-window regression a recent pace
+ * while `buildAccountUsagePredictions` internally caps the 5h window to 6h.
+ * Inline named constant (no env knobs, per project rule).
+ */
+const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Status prefixes that mean the account is actually blocked (vs soft warnings
@@ -443,6 +457,65 @@ export function createAccountsListHandler(
 			).map((snapshot) => [snapshot.accountId, snapshot]),
 		);
 
+		// Best-effort per-account exhaustion prediction: least-squares regression
+		// over recent stored snapshots + the live reading. Built from the same
+		// live usage cache the staleUsage fallback reads (the only live source
+		// available before the per-account map), then attached below. A DB or
+		// compute failure must NEVER break the accounts response — on error every
+		// account simply gets `prediction: null`.
+		const isoToMs = (s: string | null | undefined): number | null => {
+			if (s == null) return null;
+			const ms = Date.parse(s);
+			return Number.isFinite(ms) ? ms : null;
+		};
+		const predictionInputs: AccountPredictionInput[] = [];
+		for (const a of accounts) {
+			const provider = a.provider || "anthropic";
+			// Only Anthropic-style providers expose the 5h/7d windows the
+			// prediction model consumes.
+			if (provider !== "anthropic" && provider !== "codex") continue;
+			const live = liveUsageByAccount.get(a.id);
+			if (!live || typeof live !== "object") continue;
+			const fiveHour = (live as AnthropicUsageData).five_hour;
+			const sevenDay = (live as AnthropicUsageData).seven_day;
+			// Skip accounts with neither window (e.g. non-Anthropic-shaped cache
+			// data) — they fall through to `prediction: null`.
+			if (!fiveHour && !sevenDay) continue;
+			predictionInputs.push({
+				accountId: a.id,
+				fiveHour: fiveHour
+					? {
+							utilization: fiveHour.utilization ?? null,
+							resetsAtMs: isoToMs(fiveHour.resets_at),
+						}
+					: null,
+				sevenDay: sevenDay
+					? {
+							utilization: sevenDay.utilization ?? null,
+							resetsAtMs: isoToMs(sevenDay.resets_at),
+						}
+					: null,
+			});
+		}
+
+		let predictionByAccount = new Map<string, AccountUsagePrediction>();
+		const predictionIds = predictionInputs.map((i) => i.accountId);
+		if (predictionIds.length > 0) {
+			try {
+				const samples = await dbOps.getRecentUsageSnapshotsForAccounts(
+					predictionIds,
+					now - PREDICTION_LOOKBACK_MS,
+				);
+				predictionByAccount = buildAccountUsagePredictions(
+					predictionInputs,
+					samples,
+					now,
+				);
+			} catch (err) {
+				log.warn(`Failed to compute usage predictions: ${err}`);
+			}
+		}
+
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
 				const provider = account.provider || "anthropic";
@@ -695,6 +768,7 @@ export function createAccountsListHandler(
 					usageData: fullUsageData, // Full usage data for UI
 					codexCredits, // Codex-only credits state (null otherwise)
 					staleUsage,
+					prediction: predictionByAccount.get(account.id) ?? null,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,
 					usageThrottledWindows,
