@@ -282,4 +282,85 @@ describe("UsageSnapshotRepository", () => {
 			);
 		});
 	});
+
+	describe("getRecentSnapshotsForAccounts — raw un-bucketed rows", () => {
+		it("returns [] for empty accountIds without throwing or querying", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000 }),
+			]);
+			const result = await repo.getRecentSnapshotsForAccounts([], 0);
+			expect(result).toEqual([]);
+		});
+
+		it("returns only rows with sampled_at >= sinceMs (boundary inclusive)", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 500 }), // before, excluded
+				row({ accountId: "acct-a", sampledAt: 1_000 }), // == sinceMs, included
+				row({ accountId: "acct-a", sampledAt: 1_500 }), // after, included
+			]);
+
+			const result = await repo.getRecentSnapshotsForAccounts(
+				["acct-a"],
+				1_000,
+			);
+			expect(result.map((r) => r.sampledAt)).toEqual([1_000, 1_500]);
+		});
+
+		it("filters to only the requested accountIds", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000 }),
+				row({ accountId: "acct-b", sampledAt: 1_000 }),
+			]);
+
+			const result = await repo.getRecentSnapshotsForAccounts(["acct-a"], 0);
+			expect(result.length).toBe(1);
+			expect(result[0].accountId).toBe("acct-a");
+		});
+
+		it("orders rows by account_id then sampled_at", async () => {
+			// Insert out of order across accounts and times.
+			await repo.insertSnapshots([
+				row({ accountId: "acct-b", sampledAt: 2_000 }),
+				row({ accountId: "acct-a", sampledAt: 3_000 }),
+				row({ accountId: "acct-b", sampledAt: 1_000 }),
+				row({ accountId: "acct-a", sampledAt: 1_000 }),
+			]);
+
+			const result = await repo.getRecentSnapshotsForAccounts(
+				["acct-a", "acct-b"],
+				0,
+			);
+			expect(result.map((r) => [r.accountId, r.sampledAt] as const)).toEqual([
+				["acct-a", 1_000],
+				["acct-a", 3_000],
+				["acct-b", 1_000],
+				["acct-b", 2_000],
+			]);
+		});
+
+		it("preserves null pct/reset columns as null and maps fields to camelCase", async () => {
+			await repo.insertSnapshots([
+				row({
+					accountId: "acct-a",
+					sampledAt: 1_000,
+					provider: "anthropic",
+					fiveHourPct: null,
+					fiveHourReset: null,
+					sevenDayPct: 42.5,
+					sevenDayReset: 88_000,
+				}),
+			]);
+
+			const result = await repo.getRecentSnapshotsForAccounts(["acct-a"], 0);
+			expect(result.length).toBe(1);
+			const r = result[0];
+			expect(r.accountId).toBe("acct-a");
+			expect(r.provider).toBe("anthropic");
+			expect(r.sampledAt).toBe(1_000);
+			expect(r.fiveHourPct).toBeNull();
+			expect(r.fiveHourReset).toBeNull();
+			expect(r.sevenDayPct).toBe(42.5);
+			expect(r.sevenDayReset).toBe(88_000);
+		});
+	});
 });

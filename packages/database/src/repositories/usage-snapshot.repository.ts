@@ -1,4 +1,8 @@
-import type { RankedSnapshot, UsageSnapshotRow } from "@clankermux/types";
+import type {
+	RankedSnapshot,
+	UsageSnapshotRow,
+	UsageSnapshotSample,
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 /**
@@ -169,6 +173,51 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			sevenDayPct: row.seven_day_pct == null ? null : Number(row.seven_day_pct),
 			fiveHourReset:
 				row.five_hour_reset == null ? null : Number(row.five_hour_reset),
+			sevenDayReset:
+				row.seven_day_reset == null ? null : Number(row.seven_day_reset),
+		}));
+	}
+
+	/**
+	 * Read RAW (un-bucketed) snapshot rows for the given accounts with
+	 * `sampled_at >= sinceMs`, ordered `account_id, sampled_at`. Unlike
+	 * `getSnapshots`, this returns every stored sample at its real sample time
+	 * (no last-value-per-bucket collapsing), so a prediction service can build
+	 * per-window time series. The (account_id, sampled_at) primary key makes the
+	 * `IN (...) AND sampled_at >= ?` range scan efficient. Empty `accountIds`
+	 * short-circuits to `[]` (no query).
+	 */
+	async getRecentSnapshotsForAccounts(
+		accountIds: string[],
+		sinceMs: number,
+	): Promise<UsageSnapshotSample[]> {
+		if (accountIds.length === 0) return [];
+		const placeholders = accountIds.map(() => "?").join(", ");
+		const rows = await this.query<{
+			account_id: string;
+			provider: string | null;
+			sampled_at: number;
+			five_hour_pct: number | null;
+			five_hour_reset: number | null;
+			seven_day_pct: number | null;
+			seven_day_reset: number | null;
+		}>(
+			`SELECT account_id, provider, sampled_at,
+			        five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset
+			 FROM usage_snapshots
+			 WHERE account_id IN (${placeholders}) AND sampled_at >= ?
+			 ORDER BY account_id, sampled_at`,
+			[...accountIds, sinceMs],
+		);
+
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			provider: row.provider ?? null,
+			sampledAt: Number(row.sampled_at),
+			fiveHourPct: row.five_hour_pct == null ? null : Number(row.five_hour_pct),
+			fiveHourReset:
+				row.five_hour_reset == null ? null : Number(row.five_hour_reset),
+			sevenDayPct: row.seven_day_pct == null ? null : Number(row.seven_day_pct),
 			sevenDayReset:
 				row.seven_day_reset == null ? null : Number(row.seven_day_reset),
 		}));

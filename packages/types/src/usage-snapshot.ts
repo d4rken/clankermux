@@ -40,3 +40,21 @@ export interface RankedSnapshot {
 	fiveHourReset: number | null;
 	sevenDayReset: number | null;
 }
+
+/**
+ * Raw (un-bucketed) read shape returned by `getRecentSnapshotsForAccounts` —
+ * one row per stored sample, carrying the real sample time (not a bucket
+ * start). Used by the usage-prediction service to build per-window time series.
+ * Distinct from `RankedSnapshot`, whose `ts` is a floored bucket start and
+ * would be misleading for regression.
+ */
+export interface UsageSnapshotSample {
+	accountId: string;
+	provider: string | null;
+	/** epoch ms — the real sample time, not a bucket. */
+	sampledAt: number;
+	fiveHourPct: number | null;
+	fiveHourReset: number | null;
+	sevenDayPct: number | null;
+	sevenDayReset: number | null;
+}
