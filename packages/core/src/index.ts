@@ -70,6 +70,7 @@ export {
 	isValidClaudeModel,
 	KNOWN_PATTERNS,
 	MODEL_CONTEXT_WINDOWS,
+	type ModelFamily,
 	mapModelName,
 	parseCustomEndpointData,
 	parseModelFallbacks,
@@ -101,6 +102,12 @@ export {
 	type TokenBreakdown,
 } from "./pricing";
 export * from "./request-events";
+export {
+	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
+	getExhaustedFamilies,
+	isFamilyWeeklyExhaustedWithHeadroom,
+	type ScopedFamilyLimit,
+} from "./scoped-limits";
 export * from "./strategy";
 export {
 	computeWindowStartMs,
