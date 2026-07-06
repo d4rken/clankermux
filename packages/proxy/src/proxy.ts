@@ -25,11 +25,14 @@ import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
+	createFamilyWeeklyExhaustedResponse,
 	createPinnedTargetUnavailableResponse,
 	createPoolExhaustedResponse,
 	createRequestMetadata,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
+	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+	type FamilyWeeklyExcludedAccount,
 	getComboSlotInfo,
 	getForcedAccount,
 	getUsageThrottleUntil,
@@ -44,6 +47,7 @@ import {
 	proxyForcedAccount,
 	proxyWithAccount,
 	RequestBodyContext,
+	resolveFamilyWeeklyExclusion,
 	selectAccountsForRequest,
 	setForcedAccount,
 	validateProviderPath,
@@ -841,11 +845,76 @@ export async function handleProxy(
 		return passed;
 	};
 
+	// 6c. Family-weekly gate — exclude an Anthropic account for the REQUESTED
+	// model family when that family's weekly quota is exhausted (limits[]) while
+	// the account still has unified 5h/7d headroom for other families. This is
+	// the proactive half of family-scoped rate limiting: a Fable-weekly-exhausted
+	// account stays fully eligible for Opus/Sonnet instead of being sidelined
+	// account-wide. Non-Anthropic accounts always pass. Combo-slot model
+	// overrides are honored, mirroring the context-window gate.
+	const familyWeeklyExcludedAccounts: FamilyWeeklyExcludedAccount[] = [];
+	const applyFamilyWeeklyGate = (
+		candidates: Account[],
+		comboInfo?: {
+			slots: Array<{ accountId: string; modelOverride: string }>;
+		} | null,
+	): Account[] => {
+		const now = Date.now();
+		const passed: Account[] = [];
+		for (const account of candidates) {
+			if (account.provider !== "anthropic") {
+				passed.push(account);
+				continue;
+			}
+			let modelForGate = effectiveRequestModel ?? null;
+			if (comboInfo) {
+				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
+				if (slot?.modelOverride) {
+					modelForGate = slot.modelOverride;
+				}
+			}
+			const exclusion = resolveFamilyWeeklyExclusion(
+				account,
+				modelForGate,
+				usageCache.get(account.id),
+				getFreshCapacity(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+				),
+				now,
+			);
+			if (exclusion) {
+				if (
+					!familyWeeklyExcludedAccounts.some(
+						(excluded) => excluded.account.id === account.id,
+					)
+				) {
+					familyWeeklyExcludedAccounts.push(exclusion);
+				}
+				log.debug(
+					`Family-weekly gate: excluding "${account.name}" for family=${exclusion.family} ` +
+						`(weekly quota exhausted, unified headroom present; ` +
+						`reset ${new Date(exclusion.resetAt).toISOString()})`,
+				);
+				continue;
+			}
+			passed.push(account);
+		}
+		return passed;
+	};
+
 	// Combo slot info (if any) is populated by selectAccountsForRequest above,
 	// so it's available to the gate for combo-aware model override evaluation.
 	const initialComboInfo = getComboSlotInfo(requestMeta);
-	const accounts = applyContextWindowGate(
+	const postFamilyGateAccounts = applyFamilyWeeklyGate(
 		postThrottleAccounts,
+		initialComboInfo,
+	);
+	const accounts = applyContextWindowGate(
+		postFamilyGateAccounts,
 		initialComboInfo,
 	);
 	if (requestMeta.routing) {
@@ -1093,6 +1162,22 @@ export async function handleProxy(
 					log.warn(
 						`Storm-degrade: burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, degrading to terminal`,
 					);
+				} else if (
+					resolveFamilyWeeklyExclusion(
+						heldAccount,
+						effectiveRequestModel,
+						usageCache.get(heldAccount.id),
+						heldCapacity,
+						Date.now(),
+					) !== null
+				) {
+					// The held account's weekly quota for the REQUESTED family is
+					// exhausted (with unified headroom) — the family window won't clear
+					// within the hold budget, so holding would only re-probe into another
+					// family 429. Degrade to the terminal instead of burning the hold.
+					log.warn(
+						`Storm-degrade: held account ${heldAccount.name} is weekly-exhausted for the requested family — NOT holding, degrading to terminal`,
+					);
 				} else {
 					// Null capacity (usage stale/absent) ⇒ stale_should_retry (single
 					// probe); fresh positive headroom ⇒ fresh_headroom (full budget).
@@ -1228,9 +1313,11 @@ export async function handleProxy(
 						applyProviderOverloadGate(cwSelected);
 					const { available: cwPostThrottle } =
 						applyUsageThrottling(cwAvailable);
-					// Non-Codex accounts always pass the context-window gate.
-					const cwCandidates = cwPostThrottle.filter(
-						(a) => a.provider !== "codex",
+					// Non-Codex accounts always pass the context-window gate; still
+					// apply the family-weekly gate so we don't retry an account whose
+					// requested family is weekly-exhausted (it would only 429 again).
+					const cwCandidates = applyFamilyWeeklyGate(
+						cwPostThrottle.filter((a) => a.provider !== "codex"),
 					);
 
 					if (cwCandidates.length === 0) continue; // still unavailable
@@ -1345,6 +1432,27 @@ export async function handleProxy(
 				// returns, the 400, client-abort returns, and the fall-through.
 				clearInterval(cwRearm);
 			}
+		}
+
+		// Family-weekly terminal — fire ONLY when a family-weekly exclusion is the
+		// sole reason the candidate pool emptied (no context-window exclusion, no
+		// usage throttle applied). A genuine account-wide quota/throttle takes
+		// precedence and is surfaced by the checks around it. Returns a 429 with a
+		// Retry-After from the soonest family reset rather than routing to an
+		// account that will just 429.
+		if (
+			familyWeeklyExcludedAccounts.length > 0 &&
+			contextExcludedAccounts.length === 0 &&
+			throttledAccounts.length === 0
+		) {
+			const familyResponse = createFamilyWeeklyExhaustedResponse(
+				familyWeeklyExcludedAccounts,
+				familyWeeklyExcludedAccounts[0].family,
+				effectiveRequestModel,
+				Date.now(),
+			);
+			recordSyntheticErrorResponse(familyResponse, "family_weekly_exhausted");
+			return familyResponse;
 		}
 
 		if (throttledAccounts.length > 0) {
@@ -1495,6 +1603,22 @@ export async function handleProxy(
 				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
 					log.warn(
 						`Burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, falling through to normal failover`,
+					);
+				} else if (
+					resolveFamilyWeeklyExclusion(
+						heldAccount,
+						effectiveRequestModel,
+						usageCache.get(heldAccount.id),
+						heldCapacity,
+						Date.now(),
+					) !== null
+				) {
+					// Held account's weekly quota for the REQUESTED family is exhausted
+					// (with unified headroom) — the family window won't clear within the
+					// hold budget, so fall through to normal failover (siblings) rather
+					// than pinning this request to an account that will only 429 again.
+					log.warn(
+						`Burst marker active but held account ${heldAccount.name} is weekly-exhausted for the requested family — NOT holding, falling through to normal failover`,
 					);
 				} else {
 					enterHold = true;
@@ -1717,7 +1841,9 @@ export async function handleProxy(
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(providerFallbackAccounts);
-		fallbackAccounts = applyContextWindowGate(filteredFallbackAccounts);
+		fallbackAccounts = applyContextWindowGate(
+			applyFamilyWeeklyGate(filteredFallbackAccounts),
+		);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =
 				fallbackAccounts[0]?.id ??
