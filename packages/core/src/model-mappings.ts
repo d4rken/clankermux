@@ -12,6 +12,9 @@ const log = new Logger("ModelMappings");
 // in edge cases like "claude-opus-haiku-test" (though we would never see this pattern from the client)
 export const KNOWN_PATTERNS = ["opus", "haiku", "sonnet", "fable"] as const;
 
+/** Canonical Claude model family, as resolved by {@link getModelFamily}. */
+export type ModelFamily = "opus" | "sonnet" | "haiku" | "fable";
+
 /**
  * Get the model family (opus/sonnet/haiku/fable) from a model ID
  * Uses the same pattern matching as mapModelName().
@@ -20,9 +23,7 @@ export const KNOWN_PATTERNS = ["opus", "haiku", "sonnet", "fable"] as const;
  * combo, and provider-fallback behaviour.
  * @returns Model family or null if no pattern matches
  */
-export function getModelFamily(
-	modelId: string,
-): "opus" | "sonnet" | "haiku" | "fable" | null {
+export function getModelFamily(modelId: string): ModelFamily | null {
 	const normalized = modelId.toLowerCase();
 	// Mythos 5 shares the Fable model class — route it as the "fable" family.
 	if (normalized.includes("mythos")) {

@@ -11,6 +11,12 @@ export {
 	getAnthropicBurstThrottleUntil,
 	isAnthropicBurstThrottleActive,
 } from "./burst-cooldown";
+export {
+	createFamilyWeeklyExhaustedResponse,
+	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+	type FamilyWeeklyExcludedAccount,
+	resolveFamilyWeeklyExclusion,
+} from "./family-weekly-gate";
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	type ContextWindowExcludedBackend,
