@@ -17,7 +17,12 @@ export type RateLimitReason =
 	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
 	 *  depleted; a long cooldown (≥1h, or until window reset) is applied instead of
 	 *  the short no-reset probe loop. */
-	| "out_of_credits";
+	| "out_of_credits"
+	/** Anthropic 429 for a model family whose weekly quota is exhausted while the
+	 *  account still has unified 5h/7d headroom. Recorded when the reactive
+	 *  safety net fails the request over WITHOUT an account-wide cooldown, so the
+	 *  account stays available for other families (family-scoped rate limiting). */
+	| "family_weekly_exhausted_429";
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
