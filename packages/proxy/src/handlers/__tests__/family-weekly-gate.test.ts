@@ -9,6 +9,7 @@ import {
 	createFamilyWeeklyExhaustedResponse,
 	type FamilyWeeklyExcludedAccount,
 	resolveFamilyWeeklyExclusion,
+	resolveTransientlyCooledFamilySibling,
 } from "../family-weekly-gate";
 
 const NOW = 1_000_000_000_000;
@@ -215,5 +216,169 @@ describe("createFamilyWeeklyExhaustedResponse", () => {
 		expect(body.error.family).toBe("fable");
 		expect(body.error.request_model).toBe("claude-fable-5");
 		expect(body.error.excluded_accounts[0].name).toBe("Backup1");
+	});
+
+	it("overrides Retry-After with the sibling cooldown (not the 5-day family window)", () => {
+		const familyReset = NOW + 5 * 86_400_000; // +5 days
+		const siblingReset = NOW + 45_000; // +45s
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(familyReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: siblingReset },
+		);
+		expect(res.status).toBe(429);
+		expect(res.headers.get("Retry-After")).toBe("45");
+		expect(res.headers.get("x-clankermux-pool-status")).toBe(
+			"family-weekly-sibling-cooldown",
+		);
+	});
+
+	it("ignores a sibling cooldown that is already in the past (keeps family behavior)", () => {
+		const familyReset = NOW + 30_000; // +30s
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(familyReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW - 5_000 }, // already recovered
+		);
+		expect(res.headers.get("Retry-After")).toBe("30");
+		expect(res.headers.get("x-clankermux-pool-status")).toBe(
+			"family-weekly-exhausted",
+		);
+	});
+
+	it("names the cooling sibling in the message body", async () => {
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW + 5 * 86_400_000, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW + 60_000 },
+		);
+		const body = (await res.json()) as { error: { message: string } };
+		expect(body.error.message).toContain("Backup1");
+		expect(body.error.message).toContain("temporarily");
+	});
+});
+
+describe("resolveTransientlyCooledFamilySibling", () => {
+	// A sibling with the requested family NOT exhausted (Opus at 100, Fable absent).
+	const capableUsage = () => usage([scopedEntry("Opus")]);
+	// A sibling whose requested family (Fable) IS exhausted.
+	const exhaustedUsage = () => usage([scopedEntry("Fable")]);
+
+	it("returns the sibling when Anthropic, family-capable, and on a per-account 429 cooldown", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount({ name: "Backup1" }),
+			"fable",
+			capableUsage(),
+			NOW + 60_000, // rate_limited_until +60s
+			null,
+			NOW,
+		);
+		expect(result).not.toBeNull();
+		expect(result?.account.name).toBe("Backup1");
+		expect(result?.family).toBe("fable");
+		expect(result?.availableAt).toBe(NOW + 60_000);
+	});
+
+	it("uses the MAX of per-account 429 and provider-overload deadlines", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			capableUsage(),
+			NOW + 30_000, // 429 cooldown
+			NOW + 90_000, // provider overload — later
+			NOW,
+		);
+		expect(result?.availableAt).toBe(NOW + 90_000);
+	});
+
+	it("returns the sibling on a provider-overload cooldown alone (429 deadline null)", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			capableUsage(),
+			null,
+			NOW + 40_000,
+			NOW,
+		);
+		expect(result?.availableAt).toBe(NOW + 40_000);
+	});
+
+	it("returns null when the account is NOT on any transient cooldown", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			capableUsage(),
+			null,
+			null,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null when both cooldown deadlines are already in the past", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			capableUsage(),
+			NOW - 1_000,
+			NOW - 500,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null when the requested family IS exhausted on this sibling", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			exhaustedUsage(), // Fable at 100% → not a capable sibling
+			NOW + 60_000,
+			null,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null for a non-Anthropic account (e.g. Codex)", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount({ provider: "codex" }),
+			"fable",
+			capableUsage(),
+			NOW + 60_000,
+			null,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null for a paused account", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount({ paused: true }),
+			"fable",
+			capableUsage(),
+			NOW + 60_000,
+			null,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("fails toward holding when usage data is missing (cooled, no evidence of family exhaustion)", () => {
+		const result = resolveTransientlyCooledFamilySibling(
+			makeAccount(),
+			"fable",
+			null, // no usage data
+			NOW + 60_000,
+			null,
+			NOW,
+		);
+		expect(result).not.toBeNull();
+		expect(result?.availableAt).toBe(NOW + 60_000);
 	});
 });

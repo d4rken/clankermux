@@ -48,8 +48,10 @@ import {
 	proxyWithAccount,
 	RequestBodyContext,
 	resolveFamilyWeeklyExclusion,
+	resolveTransientlyCooledFamilySibling,
 	selectAccountsForRequest,
 	setForcedAccount,
+	type TransientlyCooledFamilySibling,
 	validateProviderPath,
 } from "./handlers";
 import { resolveProject } from "./project-extraction";
@@ -87,6 +89,13 @@ const CW_HOLD_MAX_MS = 120_000;
 const CW_HOLD_MAX_MS_NO_CODEX_FALLBACK = 330_000;
 // Small jitter (ms) added to each CW hold sleep to avoid thundering herd.
 const CW_HOLD_JITTER_MS = 500;
+// Max time (ms) to hold a live client connection for a family-weekly request when
+// the ONLY reason the pool emptied is that a family-capable sibling is on a short
+// transient cooldown (per-account 429 or provider 529 overload). Kept modest
+// (120s, matching CW_HOLD_MAX_MS — NOT the 330s no-Codex variant) because the
+// trigger is an upstream overload storm where many family requests pile into the
+// hold at once; a client disconnect releases it promptly via abortableSleep.
+const FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS = 120_000;
 
 // ===== REQUEST RECORDER WIRING =====
 
@@ -1217,6 +1226,113 @@ export async function handleProxy(
 			return giveUpResponse;
 		}
 
+		// Shared wait+retry hold used by BOTH the context-window terminal and the
+		// family-weekly terminal below. While non-Codex sibling accounts are on a
+		// transient cooldown — a per-account 429 (`rate_limited_until`) OR a
+		// provider-wide 529 overload (`getProviderOverloadUntil`, e.g. the shared
+		// `anthropic-upstream` cooldown) — sleep until the soonest recovery (the MAX
+		// of the two deadlines, since an account is serveable only once BOTH clear),
+		// bounded by `budgetMs`, then re-run full account selection with the same
+		// gates and retry any now-available non-Codex candidate. Waiting on the 429
+		// signal alone missed the 529-overload case entirely (all Anthropic accounts
+		// share one overload cooldown, with `rate_limited_until` null).
+		//
+		// Returns the upstream Response on success, a client-abort Response if the
+		// client disconnects mid-wait, or null when the budget/soonest-expiry is
+		// exhausted with nothing served (the caller then runs its own fall-through
+		// terminal). The CALLER arms/clears the idle-timeout re-arm interval around
+		// this — the base 180s timeout would otherwise reap a connection held
+		// silently while we wait.
+		const holdForNonCodexRecovery = async (
+			budgetMs: number,
+			label: string,
+		): Promise<Response | null> => {
+			const holdStart = Date.now();
+			while (true) {
+				const nowMs = Date.now();
+				const elapsed = nowMs - holdStart;
+				if (elapsed >= budgetMs) break;
+				const remaining = budgetMs - elapsed;
+
+				const allAccs = await ctx.dbOps.getAllAccounts();
+				const unavailable = allAccs
+					.filter((a) => !a.paused && a.provider !== "codex")
+					.map((a) => {
+						const rl =
+							a.rate_limited_until && a.rate_limited_until > nowMs
+								? a.rate_limited_until
+								: 0;
+						const ov = getProviderOverloadUntil(a.provider, nowMs) ?? 0;
+						return { account: a, availableAt: Math.max(rl, ov) };
+					})
+					.filter((x) => x.availableAt > nowMs);
+
+				if (unavailable.length === 0) break; // nothing to wait for
+
+				const soonest = Math.min(...unavailable.map((x) => x.availableAt));
+				const waitMs =
+					Math.max(0, soonest - nowMs) +
+					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+
+				if (waitMs > remaining) break; // soonest expiry is beyond budget
+
+				log.info(
+					`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
+				);
+
+				const completed = await abortableSleep(waitMs, req.signal);
+				if (!completed) {
+					log.info(`${label}: client disconnected during wait`);
+					return createClientAbortResponse();
+				}
+
+				// Re-run full account selection with the same gates.
+				const reSelected = await selectAccountsForRequest(
+					requestMeta,
+					ctx,
+					effectiveRequestModel ?? undefined,
+				);
+				const { available: reAvailable } =
+					applyProviderOverloadGate(reSelected);
+				const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
+				// Non-Codex accounts always pass the context-window gate; still apply
+				// the family-weekly gate so we don't retry an account whose requested
+				// family is weekly-exhausted (it would only 429 again).
+				const candidates = applyFamilyWeeklyGate(
+					rePostThrottle.filter((a) => a.provider !== "codex"),
+				);
+
+				if (candidates.length === 0) continue; // still unavailable
+
+				log.info(
+					`${label}: ${candidates.length} non-Codex account(s) now available, retrying`,
+				);
+
+				for (let i = 0; i < candidates.length; i++) {
+					const r = await proxyWithAccount(
+						req,
+						url,
+						candidates[i],
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						i,
+						ctx,
+						undefined,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						// Don't forward rate-limit response on last candidate — loop
+						// back instead to check for another available account.
+						false,
+					);
+					if (r) return r;
+				}
+				// All candidates returned null — loop back to recheck.
+			}
+			return null;
+		};
+
 		// If the pool was emptied specifically by the context-window gate
 		// (and there were Codex accounts that would have been available
 		// otherwise), hold the connection until a large-context account becomes
@@ -1229,8 +1345,6 @@ export async function handleProxy(
 		// large-context accounts are unavailable for non-throttle reasons (paused,
 		// rate-limited) — which is the incident this path was built for.
 		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
-			const cwHoldStart = Date.now();
-
 			// Pre-compute the last-resort relaxation candidates (Codex accounts that
 			// fit the FULL/unmargined window) so we can both (a) pick the hold budget
 			// and (b) reuse them in the relaxation block below without re-filtering.
@@ -1255,99 +1369,8 @@ export async function handleProxy(
 				NETWORK.IDLE_REARM_INTERVAL_MS,
 			);
 			try {
-				while (true) {
-					const nowMs = Date.now();
-					const elapsed = nowMs - cwHoldStart;
-					if (elapsed >= cwHoldBudget) break;
-					const remaining = cwHoldBudget - elapsed;
-
-					// Find non-Codex, non-paused accounts that are temporarily
-					// unavailable, and when each becomes available again. An account is
-					// blocked by EITHER a per-account 429 cooldown (`rate_limited_until`)
-					// OR a provider-wide 529 overload cooldown (`getProviderOverloadUntil`,
-					// e.g. the shared `anthropic-upstream` cooldown). It's available again
-					// only once BOTH have cleared, so its recovery time is the max of the
-					// two active deadlines. Waiting on the 429 signal alone missed the
-					// 529-overload case entirely (all Anthropic accounts share one overload
-					// cooldown, with `rate_limited_until` null) — the exact scenario where a
-					// big request that only Anthropic can serve would 400 instead of hold.
-					const allAccs = await ctx.dbOps.getAllAccounts();
-					const cwUnavailable = allAccs
-						.filter((a) => !a.paused && a.provider !== "codex")
-						.map((a) => {
-							const rl =
-								a.rate_limited_until && a.rate_limited_until > nowMs
-									? a.rate_limited_until
-									: 0;
-							const ov = getProviderOverloadUntil(a.provider, nowMs) ?? 0;
-							return { account: a, availableAt: Math.max(rl, ov) };
-						})
-						.filter((x) => x.availableAt > nowMs);
-
-					if (cwUnavailable.length === 0) break; // nothing to wait for
-
-					const soonest = Math.min(...cwUnavailable.map((x) => x.availableAt));
-					const waitMs =
-						Math.max(0, soonest - nowMs) +
-						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-
-					if (waitMs > remaining) break; // soonest expiry is beyond budget
-
-					log.info(
-						`CW hold: waiting ${waitMs}ms for large-context account(s): ${cwUnavailable.map((x) => x.account.name).join(", ")}`,
-					);
-
-					const completed = await abortableSleep(waitMs, req.signal);
-					if (!completed) {
-						log.info("CW hold: client disconnected during wait");
-						return createClientAbortResponse();
-					}
-
-					// Re-run full account selection with the same gates.
-					const cwSelected = await selectAccountsForRequest(
-						requestMeta,
-						ctx,
-						effectiveRequestModel ?? undefined,
-					);
-					const { available: cwAvailable } =
-						applyProviderOverloadGate(cwSelected);
-					const { available: cwPostThrottle } =
-						applyUsageThrottling(cwAvailable);
-					// Non-Codex accounts always pass the context-window gate; still
-					// apply the family-weekly gate so we don't retry an account whose
-					// requested family is weekly-exhausted (it would only 429 again).
-					const cwCandidates = applyFamilyWeeklyGate(
-						cwPostThrottle.filter((a) => a.provider !== "codex"),
-					);
-
-					if (cwCandidates.length === 0) continue; // still unavailable
-
-					log.info(
-						`CW hold: ${cwCandidates.length} non-Codex account(s) now available, retrying`,
-					);
-
-					for (let i = 0; i < cwCandidates.length; i++) {
-						const r = await proxyWithAccount(
-							req,
-							url,
-							cwCandidates[i],
-							requestMeta,
-							finalBodyBuffer,
-							finalCreateBodyStream,
-							i,
-							ctx,
-							undefined,
-							apiKeyId,
-							apiKeyName,
-							requestBodyContext,
-							// Don't forward rate-limit response on last candidate —
-							// loop back instead to check for another available account.
-							false,
-						);
-						if (r) return r;
-					}
-					// All candidates returned null — loop back to recheck.
-				}
+				const held = await holdForNonCodexRecovery(cwHoldBudget, "CW hold");
+				if (held) return held;
 
 				// Last-resort relaxation (E): the CW hold found no large-context
 				// account and the only backends that could serve are the Codex
@@ -1445,9 +1468,91 @@ export async function handleProxy(
 			contextExcludedAccounts.length === 0 &&
 			throttledAccounts.length === 0
 		) {
+			const family = familyWeeklyExcludedAccounts[0].family;
+
+			// The pool emptied because the requested family is weekly-exhausted on
+			// the reachable account(s). But a DIFFERENT Anthropic account that still
+			// HAS this family's weekly quota may be momentarily out of the pool only
+			// because of a short transient cooldown (a per-account 429 or a provider
+			// 529 overload). Incident: a Fable-free sibling briefly 529-cooled emptied
+			// the pool to a Fable-exhausted account, surfacing a misleading 5-day
+			// family-exhausted 429. Detect such siblings and hold for the cooldown to
+			// lapse (bounded) rather than returning that error.
+			//
+			// SKIP this for a pinned request (API-key→account/class pin): a cooled
+			// sibling may lie OUTSIDE the pin's allowed set. The hold's re-selection
+			// re-enforces the pin (so it would never be served — no fail-closed
+			// break), but holding for it wastes the budget and the response would name
+			// an account the key isn't allowed to use. Fall through to the genuine
+			// family-exhausted terminal instead. (excludeOfficialAnthropic / Codex-CLI
+			// requests never populate familyWeeklyExcludedAccounts, so `pin` is the
+			// only live case here.)
+			const nowGate = Date.now();
+			const cooledSiblings = requestMeta.pin
+				? []
+				: (await ctx.dbOps.getAllAccounts())
+						.map((a) =>
+							resolveTransientlyCooledFamilySibling(
+								a,
+								family,
+								usageCache.get(a.id),
+								a.rate_limited_until,
+								getProviderOverloadUntil(a.provider, nowGate),
+								nowGate,
+							),
+						)
+						.filter((s): s is TransientlyCooledFamilySibling => s !== null);
+
+			if (cooledSiblings.length > 0) {
+				const soonestSibling = cooledSiblings.reduce((min, s) =>
+					s.availableAt < min.availableAt ? s : min,
+				);
+				// Only hold when the soonest recovery lands within the bounded budget;
+				// a longer cooldown (e.g. a 5-min 529 overload) is reported directly
+				// with a cooldown-scaled Retry-After instead of pinning the connection.
+				if (
+					soonestSibling.availableAt - nowGate <=
+					FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS
+				) {
+					bumpIdleTimeout();
+					const famRearm = setInterval(
+						bumpIdleTimeout,
+						NETWORK.IDLE_REARM_INTERVAL_MS,
+					);
+					try {
+						const held = await holdForNonCodexRecovery(
+							FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS,
+							"Family-weekly hold",
+						);
+						if (held) return held;
+					} finally {
+						clearInterval(famRearm);
+					}
+				}
+
+				// The hold expired (or the cooldown was beyond budget) and a
+				// family-capable sibling is still cooling down: report the SIBLING's
+				// cooldown reset (~seconds/minutes), NOT the multi-day family window,
+				// so the client retries when the sibling actually recovers.
+				const familyResponse = createFamilyWeeklyExhaustedResponse(
+					familyWeeklyExcludedAccounts,
+					family,
+					effectiveRequestModel,
+					Date.now(),
+					{
+						name: soonestSibling.account.name,
+						availableAt: soonestSibling.availableAt,
+					},
+				);
+				recordSyntheticErrorResponse(familyResponse, "family_weekly_exhausted");
+				return familyResponse;
+			}
+
+			// No transiently-cooled family-capable sibling — the pool is genuinely
+			// exhausted for this family. Original behavior.
 			const familyResponse = createFamilyWeeklyExhaustedResponse(
 				familyWeeklyExcludedAccounts,
-				familyWeeklyExcludedAccounts[0].family,
+				family,
 				effectiveRequestModel,
 				Date.now(),
 			);

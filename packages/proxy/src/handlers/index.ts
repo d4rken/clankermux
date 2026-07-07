@@ -16,6 +16,9 @@ export {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	type FamilyWeeklyExcludedAccount,
 	resolveFamilyWeeklyExclusion,
+	resolveTransientlyCooledFamilySibling,
+	type TransientlyCooledFamilySibling,
+	type TransientSiblingCooldown,
 } from "./family-weekly-gate";
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
