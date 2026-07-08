@@ -48,8 +48,8 @@ describe("DatabaseOperations.optimizeAsync", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("resolves ok (not skipped) on an idle DB and checkpoints the WAL", async () => {
-		// Grow the WAL a bit so the PASSIVE checkpoint has frames to flush.
+	it("resolves ok (not skipped) on an idle DB and TRUNCATE-reclaims the WAL", async () => {
+		// Grow the WAL so the TRUNCATE checkpoint has frames to flush and zero.
 		const writer = new Database(dbPath);
 		try {
 			writer.exec(
@@ -68,6 +68,13 @@ describe("DatabaseOperations.optimizeAsync", () => {
 		expect(result.skipped).toBe(false);
 		expect(result.error).toBeUndefined();
 		expect(result.durationMs).toBeGreaterThanOrEqual(0);
+
+		// With no reader holding frames, wal_checkpoint(TRUNCATE) zeroes the WAL
+		// file — the reclamation the main connection no longer does itself
+		// (wal_autocheckpoint=0). PASSIVE would have left the WAL at its grown
+		// size, so this assertion is what distinguishes the two modes.
+		const walAfter = await dbOps.getWalSizeBytes();
+		expect(walAfter).toBeLessThan(walBefore);
 	});
 
 	it("returns skipped:true quickly when another connection holds the write lock (regression: 10s event-loop freeze)", async () => {

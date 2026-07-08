@@ -24,13 +24,16 @@ const INCREMENTAL_VACUUM_BATCH_YIELD_MS = 25;
 
 /**
  * Dedicated worker for `PRAGMA incremental_vacuum(N)` and the periodic
- * `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)` maintenance tick.
+ * `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)` maintenance tick.
  *
  * Two kinds (discriminated by `kind`, defaulting to "vacuum" for backward
  * compatibility with kind-less messages):
  *   - "vacuum"   — the original incremental_vacuum behavior (below).
- *   - "optimize" — runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(PASSIVE)`
- *     with `busy_timeout = 0`. Previously this ran synchronously on the main
+ *   - "optimize" — runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)`
+ *     with `busy_timeout = 0`. This is the ONLY WAL reclaimer: the main
+ *     connection runs with `wal_autocheckpoint = 0` (see database-operations.ts)
+ *     so all checkpointing happens here, off-thread, where it can't freeze the
+ *     event loop. Previously this ran synchronously on the main
  *     thread via `DatabaseOperations.optimize()`; when the vacuum kind (or
  *     any other writer) held SQLite's single writer slot, `PRAGMA optimize`'s
  *     internal ANALYZE blocked inside SQLite's C-level busy handler for the
@@ -192,7 +195,16 @@ function runOptimize(dbPath: string): void {
 		applyWorkerPragmas(db);
 
 		db.exec("PRAGMA optimize");
-		db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+		// TRUNCATE (not PASSIVE): actively reclaim and zero the WAL off-thread so
+		// it stays bounded now that the main connection's autocheckpoint is
+		// disabled (see `PRAGMA wal_autocheckpoint = 0` in database-operations.ts).
+		// With busy_timeout=0 a concurrent reader/writer yields either a partial
+		// checkpoint (busy>0, WAL not truncated, no throw) or a transient-lock
+		// skip — it never blocks. When no reader holds frames, TRUNCATE copies all
+		// frames back to the DB file and truncates the WAL to zero bytes; over
+		// successive ticks that keeps the WAL bounded to ~one reader-idle window
+		// of writes.
+		db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 
 		self.postMessage({
 			ok: true,
