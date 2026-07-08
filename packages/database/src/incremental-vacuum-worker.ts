@@ -398,6 +398,12 @@ async function runCleanup(
 			memorySnapshotCutoff,
 		);
 
+		// Close the worker's connection BEFORE signalling completion. The caller
+		// terminates the worker on receipt and may immediately open its own
+		// connection to the DB; closing first releases our write lock so that
+		// access can't race a half-torn-down worker connection.
+		db.close();
+		db = undefined;
 		self.postMessage({
 			ok: true,
 			cleanup: {

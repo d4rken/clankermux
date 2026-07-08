@@ -572,46 +572,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}));
 	}
 
-	async deleteOlderThan(cutoffTs: number): Promise<number> {
-		// Increased from 500 to 2000 for more aggressive cleanup of large databases.
-		// The covering index idx_requests_cleanup makes each batch faster.
-		const BATCH_SIZE = 2000;
-		let total = 0;
-		let deleted: number;
-		do {
-			deleted = await this.runWithChanges(
-				`DELETE FROM requests WHERE id IN (
-					SELECT id FROM requests WHERE timestamp < ? LIMIT ?
-				)`,
-				[cutoffTs, BATCH_SIZE],
-			);
-			total += deleted;
-		} while (deleted === BATCH_SIZE);
-		return total;
-	}
-
-	async deleteOrphanedPayloads(): Promise<number> {
-		return this.runWithChanges(
-			`DELETE FROM request_payloads WHERE id NOT IN (SELECT id FROM requests)`,
-		);
-	}
-
-	async deletePayloadsOlderThan(cutoffTs: number): Promise<number> {
-		// Increased from 500 to 2000 for more aggressive cleanup of large databases.
-		// The covering index idx_request_payloads_cleanup makes each batch faster.
-		const BATCH_SIZE = 2000;
-		let total = 0;
-		let deleted: number;
-		do {
-			// Direct timestamp-based deletion — avoids expensive subquery through requests table
-			deleted = await this.runWithChanges(
-				`DELETE FROM request_payloads WHERE id IN (
-					SELECT id FROM request_payloads WHERE timestamp IS NOT NULL AND timestamp < ? LIMIT ?
-				)`,
-				[cutoffTs, BATCH_SIZE],
-			);
-			total += deleted;
-		} while (deleted === BATCH_SIZE);
-		return total;
-	}
+	// Retention DELETEs (requests / payloads by age, orphaned payloads) now run
+	// off the main thread in the incremental-vacuum worker's "cleanup" kind —
+	// see runCleanup() in incremental-vacuum-worker.ts, driven by
+	// DatabaseOperations.cleanupOldRequests(). The former deleteOlderThan /
+	// deleteOrphanedPayloads / deletePayloadsOlderThan methods lived here and ran
+	// synchronously on the main connection, which froze the event loop for
+	// seconds when purging large payload blobs; they were removed with that fix.
 }

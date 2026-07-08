@@ -88,6 +88,8 @@ function seed(
 
 function count(dbPath: string, table: string): number {
 	const db = new Database(dbPath);
+	// Tolerate a brief lock if a just-terminated worker connection lingers.
+	db.exec("PRAGMA busy_timeout = 5000");
 	try {
 		return (
 			db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }
@@ -192,5 +194,50 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 
 		expect(count(dbPath, "request_payloads")).toBe(5);
 		expect(count(dbPath, "requests")).toBe(5);
+	});
+
+	it("reports orphaned payloads (no matching request) in removedPayloads", async () => {
+		// A payload whose request row is gone, with a RECENT timestamp: the
+		// age pass skips it, so only the orphan sweep removes it — and it must
+		// still be counted in removedPayloads.
+		const db = new Database(dbPath);
+		try {
+			db.run(
+				"INSERT INTO request_payloads (id, json, timestamp) VALUES ('orphan', '{}', ?)",
+				[Date.now()],
+			);
+		} finally {
+			db.close();
+		}
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			const res = await dbOps.cleanupOldRequests(60 * 60 * 1000);
+			expect(res.removedPayloads).toBe(1);
+		} finally {
+			await dbOps.close();
+		}
+		expect(count(dbPath, "request_payloads")).toBe(0);
+	});
+
+	it("returns an all-zero count shape when nothing is old enough", async () => {
+		const HOUR = 60 * 60 * 1000;
+		// Two distinct-but-recent timestamps (both well within the 1h window) —
+		// distinct so the snapshot-table primary keys don't collide during seed.
+		seed(dbPath, Date.now() - 1000, Date.now(), 3, 3);
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			const res = await dbOps.cleanupOldRequests(HOUR, HOUR, HOUR, HOUR);
+			// Exact shape (no stray fields) + nothing deleted.
+			expect(res).toEqual({
+				removedRequests: 0,
+				removedPayloads: 0,
+				removedSnapshots: 0,
+				removedMemorySnapshots: 0,
+			});
+		} finally {
+			await dbOps.close();
+		}
 	});
 });
