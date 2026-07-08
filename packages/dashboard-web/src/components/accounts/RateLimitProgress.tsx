@@ -10,6 +10,8 @@ import { useEffect, useState } from "react";
 import {
 	formatDuration,
 	formatPredictionMessage,
+	type ProjectedUsage,
+	type ProjectionTone,
 } from "../../lib/format-prediction";
 import { getScopedWeeklyLimits } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
@@ -116,7 +118,7 @@ function computeProjectedMessage(
 	window: string | null,
 	percentage: number | null,
 	now: number,
-): string | null {
+): ProjectedUsage | null {
 	if (!resetTime || !window || percentage === null) return null;
 	const resetMs = new Date(resetTime).getTime();
 	const startMs = computeWindowStartMs(resetMs, window);
@@ -125,12 +127,34 @@ function computeProjectedMessage(
 	const remaining = resetMs - now;
 	if (elapsed <= 0 || remaining <= 0) return null;
 	const f = percentage / 100;
-	if (f <= 0) return "No usage recorded yet in this window";
+	if (f <= 0)
+		return { message: "No usage recorded yet in this window", tone: "neutral" };
 	const timeToExhaustMs = ((1 - f) / f) * elapsed;
 	if (timeToExhaustMs < remaining) {
-		return `Runs out ${formatDuration(remaining - timeToExhaustMs)} before reset`;
+		return {
+			message: `Runs out ${formatDuration(remaining - timeToExhaustMs)} before reset`,
+			tone: "danger",
+		};
 	}
-	return `Resets ${formatDuration(timeToExhaustMs - remaining)} before exhaustion`;
+	return {
+		message: `Resets ${formatDuration(timeToExhaustMs - remaining)} before exhaustion`,
+		tone: "safe",
+	};
+}
+
+// Maps a projection tone to the correct color class for each render surface.
+// The two surfaces use different palettes: the inline line uses the semantic
+// destructive/success tokens, the hover tooltip (on a dark popover) uses the
+// fixed red-400/green-400 pair.
+function projectionToneClass(
+	tone: ProjectionTone,
+	surface: "inline" | "tooltip",
+): string {
+	if (tone === "neutral") return "text-muted-foreground";
+	if (surface === "inline") {
+		return tone === "danger" ? "text-destructive" : "text-success";
+	}
+	return tone === "danger" ? "text-red-400" : "text-green-400";
 }
 
 // Format window name for display
@@ -588,13 +612,16 @@ export function RateLimitProgress({
 					);
 				}
 
+				// expectedPct positions the time-linear "pace" tick mark on the bar;
+				// it is intentionally NOT used to color the projection line — that is
+				// driven by the projection's own tone (safe/danger) so a reassuring
+				// "Resets … before exhaustion" never shows up red just for being ahead
+				// of a flat pace.
 				const expectedPct = computeExpectedPct(
 					usage.resetTime,
 					usage.window,
 					now,
 				);
-				const isOverPacing =
-					expectedPct !== null && (percentage ?? 0) > expectedPct;
 				const isWindowThrottled = usage.window
 					? throttledWindowSet.has(usage.window)
 					: false;
@@ -621,7 +648,7 @@ export function RateLimitProgress({
 				const liveResetMs = usage.resetTime
 					? new Date(usage.resetTime).getTime()
 					: null;
-				const projectedMessage =
+				const projection =
 					percentage !== null &&
 					isUsablePrediction(windowPrediction, liveResetMs)
 						? formatPredictionMessage(windowPrediction, liveResetMs, now)
@@ -674,17 +701,15 @@ export function RateLimitProgress({
 									style={{ left: `clamp(10%, ${expectedPct ?? 50}%, 90%)` }}
 								>
 									<div className="mb-1 font-medium">{windowLabel} usage</div>
-									{projectedMessage && (
+									{projection && (
 										<div
 											className={
 												(percentage ?? 0) <= 0
 													? "text-muted-foreground"
-													: isOverPacing
-														? "text-red-400"
-														: "text-green-400"
+													: projectionToneClass(projection.tone, "tooltip")
 											}
 										>
-											{projectedMessage}
+											{projection.message}
 										</div>
 									)}
 								</div>
@@ -727,18 +752,16 @@ export function RateLimitProgress({
 								{rightStatus}
 							</span>
 						</div>
-						{inlineProjection && projectedMessage && (
+						{inlineProjection && projection && (
 							<p
 								className={cn(
 									"text-xs",
 									(percentage ?? 0) <= 0
 										? "text-muted-foreground"
-										: isOverPacing
-											? "text-destructive"
-											: "text-success",
+										: projectionToneClass(projection.tone, "inline"),
 								)}
 							>
-								{projectedMessage}
+								{projection.message}
 							</p>
 						)}
 						{isWindowThrottled && throttleDisplayUntil && (
