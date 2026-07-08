@@ -96,6 +96,14 @@ const CW_HOLD_JITTER_MS = 500;
 // trigger is an upstream overload storm where many family requests pile into the
 // hold at once; a client disconnect releases it promptly via abortableSleep.
 const FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS = 120_000;
+// Max time (ms) to hold a live client connection for an API-key→account/class
+// PINNED request when the pin strict-failed selection ONLY because every
+// pin-allowed account is on a short transient cooldown (per-account 429 or a
+// provider-wide 529 overload) that will clear within budget. Re-selection during
+// the hold re-enforces the pin, so a disallowed account is never served; a long
+// 5h/7d wall (recovery beyond budget) is not held and still fast-fails. 120s
+// matches CW_HOLD_MAX_MS / BURST_RETRY_MAX_HOLD_MS.
+const PIN_HOLD_MAX_MS = 120_000;
 
 // ===== REQUEST RECORDER WIRING =====
 
@@ -1052,6 +1060,83 @@ export async function handleProxy(
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
+		// Pin-transient hold: the pin strict-failed selection ONLY because every
+		// pin-ALLOWED account is on a short transient cooldown (a per-account 429 or
+		// a provider-wide 529 overload) that will clear within the hold budget — NOT
+		// a long 5h/7d usage wall. Rather than fast-fail a burst of 503s to the
+		// client (the reported incident), hold the connection and re-probe until a
+		// pinned account recovers. The hold's re-selection re-enforces the pin every
+		// iteration, so a disallowed account is never served. On give-up (or a long
+		// wall whose recovery is beyond budget), fall through to the pinned terminal.
+		//
+		// SKIP count_tokens: it is an advisory "how big is this?" probe answered
+		// locally/quickly (see the count_tokens last-resort below) — holding a live
+		// connection up to 120s for it would be wrong; it keeps its fast terminal.
+		const activePin = requestMeta.pin;
+		if (
+			url.pathname !== "/v1/messages/count_tokens" &&
+			requestMeta.pinFailure &&
+			(requestMeta.pinFailure.code === "pinned_no_available_account" ||
+				requestMeta.pinFailure.code === "pinned_account_unavailable") &&
+			activePin &&
+			(activePin.accountId ||
+				(activePin.providers && activePin.providers.length > 0))
+		) {
+			const isPinAllowed = (a: Account): boolean =>
+				activePin.accountId
+					? a.id === activePin.accountId
+					: (activePin.providers ?? []).includes(a.provider);
+			const nowMs = Date.now();
+			let hasHoldCandidate = false;
+			try {
+				const allAccs = await ctx.dbOps.getAllAccounts();
+				hasHoldCandidate = allAccs.some((a) => {
+					if (a.paused || !isPinAllowed(a)) return false;
+					const rl =
+						a.rate_limited_until && a.rate_limited_until > nowMs
+							? a.rate_limited_until
+							: 0;
+					const ov = getProviderOverloadUntil(a.provider, nowMs) ?? 0;
+					const availableAt = Math.max(rl, ov);
+					// Only hold when the transient cooldown clears within budget; a
+					// long 5h/7d wall (or nothing cooled) fails fast at the terminal.
+					return availableAt > nowMs && availableAt - nowMs <= PIN_HOLD_MAX_MS;
+				});
+			} catch (err) {
+				// DB error probing accounts — don't hold, fall through to the terminal.
+				log.warn("Pin hold: failed to probe accounts, skipping hold", err);
+			}
+			if (hasHoldCandidate) {
+				const savedPinFailure = requestMeta.pinFailure;
+				// Re-arm the connection's idle timer while we hold (the base 180s
+				// timeout would otherwise reap a silently-held connection).
+				bumpIdleTimeout();
+				const pinRearm = setInterval(
+					bumpIdleTimeout,
+					NETWORK.IDLE_REARM_INTERVAL_MS,
+				);
+				try {
+					const held = await holdForNonCodexRecovery(
+						PIN_HOLD_MAX_MS,
+						"Pin hold",
+						{
+							eligible: isPinAllowed,
+							clearPinFailure: true,
+						},
+					);
+					if (held) return held;
+				} finally {
+					clearInterval(pinRearm);
+				}
+				// Hold gave up (budget/soonest-expiry exhausted). A mid-hold
+				// re-selection may have cleared pinFailure — restore the original so
+				// the terminal below still fires with the right code/message.
+				if (!requestMeta.pinFailure) {
+					requestMeta.pinFailure = savedPinFailure;
+				}
+			}
+		}
+
 		// A pin strict-failed selection (pinned account/class had no allowed,
 		// available candidate). Return a clean terminal error rather than degrading
 		// to storm-hold / pool_exhausted — never silently answer from a disallowed
@@ -1243,10 +1328,20 @@ export async function handleProxy(
 		// terminal). The CALLER arms/clears the idle-timeout re-arm interval around
 		// this — the base 180s timeout would otherwise reap a connection held
 		// silently while we wait.
-		const holdForNonCodexRecovery = async (
+		// Hoisted (function declaration) so the pin-transient hold near the top of
+		// this block can call it before its lexical position. `opts.eligible`
+		// narrows BOTH the wait-set and the re-probe candidates to a caller-supplied
+		// predicate (the pin's allow-list); it defaults to "any non-Codex account"
+		// (the original CW / family-weekly behavior). `opts.clearPinFailure` clears
+		// the residual pin strict-fail marker before each re-selection so
+		// selectCandidates doesn't short-circuit on it (pin hold only).
+		async function holdForNonCodexRecovery(
 			budgetMs: number,
 			label: string,
-		): Promise<Response | null> => {
+			opts?: { eligible?: (a: Account) => boolean; clearPinFailure?: boolean },
+		): Promise<Response | null> {
+			const isEligible = (a: Account): boolean =>
+				opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
 			const holdStart = Date.now();
 			while (true) {
 				const nowMs = Date.now();
@@ -1256,7 +1351,7 @@ export async function handleProxy(
 
 				const allAccs = await ctx.dbOps.getAllAccounts();
 				const unavailable = allAccs
-					.filter((a) => !a.paused && a.provider !== "codex")
+					.filter((a) => !a.paused && isEligible(a))
 					.map((a) => {
 						const rl =
 							a.rate_limited_until && a.rate_limited_until > nowMs
@@ -1286,7 +1381,12 @@ export async function handleProxy(
 					return createClientAbortResponse();
 				}
 
-				// Re-run full account selection with the same gates.
+				// Re-run full account selection with the same gates. For a pin hold,
+				// clear the residual strict-fail marker first — otherwise
+				// selectCandidates short-circuits on it and never re-selects.
+				if (opts?.clearPinFailure) {
+					requestMeta.pinFailure = null;
+				}
 				const reSelected = await selectAccountsForRequest(
 					requestMeta,
 					ctx,
@@ -1295,17 +1395,17 @@ export async function handleProxy(
 				const { available: reAvailable } =
 					applyProviderOverloadGate(reSelected);
 				const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
-				// Non-Codex accounts always pass the context-window gate; still apply
+				// Eligible accounts always pass the context-window gate; still apply
 				// the family-weekly gate so we don't retry an account whose requested
 				// family is weekly-exhausted (it would only 429 again).
 				const candidates = applyFamilyWeeklyGate(
-					rePostThrottle.filter((a) => a.provider !== "codex"),
+					rePostThrottle.filter((a) => isEligible(a)),
 				);
 
 				if (candidates.length === 0) continue; // still unavailable
 
 				log.info(
-					`${label}: ${candidates.length} non-Codex account(s) now available, retrying`,
+					`${label}: ${candidates.length} account(s) now available, retrying`,
 				);
 
 				for (let i = 0; i < candidates.length; i++) {
@@ -1331,7 +1431,7 @@ export async function handleProxy(
 				// All candidates returned null — loop back to recheck.
 			}
 			return null;
-		};
+		}
 
 		// If the pool was emptied specifically by the context-window gate
 		// (and there were Codex accounts that would have been available
