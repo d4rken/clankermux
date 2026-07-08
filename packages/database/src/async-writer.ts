@@ -59,6 +59,16 @@ export class AsyncDbWriter implements Disposable {
 	private readonly MAX_JOBS_PER_TICK = 50;
 	private readonly MAX_DRAIN_MS_PER_TICK = 250;
 
+	// Max time the drain may run *contiguously* before handing control back to
+	// the event loop with a real macrotask yield mid-tick. `await job.run()`
+	// resolves through microtasks only (bun:sqlite is synchronous), so without
+	// this a single tick draining many jobs back-to-back blocks HTTP serving and
+	// the event-loop monitor for its whole duration — up to MAX_DRAIN_MS_PER_TICK,
+	// which equals the monitor's 250ms WARN threshold, so a full-drain tick trips
+	// it. Kept well under that threshold. Only long drains ever yield; a normal
+	// sub-50ms tick is unchanged, so light load pays nothing.
+	private readonly YIELD_INTERVAL_MS = 50;
+
 	private metadataDropped = 0;
 	private payloadDropped = 0;
 	private payloadDroppedBytes = 0;
@@ -234,12 +244,23 @@ export class AsyncDbWriter implements Disposable {
 	private async runTick(): Promise<void> {
 		const start = performance.now();
 		let jobsProcessed = 0;
+		let lastYieldAt = start;
 
 		while (
 			(this.metadataQueue.length > 0 || this.payloadQueue.length > 0) &&
 			jobsProcessed < this.MAX_JOBS_PER_TICK &&
 			performance.now() - start < this.MAX_DRAIN_MS_PER_TICK
 		) {
+			// If we've been draining contiguously for YIELD_INTERVAL_MS, yield to
+			// a real macrotask so pending HTTP I/O and timers (incl. the event-loop
+			// monitor tick) run before the next job — otherwise the microtask-only
+			// `await job.run()` chain blocks the loop for the whole tick. Only long
+			// drains reach this; a normal short tick never yields.
+			if (performance.now() - lastYieldAt >= this.YIELD_INTERVAL_MS) {
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				lastYieldAt = performance.now();
+			}
+
 			const preferPayload =
 				this.metadataStreak >= this.METADATA_PER_PAYLOAD &&
 				this.payloadQueue.length > 0;

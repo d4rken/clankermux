@@ -74,7 +74,12 @@ test("processQueue yields the event loop so concurrent setInterval can fire", as
 	console.log(
 		`[interleaving] jobsRun=${jobsRun}, tickerFires=${tickerFires}, observeMs=${observeMs}`,
 	);
-});
+	// Explicit timeout: this test does 500×10ms ≈ 5s of synthetic busy-work, and
+	// dispose() drains whatever the 2s observation didn't. With the mid-tick
+	// macrotask yield the drain is now cooperative (interleaving other loop work),
+	// so total wall-clock sits just above bun's 5s default. The generous ceiling
+	// keeps it off the boundary without weakening any assertion above.
+}, 10_000);
 
 test("drain budget caps tick duration to MAX_DRAIN_MS_PER_TICK + slowest job", async () => {
 	const writer = new AsyncDbWriter();
@@ -113,4 +118,49 @@ test("drain budget caps tick duration to MAX_DRAIN_MS_PER_TICK + slowest job", a
 	);
 
 	await writer.dispose();
+});
+
+test("drain loop yields to a macrotask mid-tick when a run exceeds YIELD_INTERVAL_MS", async () => {
+	// Regression for the ~250ms event-loop stalls: a single tick that drains
+	// several slow jobs back-to-back used to block the loop for the whole tick
+	// (the `await job.run()` chain is microtask-only). The mid-tick macrotask
+	// yield should let a concurrently-scheduled macrotask interleave BEFORE the
+	// tick finishes.
+	const writer = new AsyncDbWriter();
+	const order: string[] = [];
+
+	// 5 jobs × ~30ms busy each ≈ 150ms of contiguous work: over YIELD_INTERVAL_MS
+	// (50ms, so the loop must yield ~2×) but under MAX_DRAIN_MS_PER_TICK (250ms)
+	// and MAX_JOBS_PER_TICK (50), so all 5 run within a single tick.
+	for (let i = 0; i < 5; i++) {
+		writer.enqueue(() => {
+			const t0 = Date.now();
+			while (Date.now() - t0 < 30) {
+				// busy-wait — same shape as a synchronous SQLite call
+			}
+			order.push(`job${i}`);
+		});
+	}
+
+	// A macrotask scheduled now, while the drain (kicked synchronously by
+	// enqueue) is in flight. Without a mid-tick yield the microtask-only drain
+	// runs all 5 jobs before any macrotask fires, so this lands LAST. With the
+	// yield it interleaves before the final job.
+	await new Promise<void>((resolve) => {
+		setImmediate(() => {
+			order.push("macrotask");
+			resolve();
+		});
+	});
+
+	await writer.dispose();
+
+	const macroIdx = order.indexOf("macrotask");
+	const lastJobIdx = order.indexOf("job4");
+	expect(macroIdx).toBeGreaterThanOrEqual(0); // the macrotask did run
+	// The critical assertion: it ran BEFORE the drain finished the last job,
+	// proving the loop yielded mid-tick instead of blocking for the full ~150ms.
+	expect(macroIdx).toBeLessThan(lastJobIdx);
+
+	console.log(`[yield] order=${order.join(",")}`);
 });
