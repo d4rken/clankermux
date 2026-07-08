@@ -205,9 +205,18 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 		db.run("PRAGMA temp_store = MEMORY");
 		db.run("PRAGMA foreign_keys = ON");
 
-		// Add checkpoint interval for WAL mode (1000 pages = ~4MB with 4KB pages)
-		// Higher threshold reduces checkpoint frequency for better throughput under high traffic
-		db.run("PRAGMA wal_autocheckpoint = 1000");
+		// WAL checkpointing is handled entirely OFF the main thread — disable
+		// autocheckpoint on this (the main, writer) connection. Autocheckpoint
+		// runs a synchronous PASSIVE checkpoint inside the committing connection
+		// whenever the WAL crosses the threshold; because PASSIVE can't reset the
+		// WAL while any reader (analytics worker, usage pollers) holds frames, the
+		// WAL grows large and each such checkpoint does hundreds of ms of
+		// synchronous I/O on the main thread — freezing the event loop (observed
+		// as ~250-290ms "Event loop blocked" WARNs). With autocheckpoint off, the
+		// 5-minute off-thread optimize tick reclaims the WAL via
+		// wal_checkpoint(TRUNCATE) with busy_timeout=0, which never blocks the
+		// loop (see runOptimize in incremental-vacuum-worker.ts).
+		db.run("PRAGMA wal_autocheckpoint = 0");
 	} catch (error) {
 		console.error("Database configuration failed:", error);
 		throw new Error(`Failed to configure SQLite database: ${error}`);
