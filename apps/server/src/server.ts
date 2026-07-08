@@ -780,6 +780,16 @@ export default async function startServer(options?: {
 
 	stopRateLimitCleanupJob = unregisterRateLimitCleanup;
 
+	// Max free pages the hourly tick reclaims to the OS. Sized to outpace normal
+	// hourly deletes AND steadily drain a pre-existing freelist backlog (a large
+	// DB can carry hundreds of thousands of freed pages). The worker reclaims
+	// this in small batches that release the writer slot between each, so a high
+	// budget drains fast without lengthening any single contended stall, and it
+	// early-breaks once the freelist is empty — so on a caught-up DB the budget
+	// costs nothing beyond that hour's actual deletes. 40000 pages × 4 KiB ≈
+	// 160 MiB/hr. See incremental-vacuum-worker.ts for the batching rationale.
+	const INCREMENTAL_VACUUM_PAGES_PER_TICK = 40000;
+
 	// Set up periodic data retention cleanup every 1 hour
 	const dataRetentionCleanup = async () => {
 		const startTime = Date.now();
@@ -817,17 +827,20 @@ export default async function startServer(options?: {
 				log.info(
 					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots in ${Date.now() - startTime}ms`,
 				);
-				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
-				// per tick, off-thread via the incremental-vacuum worker. Small N
-				// keeps the writer-slot hold sub-100ms on local SSD so concurrent
-				// main-thread writes (rate-limit updates, OAuth refresh, post-
-				// processor inserts) don't pile up on busy_timeout. Pre-fix this
-				// path passed 200000 and silently fell back to a full main-thread
-				// VACUUM when auto_vacuum=NONE — see incrementalVacuum() in
+				// Reclaim freed pages to the OS, off-thread via the incremental-
+				// vacuum worker, which batches the budget into slot-releasing
+				// chunks so main-thread writes (rate-limit updates, OAuth refresh,
+				// post-processor inserts) don't pile up on busy_timeout during a
+				// long reclaim — see INCREMENTAL_VACUUM_PAGES_PER_TICK above and
+				// the batching rationale in incremental-vacuum-worker.ts. Pre-fix
+				// this path passed 200000 and silently fell back to a full main-
+				// thread VACUUM when auto_vacuum=NONE — see incrementalVacuum() in
 				// packages/database/src/database-operations.ts.
-				dbOps.incrementalVacuum(8000).catch((err) => {
-					log.error(`Incremental vacuum error: ${err}`);
-				});
+				dbOps
+					.incrementalVacuum(INCREMENTAL_VACUUM_PAGES_PER_TICK)
+					.catch((err) => {
+						log.error(`Incremental vacuum error: ${err}`);
+					});
 			}
 		} catch (err) {
 			log.error(`Periodic data retention cleanup error: ${err}`);
