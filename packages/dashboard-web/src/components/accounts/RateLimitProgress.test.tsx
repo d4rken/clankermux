@@ -256,6 +256,35 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
+	describe("inline projection color", () => {
+		// A window that is only 5% used one hour into a five-hour window projects
+		// exhaustion far past the reset, i.e. it will reset long before running out.
+		// That reassuring "Resets … before exhaustion" line must render green
+		// (text-success), never red (text-destructive) — even though 5% at the
+		// one-hour mark is technically "ahead" of a flat 20% time-linear pace.
+		it("renders a 'before exhaustion' projection green, not red", () => {
+			const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 5, resets_at: reset },
+						seven_day: null,
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before exhaustion");
+			expect(html).toContain("text-success");
+			expect(html).not.toContain("text-destructive");
+		});
+	});
+
 	it("does not display a throttled-until time past reset for over-100% usage", () => {
 		const now = Date.now();
 		const resetAt = now + 30 * 1000;

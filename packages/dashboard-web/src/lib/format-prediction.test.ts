@@ -30,10 +30,10 @@ describe("formatDuration", () => {
 describe("formatPredictionMessage", () => {
 	const now = 1_000_000_000_000;
 
-	it("returns 'Quota exhausted' for the exhausted state", () => {
+	it("returns 'Quota exhausted' (danger) for the exhausted state", () => {
 		expect(
 			formatPredictionMessage(pred({ state: "exhausted" }), null, now),
-		).toBe("Quota exhausted");
+		).toEqual({ message: "Quota exhausted", tone: "danger" });
 	});
 
 	it("returns null for the stable state", () => {
@@ -56,27 +56,27 @@ describe("formatPredictionMessage", () => {
 		).toBeNull();
 	});
 
-	it("says how long before reset when exhaustion precedes reset", () => {
+	it("says how long before reset (danger) when exhaustion precedes reset", () => {
 		const eta = now + 2 * HOUR;
 		const reset = now + 4 * HOUR + 15 * 60 * 1000;
 		expect(
 			formatPredictionMessage(pred({ etaExhaustMs: eta }), reset, now),
-		).toBe("Runs out 2h 15m before reset");
+		).toEqual({ message: "Runs out 2h 15m before reset", tone: "danger" });
 	});
 
-	it("says how long the reset precedes exhaustion when reset comes first", () => {
+	it("says the reset precedes exhaustion (safe) when reset comes first", () => {
 		const eta = now + 4 * HOUR;
 		const reset = now + 2 * HOUR + 30 * 60 * 1000;
 		expect(
 			formatPredictionMessage(pred({ etaExhaustMs: eta }), reset, now),
-		).toBe("Resets 1h 30m before exhaustion");
+		).toEqual({ message: "Resets 1h 30m before exhaustion", tone: "safe" });
 	});
 
-	it("says time-to-exhaustion from now when there is no reset time", () => {
+	it("says time-to-exhaustion from now (danger) when there is no reset time", () => {
 		const eta = now + 90 * 60 * 1000;
 		expect(
 			formatPredictionMessage(pred({ etaExhaustMs: eta }), null, now),
-		).toBe("Runs out in 1h 30m");
+		).toEqual({ message: "Runs out in 1h 30m", tone: "danger" });
 	});
 
 	it("returns null for a rising state with no ETA", () => {
