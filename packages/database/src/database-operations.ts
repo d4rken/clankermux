@@ -30,6 +30,7 @@ import type {
 } from "@clankermux/types";
 import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
+import type { CleanupCounts } from "./incremental-vacuum-worker";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { runMigrations } from "./migrations";
@@ -1310,69 +1311,76 @@ OAuth tokens will need to be re-authenticated.
 	}> {
 		const now = Date.now();
 
-		// Pass 1 — payloads
+		// Compute the four cutoffs, then run the DELETEs OFF the main thread in
+		// the incremental-vacuum worker (kind "cleanup"). Deleting aged payload
+		// rows (large multi-MB blobs) synchronously on the main connection froze
+		// the event loop for seconds; the worker chunks them with slot-releasing
+		// yields — see runCleanup in incremental-vacuum-worker.ts. requestCutoff
+		// is null when request-row retention is disabled (payloads still purged).
 		const payloadCutoff = now - payloadRetentionMs;
-		const removedPayloadsByAge =
-			await this.requests.deletePayloadsOlderThan(payloadCutoff);
-		const removedOrphans = await this.requests.deleteOrphanedPayloads();
-
-		// Pass 2 — request metadata
-		let removedRequests = 0;
-		if (
+		const requestCutoff =
 			typeof requestRetentionMs === "number" &&
 			Number.isFinite(requestRetentionMs)
-		) {
-			const requestCutoff = now - requestRetentionMs;
-			removedRequests = await this.requests.deleteOlderThan(requestCutoff);
-		}
-
-		// Pass 3 — usage snapshots (time-series for the Limits sawtooth graph)
-		const effectiveSnapshotRetentionMs =
-			typeof snapshotRetentionMs === "number" &&
+				? now - requestRetentionMs
+				: null;
+		const usageSnapshotCutoff =
+			now -
+			(typeof snapshotRetentionMs === "number" &&
 			Number.isFinite(snapshotRetentionMs)
 				? snapshotRetentionMs
-				: DEFAULT_USAGE_SNAPSHOT_RETENTION_MS;
-		let removedSnapshots = 0;
-		try {
-			const snapshotCutoff = now - effectiveSnapshotRetentionMs;
-			removedSnapshots =
-				await this.usageSnapshots.deleteOlderThan(snapshotCutoff);
-		} catch (err) {
-			// Snapshot pruning is best-effort: never let it sink the whole cleanup.
-			console.warn(
-				`[cleanupOldRequests] usage snapshot pruning failed: ${err}`,
-			);
-		}
-
-		// Pass 4 — memory snapshots (time-series for the Memory Usage graph)
-		const effectiveMemorySnapshotRetentionMs =
-			typeof memorySnapshotRetentionMs === "number" &&
+				: DEFAULT_USAGE_SNAPSHOT_RETENTION_MS);
+		const memorySnapshotCutoff =
+			now -
+			(typeof memorySnapshotRetentionMs === "number" &&
 			Number.isFinite(memorySnapshotRetentionMs)
 				? memorySnapshotRetentionMs
-				: DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS;
-		let removedMemorySnapshots = 0;
-		try {
-			const memorySnapshotCutoff = now - effectiveMemorySnapshotRetentionMs;
-			removedMemorySnapshots =
-				await this.memorySnapshots.deleteOlderThan(memorySnapshotCutoff);
-		} catch (err) {
-			// Best-effort, like the usage-snapshot pass above.
-			console.warn(
-				`[cleanupOldRequests] memory snapshot pruning failed: ${err}`,
-			);
-		}
+				: DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS);
 
-		// Row counts and sizes just changed — drop the cached storage-usage
-		// measurement so the next dashboard read recomputes (the standing
-		// per-type display refreshes right after a manual cleanup).
-		this.retentionUsageCache = null;
-
-		return {
-			removedRequests,
-			removedPayloads: removedPayloadsByAge + removedOrphans,
-			removedSnapshots,
-			removedMemorySnapshots,
+		const empty = {
+			removedRequests: 0,
+			removedPayloads: 0,
+			removedSnapshots: 0,
+			removedMemorySnapshots: 0,
 		};
+
+		const worker = this.spawnIncrementalVacuumWorker();
+		try {
+			const result = await new Promise<
+				{ ok: true; cleanup: CleanupCounts } | { ok: false; error: string }
+			>((resolve, reject) => {
+				worker.onmessage = (event: MessageEvent) => resolve(event.data);
+				worker.onerror = (event: ErrorEvent) =>
+					reject(new Error(event.message ?? "cleanup worker error"));
+				worker.postMessage({
+					dbPath: this.resolvedDbPath,
+					kind: "cleanup",
+					payloadCutoff,
+					requestCutoff,
+					usageSnapshotCutoff,
+					memorySnapshotCutoff,
+				});
+			});
+
+			if (!result.ok) {
+				// Best-effort: a failed cleanup tick must not throw into the hourly
+				// maintenance job (that would skip the follow-up vacuum). Report
+				// zero removed and let the next tick retry.
+				console.warn(
+					`[cleanupOldRequests] worker cleanup failed: ${result.error}`,
+				);
+				return empty;
+			}
+			return result.cleanup;
+		} catch (err) {
+			console.warn(`[cleanupOldRequests] worker cleanup error: ${err}`);
+			return empty;
+		} finally {
+			worker.terminate();
+			// Row counts/sizes may have changed (even a partial/failed run) — drop
+			// the cached storage-usage measurement so the next dashboard read
+			// recomputes. Must happen on THIS instance; the worker can't touch it.
+			this.retentionUsageCache = null;
+		}
 	}
 
 	async getTableRowCounts(): Promise<

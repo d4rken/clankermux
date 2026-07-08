@@ -23,12 +23,30 @@ export const INCREMENTAL_VACUUM_BATCH_PAGES = 2000;
 const INCREMENTAL_VACUUM_BATCH_YIELD_MS = 25;
 
 /**
- * Dedicated worker for `PRAGMA incremental_vacuum(N)` and the periodic
- * `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)` maintenance tick.
+ * Rows per batch for the "cleanup" kind's retention DELETEs. Deliberately small
+ * (vs the repositories' old 2000): payload rows are large blobs (multi-MB), so
+ * delete cost scales with bytes freed, not row count. A small batch keeps each
+ * committed transaction's writer-slot hold short so a colliding main-thread
+ * write waits at most briefly. The old single synchronous main-thread delete of
+ * a batch of payloads froze the event loop for seconds — this runs off-thread
+ * AND in small slices.
+ */
+export const CLEANUP_DELETE_BATCH_ROWS = 50;
+
+/** Yield between cleanup delete batches so main-thread writes can grab the slot. */
+const CLEANUP_DELETE_YIELD_MS = 25;
+
+/**
+ * Off-thread DB-maintenance worker: incremental vacuum, the periodic
+ * optimize/checkpoint tick, and the hourly retention cleanup (all the mutating
+ * maintenance that would otherwise freeze the main event loop).
  *
- * Two kinds (discriminated by `kind`, defaulting to "vacuum" for backward
+ * Three kinds (discriminated by `kind`, defaulting to "vacuum" for backward
  * compatibility with kind-less messages):
  *   - "vacuum"   — the original incremental_vacuum behavior (below).
+ *   - "cleanup"  — runs the retention DELETEs (payloads/requests/snapshots) in
+ *     small slot-releasing batches. Previously synchronous on the main thread,
+ *     where deleting a batch of large payload blobs froze the loop for seconds.
  *   - "optimize" — runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)`
  *     with `busy_timeout = 0`. This is the ONLY WAL reclaimer: the main
  *     connection runs with `wal_autocheckpoint = 0` (see database-operations.ts)
@@ -93,11 +111,29 @@ export type IncrementalVacuumRequest =
 	| {
 			kind: "optimize";
 			dbPath: string;
+	  }
+	| {
+			kind: "cleanup";
+			dbPath: string;
+			// Epoch-ms cutoffs; rows older than each are deleted. requestCutoff is
+			// null when request-row retention is disabled (payloads still purged).
+			payloadCutoff: number;
+			requestCutoff: number | null;
+			usageSnapshotCutoff: number;
+			memorySnapshotCutoff: number;
 	  };
+
+export type CleanupCounts = {
+	removedRequests: number;
+	removedPayloads: number;
+	removedSnapshots: number;
+	removedMemorySnapshots: number;
+};
 
 export type IncrementalVacuumResult =
 	| { ok: true; mode: number }
 	| { ok: true; skipped: boolean }
+	| { ok: true; cleanup: CleanupCounts }
 	| { ok: false; error: string };
 
 /**
@@ -232,10 +268,168 @@ function runOptimize(dbPath: string): void {
 	}
 }
 
+/**
+ * Delete rows older than `cutoff` from `table` in small committed batches,
+ * releasing the writer slot between each. `whereCond` is the age predicate on
+ * that table (e.g. `timestamp < ?`), bound with `cutoff`; `table`/`whereCond`
+ * are trusted internal constants, not caller input.
+ *
+ * Selects the target ids first (LIMIT), then deletes exactly those — so the
+ * returned count reflects rows *of this table* deleted, NOT the FK-cascade
+ * child rows that `.changes` would additionally include (which both inflates
+ * the count and breaks a `.changes < batchSize` termination test). Loop ends
+ * when a batch returns fewer ids than the batch size. A transient lock after
+ * progress stops early (deleted rows persist; the next hourly tick resumes); a
+ * transient lock on the first batch, or any non-lock error, propagates to the
+ * caller's { ok: false }.
+ */
+async function deleteBatched(
+	db: Database,
+	table: string,
+	whereCond: string,
+	cutoff: number,
+): Promise<number> {
+	const selectSql = `SELECT id FROM ${table} WHERE ${whereCond} LIMIT ?`;
+	let total = 0;
+	for (;;) {
+		let ids: Array<{ id: string }>;
+		try {
+			ids = db
+				.query(selectSql)
+				.all(cutoff, CLEANUP_DELETE_BATCH_ROWS) as Array<{ id: string }>;
+			if (ids.length > 0) {
+				const placeholders = ids.map(() => "?").join(",");
+				db.run(
+					`DELETE FROM ${table} WHERE id IN (${placeholders})`,
+					ids.map((r) => r.id),
+				);
+			}
+		} catch (err) {
+			if (isTransientLockError(err) && total > 0) break;
+			throw err;
+		}
+		total += ids.length;
+		// A short batch means everything older than the cutoff is drained.
+		if (ids.length < CLEANUP_DELETE_BATCH_ROWS) break;
+		await Bun.sleep(CLEANUP_DELETE_YIELD_MS);
+	}
+	return total;
+}
+
+/** Best-effort single-statement delete for the tiny snapshot tables. */
+function tryDelete(db: Database, sql: string, cutoff: number): number {
+	try {
+		return db.run(sql, [cutoff]).changes;
+	} catch (err) {
+		// Snapshot volume is tiny and non-critical — never let it abort a tick
+		// that already reclaimed payload/request rows. Mirrors the per-pass
+		// try/catch in the main-thread cleanupOldRequests().
+		console.warn(
+			`[cleanup-worker] snapshot delete skipped: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return 0;
+	}
+}
+
+/**
+ * Retention DELETEs, off the main thread. Previously these ran synchronously on
+ * the main connection inside the hourly tick; deleting a batch of large payload
+ * blobs froze the event loop for seconds. Here the heavy payload/request deletes
+ * are chunked with slot-releasing yields (see CLEANUP_DELETE_BATCH_ROWS) so this
+ * can't monopolize SQLite's single writer slot. The main thread still nulls its
+ * in-process retentionUsageCache after this resolves — the worker can't.
+ */
+async function runCleanup(
+	dbPath: string,
+	payloadCutoff: number,
+	requestCutoff: number | null,
+	usageSnapshotCutoff: number,
+	memorySnapshotCutoff: number,
+): Promise<void> {
+	let db: Database | undefined;
+	try {
+		db = new Database(dbPath);
+		// Enable FK enforcement so deleting an aged `requests` row cascades to its
+		// children (request_payloads / request_routing / request_tool_calls /
+		// request_tool_errors, all ON DELETE CASCADE). Only request_payloads has
+		// its own age/orphan pass; the other three rely entirely on cascade, so
+		// without this they'd orphan and grow unbounded. bun:sqlite defaults FK
+		// OFF, and the old main-thread path ran with FK ON (configureSqlite).
+		db.exec("PRAGMA foreign_keys = ON");
+		// Wait politely for the writer slot when the main thread holds it; the
+		// small per-batch deletes + yields release it promptly in return.
+		db.exec("PRAGMA busy_timeout = 200");
+		applyWorkerPragmas(db);
+
+		const removedPayloadsByAge = await deleteBatched(
+			db,
+			"request_payloads",
+			"timestamp IS NOT NULL AND timestamp < ?",
+			payloadCutoff,
+		);
+
+		// Orphaned payloads (request row already gone). Typically ~0; a NOT IN
+		// subquery has no natural LIMIT, so run it as a single statement.
+		// (request_payloads has no children, so .changes here is accurate.)
+		const removedOrphans = db.run(
+			`DELETE FROM request_payloads WHERE id NOT IN (SELECT id FROM requests)`,
+		).changes;
+
+		let removedRequests = 0;
+		if (requestCutoff !== null) {
+			// FK ON cascades child rows (routing/tool_calls/tool_errors/payloads);
+			// deleteBatched counts request rows only.
+			removedRequests = await deleteBatched(
+				db,
+				"requests",
+				"timestamp < ?",
+				requestCutoff,
+			);
+		}
+
+		const removedSnapshots = tryDelete(
+			db,
+			`DELETE FROM usage_snapshots WHERE sampled_at < ?`,
+			usageSnapshotCutoff,
+		);
+		const removedMemorySnapshots = tryDelete(
+			db,
+			`DELETE FROM memory_snapshots WHERE sampled_at < ?`,
+			memorySnapshotCutoff,
+		);
+
+		self.postMessage({
+			ok: true,
+			cleanup: {
+				removedRequests,
+				removedPayloads: removedPayloadsByAge + removedOrphans,
+				removedSnapshots,
+				removedMemorySnapshots,
+			},
+		} satisfies IncrementalVacuumResult);
+	} catch (err) {
+		self.postMessage({
+			ok: false,
+			error: err instanceof Error ? err.message : String(err),
+		} satisfies IncrementalVacuumResult);
+	} finally {
+		db?.close();
+	}
+}
+
 self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 	const request = event.data;
 	if (request.kind === "optimize") {
 		runOptimize(request.dbPath);
+	} else if (request.kind === "cleanup") {
+		// Fire-and-forget: runCleanup posts its own result and never rejects.
+		void runCleanup(
+			request.dbPath,
+			request.payloadCutoff,
+			request.requestCutoff,
+			request.usageSnapshotCutoff,
+			request.memorySnapshotCutoff,
+		);
 	} else {
 		// kind "vacuum" or absent (backward compat: kind-less messages
 		// predate the discriminator and always meant incremental_vacuum).
