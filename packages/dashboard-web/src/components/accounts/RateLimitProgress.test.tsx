@@ -257,12 +257,14 @@ describe("RateLimitProgress", () => {
 	});
 
 	describe("inline projection color", () => {
-		// A window that is only 5% used one hour into a five-hour window projects
-		// exhaustion far past the reset, i.e. it will reset long before running out.
-		// That reassuring "Resets … before exhaustion" line must render green
-		// (text-success), never red (text-destructive) — even though 5% at the
-		// one-hour mark is technically "ahead" of a flat 20% time-linear pace.
-		it("renders a 'before exhaustion' projection green, not red", () => {
+		// Legacy-path smoke test: no `prediction` prop, so this flows through
+		// computeProjectedMessage. 5% used one hour into a five-hour window is
+		// *behind* the flat 20% pace, so exhaustion is projected far past the reset
+		// and the reassuring "Resets … before exhaustion" line renders green. The
+		// legacy path was always internally consistent (safe ⟺ not over-pacing), so
+		// this only guards the render wiring — see the prediction-path test below
+		// for the actual regression case.
+		it("renders a legacy 'before exhaustion' projection green (text-success)", () => {
 			const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
@@ -276,6 +278,49 @@ describe("RateLimitProgress", () => {
 					provider="anthropic"
 					showWeekly
 					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before exhaustion");
+			expect(html).toContain("text-success");
+			expect(html).not.toContain("text-destructive");
+		});
+
+		// Regression for the reported bug, which lived ONLY on the server-prediction
+		// path: usage is over-pacing (90% at the four-hour mark of a five-hour
+		// window, vs an 80% flat pace) — the old code keyed the color off
+		// isOverPacing and painted this red — while the regression prediction
+		// projects exhaustion (now + 2h) AFTER the reset (now + 1h), i.e. the window
+		// resets before it runs out. The line must be green, not red: a safe
+		// projection should never render alarming just for being ahead of pace.
+		it("renders an over-pacing but safe prediction green, not red", () => {
+			const now = Date.now();
+			const resetMs = now + 60 * 60 * 1000; // reset in 1h → 4h elapsed, 80% pace
+			const reset = new Date(resetMs).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset}
+					usageUtilization={90}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 90, resets_at: reset },
+						seven_day: null,
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+					prediction={{
+						fiveHour: {
+							state: "rising",
+							slopePerHour: 5,
+							etaExhaustMs: now + 2 * 60 * 60 * 1000, // exhausts AFTER the reset
+							predictedAtReset: null,
+							resetsAtMs: resetMs,
+							willExhaustBeforeReset: false,
+							lowConfidence: false,
+						},
+						sevenDay: undefined,
+					}}
 				/>,
 			);
 
