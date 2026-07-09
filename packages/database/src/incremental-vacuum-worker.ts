@@ -37,6 +37,20 @@ export const CLEANUP_DELETE_BATCH_ROWS = 50;
 const CLEANUP_DELETE_YIELD_MS = 25;
 
 /**
+ * Row cap for `PRAGMA optimize`'s internal ANALYZE, set via `PRAGMA
+ * analysis_limit` before it. Without a limit (SQLite's default of 0 = unbounded)
+ * ANALYZE does a full index scan on every table it deems stale — on our multi-GB
+ * tables that holds SQLite's single writer slot for SECONDS, during which every
+ * main-thread write parks in the busy handler (up to
+ * MAIN_CONNECTION_BUSY_TIMEOUT_MS = 250 ms), freezing the event loop. 400 is
+ * SQLite's documented value (https://sqlite.org/lang_analyze.html): it samples
+ * ~400 rows per index for near-identical planner statistics while bounding each
+ * ANALYZE to milliseconds, so the writer-slot hold — and the parks it caused —
+ * effectively vanish.
+ */
+const ANALYZE_ANALYSIS_LIMIT = 400;
+
+/**
  * Off-thread DB-maintenance worker: incremental vacuum, the periodic
  * optimize/checkpoint tick, and the hourly retention cleanup (all the mutating
  * maintenance that would otherwise freeze the main event loop).
@@ -60,6 +74,9 @@ const CLEANUP_DELETE_YIELD_MS = 25;
  *     `busy_timeout = 0` turns contention into an instant, explicit skip
  *     (`{ ok: true, skipped: true }`) — missing one 5-minute cycle while
  *     maintenance contends is normal and harmless; the next tick retries.
+ *     Conversely, when THIS worker's ANALYZE runs, `PRAGMA analysis_limit`
+ *     (ANALYZE_ANALYSIS_LIMIT) bounds its writer-slot hold to ~ms so it can't
+ *     park main-thread writes — see the const's comment for the full rationale.
  *
  * Why a worker, not the main `sqliteDb` handle:
  *   `bun:sqlite` is synchronous (blocks the JS event loop for the duration of
@@ -230,6 +247,12 @@ function runOptimize(dbPath: string): void {
 		db.exec("PRAGMA busy_timeout = 0");
 		applyWorkerPragmas(db);
 
+		// Bound ANALYZE's writer-slot hold to ~ms. Must be set on THIS connection
+		// before `PRAGMA optimize` runs its internal ANALYZE. See
+		// ANALYZE_ANALYSIS_LIMIT — without it, ANALYZE full-scans indexes on the
+		// multi-GB tables and holds the slot for seconds, parking main-thread
+		// writes in their busy handler (the residual event-loop stall source).
+		db.exec(`PRAGMA analysis_limit = ${ANALYZE_ANALYSIS_LIMIT}`);
 		db.exec("PRAGMA optimize");
 		// TRUNCATE (not PASSIVE): actively reclaim and zero the WAL off-thread so
 		// it stays bounded now that the main connection's autocheckpoint is
