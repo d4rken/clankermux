@@ -483,8 +483,8 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("resolves the family default Codex model when no stored mapping exists", () => {
-		// No account mapping → opus resolves to the gpt-5.5 family default
-		// (272K window, threshold 263840), matching what the provider actually
+		// No account mapping → opus resolves to the gpt-5.6-sol family default
+		// (353K window, threshold 342410), matching what the provider actually
 		// sends, so an oversized request is correctly excluded (not "fits").
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
@@ -496,16 +496,16 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-5.5 default (272K, threshold 263840).
+		// fable → gpt-5.6-sol default (353K, threshold 342410).
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_840)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 342_410)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_841)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 342_411)).toBe(
 			false,
 		);
 		// mythos resolves to the same fable family default.
-		expect(codexAccountFitsRequest(account, "claude-mythos-5", 263_841)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-mythos-5", 342_411)).toBe(
 			false,
 		);
 	});
@@ -559,14 +559,14 @@ describe("estimateContextWindowTokens", () => {
 		);
 	});
 
-	test("the incident request (~675k chars, max_tokens 64k) now fits gpt-5.5", () => {
+	test("the incident request (~675k chars, max_tokens 64k) now fits gpt-5.6-sol", () => {
 		// Reproduces the reported 400: old estimate was 232,859 = 675,436/4 + 64,000.
 		const comp = composition(6_601, 134_827, 534_008); // 675,436 chars total
 		const est = estimateContextWindowTokens({ max_tokens: 64_000 }, comp);
 		// 675,436 / 3.0 = 225,146 (ceil) + min(64000, 4000) = 229,146.
 		expect(est).toBe(229_146);
 		const account = makeCodexAccount({ model_mappings: null });
-		// Admitted by the gate (threshold floor(272000 * 0.97) = 263,840).
+		// Admitted by the gate (threshold floor(353000 * 0.97) = 342,410).
 		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
 	});
 
@@ -601,25 +601,25 @@ describe("estimateRequestTokens is unchanged (cache-warming promotion regression
 
 describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
 	test("admits up to the FULL window (the margin band is re-admitted)", () => {
-		const account = makeCodexAccount({ model_mappings: null }); // opus→gpt-5.5
-		// In the (floor(272000*0.97)=263840, 272000] band: margined gate rejects,
+		const account = makeCodexAccount({ model_mappings: null }); // opus→gpt-5.6-sol
+		// In the (floor(353000*0.97)=342410, 353000] band: margined gate rejects,
 		// unmargined admits.
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 270_000)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 350_000)).toBe(
 			false,
 		);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 270_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 350_000),
 		).toBe(true);
 		// Exactly at the window: admitted.
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_000),
 		).toBe(true);
 	});
 
 	test("rejects beyond the full window", () => {
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_001),
 		).toBe(false);
 	});
 
@@ -657,15 +657,21 @@ describe("resolveCodexTargetModel", () => {
 
 	test("falls back to the family default when no mapping exists", () => {
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe("gpt-5.5");
+		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe(
+			"gpt-5.6-sol",
+		);
 		expect(resolveCodexTargetModel("claude-sonnet-4-5", account)).toBe(
-			"gpt-5.4",
+			"gpt-5.6-terra",
 		);
 		expect(resolveCodexTargetModel("claude-haiku-4-5", account)).toBe(
-			"gpt-5.4-mini",
+			"gpt-5.6-luna",
 		);
-		expect(resolveCodexTargetModel("claude-fable-5", account)).toBe("gpt-5.5");
-		expect(resolveCodexTargetModel("claude-mythos-5", account)).toBe("gpt-5.5");
+		expect(resolveCodexTargetModel("claude-fable-5", account)).toBe(
+			"gpt-5.6-sol",
+		);
+		expect(resolveCodexTargetModel("claude-mythos-5", account)).toBe(
+			"gpt-5.6-sol",
+		);
 	});
 
 	test("returns a non-Claude model with no mapping unchanged", () => {
@@ -677,10 +683,10 @@ describe("resolveCodexTargetModel", () => {
 
 	test("DEFAULT_CODEX_MODEL_BY_FAMILY covers every family", () => {
 		expect(DEFAULT_CODEX_MODEL_BY_FAMILY).toEqual({
-			opus: "gpt-5.5",
-			sonnet: "gpt-5.4",
-			haiku: "gpt-5.4-mini",
-			fable: "gpt-5.5",
+			opus: "gpt-5.6-sol",
+			sonnet: "gpt-5.6-terra",
+			haiku: "gpt-5.6-luna",
+			fable: "gpt-5.6-sol",
 		});
 	});
 

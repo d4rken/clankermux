@@ -395,6 +395,15 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.4": 272_000,
 	"gpt-5.4-mini": 272_000,
 	"gpt-5.3-codex-spark": 128_000,
+	// GPT-5.6 tiers. `gpt-5.6-sol` is CONFIRMED: the Codex TUI reported a 353K
+	// window for it on a prolite plan (public API lists ~1.05M, but the
+	// Codex-served/plan-gated window is smaller — same story as gpt-5.5's 272K
+	// vs its 400K public figure). `terra`/`luna` are ASSUMED equal to sol (353K)
+	// pending direct verification from the TUI — likely a plan-wide cap. Correct
+	// these once terra/luna are observed.
+	"gpt-5.6-sol": 353_000,
+	"gpt-5.6-terra": 353_000,
+	"gpt-5.6-luna": 353_000,
 };
 
 /**
@@ -523,11 +532,14 @@ export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	"opus" | "sonnet" | "haiku" | "fable",
 	string
 > = {
-	opus: "gpt-5.5",
-	sonnet: "gpt-5.4",
-	haiku: "gpt-5.4-mini",
+	// GPT-5.6 tier-matched: flagship→sol, balanced→terra, efficient→luna. sol's
+	// 353K window is confirmed; terra/luna windows are assumed 353K (see
+	// MODEL_CONTEXT_WINDOWS) pending verification.
+	opus: "gpt-5.6-sol",
+	sonnet: "gpt-5.6-terra",
+	haiku: "gpt-5.6-luna",
 	// Fable/Mythos are above Opus — route to the top Codex tier (same as opus).
-	fable: "gpt-5.5",
+	fable: "gpt-5.6-sol",
 };
 
 /**
