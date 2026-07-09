@@ -40,7 +40,14 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
-export const CODEX_VERSION = "0.133.0";
+// Codex CLI version advertised to the ChatGPT/Codex backend via the `Version`
+// header + User-Agent (see prepareHeaders / on-demand-fetch). The backend GATES
+// newer models behind a minimum client version: too-old here → 400 "The '<model>'
+// model requires a newer version of Codex." We override the real client's header
+// with this value, so it must track a version new enough for the models we route
+// (e.g. gpt-5.6-sol needs >= 0.144). Bump this when a new Codex model 400s on the
+// version gate.
+export const CODEX_VERSION = "0.144.0";
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
 // Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
 // CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
