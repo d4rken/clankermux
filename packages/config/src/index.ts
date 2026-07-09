@@ -538,7 +538,14 @@ export class Config extends EventEmitter {
 			database: {
 				walMode: true,
 				busyTimeoutMs: 5000,
-				cacheSize: -20000, // 20MB cache
+				// 256 MiB (negative = KiB). Big enough to keep the hot B-tree
+				// interior/overflow pages of the multi-GB request tables resident on
+				// this LOCAL-disk 8 GB DB. At the old 20 MiB, a random-UUID INSERT
+				// into the 5.7 GB request_payloads table missed cache on nearly every
+				// page → synchronous disk reads (~250 ms), which the AsyncDbWriter
+				// can't subdivide (one atomic db.run) → event-loop blips during write
+				// bursts. Bounded RSS, safe under MemoryHigh (unlike mmap, which OOM'd).
+				cacheSize: -262144, // 256MB cache
 				synchronous: "NORMAL",
 				mmapSize: 268435456, // 256MB
 				retry: {
@@ -599,7 +606,7 @@ export class Config extends EventEmitter {
 			defaults.database = {
 				walMode: true,
 				busyTimeoutMs: 5000,
-				cacheSize: -20000,
+				cacheSize: -262144, // 256MB cache — see the getRuntime default above
 				synchronous: "NORMAL",
 				mmapSize: 268435456,
 				retry: {
