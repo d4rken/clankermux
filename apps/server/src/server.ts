@@ -893,13 +893,19 @@ export default async function startServer(options?: {
 					// TRUNCATE, or repeated skips) escalates to WARN; otherwise DEBUG.
 					const walMiB = (await dbOps.getWalSizeBytes()) / (1024 * 1024);
 					const status = result.skipped ? "skipped (DB busy)" : "ran";
+					// Duration surfaces the optimize+checkpoint's writer-slot hold. A
+					// bounded ANALYZE (PRAGMA analysis_limit in the worker) keeps this
+					// in the single-digit/low-tens ms range; a spike back into the
+					// hundreds/seconds means ANALYZE is scanning unbounded again.
+					const timing =
+						result.durationMs != null ? ` in ${result.durationMs}ms` : "";
 					if (walMiB > WAL_SIZE_WARN_MIB) {
 						log.warn(
-							`WAL checkpoint ${status}; WAL ${walMiB.toFixed(1)}MiB exceeds ${WAL_SIZE_WARN_MIB}MiB — reclaim may be starved by a long-lived reader`,
+							`WAL checkpoint ${status}${timing}; WAL ${walMiB.toFixed(1)}MiB exceeds ${WAL_SIZE_WARN_MIB}MiB — reclaim may be starved by a long-lived reader`,
 						);
 					} else {
 						log.debug(
-							`checkpoint/optimize ${status}; WAL ${walMiB.toFixed(1)}MiB`,
+							`checkpoint/optimize ${status}${timing}; WAL ${walMiB.toFixed(1)}MiB`,
 						);
 					}
 				})

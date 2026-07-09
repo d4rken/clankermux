@@ -188,4 +188,55 @@ describe("incremental-vacuum worker protocol: kind discriminator", () => {
 			worker.terminate();
 		}
 	});
+
+	it('kind "optimize" still runs ANALYZE under PRAGMA analysis_limit (bounds, does not disable, analysis)', async () => {
+		// The residual-stall fix caps ANALYZE with `PRAGMA analysis_limit = 400`
+		// so it can't hold the writer slot for seconds. That must BOUND the scan,
+		// not switch analysis off — otherwise the query planner loses its stats.
+		// Seed a freshly-created indexed table with >analysis_limit rows: SQLite
+		// (>= 3.46) analyzes an indexed table lacking a sqlite_stat1 entry, and
+		// the row count exceeds the 400-row limit so the limit is genuinely in
+		// effect. After the optimize kind runs, sqlite_stat1 must hold a row for
+		// the table's index — proving ANALYZE executed.
+		{
+			const db = new Database(dbPath, { create: true });
+			try {
+				db.exec("PRAGMA journal_mode = WAL");
+				db.exec("CREATE TABLE analyzed (id INTEGER PRIMARY KEY, v TEXT)");
+				db.exec("CREATE INDEX idx_analyzed_v ON analyzed(v)");
+				const ins = db.prepare("INSERT INTO analyzed (v) VALUES (?)");
+				db.exec("BEGIN");
+				for (let i = 0; i < 1000; i++) ins.run(`val-${i % 50}`);
+				db.exec("COMMIT");
+			} finally {
+				db.close();
+			}
+		}
+
+		const worker = spawnWorker();
+		try {
+			const result = await roundTrip<{ ok: boolean; skipped?: boolean }>(
+				worker,
+				{ dbPath, kind: "optimize" },
+			);
+			expect(result.ok).toBe(true);
+			expect(result.skipped).toBe(false);
+		} finally {
+			worker.terminate();
+		}
+
+		// ANALYZE writes estimated stats into sqlite_stat1 even when
+		// analysis_limit caps the scan — assert a row exists for our index.
+		const check = new Database(dbPath);
+		try {
+			const row = check
+				.query<{ n: number }, []>(
+					"SELECT COUNT(*) AS n FROM sqlite_stat1 WHERE idx = 'idx_analyzed_v'",
+				)
+				.get();
+			expect(row?.n ?? 0).toBeGreaterThan(0);
+		} finally {
+			check.close();
+		}
+	});
 });
