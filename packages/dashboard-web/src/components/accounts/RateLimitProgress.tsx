@@ -6,7 +6,7 @@ import type {
 	UsagePrediction,
 } from "@clankermux/types";
 import { isUsablePrediction } from "@clankermux/types";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
 	formatDuration,
 	formatPredictionMessage,
@@ -285,15 +285,21 @@ export function RateLimitProgress({
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
+	// Each mounted card needs its OWN ticker. The shared IntervalManager keys
+	// intervals by id and replaces any colliding one, so a hard-coded id would
+	// make every newly-mounted card cancel the previous card's ticker — leaving
+	// only the last card's countdown live and freezing all the others until a
+	// full page reload. useId() gives every instance a stable, unique id.
+	const instanceId = useId();
 	useEffect(() => {
 		const unregisterInterval = registerUIRefresh({
-			id: "rate-limit-progress-update",
+			id: `rate-limit-progress-update-${instanceId}`,
 			callback: () => setNow(Date.now()),
 			seconds: 30,
 			description: "Rate limit progress UI update",
 		});
 		return unregisterInterval;
-	}, []);
+	}, [instanceId]);
 
 	// Allow null resetIso for providers that show usage data (e.g. PayG mode)
 	// but still render null if there's no resetIso and no usage data to show
