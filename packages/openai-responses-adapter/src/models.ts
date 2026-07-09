@@ -12,6 +12,9 @@
 // CURRENTLY-SERVED Codex models (per the codex-cli models cache, 2026-06-09);
 // retired slugs (gpt-5-codex, gpt-5.3-codex) were dropped.
 const CODEX_MODELS = [
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",

@@ -150,9 +150,10 @@ describe("context-window gate", () => {
 	});
 
 	it("gates a default-config codex account (no model_mappings) on its family-default window", async () => {
-		// No model_mappings → opus resolves to the gpt-5.5 family default (272K,
-		// threshold 263840), matching what the provider actually sends. An oversized
-		// request must be excluded by the gate rather than slipping through.
+		// No model_mappings → opus resolves to the gpt-5.6-sol family default (353K,
+		// threshold 342410), matching what the provider actually sends. An oversized
+		// request must be excluded by the gate rather than slipping through. Sized
+		// past the FULL 353K window so even the unmargined last-resort rejects it.
 		const codexAccount = makeAccount({
 			id: "codex-default",
 			name: "Codex-default",
@@ -161,7 +162,7 @@ describe("context-window gate", () => {
 		});
 
 		const ctx = makeContext([codexAccount]);
-		const req = makeLargeRequest(350_000);
+		const req = makeLargeRequest(500_000);
 		const response = await callHandleProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
@@ -172,7 +173,7 @@ describe("context-window gate", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
-		expect(error.message as string).toContain("gpt-5.5");
+		expect(error.message as string).toContain("gpt-5.6-sol");
 	});
 
 	it("returns x-clankermux-pool-status: context-window-exceeded header", async () => {

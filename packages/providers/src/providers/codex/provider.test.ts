@@ -1729,7 +1729,7 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.4");
+		expect(body.model).toBe("gpt-5.6-terra");
 	});
 
 	it("maps fable and mythos models to the top Codex tier", async () => {
@@ -1751,7 +1751,7 @@ describe("CodexProvider.transformRequestBody", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("gpt-5.5");
+			expect(body.model).toBe("gpt-5.6-sol");
 		}
 	});
 
@@ -1817,7 +1817,7 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.4-mini");
+		expect(body.model).toBe("gpt-5.6-luna");
 	});
 
 	it("passes through unknown model names unchanged", async () => {
@@ -1958,7 +1958,7 @@ describe("CodexProvider native Responses passthrough", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.4");
+		expect(body.model).toBe("gpt-5.6-terra");
 		expect(body.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "hello" }] },
 		]);
