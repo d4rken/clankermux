@@ -376,7 +376,12 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.dbConfig = {
 			walMode: true,
 			busyTimeoutMs: 10000,
-			cacheSize: -5000,
+			// 256 MiB (negative = KiB). Fallback default for when no runtime config
+			// is supplied; kept in sync with the runtime-config default in
+			// packages/config/src/index.ts so a big-table INSERT keeps its hot
+			// B-tree pages resident instead of doing cold-page disk I/O (~250 ms
+			// event-loop blips). The runtime config normally overrides this.
+			cacheSize: -262144,
 			synchronous: "FULL",
 			mmapSize: 0,
 			pageSize: 2048,
