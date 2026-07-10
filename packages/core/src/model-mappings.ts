@@ -395,12 +395,13 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.4": 272_000,
 	"gpt-5.4-mini": 272_000,
 	"gpt-5.3-codex-spark": 128_000,
-	// GPT-5.6 tiers. `gpt-5.6-sol` is CONFIRMED: the Codex TUI reported a 353K
-	// window for it on a prolite plan (public API lists ~1.05M, but the
-	// Codex-served/plan-gated window is smaller — same story as gpt-5.5's 272K
-	// vs its 400K public figure). `terra`/`luna` are ASSUMED equal to sol (353K)
-	// pending direct verification from the TUI — likely a plan-wide cap. Correct
-	// these once terra/luna are observed.
+	// GPT-5.6 tiers — all three VERIFIED on a prolite plan (2026-07-10). The
+	// Codex TUI reports a 353K window for each (sol's session data shows the
+	// exact 353,400); the public API lists ~1.05M, but the Codex-served window
+	// is smaller — same story as gpt-5.5's 272K vs its 400K public figure. We
+	// store 353_000: it faithfully represents the TUI's "353K" and sits within
+	// the gate's 0.97 margin of the exact value. terra/luna availability was
+	// confirmed by direct probe (HTTP 200); their windows read 353K in the TUI.
 	"gpt-5.6-sol": 353_000,
 	"gpt-5.6-terra": 353_000,
 	"gpt-5.6-luna": 353_000,
@@ -532,9 +533,9 @@ export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	"opus" | "sonnet" | "haiku" | "fable",
 	string
 > = {
-	// GPT-5.6 tier-matched: flagship→sol, balanced→terra, efficient→luna. sol's
-	// 353K window is confirmed; terra/luna windows are assumed 353K (see
-	// MODEL_CONTEXT_WINDOWS) pending verification.
+	// GPT-5.6 tier-matched: flagship→sol, balanced→terra, efficient→luna. All
+	// three verified served on a prolite plan with a 353K window (see
+	// MODEL_CONTEXT_WINDOWS), 2026-07-10.
 	opus: "gpt-5.6-sol",
 	sonnet: "gpt-5.6-terra",
 	haiku: "gpt-5.6-luna",
