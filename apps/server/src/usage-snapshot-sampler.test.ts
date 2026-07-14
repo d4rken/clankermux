@@ -1,13 +1,13 @@
 /**
  * Tests for the PURE `buildSnapshotRows` helper that turns the in-memory usage
  * cache into write-ready `UsageSnapshotRow`s for the rate-limit "sawtooth"
- * time-series, plus the sampler's Codex-probe retry/skip behavior driven through
- * its public `tick()`. The timer/scheduling path is still exercised via
- * integration in the running server.
+ * time-series, plus the sampler's pure read-through `tick()` behavior. The
+ * sampler never probes/spends — it only reads the shared cache — so pause is
+ * irrelevant to what gets recorded. The timer/scheduling path is still exercised
+ * via integration in the running server.
  */
 import { describe, expect, it } from "bun:test";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
-import type { CodexUsageRefreshOutcome } from "@clankermux/proxy";
 import type { Account, UsageSnapshotRow } from "@clankermux/types";
 import {
 	buildSnapshotRows,
@@ -278,7 +278,7 @@ describe("buildSnapshotRows", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Codex probe behavior (via the sampler's public `tick()`)
+// Pure read-through behavior (via the sampler's public `tick()`)
 // ---------------------------------------------------------------------------
 
 /** Minimal Account-shaped object for the sampler's getAccounts/provider/paused. */
@@ -288,21 +288,18 @@ function acct(id: string, provider: string, paused = false): Account {
 
 interface SamplerHarness {
 	sampler: UsageSnapshotSampler;
-	probeCalls: () => number;
 	insertedRows: () => UsageSnapshotRow[];
 }
 
 /**
- * Build a sampler with mocked deps. `refreshCodex` counts calls and returns the
- * supplied outcomes in sequence (last one repeats). `codexProbeRetryDelayMs: 0`
- * keeps retries instant.
+ * Build a sampler with mocked deps. There is NO refresher/probe dependency —
+ * the sampler is a pure read-through observer, so it only reads the supplied
+ * cache and never spends quota.
  */
 function makeSampler(opts: {
 	accounts: Account[];
 	cache: SamplerCache;
-	outcomes: CodexUsageRefreshOutcome[];
 }): SamplerHarness {
-	let calls = 0;
 	const inserted: UsageSnapshotRow[] = [];
 	const sampler = new UsageSnapshotSampler({
 		getAccounts: async () => opts.accounts,
@@ -310,54 +307,70 @@ function makeSampler(opts: {
 			inserted.push(...rows);
 		},
 		cache: opts.cache,
-		refreshCodex: async () => {
-			const outcome = opts.outcomes[Math.min(calls, opts.outcomes.length - 1)];
-			calls++;
-			return outcome ?? { success: false, message: "no outcome" };
-		},
 		getFreshnessMs: () => FRESHNESS,
 		getPollIntervalMs: () => 90_000,
-		codexProbeRetryDelayMs: 0,
 	});
 	return {
 		sampler,
-		probeCalls: () => calls,
 		insertedRows: () => inserted,
 	};
 }
 
-describe("UsageSnapshotSampler Codex probe", () => {
-	it("retries once when the probe returns no usage (success:false)", async () => {
+describe("UsageSnapshotSampler read-through tick", () => {
+	it("records rows purely from the cache for both codex and anthropic", async () => {
+		const h = makeSampler({
+			accounts: [acct("codex-1", "codex"), acct("anth-1", "anthropic")],
+			cache: makeCache({
+				"codex-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 7 }) },
+				"anth-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 42 }) },
+			}),
+		});
+
+		await h.sampler.tick();
+
+		const rows = h.insertedRows();
+		expect(rows).toHaveLength(2);
+		expect(rows.find((r) => r.accountId === "codex-1")?.fiveHourPct).toBe(7);
+		expect(rows.find((r) => r.accountId === "anth-1")?.fiveHourPct).toBe(42);
+	});
+
+	it("writes an honest gap (no row) when a codex cache entry is missing", async () => {
 		const h = makeSampler({
 			accounts: [acct("codex-1", "codex")],
 			cache: makeCache({ "codex-1": { ageMs: null, data: null } }),
-			outcomes: [
-				{ success: false, message: "no headers" },
-				{ success: false, message: "no headers" },
-			],
 		});
 
 		await h.sampler.tick();
 
-		// 1 initial attempt + 1 retry = 2 calls; no row (cache empty).
-		expect(h.probeCalls()).toBe(2);
 		expect(h.insertedRows()).toHaveLength(0);
 	});
 
-	it("does not retry when the first probe succeeds", async () => {
+	it("writes an honest gap (no row) when a cache entry is staler than freshness", async () => {
 		const h = makeSampler({
-			accounts: [acct("codex-1", "codex")],
+			accounts: [acct("anth-1", "anthropic")],
 			cache: makeCache({
-				// After a successful probe the real cache is warm; simulate fresh data.
-				"codex-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 7 }) },
+				"anth-1": {
+					ageMs: FRESHNESS + 1, // just over the freshness window
+					data: usageData({ fiveHourUtil: 50 }),
+				},
 			}),
-			outcomes: [{ success: true, message: "ok" }],
 		});
 
 		await h.sampler.tick();
 
-		expect(h.probeCalls()).toBe(1);
-		// Fresh codex data → a row is recorded.
+		expect(h.insertedRows()).toHaveLength(0);
+	});
+
+	it("still records a PAUSED codex account with a fresh cache entry (pause is irrelevant to reading)", async () => {
+		const h = makeSampler({
+			accounts: [acct("codex-1", "codex", true)],
+			cache: makeCache({
+				"codex-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 7 }) },
+			}),
+		});
+
+		await h.sampler.tick();
+
 		const rows = h.insertedRows();
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.accountId).toBe("codex-1");
@@ -365,16 +378,14 @@ describe("UsageSnapshotSampler Codex probe", () => {
 		expect(rows[0]?.fiveHourPct).toBe(7);
 	});
 
-	it("never probes a paused Codex account (avoids spend)", async () => {
+	it("writes an honest gap for a paused codex account with a missing entry", async () => {
 		const h = makeSampler({
 			accounts: [acct("codex-1", "codex", true)],
 			cache: makeCache({ "codex-1": { ageMs: null, data: null } }),
-			outcomes: [{ success: true, message: "ok" }],
 		});
 
 		await h.sampler.tick();
 
-		expect(h.probeCalls()).toBe(0);
 		expect(h.insertedRows()).toHaveLength(0);
 	});
 });

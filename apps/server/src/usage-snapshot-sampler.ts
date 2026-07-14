@@ -3,17 +3,21 @@
  * utilization into the `usage_snapshots` time-series that backs the dashboard
  * "sawtooth" Limits graph.
  *
+ * The sampler is a PURE READ-THROUGH observer: it only reads the shared
+ * in-memory usage cache and never issues an upstream request, so it never
+ * spends quota or starts a dormant window.
+ *
  * Design notes:
  *  - Only `anthropic` and `codex` accounts have the windowed `UsageData`
  *    (five_hour / seven_day). All other providers are excluded.
- *  - Anthropic accounts are kept warm by the existing 90s usage poller
- *    (`startUsagePollingWithRefresh`), so we just read their cache.
- *  - Codex has no free polling endpoint — each refresh costs a real (bounded)
- *    upstream request. We trigger the EXISTING bounded probe
- *    (`refreshCodexUsageForAccount`) on each tick so the cache is fresh, then
- *    read it. Paused Codex accounts are SKIPPED to avoid spend on accounts the
- *    operator has deliberately taken out of rotation; Anthropic is always
- *    recorded (its poll is free and runs regardless of paused state).
+ *  - The cache is kept warm WITHOUT the sampler's help: by real user traffic
+ *    (both providers, via `updateAccountMetadata`), by the Anthropic 90s usage
+ *    poller (`startUsagePollingWithRefresh`), and by the auto-refresh scheduler's
+ *    priming (which is gated per-account by `auto_refresh_enabled`). The sampler
+ *    just reads whatever those have populated — for Codex too. Because it never
+ *    probes, paused Codex accounts are treated no differently from any other:
+ *    pause is irrelevant to reading, so a paused account with a fresh cache
+ *    entry is still recorded.
  *  - Freshness is honest: if the cache for an account is missing or older than
  *    `freshnessMs`, no row is written (gaps are real, never carried forward).
  *    This is the WRITE path — the DB stores only what was actually observed.
@@ -31,10 +35,6 @@ import type {
 	UsageData,
 	UsageWindow,
 } from "@clankermux/providers";
-import {
-	type CodexUsageRefreshOutcome,
-	refreshCodexUsageForAccount,
-} from "@clankermux/proxy";
 import type { Account, UsageSnapshotRow } from "@clankermux/types";
 
 const log = new Logger("UsageSnapshotSampler");
@@ -43,17 +43,6 @@ const log = new Logger("UsageSnapshotSampler");
 export const SAMPLE_INTERVAL_MS = 120_000;
 /** Floor for the env-overridable sample cadence (30s). */
 const SAMPLE_INTERVAL_FLOOR_MS = 30_000;
-/** Per-account timeout for the bounded Codex probe so one hang can't stall a tick. */
-const CODEX_PROBE_TIMEOUT_MS = 8_000;
-/**
- * How many times to attempt the Codex probe per tick. The at-rest probe
- * intermittently comes back without the `x-codex-*` usage headers; a single
- * retry meaningfully tightens an otherwise-gappy Codex line at the cost of one
- * extra bounded request on a miss.
- */
-const CODEX_PROBE_ATTEMPTS = 2;
-/** Delay between Codex probe attempts (lets the per-account in-flight dedup clear). */
-const CODEX_PROBE_RETRY_DELAY_MS = 1_500;
 
 /** Minimal cache surface the pure projection needs (matches `usageCache`). */
 export interface SamplerCache {
@@ -150,23 +139,14 @@ export function resolveSampleIntervalMs(): number {
 	return SAMPLE_INTERVAL_MS;
 }
 
-/** True for any account currently paused. */
-function isPaused(account: Account): boolean {
-	return account.paused === true;
-}
-
 /** Dependencies the sampler needs from the host server. */
 export interface UsageSnapshotSamplerDeps {
-	/** Re-read the live account list each tick (add/remove/pause aware). */
+	/** Re-read the live account list each tick (add/remove aware). */
 	getAccounts: () => Promise<Account[]>;
 	/** Persist a batch of snapshot rows. */
 	insertSnapshots: (rows: UsageSnapshotRow[]) => Promise<void>;
 	/** The shared in-memory usage cache. */
 	cache: SamplerCache;
-	/** Trigger the bounded Codex usage probe for one account. */
-	refreshCodex?: (accountId: string) => Promise<CodexUsageRefreshOutcome>;
-	/** Delay between Codex probe retries (ms). Overridable for fast tests. */
-	codexProbeRetryDelayMs?: number;
 	/** Resolve the freshness window in ms (`max(2*pollInterval, 150_000)`). */
 	getFreshnessMs: () => number;
 	/**
@@ -180,13 +160,12 @@ export interface UsageSnapshotSamplerDeps {
 /**
  * Periodic sampler. Each tick:
  *  1) stamps one shared `now`,
- *  2) primes Codex accounts via the bounded probe (per-account try/catch +
- *     timeout; paused Codex accounts skipped),
- *  3) projects the cache → rows via `buildSnapshotRows`,
+ *  2) reads the live account list,
+ *  3) projects the cache → rows via `buildSnapshotRows` (pure read-through),
  *  4) writes any non-empty batch (DB errors are logged, never thrown).
  *
  * Registered through `intervalManager` with `maxConcurrent: 1` so a slow tick
- * (e.g. a hanging Codex probe) can never overlap the next.
+ * can never overlap the next.
  */
 export class UsageSnapshotSampler {
 	private readonly deps: UsageSnapshotSamplerDeps;
@@ -195,12 +174,7 @@ export class UsageSnapshotSampler {
 	private readonly intervalId = "usage-snapshot-sampler";
 
 	constructor(deps: UsageSnapshotSamplerDeps) {
-		// Apply the default only when the caller omits the field — spreading an
-		// explicit `refreshCodex: undefined` must not silently restore the default
-		// (a test suppressing the probe relies on this).
 		this.deps = { ...deps };
-		this.deps.refreshCodex ??= refreshCodexUsageForAccount;
-		this.deps.codexProbeRetryDelayMs ??= CODEX_PROBE_RETRY_DELAY_MS;
 	}
 
 	/**
@@ -267,14 +241,6 @@ export class UsageSnapshotSampler {
 			return;
 		}
 
-		// Prime Codex accounts (bounded probe) before reading the cache. Skip
-		// paused Codex accounts to avoid spend; Anthropic is kept warm for free
-		// by its own poller regardless of paused state.
-		const codexToProbe = accounts.filter(
-			(a) => a.provider === "codex" && !isPaused(a),
-		);
-		await Promise.all(codexToProbe.map((a) => this.probeCodex(a.id)));
-
 		const freshnessMs = this.deps.getFreshnessMs();
 		const rows = buildSnapshotRows(accounts, this.deps.cache, now, freshnessMs);
 
@@ -289,62 +255,6 @@ export class UsageSnapshotSampler {
 		} catch (err) {
 			// A DB error must not kill the interval — log and move on.
 			log.error(`Snapshot sampler: failed to persist snapshots: ${err}`);
-		}
-	}
-
-	/**
-	 * Trigger the bounded Codex probe for one account, inspecting the outcome so
-	 * the otherwise-silent "no usage headers" case is surfaced, and retrying once
-	 * on a non-success result to tighten the gappy Codex line. Each attempt has a
-	 * per-attempt timeout + try/catch so a hang or failure can't stall or abort
-	 * the tick. A throw/timeout is NOT retried — the underlying request may still
-	 * be in flight and would be deduped by the refresher's in-flight tracker.
-	 */
-	private async probeCodex(accountId: string): Promise<void> {
-		const refresh = this.deps.refreshCodex;
-		if (!refresh) return;
-		const retryDelayMs =
-			this.deps.codexProbeRetryDelayMs ?? CODEX_PROBE_RETRY_DELAY_MS;
-
-		for (let attempt = 1; attempt <= CODEX_PROBE_ATTEMPTS; attempt++) {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				const outcome = await Promise.race([
-					refresh(accountId),
-					new Promise<never>((_, reject) => {
-						timer = setTimeout(
-							() => reject(new Error("codex probe timeout")),
-							CODEX_PROBE_TIMEOUT_MS,
-						);
-					}),
-				]);
-				if (outcome.success) return; // fresh usage cached — done
-
-				// Resolved but no usage data (e.g. response lacked x-codex-* headers).
-				// This used to be swallowed silently; surface it and retry once.
-				if (attempt < CODEX_PROBE_ATTEMPTS) {
-					log.debug(
-						`Snapshot sampler: Codex probe for ${accountId} returned no usage (${outcome.message}); retrying`,
-					);
-					await new Promise<void>((resolve) =>
-						setTimeout(resolve, retryDelayMs),
-					);
-					continue;
-				}
-				log.debug(
-					`Snapshot sampler: Codex probe for ${accountId} returned no usage after ${attempt} attempts (${outcome.message}); skipping this tick`,
-				);
-				return;
-			} catch (err) {
-				log.warn(
-					`Snapshot sampler: Codex probe failed for ${accountId}: ${err}`,
-				);
-				return;
-			} finally {
-				// Clear the timeout so it can't keep the event loop alive after the
-				// probe settled (or fire a no-op rejection on an already-settled race).
-				if (timer) clearTimeout(timer);
-			}
 		}
 	}
 }

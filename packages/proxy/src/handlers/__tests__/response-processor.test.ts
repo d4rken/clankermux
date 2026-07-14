@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { usageCache } from "@clankermux/providers";
+import { type CodexCreditsInfo, usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import {
 	clearAnthropicBurstThrottle,
@@ -899,6 +899,119 @@ describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 
 		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		usageCache.delete(account.id);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Codex credits carry-forward.
+//
+// A credits-less Codex response (one that carries usage headers but NO
+// x-codex-credits-* headers) must PRESERVE the previously-cached codexCredits
+// rather than dropping it when usageCache.set overwrites the entry. The header
+// absence signals a "non-credits-aware response", NOT "off credits" — so
+// blanking the state would wipe the dashboard credits chip and let the
+// auto-refresh overage-resume guard (shouldResumeFromOverage, which consults
+// usageCache.codexCredits) resume an account that is still on paid credits. A
+// response that DOES carry credits headers still wins (fresh state overwrites).
+// ---------------------------------------------------------------------------
+describe("processProxyResponse — Codex credits carry-forward", () => {
+	function codexResponseWithCredits(
+		fiveHourResetMs: number,
+		creditsHeaders: Record<string, string>,
+	): Response {
+		return new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: {
+				"content-type": "application/json",
+				"x-codex-primary-window-minutes": "300",
+				"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
+				...creditsHeaders,
+			},
+		});
+	}
+
+	it("preserves prior codexCredits when the response carries NO x-codex-credits-* headers", async () => {
+		const account = makeAccount({
+			id: "codex-credits-carry",
+			provider: "codex",
+		});
+		const futureResetMs = Date.now() + 4 * 60 * 60 * 1000;
+		const seededCredits: CodexCreditsInfo = {
+			hasCredits: true,
+			balance: 12.5,
+			unlimited: false,
+			planType: "pro",
+			weeklyUsedPct: 42,
+		};
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(futureResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+			codexCredits: seededCredits,
+		});
+
+		const { ctx } = makeCodexCtx();
+		// codexResponse() emits usage headers but NO x-codex-credits-* headers, so
+		// parseCodexCreditsHeaders returns null. The cache entry is still
+		// overwritten (fresh usage), but the prior credits must carry forward.
+		await processProxyResponse(codexResponse(futureResetMs), account, ctx);
+
+		const cached = usageCache.get(account.id) as {
+			codexCredits?: CodexCreditsInfo | null;
+		} | null;
+		expect(cached?.codexCredits).toEqual(seededCredits);
+
+		usageCache.delete(account.id);
+	});
+
+	it("overwrites prior codexCredits when the response DOES carry x-codex-credits-* headers", async () => {
+		const account = makeAccount({
+			id: "codex-credits-fresh",
+			provider: "codex",
+		});
+		const futureResetMs = Date.now() + 4 * 60 * 60 * 1000;
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(futureResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+			codexCredits: {
+				hasCredits: false,
+				balance: null,
+				unlimited: false,
+				planType: "prolite",
+				weeklyUsedPct: null,
+			},
+		});
+
+		const { ctx } = makeCodexCtx();
+		await processProxyResponse(
+			codexResponseWithCredits(futureResetMs, {
+				"x-codex-credits-has-credits": "true",
+				"x-codex-credits-balance": "7.25",
+				"x-codex-credits-unlimited": "false",
+				"x-codex-plan-type": "pro",
+				"x-codex-secondary-used-percent": "88",
+			}),
+			account,
+			ctx,
+		);
+
+		const cached = usageCache.get(account.id) as {
+			codexCredits?: CodexCreditsInfo | null;
+		} | null;
+		expect(cached?.codexCredits).toEqual({
+			hasCredits: true,
+			balance: 7.25,
+			unlimited: false,
+			planType: "pro",
+			weeklyUsedPct: 88,
+		});
+
 		usageCache.delete(account.id);
 	});
 });
