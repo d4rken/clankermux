@@ -1618,9 +1618,11 @@ Available endpoints:
 
 	// Start the usage-snapshot sampler: a periodic job that records per-account
 	// rate-limit utilization into the usage_snapshots time-series (the Limits
-	// "sawtooth" graph). It reads the warm usage cache (Anthropic kept warm by
-	// the pollers above; Codex primed via its bounded on-demand probe each tick)
-	// and defers its first sample until after the startup poll-stagger wave.
+	// "sawtooth" graph). It is a pure read-through observer of the warm usage
+	// cache (kept warm by real traffic, the Anthropic pollers above, and the
+	// auto_refresh_enabled-gated auto-refresh priming — never by the sampler
+	// itself, so it spends no quota) and defers its first sample until after the
+	// startup poll-stagger wave.
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),

@@ -1,6 +1,7 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	type CodexCreditsInfo,
 	getFreshCapacity,
 	isGenuineWindowRoll,
 	type Provider,
@@ -134,10 +135,21 @@ export function updateAccountMetadata(
 			// past its weekly limit. The dashboard reads this; the auto-refresh
 			// resume guard also consults it to avoid resuming a still-on-credits
 			// account on a 5h reset. Only overwrite when the header is present —
-			// absence signals a non-credits-aware response, not "off credits".
+			// absence signals a non-credits-aware response, not "off credits". Since
+			// the usageCache.set below fully replaces the prior entry, an absent
+			// header must carry the last known credits FORWARD onto the freshly-built
+			// codexUsage; otherwise a single credits-less response would silently drop
+			// credits/overage state learned from an earlier response.
 			const creditsInfo = parseCodexCreditsHeaders(response.headers);
 			if (creditsInfo !== null) {
 				codexUsage.codexCredits = creditsInfo;
+			} else {
+				const prevCredits = (
+					prevUsage as { codexCredits?: CodexCreditsInfo | null } | null
+				)?.codexCredits;
+				if (prevCredits != null) {
+					codexUsage.codexCredits = prevCredits;
+				}
 			}
 
 			usageCache.set(account.id, codexUsage);

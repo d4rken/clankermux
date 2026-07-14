@@ -332,6 +332,25 @@ export class AutoRefreshScheduler {
 		pause_reason: string | null;
 	}): Promise<boolean> {
 		try {
+			// Query-to-dispatch race guard: checkAndRefresh() selects a batch of
+			// auto_refresh_enabled=1 accounts, then awaits this dispatch per account.
+			// An operator can toggle auto_refresh_enabled OFF in the dashboard between
+			// that SELECT and this point. Re-read the CURRENT flag and skip the probe
+			// if it is now 0 (or the account was deleted mid-pass) so autonomous
+			// priming never starts a window for an account the operator just turned
+			// off — no real quota spent. This single guard covers both callers (the
+			// 5h refresh loop and the weekly-dormant prime); both route through here.
+			const freshFlag = await this.db.query<{ auto_refresh_enabled: number }>(
+				"SELECT COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled FROM accounts WHERE id = ?",
+				[accountRow.id],
+			);
+			if (!freshFlag[0] || freshFlag[0].auto_refresh_enabled === 0) {
+				log.info(
+					`Skipping auto-refresh dispatch for ${accountRow.name} — auto_refresh_enabled turned off since selection`,
+				);
+				return false;
+			}
+
 			log.info(`Sending auto-refresh message to account: ${accountRow.name}`);
 
 			const provider = getProvider(accountRow.provider);
