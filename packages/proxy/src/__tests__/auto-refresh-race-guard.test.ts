@@ -2,19 +2,20 @@
  * Regression test: query-to-dispatch race in AutoRefreshScheduler.
  *
  * checkAndRefresh() SELECTs a batch of auto_refresh_enabled=1 accounts, then
- * awaits sendDummyMessage(row) per account (and, once per cycle, for the
- * weekly-dormant prime). Each sendDummyMessage awaits a network dispatch, so an
- * operator can toggle auto_refresh_enabled OFF in the dashboard between the
- * batch SELECT and a given account's dispatch. sendDummyMessage re-reads the
- * CURRENT flag at the very top and MUST skip the probe — no upstream dispatch,
- * real quota preserved — when it is now 0 (or the row was deleted mid-pass).
+ * awaits sendTranslatedClaudePrime(row) per anthropic/zai account (and, once per
+ * cycle, for the weekly-dormant prime). Each sendTranslatedClaudePrime awaits a
+ * network dispatch, so an operator can toggle auto_refresh_enabled OFF in the
+ * dashboard between the batch SELECT and a given account's dispatch.
+ * sendTranslatedClaudePrime re-reads the CURRENT flag at the very top and MUST
+ * skip the probe — no upstream dispatch, real quota preserved — when it is now 0
+ * (or the row was deleted mid-pass).
  *
  * The single guard covers BOTH callers (the 5h refresh loop and the
- * weekly-dormant prime) because both route through sendDummyMessage.
+ * weekly-dormant prime) because both route through sendTranslatedClaudePrime.
  *
  * Strategy: mock.module("../dispatch") so we can observe whether the scheduler
- * dispatched, then call sendDummyMessage directly (private, reached via cast)
- * with a mock db whose re-check query returns 0 / 1 / [] per scenario.
+ * dispatched, then call sendTranslatedClaudePrime directly (private, reached via
+ * cast) with a mock db whose re-check query returns 0 / 1 / [] per scenario.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
@@ -59,8 +60,8 @@ type AccountRow = {
 
 /**
  * Mock db whose `query` always returns the given re-check rows. When
- * sendDummyMessage is called directly the ONLY query it issues is the mid-pass
- * auto_refresh_enabled re-read, so this cleanly drives the guard branch.
+ * sendTranslatedClaudePrime is called directly the ONLY query it issues is the
+ * mid-pass auto_refresh_enabled re-read, so this cleanly drives the guard branch.
  */
 function makeDb(recheckRows: FlagRow[]) {
 	const queryCalls: Array<{ sql: string; params: unknown[] }> = [];
@@ -83,7 +84,7 @@ function makeProxyContext() {
 }
 
 type SchedulerInternals = AutoRefreshScheduler & {
-	sendDummyMessage(row: AccountRow): Promise<boolean>;
+	sendTranslatedClaudePrime(row: AccountRow): Promise<boolean>;
 };
 
 function makeScheduler(db: ReturnType<typeof makeDb>): SchedulerInternals {
@@ -125,7 +126,7 @@ describe("AutoRefreshScheduler — query-to-dispatch race guard", () => {
 		const db = makeDb([{ auto_refresh_enabled: 0 }]);
 		const scheduler = makeScheduler(db);
 
-		const result = await scheduler.sendDummyMessage(makeRow());
+		const result = await scheduler.sendTranslatedClaudePrime(makeRow());
 
 		expect(result).toBe(false);
 		// No probe was dispatched — real quota preserved.
@@ -144,7 +145,7 @@ describe("AutoRefreshScheduler — query-to-dispatch race guard", () => {
 		const db = makeDb([]); // no row for this id
 		const scheduler = makeScheduler(db);
 
-		const result = await scheduler.sendDummyMessage(makeRow());
+		const result = await scheduler.sendTranslatedClaudePrime(makeRow());
 
 		expect(result).toBe(false);
 		expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
@@ -157,7 +158,7 @@ describe("AutoRefreshScheduler — query-to-dispatch race guard", () => {
 		// Dispatch stub returns 500, so the method ultimately takes the failure
 		// path and returns false — but the point under test is that it DISPATCHED
 		// (the guard let a still-enabled account through), unlike the cases above.
-		await scheduler.sendDummyMessage(makeRow());
+		await scheduler.sendTranslatedClaudePrime(makeRow());
 
 		expect(mockDispatchProxyRequest).toHaveBeenCalled();
 		expect(dispatchCalls.length).toBeGreaterThanOrEqual(1);

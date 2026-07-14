@@ -13,10 +13,12 @@
  *  - The cache is kept warm WITHOUT the sampler's help: by real user traffic
  *    (both providers, via `updateAccountMetadata`), by the Anthropic 90s usage
  *    poller (`startUsagePollingWithRefresh`), and by the auto-refresh scheduler's
- *    priming (which is gated per-account by `auto_refresh_enabled`). The sampler
- *    just reads whatever those have populated — for Codex too. Because it never
- *    probes, paused Codex accounts are treated no differently from any other:
- *    pause is irrelevant to reading, so a paused account with a fresh cache
+ *    priming (gated per-account by `auto_refresh_enabled`) — anthropic/zai via the
+ *    translated Claude prime, Codex via the CodexSpendCoordinator's native
+ *    `/responses` ping (which writes `usageCache` through `applyCodexObservation`).
+ *    The sampler just reads whatever those have populated — for Codex too. Because
+ *    it never probes, paused Codex accounts are treated no differently from any
+ *    other: pause is irrelevant to reading, so a paused account with a fresh cache
  *    entry is still recorded.
  *  - Freshness is honest: if the cache for an account is missing or older than
  *    `freshnessMs`, no row is written (gaps are real, never carried forward).

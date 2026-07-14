@@ -23,6 +23,11 @@ export {
 } from "./bridge-policy";
 export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
+export {
+	type CodexSpendCause,
+	CodexSpendCoordinator,
+	type CodexSpendResult,
+} from "./codex-spend-coordinator";
 export { dispatchProxyRequest } from "./dispatch";
 export {
 	type CodexUsageRefreshOutcome,

@@ -188,7 +188,7 @@ describe("AutoRefreshScheduler — consecutive failure threshold", () => {
 		);
 
 		// Validate that Map.delete removes the entry — this is the operation
-		// sendDummyMessage performs on success to reset the failure counter.
+		// sendTranslatedClaudePrime performs on success to reset the failure counter.
 		scheduler.consecutiveFailures.delete("acc-1");
 		expect(scheduler.consecutiveFailures.get("acc-1")).toBeUndefined();
 	});

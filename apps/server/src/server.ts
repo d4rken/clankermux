@@ -38,8 +38,6 @@ import {
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
 import {
-	CODEX_DEFAULT_ENDPOINT,
-	fetchCodexUsageOnDemand,
 	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
@@ -49,9 +47,9 @@ import {
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
+	CodexSpendCoordinator,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
-	getValidAccessToken,
 	handleProxy,
 	type ProxyContext,
 	RequestRecorder,
@@ -989,6 +987,13 @@ export default async function startServer(options?: {
 		requestRecorder,
 	};
 
+	// The single authority for autonomous (scheduled-prime) and manual
+	// (manual-refresh) Codex spend. Constructed ONCE over this proxyContext and
+	// shared: Step 3 injects it into the auto-refresh scheduler (below) so codex
+	// priming uses the native `/responses` ping instead of the translated Haiku
+	// dummy; Step 4 will reuse this SAME instance in the codex usage refresher.
+	const codexSpendCoordinator = new CodexSpendCoordinator(proxyContext);
+
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
 	// Track at module scope so handleGracefulShutdown can unregister cleanly.
@@ -1033,114 +1038,18 @@ export default async function startServer(options?: {
 		return true;
 	});
 
-	// Register this server's codex on-demand usage refresher. Codex does not
-	// expose a free usage endpoint (unlike Anthropic's /api/oauth/usage), so
-	// each call sends a tiny upstream request and parses the x-codex-* headers
-	// from the response. Cost is bounded by `max_output_tokens: 1` plus the
-	// abort-after-headers cancel inside fetchCodexUsageOnDemand.
-	registerCodexUsageRefresher(serverId, async (accountId: string) => {
-		const account = await dbOps.getAccount(accountId);
-		if (!account) {
-			return {
-				success: false,
-				message: `Account ${accountId} not found`,
-			};
-		}
-		if (account.provider !== "codex") {
-			return {
-				success: false,
-				message: `Account '${account.name}' is not a Codex account`,
-			};
-		}
-		if (!account.access_token && !account.refresh_token) {
-			return {
-				success: false,
-				message: `Account '${account.name}' has no tokens — please re-authenticate`,
-			};
-		}
-
-		let accessToken: string;
-		try {
-			accessToken = await getValidAccessToken(account, proxyContext);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			log.warn(
-				`Codex usage refresh: failed to get access token for ${account.name}: ${message}`,
-			);
-			return {
-				success: false,
-				message: `Could not refresh access token for '${account.name}': ${message}`,
-			};
-		}
-
-		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
-
-		let fetchResult: Awaited<ReturnType<typeof fetchCodexUsageOnDemand>>;
-		try {
-			fetchResult = await fetchCodexUsageOnDemand(accessToken, endpoint);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			log.error(
-				`Codex usage refresh: upstream fetch failed for ${account.name}:`,
-				message,
-			);
-			return {
-				success: false,
-				message: `Codex request failed for '${account.name}': ${message}`,
-			};
-		}
-
-		// Persist rate-limit reset even on non-2xx so the dashboard sees the
-		// most accurate reset time when the account is currently limited.
-		const codexProvider = getProvider("codex");
-		if (codexProvider) {
-			const rl = codexProvider.parseRateLimit(fetchResult.response);
-			if (rl.resetTime != null) {
-				try {
-					await db.run(
-						"UPDATE accounts SET rate_limit_reset = ? WHERE id = ?",
-						[rl.resetTime, account.id],
-					);
-				} catch (error) {
-					log.warn(
-						`Codex usage refresh: failed to update rate_limit_reset for ${account.name}:`,
-						error,
-					);
-				}
-			}
-		}
-
-		if (!fetchResult.data) {
-			return {
-				success: false,
-				message: `Codex returned no usage headers (status ${fetchResult.response.status}) for '${account.name}'`,
-			};
-		}
-
-		usageCache.set(accountId, fetchResult.data);
-
-		const fiveHour = fetchResult.data.five_hour?.utilization ?? 0;
-		const sevenDay = fetchResult.data.seven_day?.utilization ?? 0;
-		const isRateLimited = fetchResult.response.status === 429;
-		log.info(
-			`Codex usage refreshed for '${account.name}': 5h=${fiveHour}%, 7d=${sevenDay}%${
-				isRateLimited ? " (rate-limited)" : ""
-			}`,
-		);
-
-		// 429 still produces a successful header refresh (the usage payload is
-		// what we wanted), but the dashboard message must not celebrate it —
-		// otherwise the operator sees "refreshed successfully" while the
-		// account is fully exhausted. See tombii's PR #219 review note.
-		const message = isRateLimited
-			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
-			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
-
-		return {
-			success: true,
-			message,
-		};
-	});
+	// Register this server's codex on-demand usage refresher. Delegates to the
+	// shared CodexSpendCoordinator: the manual "Refresh usage" click routes through
+	// observe(accountId, "manual-refresh") → applyCodexObservation, so it issues the
+	// native `/responses` ping, carries prior codexCredits FORWARD (fixing the old
+	// window-only `usageCache.set` overwrite that silently erased learned credits),
+	// persists the rate-limit reset, and applies a 429 cooldown — all through the
+	// single Codex spend authority. The manual-refresh cause ignores
+	// `auto_refresh_enabled` (explicit operator consent). Cost is bounded by
+	// `max_output_tokens: 1` plus the abort-after-headers cancel in the native ping.
+	registerCodexUsageRefresher(serverId, (accountId: string) =>
+		codexSpendCoordinator.refreshManual(accountId),
+	);
 
 	// Register this server's session-affinity clearing capability, so the
 	// "Reset session stickiness" HTTP action can wipe the in-memory affinity
@@ -1151,8 +1060,14 @@ export default async function startServer(options?: {
 			currentStrategy?.clearAffinityForAccount?.(accountId) ?? 0,
 	);
 
-	// Initialize auto-refresh scheduler (now that proxyContext is available)
-	autoRefreshScheduler = new AutoRefreshScheduler(db, proxyContext);
+	// Initialize auto-refresh scheduler (now that proxyContext is available).
+	// Inject the shared CodexSpendCoordinator so codex scheduled priming routes
+	// through the native ping; anthropic/zai keep the translated dummy path.
+	autoRefreshScheduler = new AutoRefreshScheduler(
+		db,
+		proxyContext,
+		codexSpendCoordinator,
+	);
 	autoRefreshScheduler.start();
 
 	// Initialize cache keepalive scheduler

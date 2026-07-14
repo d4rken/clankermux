@@ -873,7 +873,7 @@ describe("selectAccountsForRequest — auto-refresh bypass (overage-paused accou
 		// A manual pause must win even when auto_pause_on_overage_enabled is set:
 		// the auto-resume guard would never un-pause it, so admitting it on a
 		// bypass-session force-route just produces an endless probe loop. Mirrors
-		// the scheduler eligibility query and the sendDummyMessage resume guard.
+		// the scheduler eligibility query and the sendTranslatedClaudePrime resume guard.
 		const manualPausedAcc = makeAccount({
 			id: "acc-manual",
 			name: "manual-paused",

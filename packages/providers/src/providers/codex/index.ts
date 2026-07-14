@@ -3,9 +3,8 @@ export {
 	initiateCodexDeviceFlow,
 	pollCodexForToken,
 } from "./device-oauth";
+export { sendCodexNativePing } from "./native-ping";
 export { CodexOAuthProvider } from "./oauth";
-export type { CodexUsageRefreshFetchResult } from "./on-demand-fetch";
-export { fetchCodexUsageOnDemand } from "./on-demand-fetch";
 export {
 	CODEX_DEFAULT_ENDPOINT,
 	CODEX_PING_MODEL,
