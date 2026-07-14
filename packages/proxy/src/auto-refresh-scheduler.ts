@@ -14,6 +14,10 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
+import {
+	CodexSpendCoordinator,
+	type CodexSpendResult,
+} from "./codex-spend-coordinator";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
 import {
@@ -26,8 +30,8 @@ const log = new Logger("AutoRefreshScheduler");
 
 /**
  * The row shape selected by the auto-refresh eligibility query and consumed by
- * sendDummyMessage. Kept as a single alias so the 5h and weekly selection passes
- * share exactly the columns sendDummyMessage needs.
+ * sendTranslatedClaudePrime. Kept as a single alias so the 5h and weekly
+ * selection passes share exactly the columns sendTranslatedClaudePrime needs.
  */
 type AutoRefreshAccountRow = {
 	id: string;
@@ -76,10 +80,22 @@ export class AutoRefreshScheduler {
 	// Maximum age of a cached usage datum we will trust when classifying a weekly
 	// window as dormant. Older than this → treat as unknown and skip (no prime).
 	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
+	// The single authority for autonomous (scheduled-prime) Codex spend. Codex
+	// priming does NOT use the translated Haiku dummy dispatch — it flows through
+	// this coordinator, which owns the native `/responses` ping and ALL codex
+	// side-effects (usageCache, credits carry-forward, window-roll, rate-limit
+	// reset persistence, and the 429 cooldown). Injectable for tests; production
+	// constructs the real coordinator over the same proxyContext.
+	private readonly coordinator: CodexSpendCoordinator;
 
-	constructor(db: BunSqlAdapter, proxyContext: ProxyContext) {
+	constructor(
+		db: BunSqlAdapter,
+		proxyContext: ProxyContext,
+		coordinator?: CodexSpendCoordinator,
+	) {
 		this.db = db;
 		this.proxyContext = proxyContext;
+		this.coordinator = coordinator ?? new CodexSpendCoordinator(proxyContext);
 	}
 
 	/**
@@ -202,7 +218,7 @@ export class AutoRefreshScheduler {
 						rate_limited_until IS NULL OR rate_limited_until <= ?
 					)
 					-- Only probe a paused account if it was auto-paused due to billing
-					-- overage. The auto-resume guard in sendDummyMessage only un-pauses an
+					-- overage. The auto-resume guard in sendTranslatedClaudePrime only un-pauses an
 					-- account when auto_pause_on_overage_enabled=1 AND pause_reason IN
 					-- (NULL, 'overage'); selecting any other paused account here would probe
 					-- it forever yet never resume it. So a manually-paused account
@@ -260,10 +276,13 @@ export class AutoRefreshScheduler {
 			// not reclassify the account as weekly-only and prime it twice).
 			const fiveHourDueIds = new Set(accountsToRefresh.map((a) => a.id));
 
-			// Send dummy message to each account
-			// The sendDummyMessage method will update lastRefreshResetTime with the NEW rate_limit_reset from the API
+			// Prime each due account. primeAccount dispatches on provider: codex
+			// accounts flow through the CodexSpendCoordinator's native ping;
+			// anthropic/zai stay on the translated sendTranslatedClaudePrime path
+			// (which updates lastRefreshResetTime with the NEW rate_limit_reset from
+			// the API).
 			for (const accountRow of accountsToRefresh) {
-				await this.sendDummyMessage(accountRow);
+				await this.primeAccount(accountRow);
 			}
 
 			// WEEKLY-DORMANT priming: prime at most ONE account per cycle whose weekly
@@ -282,7 +301,7 @@ export class AutoRefreshScheduler {
 					`Weekly-dormant prime: priming ${weeklyAccount.name} (weekly window dormant; 5h window still active)`,
 				);
 				try {
-					await this.sendDummyMessage(weeklyAccount);
+					await this.primeAccount(weeklyAccount);
 				} finally {
 					// Set the cooldown timestamp even on failure so a failing prime does
 					// not retry-storm every cycle (no retry-storm).
@@ -315,10 +334,132 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * Send a dummy message to refresh the usage window for an account
+	 * Prime a single due account, dispatching on provider. Codex accounts flow
+	 * through the CodexSpendCoordinator's native `/responses` ping (which owns the
+	 * codex side-effects and the query-to-dispatch gate); anthropic/zai stay on the
+	 * translated Haiku sendTranslatedClaudePrime path (including its own race-guard).
+	 * Both the 5h loop and the weekly-dormant prime route through here.
+	 */
+	private async primeAccount(accountRow: AutoRefreshAccountRow): Promise<void> {
+		if (accountRow.provider === "codex") {
+			await this.primeCodexViaCoordinator(accountRow);
+			return;
+		}
+		await this.sendTranslatedClaudePrime(accountRow);
+	}
+
+	/**
+	 * Prime a codex account by asking the coordinator to observe a scheduled-prime
+	 * spend. The coordinator issues the native ping and applies ALL codex
+	 * side-effects (usageCache, credits carry-forward, window-roll + session reset,
+	 * rate_limit_reset persistence, and the 429 cooldown), so the scheduler only
+	 * interprets the outcome — it MUST NOT re-record usage/reset or re-apply the
+	 * cooldown for codex.
+	 */
+	private async primeCodexViaCoordinator(
+		accountRow: AutoRefreshAccountRow,
+	): Promise<void> {
+		const result = await this.coordinator.observe(
+			accountRow.id,
+			"scheduled-prime",
+		);
+		await this.handleCodexPrimeOutcome(accountRow, result);
+	}
+
+	/**
+	 * Interpret a codex scheduled-prime {@link CodexSpendResult}:
+	 *   - `skipped`   → NOT a failure (auto-refresh off / deleted / no tokens /
+	 *                   last-moment suppression). Log + return.
+	 *   - `failed`    → a genuine failure → recordRefreshFailure.
+	 *   - `completed` + responseOk (2xx) → prime success (matching the old
+	 *                   `response.ok` rule even when observation.usage is null):
+	 *                   update lastRefreshResetTime from observation.earliestResetMs
+	 *                   when present, clear the consecutive-failure counter, and run
+	 *                   the SAME overage-resume the translated path did.
+	 *   - `completed` + !responseOk (429/5xx) → recordRefreshFailure. The cooldown /
+	 *                   rate_limit_reset were already applied by the applicator; the
+	 *                   scheduler MUST NOT touch them here.
+	 */
+	private async handleCodexPrimeOutcome(
+		accountRow: AutoRefreshAccountRow,
+		result: CodexSpendResult,
+	): Promise<void> {
+		switch (result.status) {
+			case "skipped":
+				log.debug(
+					`Codex scheduled prime skipped for ${accountRow.name}: ${result.reason}`,
+				);
+				return;
+			case "failed":
+				await this.recordRefreshFailure(
+					accountRow.id,
+					accountRow.name,
+					"(codex native prime failed)",
+				);
+				return;
+			case "completed": {
+				if (!result.responseOk) {
+					// 429/5xx: the coordinator/applicator already persisted any reset and
+					// applied the 429 cooldown — do NOT re-apply it here. Just count the
+					// failure toward the re-auth threshold, matching the old failure path.
+					await this.recordRefreshFailure(
+						accountRow.id,
+						accountRow.name,
+						`(codex native prime status ${result.responseStatus})`,
+					);
+					return;
+				}
+
+				// 2xx: prime success. The coordinator has already synchronously updated
+				// usageCache / credits, so shouldResumeFromOverage below sees fresh state.
+				const { earliestResetMs } = result.observation;
+				if (earliestResetMs != null) {
+					this.lastRefreshResetTime.set(accountRow.id, earliestResetMs);
+					log.info(
+						`Updated lastRefreshResetTime for ${accountRow.name} to ${new Date(earliestResetMs).toISOString()} (codex native prime)`,
+					);
+				}
+
+				// Reset consecutive failure counter on successful prime.
+				if (this.consecutiveFailures.has(accountRow.id)) {
+					this.consecutiveFailures.delete(accountRow.id);
+					log.debug(
+						`Reset consecutive failure counter for account ${accountRow.name} after successful codex native prime`,
+					);
+				}
+
+				// Auto-resume on window reset — identical rule to the translated path.
+				// A codex account paused for "overage" is on paid credits (weekly at
+				// 100%); shouldResumeFromOverage only permits the resume once the account
+				// is no longer on credits, avoiding resume/re-pause flapping.
+				if (
+					accountRow.auto_pause_on_overage_enabled === 1 &&
+					accountRow.paused === 1 &&
+					(!accountRow.pause_reason || accountRow.pause_reason === "overage") &&
+					this.shouldResumeFromOverage(accountRow)
+				) {
+					log.debug(
+						`Auto-resuming codex account '${accountRow.name}' after native prime (auto-pause-on-overage enabled)`,
+					);
+					await this.db.run(
+						"UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ?",
+						[accountRow.id],
+					);
+				}
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Send a translated Claude `/v1/messages` dummy prime to refresh the usage
+	 * window for an ANTHROPIC or ZAI account. This is the anthropic/zai-only path:
+	 * codex accounts prime through the CodexSpendCoordinator's native `/responses`
+	 * ping instead (see {@link primeCodexViaCoordinator}) and must never reach this
+	 * translated dispatch — the guard below enforces that.
 	 * @returns true if the refresh was successful, false otherwise
 	 */
-	private async sendDummyMessage(accountRow: {
+	private async sendTranslatedClaudePrime(accountRow: {
 		id: string;
 		name: string;
 		provider: string;
@@ -331,6 +472,19 @@ export class AutoRefreshScheduler {
 		auto_pause_on_overage_enabled: number;
 		pause_reason: string | null;
 	}): Promise<boolean> {
+		// Provider guard: codex NEVER flows through the translated Claude dummy
+		// dispatch. primeAccount already routes codex rows to the coordinator, so
+		// reaching here with a codex account is a programming error (a caller
+		// bypassed primeAccount's provider dispatch). Refuse it loudly and return
+		// false so a codex row can NEVER hit dispatchProxyRequest — a translated
+		// Haiku `/v1/messages` request would mistranslate for codex and still burn
+		// real quota.
+		if (accountRow.provider === "codex") {
+			log.error(
+				`sendTranslatedClaudePrime called with a codex account (${accountRow.name}) — codex primes via the native /responses ping, not the translated Claude dummy path. Refusing to dispatch.`,
+			);
+			return false;
+		}
 		try {
 			// Query-to-dispatch race guard: checkAndRefresh() selects a batch of
 			// auto_refresh_enabled=1 accounts, then awaits this dispatch per account.
@@ -635,16 +789,16 @@ export class AutoRefreshScheduler {
 					);
 				}
 
-				// Auto-resume on window reset: if account was auto-paused due to overage, resume it now.
-				// Never auto-resume accounts paused manually or due to failure threshold.
+				// Auto-resume on window reset: if an anthropic/zai account was
+				// auto-paused due to overage, resume it now. Never auto-resume accounts
+				// paused manually or due to the failure threshold.
 				//
-				// Codex correctness guard: a codex account paused for "overage" is
-				// actually on paid credits because its WEEKLY (seven_day) window hit
-				// 100%. Codex returns HTTP 200 while on credits, so this success path
-				// fires on every ~5h window probe. Resuming on a 5h reset would
-				// immediately re-pause on the next request (flapping) and each probe
-				// spends credits. shouldResumeFromOverage only allows the resume once
-				// the account is no longer on credits (weekly window has room again).
+				// This path is anthropic/zai only — codex primes via the coordinator,
+				// which runs its OWN overage-resume in handleCodexPrimeOutcome (the
+				// codex flapping/credits rationale lives in shouldResumeFromOverage's
+				// docstring). For anthropic/zai shouldResumeFromOverage is
+				// unconditionally true; the call is kept as the shared, self-consistent
+				// guard.
 				if (
 					accountRow.auto_pause_on_overage_enabled === 1 &&
 					accountRow.paused === 1 &&

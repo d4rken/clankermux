@@ -33,6 +33,7 @@ import {
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
+import { applyCodexObservation } from "./codex-observation";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	resolveFamilyWeeklyExclusion,
@@ -1369,17 +1370,36 @@ export async function proxyWithAccount(
 						// caps via min(resetTime, now + backoff). The audit reason is
 						// preserved so saveRequest + DB rate_limited_reason both record
 						// the failure-mode-specific tag.
-						applyRateLimitCooldown(
-							account,
-							{ resetTime: cooldownUntil, reason },
-							ctx,
-						);
-						// Persist the 429's unified-status header (status/reset/remaining).
-						// This short-circuit never reaches processProxyResponse /
-						// updateAccountMetadata, so without this the dashboard's
-						// rate_limit_status chip freezes at the last successful response's
-						// value. Headers only — the body is discarded by fail() below.
-						persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						//
+						// Codex accounts route through the single shared observation
+						// applicator (cooldown + status-meta + usage-cache/credits/
+						// window-roll share one owner). requestAccounting "none": this
+						// short-circuit never reached updateAccountMetadata, so no
+						// per-request accounting runs here. cooldownUntil drives the
+						// cooldown deadline; rateLimitInfo drives the header-only
+						// status-meta persistence (a no-op for Codex, which has no
+						// unified-status header).
+						if (account.provider === "codex") {
+							applyCodexObservation(account, rawResponse, ctx, {
+								source: "real-traffic",
+								rateLimitInfo: provider.parseRateLimit(rawResponse),
+								requestAccounting: "none",
+								rateLimitAction: { kind: "apply", reason, cooldownUntil },
+								successRecovery: "standard",
+							});
+						} else {
+							applyRateLimitCooldown(
+								account,
+								{ resetTime: cooldownUntil, reason },
+								ctx,
+							);
+							// Persist the 429's unified-status header (status/reset/remaining).
+							// This short-circuit never reaches processProxyResponse /
+							// updateAccountMetadata, so without this the dashboard's
+							// rate_limit_status chip freezes at the last successful response's
+							// value. Headers only — the body is discarded by fail() below.
+							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						}
 						const responseTime = Date.now() - requestMeta.timestamp;
 						// Deliberate direct audit row (one per failed attempted
 						// account, synthetic UUID id) — NOT owned by RequestRecorder
@@ -1545,17 +1565,36 @@ export async function proxyWithAccount(
 						// caps via min(resetTime, now + backoff). The audit reason is
 						// preserved so saveRequest + DB rate_limited_reason both record
 						// the failure-mode-specific tag.
-						applyRateLimitCooldown(
-							account,
-							{ resetTime: cooldownUntil, reason },
-							ctx,
-						);
-						// Persist the 429's unified-status header (status/reset/remaining).
-						// This short-circuit never reaches processProxyResponse /
-						// updateAccountMetadata, so without this the dashboard's
-						// rate_limit_status chip freezes at the last successful response's
-						// value. Headers only — the body is discarded by fail() below.
-						persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						//
+						// Codex accounts route through the single shared observation
+						// applicator (cooldown + status-meta + usage-cache/credits/
+						// window-roll share one owner). requestAccounting "none": this
+						// short-circuit never reached updateAccountMetadata, so no
+						// per-request accounting runs here. cooldownUntil drives the
+						// cooldown deadline; rateLimitInfo drives the header-only
+						// status-meta persistence (a no-op for Codex, which has no
+						// unified-status header).
+						if (account.provider === "codex") {
+							applyCodexObservation(account, rawResponse, ctx, {
+								source: "real-traffic",
+								rateLimitInfo: provider.parseRateLimit(rawResponse),
+								requestAccounting: "none",
+								rateLimitAction: { kind: "apply", reason, cooldownUntil },
+								successRecovery: "standard",
+							});
+						} else {
+							applyRateLimitCooldown(
+								account,
+								{ resetTime: cooldownUntil, reason },
+								ctx,
+							);
+							// Persist the 429's unified-status header (status/reset/remaining).
+							// This short-circuit never reaches processProxyResponse /
+							// updateAccountMetadata, so without this the dashboard's
+							// rate_limit_status chip freezes at the last successful response's
+							// value. Headers only — the body is discarded by fail() below.
+							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						}
 						const responseTime = Date.now() - requestMeta.timestamp;
 						// Deliberate direct audit row (one per failed attempted
 						// account, synthetic UUID id) — NOT owned by RequestRecorder

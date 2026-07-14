@@ -12,18 +12,15 @@ export {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,
 } from "./anthropic-compatible/index";
-export type {
-	CodexCreditsInfo,
-	CodexUsageRefreshFetchResult,
-} from "./codex/index";
+export type { CodexCreditsInfo } from "./codex/index";
 export {
 	CODEX_DEFAULT_ENDPOINT,
 	CodexOAuthProvider,
 	CodexProvider,
-	fetchCodexUsageOnDemand,
 	isCodexOnCredits,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
+	sendCodexNativePing,
 } from "./codex/index";
 export { KiloProvider } from "./kilo/index";
 export { MinimaxProvider } from "./minimax/index";

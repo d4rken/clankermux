@@ -11,7 +11,7 @@
  * expires. The result is an endless ~5-6 min loop of synthetic 429s against an
  * account the user disabled by hand.
  *
- * The auto-resume guard in sendDummyMessage only un-pauses accounts where
+ * The auto-resume guard in sendTranslatedClaudePrime only un-pauses accounts where
  * `auto_pause_on_overage_enabled=1 AND (pause_reason IS NULL OR pause_reason='overage')`,
  * so any other paused account would be probed forever yet never resumed. The
  * selection query must use the *same* criteria.

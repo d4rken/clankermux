@@ -508,15 +508,19 @@ async function selectCandidates(
 					(acc) => acc.id === forcedAccountId,
 				);
 				if (forcedAccount) {
-					// The auto-refresh scheduler sends dummy messages with x-clankermux-bypass-session
-					// to intentionally refresh accounts that are paused due to auto_pause_on_overage,
-					// or to probe accounts that are rate-limited (to detect when the window has reset).
+					// The auto-refresh scheduler's translated Claude prime
+					// (sendTranslatedClaudePrime) sends anthropic/zai dummy `/v1/messages`
+					// with x-clankermux-bypass-session to intentionally refresh accounts
+					// paused due to auto_pause_on_overage, or to probe accounts that are
+					// rate-limited (to detect when the window has reset). (Codex priming
+					// does NOT reach this selector — it uses the CodexSpendCoordinator's
+					// native `/responses` ping, which fetches the codex endpoint directly.)
 					// For those requests we must allow through an overage-paused or rate-limited account
 					// so the scheduler can hit the real endpoint and trigger the window-reset + auto-resume logic.
 					// Only an overage pause qualifies: a manual pause (pause_reason='manual') or a
 					// failure-threshold / peak_hours pause must still win even when the overage feature
 					// flag is enabled, because the auto-resume guard would never un-pause those accounts.
-					// This mirrors the scheduler eligibility query and the sendDummyMessage resume guard
+					// This mirrors the scheduler eligibility query and the sendTranslatedClaudePrime resume guard
 					// (auto_pause_on_overage_enabled=1 AND pause_reason IN (NULL,'overage')).
 					const isAutoRefreshBypass =
 						meta.internal === true &&

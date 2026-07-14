@@ -1,17 +1,13 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
-	type CodexCreditsInfo,
 	getFreshCapacity,
-	isGenuineWindowRoll,
 	type Provider,
-	parseCodexCreditsHeaders,
-	parseCodexUsageHeaders,
-	toEpochMs,
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
+import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
 import {
@@ -84,134 +80,47 @@ export function updateAccountMetadata(
 	requestId?: string,
 	bypassSession = false,
 ): void {
-	// Update basic usage (with optional bypass)
-	if (bypassSession) {
-		// Increment request count without updating session tracking
-		ctx.asyncWriter.enqueue(async () => {
-			// Manually increment request count and total requests without touching session
-			const db = ctx.dbOps.getAdapter();
-			const now = Date.now();
-			await db.run(
-				`UPDATE accounts
-				 SET last_used = ?, request_count = request_count + 1, total_requests = total_requests + 1
-				 WHERE id = ?`,
-				[now, account.id],
-			);
+	// Codex responses are observed through the single shared applicator, which
+	// owns request accounting, rate-limit status-meta persistence, and the
+	// usage-cache / credits-carry-forward / window-roll / earliest-reset
+	// bookkeeping. On the real-traffic main path the 429 cooldown is applied by
+	// processProxyResponse (before this call) and the success-cooldown recovery
+	// runs there too, so the applicator is told to skip the cooldown
+	// (rateLimitAction: "skip") and — for source "real-traffic" — performs no
+	// recovery. This keeps the shared cross-provider cooldown/recovery path
+	// exactly as before.
+	if (account.provider === "codex") {
+		applyCodexObservation(account, response, ctx, {
+			source: "real-traffic",
+			rateLimitInfo: ctx.provider.parseRateLimit(response),
+			requestAccounting: bypassSession ? "count-only" : "session",
+			rateLimitAction: { kind: "skip" },
+			successRecovery: "standard",
 		});
 	} else {
-		ctx.asyncWriter.enqueue(() => ctx.dbOps.updateAccountUsage(account.id));
+		// Update basic usage (with optional bypass)
+		if (bypassSession) {
+			// Increment request count without updating session tracking
+			ctx.asyncWriter.enqueue(async () => {
+				// Manually increment request count and total requests without touching session
+				const db = ctx.dbOps.getAdapter();
+				const now = Date.now();
+				await db.run(
+					`UPDATE accounts
+					 SET last_used = ?, request_count = request_count + 1, total_requests = total_requests + 1
+					 WHERE id = ?`,
+					[now, account.id],
+				);
+			});
+		} else {
+			ctx.asyncWriter.enqueue(() => ctx.dbOps.updateAccountUsage(account.id));
+		}
+		// Extract and update rate limit info for every response. Only updates the
+		// metadata when actual rate limit headers are present (shared helper).
+		persistRateLimitStatusMeta(account, response, ctx);
 	}
-	// Extract and update rate limit info for every response. Only updates the
-	// metadata when actual rate limit headers are present (shared helper).
-	persistRateLimitStatusMeta(account, response, ctx);
 	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
 	// successful response. No need to duplicate that logic here.
-
-	if (account.provider === "codex") {
-		const codexUsage = parseCodexUsageHeaders(response.headers, {
-			defaultUtilization: response.status === 429 ? 100 : 0,
-		});
-		if (codexUsage) {
-			const prevUsage = usageCache.get(account.id);
-			const prevResetAt = (
-				prevUsage as { five_hour?: { resets_at: string | null } } | null
-			)?.five_hour?.resets_at;
-			const newResetAt = codexUsage.five_hour?.resets_at;
-			// Detect a genuine 5h window roll using the shared guard: only when the
-			// previous reset has actually arrived (prevResetMs <= now) and the new
-			// reset is strictly later. This rejects sub-second forward drift of a
-			// still-future reset, which would otherwise churn session_start and flap
-			// the dashboard Primary badge (mirrors the Anthropic usage-fetcher fix).
-			const prevResetMs = toEpochMs(prevResetAt);
-			const newResetMs = toEpochMs(newResetAt);
-			const windowRolledOver = isGenuineWindowRoll(
-				prevResetMs,
-				newResetMs,
-				Date.now(),
-			);
-
-			// Attach Codex credits state (x-codex-credits-* / secondary-used-pct)
-			// so the live usageCache carries whether the account is on paid credits
-			// past its weekly limit. The dashboard reads this; the auto-refresh
-			// resume guard also consults it to avoid resuming a still-on-credits
-			// account on a 5h reset. Only overwrite when the header is present —
-			// absence signals a non-credits-aware response, not "off credits". Since
-			// the usageCache.set below fully replaces the prior entry, an absent
-			// header must carry the last known credits FORWARD onto the freshly-built
-			// codexUsage; otherwise a single credits-less response would silently drop
-			// credits/overage state learned from an earlier response.
-			const creditsInfo = parseCodexCreditsHeaders(response.headers);
-			if (creditsInfo !== null) {
-				codexUsage.codexCredits = creditsInfo;
-			} else {
-				const prevCredits = (
-					prevUsage as { codexCredits?: CodexCreditsInfo | null } | null
-				)?.codexCredits;
-				if (prevCredits != null) {
-					codexUsage.codexCredits = prevCredits;
-				}
-			}
-
-			usageCache.set(account.id, codexUsage);
-			log.debug(
-				`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour.utilization}%, 7d=${codexUsage.seven_day.utilization}%`,
-			);
-
-			// Update rate_limit_reset from usage headers so auto-refresh can track
-			// windows. We persist the earliest of the 5h/7d resets.
-			const earliestResetOf = (
-				usage: {
-					five_hour?: { resets_at: string | null };
-					seven_day?: { resets_at: string | null };
-				} | null,
-			): number | null => {
-				const resetTimes = [
-					usage?.five_hour?.resets_at,
-					usage?.seven_day?.resets_at,
-				]
-					.map((t) => toEpochMs(t))
-					.filter((ms): ms is number => ms != null);
-				return resetTimes.length > 0 ? Math.min(...resetTimes) : null;
-			};
-			const newEarliestReset = earliestResetOf(codexUsage);
-			// Compare against the PERSISTED account value (rate_limit_reset, epoch ms),
-			// NOT the usageCache: usageCache.set(...) above has already overwritten the
-			// prior entry, and — more importantly — on a failed async DB write the cache
-			// would hold the new value, so comparing against it would suppress the retry
-			// and leave the DB permanently stale. Comparing against account.rate_limit_reset
-			// means a failed write is retried on the next response (the persisted value
-			// only advances on a real, committed write), while genuine sub-second forward
-			// drift of a still-future reset is still suppressed (the persisted value won't
-			// have moved, so |new - persisted| stays < 1s once it has been written once).
-			if (
-				newEarliestReset != null &&
-				(account.rate_limit_reset == null ||
-					Math.abs(newEarliestReset - account.rate_limit_reset) >= 1000)
-			) {
-				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps
-						.getAdapter()
-						.run("UPDATE accounts SET rate_limit_reset = ? WHERE id = ?", [
-							newEarliestReset,
-							account.id,
-						]),
-				);
-			}
-
-			if (windowRolledOver) {
-				log.info(
-					`Codex window rolled over for ${account.name}: ${prevResetAt} → ${newResetAt}, resetting session`,
-				);
-				ctx.dbOps
-					.resetAccountSession(account.id, Date.now())
-					.catch((err) =>
-						log.warn(
-							`Failed to reset Codex session for ${account.name} on window reset: ${err}`,
-						),
-					);
-			}
-		}
-	}
 
 	// Extract usage info if supported
 	if (requestId) {
