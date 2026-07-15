@@ -19,10 +19,16 @@ export type IntegrityCheckKind = "quick" | "full";
  * overwrite the last verified verdict — it only stamps the attempt + skip
  * reason and (when nothing is corrupt) collapses `status` to `skipped`.
  *
+ * In-flight signal: a probe being in flight is conveyed by `runningKind !==
+ * null`, NOT by a collapsed `status` value — `status` always reflects the last
+ * settled outcome so a sticky `corrupt` (and its banner) is never hidden while
+ * a recheck runs. `"running"` remains in the union for backward compatibility
+ * but is never assigned; consumers should test `runningKind` for in-flight.
+ *
  * Status semantics:
  *  - `unchecked`: no probe has produced a verified verdict yet (fresh boot,
  *    scheduler still in its initial-delay window).
- *  - `running`: a probe is currently in flight; `runningKind` says which.
+ *  - `running`: legacy/never-emitted — see the in-flight note above.
  *  - `ok`: the last-known quick and/or full *verified* result is "ok".
  *  - `corrupt`: at least one of the last-known *verified* probes returned
  *    non-"ok". A subsequent quick `ok` clears quick-only corruption but does
@@ -35,7 +41,8 @@ export type IntegrityCheckKind = "quick" | "full";
  */
 export interface IntegrityStatus {
 	status: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
-	/** Which kind of probe is in flight when status="running"; null otherwise. */
+	/** Which kind of probe is currently in flight; null when none. This is the
+	 *  authoritative in-flight signal (`status` is never set to "running"). */
 	runningKind: IntegrityCheckKind | null;
 	/** Last completed probe of either kind (verified verdict), ms epoch. */
 	lastCheckAt: number | null;

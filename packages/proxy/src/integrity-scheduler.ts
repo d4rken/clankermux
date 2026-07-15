@@ -1,7 +1,10 @@
 import { statSync } from "node:fs";
 import { TIME_CONSTANTS } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
-import { runIntegrityCheckInWorker } from "@clankermux/database";
+import {
+	isCorruptionError,
+	runIntegrityCheckInWorker,
+} from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 
 /**
@@ -189,18 +192,29 @@ const FULL_CHECK_MAX_DB_BYTES = 64 * 1024 ** 3;
  * Map a worker/runner result to the `(result, detail)` pair
  * `recordIntegrityResult` expects:
  *  - `{ ok: true }` → `ok` (no detail).
- *  - `verdict: "corrupt"` → `corrupt` (a real, proven verdict).
  *  - `verdict: "error" | "timeout"` → `skipped` (the check could not complete;
  *    an operational failure is NOT proven corruption).
+ *  - anything else non-ok → `corrupt`.
+ *
+ * The default is DELIBERATELY `corrupt`, not `skipped`. Only an explicit
+ * operational failure (`error`/`timeout`) downgrades to amber. A non-ok result
+ * with a missing or unrecognized `verdict` — e.g. a stale embedded worker still
+ * on the old `{ ok: false, error }` protocol during the brief window before
+ * `build:db-workers` regenerates it — must fail safe toward red rather than
+ * silently masking real corruption. `verdict?` is intentionally optional so
+ * such a legacy shape type-checks and hits the safe default. (Masking real
+ * corruption as `skipped` is the dangerous false-negative direction.)
  */
 function mapVerdict(
 	r:
 		| { ok: true }
-		| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string },
+		| { ok: false; verdict?: "corrupt" | "error" | "timeout"; error: string },
 ): { result: "ok" | "corrupt" | "skipped"; detail: string | null } {
 	if (r.ok) return { result: "ok", detail: null };
-	if (r.verdict === "corrupt") return { result: "corrupt", detail: r.error };
-	return { result: "skipped", detail: r.error };
+	if (r.verdict === "error" || r.verdict === "timeout") {
+		return { result: "skipped", detail: r.error };
+	}
+	return { result: "corrupt", detail: r.error };
 }
 
 /**
@@ -227,12 +241,24 @@ async function runCheckLocked(
 		const dbPath = dbOps.getResolvedDbPath();
 		if (!dbPath) {
 			// In-memory / unresolvable-path fallback: a direct pragma that
-			// RETURNS a non-"ok" answer is a real verdict (corrupt); a THROW
-			// falls through to the outer catch → skipped (couldn't complete).
-			const out =
-				kind === "quick"
-					? await dbOps.runQuickIntegrityCheck()
-					: await dbOps.runFullIntegrityCheck();
+			// RETURNS a non-"ok" answer is a real verdict (corrupt). A THROW is
+			// classified: a SQLITE_CORRUPT/SQLITE_NOTADB throw IS a corruption
+			// verdict (record `corrupt`); any other throw propagates to the
+			// outer catch → `skipped` (couldn't complete).
+			let out: string;
+			try {
+				out =
+					kind === "quick"
+						? await dbOps.runQuickIntegrityCheck()
+						: await dbOps.runFullIntegrityCheck();
+			} catch (err) {
+				if (isCorruptionError(err)) {
+					const detail = err instanceof Error ? err.message : String(err);
+					dbOps.recordIntegrityResult(kind, "corrupt", detail);
+					return { result: "corrupt", error: detail };
+				}
+				throw err;
+			}
 			const result = out === "ok" ? "ok" : "corrupt";
 			dbOps.recordIntegrityResult(
 				kind,
@@ -270,6 +296,13 @@ async function runCheckLocked(
 					mappedQuick.detail,
 				);
 				dbOps.recordIntegrityResult("full", "skipped", skipReason);
+				// If the substitute quick check PROVED corruption, surface that as
+				// the outcome (correct ERROR log + honest on-demand return) rather
+				// than a benign "skipped" — the collapsed status is already corrupt
+				// via the records above, but the awaited return/log must agree.
+				if (mappedQuick.result === "corrupt") {
+					return { result: "corrupt", error: mappedQuick.detail };
+				}
 				return { result: "skipped", error: skipReason };
 			}
 		}

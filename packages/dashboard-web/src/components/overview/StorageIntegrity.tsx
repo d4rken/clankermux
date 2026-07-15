@@ -36,7 +36,11 @@ export function StorageIntegritySection() {
 	>(null);
 
 	const status = data?.integrity_status ?? "unchecked";
-	const isRunning = status === "running" || triggerCheck.isPending;
+	// Drive the spinner off the in-flight kind, NOT the collapsed status: the
+	// backend no longer overwrites `status` with "running", so a `corrupt`
+	// status (and its banner) persists while a recheck runs.
+	const isRunning =
+		data?.integrity_running_kind != null || triggerCheck.isPending;
 	const runningKind = data?.integrity_running_kind ?? lastTriggeredKind;
 
 	const onClick = (kind: "quick" | "full") => {
