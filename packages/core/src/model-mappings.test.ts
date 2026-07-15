@@ -332,6 +332,26 @@ describe("resolveModelContextWindow", () => {
 		expect(resolveModelContextWindow("gpt-5.2-codex")).toBeUndefined();
 		expect(resolveModelContextWindow("unknown-model")).toBeUndefined();
 	});
+
+	test("falls back to the base window for a trailing dated suffix", () => {
+		// A dated variant (e.g. the backend pins a release date) resolves to its
+		// base model's window rather than being treated as unknown.
+		expect(resolveModelContextWindow("gpt-5.6-sol-2026-05-13")).toBe(353_000);
+		expect(resolveModelContextWindow("gpt-5.5-2026-01-01")).toBe(272_000);
+	});
+
+	test("does not accept arbitrary (non-date) suffixes", () => {
+		// Only a trailing YYYY-MM-DD suffix is stripped; anything else stays
+		// unknown, so it fits (no false exclusion) rather than borrowing a window.
+		expect(resolveModelContextWindow("gpt-5.6-sol-foo")).toBeUndefined();
+		expect(resolveModelContextWindow("gpt-5.6-sol-2026-05")).toBeUndefined();
+		expect(resolveModelContextWindow("gpt-5.6-sol-2026")).toBeUndefined();
+	});
+
+	test("exact keys are unchanged by the dated fallback", () => {
+		expect(resolveModelContextWindow("gpt-5.6-sol")).toBe(353_000);
+		expect(resolveModelContextWindow("gpt-5.4-mini")).toBe(272_000);
+	});
 });
 
 describe("estimateRequestTokens", () => {
@@ -642,6 +662,48 @@ describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
 		expect(
 			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 128_001),
 		).toBe(false);
+	});
+});
+
+describe("codex gates apply the dated-suffix window fallback", () => {
+	test("margined gate resolves a dated target to its base window", () => {
+		// Account maps opus → a dated variant of gpt-5.6-sol (353k window). The
+		// gate must resolve it via resolveModelContextWindow, not treat it as an
+		// unknown model (which would falsely "fit" any size).
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
+		});
+		// floor(353000 * 0.97) = 342410 is the margined bound.
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 342_410)).toBe(
+			true,
+		);
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 342_411)).toBe(
+			false,
+		);
+	});
+
+	test("unmargined gate resolves a dated target to its base window", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
+		});
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_000),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_001),
+		).toBe(false);
+	});
+
+	test("a non-date suffix stays unknown → fits (no false exclusion)", () => {
+		const account = makeCodexAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-foo" }),
+		});
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 9_999_999)).toBe(
+			true,
+		);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 9_999_999),
+		).toBe(true);
 	});
 });
 

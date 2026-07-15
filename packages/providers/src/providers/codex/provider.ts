@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import {
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	getModelFamily,
-	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
 	OAuthRefreshTokenError,
+	resolveModelContextWindow,
 	ValidationError,
 	validateEndpointUrl,
 } from "@clankermux/core";
@@ -40,6 +41,17 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
+/** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
+const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
+/**
+ * Hex length of the truncated sha256 digest in a derived prompt_cache_key.
+ * OpenAI caps prompt_cache_key at 64 chars; the longest prefix we emit is
+ * `clankermux-session-` (19 chars), so 45 hex keeps every key <= 64
+ * (session: 19+45=64, convo: 17+45=62) while retaining 180 bits of digest.
+ * (Upstream used 48 under the shorter `ccflare-` prefix; our longer fork
+ * naming required trimming the digest to preserve the same hard bound.)
+ */
+const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
 // Codex CLI version advertised to the ChatGPT/Codex backend via the `Version`
 // header + User-Agent (see prepareHeaders / on-demand-fetch). The backend GATES
 // newer models behind a minimum client version: too-old here → 400 "The '<model>'
@@ -79,9 +91,10 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 // (DEFAULT_CODEX_MODEL_BY_FAMILY) so the context-window gate and this provider
 // resolve the same target model. Do not re-declare it here.
 
-// MODEL_CONTEXT_WINDOWS is the shared source of truth from @clankermux/core.
-// It feeds both routing-side context-window gating and the display-metadata
-// reuse in extractContextWindow() below.
+// resolveModelContextWindow (over the shared MODEL_CONTEXT_WINDOWS map in
+// @clankermux/core) is the single source of truth for context-window sizes. It
+// feeds both routing-side context-window gating and the display-metadata reuse
+// in extractContextWindow() below, so both apply the dated-suffix fallback.
 
 // ── Codex Responses API types ─────────────────────────────────────────────────
 
@@ -136,6 +149,7 @@ interface CodexRequest {
 	reasoning?: { effort: string };
 	instructions?: string;
 	tools?: CodexTool[];
+	prompt_cache_key?: string;
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -182,6 +196,8 @@ interface AnthropicRequest {
 	stream?: boolean;
 	tools?: AnthropicTool[];
 	reasoning?: { effort?: string };
+	/** Claude Code sends a JSON-encoded object with a session_id here. */
+	metadata?: { user_id?: string };
 	[key: string]: unknown;
 }
 
@@ -227,6 +243,38 @@ interface StreamState {
 		code?: string;
 		status?: string;
 	};
+}
+
+/**
+ * Resolves the endpoint a Codex request would be sent to, mirroring
+ * CodexProvider.buildUrl's fallback (invalid/missing custom_endpoint falls
+ * back to CODEX_DEFAULT_ENDPOINT). Read-only: unlike buildUrl it never logs,
+ * since it may be called on every request just to decide prompt_cache_key
+ * eligibility.
+ */
+function resolveCodexPromptCacheEndpoint(account?: Account): string {
+	if (account?.custom_endpoint) {
+		try {
+			return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
+		} catch {
+			return CODEX_DEFAULT_ENDPOINT;
+		}
+	}
+	return CODEX_DEFAULT_ENDPOINT;
+}
+
+/**
+ * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
+ * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
+ * only attach it when the account resolves to OpenAI's own hosts.
+ */
+function isOpenAiPromptCacheEndpoint(account?: Account): boolean {
+	try {
+		const { hostname } = new URL(resolveCodexPromptCacheEndpoint(account));
+		return OPENAI_PROMPT_CACHE_HOSTS.has(hostname);
+	} catch {
+		return false;
+	}
 }
 
 export class CodexProvider extends BaseProvider {
@@ -892,7 +940,11 @@ export class CodexProvider extends BaseProvider {
 	): ContextWindow | null {
 		const model = response?.model;
 		if (typeof model !== "string") return null;
-		const contextWindowSize = MODEL_CONTEXT_WINDOWS[model];
+		// resolveModelContextWindow (not a direct MODEL_CONTEXT_WINDOWS lookup) so
+		// a dated backend model (e.g. gpt-5.6-sol-2026-05-13) still resolves to its
+		// family window — matching the routing gate — instead of dropping the
+		// client gauge / compaction signal.
+		const contextWindowSize = resolveModelContextWindow(model);
 		if (!contextWindowSize) return null;
 
 		const inputTokens = usage?.input_tokens;
@@ -927,6 +979,96 @@ export class CodexProvider extends BaseProvider {
 			},
 			context_window_size: contextWindowSize,
 		};
+	}
+
+	private extractSessionId(body: AnthropicRequest): string | undefined {
+		const rawUserId = body.metadata?.user_id;
+		if (typeof rawUserId !== "string") return undefined;
+		try {
+			const metadata = JSON.parse(rawUserId) as unknown;
+			if (!metadata || typeof metadata !== "object") return undefined;
+			const sessionId = (metadata as Record<string, unknown>).session_id;
+			if (
+				typeof sessionId !== "string" ||
+				!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+					sessionId,
+				)
+			) {
+				return undefined;
+			}
+			return sessionId.toLowerCase();
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Attaches an OpenAI prompt_cache_key to converted Codex requests. OpenAI
+	 * documents that on GPT-5.6-family models this key is required for reliable
+	 * prompt-cache matching, routes each request to a cache machine by hashing
+	 * the prompt prefix together with the key, and warns that one key should
+	 * stay under ~15 requests/minute or "some requests may miss the cache".
+	 *
+	 * A Claude Code session multiplexes the main loop plus every subagent
+	 * conversation over one session id, so keying on the session alone funnels
+	 * an entire fan-out burst onto one cache machine and thrashes it (measured
+	 * in production traces: turns 1-8 of subagent conversations cached no better
+	 * than cold starts while one session key carried 170+ conversations in five
+	 * minutes). We therefore partition the key by conversation identity: session
+	 * id + first input item, stable across the turns of one conversation and
+	 * distinct across concurrent subagents. Each conversation is sequential, so
+	 * per-key traffic stays far below the documented bound.
+	 *
+	 * Instructions (the system prompt) are deliberately NOT hashed into the key:
+	 * Claude Code's system prompt embeds volatile content (current date, cwd,
+	 * git-status snapshot), so including it would re-shard the key mid-
+	 * conversation (a midnight rollover or a new commit), splitting the cache.
+	 * The key only picks the routing bucket — OpenAI still matches the real
+	 * prompt prefix inside that bucket, so dropping instructions cannot cause an
+	 * incorrect cache HIT; it only makes the bucket stable across turns.
+	 *
+	 * Always-on, but gated on the resolved account endpoint
+	 * (isOpenAiPromptCacheEndpoint): only sent when the account targets OpenAI's
+	 * own chatgpt.com / api.openai.com hosts, never a custom_endpoint pointing
+	 * elsewhere (which may reject the unknown field). This is the TRANSLATED
+	 * (Claude Code → Codex) path only; the native /v1/responses passthrough
+	 * carries the Codex CLI's own key.
+	 *
+	 * Digests are truncated to PROMPT_CACHE_KEY_DIGEST_LEN hex chars so the full
+	 * key (including the longer `clankermux-session-` prefix) stays within the
+	 * API's 64-char key bound. Session ids and prompt content never appear in
+	 * the key.
+	 */
+	private derivePromptCacheKey(
+		body: AnthropicRequest,
+		input: readonly unknown[],
+		account?: Account,
+	): string | undefined {
+		if (!isOpenAiPromptCacheEndpoint(account)) return undefined;
+		const sessionId = this.extractSessionId(body);
+		if (!sessionId) return undefined;
+		const sessionKey = () =>
+			`clankermux-session-${createHash("sha256")
+				.update(sessionId)
+				.digest("hex")
+				.slice(0, PROMPT_CACHE_KEY_DIGEST_LEN)}`;
+		// Empty input: no conversation-identity anchor → coarse per-session key.
+		if (input.length === 0) return sessionKey();
+		let firstItem: string | undefined;
+		try {
+			firstItem = JSON.stringify(input[0]);
+		} catch {
+			firstItem = undefined;
+		}
+		// Non-serializable first item (e.g. a circular structure): fall back to
+		// the coarse per-session key rather than a partial-identity convo key.
+		if (firstItem === undefined) return sessionKey();
+		return `clankermux-convo-${createHash("sha256")
+			.update(sessionId)
+			.update("\0")
+			.update(firstItem)
+			.digest("hex")
+			.slice(0, PROMPT_CACHE_KEY_DIGEST_LEN)}`;
 	}
 
 	private convertToCodexFormat(
@@ -1011,6 +1153,10 @@ export class CodexProvider extends BaseProvider {
 		};
 
 		codexRequest.instructions = instructions || "You are a helpful assistant.";
+		const promptCacheKey = this.derivePromptCacheKey(body, input, account);
+		if (promptCacheKey) {
+			codexRequest.prompt_cache_key = promptCacheKey;
+		}
 		if (tools) {
 			codexRequest.tools = tools;
 		}
@@ -1701,6 +1847,12 @@ export class CodexProvider extends BaseProvider {
 			}
 
 			case "response.completed": {
+				// Guard against a stray response.completed that arrives AFTER a
+				// terminal/error event (e.g. response.failed set upstreamError +
+				// hasSentTerminalEvents and wrote an `error` SSE). Emitting
+				// message_delta/message_stop here would produce an invalid SSE
+				// sequence (terminal events after an error), so bail out.
+				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
 				const usage = resp?.usage as
 					| {

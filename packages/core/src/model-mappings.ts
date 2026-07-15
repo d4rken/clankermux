@@ -438,11 +438,27 @@ export const GATE_CHARS_PER_TOKEN = 3.0;
 export const GATE_OUTPUT_RESERVE_CAP = 4_000;
 
 /**
+ * Matches a model slug ending in a `-YYYY-MM-DD` release-date suffix, capturing
+ * the base slug. Restricted to a date-like suffix so we never borrow a window
+ * for an arbitrary unknown suffix (which could point at a differently-sized
+ * model) — only a dated variant of a KNOWN base resolves.
+ */
+const DATED_MODEL_SUFFIX = /^(.+)-\d{4}-\d{2}-\d{2}$/;
+
+/**
  * Look up the context window for a Codex model.
  * Returns undefined for unknown/compaction models.
+ *
+ * Exact keys win. If the exact slug is unknown but ends in a trailing
+ * `-YYYY-MM-DD` release-date suffix (e.g. `gpt-5.6-sol-2026-05-13`), fall back
+ * to the base model's window (`gpt-5.6-sol`). Non-date suffixes stay unknown.
  */
 export function resolveModelContextWindow(model: string): number | undefined {
-	return MODEL_CONTEXT_WINDOWS[model];
+	const exact = MODEL_CONTEXT_WINDOWS[model];
+	if (exact !== undefined) return exact;
+	const dated = DATED_MODEL_SUFFIX.exec(model);
+	if (dated) return MODEL_CONTEXT_WINDOWS[dated[1]];
+	return undefined;
 }
 
 /**
@@ -585,7 +601,7 @@ export function codexAccountFitsRequest(
 	estimate: number,
 ): boolean {
 	const target = resolveCodexTargetModel(effectiveModel, account);
-	const window = MODEL_CONTEXT_WINDOWS[target];
+	const window = resolveModelContextWindow(target);
 	if (window === undefined) return true; // unknown model → fits (no false exclusion)
 	return estimate <= Math.floor(window * SAFETY_MARGIN);
 }
@@ -611,7 +627,7 @@ export function codexAccountFitsRequestUnmargined(
 	estimate: number,
 ): boolean {
 	const target = resolveCodexTargetModel(effectiveModel, account);
-	const window = MODEL_CONTEXT_WINDOWS[target];
+	const window = resolveModelContextWindow(target);
 	if (window === undefined) return true;
 	return estimate <= window;
 }
