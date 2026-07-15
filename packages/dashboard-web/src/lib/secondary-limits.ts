@@ -1,3 +1,4 @@
+import { isAnthropicUsageShape } from "@clankermux/core";
 import type { AnthropicUsageData, FullUsageData } from "@clankermux/types";
 
 /** localStorage key for the per-account "show secondary limits" preference. */
@@ -17,12 +18,18 @@ export interface ScopedWeeklyLimit {
  * Does not filter on `is_active` — mirrors the old "any window with data
  * renders" rule; scoped windows are mutual fallbacks so in practice only one
  * is populated at a time.
+ *
+ * Gated by `isAnthropicUsageShape` (flat five_hour/seven_day OR a non-empty
+ * `limits[]`) rather than the old both-flat-keys guard, so a `limits[]`-only
+ * payload (upstream is dropping the flat keys) still surfaces its scoped windows.
  */
 export function getScopedWeeklyLimits(
 	usageData: FullUsageData | null | undefined,
 ): ScopedWeeklyLimit[] {
-	if (!usageData) return [];
-	if (!("five_hour" in usageData) || !("seven_day" in usageData)) return [];
+	if (
+		!isAnthropicUsageShape(usageData as AnthropicUsageData | null | undefined)
+	)
+		return [];
 	const anthropicData = usageData as AnthropicUsageData;
 	const results: ScopedWeeklyLimit[] = [];
 	for (const entry of anthropicData.limits ?? []) {

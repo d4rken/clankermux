@@ -44,6 +44,69 @@ describe("extractWindowResetTime", () => {
 		expect(extractWindowResetTime(data, "anthropic")).toBeNull();
 	});
 
+	it("returns the limits[] session reset for a limits[]-only anthropic payload", () => {
+		const resetIso = "2030-02-01T08:00:00Z";
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 20,
+					resets_at: resetIso,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as AnyUsageData;
+		expect(extractWindowResetTime(data, "anthropic")).toBe(
+			new Date(resetIso).getTime(),
+		);
+		// Works for codex too (shares the windowed shape).
+		expect(extractWindowResetTime(data, "codex")).toBe(
+			new Date(resetIso).getTime(),
+		);
+	});
+
+	it("does not let an EMPTY flat five_hour shadow a valid limits[] session reset", () => {
+		const flatReset = "2030-03-01T00:00:00Z"; // present but on an empty window
+		const limitsReset = "2030-04-01T00:00:00Z";
+		const data = {
+			// Present-but-empty flat five_hour (utilization null) must not shadow the
+			// real session window carried in limits[].
+			five_hour: { utilization: null, resets_at: flatReset },
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 20,
+					resets_at: limitsReset,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as AnyUsageData;
+		expect(extractWindowResetTime(data, "anthropic")).toBe(
+			new Date(limitsReset).getTime(),
+		);
+	});
+
+	it("ignores a null-percent limits[] session entry (no window evidence)", () => {
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: null,
+					resets_at: "2030-05-01T00:00:00Z",
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as AnyUsageData;
+		// No finite-percent session and no flat window → no reset.
+		expect(extractWindowResetTime(data, "anthropic")).toBeNull();
+	});
+
 	it("returns null for unknown/unsupported provider", () => {
 		expect(
 			extractWindowResetTime({} as unknown as AnyUsageData, "unknown-provider"),

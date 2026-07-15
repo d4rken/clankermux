@@ -1,6 +1,15 @@
-import { CLAUDE_CLI_VERSION } from "@clankermux/core";
+import {
+	CLAUDE_CLI_VERSION,
+	getNormalizedRepresentativeUtilization,
+	normalizeAnthropicUsage,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { type CapacitySignal, supportsUsageTracking } from "@clankermux/types";
+import {
+	type AnthropicLimitEntry,
+	type AnthropicUsageData,
+	type CapacitySignal,
+	supportsUsageTracking,
+} from "@clankermux/types";
 import {
 	type AlibabaCodingPlanUsageData,
 	fetchAlibabaCodingPlanUsageData,
@@ -41,6 +50,13 @@ export interface UsageData {
 	seven_day_sonnet?: UsageWindow | null;
 	iguana_necktie?: unknown; // Unknown purpose, keep as flexible type
 	extra_usage?: ExtraUsage;
+	/**
+	 * Anthropic's generic per-window array (`kind`/`group`/`percent`/…). Present
+	 * alongside the flat windows today and expected to become the ONLY source as
+	 * upstream drops the flat keys. Typed here so the routing-critical reads can
+	 * see it; normalized via `normalizeAnthropicUsage`.
+	 */
+	limits?: AnthropicLimitEntry[];
 	/** Codex-only: in-response credits state. Absent for other providers. */
 	codexCredits?: CodexCreditsInfo | null;
 	// Allow any additional fields Anthropic might add in the future
@@ -66,16 +82,38 @@ export function extractWindowResetTime(
 		const zai = data as ZaiUsageData;
 		return zai.tokens_limit?.resetAt ?? null;
 	}
-	if (provider === "anthropic") {
-		const anthropic = data as UsageData;
-		const resetsAt = anthropic.five_hour?.resets_at;
-		if (!resetsAt) return null;
-		const ms = new Date(resetsAt).getTime();
-		return Number.isFinite(ms) ? ms : null;
-	}
-	if (provider === "codex") {
-		const codex = data as UsageData;
-		const resetsAt = codex.five_hour?.resets_at;
+	if (provider === "anthropic" || provider === "codex") {
+		const d = data as UsageData;
+		// The primary (5h session) window reset. Prefer the flat `five_hour` window
+		// ONLY when it's a real (finite-utilization) window; a present-but-empty flat
+		// window must NOT shadow a valid `limits[]` `session` entry (upstream is
+		// dropping the flat keys). Fully-flat payloads are byte-identical (no
+		// limits[] → the flat reset is always used regardless of utilization).
+		const flat = d.five_hour;
+		let resetsAt: string | null = null;
+		if (
+			flat &&
+			typeof flat.utilization === "number" &&
+			Number.isFinite(flat.utilization)
+		) {
+			resetsAt = flat.resets_at ?? null;
+		} else {
+			const limits = (d as { limits?: AnthropicLimitEntry[] }).limits;
+			if (Array.isArray(limits)) {
+				// Require a finite numeric percent (matching the normalizer) before
+				// trusting the limits[] session — a null/NaN-percent entry carries no
+				// window evidence.
+				resetsAt =
+					limits.find(
+						(e) =>
+							e.kind === "session" &&
+							typeof e.percent === "number" &&
+							Number.isFinite(e.percent),
+					)?.resets_at ?? null;
+			}
+			// No usable limits session — fall back to the (possibly empty) flat reset.
+			if (!resetsAt && flat) resetsAt = flat.resets_at ?? null;
+		}
 		if (!resetsAt) return null;
 		const ms = new Date(resetsAt).getTime();
 		return Number.isFinite(ms) ? ms : null;
@@ -215,41 +253,71 @@ export async function fetchUsageData(
 }
 
 /**
- * Get the representative utilization percentage
- * Returns the highest utilization across all windows
- * Dynamically handles any usage window fields in the response
+ * Representative account-wide utilization for an Anthropic/Codex windowed
+ * payload: the max of the account-session (5h), account-wide weekly, and the
+ * OAuth-apps weekly (`seven_day_oauth_apps`) windows. The session + weekly are
+ * sourced through {@link normalizeAnthropicUsage} so it reads flat AND
+ * `limits[]`-only payloads identically; the OAuth-apps window (the Claude Code
+ * weekly quota — the binding constraint for OAuth accounts) is folded in from
+ * the flat field, since the normalizer's account-wide windows don't capture it.
+ * `weekly_scoped` (per-family) and `extra_usage` are deliberately excluded.
+ *
+ * Why exclude `extra_usage`: overage-credit exhaustion is handled by the
+ * dedicated `out_of_credits` floor-until cooldown path, NOT this generic
+ * usage-based clear guard; and `getAccountCapacitySignal` still folds
+ * `extra_usage` into `bindingUtilization` for load-balancer deprioritization —
+ * so excluding it here only affects the cooldown-clear guard, intentionally.
+ *
+ * **Returns `null` when there is no account-level evidence — NEVER 0.** The old
+ * reader collapsed "no windows" into `0`, which read as "plenty of headroom"
+ * and (at the capacity-restored path) FALSELY CLEARED an account's
+ * `rate_limited_until` cooldown for a `limits[]`-only payload. `null` keeps the
+ * cooldown; a real 100% weekly (incl. OAuth-apps) stays 100 (never clears).
  */
 export function getRepresentativeUtilization(
 	usage: UsageData | null,
+	now: number = Date.now(),
 ): number | null {
-	if (!usage) return null;
+	const base = getNormalizedRepresentativeUtilization(
+		normalizeAnthropicUsage(usage as AnthropicUsageData | null, now),
+	);
+	// Fold in the flat OAuth-apps weekly window if present. (If Anthropic ever
+	// carries an OAuth-apps-equivalent in `limits[]`, add it to the normalizer;
+	// flat is the known shape today.)
+	const oauth = usage?.seven_day_oauth_apps;
+	const oauthUtil =
+		oauth &&
+		typeof oauth.utilization === "number" &&
+		Number.isFinite(oauth.utilization)
+			? oauth.utilization
+			: null;
+	if (oauthUtil === null) return base;
+	return base === null ? oauthUtil : Math.max(base, oauthUtil);
+}
 
-	const utilizations: number[] = [];
-
-	// Iterate through all properties to find UsageWindow objects
-	for (const [key, value] of Object.entries(usage)) {
-		// Check if this is a UsageWindow object
-		if (
-			value &&
-			typeof value === "object" &&
-			"utilization" in value &&
-			typeof value.utilization === "number"
-		) {
-			utilizations.push(value.utilization);
-		}
-		// Also check extra_usage if present
-		if (
-			key === "extra_usage" &&
-			value &&
-			typeof value === "object" &&
-			"utilization" in value &&
-			typeof value.utilization === "number"
-		) {
-			utilizations.push(value.utilization);
-		}
-	}
-
-	return utilizations.length > 0 ? Math.max(...utilizations) : 0;
+/**
+ * Whether a successful usage poll should fire the capacity-restored callback
+ * (which clears a stale `rate_limited_until`). True only when ALL hold:
+ *  - the account was previously usage-rate-limited (`wasRateLimited`),
+ *  - the account-wide representative utilization is a number below 100 (genuine
+ *    headroom — `null`/no-evidence never clears), AND
+ *  - the overage `extra_usage` window is below 100.
+ *
+ * The account-wide representative deliberately EXCLUDES `extra_usage`, so an
+ * account whose overage credits are spent can read <100% here; vetoing on a
+ * spent `extra_usage` prevents polling from wiping an overage / `out_of_credits`
+ * floor. Belt-and-suspenders with the reason-aware guard at the callback site.
+ */
+export function shouldClearRateLimitOnCapacity(
+	representativeUtilization: number | null,
+	extraUsageUtilization: number | null | undefined,
+	wasRateLimited: boolean,
+): boolean {
+	if (!wasRateLimited) return false;
+	if (representativeUtilization === null || representativeUtilization >= 100)
+		return false;
+	if ((extraUsageUtilization ?? 0) >= 100) return false;
+	return true;
 }
 
 /**
@@ -258,6 +326,7 @@ export function getRepresentativeUtilization(
  */
 export function getRepresentativeWindow(
 	usage: UsageData | null,
+	now: number = Date.now(),
 ): string | null {
 	if (!usage) return null;
 
@@ -286,6 +355,24 @@ export function getRepresentativeWindow(
 		}
 	}
 
+	// `limits[]`-only payload: no flat UsageWindow fields were found, so name the
+	// binding window from the normalizer's account-wide windows.
+	if (windows.length === 0) {
+		const normalized = normalizeAnthropicUsage(
+			usage as AnthropicUsageData | null,
+			now,
+		);
+		if (normalized.session) {
+			windows.push({ name: "five_hour", util: normalized.session.utilization });
+		}
+		if (normalized.weeklyAll) {
+			windows.push({
+				name: "seven_day",
+				util: normalized.weeklyAll.utilization,
+			});
+		}
+	}
+
 	if (windows.length === 0) return null;
 
 	const max = windows.reduce((prev, current) =>
@@ -307,19 +394,23 @@ export function getRepresentativeUtilizationForProvider(
 		case "anthropic":
 		case "codex": {
 			const d = data as UsageData;
-			// Only account-level windows count as hard limits. Model-specific windows
-			// (seven_day_sonnet, seven_day_opus) are excluded: they are mutual fallbacks
-			// and Anthropic never exposes both simultaneously, so neither is a hard limit.
+			// Source the account-session (5h) and account-wide weekly windows through
+			// the normalizer PER-WINDOW so flat AND `limits[]`-only AND mixed payloads
+			// all resolve (the normalizer reads flat five_hour/seven_day first, else
+			// the limits[] session/weekly_all entries). Then fold in the flat
+			// OAuth-apps weekly window (Claude Code quota — not captured by the
+			// normalizer) and `extra_usage` (kept for this ranking function's purpose).
+			// Only account-level windows count; model-scoped seven_day_opus/sonnet are
+			// excluded (mutual fallbacks, never both present).
+			const normalized = normalizeAnthropicUsage(
+				d as unknown as AnthropicUsageData,
+				Date.now(),
+			);
 			const utils: number[] = [];
-			for (const key of [
-				"five_hour",
-				"seven_day",
-				"seven_day_oauth_apps",
-			] as const) {
-				const w = d[key] as UsageWindow | undefined;
-				if (w?.utilization != null) utils.push(w.utilization);
-			}
-			// extra_usage has utilization: number | null
+			if (normalized.session) utils.push(normalized.session.utilization);
+			if (normalized.weeklyAll) utils.push(normalized.weeklyAll.utilization);
+			if (d.seven_day_oauth_apps?.utilization != null)
+				utils.push(d.seven_day_oauth_apps.utilization);
 			if (d.extra_usage?.utilization != null)
 				utils.push(d.extra_usage.utilization);
 			return utils.length > 0 ? Math.max(...utils) : null;
@@ -345,6 +436,22 @@ export function getRepresentativeUtilizationForProvider(
 	}
 }
 
+/**
+ * Reduce a flat `UsageWindow` to {util, resetMs}, or null when absent / its
+ * utilization is non-numeric. Used for the flat OAuth-apps weekly window, which
+ * the normalizer's account-wide windows do not capture.
+ */
+function flatWindowToHard(
+	w: UsageWindow | undefined,
+): { util: number; resetMs: number | null } | null {
+	if (!w || typeof w.utilization !== "number") return null;
+	const ms = w.resets_at ? new Date(w.resets_at).getTime() : null;
+	return {
+		util: w.utilization,
+		resetMs: ms !== null && Number.isFinite(ms) ? ms : null,
+	};
+}
+
 export function getAccountCapacitySignal(
 	data: AnyUsageData | null,
 	provider: string,
@@ -354,21 +461,32 @@ export function getAccountCapacitySignal(
 	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
 	if (provider !== "anthropic" && provider !== "codex") return null;
 	const d = data as UsageData;
+	// Source the hard windows PER-WINDOW: the normalizer resolves the session (5h)
+	// and account-wide weekly from flat five_hour/seven_day first, else the
+	// limits[] session/weekly_all entries — so flat, limits[]-only, AND mixed
+	// (flat + limits[]) payloads all rank correctly. The flat OAuth-apps weekly
+	// window (Claude Code quota) is added on top since the normalizer doesn't
+	// capture it. Fully-flat payloads are byte-identical to the prior behavior.
+	const normalized = normalizeAnthropicUsage(
+		d as unknown as AnthropicUsageData,
+		now,
+	);
 	const hard: Array<{ util: number; resetMs: number | null }> = [];
-	for (const key of [
-		"five_hour",
-		"seven_day",
-		"seven_day_oauth_apps",
-	] as const) {
-		const w = d[key] as UsageWindow | undefined;
-		if (w && typeof w.utilization === "number") {
-			const ms = w.resets_at ? new Date(w.resets_at).getTime() : null;
-			hard.push({
-				util: w.utilization,
-				resetMs: ms !== null && Number.isFinite(ms) ? ms : null,
-			});
-		}
+	if (normalized.session) {
+		hard.push({
+			util: normalized.session.utilization,
+			resetMs: normalized.session.resetMs,
+		});
 	}
+	if (normalized.weeklyAll) {
+		hard.push({
+			util: normalized.weeklyAll.utilization,
+			resetMs: normalized.weeklyAll.resetMs,
+		});
+	}
+	const oauthWindow = flatWindowToHard(d.seven_day_oauth_apps);
+	if (oauthWindow) hard.push(oauthWindow);
+
 	if (hard.length === 0) return null;
 	// Content-staleness: if any present hard window is already past its reset, the
 	// cached datum predates a window roll — treat as unknown so callers refresh.
@@ -394,16 +512,23 @@ export function getAccountCapacitySignal(
 	// overall soonest reset never prioritizes the weekly quota (where unused
 	// budget is genuinely lost at the reset). Rank HARVEST by the weekly reset
 	// instead; the 5-hour stays as the NEAR_LIMIT safety gate (via minHeadroom).
+	// The account-wide weekly comes from the normalizer (flat seven_day OR limits
+	// weekly_all); the flat OAuth-apps weekly is folded in on top.
+	const weeklyWindows: Array<{ util: number; resetMs: number | null }> = [];
+	if (normalized.weeklyAll) {
+		weeklyWindows.push({
+			util: normalized.weeklyAll.utilization,
+			resetMs: normalized.weeklyAll.resetMs,
+		});
+	}
+	if (oauthWindow) weeklyWindows.push(oauthWindow);
 	let weeklyHeadroom = 100;
 	let weeklyReset: number | null = null;
-	for (const key of ["seven_day", "seven_day_oauth_apps"] as const) {
-		const w = d[key] as UsageWindow | undefined;
-		if (w && typeof w.utilization === "number") {
-			weeklyHeadroom = Math.min(weeklyHeadroom, 100 - w.utilization);
-			const ms = w.resets_at ? new Date(w.resets_at).getTime() : null;
-			if (ms !== null && Number.isFinite(ms))
-				weeklyReset = weeklyReset === null ? ms : Math.min(weeklyReset, ms);
-		}
+	for (const w of weeklyWindows) {
+		weeklyHeadroom = Math.min(weeklyHeadroom, 100 - w.util);
+		if (w.resetMs !== null)
+			weeklyReset =
+				weeklyReset === null ? w.resetMs : Math.min(weeklyReset, w.resetMs);
 	}
 	return {
 		minHeadroom,
@@ -896,11 +1021,17 @@ class UsageCache {
 						result.data as UsageData,
 					);
 					// Notify capacity-restored listener only when the account was previously
-					// rate-limited (usageRateLimitedUntil set) and usage now shows < 100%.
-					// This handles seat-reassignment: org admin reassigns a seat mid-window,
-					// Anthropic resets usage, polling detects available capacity and lets
-					// the caller clear stale rate_limited_until in the DB.
-					if (utilization !== null && utilization < 100 && wasRateLimited) {
+					// rate-limited (usageRateLimitedUntil set) and usage now shows genuine
+					// account-wide headroom. This handles seat-reassignment: org admin
+					// reassigns a seat mid-window, Anthropic resets usage, polling detects
+					// available capacity and lets the caller clear stale rate_limited_until.
+					if (
+						shouldClearRateLimitOnCapacity(
+							utilization,
+							(result.data as UsageData).extra_usage?.utilization,
+							wasRateLimited,
+						)
+					) {
 						const capacityCallback =
 							this.capacityRestoredCallbacks.get(accountId);
 						if (capacityCallback) capacityCallback(accountId);

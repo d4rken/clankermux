@@ -167,12 +167,32 @@ describe("getExhaustedFamilies", () => {
 		expect(getExhaustedFamilies(undefined, NOW)).toEqual([]);
 	});
 
-	it("returns [] for non-Anthropic-shaped usage data", () => {
-		// Missing five_hour/seven_day keys — not Anthropic-shaped.
-		const nonAnthropic = {
-			limits: [scopedEntry({ displayName: "Fable" })],
+	it("returns [] for a genuinely non-Anthropic (zai) shape with no limits[]", () => {
+		const zai = {
+			tokens_limit: { percentage: 100, resetAt: null },
+			time_limit: null,
 		} as unknown as AnthropicUsageData;
-		expect(getExhaustedFamilies(nonAnthropic, NOW)).toEqual([]);
+		expect(getExhaustedFamilies(zai, NOW)).toEqual([]);
+	});
+
+	it("detects an exhausted family from a limits[]-only payload (no flat keys)", () => {
+		// Upstream limits[]-only shape: the flat five_hour/seven_day keys are gone.
+		// The old both-flat-keys guard would have returned [] here — now detected.
+		const limitsOnly = {
+			limits: [
+				scopedEntry({ displayName: "Fable", percent: 100 }),
+				scopedEntry({ displayName: "Sonnet", percent: 40 }), // under threshold
+			],
+		} as unknown as AnthropicUsageData;
+		const result = getExhaustedFamilies(limitsOnly, NOW);
+		expect(result).toHaveLength(1);
+		expect(result[0]).toEqual({
+			family: "fable",
+			percent: 100,
+			resetsAtMs: Date.parse(FUTURE_ISO),
+			isActive: true,
+			displayName: "Fable",
+		});
 	});
 
 	it("returns all qualifying entries when several are exhausted", () => {

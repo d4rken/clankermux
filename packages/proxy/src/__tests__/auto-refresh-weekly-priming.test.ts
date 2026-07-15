@@ -16,6 +16,7 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { toEpochMs, type UsageData, usageCache } from "@clankermux/providers";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { summarizeAnthropicUsageForLog } from "../auto-refresh-scheduler";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -116,6 +117,57 @@ afterEach(() => {
 	for (const id of seededIds) usageCache.delete(id);
 	seededIds.clear();
 	mock.restore();
+});
+
+// ── summarizeAnthropicUsageForLog (probe log line — must never throw) ──────────
+
+describe("summarizeAnthropicUsageForLog", () => {
+	it("reads flat five_hour/seven_day utilizations", () => {
+		expect(
+			summarizeAnthropicUsageForLog({
+				five_hour: { utilization: 42, resets_at: null },
+				seven_day: { utilization: 7, resets_at: null },
+			}),
+		).toEqual({ fiveH: 42, sevenD: 7 });
+	});
+
+	it("reads a limits[]-only payload WITHOUT throwing (would otherwise be a false failure)", () => {
+		// Regression: the old `usageData.five_hour.utilization` deref threw on this
+		// shape → caught by the probe's outer try/catch → false auto-refresh failure.
+		expect(
+			summarizeAnthropicUsageForLog({
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 30,
+						resets_at: null,
+						scope: null,
+						is_active: true,
+					},
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 12,
+						resets_at: null,
+						scope: null,
+						is_active: true,
+					},
+				],
+			}),
+		).toEqual({ fiveH: 30, sevenD: 12 });
+	});
+
+	it("returns n/a for windows with no numeric evidence (still no throw)", () => {
+		expect(summarizeAnthropicUsageForLog({})).toEqual({
+			fiveH: "n/a",
+			sevenD: "n/a",
+		});
+		expect(summarizeAnthropicUsageForLog(null)).toEqual({
+			fiveH: "n/a",
+			sevenD: "n/a",
+		});
+	});
 });
 
 // ── toEpochMs sanity ────────────────────────────────────────────────────────
@@ -224,6 +276,127 @@ describe("AutoRefreshScheduler — isWeeklyDormant", () => {
 			five_hour: { utilization: 0, resets_at: null },
 		} as unknown as UsageData);
 		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
+	});
+
+	it("detects dormancy from a limits[]-only weekly_all window (never started)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-limits-fresh");
+		const now = Date.now();
+		// No flat seven_day; the account-wide weekly lives in limits[].
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 0,
+					resets_at: null,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(true);
+	});
+
+	it("detects dormancy from a limits[]-only weekly_all window (already reset/idle)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-limits-past");
+		const now = Date.now();
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 0,
+					resets_at: new Date(now - 60_000).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(true);
+	});
+
+	it("does NOT treat a future limits[]-only weekly_all window as dormant", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-limits-future");
+		const now = Date.now();
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 30,
+					resets_at: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
+	});
+
+	it("does not let an EMPTY flat seven_day shadow a valid limits[] weekly_all (future → not dormant)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-mixed-future");
+		const now = Date.now();
+		// Present-but-empty flat window (utilization null) + a real limits weekly_all.
+		usageCache.set(id, {
+			seven_day: { utilization: null, resets_at: null },
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 30,
+					resets_at: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		// Must use the limits entry (future reset) → NOT dormant, not the empty flat.
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
+	});
+
+	it("does NOT treat a null-percent limits[] weekly_all as a dormant-priming window", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-limits-nullpct");
+		const now = Date.now();
+		// A weekly_all with null percent carries no utilization evidence: even with a
+		// PAST reset it must not be primed on (would otherwise read as dormant).
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: null,
+					resets_at: new Date(now - 60_000).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(false);
+	});
+
+	it("does not let an EMPTY flat seven_day shadow a valid limits[] weekly_all (past → dormant)", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("w-mixed-past");
+		const now = Date.now();
+		usageCache.set(id, {
+			seven_day: { utilization: null, resets_at: null },
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 0,
+					resets_at: new Date(now - 60_000).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData);
+		expect(scheduler.isWeeklyDormant(id, now)).toBe(true);
 	});
 });
 

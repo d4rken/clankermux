@@ -1,7 +1,49 @@
 import { describe, expect, it } from "bun:test";
 import { AsyncDbWriter } from "@clankermux/database";
-import type { Account } from "@clankermux/types";
-import { createHealthHandler } from "../health";
+import { usageCache } from "@clankermux/providers";
+import type { Account, AnthropicUsageData } from "@clankermux/types";
+import { computePoolStatus, createHealthHandler } from "../health";
+
+const EXH_NOW = 1_750_000_000_000;
+const EXH_FUTURE_ISO = new Date(EXH_NOW + 3_600_000).toISOString();
+
+/** A limits[]-only Anthropic payload with a single account-wide weekly window. */
+function weeklyAllUsage(
+	percent: number,
+	resetsAt: string | null,
+): AnthropicUsageData {
+	return {
+		limits: [
+			{
+				kind: "weekly_all",
+				group: "weekly",
+				percent,
+				resets_at: resetsAt,
+				scope: null,
+				is_active: true,
+			},
+		],
+	};
+}
+
+/**
+ * A flat Anthropic payload where the OAuth-apps weekly window (Claude Code
+ * quota) is the binding one — `seven_day` stays below 100.
+ */
+function oauthAppsUsage(
+	oauthPercent: number,
+	oauthResetsAt: string | null,
+	sevenDayPercent = 50,
+): AnthropicUsageData {
+	return {
+		five_hour: { utilization: 10, resets_at: EXH_FUTURE_ISO },
+		seven_day: { utilization: sevenDayPercent, resets_at: EXH_FUTURE_ISO },
+		seven_day_oauth_apps: {
+			utilization: oauthPercent,
+			resets_at: oauthResetsAt,
+		},
+	};
+}
 
 /** Partial shape of the /health JSON body, covering fields asserted in tests. */
 interface HealthTestBody {
@@ -237,6 +279,89 @@ describe("computePoolStatus", () => {
 	});
 });
 
+describe("computePoolStatus usage-window exhaustion", () => {
+	it("counts a 100%-weekly account as usage_exhausted, not routable, and recovers at the weekly reset", () => {
+		const accounts = [
+			{ name: "healthy", paused: false, rate_limited_until: null },
+			{ name: "exhausted", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, (a) =>
+			a.name === "exhausted" ? weeklyAllUsage(100, EXH_FUTURE_ISO) : null,
+		);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(1);
+		expect(status.rate_limited).toBe(0);
+		expect(status.next_available_at).toBe(EXH_FUTURE_ISO);
+	});
+
+	it("keeps a scoped-only exhausted account routable (family-scoped is detail-only)", () => {
+		const scopedOnly: AnthropicUsageData = {
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 100,
+					resets_at: EXH_FUTURE_ISO,
+					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		};
+		const accounts = [
+			{ name: "scoped", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () => scopedOnly);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(0);
+	});
+
+	it("does not flag a 100%-weekly window whose reset is already in the past (stale)", () => {
+		const accounts = [
+			{ name: "stale", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () =>
+			weeklyAllUsage(100, new Date(EXH_NOW - 1000).toISOString()),
+		);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(0);
+	});
+
+	it("does not double-count: a paused exhausted account is paused, not usage_exhausted", () => {
+		const accounts = [
+			{ name: "paused-exh", paused: true, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () =>
+			weeklyAllUsage(100, EXH_FUTURE_ISO),
+		);
+		expect(status.paused).toBe(1);
+		expect(status.usage_exhausted).toBe(0);
+		expect(status.routable).toBe(0);
+	});
+
+	it("flags an account whose seven_day_oauth_apps is spent even when seven_day < 100", () => {
+		const accounts = [
+			{ name: "oauth-exhausted", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () =>
+			oauthAppsUsage(100, EXH_FUTURE_ISO, 50),
+		);
+		expect(status.routable).toBe(0);
+		expect(status.usage_exhausted).toBe(1);
+		expect(status.next_available_at).toBe(EXH_FUTURE_ISO);
+	});
+
+	it("does not flag a spent seven_day_oauth_apps whose reset is already past (stale)", () => {
+		const accounts = [
+			{ name: "oauth-stale", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () =>
+			oauthAppsUsage(100, new Date(EXH_NOW - 1000).toISOString(), 50),
+		);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(0);
+	});
+});
+
 describe("computeHealthStatus three-state logic", () => {
 	it("returns ok when runtime healthy and routable accounts exist", async () => {
 		const { computeHealthStatus } = await import("../health");
@@ -467,6 +592,134 @@ describe("?detail=1 parameter", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 
 		expect(body).not.toHaveProperty("accounts_detail");
+	});
+
+	it("marks a 100%-weekly account as usage_exhausted in accounts_detail", async () => {
+		const id = "health-exh-acct-1";
+		// The handler uses real Date.now(), so the reset must be genuinely future.
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail).toBeDefined();
+			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
+			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
+				"number",
+			);
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("marks an account with a spent seven_day_oauth_apps as usage_exhausted in accounts_detail", async () => {
+		const id = "health-oauth-acct-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, {
+			five_hour: { utilization: 10, resets_at: futureIso },
+			seven_day: { utilization: 50, resets_at: futureIso },
+			seven_day_oauth_apps: { utilization: 100, resets_at: futureIso },
+		} as AnthropicUsageData);
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "oauth-exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
+			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
+				"number",
+			);
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("keeps a scoped-only exhausted account available but lists the scoped family", async () => {
+		const id = "health-scoped-acct-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 100,
+					resets_at: futureIso,
+					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		} as AnthropicUsageData);
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "scoped",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("available");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_families).toEqual([
+				"fable",
+			]);
+		} finally {
+			usageCache.delete(id);
+		}
 	});
 
 	it("shows available status for accounts with expired rate limits", async () => {

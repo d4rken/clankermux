@@ -4,7 +4,11 @@
  * server process; the handler only surfaces its stats).
  */
 import { describe, expect, it } from "bun:test";
-import type { SystemStatusResponse } from "@clankermux/types";
+import { usageCache } from "@clankermux/providers";
+import type {
+	AnthropicUsageData,
+	SystemStatusResponse,
+} from "@clankermux/types";
 import { createSystemStatusHandler } from "../system";
 
 function makeDbOps() {
@@ -54,5 +58,48 @@ describe("system status handler — eventLoop", () => {
 			maxLagMs: 0,
 			maxRecentLagMs: 0,
 		});
+	});
+});
+
+describe("system status handler — usage-exhaustion consistency with /health", () => {
+	it("counts a 100%-weekly account as usage_exhausted / not routable (same resolver as /health)", async () => {
+		const id = "system-exh-acct-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 100,
+					resets_at: futureIso,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as AnthropicUsageData);
+		try {
+			const dbOps = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+
+			const handler = createSystemStatusHandler(dbOps, makeConfig(), () => ({
+				healthy: true,
+			}));
+			const response = await handler();
+			const body = (await response.json()) as SystemStatusResponse;
+
+			expect(body.pool?.usage_exhausted).toBe(1);
+			expect(body.pool?.routable).toBe(0);
+		} finally {
+			usageCache.delete(id);
+		}
 	});
 });

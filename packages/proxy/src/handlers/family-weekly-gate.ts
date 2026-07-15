@@ -45,9 +45,10 @@ export interface FamilyWeeklyExcludedAccount {
  *
  * Fails open: an unresolved family, or null/stale/malformed capacity, yields
  * null — this gate must never be the thing that sidelines an account on missing
- * evidence (the account-wide cooldown path remains the fallback). The Anthropic
- * shape guard lives in the core predicate, so non-Anthropic usage data is
- * handled safely even though the cast below asserts the Anthropic shape.
+ * evidence (the account-wide cooldown path remains the fallback). Non-Anthropic
+ * usage data is handled safely because `getExhaustedFamilies` runs it through
+ * `normalizeAnthropicUsage`, which returns an empty scoped list for any shape it
+ * doesn't recognize — so the cast below is safe.
  */
 export function resolveFamilyWeeklyExclusion(
 	account: Account,
@@ -58,8 +59,8 @@ export function resolveFamilyWeeklyExclusion(
 ): FamilyWeeklyExcludedAccount | null {
 	const family = modelForGate ? getModelFamily(modelForGate) : null;
 	if (!family) return null;
-	// The core predicate/parser shape-guard non-Anthropic data, so this cast is
-	// safe — mirrors dashboard-web/src/lib/secondary-limits.ts.
+	// `getExhaustedFamilies` normalizes any shape and yields [] for non-Anthropic
+	// data, so this cast is safe — mirrors dashboard-web/src/lib/secondary-limits.ts.
 	const data = (usageData ?? undefined) as AnthropicUsageData | undefined;
 	if (!isFamilyWeeklyExhaustedWithHeadroom(data, capacity, family, now)) {
 		return null;
@@ -208,8 +209,8 @@ export interface TransientlyCooledFamilySibling {
  * so the sibling is treated as capable — a brief bounded hold then re-checks on
  * retry, which is safer than surfacing a 5-day error for a 60-second blip. The
  * caller supplies `now` and both cooldown deadlines to keep this pure (no clock,
- * no provider-overload-module import). The Anthropic shape guard lives in
- * `getExhaustedFamilies`, so the cast below is safe for non-Anthropic data.
+ * no provider-overload-module import). `getExhaustedFamilies` normalizes any
+ * shape and yields [] for non-Anthropic data, so the cast below is safe.
  */
 export function resolveTransientlyCooledFamilySibling(
 	account: Account,

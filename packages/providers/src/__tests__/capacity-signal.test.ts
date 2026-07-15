@@ -159,6 +159,94 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.weeklyResetMs).toBeNull();
 		expect(signal?.weeklyHeadroom).toBe(100);
 	});
+
+	// --- limits[]-only payloads (upstream is dropping the flat keys) ---
+
+	it("derives a capacity signal from a limits[]-only payload (no flat windows)", () => {
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 20,
+					resets_at: iso(3_600_000),
+					scope: null,
+					is_active: true,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 40,
+					resets_at: iso(600_000_000),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		// Same numbers the equivalent flat payload produces (see first test).
+		expect(signal?.minHeadroom).toBe(60);
+		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
+		expect(signal?.bindingUtilization).toBe(40);
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.weeklyHeadroom).toBe(60);
+	});
+
+	it("returns null for a content-stale limits[]-only session window (past reset)", () => {
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 20,
+					resets_at: iso(-1), // already past
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		expect(getAccountCapacitySignal(data, "anthropic", NOW)).toBeNull();
+	});
+
+	it("returns null for an empty limits[] array (no evidence, never 0)", () => {
+		const data = { limits: [] } as unknown as UsageData;
+		expect(getAccountCapacitySignal(data, "anthropic", NOW)).toBeNull();
+	});
+
+	it("does NOT let a small flat oauth_apps window mask an exhausted limits[] session (mixed payload)", () => {
+		// A flat seven_day_oauth_apps window exists (20%), but the REAL session is
+		// spent (limits[] session 100%). The all-or-nothing fallback used to ignore
+		// limits[] whenever any flat window was present → ranked ~20% healthy.
+		const data = {
+			seven_day_oauth_apps: { utilization: 20, resets_at: iso(400_000_000) },
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 100,
+					resets_at: iso(3_600_000),
+					scope: null,
+					is_active: true,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 40,
+					resets_at: iso(600_000_000),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		// session 100 → NEAR_LIMIT (no headroom), binding 100.
+		expect(signal?.minHeadroom).toBe(0);
+		expect(signal?.bindingUtilization).toBe(100);
+		// weekly fields fold in weekly_all(40) and the flat oauth_apps(20).
+		expect(signal?.weeklyHeadroom).toBe(60); // min(100-40, 100-20)
+	});
 });
 
 describe("getFreshCapacity", () => {

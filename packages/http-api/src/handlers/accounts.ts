@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
+	isAnthropicUsageShape,
 	patterns,
 	sanitizers,
 	validateAndSanitizeModelMappings,
@@ -67,6 +68,7 @@ import {
 } from "../services/build-account-predictions";
 import type { AccountResponse } from "../types";
 import { invalidateDashboardCache } from "./analytics-runner";
+import { weeklyExhaustion } from "./health";
 
 const log = new Logger("AccountsHandler");
 
@@ -141,11 +143,29 @@ export function presentRateLimitStatus(
 		rate_limited_until: number | string | null;
 	},
 	now: number,
+	/**
+	 * Account-wide weekly exhaustion (weeklyAll >= 100 with a future reset), when
+	 * known. When the account has no live rate-limit lock/status (would read
+	 * "OK"), surface `usage_exhausted (Nm)` instead so a 100%-weekly-not-yet-cooled
+	 * account stops reading "OK". Display-only — does not affect routing.
+	 */
+	weeklyExhausted?: { resetMs: number | null } | null,
 ): string {
 	const lockMs = fields.rate_limited_until
 		? Number(fields.rate_limited_until)
 		: 0;
 	const hasActiveLock = lockMs > now;
+
+	// The label for account-wide weekly exhaustion (with a countdown when the reset
+	// is a known future time). Only meaningful when `weeklyExhausted` is set.
+	const usageExhaustedLabel = (): string => {
+		const resetMs = weeklyExhausted?.resetMs ?? null;
+		if (resetMs !== null && resetMs > now) {
+			const minutesLeft = Math.ceil((resetMs - now) / 60000);
+			return `usage_exhausted (${minutesLeft}m)`;
+		}
+		return "usage_exhausted";
+	};
 
 	if (fields.rate_limit_status) {
 		const storedIsHard = HARD_LIMIT_PREFIXES.some((prefix) =>
@@ -155,6 +175,14 @@ export function presentRateLimitStatus(
 			// Stale soft status while the proxy lock is active — surface the lock.
 			const minutesLeft = Math.ceil((lockMs - now) / 60000);
 			return `rate_limited (${minutesLeft}m)`;
+		}
+		// A SOFT stored status (allowed/allowed_warning/…) does NOT block the
+		// account, but account-wide weekly exhaustion does. With no active lock and
+		// a spent weekly window, surface `usage_exhausted` instead of the reassuring
+		// soft status. An active lock or a genuinely HARD stored status keeps
+		// precedence (handled above / below).
+		if (!hasActiveLock && !storedIsHard && weeklyExhausted) {
+			return usageExhaustedLabel();
 		}
 		const resetMs = Number(fields.rate_limit_reset);
 		if (resetMs && resetMs > now) {
@@ -176,6 +204,13 @@ export function presentRateLimitStatus(
 		// Fall back to legacy rate limit check
 		const minutesLeft = Math.ceil((lockMs - now) / 60000);
 		return `Rate limited (${minutesLeft}m)`;
+	}
+
+	// No live lock/status: a 100%-weekly account is genuinely blocked for
+	// account-wide requests even though nothing has cooled it yet — surface it
+	// rather than a misleading "OK".
+	if (weeklyExhausted) {
+		return usageExhaustedLabel();
 	}
 
 	return "OK";
@@ -524,16 +559,6 @@ export function createAccountsListHandler(
 					? getProviderOverloadKey(provider)
 					: null;
 
-				const rateLimitStatus = presentRateLimitStatus(
-					{
-						rate_limit_status: account.rate_limit_status,
-						rate_limit_reset: account.rate_limit_reset,
-						rate_limited: account.rate_limited,
-						rate_limited_until: account.rate_limited_until,
-					},
-					now,
-				);
-
 				// Get usage data from cache for providers that expose account-page quota or credit data
 				const cachedUsageData = liveUsageByAccount.get(account.id) ?? null;
 				let usageData: FullUsageData | null =
@@ -546,6 +571,33 @@ export function createAccountsListHandler(
 						usageData,
 					);
 				}
+
+				// Account-wide weekly exhaustion (anthropic/codex only): the weeklyAll
+				// window OR the flat seven_day_oauth_apps (Claude Code weekly quota) at/
+				// above 100% with a future reset. Shared with /health via
+				// `weeklyExhaustion`, keeping the display consistent with the account-
+				// wide representative used for the cooldown-clear guard. Surfaced in
+				// rateLimitStatus so a 100%-weekly-not-yet-cooled account stops reading
+				// "OK". Family-scoped windows are per-model and NOT reflected here.
+				let weeklyExhausted: { resetMs: number | null } | null = null;
+				if (account.provider === "anthropic" || account.provider === "codex") {
+					const { exhausted, resetMs } = weeklyExhaustion(
+						usageData as AnthropicUsageData | null,
+						now,
+					);
+					if (exhausted) weeklyExhausted = { resetMs };
+				}
+
+				const rateLimitStatus = presentRateLimitStatus(
+					{
+						rate_limit_status: account.rate_limit_status,
+						rate_limit_reset: account.rate_limit_reset,
+						rate_limited: account.rate_limited,
+						rate_limited_until: account.rate_limited_until,
+					},
+					now,
+					weeklyExhausted,
+				);
 				// Codex-only credits state for the response chip; null for other
 				// providers or when unknown. Prefer the resolved usage object, but
 				// fall back to the live cache directly: normalizeCodexUsageData
@@ -568,8 +620,12 @@ export function createAccountsListHandler(
 					(account.provider === "anthropic" || account.provider === "codex") &&
 					usageData
 				) {
-					const isAnthropicStyleData =
-						"five_hour" in usageData && "seven_day" in usageData;
+					// Accept `limits[]`-only payloads (upstream is dropping the flat
+					// five_hour/seven_day keys), not just the both-flat-keys shape, so a
+					// limits-only account still populates its usage bars/utilization.
+					const isAnthropicStyleData = isAnthropicUsageShape(
+						usageData as AnthropicUsageData | null,
+					);
 					if (isAnthropicStyleData) {
 						try {
 							usageUtilization = getRepresentativeUtilization(

@@ -275,6 +275,50 @@ describe("buildSnapshotRows", () => {
 		});
 		expect(buildSnapshotRows(accounts, cache, NOW, FRESHNESS)).toEqual([]);
 	});
+
+	it("records a row for a limits[]-only anthropic account (no flat keys)", () => {
+		const fiveReset = "2023-11-14T22:13:20.000Z"; // == NOW + 100s
+		const sevenReset = "2023-11-21T22:13:20.000Z";
+		const accounts: Acct[] = [{ id: "limits-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"limits-1": {
+				ageMs: 1_000,
+				data: {
+					limits: [
+						{
+							kind: "session",
+							group: "session",
+							percent: 55,
+							resets_at: fiveReset,
+							scope: null,
+							is_active: true,
+						},
+						{
+							kind: "weekly_all",
+							group: "weekly",
+							percent: 8,
+							resets_at: sevenReset,
+							scope: null,
+							is_active: true,
+						},
+					],
+				} as unknown as AnyUsageData,
+			},
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toEqual({
+			accountId: "limits-1",
+			provider: "anthropic",
+			sampledAt: NOW,
+			fiveHourPct: 55,
+			fiveHourReset: new Date(fiveReset).getTime(),
+			sevenDayPct: 8,
+			sevenDayReset: new Date(sevenReset).getTime(),
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

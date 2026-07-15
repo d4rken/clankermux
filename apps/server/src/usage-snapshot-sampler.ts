@@ -30,14 +30,18 @@
  *    `packages/http-api/src/handlers/usage-history.ts`.
  */
 
-import { intervalManager, readEnv } from "@clankermux/core";
+import {
+	intervalManager,
+	normalizeAnthropicUsage,
+	readEnv,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import type { AnyUsageData, UsageData } from "@clankermux/providers";
 import type {
-	AnyUsageData,
-	UsageData,
-	UsageWindow,
-} from "@clankermux/providers";
-import type { Account, UsageSnapshotRow } from "@clankermux/types";
+	Account,
+	AnthropicUsageData,
+	UsageSnapshotRow,
+} from "@clankermux/types";
 
 const log = new Logger("UsageSnapshotSampler");
 
@@ -59,35 +63,16 @@ interface SamplerAccount {
 }
 
 /**
- * Read a numeric utilization (%) from a usage window, or null when the window
- * is absent or its utilization is missing/non-numeric.
- */
-function windowPct(window: UsageWindow | undefined): number | null {
-	if (!window) return null;
-	const util = (window as { utilization?: unknown }).utilization;
-	return typeof util === "number" && Number.isFinite(util) ? util : null;
-}
-
-/**
- * Convert a window's `resets_at` ISO string to epoch ms, or null when absent or
- * unparseable.
- */
-function windowResetMs(window: UsageWindow | undefined): number | null {
-	if (!window) return null;
-	const resetsAt = (window as { resets_at?: unknown }).resets_at;
-	if (typeof resetsAt !== "string" || resetsAt.length === 0) return null;
-	const ms = new Date(resetsAt).getTime();
-	return Number.isFinite(ms) ? ms : null;
-}
-
-/**
  * PURE projection: turn the current cache contents into write-ready snapshot
  * rows for one tick. All rows share the single `now` timestamp.
  *
  * Per account:
  *  - skip non-(anthropic|codex) providers entirely;
  *  - skip when cache age is null or `> freshnessMs` (no carry-forward);
- *  - pull five_hour / seven_day utilization + reset (null when absent/invalid);
+ *  - pull the session (5h) / account-wide weekly (7d) utilization + reset via
+ *    `normalizeAnthropicUsage`, so a `limits[]`-only payload (upstream is
+ *    dropping the flat five_hour/seven_day keys) still yields a row — otherwise
+ *    the sawtooth graph and stale-usage recovery go blank for those accounts;
  *  - skip when BOTH windows are absent/null (nothing meaningful to record).
  */
 export function buildSnapshotRows(
@@ -108,11 +93,12 @@ export function buildSnapshotRows(
 		const data = cache.get(id) as UsageData | null;
 		if (!data) continue;
 
-		const fiveHour = data.five_hour as UsageWindow | undefined;
-		const sevenDay = data.seven_day as UsageWindow | undefined;
-
-		const fiveHourPct = windowPct(fiveHour);
-		const sevenDayPct = windowPct(sevenDay);
+		const normalized = normalizeAnthropicUsage(
+			data as unknown as AnthropicUsageData,
+			now,
+		);
+		const fiveHourPct = normalized.session?.utilization ?? null;
+		const sevenDayPct = normalized.weeklyAll?.utilization ?? null;
 
 		// If neither window contributes a utilization, there is nothing to plot.
 		if (fiveHourPct === null && sevenDayPct === null) continue;
@@ -122,9 +108,9 @@ export function buildSnapshotRows(
 			provider,
 			sampledAt: now,
 			fiveHourPct,
-			fiveHourReset: windowResetMs(fiveHour),
+			fiveHourReset: normalized.session?.resetMs ?? null,
 			sevenDayPct,
-			sevenDayReset: windowResetMs(sevenDay),
+			sevenDayReset: normalized.weeklyAll?.resetMs ?? null,
 		});
 	}
 
