@@ -24,7 +24,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
  *
  * Like Anthropic's `/api/oauth/usage`, OpenAI does NOT expose a free
  * usage-introspection endpoint, so this call always consumes a small slice of
- * the account's Codex quota (bounded by `max_output_tokens: 1` plus the
+ * the account's Codex quota (bounded by `reasoning.effort: "none"` plus the
  * abort-after-headers body cancel).
  *
  * @param accessToken Bearer token for the Codex account. Empty/whitespace
@@ -53,9 +53,16 @@ export async function sendCodexNativePing(
 		],
 		stream: true,
 		store: false,
-		reasoning: { effort: "minimal" },
+		// The ChatGPT/Codex backend rejects both `max_output_tokens` ("Unsupported
+		// parameter") and `reasoning.effort: "minimal"` ("Unsupported value:
+		// 'minimal' ... Supported values are: none, low, medium, high, xhigh") as of
+		// 2026-07 — a ping carrying either 400s with no usage headers, silently
+		// breaking usage sampling + scheduled priming. `effort: "none"` is the
+		// cheapest accepted value; the abort-after-headers body cancel below is what
+		// actually bounds token generation. Verified live: 200 + x-codex-* headers
+		// on gpt-5.4-mini and gpt-5.6-sol.
+		reasoning: { effort: "none" },
 		instructions: "ping",
-		max_output_tokens: 1,
 	});
 
 	let upstream: Response;
@@ -83,7 +90,7 @@ export async function sendCodexNativePing(
 	const statusText = upstream.statusText;
 
 	// Drain/cancel the body. We rely on the server honoring stream cancellation
-	// to avoid generating further tokens; `max_output_tokens: 1` is the hard cap.
+	// to avoid generating further tokens; the abort-after-headers cancel is the cap.
 	try {
 		await upstream.body?.cancel();
 	} catch (error) {
