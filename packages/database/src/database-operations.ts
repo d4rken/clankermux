@@ -964,6 +964,29 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	/**
+	 * Atomically clear the rate-limit lock for the capacity-restored path — but
+	 * only when `rate_limited_until` still equals `expectedRateLimitedUntil` and
+	 * the reason isn't the intentional `out_of_credits` floor. Returns true iff a
+	 * row changed. See {@link AccountRepository.clearRateLimitOnCapacityRestore}.
+	 */
+	async clearRateLimitOnCapacityRestore(
+		accountId: string,
+		expectedRateLimitedUntil: number,
+		expectedRateLimitedAt: number | null,
+	): Promise<boolean> {
+		return withDatabaseRetry(
+			async () =>
+				this.accounts.clearRateLimitOnCapacityRestore(
+					accountId,
+					expectedRateLimitedUntil,
+					expectedRateLimitedAt,
+				),
+			this.retryConfig,
+			"clearRateLimitOnCapacityRestore",
+		);
+	}
+
 	async pauseAccount(accountId: string, reason = "manual"): Promise<void> {
 		await this.accounts.pause(accountId, reason);
 	}

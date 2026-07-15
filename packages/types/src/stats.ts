@@ -441,16 +441,30 @@ export interface PoolStatus {
 	routable: number; // Available for routing
 	paused: number; // Manually or automatically paused
 	rate_limited: number; // Temporarily rate-limited
-	next_available_at: string | null; // ISO timestamp when earliest rate-limit expires
+	/**
+	 * Not routable because the account's account-wide weekly window is at/above
+	 * 100% (with a future reset), even though no `rate_limited_until` lock is set.
+	 * Optional/additive: absent when usage evidence wasn't available. Family-scoped
+	 * exhaustion does NOT count here (it's per-model, surfaced in accounts_detail).
+	 */
+	usage_exhausted?: number;
+	next_available_at: string | null; // ISO timestamp when earliest rate-limit OR usage window recovers
 }
 
 // Account detail for ?detail=1
 export interface AccountDetail {
 	name: string;
-	status: "available" | "paused" | "rate_limited";
+	status: "available" | "paused" | "rate_limited" | "usage_exhausted";
 	rate_limited_until: number | null;
 	rate_limited_reason: RateLimitReason | null;
 	rate_limited_at: number | null;
+	/** Account-wide weekly window reset (ms) when status is `usage_exhausted`. */
+	usage_exhausted_until?: number | null;
+	/**
+	 * Per-model-family weekly windows currently exhausted (e.g. ["fable"]). Detail
+	 * only — a scoped-only exhausted account stays routable (status `available`).
+	 */
+	usage_exhausted_families?: string[];
 }
 
 // Health check response

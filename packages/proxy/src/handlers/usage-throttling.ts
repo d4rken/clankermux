@@ -1,6 +1,11 @@
-import { computeWindowStartMs, type SupportedWindow } from "@clankermux/core";
+import {
+	computeWindowStartMs,
+	isAnthropicUsageShape,
+	normalizeAnthropicUsage,
+	type SupportedWindow,
+} from "@clankermux/core";
 import type { AnyUsageData } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type { Account, AnthropicUsageData } from "@clankermux/types";
 
 const RETRY_AFTER_SECONDS = 60;
 
@@ -20,7 +25,10 @@ export interface UsageThrottleStatus {
 	throttledWindows: SupportedWindow[];
 }
 
-function collectWindows(data: AnyUsageData | null): UsageWindowSnapshot[] {
+function collectWindows(
+	data: AnyUsageData | null,
+	now: number,
+): UsageWindowSnapshot[] {
 	if (!data || typeof data !== "object") return [];
 
 	const windows: UsageWindowSnapshot[] = [];
@@ -123,6 +131,42 @@ function collectWindows(data: AnyUsageData | null): UsageWindowSnapshot[] {
 		return windows;
 	}
 
+	// Anthropic `limits[]`-only (upstream is dropping the flat five_hour/seven_day
+	// keys). Reached only when the flat-Anthropic branch above did NOT match (no
+	// flat five_hour && seven_day pair), so it covers pure `limits[]` payloads and
+	// partial-flat ones. Source session→five_hour, weeklyAll→seven_day, and the
+	// per-family scoped weekly windows (opus/sonnet) from the normalizer so these
+	// accounts still get proactive throttling.
+	if (isAnthropicUsageShape(data as unknown as AnthropicUsageData)) {
+		const normalized = normalizeAnthropicUsage(
+			data as unknown as AnthropicUsageData,
+			now,
+		);
+		if (normalized.session) {
+			pushWindow(
+				"five_hour",
+				normalized.session.utilization,
+				normalized.session.resetMs,
+			);
+		}
+		if (normalized.weeklyAll) {
+			pushWindow(
+				"seven_day",
+				normalized.weeklyAll.utilization,
+				normalized.weeklyAll.resetMs,
+			);
+		}
+		for (const scoped of normalized.weeklyScoped) {
+			if (scoped.family === "opus") {
+				pushWindow("seven_day_opus", scoped.percent, scoped.resetsAtMs);
+			} else if (scoped.family === "sonnet") {
+				pushWindow("seven_day_sonnet", scoped.percent, scoped.resetsAtMs);
+			}
+			// fable/haiku have no dedicated throttle window type — skipped.
+		}
+		return windows;
+	}
+
 	return windows;
 }
 
@@ -149,7 +193,7 @@ export function getUsageThrottleStatus(
 	settings: UsageThrottleSettings,
 	now = Date.now(),
 ): UsageThrottleStatus {
-	const windows = collectWindows(data);
+	const windows = collectWindows(data, now);
 	let throttleUntil: number | null = null;
 	const throttledWindows: SupportedWindow[] = [];
 

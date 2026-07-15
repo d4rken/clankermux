@@ -1,8 +1,18 @@
 import type { Config } from "@clankermux/config";
-import { isAccountAvailable, TtlCache } from "@clankermux/core";
+import {
+	getExhaustedFamilies,
+	isAccountAvailable,
+	normalizeAnthropicUsage,
+	TtlCache,
+} from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
-import type { Account } from "@clankermux/types";
+import { usageCache } from "@clankermux/providers";
+import type {
+	Account,
+	AccountDetail,
+	AnthropicUsageData,
+} from "@clankermux/types";
 import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
 
 type AsyncWriterHealthFn = () => {
@@ -13,9 +23,92 @@ type AsyncWriterHealthFn = () => {
 };
 type IntegrityStatusFn = () => IntegrityStatus;
 
+/**
+ * Resolves an account's raw Anthropic-style usage payload (or null). Injected so
+ * `computePoolStatus` stays pure/testable; the handler passes a reader backed by
+ * the live `usageCache`.
+ */
+export type AccountUsageResolver = (
+	account: Account,
+) => AnthropicUsageData | null | undefined;
+
+/**
+ * The default account-usage resolver backed by the live `usageCache`. Reads usage
+ * only for the windowed providers (anthropic/codex); the normalizer safely
+ * returns "no evidence" for anything else, but this keeps the resolver honest.
+ * Shared by `/health` and the dashboard's System Status so the two never disagree
+ * about which accounts are usage-exhausted.
+ */
+export const usageCacheResolver: AccountUsageResolver = (account) =>
+	account.provider === "anthropic" || account.provider === "codex"
+		? (usageCache.get(account.id) as AnthropicUsageData | null)
+		: null;
+
+/** An account-level weekly window reduced to utilization + parsed reset ms. */
+interface WeeklyWindow {
+	utilization: number;
+	resetMs: number | null;
+}
+
+/**
+ * The flat `seven_day_oauth_apps` window (Claude Code weekly quota) reduced to
+ * {utilization, resetMs}, or null when absent / non-numeric. The normalizer's
+ * account-wide `weeklyAll` deliberately does NOT capture this window, so it is
+ * read directly here — mirroring the account-wide representative in
+ * `getRepresentativeUtilization`.
+ */
+function flatOauthAppsWindow(
+	usage: AnthropicUsageData | null | undefined,
+): WeeklyWindow | null {
+	const w = usage?.seven_day_oauth_apps;
+	if (
+		!w ||
+		typeof w.utilization !== "number" ||
+		!Number.isFinite(w.utilization)
+	)
+		return null;
+	const ms = w.resets_at ? Date.parse(w.resets_at) : null;
+	return {
+		utilization: w.utilization,
+		resetMs: ms !== null && Number.isFinite(ms) ? ms : null,
+	};
+}
+
+/**
+ * Account-wide weekly exhaustion: EITHER the normalized `weeklyAll` window
+ * (flat `seven_day` / limits `weekly_all`) OR the flat `seven_day_oauth_apps`
+ * window (Claude Code weekly quota) is at/above 100% with a KNOWN FUTURE reset.
+ * A past/absent reset is treated as stale/unknown (not exhausted) so we never
+ * sideline an account on ambiguous evidence. When more than one window is spent,
+ * `resetMs` is the LATEST future reset — the account stays exhausted until all
+ * binding windows clear. Family-scoped windows are deliberately NOT considered
+ * here (they are per-model, surfaced as detail only).
+ */
+export function weeklyExhaustion(
+	usage: AnthropicUsageData | null | undefined,
+	now: number,
+): { exhausted: boolean; resetMs: number | null } {
+	const windows: WeeklyWindow[] = [];
+	const weeklyAll = normalizeAnthropicUsage(usage, now).weeklyAll;
+	if (weeklyAll) windows.push(weeklyAll);
+	const oauth = flatOauthAppsWindow(usage);
+	if (oauth) windows.push(oauth);
+
+	let exhausted = false;
+	let resetMs: number | null = null;
+	for (const w of windows) {
+		if (w.utilization >= 100 && w.resetMs !== null && w.resetMs > now) {
+			exhausted = true;
+			resetMs = resetMs === null ? w.resetMs : Math.max(resetMs, w.resetMs);
+		}
+	}
+	return { exhausted, resetMs };
+}
+
 export function computePoolStatus(
 	accounts: Account[],
 	now: number,
+	getUsage?: AccountUsageResolver,
 ): PoolStatus {
 	const configured = accounts.length;
 	const paused = accounts.filter((a) => a.paused).length;
@@ -23,7 +116,24 @@ export function computePoolStatus(
 		(a) => !a.paused && a.rate_limited_until && a.rate_limited_until >= now,
 	);
 	const rate_limited = rateLimitedAccounts.length;
-	const routable = accounts.filter((a) => isAccountAvailable(a, now)).length;
+
+	// Classic-available accounts (not paused, no live lock) may still be sidelined
+	// by an exhausted account-wide weekly window (no `rate_limited_until` yet).
+	let routable = 0;
+	let usage_exhausted = 0;
+	const usageResetTimes: number[] = [];
+	for (const account of accounts) {
+		if (!isAccountAvailable(account, now)) continue;
+		if (getUsage) {
+			const { exhausted, resetMs } = weeklyExhaustion(getUsage(account), now);
+			if (exhausted) {
+				usage_exhausted++;
+				if (resetMs !== null) usageResetTimes.push(resetMs);
+				continue;
+			}
+		}
+		routable++;
+	}
 
 	const earliestRateLimit = rateLimitedAccounts.reduce<number | null>(
 		(min, account) => {
@@ -35,15 +145,22 @@ export function computePoolStatus(
 		null,
 	);
 
-	const next_available_at = earliestRateLimit
-		? new Date(earliestRateLimit).toISOString()
-		: null;
+	// Recovery is the soonest of any rate-limit lock OR usage-window reset, so a
+	// pool that is only usage-exhausted reports "degraded" (recovers) not
+	// "unhealthy" (dead).
+	const recoveryCandidates: number[] = [...usageResetTimes];
+	if (earliestRateLimit !== null) recoveryCandidates.push(earliestRateLimit);
+	const next_available_at =
+		recoveryCandidates.length > 0
+			? new Date(Math.min(...recoveryCandidates)).toISOString()
+			: null;
 
 	return {
 		configured,
 		paused,
 		rate_limited,
 		routable,
+		usage_exhausted,
 		next_available_at,
 	};
 }
@@ -93,7 +210,8 @@ export function createHealthHandler(
 
 		const accounts = await dbOps.getAllAccounts();
 		const now = Date.now();
-		const pool = computePoolStatus(accounts, now);
+		const getUsage = usageCacheResolver;
+		const pool = computePoolStatus(accounts, now, getUsage);
 
 		// Call each health function once and store results
 		const asyncWriterHealth = getAsyncWriterHealth
@@ -160,26 +278,46 @@ export function createHealthHandler(
 
 		// Support ?detail=1 for per-account details.
 		if (withDetail) {
-			response.accounts_detail = accounts.map((a) => ({
-				name: a.name,
-				status: a.paused
-					? "paused"
-					: a.rate_limited_until && a.rate_limited_until >= now
-						? "rate_limited"
-						: "available",
-				rate_limited_until:
-					!a.paused && a.rate_limited_until && a.rate_limited_until >= now
-						? a.rate_limited_until
-						: null,
-				rate_limited_reason:
-					!a.paused && a.rate_limited_until && a.rate_limited_until >= now
-						? a.rate_limited_reason
-						: null,
-				rate_limited_at:
-					!a.paused && a.rate_limited_until && a.rate_limited_until >= now
-						? a.rate_limited_at
-						: null,
-			}));
+			response.accounts_detail = accounts.map((a) => {
+				const locked = !!(
+					!a.paused &&
+					a.rate_limited_until &&
+					a.rate_limited_until >= now
+				);
+				const usage = getUsage(a);
+				// Account-wide weekly exhaustion sidelines the whole account (status
+				// `usage_exhausted`), but only when it isn't already paused/locked.
+				const { exhausted, resetMs } =
+					a.paused || locked
+						? { exhausted: false, resetMs: null }
+						: weeklyExhaustion(usage, now);
+				// Family-scoped exhaustion is DETAIL only — it never changes the
+				// account's routability, so it's surfaced without touching `status`.
+				const scopedFamilies = getExhaustedFamilies(usage, now).map(
+					(f) => f.family,
+				);
+
+				const detail: AccountDetail = {
+					name: a.name,
+					status: a.paused
+						? "paused"
+						: locked
+							? "rate_limited"
+							: exhausted
+								? "usage_exhausted"
+								: "available",
+					rate_limited_until: locked ? (a.rate_limited_until ?? null) : null,
+					rate_limited_reason: locked ? (a.rate_limited_reason ?? null) : null,
+					rate_limited_at: locked ? (a.rate_limited_at ?? null) : null,
+				};
+				if (exhausted && resetMs !== null) {
+					detail.usage_exhausted_until = resetMs;
+				}
+				if (scopedFamilies.length > 0) {
+					detail.usage_exhausted_families = scopedFamilies;
+				}
+				return detail;
+			});
 		}
 
 		cache.set(response);

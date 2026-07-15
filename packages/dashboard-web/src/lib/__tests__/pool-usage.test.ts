@@ -107,6 +107,23 @@ describe("shape detectors", () => {
 			} as never),
 		).toBe(false);
 	});
+
+	it("isAnthropicStyleShape is true for a limits[]-only payload", () => {
+		expect(
+			isAnthropicStyleShape({
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 0,
+						resets_at: null,
+						scope: null,
+						is_active: true,
+					},
+				],
+			} as never),
+		).toBe(true);
+	});
 });
 
 describe("computePoolUsage", () => {
@@ -618,6 +635,83 @@ describe("computePoolUsage", () => {
 			expect(result.atRisk[0].name).toBe("weekly-burner");
 			expect(result.atRisk[0].resetMs).toBe(resetMs);
 		});
+	});
+
+	it("contributes a limits[]-only anthropic account to both pools via the normalizer", () => {
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "limits-only",
+				provider: "anthropic",
+				usageData: {
+					limits: [
+						{
+							kind: "session",
+							group: "session",
+							percent: 40,
+							resets_at: new Date(NOW + 1_000_000).toISOString(),
+							scope: null,
+							is_active: true,
+						},
+						{
+							kind: "weekly_all",
+							group: "weekly",
+							percent: 70,
+							resets_at: new Date(NOW + 2_000_000).toISOString(),
+							scope: null,
+							is_active: true,
+						},
+					],
+				} as never,
+			}),
+		];
+
+		const five = computePoolUsage(accounts, "five_hour", NOW);
+		expect(five.contributing).toEqual([
+			{ name: "limits-only", pct: 40, resetMs: NOW + 1_000_000 },
+		]);
+
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		expect(seven.contributing).toEqual([
+			{ name: "limits-only", pct: 70, resetMs: NOW + 2_000_000 },
+		]);
+	});
+
+	it("marks a limits[]-only account at 100% weekly as seven_day_exhausted", () => {
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "limits-exhausted",
+				provider: "anthropic",
+				usageData: {
+					limits: [
+						{
+							kind: "session",
+							group: "session",
+							percent: 10,
+							resets_at: null,
+							scope: null,
+							is_active: true,
+						},
+						{
+							kind: "weekly_all",
+							group: "weekly",
+							percent: 100,
+							resets_at: new Date(NOW + 5_000_000).toISOString(),
+							scope: null,
+							is_active: true,
+						},
+					],
+				} as never,
+			}),
+		];
+
+		const result = computePoolUsage(accounts, "five_hour", NOW);
+		expect(result.exhausted).toEqual([
+			{
+				name: "limits-exhausted",
+				reason: "seven_day_exhausted",
+				resetMs: NOW + 5_000_000,
+			},
+		]);
 	});
 
 	it("counts accounts exhausted in another quota window as unavailable 5h capacity", () => {

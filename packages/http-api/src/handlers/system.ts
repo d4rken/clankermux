@@ -11,7 +11,11 @@ import {
 	InternalServerError,
 	jsonResponse,
 } from "../utils/http-error";
-import { computeHealthStatus, computePoolStatus } from "./health";
+import {
+	computeHealthStatus,
+	computePoolStatus,
+	usageCacheResolver,
+} from "./health";
 
 type AsyncWriterHealthFn = () => { healthy: boolean };
 type IntegrityStatusFn = () => IntegrityStatus;
@@ -38,7 +42,9 @@ export function createSystemStatusHandler(
 		try {
 			const accounts = await dbOps.getAllAccounts();
 			const now = Date.now();
-			const pool = computePoolStatus(accounts, now);
+			// Use the same usage resolver as `/health` so the System Status tile never
+			// disagrees about which accounts are usage-exhausted (weekly window spent).
+			const pool = computePoolStatus(accounts, now, usageCacheResolver);
 
 			const asyncWriterHealthy = getAsyncWriterHealth
 				? getAsyncWriterHealth().healthy

@@ -77,6 +77,7 @@ import {
 	liveGauges,
 	liveStats,
 } from "./cache-keepalive-snapshot-sampler";
+import { clearRateLimitOnCapacityRestored } from "./capacity-restored";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
@@ -347,31 +348,19 @@ function startUsagePollingWithRefresh(
 						);
 				},
 				(accountId) => {
-					// Usage API shows available capacity (<100%). If rate_limited_until is
-					// set in the future (seat-reassignment case), clear it now rather than
-					// waiting for the natural expiry timer — the polling loop has confirmed
-					// the seat is available again.
-					proxyContext.dbOps
-						.getAccount(accountId)
-						.then((acc) => {
-							if (
-								acc?.rate_limited_until &&
-								Number(acc.rate_limited_until) > Date.now()
-							) {
-								return proxyContext.dbOps
-									.forceResetAccountRateLimit(accountId)
-									.then(() => {
-										logger.info(
-											`Cleared stale rate_limited_until for account ${acc.name} (${accountId}): usage polling shows available capacity (seat reassignment or early reset)`,
-										);
-									});
-							}
-						})
-						.catch((err) =>
-							logger.warn(
-								`Failed to check/clear rate_limited_until for account ${accountId} on capacity restore: ${err}`,
-							),
-						);
+					// Usage API shows available capacity (<100%). Clear a stale future
+					// rate_limited_until lock now (seat-reassignment / early reset) rather
+					// than waiting for the natural expiry — but never wipe an intentional
+					// `out_of_credits` floor. See clearRateLimitOnCapacityRestored.
+					clearRateLimitOnCapacityRestored(
+						proxyContext.dbOps,
+						logger,
+						accountId,
+					).catch((err) =>
+						logger.warn(
+							`Failed to check/clear rate_limited_until for account ${accountId} on capacity restore: ${err}`,
+						),
+					);
 				},
 				(accountId) => {
 					// Usage endpoint reports the subscription/seat is gone (403

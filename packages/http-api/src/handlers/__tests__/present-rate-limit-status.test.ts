@@ -1,8 +1,24 @@
 import { describe, expect, it } from "bun:test";
+import type { AnthropicUsageData } from "@clankermux/types";
 import { presentRateLimitStatus } from "../accounts";
+import { weeklyExhaustion } from "../health";
 
 const NOW = 1_750_000_000_000;
 const MIN = 60_000;
+
+/** The base "no live lock / no stored status" fields → would read "OK". */
+const OK_FIELDS = {
+	rate_limit_status: null,
+	rate_limit_reset: null,
+	rate_limited: 0,
+	rate_limited_until: null,
+} as const;
+
+/** Run the exhaustion derivation exactly as the accounts handler does. */
+function statusForUsage(usage: AnthropicUsageData, now: number): string {
+	const { exhausted, resetMs } = weeklyExhaustion(usage, now);
+	return presentRateLimitStatus(OK_FIELDS, now, exhausted ? { resetMs } : null);
+}
 
 describe("presentRateLimitStatus", () => {
 	it("overrides a stale soft status with rate_limited (Nm) when an active lock exists", () => {
@@ -229,5 +245,136 @@ describe("presentRateLimitStatus", () => {
 			NOW,
 		);
 		expect(status).toBe("OK");
+	});
+
+	it("surfaces usage_exhausted (Nm) instead of OK when the weekly window is spent", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			{ resetMs: NOW + 15 * MIN },
+		);
+		expect(status).toBe("usage_exhausted (15m)");
+	});
+
+	it("shows a bare usage_exhausted when the weekly reset is unknown/null", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			{ resetMs: null },
+		);
+		expect(status).toBe("usage_exhausted");
+	});
+
+	it("prefers an active rate-limit lock over weekly exhaustion", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 4 * MIN,
+			},
+			NOW,
+			{ resetMs: NOW + 15 * MIN },
+		);
+		expect(status).toBe("Rate limited (4m)");
+	});
+
+	it("does not override an OK-returning path when weeklyExhausted is null", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			null,
+		);
+		expect(status).toBe("OK");
+	});
+
+	it("reflects a spent seven_day_oauth_apps window (binding), not just seven_day", () => {
+		// seven_day below 100 but the OAuth-apps weekly quota is spent → non-OK.
+		const usage: AnthropicUsageData = {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(NOW + 30 * MIN).toISOString(),
+			},
+			seven_day: {
+				utilization: 50,
+				resets_at: new Date(NOW + 20 * MIN).toISOString(),
+			},
+			seven_day_oauth_apps: {
+				utilization: 100,
+				resets_at: new Date(NOW + 15 * MIN).toISOString(),
+			},
+		};
+		expect(statusForUsage(usage, NOW)).toBe("usage_exhausted (15m)");
+	});
+
+	it("does not flag a spent seven_day_oauth_apps whose reset is already past (stale) — stays OK", () => {
+		const usage: AnthropicUsageData = {
+			five_hour: { utilization: 10, resets_at: null },
+			seven_day: { utilization: 50, resets_at: null },
+			seven_day_oauth_apps: {
+				utilization: 100,
+				resets_at: new Date(NOW - MIN).toISOString(),
+			},
+		};
+		expect(statusForUsage(usage, NOW)).toBe("OK");
+	});
+
+	it("overrides a no-lock SOFT stored status with usage_exhausted when weekly is spent", () => {
+		// allowed_warning is a soft (non-blocking) status; with no active lock and a
+		// spent weekly window, the account IS blocked account-wide → usage_exhausted.
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN },
+		);
+		expect(status).toBe("usage_exhausted (12m)");
+	});
+
+	it("does NOT override a HARD stored status with usage_exhausted (hard keeps precedence)", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "rate_limited",
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: NOW - MIN, // no active lock
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN },
+		);
+		expect(status).toBe("rate_limited");
+	});
+
+	it("does NOT override a soft status when there is an active lock (lock precedence)", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 5 * MIN,
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN },
+		);
+		expect(status).toBe("rate_limited (5m)");
 	});
 });

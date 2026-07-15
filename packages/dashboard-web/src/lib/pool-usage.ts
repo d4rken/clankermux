@@ -1,5 +1,13 @@
-import { computeWindowStartMs } from "@clankermux/core";
-import type { AccountResponse, FullUsageData } from "@clankermux/types";
+import {
+	computeWindowStartMs,
+	isAnthropicUsageShape,
+	normalizeAnthropicUsage,
+} from "@clankermux/core";
+import type {
+	AccountResponse,
+	AnthropicUsageData,
+	FullUsageData,
+} from "@clankermux/types";
 
 export type PoolWindow = "five_hour" | "seven_day";
 
@@ -98,7 +106,10 @@ export function isAnthropicStyleShape(
 	if (usageData == null) return false;
 	if (isAlibabaShape(usageData)) return false;
 	if (isZaiShape(usageData)) return false;
-	return "five_hour" in usageData && "seven_day" in usageData;
+	// Flat five_hour/seven_day OR a non-empty `limits[]` (upstream is dropping the
+	// flat keys). Alibaba/Zai were already excluded above, so a bare `limits[]`
+	// array here is unambiguously an Anthropic-style payload.
+	return isAnthropicUsageShape(usageData as AnthropicUsageData);
 }
 
 export interface ExtractedValue {
@@ -135,16 +146,17 @@ export function extractFiveHour(
 		};
 	}
 	if (isAnthropicStyleShape(usageData)) {
-		const data = usageData as {
-			five_hour?: { utilization: number | null; resets_at: string | null };
-		};
-		const five = data.five_hour;
-		if (!five) {
-			return { pct: null, resetMs: null };
-		}
+		// Read the session (5h) window via the normalizer so a `limits[]`-only
+		// payload resolves too. For a flat payload this reads the same
+		// five_hour.utilization / resets_at the direct field access did. `now`
+		// only gates scoped windows (unused here), so a constant is fine.
+		const session = normalizeAnthropicUsage(
+			usageData as AnthropicUsageData,
+			Date.now(),
+		).session;
 		return {
-			pct: five.utilization ?? null,
-			resetMs: normalizeResetMs(five.resets_at ?? null),
+			pct: session?.utilization ?? null,
+			resetMs: session?.resetMs ?? null,
 		};
 	}
 	return null;
@@ -166,16 +178,18 @@ export function extractSevenDay(
 		return null;
 	}
 	if (isAnthropicStyleShape(usageData)) {
-		const data = usageData as {
-			seven_day?: { utilization: number | null; resets_at: string | null };
-		};
-		const seven = data.seven_day;
-		if (!seven) {
-			return { pct: null, resetMs: null };
-		}
+		// Read the account-wide weekly window via the normalizer so a `limits[]`-only
+		// payload resolves too. For a flat payload this reads the same
+		// seven_day.utilization / resets_at (model-scoped opus/sonnet windows are
+		// deliberately NOT counted, matching the old behavior). `now` only gates
+		// scoped windows (unused here), so a constant is fine.
+		const weeklyAll = normalizeAnthropicUsage(
+			usageData as AnthropicUsageData,
+			Date.now(),
+		).weeklyAll;
 		return {
-			pct: seven.utilization ?? null,
-			resetMs: normalizeResetMs(seven.resets_at ?? null),
+			pct: weeklyAll?.utilization ?? null,
+			resetMs: weeklyAll?.resetMs ?? null,
 		};
 	}
 	return null;

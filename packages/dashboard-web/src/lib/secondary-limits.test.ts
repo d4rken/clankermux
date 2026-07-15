@@ -197,6 +197,32 @@ describe("getScopedWeeklyLimits", () => {
 		expect(getScopedWeeklyLimits(null)).toEqual([]);
 		expect(getScopedWeeklyLimits(undefined)).toEqual([]);
 	});
+
+	it("surfaces scoped windows from a limits[]-only payload (no flat keys)", () => {
+		expect(
+			getScopedWeeklyLimits({
+				limits: [scopedEntry()],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{ key: "Fable", label: "Fable", utilization: 69, resetsAt: ISO },
+		]);
+	});
+
+	it("returns [] for a non-Anthropic shape even if a scoped-looking entry sneaks in", () => {
+		// No flat keys and no `limits[]` → not Anthropic-shaped → [].
+		expect(
+			getScopedWeeklyLimits({
+				tokens_limit: {
+					used: 0,
+					remaining: 0,
+					percentage: 0,
+					resetAt: null,
+					type: "tokens",
+				},
+				time_limit: null,
+			} as unknown as FullUsageData),
+		).toEqual([]);
+	});
 });
 
 describe("hasSecondaryWeeklyWindows", () => {
@@ -249,13 +275,23 @@ describe("hasSecondaryWeeklyWindows", () => {
 		).toBe(false);
 	});
 
-	it("is false when seven_day is absent (mirrors hasAnthropicStyleData — bars would not render)", () => {
+	it("is true from a limits[]-only payload with a scoped window (no flat keys)", () => {
+		// The old both-flat-keys guard has been dropped: upstream is moving to a
+		// `limits[]`-only payload, so a scoped window there must still be offered.
+		expect(
+			hasSecondaryWeeklyWindows({
+				limits: [scopedEntry()],
+			} as unknown as FullUsageData),
+		).toBe(true);
+	});
+
+	it("is still true when only five_hour + scoped limits are present (partial flat)", () => {
 		expect(
 			hasSecondaryWeeklyWindows({
 				five_hour: { utilization: 10, resets_at: ISO },
 				limits: [scopedEntry()],
 			} as unknown as FullUsageData),
-		).toBe(false);
+		).toBe(true);
 	});
 });
 

@@ -115,6 +115,13 @@ export {
 	type SupportedWindow,
 } from "./throttle-utils";
 export { TtlCache } from "./ttl-cache";
+export {
+	getRepresentativeUtilization as getNormalizedRepresentativeUtilization,
+	isAnthropicUsageShape,
+	type NormalizedAnthropicUsage,
+	type NormalizedUsageWindow,
+	normalizeAnthropicUsage,
+} from "./usage-normalizer";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

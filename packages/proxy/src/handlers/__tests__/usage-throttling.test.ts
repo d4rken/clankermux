@@ -123,6 +123,92 @@ describe("getUsageThrottleUntil", () => {
 		expect(throttleStatus.throttleUntil).not.toBeNull();
 	});
 
+	it("throttles a limits[]-only account ahead of its 5h pacing line", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const resetAt = new Date(now + 2 * 60 * 60 * 1000).toISOString();
+
+		const throttleUntil = getUsageThrottleUntil(
+			{
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 80,
+						resets_at: resetAt,
+						scope: null,
+						is_active: true,
+					},
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 10,
+						resets_at: null,
+						scope: null,
+						is_active: true,
+					},
+				],
+			} as never,
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+		);
+
+		expect(throttleUntil).not.toBeNull();
+		expect(throttleUntil).toBeGreaterThan(now);
+	});
+
+	it("throttles a limits[]-only weekly window independently of the 5h window", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const status = getUsageThrottleStatus(
+			{
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 10,
+						resets_at: new Date(now + 30 * 60 * 1000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 95,
+						resets_at: new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+				],
+			} as never,
+			{ fiveHourEnabled: false, weeklyEnabled: true },
+			now,
+		);
+
+		expect(status.throttledWindows).toEqual(["seven_day"]);
+		expect(status.throttleUntil).not.toBeNull();
+	});
+
+	it("does not throttle a limits[]-only account that is below pace", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const throttleUntil = getUsageThrottleUntil(
+			{
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 5,
+						resets_at: new Date(now + 30 * 60 * 1000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+				],
+			} as never,
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+		);
+
+		expect(throttleUntil).toBeNull();
+	});
+
 	it("caps throttleUntil at the window reset when utilization exceeds 100%", () => {
 		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
 		const resetAt = new Date(now + 60 * 60 * 1000).toISOString();

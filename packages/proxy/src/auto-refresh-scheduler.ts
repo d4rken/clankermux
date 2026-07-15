@@ -1,6 +1,7 @@
 import {
 	CLAUDE_MODEL_IDS,
 	getClientVersion,
+	normalizeAnthropicUsage,
 	registerHeartbeat,
 } from "@clankermux/core";
 import type { BunSqlAdapter } from "@clankermux/database";
@@ -13,7 +14,11 @@ import {
 	toEpochMs,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type {
+	Account,
+	AnthropicLimitEntry,
+	AnthropicUsageData,
+} from "@clankermux/types";
 import {
 	CodexSpendCoordinator,
 	type CodexSpendResult,
@@ -51,6 +56,84 @@ function isZaiPeakHour(ts = Date.now()): boolean {
 	const d = new Date(ts);
 	const sgtHour = (d.getUTCHours() + d.getUTCMinutes() / 60 + 8) % 24;
 	return sgtHour >= 14 && sgtHour < 18;
+}
+
+/**
+ * Total (never-throwing) usage summary for the post-prime log line: the session
+ * (5h) and account-wide weekly utilizations, sourced via `normalizeAnthropicUsage`
+ * so a `limits[]`-only payload (no flat five_hour/seven_day keys) doesn't throw.
+ * A throw here would be caught by the probe's outer try/catch and FALSELY
+ * recorded as an auto-refresh failure even though the probe succeeded. Returns
+ * `"n/a"` for a window with no numeric evidence.
+ */
+export function summarizeAnthropicUsageForLog(usageData: unknown): {
+	fiveH: number | "n/a";
+	sevenD: number | "n/a";
+} {
+	const normalized = normalizeAnthropicUsage(
+		usageData as AnthropicUsageData | null,
+		Date.now(),
+	);
+	return {
+		fiveH: normalized.session?.utilization ?? "n/a",
+		sevenD: normalized.weeklyAll?.utilization ?? "n/a",
+	};
+}
+
+/**
+ * Read the account-wide weekly window as a RAW {utilization, resets_at} pair from
+ * a cached usage datum: prefers the flat `seven_day` window (exact prior
+ * behavior), else the `limits[]` `weekly_all` entry (upstream is dropping the
+ * flat keys). Returns null when neither is present.
+ *
+ * Deliberately raw (unparsed): `isWeeklyDormant` must distinguish "resets_at
+ * literally null" (→ util 0 = not started) from "resets_at unparseable" (→
+ * unknown → skip), a distinction `normalizeAnthropicUsage` erases by parsing.
+ */
+function rawWeeklyWindow(
+	entry: unknown,
+): { utilization: number | null; resets_at: string | null } | null {
+	if (!entry || typeof entry !== "object") return null;
+	const flat = (
+		entry as {
+			seven_day?: { utilization?: number | null; resets_at?: string | null };
+		}
+	).seven_day;
+	// Prefer the flat window ONLY when it carries a finite numeric utilization. A
+	// present-but-empty flat window (utilization null) must NOT shadow a valid
+	// `limits[]` `weekly_all` entry — otherwise dormancy is misread. Raw resets_at
+	// is kept so the null-vs-unparseable distinction still holds for the flat case.
+	if (
+		flat &&
+		typeof flat.utilization === "number" &&
+		Number.isFinite(flat.utilization)
+	) {
+		return { utilization: flat.utilization, resets_at: flat.resets_at ?? null };
+	}
+	const limits = (entry as { limits?: AnthropicLimitEntry[] }).limits;
+	if (Array.isArray(limits)) {
+		// Require a finite numeric percent (matching the normalizer): a
+		// `weekly_all` with null/NaN percent carries no utilization evidence and
+		// must not be treated as a dormant-priming window.
+		const weekly = limits.find(
+			(e) =>
+				e.kind === "weekly_all" &&
+				typeof e.percent === "number" &&
+				Number.isFinite(e.percent),
+		);
+		if (weekly) {
+			return { utilization: weekly.percent, resets_at: weekly.resets_at };
+		}
+	}
+	// No usable limits entry — fall back to the (possibly empty) flat window so the
+	// prior "present but empty → not dormant" behavior is preserved.
+	if (flat) {
+		return {
+			utilization: flat.utilization ?? null,
+			resets_at: flat.resets_at ?? null,
+		};
+	}
+	return null;
 }
 
 /**
@@ -824,8 +907,14 @@ export class AutoRefreshScheduler {
 					if (accessToken) {
 						const { data: usageData } = await fetchUsageData(accessToken);
 						if (usageData) {
+							// Read via the total helper so a `limits[]`-only payload (no flat
+							// five_hour/seven_day keys) doesn't throw here — an exception would
+							// be caught below and falsely recorded as an auto-refresh FAILURE
+							// even though the probe succeeded.
+							const { fiveH, sevenD } =
+								summarizeAnthropicUsageForLog(usageData);
 							log.info(
-								`Fetched usage data for ${accountRow.name}: 5h=${usageData.five_hour.utilization}%, 7d=${usageData.seven_day.utilization}%`,
+								`Fetched usage data for ${accountRow.name}: 5h=${fiveH}%, 7d=${sevenD}%`,
 							);
 						} else {
 							log.warn(
@@ -1448,11 +1537,14 @@ export class AutoRefreshScheduler {
 		const age = usageCache.getAge(accountId);
 		if (age === null || age > this.WEEKLY_CACHE_MAX_AGE_MS) return false;
 
-		const seven = (
-			entry as {
-				seven_day?: { utilization: number | null; resets_at: string | null };
-			}
-		).seven_day;
+		// Read the account-wide weekly window as a RAW {utilization, resets_at} pair
+		// — flat `seven_day` first (exact prior behavior), else the `limits[]`
+		// `weekly_all` entry (upstream is dropping the flat keys). We deliberately do
+		// NOT go through `normalizeAnthropicUsage` here: it parses resets_at, which
+		// collapses "resets_at literally null" and "resets_at unparseable" into the
+		// same null — but this method must treat them differently (null → "not
+		// started"; unparseable → unknown → skip).
+		const seven = rawWeeklyWindow(entry);
 		if (!seven) return false;
 
 		// null reset + util 0 → never started → dormant.
