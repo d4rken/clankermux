@@ -40,8 +40,10 @@ describe("sendCodexNativePing", () => {
 		expect(body.model).toBe(CODEX_PING_MODEL);
 		expect(body.stream).toBe(true);
 		expect(body.store).toBe(false);
-		expect(body.max_output_tokens).toBe(1);
-		expect(body.reasoning).toEqual({ effort: "minimal" });
+		// The Codex backend rejects `max_output_tokens` and `reasoning.effort:
+		// "minimal"` (both 400) — the ping must omit the former and use "none".
+		expect(body.max_output_tokens).toBeUndefined();
+		expect(body.reasoning).toEqual({ effort: "none" });
 		expect(body.instructions).toBe("ping");
 		expect(body.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "." }] },
