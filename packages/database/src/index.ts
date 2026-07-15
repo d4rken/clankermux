@@ -39,4 +39,5 @@ export { StatsRepository } from "./repositories/stats.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 // Re-export retry utilities for external use (from your improvements)
 export { withDatabaseRetry } from "./retry";
+export { isCorruptionError, isTransientLockError } from "./sqlite-error";
 export { DatabaseOperations };

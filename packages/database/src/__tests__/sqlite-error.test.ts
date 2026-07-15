@@ -14,7 +14,7 @@
  * minutes on a busy DB. The classifier must match the whole BUSY/LOCKED family.
  */
 import { describe, expect, it } from "bun:test";
-import { isTransientLockError } from "../sqlite-error";
+import { isCorruptionError, isTransientLockError } from "../sqlite-error";
 
 describe("isTransientLockError", () => {
 	it("matches base SQLITE_BUSY (errno 5)", () => {
@@ -107,5 +107,115 @@ describe("isTransientLockError", () => {
 		expect(isTransientLockError(undefined)).toBe(false);
 		expect(isTransientLockError("database is locked")).toBe(false);
 		expect(isTransientLockError(42)).toBe(false);
+	});
+});
+
+/**
+ * Tests for `isCorruptionError` — the classifier that decides whether a THROWN
+ * SQLite error proves corruption (SQLITE_CORRUPT / SQLITE_NOTADB). The
+ * integrity worker uses it to post `verdict:"corrupt"` for such throws instead
+ * of the generic `error` → `skipped`, which would mask real corruption.
+ */
+describe("isCorruptionError", () => {
+	it("matches base SQLITE_CORRUPT (errno 11)", () => {
+		expect(
+			isCorruptionError({
+				code: "SQLITE_CORRUPT",
+				errno: 11,
+				message: "database disk image is malformed",
+			}),
+		).toBe(true);
+	});
+
+	it("matches SQLITE_NOTADB (errno 26)", () => {
+		expect(
+			isCorruptionError({
+				code: "SQLITE_NOTADB",
+				errno: 26,
+				message: "file is not a database",
+			}),
+		).toBe(true);
+	});
+
+	it("matches extended SQLITE_CORRUPT variants by low byte (e.g. _VTAB 267)", () => {
+		// 267 & 0xff === 11 → still CORRUPT.
+		expect(isCorruptionError({ code: "SQLITE_CORRUPT_VTAB", errno: 267 })).toBe(
+			true,
+		);
+	});
+
+	it("matches on code prefix when errno is absent", () => {
+		expect(isCorruptionError({ code: "SQLITE_CORRUPT_INDEX" })).toBe(true);
+		expect(isCorruptionError({ code: "SQLITE_NOTADB" })).toBe(true);
+	});
+
+	it("matches on message alone (case-insensitive) when no code/errno", () => {
+		expect(
+			isCorruptionError(new Error("database disk image is malformed")),
+		).toBe(true);
+		expect(isCorruptionError(new Error("file is not a database"))).toBe(true);
+		expect(
+			isCorruptionError(new Error("file is encrypted or is not a database")),
+		).toBe(true);
+		expect(isCorruptionError(new Error("DISK IMAGE IS MALFORMED"))).toBe(true);
+	});
+
+	it("does NOT match a bare 'malformed'/'database' message (narrowed fallback)", () => {
+		// The message fallback must match only canonical corruption phrases, so
+		// an unrelated operational error can't be misclassified as corruption
+		// (a false-positive that would falsely light the red banner).
+		expect(isCorruptionError(new Error("malformed request payload"))).toBe(
+			false,
+		);
+		expect(isCorruptionError({ message: "could not open the database" })).toBe(
+			false,
+		);
+		expect(
+			isCorruptionError(new Error("unexpected token, malformed JSON")),
+		).toBe(false);
+	});
+
+	it("matches on errno alone when code is missing (low 8 bits === 11)", () => {
+		expect(isCorruptionError({ errno: 267 })).toBe(true);
+	});
+
+	it("does NOT match lock contention or other non-corruption failures", () => {
+		expect(
+			isCorruptionError({
+				code: "SQLITE_BUSY_SNAPSHOT",
+				errno: 517,
+				message: "database is locked",
+			}),
+		).toBe(false);
+		expect(
+			isCorruptionError({
+				code: "SQLITE_FULL",
+				errno: 13,
+				message: "database or disk is full",
+			}),
+		).toBe(false);
+		expect(
+			isCorruptionError({
+				code: "SQLITE_IOERR",
+				errno: 10,
+				message: "disk I/O error",
+			}),
+		).toBe(false);
+	});
+
+	it("is disjoint from isTransientLockError for the canonical corrupt/lock cases", () => {
+		const corrupt = { code: "SQLITE_CORRUPT", errno: 11 };
+		const lock = { code: "SQLITE_BUSY", errno: 5 };
+		expect(isCorruptionError(corrupt)).toBe(true);
+		expect(isTransientLockError(corrupt)).toBe(false);
+		expect(isCorruptionError(lock)).toBe(false);
+		expect(isTransientLockError(lock)).toBe(true);
+	});
+
+	it("handles non-object inputs without throwing", () => {
+		expect(isCorruptionError(null)).toBe(false);
+		expect(isCorruptionError(undefined)).toBe(false);
+		expect(isCorruptionError("malformed")).toBe(false);
+		expect(isCorruptionError(42)).toBe(false);
 	});
 });

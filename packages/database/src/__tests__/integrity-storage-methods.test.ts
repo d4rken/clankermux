@@ -124,17 +124,35 @@ describe("DatabaseOperations.getIntegrityStatus / recordIntegrityResult", () => 
 		expect(s.lastQuickError).toBeNull();
 	});
 
-	it("runningKind reflects the in-flight probe", () => {
+	it("runningKind reflects the in-flight probe without overwriting collapsed status", () => {
 		const claimed = dbOps.markIntegrityCheckRunning("full");
 		expect(claimed).toBe(true);
 		const mid = dbOps.getIntegrityStatus();
-		expect(mid.status).toBe("running");
+		// In-flight is tracked ONLY via runningKind now — the collapsed status
+		// keeps its last value (here "unchecked" on a fresh instance), it is
+		// never overwritten to "running".
+		expect(mid.status).toBe("unchecked");
 		expect(mid.runningKind).toBe("full");
 
 		dbOps.recordIntegrityResult("full", "ok");
 		const done = dbOps.getIntegrityStatus();
 		expect(done.status).toBe("ok");
 		expect(done.runningKind).toBeNull();
+	});
+
+	it("a running recheck does NOT hide an existing corrupt status/banner (Fix C)", () => {
+		dbOps.recordIntegrityResult("full", "corrupt", "disk image is malformed");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+
+		// Starting a recheck must keep the corrupt status visible (the
+		// cross-dashboard banner keys off status === "corrupt"), only flagging
+		// the in-flight kind.
+		const claimed = dbOps.markIntegrityCheckRunning("full");
+		expect(claimed).toBe(true);
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).toBe("corrupt");
+		expect(s.runningKind).toBe("full");
+		expect(s.lastError).toBe("disk image is malformed");
 	});
 
 	it("markIntegrityCheckRunning refuses while another probe is running", () => {

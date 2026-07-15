@@ -18,6 +18,10 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import * as nodeFs from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { IntegrityStatus } from "@clankermux/types";
+// The real corruption classifier — imported by FILE path (not the mocked
+// `@clankermux/database` package specifier) so the scheduler's mocked module
+// can re-export the genuine implementation used by the fallback path.
+import { isCorruptionError as realIsCorruptionError } from "../../../database/src/sqlite-error";
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be declared before importing the scheduler so that
@@ -28,11 +32,18 @@ import type { IntegrityStatus } from "@clankermux/types";
 // runtime, so it doesn't need a stub.
 // ---------------------------------------------------------------------------
 
-// New runner shape: a non-ok result carries a `verdict` discriminating a real
-// corruption verdict from an operational failure (error/timeout).
+// Runner shape: a non-ok result carries a `verdict` discriminating a real
+// corruption verdict from an operational failure (error/timeout). `verdict` is
+// intentionally optional here so a test can inject the legacy, verdict-less
+// `{ ok: false, error }` shape (a stale embedded worker) and assert it fails
+// safe toward `corrupt`.
 type RunnerResult =
 	| { ok: true }
-	| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string };
+	| {
+			ok: false;
+			verdict?: "corrupt" | "error" | "timeout";
+			error: string;
+	  };
 
 let workerResultByKind: { quick: RunnerResult; full: RunnerResult } = {
 	quick: { ok: true },
@@ -53,6 +64,10 @@ const mockRunIntegrityCheckInWorker = mock(
 
 mock.module("@clankermux/database", () => ({
 	runIntegrityCheckInWorker: mockRunIntegrityCheckInWorker,
+	// Real classifier — the scheduler's in-memory-fallback path calls it to
+	// decide whether a thrown pragma error is corruption (→ corrupt) or an
+	// operational failure (→ skipped).
+	isCorruptionError: realIsCorruptionError,
 }));
 
 // statSync mock — small size by default so the full path takes the normal
@@ -89,7 +104,6 @@ interface MockDbOpsOptions {
 function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 	const quickResult = opts.quickResult ?? "ok";
 	const fullResult = opts.fullResult ?? { ok: true };
-	let claimed = false;
 
 	const state: IntegrityStatus = {
 		status: "unchecked",
@@ -118,9 +132,9 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 	});
 	const markIntegrityCheckRunning = mock((kind: "quick" | "full") => {
 		if (opts.canClaim === false) return false;
-		if (claimed) return false;
-		claimed = true;
-		state.status = "running";
+		// Mirror the real mutex: in-flight is tracked via runningKind only, and
+		// the collapsed status is never overwritten to "running".
+		if (state.runningKind !== null) return false;
 		state.runningKind = kind;
 		return true;
 	});
@@ -130,7 +144,6 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 			result: "ok" | "corrupt" | "skipped",
 			detail?: string | null,
 		) => {
-			claimed = false;
 			const now = Date.now();
 			state.runningKind = null;
 			if (result === "skipped") {
@@ -572,6 +585,97 @@ describe("runCheckLocked verdict mapping", () => {
 
 		// Mutex released — a fresh claim succeeds.
 		expect(dbOps.markIntegrityCheckRunning("full")).toBe(true);
+	});
+
+	it("Fix A: a non-ok worker result WITHOUT a verdict (stale old-protocol worker) fails safe to corrupt", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		// Legacy embedded worker shape: { ok:false, error } — NO `verdict`. This
+		// must NOT be downgraded to skipped; masking real corruption is the
+		// dangerous false-negative direction.
+		workerResultByKind.full = { ok: false, error: "*** in database main" };
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("corrupt");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+		expect(dbOps.recordIntegrityResult).toHaveBeenLastCalledWith(
+			"full",
+			"corrupt",
+			"*** in database main",
+		);
+	});
+
+	it("Fix B (worker path): a worker-classified corruption throw (verdict:'corrupt') is recorded corrupt", async () => {
+		// The worker's catch classifies a thrown SQLITE_CORRUPT via
+		// isCorruptionError and posts verdict:"corrupt"; the scheduler records it.
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		workerResultByKind.full = {
+			ok: false,
+			verdict: "corrupt",
+			error: "database disk image is malformed",
+		};
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("corrupt");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+	});
+
+	it("Fix B (fallback): in-memory direct check that THROWS SQLITE_CORRUPT is recorded corrupt", async () => {
+		const corruptErr = Object.assign(
+			new Error("database disk image is malformed"),
+			{ code: "SQLITE_CORRUPT", errno: 11 },
+		);
+		const dbOps = makeDbOps({ dbPath: undefined, fullResult: corruptErr });
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("corrupt");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+		const last = (
+			dbOps.recordIntegrityResult as ReturnType<typeof mock>
+		).mock.calls.at(-1);
+		expect(last?.[0]).toBe("full");
+		expect(last?.[1]).toBe("corrupt");
+		expect(last?.[2]).toContain("malformed");
+	});
+
+	it("Fix B (fallback): in-memory direct check that throws a NON-corruption error is recorded skipped", async () => {
+		const ioErr = Object.assign(new Error("disk I/O error"), {
+			code: "SQLITE_IOERR",
+			errno: 10,
+		});
+		const dbOps = makeDbOps({ dbPath: undefined, fullResult: ioErr });
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+	});
+
+	it("Fix D: size-skip whose substitute quick check PROVES corruption returns corrupt, not skipped", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling → size-skip branch
+		workerResultByKind.quick = {
+			ok: false,
+			verdict: "corrupt",
+			error: "*** page 5 is corrupt",
+		};
+
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) {
+			// The awaited return + the ERROR log must reflect the real corruption,
+			// NOT a benign "skipped".
+			expect(out.result).toBe("corrupt");
+			expect(out.error).toContain("page 5 is corrupt");
+		}
+		// Collapsed status is corrupt (the quick-corrupt record wins over the
+		// full-skip record).
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+
+		const calls = (dbOps.recordIntegrityResult as ReturnType<typeof mock>).mock
+			.calls;
+		expect(calls[0][0]).toBe("quick");
+		expect(calls[0][1]).toBe("corrupt");
+		expect(calls[1][0]).toBe("full");
+		expect(calls[1][1]).toBe("skipped");
 	});
 });
 

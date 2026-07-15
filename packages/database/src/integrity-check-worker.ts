@@ -1,4 +1,18 @@
 import { Database } from "bun:sqlite";
+import { isCorruptionError } from "./sqlite-error";
+
+/**
+ * Best-effort close: a failure to close the read-only handle must never
+ * discard an already-computed verdict or prevent the structured post that
+ * follows. Swallow any close error.
+ */
+function closeQuietly(db: Database | undefined): void {
+	try {
+		db?.close();
+	} catch {
+		// ignore — the handle is being torn down anyway
+	}
+}
 
 /**
  * Dedicated worker for running integrity checks against the SQLite file
@@ -40,8 +54,15 @@ export type IntegrityCheckRequest = {
  *    reported a problem (quick_check != "ok", integrity_check rows, or FK
  *    violations). This IS proven corruption.
  *  - `{ ok: false, verdict: "error", error }` — the check could not complete
- *    (DB open failure / thrown exception). NOT proven corruption; callers map
- *    this to a `skipped` outcome and preserve the last verified verdict.
+ *    for a NON-corruption reason (e.g. a transient I/O error, an unreadable
+ *    file). Callers map this to a `skipped` outcome and preserve the last
+ *    verified verdict.
+ *
+ * Note: severe corruption often *throws* (SQLITE_CORRUPT "database disk image
+ * is malformed", SQLITE_NOTADB "file is not a database") instead of returning
+ * PRAGMA rows. The worker's `catch` classifies such throws via
+ * `isCorruptionError` and posts `verdict: "corrupt"` — a thrown-but-real
+ * corruption must NOT be downgraded to `error`/`skipped`.
  */
 export type IntegrityCheckResult =
 	| { ok: true }
@@ -63,7 +84,7 @@ self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 				quick_check: string;
 			};
 			const msg = row.quick_check;
-			db.close();
+			closeQuietly(db);
 			db = undefined;
 			if (msg === "ok") {
 				self.postMessage({ ok: true } satisfies IntegrityCheckResult);
@@ -90,7 +111,7 @@ self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 			Record<string, unknown>
 		>;
 
-		db.close();
+		closeQuietly(db);
 		db = undefined;
 
 		const integrityOk = integrityMsg === "ok";
@@ -113,13 +134,17 @@ self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 			error: parts.join("\n"),
 		} satisfies IntegrityCheckResult);
 	} catch (err) {
-		db?.close();
-		// A thrown exception (DB open failure, unreadable file, etc.) means the
-		// check could NOT complete — it is not a corruption verdict. Report it
-		// as an operational error so callers map it to `skipped`.
+		closeQuietly(db);
+		// A throw can mean two very different things:
+		//  - real corruption surfaced as an exception (SQLITE_CORRUPT /
+		//    SQLITE_NOTADB) → this IS a corruption verdict, post `corrupt`;
+		//  - any other failure (transient I/O, unreadable file) → the check
+		//    could not complete, post `error` so callers map it to `skipped`.
+		// Failing safe toward `corrupt` here is deliberate: masking real
+		// corruption as `skipped` (amber) is the dangerous false-negative.
 		self.postMessage({
 			ok: false,
-			verdict: "error",
+			verdict: isCorruptionError(err) ? "corrupt" : "error",
 			error: err instanceof Error ? err.message : String(err),
 		} satisfies IntegrityCheckResult);
 	}

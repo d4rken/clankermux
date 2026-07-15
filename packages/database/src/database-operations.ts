@@ -534,12 +534,20 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * Mark an integrity probe as in flight. Callers must pair this with
 	 * `recordIntegrityResult()`. Returns false if a probe is already running
 	 * — used as a cheap mutex.
+	 *
+	 * In-flight state is tracked ONLY via `runningKind`, deliberately decoupled
+	 * from the collapsed `status`. Overwriting `status` with `"running"` here
+	 * would make an existing `corrupt` verdict (and its cross-dashboard banner)
+	 * vanish for up to the full worker timeout every time a recheck starts —
+	 * exactly when the operator most needs to keep seeing it. The last verified
+	 * `status` therefore persists across a running recheck; consumers detect
+	 * "in flight" from `runningKind != null`. (`"running"` remains in the
+	 * `IntegrityStatus.status` union for backwards-compat but is never assigned.)
 	 */
 	markIntegrityCheckRunning(kind: "quick" | "full"): boolean {
-		if (this.integrityStatus.status === "running") return false;
+		if (this.integrityStatus.runningKind !== null) return false;
 		this.integrityStatus = {
 			...this.integrityStatus,
-			status: "running",
 			runningKind: kind,
 		};
 		return true;
