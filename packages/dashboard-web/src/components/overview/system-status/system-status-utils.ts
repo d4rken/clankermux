@@ -83,6 +83,10 @@ export function statusSummary(data: SystemStatusResponse): {
 	}
 	if (runtime.integrityStatus === "corrupt") {
 		description += " · DB integrity check failed";
+	} else if (runtime.integrityStatus === "skipped") {
+		// Amber, not red: the check couldn't complete (timeout / size-skip),
+		// which is not proven corruption — note it without the "failed" wording.
+		description += " · DB integrity check skipped";
 	}
 	return { label: "Service Unhealthy", description };
 }

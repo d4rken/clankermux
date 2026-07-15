@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { TIME_CONSTANTS } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { runIntegrityCheckInWorker } from "@clankermux/database";
@@ -106,6 +107,10 @@ export function startIntegrityScheduler(
 		const { result, error } = await runCheckLocked(dbOps, "quick");
 		if (result === "ok") {
 			logger.debug("Quick integrity check passed");
+		} else if (result === "skipped") {
+			logger.warn(
+				`Quick integrity check skipped: ${error}; will retry next tick`,
+			);
 		} else {
 			logger.error(`Quick integrity check FAILED: ${error}`);
 			logger.error(
@@ -123,6 +128,10 @@ export function startIntegrityScheduler(
 		const { result, error } = await runCheckLocked(dbOps, "full");
 		if (result === "ok") {
 			logger.info("Full integrity check passed");
+		} else if (result === "skipped") {
+			logger.warn(
+				`Full integrity check skipped: ${error}; will retry next tick`,
+			);
 		} else {
 			logger.error(`Full integrity check FAILED: ${error}`);
 			logger.error(
@@ -160,6 +169,41 @@ export function startIntegrityScheduler(
 }
 
 /**
+ * Defensive ceiling on the DB size we'll attempt a *full* integrity check on.
+ * Our full check completes in ~tens of seconds even at 15 GiB (well under the
+ * 10-min = 600 s worker cap), so this is NOT a normal-operation gate — it's
+ * headroom against pathological growth where a full `integrity_check` could
+ * exceed the worker timeout. Sizing: at a pessimistic ~4 s/GiB, 64 GiB ≈ 256 s
+ * — comfortably under the 600 s cap — and it's >4× our current ~15 GiB, so a
+ * healthy green stays reachable across realistic growth while still guarding
+ * the genuinely pathological case. Set it too low and the surface pins
+ * permanently amber, because a quick `ok` never clears a full skip. Above the
+ * ceiling we run the (much cheaper) quick check instead and mark the full
+ * probe `skipped`, so the surface stays honest (amber "couldn't complete")
+ * rather than falsely red. Deliberately a fixed inline constant — no env var
+ * (single-operator deploy-from-source).
+ */
+const FULL_CHECK_MAX_DB_BYTES = 64 * 1024 ** 3;
+
+/**
+ * Map a worker/runner result to the `(result, detail)` pair
+ * `recordIntegrityResult` expects:
+ *  - `{ ok: true }` → `ok` (no detail).
+ *  - `verdict: "corrupt"` → `corrupt` (a real, proven verdict).
+ *  - `verdict: "error" | "timeout"` → `skipped` (the check could not complete;
+ *    an operational failure is NOT proven corruption).
+ */
+function mapVerdict(
+	r:
+		| { ok: true }
+		| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string },
+): { result: "ok" | "corrupt" | "skipped"; detail: string | null } {
+	if (r.ok) return { result: "ok", detail: null };
+	if (r.verdict === "corrupt") return { result: "corrupt", detail: r.error };
+	return { result: "skipped", detail: r.error };
+}
+
+/**
  * Run a check (`quick` or `full`) once the caller has already claimed the
  * mutex via `markIntegrityCheckRunning(kind)`. Routes through the
  * `integrity-check-worker` when a SQLite path is resolvable so the
@@ -168,16 +212,23 @@ export function startIntegrityScheduler(
  * file path is resolvable (e.g. an in-memory DB — lightweight there, so
  * blocking is fine).
  *
+ * Verdict handling: a real PRAGMA verdict maps to `ok`/`corrupt`; a worker
+ * timeout / worker exception / defensive size-skip maps to `skipped`, which
+ * preserves the last verified verdict rather than falsely flagging corruption.
+ *
  * Records the result and (implicitly) releases the mutex via
  * `recordIntegrityResult`.
  */
 async function runCheckLocked(
 	dbOps: DatabaseOperations,
 	kind: "quick" | "full",
-): Promise<{ result: "ok" | "corrupt"; error: string | null }> {
+): Promise<{ result: "ok" | "corrupt" | "skipped"; error: string | null }> {
 	try {
 		const dbPath = dbOps.getResolvedDbPath();
 		if (!dbPath) {
+			// In-memory / unresolvable-path fallback: a direct pragma that
+			// RETURNS a non-"ok" answer is a real verdict (corrupt); a THROW
+			// falls through to the outer catch → skipped (couldn't complete).
 			const out =
 				kind === "quick"
 					? await dbOps.runQuickIntegrityCheck()
@@ -190,21 +241,50 @@ async function runCheckLocked(
 			);
 			return { result, error: result === "corrupt" ? out : null };
 		}
+
+		// Size-skip (full only): on a pathologically large DB a full
+		// integrity_check could exceed the worker timeout. Run a quick check
+		// instead — while still holding the mutex we already claimed (do NOT
+		// re-claim) — and mark the full probe skipped. `statSync` failure just
+		// falls through to the normal full-worker path.
+		if (kind === "full") {
+			let dbBytes: number | null = null;
+			try {
+				dbBytes = statSync(dbPath).size;
+			} catch {
+				dbBytes = null;
+			}
+			if (dbBytes !== null && dbBytes > FULL_CHECK_MAX_DB_BYTES) {
+				const gib = (dbBytes / 1024 ** 3).toFixed(1);
+				const ceilingGiB = (FULL_CHECK_MAX_DB_BYTES / 1024 ** 3).toFixed(0);
+				const quickResult = await runIntegrityCheckInWorker(dbPath, {
+					kind: "quick",
+				});
+				const mappedQuick = mapVerdict(quickResult);
+				const skipReason = `DB ${gib}GiB exceeds full-check ceiling ${ceilingGiB}GiB — ran quick check instead`;
+				// Record both synchronously (no await between) so the collapsed
+				// status reflects the quick verdict + full skip atomically.
+				dbOps.recordIntegrityResult(
+					"quick",
+					mappedQuick.result,
+					mappedQuick.detail,
+				);
+				dbOps.recordIntegrityResult("full", "skipped", skipReason);
+				return { result: "skipped", error: skipReason };
+			}
+		}
+
 		const workerResult = await runIntegrityCheckInWorker(dbPath, { kind });
-		const result = workerResult.ok ? "ok" : "corrupt";
-		dbOps.recordIntegrityResult(
-			kind,
-			result,
-			workerResult.ok ? null : workerResult.error,
-		);
-		return {
-			result,
-			error: workerResult.ok ? null : workerResult.error,
-		};
+		const mapped = mapVerdict(workerResult);
+		dbOps.recordIntegrityResult(kind, mapped.result, mapped.detail);
+		return { result: mapped.result, error: mapped.detail };
 	} catch (error) {
+		// A worker onerror / stat throw / unexpected exception is an
+		// operational failure — NOT proven corruption. Record it as skipped so
+		// the last verified verdict is preserved and the next tick retries.
 		const msg = String(error);
-		dbOps.recordIntegrityResult(kind, "corrupt", msg);
-		return { result: "corrupt", error: msg };
+		dbOps.recordIntegrityResult(kind, "skipped", msg);
+		return { result: "skipped", error: msg };
 	}
 }
 
@@ -223,7 +303,7 @@ export async function runIntegrityCheckOnDemand(
 	dbOps: DatabaseOperations,
 	kind: "quick" | "full",
 ): Promise<
-	| { ok: true; result: "ok" | "corrupt"; error: string | null }
+	| { ok: true; result: "ok" | "corrupt" | "skipped"; error: string | null }
 	| { ok: false; reason: "already-running" }
 > {
 	if (!dbOps.markIntegrityCheckRunning(kind)) {
@@ -250,7 +330,8 @@ export async function runIntegrityCheckOnDemand(
  *    flight; nothing was started.
  *
  * Errors inside the background coroutine are recorded as
- * `corrupt` with the message — same handling as the awaited path.
+ * `skipped` with the message (an operational failure is not proven
+ * corruption) — same handling as the awaited path.
  */
 export function startFullIntegrityCheckBackground(
 	dbOps: DatabaseOperations,

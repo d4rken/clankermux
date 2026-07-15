@@ -24,10 +24,18 @@ export function createStorageHandler(dbOps: DatabaseOperations) {
 				? new Date(integrity.lastQuickCheckAt).toISOString()
 				: null,
 			last_quick_result: integrity.lastQuickResult,
+			last_quick_attempt_at: integrity.lastQuickAttemptAt
+				? new Date(integrity.lastQuickAttemptAt).toISOString()
+				: null,
+			last_quick_skip_reason: integrity.lastQuickSkipReason,
 			last_full_check_at: integrity.lastFullCheckAt
 				? new Date(integrity.lastFullCheckAt).toISOString()
 				: null,
 			last_full_result: integrity.lastFullResult,
+			last_full_attempt_at: integrity.lastFullAttemptAt
+				? new Date(integrity.lastFullAttemptAt).toISOString()
+				: null,
+			last_full_skip_reason: integrity.lastFullSkipReason,
 			orphan_pages: metrics.orphanPages,
 			last_retention_sweep_at: metrics.lastRetentionSweepAt
 				? new Date(metrics.lastRetentionSweepAt).toISOString()

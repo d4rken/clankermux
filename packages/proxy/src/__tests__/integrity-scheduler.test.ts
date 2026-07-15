@@ -15,33 +15,56 @@
  * `dbPath: "/tmp/anything"` exercise the worker branch.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import * as nodeFs from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
+import type { IntegrityStatus } from "@clankermux/types";
 
 // ---------------------------------------------------------------------------
-// Module mock — must be declared before importing the scheduler so that
-// bun's module resolution picks up the mock when it resolves
-// @clankermux/database. The scheduler imports `runIntegrityCheckInWorker`
-// as a value (only thing we need to fake); `DatabaseOperations` is a
-// type-only import and is erased at runtime, so it doesn't need a stub.
+// Module mocks — must be declared before importing the scheduler so that
+// bun's module resolution picks up the mocks. The scheduler imports
+// `runIntegrityCheckInWorker` (a value we fake) and `statSync` from node:fs
+// (which we fake so the defensive size-skip path is testable without a real
+// 24 GiB file). `DatabaseOperations` is a type-only import and is erased at
+// runtime, so it doesn't need a stub.
 // ---------------------------------------------------------------------------
 
-type WorkerResult = { ok: true } | { ok: false; error: string };
+// New runner shape: a non-ok result carries a `verdict` discriminating a real
+// corruption verdict from an operational failure (error/timeout).
+type RunnerResult =
+	| { ok: true }
+	| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string };
 
-let workerResultByKind: { quick: WorkerResult; full: WorkerResult } = {
+let workerResultByKind: { quick: RunnerResult; full: RunnerResult } = {
 	quick: { ok: true },
 	full: { ok: true },
 };
+/** When set, the mocked worker rejects (simulates worker.onerror / throw). */
+let workerThrows: Error | null = null;
 
 const mockRunIntegrityCheckInWorker = mock(
 	async (
 		_dbPath: string,
 		options: { kind: "quick" | "full" },
-	): Promise<WorkerResult> => workerResultByKind[options.kind],
+	): Promise<RunnerResult> => {
+		if (workerThrows) throw workerThrows;
+		return workerResultByKind[options.kind];
+	},
 );
 
 mock.module("@clankermux/database", () => ({
 	runIntegrityCheckInWorker: mockRunIntegrityCheckInWorker,
 }));
+
+// statSync mock — small size by default so the full path takes the normal
+// worker route; individual tests bump `statSize` past the ceiling to exercise
+// the size-skip branch. Spread the real module so every other fs export is
+// preserved for unrelated importers (core/logger).
+let statSize = 1024;
+const mockStatSync = mock(
+	(_path: nodeFs.PathLike) =>
+		({ size: statSize }) as unknown as ReturnType<typeof nodeFs.statSync>,
+);
+mock.module("node:fs", () => ({ ...nodeFs, statSync: mockStatSync }));
 
 import {
 	runIntegrityCheckOnDemand,
@@ -56,10 +79,34 @@ interface MockDbOpsOptions {
 	canClaim?: boolean;
 }
 
+/**
+ * Build a stub DatabaseOperations. `recordIntegrityResult` / `getIntegrityStatus`
+ * maintain a faithful in-memory copy of the real collapse precedence so tests
+ * can assert the end-to-end status (`getIntegrityStatus().status`) the scheduler
+ * produces, not just the raw call args. The real reducer is independently
+ * covered by integrity-storage-methods.test.ts.
+ */
 function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 	const quickResult = opts.quickResult ?? "ok";
 	const fullResult = opts.fullResult ?? { ok: true };
 	let claimed = false;
+
+	const state: IntegrityStatus = {
+		status: "unchecked",
+		runningKind: null,
+		lastCheckAt: null,
+		lastError: null,
+		lastQuickCheckAt: null,
+		lastQuickResult: null,
+		lastQuickError: null,
+		lastQuickAttemptAt: null,
+		lastQuickSkipReason: null,
+		lastFullCheckAt: null,
+		lastFullResult: null,
+		lastFullError: null,
+		lastFullAttemptAt: null,
+		lastFullSkipReason: null,
+	};
 
 	const runQuickIntegrityCheck = mock(async () => {
 		if (quickResult instanceof Error) throw quickResult;
@@ -69,15 +116,80 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 		if (fullResult instanceof Error) throw fullResult;
 		return fullResult.ok ? "ok" : fullResult.error;
 	});
-	const markIntegrityCheckRunning = mock(() => {
+	const markIntegrityCheckRunning = mock((kind: "quick" | "full") => {
 		if (opts.canClaim === false) return false;
 		if (claimed) return false;
 		claimed = true;
+		state.status = "running";
+		state.runningKind = kind;
 		return true;
 	});
-	const recordIntegrityResult = mock(() => {
-		claimed = false;
-	});
+	const recordIntegrityResult = mock(
+		(
+			kind: "quick" | "full",
+			result: "ok" | "corrupt" | "skipped",
+			detail?: string | null,
+		) => {
+			claimed = false;
+			const now = Date.now();
+			state.runningKind = null;
+			if (result === "skipped") {
+				const reason = detail ?? "check could not complete";
+				if (kind === "quick") {
+					state.lastQuickAttemptAt = now;
+					state.lastQuickSkipReason = reason;
+				} else {
+					state.lastFullAttemptAt = now;
+					state.lastFullSkipReason = reason;
+				}
+			} else if (kind === "quick") {
+				state.lastQuickCheckAt = now;
+				state.lastQuickResult = result;
+				state.lastQuickError = result === "corrupt" ? (detail ?? null) : null;
+				state.lastQuickAttemptAt = now;
+				state.lastQuickSkipReason = null;
+				state.lastCheckAt = now;
+			} else {
+				state.lastFullCheckAt = now;
+				state.lastFullResult = result;
+				state.lastFullError = result === "corrupt" ? (detail ?? null) : null;
+				state.lastFullAttemptAt = now;
+				state.lastFullSkipReason = null;
+				if (result === "ok") {
+					state.lastQuickResult = "ok";
+					state.lastQuickError = null;
+					state.lastQuickSkipReason = null;
+				}
+				state.lastCheckAt = now;
+			}
+			if (
+				state.lastFullResult === "corrupt" ||
+				state.lastQuickResult === "corrupt"
+			) {
+				state.status = "corrupt";
+				state.lastError =
+					state.lastFullError ??
+					state.lastQuickError ??
+					"integrity check failed";
+			} else if (
+				state.lastFullSkipReason !== null ||
+				state.lastQuickSkipReason !== null
+			) {
+				state.status = "skipped";
+				state.lastError = null;
+			} else if (
+				state.lastQuickResult === "ok" ||
+				state.lastFullResult === "ok"
+			) {
+				state.status = "ok";
+				state.lastError = null;
+			} else {
+				state.status = "unchecked";
+				state.lastError = null;
+			}
+		},
+	);
+	const getIntegrityStatus = mock(() => ({ ...state }));
 	const getResolvedDbPath = mock(() => opts.dbPath);
 
 	return {
@@ -85,13 +197,17 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 		runFullIntegrityCheck,
 		markIntegrityCheckRunning,
 		recordIntegrityResult,
+		getIntegrityStatus,
 		getResolvedDbPath,
 	} as unknown as DatabaseOperations;
 }
 
 beforeEach(() => {
 	mockRunIntegrityCheckInWorker.mockClear();
+	mockStatSync.mockClear();
 	workerResultByKind = { quick: { ok: true }, full: { ok: true } };
+	workerThrows = null;
+	statSize = 1024;
 });
 
 describe("startIntegrityScheduler", () => {
@@ -191,14 +307,18 @@ describe("runIntegrityCheckOnDemand", () => {
 		}
 	});
 
-	it("quick reports corrupt when runQuickIntegrityCheck throws", async () => {
+	it("quick reports SKIPPED when runQuickIntegrityCheck throws (a throw is not proven corruption)", async () => {
+		// Behavior change: a thrown pragma error (I/O failure, etc.) is an
+		// operational failure that could NOT complete — the outer catch now
+		// records it as `skipped`, not `corrupt`, preserving any prior verdict.
 		const dbOps = makeDbOps({ quickResult: new Error("I/O error") });
 		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
 		expect(out.ok).toBe(true);
 		if (out.ok) {
-			expect(out.result).toBe("corrupt");
+			expect(out.result).toBe("skipped");
 			expect(out.error).toContain("I/O error");
 		}
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
 	});
 
 	it("returns 409-style { ok: false, reason: 'already-running' } when mutex is held", async () => {
@@ -240,7 +360,11 @@ describe("runIntegrityCheckOnDemand", () => {
 
 	it("quick worker corrupt result is recorded with the worker's error message", async () => {
 		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
-		workerResultByKind.quick = { ok: false, error: "*** in database main" };
+		workerResultByKind.quick = {
+			ok: false,
+			verdict: "corrupt",
+			error: "*** in database main",
+		};
 		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
 		expect(out.ok).toBe(true);
 		if (out.ok) {
@@ -302,6 +426,155 @@ describe("runIntegrityCheckOnDemand", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// Verdict mapping: a timeout / worker error / worker onerror is NOT proven
+// corruption — the scheduler must record `skipped` (amber), preserving the
+// last verified verdict. A real `verdict:"corrupt"` still records `corrupt`.
+// ---------------------------------------------------------------------------
+
+describe("runCheckLocked verdict mapping", () => {
+	it("verdict:'timeout' is recorded as skipped, not corrupt", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		workerResultByKind.full = {
+			ok: false,
+			verdict: "timeout",
+			error: "worker timed out after 600000ms — bun:sqlite call likely hung",
+		};
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).not.toBe("corrupt");
+		expect(s.status).toBe("skipped");
+		expect(s.lastFullSkipReason).toContain("timed out");
+		expect(dbOps.recordIntegrityResult).toHaveBeenLastCalledWith(
+			"full",
+			"skipped",
+			expect.stringContaining("timed out"),
+		);
+	});
+
+	it("verdict:'error' is recorded as skipped, not corrupt", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		workerResultByKind.full = {
+			ok: false,
+			verdict: "error",
+			error: "unable to open database file",
+		};
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+		expect(dbOps.getIntegrityStatus().lastFullSkipReason).toContain(
+			"unable to open database file",
+		);
+	});
+
+	it("a worker onerror/throw is recorded as skipped, not corrupt", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		workerThrows = new Error("integrity worker error");
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+		const last = (
+			dbOps.recordIntegrityResult as ReturnType<typeof mock>
+		).mock.calls.at(-1);
+		expect(last?.[1]).toBe("skipped");
+	});
+
+	it("a real verdict:'corrupt' is still recorded as corrupt", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/test.db" });
+		workerResultByKind.full = {
+			ok: false,
+			verdict: "corrupt",
+			error: "*** in database main",
+		};
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("corrupt");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+	});
+
+	it("size-skip: a full over the ceiling runs a quick verdict + marks full skipped, holding the mutex", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling
+		workerResultByKind.quick = { ok: true };
+
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+
+		// The mutex was claimed once by runIntegrityCheckOnDemand; the size-skip
+		// branch must NOT claim it again (it already holds it).
+		expect(
+			(dbOps.markIntegrityCheckRunning as ReturnType<typeof mock>).mock.calls
+				.length,
+		).toBe(1);
+
+		// Records the quick verdict first, then the full skip — both synchronously.
+		const calls = (dbOps.recordIntegrityResult as ReturnType<typeof mock>).mock
+			.calls;
+		expect(calls[0][0]).toBe("quick");
+		expect(calls[0][1]).toBe("ok");
+		expect(calls[1][0]).toBe("full");
+		expect(calls[1][1]).toBe("skipped");
+		expect(calls[1][2]).toContain("exceeds full-check ceiling");
+
+		// The worker ran exactly once — the quick check, NOT a full check.
+		expect(mockRunIntegrityCheckInWorker).toHaveBeenCalledTimes(1);
+		expect(mockRunIntegrityCheckInWorker.mock.calls[0][1]).toEqual({
+			kind: "quick",
+		});
+
+		// Collapsed status is skipped (quick ok, full skipped, nothing corrupt).
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+	});
+
+	it("size-skip does not trigger below the ceiling (normal full worker path)", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/normal.db" });
+		statSize = 1024; // well under the ceiling
+		workerResultByKind.full = { ok: true };
+
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("ok");
+		expect(mockRunIntegrityCheckInWorker).toHaveBeenCalledTimes(1);
+		expect(mockRunIntegrityCheckInWorker.mock.calls[0][1]).toEqual({
+			kind: "full",
+		});
+	});
+
+	it("size-skip: if the substitute quick worker THROWS, the outer catch records the FULL kind skipped and releases the mutex", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling — takes the size-skip branch
+		// The substitute quick worker blows up (e.g. worker onerror). The outer
+		// catch must record the ORIGINAL kind ("full") as skipped — NOT corrupt
+		// — and still release the mutex.
+		workerThrows = new Error("quick worker blew up");
+
+		const out = await runIntegrityCheckOnDemand(dbOps, "full");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("skipped");
+
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).not.toBe("corrupt");
+		expect(s.status).toBe("skipped");
+		expect(s.lastFullSkipReason).toContain("quick worker blew up");
+
+		// The recorded outcome is the full kind, skipped (from the outer catch).
+		const last = (
+			dbOps.recordIntegrityResult as ReturnType<typeof mock>
+		).mock.calls.at(-1);
+		expect(last?.[0]).toBe("full");
+		expect(last?.[1]).toBe("skipped");
+
+		// Mutex released — a fresh claim succeeds.
+		expect(dbOps.markIntegrityCheckRunning("full")).toBe(true);
+	});
+});
+
 describe("startFullIntegrityCheckBackground", () => {
 	it("returns ok synchronously and kicks the worker off without awaiting", async () => {
 		const dbOps = makeDbOps({ fullResult: { ok: true }, dbPath: undefined });
@@ -330,7 +603,10 @@ describe("startFullIntegrityCheckBackground", () => {
 		expect(dbOps.runFullIntegrityCheck).not.toHaveBeenCalled();
 	});
 
-	it("releases the mutex via recordIntegrityResult on background failure", async () => {
+	it("releases the mutex via recordIntegrityResult on background failure (recorded as skipped)", async () => {
+		// A thrown failure in the background coroutine is an operational error,
+		// not proven corruption — it's recorded as `skipped` (still releasing
+		// the mutex) so a prior verified verdict is preserved.
 		const dbOps = makeDbOps({
 			fullResult: new Error("boom"),
 			dbPath: undefined,
@@ -343,6 +619,6 @@ describe("startFullIntegrityCheckBackground", () => {
 			dbOps.recordIntegrityResult as ReturnType<typeof mock>
 		).mock.calls.at(-1);
 		expect(lastCall?.[0]).toBe("full");
-		expect(lastCall?.[1]).toBe("corrupt");
+		expect(lastCall?.[1]).toBe("skipped");
 	});
 });

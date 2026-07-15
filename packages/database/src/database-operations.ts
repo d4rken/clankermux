@@ -338,9 +338,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		lastQuickCheckAt: null,
 		lastQuickResult: null,
 		lastQuickError: null,
+		lastQuickAttemptAt: null,
+		lastQuickSkipReason: null,
 		lastFullCheckAt: null,
 		lastFullResult: null,
 		lastFullError: null,
+		lastFullAttemptAt: null,
+		lastFullSkipReason: null,
 	};
 	/**
 	 * Cached per-data-type storage-usage measurement, with the epoch ms it was
@@ -545,19 +549,31 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * Record the outcome of a quick or full integrity probe and recompute the
 	 * collapsed `status` field.
 	 *
-	 * Sticky-corrupt rule:
-	 *  - A full `corrupt` result poisons `status` until another *full* probe
-	 *    returns `ok`. A subsequent quick `ok` does NOT clear it. Without
-	 *    this, the 6-hourly quick_check would mask the daily full check's
-	 *    silent-corruption findings (index/table mismatch, FK violations).
-	 *  - A quick `corrupt` is also reflected immediately, and is cleared by
-	 *    the next quick `ok` (or a full `ok` if the full result was also
-	 *    quick-detectable, which any structural corruption is).
+	 * `result` is one of:
+	 *  - `"ok"` / `"corrupt"` — a VERIFIED verdict (the probe completed and
+	 *    returned a real answer). `detail` carries the corruption message for
+	 *    `"corrupt"`.
+	 *  - `"skipped"` — the probe could NOT complete (worker timeout, worker
+	 *    exception, or a defensive size-skip). `detail` carries the skip
+	 *    reason. A skip records only the attempt timestamp + skip reason for
+	 *    that kind; it does NOT overwrite the kind's last verified verdict,
+	 *    timestamp, or error, and it does NOT advance `lastCheckAt` (which
+	 *    tracks verified completions only). This is the whole point: a
+	 *    timeout on a huge DB must not masquerade as proven corruption.
+	 *
+	 * Sticky-corrupt rule (unchanged):
+	 *  - A full `corrupt` verdict poisons `status` until another *full* probe
+	 *    returns `ok`. A subsequent quick `ok` does NOT clear it. A `skipped`
+	 *    attempt of either kind never clears it either (skips don't touch the
+	 *    per-kind Result fields, so the corrupt precedence still wins).
+	 *  - A passing full check subsumes a lingering quick-corrupt (and clears a
+	 *    lingering quick skip reason), since integrity_check is a strict
+	 *    superset of quick_check.
 	 */
 	recordIntegrityResult(
 		kind: "quick" | "full",
-		result: "ok" | "corrupt",
-		error?: string | null,
+		result: "ok" | "corrupt" | "skipped",
+		detail?: string | null,
 	): void {
 		const now = Date.now();
 		const next: IntegrityStatus = {
@@ -565,36 +581,66 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			runningKind: null,
 		};
 
-		if (kind === "quick") {
+		if (result === "skipped") {
+			// Attempt could not complete: preserve the last verified verdict,
+			// timestamp, and error for this kind — only stamp the attempt +
+			// skip reason. `lastCheckAt` (verified completions) is untouched.
+			const reason = detail ?? "check could not complete";
+			if (kind === "quick") {
+				next.lastQuickAttemptAt = now;
+				next.lastQuickSkipReason = reason;
+			} else {
+				next.lastFullAttemptAt = now;
+				next.lastFullSkipReason = reason;
+			}
+		} else if (kind === "quick") {
 			next.lastQuickCheckAt = now;
 			next.lastQuickResult = result;
-			next.lastQuickError = result === "corrupt" ? (error ?? null) : null;
+			next.lastQuickError = result === "corrupt" ? (detail ?? null) : null;
+			next.lastQuickAttemptAt = now;
+			// A real verdict supersedes any prior skip for this kind.
+			next.lastQuickSkipReason = null;
+			next.lastCheckAt = now;
 		} else {
 			next.lastFullCheckAt = now;
 			next.lastFullResult = result;
-			next.lastFullError = result === "corrupt" ? (error ?? null) : null;
+			next.lastFullError = result === "corrupt" ? (detail ?? null) : null;
+			next.lastFullAttemptAt = now;
+			next.lastFullSkipReason = null;
 			// A passing full check is a strict superset of quick_check, so it
 			// subsumes any lingering quick-corrupt: if the structurally-more-
 			// thorough probe is clean, the structurally-less-thorough probe's
 			// stale corrupt verdict is no longer accurate. Without this clear,
 			// a quick `corrupt` recorded six hours ago would keep collapsed
 			// `status = "corrupt"` on the dashboard until the next quick tick
-			// even though a full check just returned ok.
+			// even though a full check just returned ok. Likewise clear a
+			// lingering quick skip reason so the collapsed status can settle to
+			// "ok" rather than being pinned to "skipped".
 			if (result === "ok") {
 				next.lastQuickResult = "ok";
 				next.lastQuickError = null;
+				next.lastQuickSkipReason = null;
 			}
+			next.lastCheckAt = now;
 		}
 
-		next.lastCheckAt = now;
-
-		// Recompute collapsed status. Order: any corrupt result wins.
+		// Recompute collapsed status by precedence:
+		//   1. corrupt (a verified corrupt verdict wins; a skip can't clear it)
+		//   2. skipped (most recent attempt of some kind couldn't complete)
+		//   3. ok (some kind has a verified ok)
+		//   4. unchecked (nothing verified, nothing skipped)
 		const fullCorrupt = next.lastFullResult === "corrupt";
 		const quickCorrupt = next.lastQuickResult === "corrupt";
 		if (fullCorrupt || quickCorrupt) {
 			next.status = "corrupt";
 			next.lastError =
 				next.lastFullError ?? next.lastQuickError ?? "integrity check failed";
+		} else if (
+			next.lastFullSkipReason !== null ||
+			next.lastQuickSkipReason !== null
+		) {
+			next.status = "skipped";
+			next.lastError = null;
 		} else if (next.lastQuickResult === "ok" || next.lastFullResult === "ok") {
 			next.status = "ok";
 			next.lastError = null;

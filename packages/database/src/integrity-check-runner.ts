@@ -29,11 +29,19 @@ const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
  * Race the worker promise against a configurable timeout (default 10 min,
  * env override `CCFLARE_INTEGRITY_CHECK_WORKER_TIMEOUT_MS`). On timeout the
  * worker is terminated and the runner returns
- * `{ ok: false, error: "worker timed out" }` — callers translate that to a
- * `corrupt` result, which releases the scheduler mutex and keeps the next
- * tick eligible to run. Without this cap a stuck I/O syscall in the worker
- * would freeze integrity checking for the entire process lifetime
- * (potentially weeks between restarts).
+ * `{ ok: false, verdict: "timeout", error: "worker timed out …" }` — callers
+ * translate that to a `skipped` result (NOT corrupt: a timeout is an
+ * operational failure, not proven corruption), which releases the scheduler
+ * mutex and keeps the next tick eligible to run. Without this cap a stuck I/O
+ * syscall in the worker would freeze integrity checking for the entire
+ * process lifetime (potentially weeks between restarts).
+ *
+ * The `verdict` discriminates the three non-ok cases so callers can map a real
+ * corruption verdict to `corrupt` while treating `error`/`timeout` as
+ * `skipped`:
+ *  - `"corrupt"` — a pragma ran and reported a problem (from the worker).
+ *  - `"error"` — the worker caught an exception (DB open failure, etc.).
+ *  - `"timeout"` — the worker did not respond within the cap (added here).
  */
 export async function runIntegrityCheckInWorker(
 	dbPath: string,
@@ -42,7 +50,10 @@ export async function runIntegrityCheckInWorker(
 		busyTimeoutMs?: number;
 		timeoutMs?: number;
 	},
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<
+	| { ok: true }
+	| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string }
+> {
 	let worker: Worker;
 	if (EMBEDDED_INTEGRITY_CHECK_WORKER_CODE) {
 		const workerCode = Buffer.from(
@@ -62,7 +73,8 @@ export async function runIntegrityCheckInWorker(
 
 	try {
 		const result = await new Promise<
-			{ ok: true } | { ok: false; error: string }
+			| { ok: true }
+			| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string }
 		>((resolve, reject) => {
 			worker.onmessage = (event: MessageEvent) => resolve(event.data);
 			worker.onerror = (event: ErrorEvent) =>
@@ -71,8 +83,10 @@ export async function runIntegrityCheckInWorker(
 				// resolve (not reject) — we want this to look like any other
 				// "non-ok" result so callers (recordIntegrityResult, the
 				// on-demand endpoint) treat it uniformly and release the mutex.
+				// verdict:"timeout" tells callers this is NOT proven corruption.
 				resolve({
 					ok: false,
+					verdict: "timeout",
 					error: `worker timed out after ${timeoutMs}ms — bun:sqlite call likely hung on disk I/O; check filesystem health`,
 				});
 			}, timeoutMs);

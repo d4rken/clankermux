@@ -32,7 +32,21 @@ export type IntegrityCheckRequest = {
 	kind: IntegrityCheckKind;
 };
 
-export type IntegrityCheckResult = { ok: true } | { ok: false; error: string };
+/**
+ * A worker outcome distinguishes a *real PRAGMA verdict* from an *operational
+ * failure*:
+ *  - `{ ok: true }` — the DB is sound.
+ *  - `{ ok: false, verdict: "corrupt", error }` — a pragma actually ran and
+ *    reported a problem (quick_check != "ok", integrity_check rows, or FK
+ *    violations). This IS proven corruption.
+ *  - `{ ok: false, verdict: "error", error }` — the check could not complete
+ *    (DB open failure / thrown exception). NOT proven corruption; callers map
+ *    this to a `skipped` outcome and preserve the last verified verdict.
+ */
+export type IntegrityCheckResult =
+	| { ok: true }
+	| { ok: false; verdict: "corrupt"; error: string }
+	| { ok: false; verdict: "error"; error: string };
 
 self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 	const { dbPath, busyTimeoutMs, kind } = event.data;
@@ -56,6 +70,7 @@ self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 			} else {
 				self.postMessage({
 					ok: false,
+					verdict: "corrupt",
 					error: msg,
 				} satisfies IntegrityCheckResult);
 			}
@@ -94,12 +109,17 @@ self.onmessage = (event: MessageEvent<IntegrityCheckRequest>) => {
 		}
 		self.postMessage({
 			ok: false,
+			verdict: "corrupt",
 			error: parts.join("\n"),
 		} satisfies IntegrityCheckResult);
 	} catch (err) {
 		db?.close();
+		// A thrown exception (DB open failure, unreadable file, etc.) means the
+		// check could NOT complete — it is not a corruption verdict. Report it
+		// as an operational error so callers map it to `skipped`.
 		self.postMessage({
 			ok: false,
+			verdict: "error",
 			error: err instanceof Error ? err.message : String(err),
 		} satisfies IntegrityCheckResult);
 	}

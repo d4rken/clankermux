@@ -62,6 +62,31 @@ export function StorageIntegritySection() {
 		label = "Database corruption detected";
 		description = data?.last_integrity_error ?? "See server logs for details.";
 		badgeNode = <Badge variant="destructive">Corrupt</Badge>;
+	} else if (status === "skipped") {
+		// A check could not complete (worker timeout / error / defensive
+		// size-skip). This is NOT proven corruption — surface it amber and
+		// reassure with the last VERIFIED verdict, so a slow full check on a
+		// huge DB never lights the red corruption UI.
+		tone = "warn";
+		icon = <AlertTriangle className="h-5 w-5 text-warning" />;
+		const skipReason =
+			data?.last_full_skip_reason ?? data?.last_quick_skip_reason ?? null;
+		const lastVerified =
+			data?.last_full_result === "ok" && data?.last_full_check_at != null
+				? `Last full check ${formatRelative(data.last_full_check_at)} passed`
+				: data?.last_quick_result === "ok" && data?.last_quick_check_at != null
+					? `Last quick check ${formatRelative(data.last_quick_check_at)} passed`
+					: "No prior verified check on record";
+		// Headline the kind that actually skipped — a standalone quick skip
+		// (quick tick timed out, or a manual "Run quick check" errored) also
+		// lands here with last_full_skip_reason === null.
+		label = data?.last_full_skip_reason
+			? "Full integrity check couldn't complete"
+			: data?.last_quick_skip_reason
+				? "Quick integrity check couldn't complete"
+				: "Integrity check couldn't complete";
+		description = `${skipReason ?? "The integrity check could not complete."} · ${lastVerified}`;
+		badgeNode = <Badge variant="secondary">Skipped</Badge>;
 	} else if (status === "ok") {
 		tone = "ok";
 		icon = <CheckCircle className="h-5 w-5 text-success" />;
@@ -120,19 +145,41 @@ export function StorageIntegritySection() {
 				<div>
 					<dt className="text-muted-foreground">Last quick check</dt>
 					<dd>
-						{formatRelative(data?.last_quick_check_at ?? null)}
-						{data?.last_quick_result === "corrupt" ? (
-							<span className="text-destructive"> (corrupt)</span>
-						) : null}
+						{data?.last_quick_result !== "corrupt" &&
+						data?.last_quick_skip_reason ? (
+							<>
+								{/* Most recent attempt was a skip — show the ATTEMPT time so
+								    "(skipped)" doesn't sit next to a stale verified time. */}
+								{formatRelative(data?.last_quick_attempt_at ?? null)}
+								<span className="text-warning"> (skipped)</span>
+							</>
+						) : (
+							<>
+								{formatRelative(data?.last_quick_check_at ?? null)}
+								{data?.last_quick_result === "corrupt" ? (
+									<span className="text-destructive"> (corrupt)</span>
+								) : null}
+							</>
+						)}
 					</dd>
 				</div>
 				<div>
 					<dt className="text-muted-foreground">Last full check</dt>
 					<dd>
-						{formatRelative(data?.last_full_check_at ?? null)}
-						{data?.last_full_result === "corrupt" ? (
-							<span className="text-destructive"> (corrupt)</span>
-						) : null}
+						{data?.last_full_result !== "corrupt" &&
+						data?.last_full_skip_reason ? (
+							<>
+								{formatRelative(data?.last_full_attempt_at ?? null)}
+								<span className="text-warning"> (skipped)</span>
+							</>
+						) : (
+							<>
+								{formatRelative(data?.last_full_check_at ?? null)}
+								{data?.last_full_result === "corrupt" ? (
+									<span className="text-destructive"> (corrupt)</span>
+								) : null}
+							</>
+						)}
 					</dd>
 				</div>
 			</dl>
