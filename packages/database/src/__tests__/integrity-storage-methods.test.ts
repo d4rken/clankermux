@@ -37,8 +37,12 @@ describe("DatabaseOperations.getIntegrityStatus / recordIntegrityResult", () => 
 		expect(s.lastError).toBeNull();
 		expect(s.lastQuickCheckAt).toBeNull();
 		expect(s.lastQuickResult).toBeNull();
+		expect(s.lastQuickAttemptAt).toBeNull();
+		expect(s.lastQuickSkipReason).toBeNull();
 		expect(s.lastFullCheckAt).toBeNull();
 		expect(s.lastFullResult).toBeNull();
+		expect(s.lastFullAttemptAt).toBeNull();
+		expect(s.lastFullSkipReason).toBeNull();
 	});
 
 	it("reflects ok status after recording a quick ok result", () => {
@@ -137,6 +141,126 @@ describe("DatabaseOperations.getIntegrityStatus / recordIntegrityResult", () => 
 		expect(dbOps.markIntegrityCheckRunning("quick")).toBe(true);
 		expect(dbOps.markIntegrityCheckRunning("full")).toBe(false);
 		expect(dbOps.markIntegrityCheckRunning("quick")).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Tests: recordIntegrityResult "skipped" outcomes (timeout / worker error /
+// size-skip). A skip is NOT proven corruption — it must preserve the last
+// verified verdict and collapse to the amber "skipped" status when nothing is
+// corrupt.
+// ---------------------------------------------------------------------------
+
+describe("DatabaseOperations.recordIntegrityResult skipped outcomes", () => {
+	let dbOps: DatabaseOperations;
+
+	beforeEach(() => {
+		dbOps = new DatabaseOperations(tempDbPath());
+	});
+
+	afterEach(() => {
+		dbOps.dispose?.();
+	});
+
+	it("a full skipped after a full ok preserves the ok verdict and collapses to skipped", () => {
+		dbOps.recordIntegrityResult("full", "ok");
+		const okAt = dbOps.getIntegrityStatus().lastFullCheckAt;
+		expect(okAt).not.toBeNull();
+
+		dbOps.recordIntegrityResult(
+			"full",
+			"skipped",
+			"worker timed out after 600000ms",
+		);
+
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).toBe("skipped");
+		// The verified verdict + its timestamp survive the skip untouched.
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.lastFullCheckAt).toBe(okAt);
+		expect(s.lastFullError).toBeNull();
+		// The attempt + skip reason are stamped.
+		expect(s.lastFullSkipReason).toBe("worker timed out after 600000ms");
+		expect(s.lastFullAttemptAt).not.toBeNull();
+		expect(s.lastError).toBeNull();
+	});
+
+	it("a full skipped after a full corrupt keeps status corrupt (a skip never clears corruption)", () => {
+		dbOps.recordIntegrityResult("full", "corrupt", "index missing entry");
+		dbOps.recordIntegrityResult("full", "skipped", "worker timed out");
+
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).toBe("corrupt");
+		expect(s.lastFullResult).toBe("corrupt");
+		expect(s.lastError).toBe("index missing entry");
+		// The skip attempt is still recorded even though status stays corrupt.
+		expect(s.lastFullSkipReason).toBe("worker timed out");
+	});
+
+	it("a fresh full corrupt verdict still sets status corrupt", () => {
+		dbOps.recordIntegrityResult("full", "corrupt", "boom");
+		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+	});
+
+	it("a full ok clears a prior quick skip", () => {
+		dbOps.recordIntegrityResult("quick", "skipped", "worker error");
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+
+		dbOps.recordIntegrityResult("full", "ok");
+
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).toBe("ok");
+		expect(s.lastQuickSkipReason).toBeNull();
+		expect(s.lastFullSkipReason).toBeNull();
+		expect(s.lastError).toBeNull();
+	});
+
+	it("a real verdict clears that kind's own skip reason", () => {
+		dbOps.recordIntegrityResult("full", "skipped", "timed out");
+		expect(dbOps.getIntegrityStatus().lastFullSkipReason).toBe("timed out");
+
+		dbOps.recordIntegrityResult("full", "ok");
+		expect(dbOps.getIntegrityStatus().lastFullSkipReason).toBeNull();
+	});
+
+	it("a skip does not advance lastCheckAt (verified completions only)", () => {
+		dbOps.recordIntegrityResult("full", "ok");
+		const checkedAt = dbOps.getIntegrityStatus().lastCheckAt;
+		expect(checkedAt).not.toBeNull();
+
+		dbOps.recordIntegrityResult("full", "skipped", "timed out");
+		expect(dbOps.getIntegrityStatus().lastCheckAt).toBe(checkedAt);
+	});
+
+	it("defaults the skip reason when none is supplied", () => {
+		dbOps.recordIntegrityResult("quick", "skipped");
+		const s = dbOps.getIntegrityStatus();
+		expect(s.status).toBe("skipped");
+		expect(s.lastQuickSkipReason).toBe("check could not complete");
+	});
+
+	it("a quick ok does NOT clear a lingering full skip; only a full ok does", () => {
+		// Mirror of the sticky-corrupt asymmetry: a full skip means the full
+		// check couldn't complete, and a cheaper quick pass says nothing about
+		// the full check's domain (index/table cross-checks, FKs). So a quick
+		// ok must NOT resolve a lingering full skip — the surface stays amber
+		// until a full verdict actually lands.
+		dbOps.recordIntegrityResult("full", "ok");
+		dbOps.recordIntegrityResult("full", "skipped", "worker timed out");
+		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
+
+		dbOps.recordIntegrityResult("quick", "ok");
+		const mid = dbOps.getIntegrityStatus();
+		expect(mid.status).toBe("skipped");
+		expect(mid.lastFullSkipReason).toBe("worker timed out");
+		// The verified full verdict is still the last-known ok underneath.
+		expect(mid.lastFullResult).toBe("ok");
+
+		// Only a full verdict clears the full skip and returns to green.
+		dbOps.recordIntegrityResult("full", "ok");
+		const done = dbOps.getIntegrityStatus();
+		expect(done.status).toBe("ok");
+		expect(done.lastFullSkipReason).toBeNull();
 	});
 });
 

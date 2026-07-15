@@ -10,32 +10,53 @@ export type IntegrityCheckKind = "quick" | "full";
  * surface, but each probe's own most-recent result is preserved so a quick
  * `ok` cannot mask a previously-detected full `corrupt`.
  *
+ * Verified-verdict vs. attempted split: `last{Quick,Full}Result` /
+ * `last{Quick,Full}CheckAt` / `last{Quick,Full}Error` record only a *verified
+ * PRAGMA verdict* ("ok" or "corrupt") — i.e. a probe that actually completed
+ * and returned a real answer. `last{Quick,Full}AttemptAt` /
+ * `last{Quick,Full}SkipReason` record the most recent *attempt* including one
+ * that could not complete. A timeout, worker exception, or size-skip does NOT
+ * overwrite the last verified verdict — it only stamps the attempt + skip
+ * reason and (when nothing is corrupt) collapses `status` to `skipped`.
+ *
  * Status semantics:
- *  - `unchecked`: no probe has completed yet (fresh boot, scheduler still in
- *    its initial-delay window).
+ *  - `unchecked`: no probe has produced a verified verdict yet (fresh boot,
+ *    scheduler still in its initial-delay window).
  *  - `running`: a probe is currently in flight; `runningKind` says which.
- *  - `ok`: both the last-known quick and full results are "ok" (or only one
- *    has been run and it was "ok").
- *  - `corrupt`: at least one of the last-known probes returned non-"ok".
- *    A subsequent quick `ok` clears quick-only corruption but does NOT clear
- *    a full `corrupt`; only another full `ok` does that.
+ *  - `ok`: the last-known quick and/or full *verified* result is "ok".
+ *  - `corrupt`: at least one of the last-known *verified* probes returned
+ *    non-"ok". A subsequent quick `ok` clears quick-only corruption but does
+ *    NOT clear a full `corrupt`; only another full `ok` does that. A `skipped`
+ *    attempt never clears a corrupt verdict.
+ *  - `skipped`: the most recent attempt of some kind could NOT complete
+ *    (timeout / worker error / size-skip) and nothing is currently corrupt.
+ *    The last verified verdict is preserved in the per-kind Result fields; the
+ *    surface stays amber (not red, not green) until a probe completes again.
  */
 export interface IntegrityStatus {
-	status: "ok" | "corrupt" | "unchecked" | "running";
+	status: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
 	/** Which kind of probe is in flight when status="running"; null otherwise. */
 	runningKind: IntegrityCheckKind | null;
-	/** Last completed probe of either kind, ms epoch. */
+	/** Last completed probe of either kind (verified verdict), ms epoch. */
 	lastCheckAt: number | null;
-	/** Combined error message if status is "corrupt"; null when "ok". */
+	/** Combined error message if status is "corrupt"; null otherwise. */
 	lastError: string | null;
-	/** Most recent quick_check result. */
+	/** Most recent quick_check VERIFIED result (unaffected by a skip). */
 	lastQuickCheckAt: number | null;
 	lastQuickResult: "ok" | "corrupt" | null;
 	lastQuickError: string | null;
-	/** Most recent full integrity_check + foreign_key_check result. */
+	/** Last quick attempt incl. skipped, ms epoch. */
+	lastQuickAttemptAt: number | null;
+	/** Reason the most recent quick attempt was skipped; null on a real verdict. */
+	lastQuickSkipReason: string | null;
+	/** Most recent full integrity_check + foreign_key_check VERIFIED result. */
 	lastFullCheckAt: number | null;
 	lastFullResult: "ok" | "corrupt" | null;
 	lastFullError: string | null;
+	/** Last full attempt incl. skipped, ms epoch. */
+	lastFullAttemptAt: number | null;
+	/** Reason the most recent full attempt was skipped; null on a real verdict. */
+	lastFullSkipReason: string | null;
 }
 
 // Stats types
@@ -441,14 +462,18 @@ export interface HealthResponse {
 		};
 		storage?: {
 			integrity: {
-				status: "ok" | "corrupt" | "unchecked" | "running";
+				status: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
 				runningKind: IntegrityCheckKind | null;
 				lastCheckAt: string | null;
 				lastError: string | null;
 				lastQuickCheckAt: string | null;
 				lastQuickResult: "ok" | "corrupt" | null;
+				lastQuickAttemptAt: string | null;
+				lastQuickSkipReason: string | null;
 				lastFullCheckAt: string | null;
 				lastFullResult: "ok" | "corrupt" | null;
+				lastFullAttemptAt: string | null;
+				lastFullSkipReason: string | null;
 			};
 		};
 	};

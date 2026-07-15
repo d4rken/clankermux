@@ -142,10 +142,18 @@ export function createHealthHandler(
 						? new Date(integrity.lastQuickCheckAt).toISOString()
 						: null,
 					lastQuickResult: integrity.lastQuickResult,
+					lastQuickAttemptAt: integrity.lastQuickAttemptAt
+						? new Date(integrity.lastQuickAttemptAt).toISOString()
+						: null,
+					lastQuickSkipReason: integrity.lastQuickSkipReason,
 					lastFullCheckAt: integrity.lastFullCheckAt
 						? new Date(integrity.lastFullCheckAt).toISOString()
 						: null,
 					lastFullResult: integrity.lastFullResult,
+					lastFullAttemptAt: integrity.lastFullAttemptAt
+						? new Date(integrity.lastFullAttemptAt).toISOString()
+						: null,
+					lastFullSkipReason: integrity.lastFullSkipReason,
 				},
 			};
 		}

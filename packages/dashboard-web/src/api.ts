@@ -57,14 +57,18 @@ export interface CacheWarmingResponse {
 export interface StorageInfoResponse {
 	db_bytes: number;
 	wal_bytes: number;
-	integrity_status: "ok" | "corrupt" | "unchecked" | "running";
+	integrity_status: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
 	integrity_running_kind: "quick" | "full" | null;
 	last_integrity_check_at: string | null;
 	last_integrity_error: string | null;
 	last_quick_check_at: string | null;
 	last_quick_result: "ok" | "corrupt" | null;
+	last_quick_attempt_at: string | null;
+	last_quick_skip_reason: string | null;
 	last_full_check_at: string | null;
 	last_full_result: "ok" | "corrupt" | null;
+	last_full_attempt_at: string | null;
+	last_full_skip_reason: string | null;
 	orphan_pages: number | null;
 	last_retention_sweep_at: string | null;
 	null_account_rows_24h: number;
@@ -79,7 +83,11 @@ export interface StorageInfoResponse {
  * dashboard's storage poll picks it up on its next tick.
  */
 export type IntegrityCheckResponse =
-	| { kind: "quick"; result: "ok" | "corrupt"; error: string | null }
+	| {
+			kind: "quick";
+			result: "ok" | "corrupt" | "skipped";
+			error: string | null;
+	  }
 	| { kind: "full"; queued: true };
 
 // Token health response interfaces

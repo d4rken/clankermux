@@ -17,9 +17,18 @@ import { createStorageHandler, createStorageUsageHandler } from "../storage";
 // ---------------------------------------------------------------------------
 
 type IntegrityStatus = {
-	status: "ok" | "corrupt" | "unchecked";
+	status: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
+	runningKind: "quick" | "full" | null;
 	lastCheckAt: number | null;
 	lastError: string | null;
+	lastQuickCheckAt: number | null;
+	lastQuickResult: "ok" | "corrupt" | null;
+	lastQuickAttemptAt: number | null;
+	lastQuickSkipReason: string | null;
+	lastFullCheckAt: number | null;
+	lastFullResult: "ok" | "corrupt" | null;
+	lastFullAttemptAt: number | null;
+	lastFullSkipReason: string | null;
 };
 
 type StorageMetrics = {
@@ -45,8 +54,17 @@ function makeDbOps(
 
 	const resolvedIntegrity: IntegrityStatus = {
 		status: "ok",
+		runningKind: null,
 		lastCheckAt: null,
 		lastError: null,
+		lastQuickCheckAt: null,
+		lastQuickResult: null,
+		lastQuickAttemptAt: null,
+		lastQuickSkipReason: null,
+		lastFullCheckAt: null,
+		lastFullResult: null,
+		lastFullAttemptAt: null,
+		lastFullSkipReason: null,
 		...integrity,
 	};
 
@@ -79,6 +97,16 @@ describe("createStorageHandler", () => {
 			expect(body).toHaveProperty("orphan_pages");
 			expect(body).toHaveProperty("last_retention_sweep_at");
 			expect(body).toHaveProperty("null_account_rows_24h");
+		});
+
+		it("includes the skip attempt/reason keys", async () => {
+			const handler = createStorageHandler(makeDbOps());
+			const body = (await (await handler()).json()) as Record<string, unknown>;
+
+			expect(body).toHaveProperty("last_quick_attempt_at");
+			expect(body).toHaveProperty("last_quick_skip_reason");
+			expect(body).toHaveProperty("last_full_attempt_at");
+			expect(body).toHaveProperty("last_full_skip_reason");
 		});
 
 		it("does NOT include snake_case keys that were renamed", async () => {
@@ -134,6 +162,32 @@ describe("createStorageHandler", () => {
 			);
 			const body = (await (await handler()).json()) as Record<string, unknown>;
 			expect(body.integrity_status).toBe("unchecked");
+		});
+
+		it("returns 'skipped' status and surfaces the full skip reason + attempt time", async () => {
+			const attemptTs = new Date("2025-01-15T10:30:00.000Z").getTime();
+			const skipReason =
+				"DB 30.0GiB exceeds full-check ceiling 24GiB — ran quick check instead";
+			const handler = createStorageHandler(
+				makeDbOps(
+					{},
+					{
+						status: "skipped",
+						lastFullSkipReason: skipReason,
+						lastFullAttemptAt: attemptTs,
+						// The last verified full verdict is preserved alongside the skip.
+						lastFullResult: "ok",
+						lastFullCheckAt: attemptTs - 1000,
+					},
+				),
+			);
+			const body = (await (await handler()).json()) as Record<string, unknown>;
+
+			expect(body.integrity_status).toBe("skipped");
+			expect(body.last_full_skip_reason).toBe(skipReason);
+			expect(body.last_full_attempt_at).toBe(new Date(attemptTs).toISOString());
+			// Verified verdict still exposed so the UI can reassure the operator.
+			expect(body.last_full_result).toBe("ok");
 		});
 	});
 

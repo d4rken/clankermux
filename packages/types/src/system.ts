@@ -38,7 +38,7 @@ export interface SystemStatusResponse {
 	/** Compact runtime signals used to explain a non-ok status. */
 	runtime: {
 		asyncWriterHealthy: boolean;
-		integrityStatus: "ok" | "corrupt" | "unchecked" | "running";
+		integrityStatus: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
 	};
 	/** Event-loop lag from the in-process monitor (zeros when not running). */
 	eventLoop: EventLoopLagStats;
