@@ -1137,6 +1137,41 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).toContain('"context_window_size":128000');
 	});
 
+	it("synthesizes context_window for a dated model via the family-window fallback", async () => {
+		const provider = new CodexProvider();
+		// The Codex backend returns a dated variant of a known model. Routing
+		// already resolves the dated suffix; the response-side context_window
+		// synthesis must too, so the client gauge / compaction signal is present.
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.6-sol-2026-05-13" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.6-sol-2026-05-13",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 50,
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"'));
+
+		expect(messageDeltaLine).toContain('"context_window"');
+		expect(messageDeltaLine).toContain('"context_window_size":353000');
+	});
+
 	it("omits context_window when model metadata is unavailable", async () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
@@ -1373,6 +1408,48 @@ describe("CodexProvider.processResponse", () => {
 		expect(transformedBody).toContain("event: error");
 		expect(transformedBody).toContain("Input is too large");
 		expect(transformedBody).toContain("context_length_exceeded");
+		expect(transformedBody).not.toContain("event: message_delta");
+		expect(transformedBody).not.toContain("event: message_stop");
+	});
+
+	it("does not emit terminal events when response.completed arrives after response.failed", async () => {
+		const provider = new CodexProvider();
+		// A malformed upstream stream: response.failed sets the terminal/error
+		// state, then a stray response.completed follows. The completed handler
+		// must NOT append message_delta/message_stop after the error terminal —
+		// that would be an invalid SSE sequence (terminal events after an error).
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_failed", model: "gpt-5.5" },
+			}),
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						type: "invalid_request_error",
+						code: "context_length_exceeded",
+						message: "Input is too large",
+					},
+				},
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+
+		expect(transformedBody).toContain("event: error");
+		expect(transformedBody).toContain("Input is too large");
 		expect(transformedBody).not.toContain("event: message_delta");
 		expect(transformedBody).not.toContain("event: message_stop");
 	});
@@ -1835,6 +1912,147 @@ describe("CodexProvider.transformRequestBody", () => {
 		const body = await transformed.json();
 
 		expect(body.model).toBe("gpt-5.4-mini");
+	});
+});
+
+describe("CodexProvider prompt_cache_key derivation", () => {
+	// Test files are excluded from typecheck, so a minimal account shape is fine.
+	const codexAccount = (overrides: Record<string, unknown> = {}) =>
+		({
+			id: "codex-1",
+			name: "codex-test",
+			provider: "codex",
+			api_key: null,
+			refresh_token: null,
+			access_token: null,
+			expires_at: null,
+			created_at: Date.now(),
+			request_count: 0,
+			total_requests: 0,
+			priority: 20,
+			model_mappings: null,
+			custom_endpoint: null,
+			...overrides,
+		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
+
+	const transform = async (
+		payload: Record<string, unknown>,
+		account?: Parameters<CodexProvider["transformRequestBody"]>[1],
+	) => {
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-5-sonnet-20241022",
+				max_tokens: 10,
+				metadata: {
+					user_id: JSON.stringify({
+						session_id: "11111111-1111-4111-8111-111111111111",
+					}),
+				},
+				messages: [{ role: "user", content: "hello" }],
+				...payload,
+			}),
+		});
+		return new CodexProvider()
+			.transformRequestBody(request, account)
+			.then((r) => r.json());
+	};
+
+	it("attaches a conversation key by default (always-on) for OpenAI endpoints", async () => {
+		// account === undefined resolves to the default chatgpt.com endpoint,
+		// which is an OpenAI host, so the key is attached with no env flag.
+		const noAccount = await transform({});
+		const openaiAccount = await transform(
+			{},
+			codexAccount({ custom_endpoint: "https://api.openai.com/v1" }),
+		);
+		expect(noAccount.prompt_cache_key).toMatch(
+			/^clankermux-convo-[0-9a-f]{45}$/,
+		);
+		expect(openaiAccount.prompt_cache_key).toMatch(
+			/^clankermux-convo-[0-9a-f]{45}$/,
+		);
+	});
+
+	it("omits prompt_cache_key for custom/self-hosted OpenAI-compatible endpoints", async () => {
+		const body = await transform(
+			{},
+			codexAccount({
+				custom_endpoint: "https://my-openai-proxy.example.com/v1",
+			}),
+		);
+		expect(body.prompt_cache_key).toBeUndefined();
+	});
+
+	it("omits prompt_cache_key for malformed or absent session metadata", async () => {
+		const noMeta = await transform({ metadata: { user_id: "not-json" } });
+		expect(noMeta.prompt_cache_key).toBeUndefined();
+		const badUuid = await transform({
+			metadata: { user_id: JSON.stringify({ session_id: "not-a-uuid" }) },
+		});
+		expect(badUuid.prompt_cache_key).toBeUndefined();
+		const absent = await transform({ metadata: undefined });
+		expect(absent.prompt_cache_key).toBeUndefined();
+	});
+
+	it("conversation keys are stable across turns and distinct across conversations", async () => {
+		const turn1 = await transform({
+			system: "main loop system prompt",
+			messages: [{ role: "user", content: "task A" }],
+		});
+		// Same conversation one turn later: identical first message, longer tail.
+		const turn2 = await transform({
+			system: "main loop system prompt",
+			messages: [
+				{ role: "user", content: "task A" },
+				{ role: "assistant", content: "working on it" },
+				{ role: "user", content: "continue" },
+			],
+		});
+		// Sibling subagent: same session, different first message.
+		const sibling = await transform({
+			system: "main loop system prompt",
+			messages: [{ role: "user", content: "task B" }],
+		});
+
+		expect(turn1.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect((turn1.prompt_cache_key as string).length).toBeLessThanOrEqual(64);
+		expect(turn1.prompt_cache_key).not.toContain("11111111");
+		expect(turn2.prompt_cache_key).toBe(turn1.prompt_cache_key);
+		expect(sibling.prompt_cache_key).not.toBe(turn1.prompt_cache_key);
+	});
+
+	it("keeps the same key when only instructions differ (system prompt is volatile)", async () => {
+		// Claude Code's system prompt embeds volatile content (current date, cwd,
+		// git-status snapshot), so instructions must NOT participate in the key —
+		// otherwise the key re-shards mid-conversation (midnight rollover, a new
+		// commit) and splits the cache. Same session + same first input with
+		// DIFFERENT instructions must yield the SAME key.
+		const first = await transform({
+			system: "main loop system prompt @ 2026-07-15",
+			messages: [{ role: "user", content: "task A" }],
+		});
+		const laterSameConvo = await transform({
+			system: "main loop system prompt @ 2026-07-16 (new commit abc123)",
+			messages: [{ role: "user", content: "task A" }],
+		});
+		expect(first.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(laterSameConvo.prompt_cache_key).toBe(first.prompt_cache_key);
+	});
+
+	it("differing session ids produce differing keys, case-insensitively", async () => {
+		const withSession = (sessionId: string) =>
+			transform({
+				metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+			});
+		const lower = await withSession("11111111-1111-4111-8111-111111111111");
+		const upper = await withSession(
+			"11111111-1111-4111-8111-111111111111".toUpperCase(),
+		);
+		const different = await withSession("22222222-2222-4222-8222-222222222222");
+		expect(upper.prompt_cache_key).toBe(lower.prompt_cache_key);
+		expect(different.prompt_cache_key).not.toBe(lower.prompt_cache_key);
 	});
 });
 

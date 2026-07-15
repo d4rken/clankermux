@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { TIME_CONSTANTS, ValidationError } from "@clankermux/core";
 import type { Provider } from "@clankermux/providers";
 import type { RequestMeta } from "@clankermux/types";
+import { chatGptCloudflareCookieJar } from "../chatgpt-cloudflare-cookies";
 import { ERROR_MESSAGES } from "./proxy-types";
 
 /** Trusted internal origin for synthetic responses. Never reachable over the network. */
@@ -146,16 +147,32 @@ export async function makeProxyRequest(
 
 	try {
 		if (target instanceof Request) {
-			return await fetch(new Request(target, { signal: effectiveSignal }));
+			const targetUrl = target.url;
+			const mutableHeaders = new Headers(target.headers);
+			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
+
+			const response = await fetch(
+				new Request(target, {
+					headers: mutableHeaders,
+					signal: effectiveSignal,
+				}),
+			);
+			chatGptCloudflareCookieJar.captureFromResponse(targetUrl, response);
+			return response;
 		}
 
-		return await fetch(target, {
+		const mutableHeaders = new Headers(headers);
+		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
+
+		const response = await fetch(target, {
 			method,
-			headers,
+			headers: mutableHeaders,
 			body: createBodyStream ? createBodyStream() : undefined,
 			signal: effectiveSignal,
 			...(hasBody ? ({ duplex: "half" } as RequestInit) : {}),
 		});
+		chatGptCloudflareCookieJar.captureFromResponse(target, response);
+		return response;
 	} finally {
 		clearTimeout(timeoutId);
 	}
