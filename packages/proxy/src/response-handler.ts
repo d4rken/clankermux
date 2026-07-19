@@ -17,6 +17,7 @@ import { markAnthropicBurstThrottle } from "./handlers/burst-cooldown";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
+import { missingMessageStopStats } from "./missing-message-stop-stats";
 import {
 	NO_ACCOUNT_ID,
 	type RecordMeta,
@@ -27,6 +28,7 @@ import { shouldRecordRequest } from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import {
 	createUsageState,
+	detectMissingMessageStop,
 	feedChunk,
 	feedNonStreamBody,
 	finalizeUsage,
@@ -97,6 +99,25 @@ function trackFinalize(
 ): void {
 	const promise = finalizeUsage(state, opts)
 		.then((summary) => {
+			// Diagnostic (observational only): an Anthropic stream that reached clean
+			// EOF and reported output but never sent `message_stop` — the condition
+			// that hangs Claude Code at end-of-stream. Runs here (after finalizeUsage,
+			// whose flush can still set sawMessageStop from a trailing line) so we can
+			// tell from logs/counter whether this occurs before adopting the upstream
+			// stream-repair wrapper. Does not touch usage/cost.
+			if (detectMissingMessageStop(state, opts)) {
+				const occurrence = missingMessageStopStats.record(
+					state.model,
+					requestId,
+					Date.now(),
+				);
+				log.warn(
+					`Anthropic stream ended without message_stop ` +
+						`(occurrence #${occurrence} since restart): requestId=${requestId} ` +
+						`model=${state.model ?? "unknown"} ` +
+						`reportedOutputTokens=${state.providerFinalOutputTokens ?? "?"}`,
+				);
+			}
 			cacheBodyStore.onSummary(
 				requestId,
 				summary.usage.cacheCreationInputTokens ??
