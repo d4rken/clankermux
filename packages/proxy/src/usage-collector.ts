@@ -437,6 +437,39 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 	state.streamedBytes = bodyText.length;
 }
 
+/**
+ * Diagnostic predicate for the "missing message_stop" anomaly: a STREAMING
+ * Anthropic response that reached natural EOF (`endedCleanly`) and reported an
+ * authoritative output count (a `message_delta` carrying `usage.output_tokens`
+ * was seen → `providerReportedOutput`) but never emitted the terminal
+ * `message_stop` event (`sawMessageStop` still false).
+ *
+ * This is the exact condition under which Claude Code can hang at end-of-stream
+ * waiting for the protocol terminator, and the trigger the upstream
+ * stream-repair wrapper keys on. Purely observational — it does NOT alter usage
+ * or cost; the caller uses it only to log/count occurrences so we can tell
+ * whether this actually happens in production before adopting that wrapper.
+ *
+ * Gated to `providerName === "anthropic"`. It cannot misfire on the Codex native
+ * path: Codex's terminal `response.completed` sets `providerReportedOutput` and
+ * `sawMessageStop` together (see feedChunk), so a Codex stream can never present
+ * "reported output but no stop". MUST be evaluated AFTER `finalizeUsage`, whose
+ * flush can still set `sawMessageStop` from a trailing unterminated
+ * `message_stop` line.
+ */
+export function detectMissingMessageStop(
+	state: UsageState,
+	opts: { providerName: string; isStream: boolean; endedCleanly?: boolean },
+): boolean {
+	return (
+		opts.providerName === "anthropic" &&
+		opts.isStream === true &&
+		(opts.endedCleanly ?? true) === true &&
+		state.providerReportedOutput === true &&
+		state.sawMessageStop === false
+	);
+}
+
 export interface FinalizeOpts {
 	responseTimeMs: number;
 	providerName: string;
