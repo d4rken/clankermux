@@ -6,6 +6,8 @@ import type { TimeRange } from "../../constants";
 import {
 	buildActiveSessionsTrend,
 	SESSION_SCOPE_COLORS,
+	SESSION_TOTAL_COLOR,
+	SESSION_TOTAL_KEY,
 	sortActiveSessionsByAccount,
 } from "../../lib/active-sessions";
 import {
@@ -102,8 +104,9 @@ export function ActiveSessionsPanel({
 							<CardDescription>
 								Distinct sessions active per time bucket, split by client. A
 								session spanning multiple buckets is counted in each — this is
-								not a running total or a count of new sessions. Honors the
-								filters above.
+								not a running total or a count of new sessions. The dashed{" "}
+								<span className="font-medium">Total</span> line is the
+								per-bucket sum across clients. Honors the filters above.
 							</CardDescription>
 						</div>
 						<Badge
@@ -118,12 +121,28 @@ export function ActiveSessionsPanel({
 				<CardContent>
 					<BaseLineChart
 						data={data as unknown as ChartDataPoint[]}
-						lines={series.map(({ key, label }) => ({
-							dataKey: key,
-							name: label,
-							stroke: SESSION_SCOPE_COLORS[key],
-							connectNulls: true,
-						}))}
+						lines={[
+							...series.map(({ key, label }) => ({
+								dataKey: key,
+								name: label,
+								stroke: SESSION_SCOPE_COLORS[key],
+								connectNulls: true,
+							})),
+							// Aggregate Total line — only meaningful when >1 client scope is
+							// present (with a single scope it would just overlay that line).
+							...(series.length > 1
+								? [
+										{
+											dataKey: SESSION_TOTAL_KEY,
+											name: "Total",
+											stroke: SESSION_TOTAL_COLOR,
+											strokeDasharray: "5 4",
+											strokeWidth: 2,
+											connectNulls: true,
+										},
+									]
+								: []),
+						]}
 						xAxisKey="time"
 						height="medium"
 						showLegend={series.length > 1}
