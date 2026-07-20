@@ -18,6 +18,8 @@ clankermux.db-wal
 clankermux.db-shm
 apps/*/dist/
 packages/dashboard-web/dist/
+# build-guard content-hash markers (scripts/guarded-build.ts)
+/.cache/
 .DS_Store
 *.log
 tsconfig.tsbuildinfo

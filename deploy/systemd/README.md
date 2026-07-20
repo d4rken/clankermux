@@ -8,6 +8,7 @@ review and reproducibility.
 | File | Purpose |
 |------|---------|
 | `clankermux.service.d/00-verify-deps.conf` | `ExecStartPre` that runs `scripts/verify-deps.sh` — refuses to start unless `node_modules` matches the integrity-hashed `bun.lock`. Named `00-` so it runs before the dashboard build. |
+| `clankermux.service.d/dashboard-build.conf` | `ExecStartPre` steps that regenerate the inline DB workers and rebuild the dashboard on every restart via a content-hash guard (`scripts/guarded-build.ts`). Hashes source + output content (not mtime) and skips the build when nothing changed; falls back to a full build on first run, missing/corrupt marker, or stale artifact. Fail-closed: a failed build writes no marker and blocks startup. |
 | `clankermux.service.d/hardening.conf` | Sandbox hardening (`ProtectSystem=strict`, capability/syscall/namespace restriction, etc.). Tuned for a home-dir source install: `ProtectHome` and `MemoryDenyWriteExecute` are intentionally unset (bun JIT needs W+X; the tree + DB live under `/home`). |
 
 ## Applying
