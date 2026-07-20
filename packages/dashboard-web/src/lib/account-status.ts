@@ -14,6 +14,15 @@ const HARD_LIMIT_PREFIXES = [
 	"payment_required",
 ];
 
+/** Urgency of the soonest-expiring available Codex usage-reset credit. */
+export type ResetCreditUrgency = "none" | "soon" | "imminent";
+
+/** Soonest available reset credit expires in under this → "imminent" (red). */
+export const RESET_CREDIT_IMMINENT_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+/** Soonest available reset credit expires in under this → "soon" (amber). */
+export const RESET_CREDIT_SOON_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 /**
  * Display-ready status flags derived from an account. This is the single source
  * of truth for the per-account status chips shown on both the Accounts page
@@ -82,6 +91,19 @@ export interface AccountStatus {
 	creditsBalance: number | null;
 	/** Codex plan tier, e.g. "prolite". Null when unknown. */
 	creditsPlanType: string | null;
+	/**
+	 * Available (unredeemed, unexpired) Codex usage-reset credit expiries,
+	 * soonest first. Empty when there are none or expiry detail is unavailable.
+	 */
+	resetCreditAvailableExpiries: Date[];
+	/** Soonest available reset-credit expiry, or null when none. */
+	resetCreditNextExpiry: Date | null;
+	/** Urgency of the soonest available reset-credit expiry (drives chip color). */
+	resetCreditUrgency: ResetCreditUrgency;
+	/** Per-account auto-apply of expiring reset credits is enabled (opt-in). */
+	resetCreditAutoApplyArmed: boolean;
+	/** Per-account auto-apply of a reset credit at the weekly limit is enabled (opt-in). */
+	resetCreditAutoApplyOnWeeklyLimitArmed: boolean;
 }
 
 /**
@@ -162,6 +184,35 @@ export function deriveAccountStatus(
 	const creditsBalance = isOnCredits ? (c?.balance ?? null) : null;
 	const creditsPlanType = isOnCredits ? (c?.planType ?? null) : null;
 
+	// Codex usage-reset credits: soonest available future expiry drives the
+	// urgency coloring of the usage-reset chip. Expired or non-available
+	// (redeeming/redeemed/unknown) credits never contribute.
+	const resetCreditAvailableExpiries = (
+		account.codexRateLimitResetCredits?.credits ?? []
+	)
+		.flatMap((credit) => {
+			if (credit.status !== "available" || credit.expiresAt === null) {
+				return [];
+			}
+			const date = new Date(credit.expiresAt);
+			return date.getTime() > now ? [date] : [];
+		})
+		.sort((a, b) => a.getTime() - b.getTime());
+	const resetCreditNextExpiry = resetCreditAvailableExpiries[0] ?? null;
+	let resetCreditUrgency: ResetCreditUrgency = "none";
+	if (resetCreditNextExpiry) {
+		const msLeft = resetCreditNextExpiry.getTime() - now;
+		if (msLeft < RESET_CREDIT_IMMINENT_THRESHOLD_MS) {
+			resetCreditUrgency = "imminent";
+		} else if (msLeft < RESET_CREDIT_SOON_THRESHOLD_MS) {
+			resetCreditUrgency = "soon";
+		}
+	}
+	const resetCreditAutoApplyArmed =
+		account.autoApplyResetCreditsEnabled === true;
+	const resetCreditAutoApplyOnWeeklyLimitArmed =
+		account.autoApplyResetOnWeeklyLimitEnabled === true;
+
 	return {
 		isPrimary: account.isPrimary,
 		priority: account.priority,
@@ -189,5 +240,10 @@ export function deriveAccountStatus(
 		isOnCredits,
 		creditsBalance,
 		creditsPlanType,
+		resetCreditAvailableExpiries,
+		resetCreditNextExpiry,
+		resetCreditUrgency,
+		resetCreditAutoApplyArmed,
+		resetCreditAutoApplyOnWeeklyLimitArmed,
 	};
 }

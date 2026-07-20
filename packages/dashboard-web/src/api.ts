@@ -5,6 +5,8 @@ import type {
 	CacheEffectivenessResponse,
 	CacheKeepaliveHistoryResponse,
 	CacheKeepaliveLiveResponse,
+	CodexRateLimitResetCreditConsumeResponse,
+	CodexResetCreditEventResponse,
 	Combo,
 	ComboFamilyAssignment,
 	ComboSlot,
@@ -2110,6 +2112,84 @@ class API extends HttpClient {
 		await this.post(`/api/accounts/${accountId}/peak-hours-pause`, {
 			enabled: enabled ? 1 : 0,
 		});
+	}
+
+	async updateAccountAutoApplyResetCredits(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const url = `/api/accounts/${accountId}/rate-limit-reset-credits/auto-apply`;
+		this.logger.debug(`→ POST ${url}`, { enabled });
+		try {
+			await this.post(url, { enabled: enabled ? 1 : 0 });
+			this.logger.debug(`← POST ${url} - 200`);
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async updateAccountAutoApplyResetOnWeeklyLimit(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const url = `/api/accounts/${accountId}/rate-limit-reset-credits/auto-apply-on-weekly-limit`;
+		this.logger.debug(`→ POST ${url}`, { enabled });
+		try {
+			await this.post(url, { enabled: enabled ? 1 : 0 });
+			this.logger.debug(`← POST ${url} - 200`);
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	/**
+	 * Consume one earned Codex usage-limit reset credit. No creditId is sent —
+	 * OpenAI picks the next available credit. Callers own `idempotencyKey` and
+	 * must reuse the same key when retrying the same logical attempt.
+	 */
+	async consumeAccountResetCredit(
+		accountId: string,
+		idempotencyKey: string,
+	): Promise<CodexRateLimitResetCreditConsumeResponse> {
+		const url = `/api/accounts/${accountId}/rate-limit-reset-credits/consume`;
+		this.logger.debug(`→ POST ${url}`);
+		try {
+			const response =
+				await this.post<CodexRateLimitResetCreditConsumeResponse>(url, {
+					idempotencyKey,
+				});
+			this.logger.debug(`← POST ${url} - 200`, { outcome: response.outcome });
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async getAccountResetCreditEvents(
+		accountId: string,
+		limit?: number,
+	): Promise<CodexResetCreditEventResponse[]> {
+		const url = `/api/accounts/${accountId}/rate-limit-reset-credits/events${
+			typeof limit === "number" ? `?limit=${limit}` : ""
+		}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<{
+				events: CodexResetCreditEventResponse[];
+			}>(url);
+			this.logger.debug(`← GET ${url} - 200`);
+			return response.events;
+		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
 	}
 
 	async getQwenAuthStatus(

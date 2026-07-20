@@ -126,6 +126,8 @@ export interface AccountRow {
 	auto_refresh_enabled?: boolean | number | null;
 	auto_pause_on_overage_enabled?: boolean | number | null;
 	peak_hours_pause_enabled?: boolean | number | null;
+	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
+	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
@@ -167,6 +169,8 @@ export interface Account {
 	auto_refresh_enabled: boolean;
 	auto_pause_on_overage_enabled: boolean;
 	peak_hours_pause_enabled: boolean;
+	codex_auto_apply_reset_credits_enabled: boolean;
+	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
@@ -231,6 +235,10 @@ export interface AccountResponse {
 	autoRefreshEnabled: boolean;
 	autoPauseOnOverageEnabled?: boolean;
 	peakHoursPauseEnabled?: boolean;
+	/** Codex-only: auto-consume expiring usage-limit reset credits (opt-in). */
+	autoApplyResetCreditsEnabled?: boolean;
+	/** Codex-only: auto-consume a reset credit when the weekly limit is hit (opt-in). */
+	autoApplyResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
@@ -296,6 +304,12 @@ export interface CodexRateLimitResetCreditConsumeRequest {
 	idempotencyKey: string;
 	/** When omitted, OpenAI selects the next available reset credit. */
 	creditId?: string | null;
+	/**
+	 * Set only by the auto-apply scheduler: tells the coordinator to resolve
+	 * the pre-claimed ledger row (`codex_reset_credit_events.id`) instead of
+	 * recording a manual event.
+	 */
+	autoApply?: { ledgerRowId: string };
 }
 
 export type CodexRateLimitResetCreditConsumeOutcome =
@@ -319,6 +333,36 @@ export interface CodexRateLimitResetCreditConsumeResponse
 	resetMetadataRefreshed: boolean;
 	availableResetCount: number | null;
 	localRateLimitStateCleared: boolean;
+}
+
+/**
+ * Lifecycle status of a `codex_reset_credit_events` ledger row. `pending` only
+ * ever appears on auto rows (a claimed-but-unresolved attempt); every other
+ * value is a resolution.
+ */
+export type CodexResetCreditEventStatus =
+	| "pending"
+	| "reset"
+	| "nothingToReset"
+	| "noCredit"
+	| "alreadyRedeemed"
+	| "failed";
+
+/** One reset-credit ledger event as served over the API boundary. */
+export interface CodexResetCreditEventResponse {
+	id: string;
+	creditId: string | null;
+	trigger: "manual" | "auto";
+	/** Why an auto attempt was claimed; null on manual rows. */
+	cause: "expiry" | "weekly-limit" | null;
+	attemptSeq: number | null;
+	status: CodexResetCreditEventStatus;
+	windowsReset: number | null;
+	errorMessage: string | null;
+	/** ISO timestamp snapshot of the credit's expiry; null when it never expires. */
+	creditExpiresAt: string | null;
+	createdAt: string; // ISO
+	resolvedAt: string | null; // ISO
 }
 
 // UI display type - used in CLI and web dashboard
@@ -437,6 +481,10 @@ export function toAccount(row: AccountRow): Account {
 		auto_refresh_enabled: !!row.auto_refresh_enabled,
 		auto_pause_on_overage_enabled: !!row.auto_pause_on_overage_enabled,
 		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
+		codex_auto_apply_reset_credits_enabled:
+			!!row.codex_auto_apply_reset_credits_enabled,
+		codex_auto_apply_reset_on_weekly_limit_enabled:
+			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		model_fallbacks: row.model_fallbacks || null,
@@ -528,6 +576,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 		autoRefreshEnabled: account.auto_refresh_enabled,
 		autoPauseOnOverageEnabled: account.auto_pause_on_overage_enabled,
 		peakHoursPauseEnabled: account.peak_hours_pause_enabled,
+		autoApplyResetCreditsEnabled:
+			account.codex_auto_apply_reset_credits_enabled,
+		autoApplyResetOnWeeklyLimitEnabled:
+			account.codex_auto_apply_reset_on_weekly_limit_enabled,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
 		usageUtilization: null, // Will be filled in by API handler from cache

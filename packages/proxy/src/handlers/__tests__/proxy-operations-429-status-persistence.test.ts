@@ -50,6 +50,7 @@ function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
 		auto_refresh_enabled: false,
 		auto_pause_on_overage_enabled: false,
 		peak_hours_pause_enabled: false,
+		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
 		model_mappings: null,
 		cross_region_mode: null,

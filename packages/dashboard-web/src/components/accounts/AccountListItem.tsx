@@ -71,6 +71,8 @@ interface AccountListItemProps {
 	onBillingTypeToggle: (account: Account) => void;
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
+	onAutoApplyResetCreditsToggle?: (account: Account) => void;
+	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
@@ -97,6 +99,8 @@ export function AccountListItem({
 	onBillingTypeToggle,
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
+	onAutoApplyResetCreditsToggle,
+	onAutoApplyResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
 	onModelMappingsChange,
 	onReauth,
@@ -132,7 +136,10 @@ export function AccountListItem({
 		providerSupportsCustomBilling(account.provider) ||
 		((account.provider === "anthropic" || account.provider === "codex") &&
 			!!onAutoPauseOnOverageToggle) ||
-		(account.provider === "zai" && !!onPeakHoursPauseToggle);
+		(account.provider === "zai" && !!onPeakHoursPauseToggle) ||
+		(account.provider === "codex" &&
+			(!!onAutoApplyResetCreditsToggle ||
+				!!onAutoApplyResetOnWeeklyLimitToggle));
 
 	return (
 		<div className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50">
@@ -269,6 +276,34 @@ export function AccountListItem({
 											Peak hours pause
 										</DropdownMenuCheckboxItem>
 									)}
+									{account.provider === "codex" &&
+										onAutoApplyResetCreditsToggle && (
+											<DropdownMenuCheckboxItem
+												checked={account.autoApplyResetCreditsEnabled ?? false}
+												onCheckedChange={() =>
+													onAutoApplyResetCreditsToggle(account)
+												}
+												onSelect={(e) => e.preventDefault()}
+												title="Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication."
+											>
+												Auto-apply expiring usage resets
+											</DropdownMenuCheckboxItem>
+										)}
+									{account.provider === "codex" &&
+										onAutoApplyResetOnWeeklyLimitToggle && (
+											<DropdownMenuCheckboxItem
+												checked={
+													account.autoApplyResetOnWeeklyLimitEnabled ?? false
+												}
+												onCheckedChange={() =>
+													onAutoApplyResetOnWeeklyLimitToggle(account)
+												}
+												onSelect={(e) => e.preventDefault()}
+												title="Automatically consume a banked usage reset when this account's weekly usage reaches 100%. At most one auto-apply per hour."
+											>
+												Auto-apply reset at weekly limit
+											</DropdownMenuCheckboxItem>
+										)}
 									<DropdownMenuSeparator />
 								</>
 							)}

@@ -1,8 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import type { AccountResponse } from "@clankermux/types";
+import type {
+	AccountResponse,
+	CodexResetCreditEventResponse,
+} from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { deriveAccountStatus } from "../../lib/account-status";
-import { AccountStatusChips } from "./AccountStatusChips";
+import {
+	AccountStatusChips,
+	ResetCreditApplyPanel,
+	ResetCreditEventsPanel,
+} from "./AccountStatusChips";
 
 // 2024-01-03 noon UTC, matching account-status.test.ts. Off-peak for anthropic.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
@@ -213,5 +220,348 @@ describe("AccountStatusChips — earned usage resets", () => {
 		);
 
 		expect(html).not.toContain("usage reset");
+	});
+});
+
+/** A Codex account with one available reset credit expiring at `expiresAt`. */
+function makeResetCreditAccount(
+	expiresAt: string | null,
+	overrides: Partial<AccountResponse> = {},
+): AccountResponse {
+	return makeAccount({
+		provider: "codex",
+		codexRateLimitResetCredits: {
+			availableCount: 1,
+			credits: [
+				{
+					status: "available",
+					expiresAt,
+					title: "Full reset",
+					description: null,
+				},
+			],
+			fetchedAt: new Date(NOW).toISOString(),
+		},
+		...overrides,
+	});
+}
+
+describe("AccountStatusChips — reset-credit urgency colors", () => {
+	it("uses red classes when the soonest expiry is under an hour away", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 30 * 60_000).toISOString()),
+		);
+		expect(html).toContain("bg-red-100");
+		expect(html).not.toContain("bg-sky-100");
+	});
+
+	it("uses amber classes when the soonest expiry is under 24 hours away", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 5 * 3_600_000).toISOString()),
+		);
+		expect(html).toContain("bg-amber-100");
+		expect(html).not.toContain("bg-sky-100");
+	});
+
+	it("keeps the default sky classes when nothing expires soon", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString()),
+		);
+		expect(html).toContain("bg-sky-100");
+		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-amber-100");
+	});
+});
+
+describe("AccountStatusChips — auto-apply tooltip line", () => {
+	it("mentions 'Auto-apply armed' when the account has the toggle enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: true,
+			}),
+		);
+		expect(html).toContain("Auto-apply armed");
+		expect(html).not.toContain("Auto-apply is off");
+	});
+
+	it("mentions 'Auto-apply is off' when the toggle is disabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: false,
+			}),
+		);
+		expect(html).toContain("Auto-apply is off");
+		expect(html).not.toContain("Auto-apply armed");
+	});
+
+	it("mentions the weekly-limit variant when only the weekly toggle is enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: false,
+				autoApplyResetOnWeeklyLimitEnabled: true,
+			}),
+		);
+		expect(html).toContain("Auto-apply armed (weekly limit)");
+		expect(html).not.toContain("expiry + weekly limit");
+		expect(html).not.toContain("Auto-apply is off");
+	});
+
+	it("mentions both causes when both toggles are enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: true,
+				autoApplyResetOnWeeklyLimitEnabled: true,
+			}),
+		);
+		expect(html).toContain("Auto-apply armed (expiry + weekly limit)");
+		expect(html).not.toContain("Auto-apply is off");
+	});
+
+	it("keeps the expiry-only wording when only the expiry toggle is enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: true,
+				autoApplyResetOnWeeklyLimitEnabled: false,
+			}),
+		);
+		expect(html).toContain(
+			"Auto-apply armed — a reset will be consumed automatically shortly before expiry.",
+		);
+		expect(html).not.toContain("weekly limit");
+	});
+
+	it("omits the auto-apply line entirely when no credits are available", () => {
+		const html = render(
+			makeAccount({
+				provider: "codex",
+				autoApplyResetCreditsEnabled: true,
+				codexRateLimitResetCredits: {
+					availableCount: 0,
+					credits: [],
+					fetchedAt: new Date(NOW).toISOString(),
+				},
+			}),
+		);
+		expect(html).not.toContain("Auto-apply");
+	});
+});
+
+describe("ResetCreditEventsPanel — popover history states", () => {
+	function makeEvent(
+		overrides: Partial<CodexResetCreditEventResponse> = {},
+	): CodexResetCreditEventResponse {
+		return {
+			id: "ev1",
+			creditId: "credit-1",
+			trigger: "auto",
+			cause: null,
+			attemptSeq: 1,
+			status: "reset",
+			windowsReset: 2,
+			errorMessage: null,
+			creditExpiresAt: "2030-01-05T00:00:00.000Z",
+			createdAt: "2030-01-04T23:50:00.000Z",
+			resolvedAt: "2030-01-04T23:50:05.000Z",
+			...overrides,
+		};
+	}
+
+	it("renders a loading indicator", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel state={{ kind: "loading" }} />,
+		);
+		expect(html).toContain("Loading reset events");
+	});
+
+	it("renders the error message on failure", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{ kind: "error", message: "boom went the fetch" }}
+			/>,
+		);
+		expect(html).toContain("Failed to load reset events");
+		expect(html).toContain("boom went the fetch");
+	});
+
+	it("renders an empty state when there are no events", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel state={{ kind: "loaded", events: [] }} />,
+		);
+		expect(html).toContain("No reset events yet");
+	});
+
+	it("renders fetched events with trigger badge, status label and windows reset", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [
+						makeEvent(),
+						makeEvent({
+							id: "ev2",
+							trigger: "manual",
+							status: "nothingToReset",
+							windowsReset: 0,
+						}),
+					],
+				}}
+			/>,
+		);
+		expect(html).toContain("auto");
+		expect(html).toContain("manual");
+		expect(html).toContain("Reset applied");
+		expect(html).toContain("Nothing to reset");
+		expect(html).toContain("2 windows reset");
+		// windowsReset of 0 is noise next to "Nothing to reset" — not rendered.
+		expect(html).not.toContain("0 windows reset");
+	});
+
+	it("truncates a long error message but keeps the full text in the title", () => {
+		const longMessage = `upstream exploded: ${"x".repeat(200)}`;
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [makeEvent({ status: "failed", errorMessage: longMessage })],
+				}}
+			/>,
+		);
+		expect(html).toContain("Failed");
+		// Inline text is capped at 120 chars ("upstream exploded: " = 19 chars,
+		// so exactly 101 x's survive) and ends with an ellipsis…
+		expect(html).toContain(`${"x".repeat(101)}…</p>`);
+		expect(html).not.toContain(`${"x".repeat(102)}…`);
+		// …while the title attribute carries the full message.
+		expect(html).toContain(`title="${longMessage}"`);
+	});
+
+	it("labels auto events with their cause (expiry vs weekly limit)", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [
+						makeEvent({ id: "ev-exp", cause: "expiry" }),
+						makeEvent({ id: "ev-wk", cause: "weekly-limit" }),
+					],
+				}}
+			/>,
+		);
+		expect(html).toContain("auto · expiry");
+		expect(html).toContain("auto · weekly limit");
+	});
+
+	it("keeps manual rows unchanged (no cause suffix) and plain 'auto' when cause is unknown", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [
+						makeEvent({ id: "ev-m", trigger: "manual", cause: null }),
+						makeEvent({ id: "ev-a", trigger: "auto", cause: null }),
+					],
+				}}
+			/>,
+		);
+		expect(html).toContain(">manual<");
+		expect(html).toContain(">auto<");
+		expect(html).not.toContain("manual ·");
+		expect(html).not.toContain("auto ·");
+	});
+});
+
+describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
+	const noop = () => {};
+	function renderPanel(
+		state: Parameters<typeof ResetCreditApplyPanel>[0]["state"],
+		availableCount = 1,
+	): string {
+		return renderToStaticMarkup(
+			<ResetCreditApplyPanel
+				accountName="acct"
+				availableCount={availableCount}
+				state={state}
+				onArm={noop}
+				onConfirm={noop}
+				onCancel={noop}
+				onRetry={noop}
+				onDismiss={noop}
+			/>,
+		);
+	}
+
+	it("shows the Apply now button when a reset credit is available", () => {
+		const html = renderPanel({ kind: "idle" }, 1);
+		expect(html).toContain("Apply now");
+	});
+
+	it("renders nothing at zero available credits", () => {
+		expect(renderPanel({ kind: "idle" }, 0)).toBe("");
+	});
+
+	it("renders the inline confirm step naming the account", () => {
+		const html = renderPanel({ kind: "confirm" });
+		expect(html).toContain("Consume 1 reset for");
+		expect(html).toContain("acct");
+		expect(html).toContain("Confirm");
+		expect(html).toContain("Cancel");
+		expect(html).not.toContain("Apply now");
+	});
+
+	it("renders an in-flight indicator while applying", () => {
+		const html = renderPanel({ kind: "applying" });
+		expect(html).toContain("Applying reset…");
+		expect(html).not.toContain("Confirm");
+	});
+
+	it.each([
+		["reset", "Reset applied — usage windows cleared"],
+		["nothingToReset", "Nothing to reset"],
+		["noCredit", "No credit available"],
+		["alreadyRedeemed", "Already redeemed"],
+	] as const)("renders the '%s' business outcome", (outcome, message) => {
+		const html = renderPanel({ kind: "done", outcome, message });
+		expect(html).toContain(message);
+		expect(html).not.toContain("Retry");
+	});
+
+	it("colors only the successful reset outcome green", () => {
+		expect(
+			renderPanel({
+				kind: "done",
+				outcome: "reset",
+				message: "Reset applied — usage windows cleared",
+			}),
+		).toContain("text-green-600");
+		expect(
+			renderPanel({
+				kind: "done",
+				outcome: "noCredit",
+				message: "No credit available",
+			}),
+		).not.toContain("text-green-600");
+	});
+
+	it("renders a dismiss control in the done state (path back to idle)", () => {
+		// Without this, the Apply-now button would disappear permanently after
+		// one use — "done" had no way back to idle.
+		const html = renderPanel({
+			kind: "done",
+			outcome: "reset",
+			message: "Reset applied — usage windows cleared",
+		});
+		expect(html).toContain("Done");
+		expect(html).not.toContain("Retry");
+	});
+
+	it("renders the error state with the message and a Retry affordance", () => {
+		const html = renderPanel({
+			kind: "error",
+			message: "upstream 500: transport failed",
+		});
+		expect(html).toContain("Failed to apply reset");
+		expect(html).toContain("upstream 500: transport failed");
+		expect(html).toContain("Retry");
+		expect(html).toContain("Cancel");
 	});
 });

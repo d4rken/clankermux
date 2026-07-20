@@ -12,6 +12,7 @@ import type {
 	Account,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
+	CodexResetCreditEventStatus,
 } from "@clankermux/types";
 import {
 	applyCodexObservation,
@@ -142,6 +143,73 @@ export class CodexSpendCoordinator {
 	}
 
 	/**
+	 * Book a consume attempt into the `codex_reset_credit_events` ledger. Auto
+	 * attempts (request.autoApply) resolve their pre-claimed pending row;
+	 * manual attempts insert a one-shot resolved event. A FAILED auto attempt
+	 * deliberately writes NOTHING — the pending row must stay pending so the
+	 * next scheduler tick retries with the SAME idempotency key. Ledger writes
+	 * must never break the consume flow, so every error is swallowed and logged.
+	 */
+	private async recordResetCreditLedger(
+		accountId: string,
+		accountName: string,
+		request: CodexRateLimitResetCreditConsumeRequest,
+		status: Exclude<CodexResetCreditEventStatus, "pending">,
+		windowsReset: number | null,
+		errorMessage: string | null,
+	): Promise<void> {
+		try {
+			if (request.autoApply) {
+				// Transport/validation failures keep the pending auto row for a
+				// same-key retry; only business outcomes resolve it.
+				if (status === "failed") return;
+				await this.ctx.dbOps.resolveCodexResetCreditAttempt(
+					request.autoApply.ledgerRowId,
+					status,
+					windowsReset,
+					null,
+				);
+			} else {
+				await this.ctx.dbOps.recordManualCodexResetCreditEvent({
+					accountId,
+					accountName,
+					creditId: request.creditId ?? null,
+					idempotencyKey: request.idempotencyKey,
+					status,
+					windowsReset,
+					errorMessage,
+				});
+			}
+		} catch (error) {
+			log.error(
+				`Failed to record reset-credit ledger event for '${accountName}' (status ${status}):`,
+				error,
+			);
+		}
+	}
+
+	/**
+	 * Record a failed consume attempt (manual only — auto rows stay pending)
+	 * and produce the failed dispatch outcome.
+	 */
+	private async failResetCreditConsume(
+		accountId: string,
+		accountName: string,
+		request: CodexRateLimitResetCreditConsumeRequest,
+		message: string,
+	): Promise<CodexResetCreditConsumeDispatchOutcome> {
+		await this.recordResetCreditLedger(
+			accountId,
+			accountName,
+			request,
+			"failed",
+			null,
+			message,
+		);
+		return { status: "failed", message };
+	}
+
+	/**
 	 * Consume one earned reset credit for a Codex account. This is the only
 	 * coordinator method that performs the state-changing reset action.
 	 */
@@ -151,29 +219,40 @@ export class CodexSpendCoordinator {
 	): Promise<CodexResetCreditConsumeDispatchOutcome> {
 		const account = await this.ctx.dbOps.getAccount(accountId);
 		if (!account) {
-			return { status: "failed", message: `Account ${accountId} not found` };
+			return this.failResetCreditConsume(
+				accountId,
+				accountId,
+				request,
+				`Account ${accountId} not found`,
+			);
 		}
 		if (account.provider !== "codex") {
-			return {
-				status: "failed",
-				message: `Account '${account.name}' is not a Codex account`,
-			};
+			return this.failResetCreditConsume(
+				accountId,
+				account.name,
+				request,
+				`Account '${account.name}' is not a Codex account`,
+			);
 		}
 		if (!account.access_token && !account.refresh_token) {
-			return {
-				status: "failed",
-				message: `Account '${account.name}' has no tokens — please re-authenticate`,
-			};
+			return this.failResetCreditConsume(
+				accountId,
+				account.name,
+				request,
+				`Account '${account.name}' has no tokens — please re-authenticate`,
+			);
 		}
 
 		let accessToken: string;
 		try {
 			accessToken = await this.getValidAccessToken(account, this.ctx);
 		} catch (error) {
-			return {
-				status: "failed",
-				message: `Could not refresh access token for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
-			};
+			return this.failResetCreditConsume(
+				accountId,
+				account.name,
+				request,
+				`Could not refresh access token for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 
 		// Do not let a metadata read begun before the mutation finish afterward and
@@ -194,11 +273,25 @@ export class CodexSpendCoordinator {
 				request,
 			);
 		} catch (error) {
-			return {
-				status: "failed",
-				message: `Failed to consume a reset credit for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
-			};
+			return this.failResetCreditConsume(
+				accountId,
+				account.name,
+				request,
+				`Failed to consume a reset credit for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
+
+		// A business outcome (reset/nothingToReset/noCredit/alreadyRedeemed) is
+		// definitive: resolve the auto row / book the manual event now, before the
+		// best-effort cleanup below.
+		await this.recordResetCreditLedger(
+			accountId,
+			account.name,
+			request,
+			result.outcome,
+			result.windowsReset,
+			null,
+		);
 
 		let localRateLimitStateCleared = false;
 		if (result.outcome === "reset" || result.outcome === "alreadyRedeemed") {

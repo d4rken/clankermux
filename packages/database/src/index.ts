@@ -34,6 +34,12 @@ export {
 	type CacheKeepaliveWindowTotals,
 	sumCounterDeltas,
 } from "./repositories/cache-keepalive-snapshot.repository";
+export {
+	type CodexResetCreditAutoClaim,
+	CodexResetCreditEventRepository,
+	type CodexResetCreditEventResolvedStatus,
+	type CodexResetCreditEventRow,
+} from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
