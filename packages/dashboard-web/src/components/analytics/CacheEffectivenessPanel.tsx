@@ -1,8 +1,7 @@
 import { formatNumber, formatTokens, formatUsd } from "@clankermux/ui-common";
 import { Gauge } from "lucide-react";
-import { useState } from "react";
+import type { TimeRange } from "../../constants";
 import { useCacheEffectiveness } from "../../hooks/queries";
-import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 
 /**
@@ -32,14 +31,13 @@ function StatTile({
 }
 
 /**
- * Analytics-tab "Cache Keep-Alive Effectiveness" panel. A per-range summary that
+ * Analytics-tab cache-keepalive "Effectiveness" panel. A per-range summary that
  * answers "did keeping caches warm actually reduce quota pressure?". The headline
  * figures are the HONEST (conservative, 5m-counterfactual) savings; the optimistic
- * (1h-rate) figures are shown muted for comparison. Self-contained: owns its range
- * state and the useCacheEffectiveness hook, mirroring CacheKeepalivePanel.
+ * (1h-rate) figures are shown muted for comparison. The `range` is supplied by the
+ * enclosing CacheKeepaliveSection, which owns the shared window selector.
  */
-export function CacheEffectivenessPanel() {
-	const [range, setRange] = useState<string>("7d");
+export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 	const { data, isLoading } = useCacheEffectiveness(range);
 
 	const netConservative = data?.netUsdConservative ?? 0;
@@ -48,21 +46,16 @@ export function CacheEffectivenessPanel() {
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
-					<div>
-						<CardTitle className="flex items-center gap-2">
-							<Gauge className="h-5 w-5" />
-							Cache Keep-Alive Effectiveness
-						</CardTitle>
-						<p className="text-xs text-muted-foreground mt-1 max-w-prose">
-							Measures whether keeping caches warm actually reduced quota
-							pressure over the window. Headline figures are the honest
-							(conservative, 5-minute counterfactual) numbers — what the bridge
-							saved versus Claude Code's native behaviour with no bridge.
-						</p>
-					</div>
-					<TimeRangeSelector value={range} onChange={setRange} />
-				</div>
+				<CardTitle className="flex items-center gap-2">
+					<Gauge className="h-5 w-5" />
+					Effectiveness
+				</CardTitle>
+				<p className="text-xs text-muted-foreground mt-1 max-w-prose">
+					Measures whether keeping caches warm actually reduced quota pressure
+					over the window. Headline figures are the honest (conservative,
+					5-minute counterfactual) numbers — what the bridge saved versus Claude
+					Code's native behaviour with no bridge.
+				</p>
 			</CardHeader>
 			<CardContent className="space-y-4">
 				{/* Honest headline tiles. */}

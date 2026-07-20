@@ -5,9 +5,8 @@ import { toCumulativeSeries } from "../lib/cumulative";
 import { formatAxisTime } from "../lib/time-format";
 import {
 	AnalyticsControls,
-	CacheEffectivenessPanel,
 	CacheFlowPanel,
-	CacheKeepalivePanel,
+	CacheKeepaliveSection,
 	ContextCompositionPanel,
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
@@ -302,11 +301,9 @@ export const AnalyticsTab = React.memo(() => {
 			{/* Cache Flow */}
 			<CacheFlowPanel cacheFlow={analytics?.cacheFlow} loading={loading} />
 
-			{/* Cache Keep-Alive (self-contained: own live + history hooks + range) */}
-			<CacheKeepalivePanel />
-
-			{/* Cache Keep-Alive Effectiveness (self-contained: own range + summary hook) */}
-			<CacheEffectivenessPanel />
+			{/* Cache Keep-Alive — grouped section with one shared window selector
+			    driving both the history chart and the effectiveness summary. */}
+			<CacheKeepaliveSection />
 
 			{/* Context Composition */}
 			<ContextCompositionPanel

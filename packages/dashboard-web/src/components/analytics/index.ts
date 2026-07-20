@@ -8,9 +8,8 @@ export {
 } from "./AnalyticsCharts";
 export { AnalyticsControls } from "./AnalyticsControls";
 export { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
-export { CacheEffectivenessPanel } from "./CacheEffectivenessPanel";
 export { CacheFlowPanel } from "./CacheFlowPanel";
-export { CacheKeepalivePanel } from "./CacheKeepalivePanel";
+export { CacheKeepaliveSection } from "./CacheKeepaliveSection";
 export { ContextCompositionPanel } from "./ContextCompositionPanel";
 export { ModelAnalytics } from "./ModelAnalytics";
 export { ProjectAnalytics } from "./ProjectAnalytics";
