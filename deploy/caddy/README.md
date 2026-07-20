@@ -14,8 +14,8 @@ Now Caddy owns client-facing `:8080` and **never restarts**; the app listens on
 restart:
 
 - established SSE streams keep flowing through Caddy to the draining process
-  (the in-app shutdown watchdog gives them up to 85s to finish);
-- NEW connections are held by Caddy (`lb_try_duration 100s`), which re-dials
+  (the in-app shutdown watchdog gives them up to 300s to finish);
+- NEW connections are held by Caddy (`lb_try_duration 330s`), which re-dials
   the backend every 250ms until the new process is up.
 
 Zero refused connections, and there is only ever one app process at a time —
@@ -70,8 +70,8 @@ sudo systemctl disable --now caddy
   (`systemctl restart caddy`) severs every connection, including active
   streams. Hold unattended-upgrades for the `caddy` package, or restart it only
   when the proxy is idle.
-- `lb_try_duration 100s` means a genuinely hard-down app (crash loop, failed
-  build) looks like a ~100s client hang followed by a 502, instead of an
+- `lb_try_duration 330s` means a genuinely hard-down app (crash loop, failed
+  build) looks like a ~5.5min client hang followed by a 502, instead of an
   immediate failure.
 - Port `8081` stays reserved for manual test instances (`bun start --serve
   --port 8081`), unchanged.

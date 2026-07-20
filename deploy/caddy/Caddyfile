@@ -31,13 +31,14 @@
 
 http://:8080 {
 	reverse_proxy 127.0.0.1:8090 {
-		# Keep retrying the backend dial for up to 100s per request before
-		# giving up with a 502. Covers the worst-case app restart: 85s drain
-		# (SHUTDOWN_WATCHDOG_MS in apps/server/src/server.ts) + a few seconds
-		# of boot + margin. Trade-off: if the app is genuinely down (crash
-		# loop, failed build), new clients hang for up to 100s before seeing
-		# the 502 instead of failing fast.
-		lb_try_duration 100s
+		# Keep retrying the backend dial for up to 330s per request before
+		# giving up with a 502. Covers the worst-case app restart: 300s drain
+		# (SHUTDOWN_WATCHDOG_MS in apps/server/src/server.ts, matched by
+		# systemd TimeoutStopSec=330 in stop-timeout.conf) + a few seconds of
+		# boot + margin. Trade-off: if the app is genuinely down (crash loop,
+		# failed build), new clients hang for up to ~5.5min before seeing the
+		# 502 instead of failing fast.
+		lb_try_duration 330s
 
 		# Wait between dial attempts while lb_try_duration is running.
 		lb_try_interval 250ms
