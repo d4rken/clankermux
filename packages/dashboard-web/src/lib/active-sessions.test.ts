@@ -4,11 +4,13 @@ import {
 	buildActiveSessionsTrend,
 	SCOPE_ORDER,
 	SESSION_SCOPE_COLORS,
+	SESSION_TOTAL_KEY,
 } from "./active-sessions";
 
 const CLAUDE_KEY = "scope:claude_session";
 const CODEX_KEY = "scope:codex_thread";
 const PROJECT_KEY = "scope:project";
+const TOTAL_KEY = SESSION_TOTAL_KEY;
 
 describe("buildActiveSessionsTrend", () => {
 	it("returns empty rows and series for empty input", () => {
@@ -42,6 +44,7 @@ describe("buildActiveSessionsTrend", () => {
 				[CLAUDE_KEY]: 5,
 				[CODEX_KEY]: 0,
 				[PROJECT_KEY]: 0,
+				[TOTAL_KEY]: 5,
 			},
 		]);
 	});
@@ -70,9 +73,27 @@ describe("buildActiveSessionsTrend", () => {
 		const { rows } = buildActiveSessionsTrend(timeSeries);
 		expect(rows.map((r) => r.ts)).toEqual([10, 20, 30]);
 		expect(rows).toEqual([
-			{ ts: 10, [CLAUDE_KEY]: 1, [CODEX_KEY]: 0, [PROJECT_KEY]: 0 },
-			{ ts: 20, [CLAUDE_KEY]: 0, [CODEX_KEY]: 0, [PROJECT_KEY]: 3 },
-			{ ts: 30, [CLAUDE_KEY]: 0, [CODEX_KEY]: 7, [PROJECT_KEY]: 0 },
+			{
+				ts: 10,
+				[CLAUDE_KEY]: 1,
+				[CODEX_KEY]: 0,
+				[PROJECT_KEY]: 0,
+				[TOTAL_KEY]: 1,
+			},
+			{
+				ts: 20,
+				[CLAUDE_KEY]: 0,
+				[CODEX_KEY]: 0,
+				[PROJECT_KEY]: 3,
+				[TOTAL_KEY]: 3,
+			},
+			{
+				ts: 30,
+				[CLAUDE_KEY]: 0,
+				[CODEX_KEY]: 7,
+				[PROJECT_KEY]: 0,
+				[TOTAL_KEY]: 7,
+			},
 		]);
 	});
 
@@ -84,8 +105,29 @@ describe("buildActiveSessionsTrend", () => {
 
 		const { rows } = buildActiveSessionsTrend(timeSeries);
 		expect(rows).toEqual([
-			{ ts: 5, [CLAUDE_KEY]: 2, [CODEX_KEY]: 3, [PROJECT_KEY]: 0 },
+			{
+				ts: 5,
+				[CLAUDE_KEY]: 2,
+				[CODEX_KEY]: 3,
+				[PROJECT_KEY]: 0,
+				[TOTAL_KEY]: 5,
+			},
 		]);
+	});
+
+	it("adds a per-bucket total equal to the sum of all client scopes", () => {
+		const timeSeries: ActiveSessionsTimePoint[] = [
+			{ ts: 1, scope: "claude_session", sessions: 2 },
+			{ ts: 1, scope: "codex_thread", sessions: 3 },
+			{ ts: 1, scope: "project", sessions: 4 },
+			{ ts: 2, scope: "claude_session", sessions: 1 },
+		];
+
+		const { rows } = buildActiveSessionsTrend(timeSeries);
+		// Bucket 1: 2 + 3 + 4 = 9 across all three scopes.
+		expect(rows[0][TOTAL_KEY]).toBe(9);
+		// Bucket 2: single scope + 0-filled siblings = 1.
+		expect(rows[1][TOTAL_KEY]).toBe(1);
 	});
 });
 
