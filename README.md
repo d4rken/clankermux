@@ -30,6 +30,10 @@ Features:
 * Web dashboard: accounts, request history, rate-limit graphs with burn-rate forecasts, analytics, spend tracking, logs.
 * Small dependency tree; memory-leak and stability hardening for long-running deployments.
 
+## Related projects
+
+* [Clankermux Usage for Cinnamon](https://github.com/d4rken/clankermux-mint-applet) — Linux Mint/Cinnamon panel applet for monitoring pooled quota usage and exhaustion forecasts.
+
 ## Build from source
 
 Requires [Bun](https://bun.sh).
