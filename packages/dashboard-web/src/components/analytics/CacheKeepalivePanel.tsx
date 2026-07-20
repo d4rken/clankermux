@@ -1,6 +1,6 @@
 import { formatUsd } from "@clankermux/ui-common";
 import { Snowflake } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
 	CartesianGrid,
 	ComposedChart,
@@ -20,7 +20,6 @@ import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
 import { getChartHeight } from "../charts/chart-utils";
-import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 
 const MODE_LABELS: Record<string, string> = {
@@ -68,13 +67,13 @@ function StatTile({
 }
 
 /**
- * Analytics-tab "Cache Keep-Alive" panel. Headline tiles come from the live
- * endpoint (cumulative-since-restart); the chart plots per-bucket spent vs saved
- * USD plus the hit-rate line over a self-controlled range. Built directly on
- * recharts primitives like MemoryUsageChart since it composes a dual-axis chart.
+ * Analytics-tab cache-keepalive "Live Status & History" panel. Headline tiles
+ * come from the live endpoint (cumulative-since-restart); the chart plots
+ * per-bucket spent vs saved USD plus the hit-rate line over the `range` supplied
+ * by the enclosing CacheKeepaliveSection. Built directly on recharts primitives
+ * like MemoryUsageChart since it composes a dual-axis chart.
  */
-export function CacheKeepalivePanel() {
-	const [range, setRange] = useState<string>("7d");
+export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 	const { data: live, isLoading: liveLoading } = useCacheKeepalive();
 	const { data: history, isLoading: historyLoading } =
 		useCacheKeepaliveHistory(range);
@@ -91,7 +90,6 @@ export function CacheKeepalivePanel() {
 
 	// Need at least two points to draw a meaningful trend.
 	const isEmpty = rows.length < 2;
-	const tr = range as TimeRange;
 
 	const modeLabel = live ? (MODE_LABELS[live.mode] ?? live.mode) : "—";
 	const netUsd = live?.netUsd ?? 0;
@@ -99,15 +97,10 @@ export function CacheKeepalivePanel() {
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
-					<div>
-						<CardTitle className="flex items-center gap-2">
-							<Snowflake className="h-5 w-5" />
-							Cache Keep-Alive
-						</CardTitle>
-					</div>
-					<TimeRangeSelector value={range} onChange={setRange} />
-				</div>
+				<CardTitle className="flex items-center gap-2">
+					<Snowflake className="h-5 w-5" />
+					Live Status &amp; History
+				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-4">
 				{/* Live headline tiles (cumulative since the last restart). */}
@@ -161,7 +154,7 @@ export function CacheKeepalivePanel() {
 								dataKey="ts"
 								className="text-xs"
 								height={30}
-								tickFormatter={(value) => formatAxisTime(Number(value), tr)}
+								tickFormatter={(value) => formatAxisTime(Number(value), range)}
 							/>
 							<YAxis
 								yAxisId="usd"
@@ -189,7 +182,7 @@ export function CacheKeepalivePanel() {
 										labelFormatter={(label, payload) => {
 											const ts = payload?.[0]?.payload?.ts;
 											return typeof ts === "number"
-												? formatTooltipTime(ts, tr)
+												? formatTooltipTime(ts, range)
 												: label;
 										}}
 									/>
