@@ -42,6 +42,20 @@ http://:8080 {
 		# Wait between dial attempts while lb_try_duration is running.
 		lb_try_interval 250ms
 
+		# Do NOT pool/reuse idle upstream connections. With pooling, requests
+		# arriving during an app drain ride pre-established keep-alive
+		# connections straight past the closed listener into the DRAINING
+		# process — observed: 30 requests served mid-drain, holding the drain
+		# open until the 85s shutdown watchdog on every restart. With
+		# keepalive off, every request dials fresh: during a drain the dial is
+		# refused, the request is held by lb_try_duration above, and it lands
+		# on the NEW process instead. A loopback dial per request is
+		# negligible at this deployment's scale. (Active SSE streams are
+		# unaffected — this only disables reuse of idle connections.)
+		transport http {
+			keepalive off
+		}
+
 		# When the CADDY config is reloaded/unloaded, delay forcibly closing
 		# streaming requests (SSE/WebSockets) for up to 35 minutes so
 		# long-running agentic streams survive Caddy config changes. Has no
