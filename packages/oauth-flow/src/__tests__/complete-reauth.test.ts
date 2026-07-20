@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { OAuthProviderConfig, OAuthTokens } from "@clankermux/providers";
+import * as realProviders from "@clankermux/providers";
 import { OAuthFlow } from "../index";
 
 // ---------------------------------------------------------------------------
@@ -67,7 +68,13 @@ const mockExchangeCode = mock(
 	}),
 );
 
+// Spread the REAL providers exports first, then override only getOAuthProvider.
+// A destructive stub that dropped the rest (e.g. normalizeCodexInputUsage, which
+// usage-collector imports) leaks across the shared `bun test` process — the mock
+// is never restored, so a provider-dependent module first-loading afterward would
+// bind to `undefined`. Keeping the real surface makes the mock order-independent.
 mock.module("@clankermux/providers", () => ({
+	...realProviders,
 	getOAuthProvider: (_name: string) => ({
 		exchangeCode: mockExchangeCode,
 		getOAuthConfig: (_mode: string) => ({ ...testOauthConfig }),

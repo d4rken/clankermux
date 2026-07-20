@@ -11,6 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Config } from "@clankermux/config";
+import * as realCore from "@clankermux/core";
 import type { ProxyContext } from "../proxy";
 
 // ---------------------------------------------------------------------------
@@ -37,7 +38,15 @@ const mockRegisterHeartbeat = mock((opts: HeartbeatOpts) => {
 	return mockUnregister;
 });
 
+// Spread the REAL core exports first, then override only the timer-registration
+// symbols. A destructive stub that dropped the rest (estimateCostUSD,
+// isPlausibleSpeed, ValidationError, …) leaks across the shared `bun test`
+// process: mock.module is never restored, so whichever core-dependent module
+// first-loads afterward (e.g. usage-collector via request-recorder) binds to
+// `undefined` and fails to import. Keeping the real surface makes the mock safe
+// regardless of test-file ordering.
 mock.module("@clankermux/core", () => ({
+	...realCore,
 	registerHeartbeat: mockRegisterHeartbeat,
 	registerCleanup: mock(() => () => {}),
 	registerUIRefresh: mock(() => () => {}),
