@@ -1,6 +1,6 @@
 import { registerUIRefresh, TIME_CONSTANTS } from "@clankermux/core";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { Activity, BarChart3, Database, Gauge, Users } from "lucide-react";
+import { Activity, BarChart3, Gauge, Users } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import {
@@ -100,7 +100,6 @@ export const OverviewTab = React.memo(() => {
 			ts: point.ts,
 			requests: point.requests,
 			successRate: point.successRate,
-			cacheHitRate: point.cacheHitRate,
 			responseTime: Math.round(point.avgResponseTime),
 			cost: point.costUsd.toFixed(2),
 			planCost: point.planCostUsd ?? 0,
@@ -114,9 +113,7 @@ export const OverviewTab = React.memo(() => {
 		if (timeSeriesData.length < 2) {
 			return {
 				deltaRequests: null,
-				deltaCacheHitRate: null,
 				trendRequests: "flat" as "up" | "down" | "flat",
-				trendCacheHitRate: "flat" as "up" | "down" | "flat",
 			};
 		}
 
@@ -125,10 +122,6 @@ export const OverviewTab = React.memo(() => {
 
 		// Calculate deltas
 		const deltaRequests = pctChange(lastBucket.requests, prevBucket.requests);
-		const deltaCacheHitRate = pctChange(
-			lastBucket.cacheHitRate,
-			prevBucket.cacheHitRate,
-		);
 
 		// Helper to determine trend
 		const getTrend = (delta: number | null): "up" | "down" | "flat" => {
@@ -138,9 +131,7 @@ export const OverviewTab = React.memo(() => {
 
 		return {
 			deltaRequests,
-			deltaCacheHitRate,
 			trendRequests: getTrend(deltaRequests),
-			trendCacheHitRate: getTrend(deltaCacheHitRate),
 		};
 	}, [timeSeriesData, pctChange]);
 
@@ -172,7 +163,7 @@ export const OverviewTab = React.memo(() => {
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals.requests || 0)}
@@ -187,19 +178,11 @@ export const OverviewTab = React.memo(() => {
 							label: "Success rate",
 							value: formatPercentage(analytics?.totals.successRate || 0, 0),
 						},
+						{
+							label: "Cache hit",
+							value: formatPercentage(analytics?.totals.cacheHitRate || 0, 0),
+						},
 					]}
-				/>
-				<MetricCard
-					title="Cache Hit Rate"
-					value={formatPercentage(analytics?.totals.cacheHitRate || 0, 0)}
-					change={
-						trends.deltaCacheHitRate !== null
-							? trends.deltaCacheHitRate
-							: undefined
-					}
-					trend={trends.trendCacheHitRate}
-					trendPeriod={trendPeriod}
-					icon={Database}
 				/>
 				<MetricCard
 					title="Active Sessions"

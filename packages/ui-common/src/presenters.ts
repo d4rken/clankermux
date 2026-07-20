@@ -66,6 +66,12 @@ export class AccountPresenter {
 			: this.account.request_count;
 	}
 
+	get activeSessionCount(): number {
+		return "activeSessionCount" in this.account
+			? (this.account.activeSessionCount ?? 0)
+			: 0;
+	}
+
 	get totalRequests(): number {
 		return "totalRequests" in this.account
 			? this.account.totalRequests

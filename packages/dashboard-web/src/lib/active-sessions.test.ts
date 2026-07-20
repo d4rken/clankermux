@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { ActiveSessionsTimePoint } from "@clankermux/types";
 import {
+	type ActiveSessionsAccountRow,
 	buildActiveSessionsTrend,
 	SCOPE_ORDER,
 	SESSION_SCOPE_COLORS,
 	SESSION_TOTAL_KEY,
+	sortActiveSessionsByAccount,
 } from "./active-sessions";
 
 const CLAUDE_KEY = "scope:claude_session";
@@ -128,6 +130,35 @@ describe("buildActiveSessionsTrend", () => {
 		expect(rows[0][TOTAL_KEY]).toBe(9);
 		// Bucket 2: single scope + 0-filled siblings = 1.
 		expect(rows[1][TOTAL_KEY]).toBe(1);
+	});
+});
+
+describe("sortActiveSessionsByAccount", () => {
+	it("sorts rows descending by sessions", () => {
+		const rows: ActiveSessionsAccountRow[] = [
+			{ accountId: "a", accountName: "Alpha", sessions: 2 },
+			{ accountId: "b", accountName: "Bravo", sessions: 5 },
+			{ accountId: "c", accountName: "Charlie", sessions: 3 },
+		];
+
+		expect(sortActiveSessionsByAccount(rows).map((r) => r.sessions)).toEqual([
+			5, 3, 2,
+		]);
+	});
+
+	it("does not mutate its input", () => {
+		const rows: ActiveSessionsAccountRow[] = [
+			{ accountId: "a", accountName: "Alpha", sessions: 1 },
+			{ accountId: "b", accountName: "Bravo", sessions: 4 },
+		];
+		const snapshot = rows.map((r) => r.sessions);
+
+		sortActiveSessionsByAccount(rows);
+		expect(rows.map((r) => r.sessions)).toEqual(snapshot);
+	});
+
+	it("returns an empty array for empty input", () => {
+		expect(sortActiveSessionsByAccount([])).toEqual([]);
 	});
 });
 

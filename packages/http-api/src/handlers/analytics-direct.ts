@@ -29,6 +29,9 @@ const SPEED_IN_RANGE_SQL = `output_tokens_per_second > 0 AND output_tokens_per_s
 // Max project rows in the project_breakdown UNION branch.
 const PROJECT_BREAKDOWN_LIMIT = 20;
 
+// Max per-account rows in the activeSessions.perAccount breakdown.
+const ACTIVE_SESSIONS_BY_ACCOUNT_LIMIT = 50;
+
 // Context composition limits.
 const CONTEXT_BY_PROJECT_LIMIT = 10;
 const GROWTH_CURVE_PROJECT_LIMIT = 5;
@@ -857,6 +860,45 @@ export function createAnalyticsHandler(context: APIContext) {
 			);
 			recordPhase(phaseTimings, "active_sessions", phaseStartedAt);
 
+			// Per-account distinct-session breakdown for the "Active Sessions by
+			// account" bar list, across the WHOLE filtered range.
+			//
+			// Kept as a STANDALONE query rather than a 3rd branch of the
+			// activeSessionRows UNION on purpose: that UNION is shaped as
+			// (row_type, ts, scope, sessions) for the time-bucketed presence series,
+			// whereas this breakdown groups by account (a different key and output
+			// shape). Widening the UNION to carry an account column would force NULL
+			// account placeholders into the 'total'/'bucket' rows and NULL ts/scope
+			// placeholders into these — muddying both. A sibling query is clearer and
+			// the JOIN back to requests still applies the identical shared whereClause.
+			//
+			// PRESENCE, not partition: a session that failed over between two accounts
+			// has request_routing rows with different selected_account_id but the same
+			// affinity_key_hash, so it is counted under EACH account. This breakdown
+			// therefore does NOT sum to totalDistinctSessions — same caveat as
+			// timeSeries. NULL selected_account_id collapses to the NO_ACCOUNT_ID
+			// sentinel for both id and name.
+			phaseStartedAt = performance.now();
+			const activeSessionsByAccountRows = await db.query<{
+				account_id: string;
+				account_name: string;
+				sessions: number;
+			}>(
+				`SELECT
+					COALESCE(rr.selected_account_id, ?) AS account_id,
+					COALESCE(a.name, rr.selected_account_id, ?) AS account_name,
+					COUNT(DISTINCT rr.affinity_key_hash) AS sessions
+				FROM request_routing rr
+				JOIN requests r ON r.id = rr.request_id
+				LEFT JOIN accounts a ON a.id = rr.selected_account_id
+				WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
+				GROUP BY rr.selected_account_id, a.name
+				ORDER BY sessions DESC
+				LIMIT ${ACTIVE_SESSIONS_BY_ACCOUNT_LIMIT}`,
+				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+			);
+			recordPhase(phaseTimings, "active_sessions_by_account", phaseStartedAt);
+
 			const activeSessions: ActiveSessionsAnalytics = {
 				totalDistinctSessions:
 					Number(
@@ -874,6 +916,11 @@ export function createAnalyticsHandler(context: APIContext) {
 							sessions: Number(row.sessions) || 0,
 						}),
 					),
+				perAccount: activeSessionsByAccountRows.map((row) => ({
+					accountId: String(row.account_id),
+					accountName: String(row.account_name),
+					sessions: Number(row.sessions) || 0,
+				})),
 			};
 
 			// Routing analytics: "why did this account get selected?"

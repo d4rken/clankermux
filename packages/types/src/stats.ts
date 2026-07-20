@@ -317,6 +317,16 @@ export interface ActiveSessionsAnalytics {
 	 *  honest "N distinct sessions" headline. Deliberately NOT the sum of
 	 *  timeSeries[].sessions, which would double-count multi-bucket sessions. */
 	totalDistinctSessions: number;
+	/** COUNT(DISTINCT affinity_key_hash) per account across the WHOLE filtered range,
+	 *  for the "Active Sessions by account" bar list. Sorted DESC server-side, capped.
+	 *  A session that failed over between two accounts is counted under EACH — so this
+	 *  does NOT sum to totalDistinctSessions (same "presence, not partition" caveat as
+	 *  timeSeries). Optional/additive — an older server may not populate it. */
+	perAccount?: Array<{
+		accountId: string;
+		accountName: string;
+		sessions: number;
+	}>;
 }
 
 export interface AnalyticsResponse {

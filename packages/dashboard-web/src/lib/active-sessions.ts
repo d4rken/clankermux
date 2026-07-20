@@ -1,4 +1,7 @@
-import type { ActiveSessionsTimePoint } from "@clankermux/types";
+import type {
+	ActiveSessionsAnalytics,
+	ActiveSessionsTimePoint,
+} from "@clankermux/types";
 import { COLORS } from "../constants";
 
 /**
@@ -119,4 +122,20 @@ export function buildActiveSessionsTrend(
 
 	const rows = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
 	return { rows, series };
+}
+
+/** One row of the "Active Sessions by account" bar list. */
+export type ActiveSessionsAccountRow = NonNullable<
+	ActiveSessionsAnalytics["perAccount"]
+>[number];
+
+/**
+ * Sorts per-account active-session rows by session count descending. The server
+ * already sorts, but this keeps the client robust to an unsorted payload and
+ * mirrors the pure-sort-helper convention in account-cost-table-utils.ts.
+ */
+export function sortActiveSessionsByAccount(
+	rows: ActiveSessionsAccountRow[],
+): ActiveSessionsAccountRow[] {
+	return [...rows].sort((a, b) => b.sessions - a.sessions);
 }

@@ -264,6 +264,11 @@ export interface AccountResponse {
 	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	renewalPriceUsd?: number | null; // Subscription price in USD (API boundary speaks USD floats)
 	sessionStats: SessionStats | null;
+	/** Distinct active-client sessions for this account in the trailing active-session
+	 *  window (TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS, 15m), keyed off
+	 *  request_routing.selected_account_id. Optional/additive — an older server may
+	 *  not populate it; server-computed and best-effort (defaults to 0 on repo failure). */
+	activeSessionCount?: number;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
 
