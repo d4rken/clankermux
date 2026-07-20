@@ -29,6 +29,7 @@ import {
 import {
 	APIRouter,
 	AuthService,
+	closeAllSseStreams,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
@@ -1730,6 +1731,16 @@ async function handleGracefulShutdown(signal: string) {
 		}
 
 		usageCache.clear(); // Stop all usage polling
+
+		// Endless dashboard SSE streams (requests/logs heartbeats) would hold
+		// the drain below until the watchdog; close them proactively —
+		// EventSource auto-reconnects through the front proxy once we're back.
+		const closedSseStreams = closeAllSseStreams();
+		if (closedSseStreams > 0) {
+			console.log(
+				`Closed ${closedSseStreams} dashboard SSE stream(s) before drain`,
+			);
+		}
 
 		// Stop accepting new connections and wait for in-flight HTTP requests
 		// (including streaming responses) to complete. stop() without args is

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { logBus } from "@clankermux/logger";
 import type { LogEvent } from "@clankermux/types";
+import { closeAllSseStreams } from "../../sse-registry";
 import { createLogsStreamHandler } from "../logs";
 
 const decoder = new TextDecoder();
@@ -25,6 +26,27 @@ async function readUntil(
 		if (predicate(text)) return text;
 	}
 	return text;
+}
+
+/** Drains the stream until done or timeout; reports whether it ended. */
+async function readToEnd(
+	reader: ReadableStreamDefaultReader<Uint8Array>,
+	timeoutMs = 1000,
+): Promise<{ done: boolean; text: string }> {
+	let text = "";
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const result = await Promise.race([
+			reader.read(),
+			new Promise<null>((resolve) =>
+				setTimeout(() => resolve(null), deadline - Date.now()),
+			),
+		]);
+		if (result === null) return { done: false, text };
+		if (result.done) return { done: true, text };
+		text += decoder.decode(result.value, { stream: true });
+	}
+	return { done: false, text };
 }
 
 const activeReaders: ReadableStreamDefaultReader<Uint8Array>[] = [];
@@ -115,5 +137,41 @@ describe("createLogsStreamHandler", () => {
 		// heartbeat tick (20ms) triggers it and must clean up the listener.
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(logBus.listenerCount("log")).toBe(baseline);
+	});
+
+	it("ends the stream and unsubscribes when closeAllSseStreams runs", async () => {
+		closeAllSseStreams(); // flush closers leaked by other suites
+		const baseline = logBus.listenerCount("log");
+		const handler = createLogsStreamHandler(20);
+		const reader = openStream(handler);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		expect(logBus.listenerCount("log")).toBe(baseline + 1);
+
+		expect(closeAllSseStreams()).toBe(1);
+		expect(logBus.listenerCount("log")).toBe(baseline);
+
+		// Listener is gone, so events emitted after close must not reach the
+		// stream; the reader drains pending chunks and then finishes cleanly.
+		logBus.emit("log", { ...sampleEvent, msg: "after-close" });
+		const { done, text } = await readToEnd(reader);
+		expect(done).toBe(true);
+		expect(text).not.toContain("after-close");
+	});
+
+	it("unregisters the shutdown closer on request abort", async () => {
+		closeAllSseStreams();
+		const handler = createLogsStreamHandler(20);
+		const controller = new AbortController();
+		const reader = openStream(
+			handler,
+			new Request("http://localhost/api/logs/stream", {
+				signal: controller.signal,
+			}),
+		);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		controller.abort();
+		expect(closeAllSseStreams()).toBe(0);
 	});
 });

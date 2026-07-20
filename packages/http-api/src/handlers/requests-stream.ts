@@ -1,4 +1,5 @@
 import { type RequestEvt, requestEvents } from "@clankermux/core";
+import { registerSseCloser } from "../sse-registry";
 
 // Periodic SSE comment so the socket never sits idle long enough for
 // Bun.serve's idleTimeout (255s) to kill quiet dashboard streams overnight.
@@ -13,6 +14,10 @@ export function createRequestsStreamHandler(
 		let writeHandler: ((data: RequestEvt) => void) | null = null;
 		let heartbeat: ReturnType<typeof setInterval> | null = null;
 		let isClosed = false;
+		// Set inside start() — the controller is only available there.
+		let streamController: ReadableStreamDefaultController<Uint8Array> | null =
+			null;
+		let unregisterCloser: (() => void) | null = null;
 
 		const cleanup = () => {
 			isClosed = true;
@@ -23,6 +28,10 @@ export function createRequestsStreamHandler(
 			if (heartbeat) {
 				clearInterval(heartbeat);
 				heartbeat = null;
+			}
+			if (unregisterCloser) {
+				unregisterCloser();
+				unregisterCloser = null;
 			}
 		};
 
@@ -61,6 +70,26 @@ export function createRequestsStreamHandler(
 						cleanup();
 					}
 				}, heartbeatIntervalMs);
+
+				// Register for proactive close at shutdown: this endless stream
+				// would otherwise hold Bun's graceful drain until the watchdog.
+				streamController = controller;
+				unregisterCloser = registerSseCloser(() => {
+					if (isClosed) return;
+					try {
+						streamController?.enqueue(
+							encoder.encode("event: server-shutdown\ndata: bye\n\n"),
+						);
+					} catch {
+						// Best-effort farewell only.
+					}
+					cleanup();
+					try {
+						streamController?.close();
+					} catch {
+						// Already closed/errored.
+					}
+				});
 			},
 			cancel() {
 				// Cleanup only this specific listener

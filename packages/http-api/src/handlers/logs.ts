@@ -1,6 +1,7 @@
 import { sseResponse } from "@clankermux/http-common";
 import { Logger, logBus } from "@clankermux/logger";
 import type { LogEvent } from "@clankermux/types";
+import { registerSseCloser } from "../sse-registry";
 
 const log = new Logger("LogsHandler");
 
@@ -23,6 +24,7 @@ export function createLogsStreamHandler(
 		let closed = false;
 		let handleLogEvent: ((event: LogEvent) => Promise<void>) | null = null;
 		let heartbeat: ReturnType<typeof setInterval> | null = null;
+		let unregisterCloser: (() => void) | null = null;
 
 		const cleanup = () => {
 			closed = true;
@@ -33,6 +35,10 @@ export function createLogsStreamHandler(
 			if (heartbeat) {
 				clearInterval(heartbeat);
 				heartbeat = null;
+			}
+			if (unregisterCloser) {
+				unregisterCloser();
+				unregisterCloser = null;
 			}
 		};
 
@@ -79,6 +85,22 @@ export function createLogsStreamHandler(
 				} catch {}
 			}
 		}, heartbeatIntervalMs);
+
+		// Register for proactive close at shutdown: this endless stream would
+		// otherwise hold Bun's graceful drain until the watchdog.
+		unregisterCloser = registerSseCloser(() => {
+			if (closed) return;
+			try {
+				// Best-effort farewell only; ignore write failures.
+				writer
+					.write(encoder.encode("event: server-shutdown\ndata: bye\n\n"))
+					.catch(() => {});
+			} catch {}
+			cleanup();
+			try {
+				writer.close().catch(() => {});
+			} catch {}
+		});
 
 		// Clean up on abort signal
 		req.signal?.addEventListener("abort", () => {

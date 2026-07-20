@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { requestEvents } from "@clankermux/core";
+import { closeAllSseStreams } from "../../sse-registry";
 import { createRequestsStreamHandler } from "../requests-stream";
 
 const decoder = new TextDecoder();
@@ -24,6 +25,27 @@ async function readUntil(
 		if (predicate(text)) return text;
 	}
 	return text;
+}
+
+/** Drains the stream until done or timeout; reports whether it ended. */
+async function readToEnd(
+	reader: ReadableStreamDefaultReader<Uint8Array>,
+	timeoutMs = 1000,
+): Promise<{ done: boolean; text: string }> {
+	let text = "";
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const result = await Promise.race([
+			reader.read(),
+			new Promise<null>((resolve) =>
+				setTimeout(() => resolve(null), deadline - Date.now()),
+			),
+		]);
+		if (result === null) return { done: false, text };
+		if (result.done) return { done: true, text };
+		text += decoder.decode(result.value, { stream: true });
+	}
+	return { done: false, text };
 }
 
 const activeReaders: ReadableStreamDefaultReader<Uint8Array>[] = [];
@@ -110,5 +132,55 @@ describe("createRequestsStreamHandler", () => {
 		// No heartbeat writes after abort
 		const after = await readUntil(reader, (t) => t.includes(": ping"), 80);
 		expect(after).not.toContain(": ping");
+	});
+
+	it("ends the stream and unsubscribes when closeAllSseStreams runs", async () => {
+		closeAllSseStreams(); // flush closers leaked by other suites
+		const baseline = requestEvents.listenerCount("event");
+		const handler = createRequestsStreamHandler(20);
+		const reader = openStream(handler);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		expect(requestEvents.listenerCount("event")).toBe(baseline + 1);
+
+		expect(closeAllSseStreams()).toBe(1);
+		expect(requestEvents.listenerCount("event")).toBe(baseline);
+
+		// Listener is gone, so events emitted after close must not reach the
+		// stream; the reader drains pending chunks and then finishes cleanly.
+		requestEvents.emit("event", { type: "start", id: "after-close" });
+		const { done, text } = await readToEnd(reader);
+		expect(done).toBe(true);
+		expect(text).not.toContain("after-close");
+
+		// Heartbeat cleared: waiting past its interval must not resubscribe.
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(requestEvents.listenerCount("event")).toBe(baseline);
+	});
+
+	it("unregisters the shutdown closer on request abort", async () => {
+		closeAllSseStreams();
+		const handler = createRequestsStreamHandler(20);
+		const controller = new AbortController();
+		const reader = openStream(
+			handler,
+			new Request("http://localhost/api/requests/stream", {
+				signal: controller.signal,
+			}),
+		);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		controller.abort();
+		expect(closeAllSseStreams()).toBe(0);
+	});
+
+	it("unregisters the shutdown closer on reader cancel", async () => {
+		closeAllSseStreams();
+		const handler = createRequestsStreamHandler(20);
+		const reader = openStream(handler);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		await reader.cancel();
+		expect(closeAllSseStreams()).toBe(0);
 	});
 });
