@@ -22,7 +22,11 @@ import {
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type {
+	Account,
+	CodexRateLimitResetCreditConsumeRequest,
+	CodexRateLimitResetCreditConsumeResult,
+} from "@clankermux/types";
 import { CodexSpendCoordinator } from "../codex-spend-coordinator";
 import type {
 	ApplyCodexObservationOptions,
@@ -44,6 +48,17 @@ const mockFetchCodexRateLimitResetCredits = mock(
 		availableCount: 2,
 		credits: [],
 	}),
+);
+let consumeImpl: (
+	token: string,
+	request: CodexRateLimitResetCreditConsumeRequest,
+) => Promise<CodexRateLimitResetCreditConsumeResult> = async () => ({
+	outcome: "reset",
+	windowsReset: 2,
+});
+const mockConsumeCodexRateLimitResetCredit = mock(
+	(token: string, request: CodexRateLimitResetCreditConsumeRequest) =>
+		consumeImpl(token, request),
 );
 
 // applyCodexObservation: records the opts it was called with and returns a
@@ -145,6 +160,7 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 function makeCtx() {
 	const accounts = new Map<string, Account>();
 	const getAccountCalls: string[] = [];
+	const forceResetCalls: string[] = [];
 	const ctx = {
 		dbOps: {
 			// Return a shallow COPY so a mid-flight mutation of the stored account
@@ -153,6 +169,10 @@ function makeCtx() {
 				getAccountCalls.push(id);
 				const a = accounts.get(id);
 				return a ? { ...a } : null;
+			}),
+			forceResetAccountRateLimit: mock(async (id: string) => {
+				forceResetCalls.push(id);
+				return true;
 			}),
 		},
 		asyncWriter: {
@@ -164,6 +184,7 @@ function makeCtx() {
 	return {
 		ctx,
 		getAccountCalls,
+		forceResetCalls,
 		setAccount: (a: Account) => accounts.set(a.id, a),
 		mutateAccount: (id: string, patch: Partial<Account>) => {
 			const a = accounts.get(id);
@@ -181,6 +202,7 @@ function makeCoordinator() {
 		getValidAccessToken: mockGetValidAccessToken,
 		applyCodexObservation: mockApplyCodexObservation,
 		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		consumeCodexRateLimitResetCredit: mockConsumeCodexRateLimitResetCredit,
 	});
 	return { coordinator, ...harness };
 }
@@ -283,8 +305,10 @@ beforeEach(() => {
 	mockApplyCodexObservation.mockClear();
 	mockGetValidAccessToken.mockClear();
 	mockFetchCodexRateLimitResetCredits.mockClear();
+	mockConsumeCodexRateLimitResetCredit.mockClear();
 	codexRateLimitResetCreditsCache.clear();
 	tokenImpl = async () => "token";
+	consumeImpl = async () => ({ outcome: "reset", windowsReset: 2 });
 	observationResult = makeObservation();
 	fetchImpl = async () =>
 		new Response("event: ignored\n\n", {
@@ -304,6 +328,91 @@ afterEach(() => {
 	for (const id of seededCacheIds) usageCache.delete(id);
 	seededCacheIds.clear();
 	codexRateLimitResetCreditsCache.clear();
+});
+
+// ---------------------------------------------------------------------------
+// Earned reset-credit consumption. All transports are injected doubles: these
+// tests can never redeem a real reset.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.consumeResetCredit", () => {
+	it("consumes once, clears local limits, and refreshes reset metadata", async () => {
+		const { coordinator, setAccount, forceResetCalls } = makeCoordinator();
+		const id = seedId("consume-reset");
+		setAccount(makeCodexAccount({ id, name: "codex-reset" }));
+		usageCache.set(id, {
+			five_hour: { utilization: 100, resets_at: null },
+			seven_day: { utilization: 100, resets_at: null },
+		});
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-123",
+			creditId: "credit-456",
+		});
+
+		expect(mockConsumeCodexRateLimitResetCredit).toHaveBeenCalledTimes(1);
+		expect(mockConsumeCodexRateLimitResetCredit).toHaveBeenCalledWith("token", {
+			idempotencyKey: "redeem-123",
+			creditId: "credit-456",
+		});
+		expect(forceResetCalls).toEqual([id]);
+		expect(usageCache.get(id)).toBeNull();
+		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledWith("token");
+		expect(
+			codexRateLimitResetCreditsCache.get(id)?.summary.availableCount,
+		).toBe(2);
+		expect(outcome).toEqual({
+			status: "completed",
+			accountName: "codex-reset",
+			result: { outcome: "reset", windowsReset: 2 },
+			resetMetadataRefreshed: true,
+			availableResetCount: 2,
+			localRateLimitStateCleared: true,
+		});
+	});
+
+	it("treats noCredit as a completed business outcome without clearing local limits", async () => {
+		const { coordinator, setAccount, forceResetCalls } = makeCoordinator();
+		const id = seedId("consume-none");
+		setAccount(makeCodexAccount({ id, name: "codex-none" }));
+		usageCache.set(id, {
+			five_hour: { utilization: 50, resets_at: null },
+			seven_day: { utilization: 60, resets_at: null },
+		});
+		consumeImpl = async () => ({ outcome: "noCredit", windowsReset: 0 });
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-none",
+		});
+
+		expect(outcome.status).toBe("completed");
+		if (outcome.status === "completed") {
+			expect(outcome.result.outcome).toBe("noCredit");
+			expect(outcome.localRateLimitStateCleared).toBe(false);
+		}
+		expect(forceResetCalls).toEqual([]);
+		expect(usageCache.get(id)).not.toBeNull();
+	});
+
+	it("returns an ambiguous transport failure without clearing state or inventing an outcome", async () => {
+		const { coordinator, setAccount, forceResetCalls } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "consume-failure", name: "codex-fail" }));
+		consumeImpl = async () => {
+			throw new Error("upstream timed out");
+		};
+
+		const outcome = await coordinator.consumeResetCredit("consume-failure", {
+			idempotencyKey: "redeem-retry-me",
+		});
+
+		expect(outcome).toEqual({
+			status: "failed",
+			message:
+				"Failed to consume a reset credit for 'codex-fail': upstream timed out",
+		});
+		expect(forceResetCalls).toEqual([]);
+		expect(mockFetchCodexRateLimitResetCredits).not.toHaveBeenCalled();
+	});
 });
 
 // ---------------------------------------------------------------------------

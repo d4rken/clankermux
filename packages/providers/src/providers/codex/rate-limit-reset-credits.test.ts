@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+	CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
 	CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT,
 	CODEX_RESET_CREDITS_RETRY_MS,
 	codexRateLimitResetCreditsCache,
+	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
+	parseCodexRateLimitResetCreditConsumeResult,
 	parseCodexRateLimitResetCredits,
 } from "./rate-limit-reset-credits";
 
@@ -120,6 +123,117 @@ describe("fetchCodexRateLimitResetCredits", () => {
 			new Response("nope", { status: 404 })) as typeof fetch;
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toBeNull();
+	});
+});
+
+describe("parseCodexRateLimitResetCreditConsumeResult", () => {
+	it("normalizes every backend outcome", () => {
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({
+				code: "reset",
+				windows_reset: 2,
+			}),
+		).toEqual({ outcome: "reset", windowsReset: 2 });
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({
+				code: "nothing_to_reset",
+			}),
+		).toEqual({ outcome: "nothingToReset", windowsReset: 0 });
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({ code: "no_credit" }),
+		).toEqual({ outcome: "noCredit", windowsReset: 0 });
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({
+				code: "already_redeemed",
+			}),
+		).toEqual({ outcome: "alreadyRedeemed", windowsReset: 0 });
+	});
+
+	it("also accepts the normalized app-server response", () => {
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({
+				outcome: "alreadyRedeemed",
+				windowsReset: 0,
+			}),
+		).toEqual({ outcome: "alreadyRedeemed", windowsReset: 0 });
+	});
+
+	it("rejects unknown outcomes and invalid window counts", () => {
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({ code: "future_code" }),
+		).toBeNull();
+		expect(
+			parseCodexRateLimitResetCreditConsumeResult({
+				code: "reset",
+				windows_reset: -1,
+			}),
+		).toBeNull();
+	});
+});
+
+describe("consumeCodexRateLimitResetCredit", () => {
+	it("posts the official payload and selected credit id", async () => {
+		let seenUrl = "";
+		let seenInit: RequestInit | undefined;
+		globalThis.fetch = (async (input, init) => {
+			seenUrl = String(input);
+			seenInit = init;
+			return Response.json({ code: "reset", windows_reset: 2 });
+		}) as typeof fetch;
+
+		const result = await consumeCodexRateLimitResetCredit("token", {
+			idempotencyKey: "redeem-123",
+			creditId: "credit-456",
+		});
+
+		expect(result).toEqual({ outcome: "reset", windowsReset: 2 });
+		expect(seenUrl).toBe(CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT);
+		expect(seenInit?.method).toBe("POST");
+		expect(new Headers(seenInit?.headers).get("authorization")).toBe(
+			"Bearer token",
+		);
+		expect(new Headers(seenInit?.headers).get("content-type")).toBe(
+			"application/json",
+		);
+		expect(JSON.parse(String(seenInit?.body))).toEqual({
+			redeem_request_id: "redeem-123",
+			credit_id: "credit-456",
+		});
+	});
+
+	it("omits credit_id so OpenAI can select the next available reset", async () => {
+		let seenBody = "";
+		globalThis.fetch = (async (_input, init) => {
+			seenBody = String(init?.body);
+			return Response.json({ code: "nothing_to_reset", windows_reset: 0 });
+		}) as typeof fetch;
+
+		await expect(
+			consumeCodexRateLimitResetCredit("token", {
+				idempotencyKey: "redeem-next",
+			}),
+		).resolves.toEqual({ outcome: "nothingToReset", windowsReset: 0 });
+		expect(JSON.parse(seenBody)).toEqual({
+			redeem_request_id: "redeem-next",
+		});
+	});
+
+	it("throws on transport and contract failures instead of inventing an outcome", async () => {
+		globalThis.fetch = (async () =>
+			new Response("unavailable", { status: 503 })) as typeof fetch;
+		await expect(
+			consumeCodexRateLimitResetCredit("token", {
+				idempotencyKey: "redeem-failure",
+			}),
+		).rejects.toThrow("503");
+
+		globalThis.fetch = (async () =>
+			Response.json({ code: "unexpected" })) as typeof fetch;
+		await expect(
+			consumeCodexRateLimitResetCredit("token", {
+				idempotencyKey: "redeem-contract",
+			}),
+		).rejects.toThrow("unrecognized payload");
 	});
 });
 

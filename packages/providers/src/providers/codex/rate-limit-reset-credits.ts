@@ -1,10 +1,21 @@
 import { Logger } from "@clankermux/logger";
+import type {
+	CodexRateLimitResetCreditConsumeOutcome,
+	CodexRateLimitResetCreditConsumeRequest,
+	CodexRateLimitResetCreditConsumeResult,
+} from "@clankermux/types";
 import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
 
 const log = new Logger("CodexRateLimitResetCredits");
 
 export const CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/rate-limit-reset-credits";
+/**
+ * Internal ChatGPT backend route used by Codex's app-server. This is not a
+ * public OpenAI developer API and may change without notice.
+ */
+export const CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT =
+	"https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 
 const REQUEST_TIMEOUT_MS = 5_000;
 export const CODEX_RESET_CREDITS_REFRESH_MS = 15 * 60 * 1_000;
@@ -95,6 +106,26 @@ function normalizeStatus(value: unknown): CodexRateLimitResetCreditStatus {
 	}
 }
 
+function normalizeConsumeOutcome(
+	value: unknown,
+): CodexRateLimitResetCreditConsumeOutcome | null {
+	switch (value) {
+		case "reset":
+			return "reset";
+		case "nothing_to_reset":
+		case "nothingToReset":
+			return "nothingToReset";
+		case "no_credit":
+		case "noCredit":
+			return "noCredit";
+		case "already_redeemed":
+		case "alreadyRedeemed":
+			return "alreadyRedeemed";
+		default:
+			return null;
+	}
+}
+
 function parseCredit(value: unknown): CodexRateLimitResetCredit | null {
 	const row = asRecord(value);
 	if (!row) return null;
@@ -142,9 +173,37 @@ export function parseCodexRateLimitResetCredits(
 	return { availableCount, credits };
 }
 
+/** Parse either the raw backend response or Codex app-server's normalized form. */
+export function parseCodexRateLimitResetCreditConsumeResult(
+	value: unknown,
+): CodexRateLimitResetCreditConsumeResult | null {
+	const root = asRecord(value);
+	if (!root) return null;
+	const outcome = normalizeConsumeOutcome(root.code ?? root.outcome);
+	if (!outcome) return null;
+	const rawWindowsReset = finiteInteger(
+		root.windowsReset ?? root.windows_reset ?? 0,
+	);
+	if (rawWindowsReset === null || rawWindowsReset < 0) return null;
+	return { outcome, windowsReset: rawWindowsReset };
+}
+
+function createResetCreditsHeaders(accessToken: string): Headers {
+	const headers = new Headers({
+		Authorization: `Bearer ${accessToken}`,
+		Accept: "application/json",
+		Version: CODEX_VERSION,
+		"User-Agent": CODEX_USER_AGENT,
+		originator: "codex_cli_rs",
+	});
+	const accountId = readChatgptAccountId(accessToken);
+	if (accountId) headers.set("ChatGPT-Account-ID", accountId);
+	return headers;
+}
+
 /**
- * Read earned reset metadata. This function intentionally exposes no consume
- * operation: it only performs the backend's GET request.
+ * Read earned reset metadata. This function is non-mutating and only performs
+ * the backend's GET request.
  */
 export async function fetchCodexRateLimitResetCredits(
 	accessToken: string,
@@ -158,20 +217,10 @@ export async function fetchCodexRateLimitResetCredits(
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 	try {
-		const headers = new Headers({
-			Authorization: `Bearer ${accessToken}`,
-			Accept: "application/json",
-			Version: CODEX_VERSION,
-			"User-Agent": CODEX_USER_AGENT,
-			originator: "codex_cli_rs",
-		});
-		const accountId = readChatgptAccountId(accessToken);
-		if (accountId) headers.set("ChatGPT-Account-ID", accountId);
-
 		const response = await fetch(CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT, {
 			method: "GET",
 			signal: controller.signal,
-			headers,
+			headers: createResetCreditsHeaders(accessToken),
 		});
 
 		if (!response.ok) {
@@ -192,6 +241,72 @@ export async function fetchCodexRateLimitResetCredits(
 			error instanceof Error ? error.message : String(error),
 		);
 		return null;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+/**
+ * Consume one earned reset credit through Codex's internal ChatGPT backend.
+ *
+ * This is intentionally a low-level action: callers provide the idempotency
+ * key, and transport/contract failures throw so they cannot be confused with a
+ * business outcome such as `noCredit`. Reuse the same key when retrying.
+ */
+export async function consumeCodexRateLimitResetCredit(
+	accessToken: string,
+	request: CodexRateLimitResetCreditConsumeRequest,
+): Promise<CodexRateLimitResetCreditConsumeResult> {
+	if (!accessToken || accessToken.trim() === "") {
+		throw new Error(
+			"consumeCodexRateLimitResetCredit requires a non-empty access token",
+		);
+	}
+	const idempotencyKey = request.idempotencyKey?.trim();
+	if (!idempotencyKey) {
+		throw new Error("idempotencyKey must not be empty");
+	}
+	const creditId = request.creditId?.trim() || null;
+	if (request.creditId != null && !creditId) {
+		throw new Error("creditId must not be empty when provided");
+	}
+
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+	try {
+		const headers = createResetCreditsHeaders(accessToken);
+		headers.set("Content-Type", "application/json");
+		const response = await fetch(
+			CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
+			{
+				method: "POST",
+				signal: controller.signal,
+				headers,
+				body: JSON.stringify({
+					redeem_request_id: idempotencyKey,
+					...(creditId ? { credit_id: creditId } : {}),
+				}),
+			},
+		);
+
+		if (!response.ok) {
+			throw new Error(
+				`Codex reset-credit consume endpoint returned ${response.status} ${response.statusText}`,
+			);
+		}
+
+		const parsed = parseCodexRateLimitResetCreditConsumeResult(
+			await response.json(),
+		);
+		if (!parsed) {
+			throw new Error(
+				"Codex reset-credit consume endpoint returned an unrecognized payload",
+			);
+		}
+		return parsed;
+	} catch (error) {
+		if (error instanceof Error) throw error;
+		throw new Error(String(error));
 	} finally {
 		clearTimeout(timeoutId);
 	}

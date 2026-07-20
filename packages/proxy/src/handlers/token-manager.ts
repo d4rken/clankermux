@@ -8,7 +8,11 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getProvider, type TokenRefreshResult } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type {
+	Account,
+	CodexRateLimitResetCreditConsumeRequest,
+	CodexRateLimitResetCreditConsumeResult,
+} from "@clankermux/types";
 import { TOKEN_REFRESH_BACKOFF_MS, TOKEN_SAFETY_WINDOW_MS } from "../constants";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {
@@ -420,6 +424,17 @@ export interface CodexUsageRefreshOutcome {
 	message: string;
 }
 
+export type CodexResetCreditConsumeDispatchOutcome =
+	| {
+			status: "completed";
+			accountName: string;
+			result: CodexRateLimitResetCreditConsumeResult;
+			resetMetadataRefreshed: boolean;
+			availableResetCount: number | null;
+			localRateLimitStateCleared: boolean;
+	  }
+	| { status: "failed"; message: string };
+
 // Global registry for codex on-demand usage refreshers (one per server)
 const codexUsageRefreshers: Map<
 	string,
@@ -441,6 +456,25 @@ const codexResetCreditsRefreshers: Map<
 const codexResetCreditsInflight = new Map<
 	string,
 	Promise<CodexUsageRefreshOutcome>
+>();
+
+// Reset consumption is a state-changing operation. The registry dispatches to
+// one server at a time and reuses the caller's idempotency key if it must fail
+// over to another server after an ambiguous transport failure.
+const codexResetCreditConsumers = new Map<
+	string,
+	(
+		accountId: string,
+		request: CodexRateLimitResetCreditConsumeRequest,
+	) => Promise<CodexResetCreditConsumeDispatchOutcome>
+>();
+interface CodexResetCreditConsumeInflight {
+	idempotencyKey: string;
+	promise: Promise<CodexResetCreditConsumeDispatchOutcome>;
+}
+const codexResetCreditConsumeInflight = new Map<
+	string,
+	CodexResetCreditConsumeInflight
 >();
 
 /**
@@ -509,6 +543,93 @@ export function registerCodexResetCreditsRefresher(
 
 export function unregisterCodexResetCreditsRefresher(serverId: string): void {
 	codexResetCreditsRefreshers.delete(serverId);
+}
+
+export function registerCodexResetCreditConsumer(
+	serverId: string,
+	consumer: (
+		accountId: string,
+		request: CodexRateLimitResetCreditConsumeRequest,
+	) => Promise<CodexResetCreditConsumeDispatchOutcome>,
+): void {
+	codexResetCreditConsumers.set(serverId, consumer);
+}
+
+export function unregisterCodexResetCreditConsumer(serverId: string): void {
+	codexResetCreditConsumers.delete(serverId);
+}
+
+/**
+ * Consume one earned reset through exactly one registered proxy server.
+ * Concurrent retries of the same account/idempotency key share one attempt.
+ */
+export async function consumeCodexResetCreditForAccount(
+	accountId: string,
+	request: CodexRateLimitResetCreditConsumeRequest,
+): Promise<CodexResetCreditConsumeDispatchOutcome> {
+	const existing = codexResetCreditConsumeInflight.get(accountId);
+	if (existing) {
+		if (existing.idempotencyKey === request.idempotencyKey) {
+			return existing.promise;
+		}
+		return {
+			status: "failed",
+			message:
+				"Another reset-credit consume attempt is already in progress for this account; refresh metadata before retrying.",
+		};
+	}
+
+	const promise =
+		(async (): Promise<CodexResetCreditConsumeDispatchOutcome> => {
+			if (codexResetCreditConsumers.size === 0) {
+				return {
+					status: "failed",
+					message:
+						"No proxy server is registered to consume Codex reset credits.",
+				};
+			}
+
+			let lastFailure: CodexResetCreditConsumeDispatchOutcome | null = null;
+			for (const [serverId, consumer] of codexResetCreditConsumers) {
+				try {
+					const outcome = await consumer(accountId, request);
+					if (outcome.status === "completed") {
+						log.info(
+							`Consumed Codex reset credit for account ${accountId} via server ${serverId} (outcome: ${outcome.result.outcome})`,
+						);
+						return outcome;
+					}
+					lastFailure = outcome;
+				} catch (error) {
+					log.error(
+						`Codex reset-credit consume via server ${serverId} threw for account ${accountId}:`,
+						error,
+					);
+					lastFailure = {
+						status: "failed",
+						message: error instanceof Error ? error.message : String(error),
+					};
+				}
+			}
+			return (
+				lastFailure ?? {
+					status: "failed",
+					message: "Codex reset-credit consume failed for unknown reasons.",
+				}
+			);
+		})();
+
+	const entry: CodexResetCreditConsumeInflight = {
+		idempotencyKey: request.idempotencyKey,
+		promise,
+	};
+	codexResetCreditConsumeInflight.set(accountId, entry);
+	void promise.finally(() => {
+		if (codexResetCreditConsumeInflight.get(accountId) === entry) {
+			codexResetCreditConsumeInflight.delete(accountId);
+		}
+	});
+	return promise;
 }
 
 /**

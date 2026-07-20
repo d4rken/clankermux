@@ -287,6 +287,40 @@ export interface AccountResponse {
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
 }
 
+/**
+ * One logical attempt to consume an earned Codex rate-limit reset credit.
+ * Callers must reuse `idempotencyKey` when retrying the same attempt.
+ * This wraps an internal ChatGPT/Codex contract, not a public developer API.
+ */
+export interface CodexRateLimitResetCreditConsumeRequest {
+	idempotencyKey: string;
+	/** When omitted, OpenAI selects the next available reset credit. */
+	creditId?: string | null;
+}
+
+export type CodexRateLimitResetCreditConsumeOutcome =
+	| "reset"
+	| "nothingToReset"
+	| "noCredit"
+	| "alreadyRedeemed";
+
+/** Normalized response from OpenAI's reset-credit consume transport. */
+export interface CodexRateLimitResetCreditConsumeResult {
+	outcome: CodexRateLimitResetCreditConsumeOutcome;
+	windowsReset: number;
+}
+
+/** Response returned by POST /api/accounts/:id/rate-limit-reset-credits/consume. */
+export interface CodexRateLimitResetCreditConsumeResponse
+	extends CodexRateLimitResetCreditConsumeResult {
+	/** True for `reset` and the idempotent-success `alreadyRedeemed` outcome. */
+	success: boolean;
+	message: string;
+	resetMetadataRefreshed: boolean;
+	availableResetCount: number | null;
+	localRateLimitStateCleared: boolean;
+}
+
 // UI display type - used in CLI and web dashboard
 export interface AccountDisplay {
 	id: string;

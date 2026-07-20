@@ -2,11 +2,17 @@ import { Logger } from "@clankermux/logger";
 import {
 	CODEX_DEFAULT_ENDPOINT,
 	codexRateLimitResetCreditsCache,
+	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
 	getProvider,
 	sendCodexNativePing,
+	usageCache,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type {
+	Account,
+	CodexRateLimitResetCreditConsumeRequest,
+	CodexRateLimitResetCreditConsumeResult,
+} from "@clankermux/types";
 import {
 	applyCodexObservation,
 	type CodexObservationResult,
@@ -16,6 +22,7 @@ import {
 } from "./handlers/codex-observation";
 import type { ProxyContext } from "./handlers/proxy-types";
 import {
+	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	getValidAccessToken,
 } from "./handlers/token-manager";
@@ -91,6 +98,7 @@ export interface CodexSpendCoordinatorDeps {
 	applyCodexObservation?: typeof applyCodexObservation;
 	sendCodexNativePing?: typeof sendCodexNativePing;
 	fetchCodexRateLimitResetCredits?: typeof fetchCodexRateLimitResetCredits;
+	consumeCodexRateLimitResetCredit?: typeof consumeCodexRateLimitResetCredit;
 	getProvider?: typeof getProvider;
 }
 
@@ -113,6 +121,7 @@ export class CodexSpendCoordinator {
 	private readonly applyCodexObservation: typeof applyCodexObservation;
 	private readonly sendCodexNativePing: typeof sendCodexNativePing;
 	private readonly fetchCodexRateLimitResetCredits: typeof fetchCodexRateLimitResetCredits;
+	private readonly consumeCodexRateLimitResetCredit: typeof consumeCodexRateLimitResetCredit;
 	private readonly getProvider: typeof getProvider;
 	private readonly resetCreditsInflight = new Map<
 		string,
@@ -127,7 +136,109 @@ export class CodexSpendCoordinator {
 		this.sendCodexNativePing = deps.sendCodexNativePing ?? sendCodexNativePing;
 		this.fetchCodexRateLimitResetCredits =
 			deps.fetchCodexRateLimitResetCredits ?? fetchCodexRateLimitResetCredits;
+		this.consumeCodexRateLimitResetCredit =
+			deps.consumeCodexRateLimitResetCredit ?? consumeCodexRateLimitResetCredit;
 		this.getProvider = deps.getProvider ?? getProvider;
+	}
+
+	/**
+	 * Consume one earned reset credit for a Codex account. This is the only
+	 * coordinator method that performs the state-changing reset action.
+	 */
+	async consumeResetCredit(
+		accountId: string,
+		request: CodexRateLimitResetCreditConsumeRequest,
+	): Promise<CodexResetCreditConsumeDispatchOutcome> {
+		const account = await this.ctx.dbOps.getAccount(accountId);
+		if (!account) {
+			return { status: "failed", message: `Account ${accountId} not found` };
+		}
+		if (account.provider !== "codex") {
+			return {
+				status: "failed",
+				message: `Account '${account.name}' is not a Codex account`,
+			};
+		}
+		if (!account.access_token && !account.refresh_token) {
+			return {
+				status: "failed",
+				message: `Account '${account.name}' has no tokens — please re-authenticate`,
+			};
+		}
+
+		let accessToken: string;
+		try {
+			accessToken = await this.getValidAccessToken(account, this.ctx);
+		} catch (error) {
+			return {
+				status: "failed",
+				message: `Could not refresh access token for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+
+		// Do not let a metadata read begun before the mutation finish afterward and
+		// overwrite the post-consume cache with a stale pre-consume snapshot.
+		const metadataRead = this.resetCreditsInflight.get(accountId);
+		if (metadataRead) {
+			try {
+				await metadataRead;
+			} catch {
+				// The consume attempt remains valid even if the preceding read failed.
+			}
+		}
+
+		let result: CodexRateLimitResetCreditConsumeResult;
+		try {
+			result = await this.consumeCodexRateLimitResetCredit(
+				accessToken,
+				request,
+			);
+		} catch (error) {
+			return {
+				status: "failed",
+				message: `Failed to consume a reset credit for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+
+		let localRateLimitStateCleared = false;
+		if (result.outcome === "reset" || result.outcome === "alreadyRedeemed") {
+			try {
+				localRateLimitStateCleared =
+					await this.ctx.dbOps.forceResetAccountRateLimit(accountId);
+			} catch (error) {
+				log.error(
+					`Reset was consumed for '${account.name}', but local rate-limit state could not be cleared:`,
+					error,
+				);
+			}
+			usageCache.delete(accountId);
+		}
+
+		let resetMetadataRefreshed = false;
+		let availableResetCount: number | null = null;
+		try {
+			codexRateLimitResetCreditsCache.markAttempt(accountId);
+			const summary = await this.fetchCodexRateLimitResetCredits(accessToken);
+			if (summary) {
+				codexRateLimitResetCreditsCache.set(accountId, summary);
+				resetMetadataRefreshed = true;
+				availableResetCount = summary.availableCount;
+			}
+		} catch (error) {
+			log.warn(
+				`Reset-credit metadata refresh after consume failed for '${account.name}':`,
+				error,
+			);
+		}
+
+		return {
+			status: "completed",
+			accountName: account.name,
+			result,
+			resetMetadataRefreshed,
+			availableResetCount,
+			localRateLimitStateCleared,
+		};
 	}
 
 	/**
