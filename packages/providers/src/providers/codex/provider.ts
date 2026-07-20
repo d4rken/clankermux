@@ -18,6 +18,7 @@ import {
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
 
@@ -959,17 +960,18 @@ export class CodexProvider extends BaseProvider {
 		const inputTokenDetails = usageRecord?.input_tokens_details as
 			| Record<string, unknown>
 			| undefined;
-		const cachedTokens = inputTokenDetails?.cached_tokens;
+		// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
+		// additive semantics so the context-window gauge's input_tokens excludes
+		// cache reads instead of double-counting them.
+		const normalizedInput = normalizeCodexInputUsage(
+			inputTokens,
+			inputTokenDetails?.cached_tokens,
+		);
 
 		return {
 			current_usage: {
-				input_tokens: inputTokens,
-				cache_read_input_tokens:
-					typeof cachedTokens === "number" &&
-					Number.isFinite(cachedTokens) &&
-					cachedTokens >= 0
-						? cachedTokens
-						: 0,
+				input_tokens: normalizedInput.inputTokens,
+				cache_read_input_tokens: normalizedInput.cacheReadInputTokens,
 				cache_creation_input_tokens:
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					Number.isFinite(inputTokenDetails.cache_creation_input_tokens) &&
@@ -1846,12 +1848,13 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "response.incomplete":
 			case "response.completed": {
-				// Guard against a stray response.completed that arrives AFTER a
-				// terminal/error event (e.g. response.failed set upstreamError +
-				// hasSentTerminalEvents and wrote an `error` SSE). Emitting
-				// message_delta/message_stop here would produce an invalid SSE
-				// sequence (terminal events after an error), so bail out.
+				// Guard against a stray response.completed/response.incomplete that
+				// arrives AFTER a terminal/error event (e.g. response.failed set
+				// upstreamError + hasSentTerminalEvents and wrote an `error` SSE).
+				// Emitting message_delta/message_stop here would produce an invalid
+				// SSE sequence (terminal events after an error), so bail out.
 				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
 				const usage = resp?.usage as
@@ -1865,22 +1868,28 @@ export class CodexProvider extends BaseProvider {
 					  }
 					| undefined;
 
-				// Extract cache fields from input_tokens_details (Codex format)
+				// Extract cache fields from input_tokens_details (Codex format).
+				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
+				// additive semantics so input_tokens excludes cache reads instead of
+				// double-counting them (our estimateCostUSD charges input_tokens and
+				// cache_read_input_tokens additively).
 				const inputTokenDetails = usage?.input_tokens_details;
-				const cacheRead =
-					typeof inputTokenDetails?.cached_tokens === "number" &&
-					inputTokenDetails.cached_tokens >= 0
-						? inputTokenDetails.cached_tokens
-						: 0;
+				const normalizedInput = normalizeCodexInputUsage(
+					usage?.input_tokens,
+					inputTokenDetails?.cached_tokens,
+				);
 				const cacheCreation =
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					inputTokenDetails.cache_creation_input_tokens >= 0
 						? inputTokenDetails.cache_creation_input_tokens
 						: 0;
 
-				state.inputTokens = usage?.input_tokens || state.inputTokens;
+				state.inputTokens =
+					usage?.input_tokens !== undefined
+						? normalizedInput.inputTokens
+						: state.inputTokens;
 				state.outputTokens = usage?.output_tokens || state.outputTokens;
-				state.cacheReadInputTokens = cacheRead;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens = cacheCreation;
 				state.contextWindow = this.extractContextWindow(resp, usage);
 				// Close any lingering content block
@@ -1892,9 +1901,32 @@ export class CodexProvider extends BaseProvider {
 					state.hasSentContentBlockStart = false;
 				}
 
+				const incompleteDetails = resp?.incomplete_details as
+					| { reason?: string }
+					| undefined;
+				const isIncomplete =
+					eventName === "response.incomplete" || resp?.status === "incomplete";
+				// An incomplete response never resolves to a success stop_reason,
+				// even mid tool call: content_filter -> refusal (client discards the
+				// partial output); every other reason, including unknown future ones
+				// (e.g. max_output_tokens), -> max_tokens (generic truncation). This
+				// stops a content-filtered or truncated Codex turn from being
+				// reported as a successful end_turn.
+				const stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal" =
+					isIncomplete
+						? incompleteDetails?.reason === "content_filter"
+							? "refusal"
+							: "max_tokens"
+						: state.sawToolUse
+							? "tool_use"
+							: "end_turn";
+
 				const messageDelta: {
 					type: "message_delta";
-					delta: { stop_reason: "end_turn" | "tool_use"; stop_sequence: null };
+					delta: {
+						stop_reason: "end_turn" | "tool_use" | "max_tokens" | "refusal";
+						stop_sequence: null;
+					};
 					usage: {
 						input_tokens: number;
 						output_tokens: number;
@@ -1905,7 +1937,7 @@ export class CodexProvider extends BaseProvider {
 				} = {
 					type: "message_delta",
 					delta: {
-						stop_reason: state.sawToolUse ? "tool_use" : "end_turn",
+						stop_reason: stopReason,
 						stop_sequence: null,
 					},
 					usage: {

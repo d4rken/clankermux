@@ -4,7 +4,7 @@ import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
 import { CodexProvider } from "./provider";
-import { parseCodexUsageHeaders } from "./usage";
+import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
 const eventLine = (name: string, data: unknown) => [
@@ -893,8 +893,50 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).not.toContain('"context_window"');
 		expect(messageDeltaLine).toContain('"usage":{');
 		expect(messageDeltaLine).toContain('"output_tokens":3');
-		expect(messageDeltaLine).toContain('"input_tokens":12');
+		// Codex's input_tokens (12) is cache-inclusive; Anthropic's input_tokens
+		// is additive and excludes the 4 cached tokens, which are reported
+		// separately as cache_read_input_tokens.
+		expect(messageDeltaLine).toContain('"input_tokens":8');
 		expect(messageDeltaLine).toContain('"cache_read_input_tokens":4');
+	});
+
+	it("translates cached input usage additively so input_tokens excludes cache reads", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.3-codex" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.3-codex",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 20,
+						input_tokens_details: { cached_tokens: 30 },
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"')) as string;
+		const payload = JSON.parse(messageDeltaLine.slice("data: ".length));
+
+		expect(payload.usage.cache_read_input_tokens).toBe(30);
+		expect(payload.usage.input_tokens).toBe(70);
+		// The additive input_tokens plus the cache read must reconstruct the
+		// original cache-inclusive total Codex reported.
+		expect(
+			payload.usage.input_tokens + payload.usage.cache_read_input_tokens,
+		).toBe(100);
 	});
 
 	it("normalizes message_delta usage and delta defaults when missing", async () => {
@@ -2296,6 +2338,169 @@ describe("CodexProvider native Responses passthrough", () => {
 
 		expect(text).toContain("message_start");
 		expect(out.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+	});
+});
+
+describe("normalizeCodexInputUsage", () => {
+	it("subtracts cached tokens from the cache-inclusive total", () => {
+		const result = normalizeCodexInputUsage(100, 30);
+		expect(result.totalInputTokens).toBe(100);
+		expect(result.inputTokens).toBe(70);
+		expect(result.cacheReadInputTokens).toBe(30);
+	});
+
+	it("treats a missing or non-numeric total as zero", () => {
+		expect(normalizeCodexInputUsage(undefined, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(Number.NaN, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("treats a missing or negative cached count as zero", () => {
+		expect(normalizeCodexInputUsage(10, undefined)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(10, -5)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("clamps a cached count larger than the total instead of going negative", () => {
+		const result = normalizeCodexInputUsage(10, 25);
+		expect(result.inputTokens).toBe(0);
+		expect(result.cacheReadInputTokens).toBe(10);
+	});
+});
+
+describe("CodexProvider response.incomplete stop reasons", () => {
+	it("maps response.incomplete with a content_filter reason to a refusal stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "content_filter" },
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"refusal"');
+		expect(body).toContain("event: message_delta");
+		expect(body).toContain("event: message_stop");
+	});
+
+	it("maps response.incomplete with a non-content_filter reason to max_tokens", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 512 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("treats a response.completed event carrying status incomplete the same as response.incomplete", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "unknown_future_reason" },
+					usage: { input_tokens: 3, output_tokens: 10 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("never resolves an incomplete response with a pending tool call to a success stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 50 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).not.toContain('"stop_reason":"tool_use"');
+		expect(body).not.toContain('"stop_reason":"end_turn"');
+		expect(body).toContain('"stop_reason":"max_tokens"');
 	});
 });
 

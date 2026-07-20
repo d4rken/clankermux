@@ -12,9 +12,10 @@ export {
 	CODEX_VERSION,
 	CodexProvider,
 } from "./provider";
-export type { CodexCreditsInfo } from "./usage";
+export type { CodexCreditsInfo, NormalizedCodexInputUsage } from "./usage";
 export {
 	isCodexOnCredits,
+	normalizeCodexInputUsage,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 } from "./usage";
