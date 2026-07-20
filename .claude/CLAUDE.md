@@ -96,8 +96,16 @@ Always run: `bun run lint && bun run typecheck && bun run format`
 **ClankerMux is not published** — build-from-source + systemd only. There is no npm publish / release lane (the `release*.yml` and `docker-publish.yml` workflows were removed). Do not run `bun publish`.
 
 ## Version Updates
-**NEVER bump the version manually.**
-`CLAUDE_CLI_VERSION` in `packages/core/src/version.ts` tracks the Claude Code CLI version (auto-updated by pre-push hook). The build injects the app version via the `__CLANKERMUX_VERSION__` define (legacy `BETTER_CCFLARE_VERSION` env still honored at runtime).
+There are **two independent version values** — don't confuse them:
+
+- **`CLAUDE_CLI_VERSION`** in `packages/core/src/version.ts` — the Claude Code CLI version echoed in upstream user-agent headers. **NEVER bump this manually**; the pre-push hook auto-updates it to track the real CLI.
+- **The app version** — the `"version"` field in the **root `package.json`**. This is the single source of truth (the dashboard badge and startup log both read it). ClankerMux uses **CalVer `YYYY.M.N`** (e.g. `2026.7.0`), deliberately diverged from upstream's `3.5.x` lineage so the two can never be numerically compared.
+
+**Bump the app version when you land a notable change into `main`** (a fix, feature, or anything user-visible — not for pure docs/comment tweaks):
+- Same month, another release → bump the third segment: `2026.7.0` → `2026.7.1`.
+- First release of a new month → roll the month and reset the counter: `2026.8.0`.
+
+The version string is **purely a human-readable label** — nothing parses it as semver (the dashboard's "is my deploy current?" check is commit-SHA based via `/api/version/check`). The `__CLANKERMUX_VERSION__` build define referenced in `version.ts` is **not currently injected** anywhere; the app version resolves from root `package.json` at runtime (legacy `BETTER_CCFLARE_VERSION` env still honored if set).
 
 ## Commands
 
