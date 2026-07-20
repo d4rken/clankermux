@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { AccountResponse } from "@clankermux/types";
 import {
+	computeFamilyWeeklyUsage,
 	computePoolUsage,
+	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	isAlibabaShape,
 	isAnthropicStyleShape,
 	isZaiShape,
@@ -799,5 +801,206 @@ describe("computePoolUsage", () => {
 		]);
 		expect(sevenDay.earliestResetMs).toBe(NOW + 1_000_000);
 		expect(sevenDay.earliestResetAccountName).toBe("five-hour-exhausted");
+	});
+});
+
+describe("computeFamilyWeeklyUsage", () => {
+	const FUTURE_RESET = NOW + 3 * 86_400_000;
+
+	function scopedEntry(
+		displayName: string,
+		percent: number,
+		resetMs: number = FUTURE_RESET,
+	) {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: resetMs == null ? null : new Date(resetMs).toISOString(),
+			scope: {
+				model: {
+					id: displayName.toLowerCase().replace(/\s+/g, "-"),
+					display_name: displayName,
+				},
+			},
+			is_active: true,
+		};
+	}
+
+	function mkScopedAccount(
+		name: string,
+		entries: ReturnType<typeof scopedEntry>[],
+		partial: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return mkAccount({
+			name,
+			provider: "anthropic",
+			usageData: { limits: entries } as never,
+			...partial,
+		});
+	}
+
+	it("returns [] when no account has weekly_scoped windows", () => {
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "flat",
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 10, resets_at: null },
+					seven_day: { utilization: 20, resets_at: null },
+				} as never,
+			}),
+		];
+		expect(computeFamilyWeeklyUsage(accounts, NOW)).toEqual([]);
+	});
+
+	it("single account + single family → one entry, not elevated", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("acct-a", [scopedEntry("Fable", 45)]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result).toHaveLength(1);
+		expect(result[0].family).toBe("fable");
+		expect(result[0].label).toBe("Fable");
+		expect(result[0].worstPct).toBe(45);
+		expect(result[0].worstAccountName).toBe("acct-a");
+		expect(result[0].earliestResetMs).toBe(FUTURE_RESET);
+		expect(result[0].elevated).toBe(false);
+		expect(result[0].accounts).toHaveLength(1);
+		expect(result[0].accounts[0]).toEqual({
+			name: "acct-a",
+			pct: 45,
+			resetMs: FUTURE_RESET,
+		});
+	});
+
+	it("two accounts same family → worst pct + accounts sorted desc", () => {
+		const earlyReset = NOW + 1 * 86_400_000;
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("low", [scopedEntry("Fable", 30, earlyReset)]),
+			mkScopedAccount("high", [scopedEntry("Fable", 92)]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result).toHaveLength(1);
+		expect(result[0].family).toBe("fable");
+		expect(result[0].worstPct).toBe(92);
+		expect(result[0].worstAccountName).toBe("high");
+		expect(result[0].earliestResetMs).toBe(earlyReset);
+		expect(result[0].accounts.map((a) => a.pct)).toEqual([92, 30]);
+		expect(result[0].accounts.map((a) => a.name)).toEqual(["high", "low"]);
+	});
+
+	it("two accounts different families → two entries sorted desc by worstPct", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("fab", [scopedEntry("Fable", 40)]),
+			mkScopedAccount("op", [scopedEntry("Claude Opus 4.8", 88)]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result).toHaveLength(2);
+		expect(result[0].family).toBe("opus");
+		expect(result[0].worstPct).toBe(88);
+		expect(result[1].family).toBe("fable");
+		expect(result[1].worstPct).toBe(40);
+	});
+
+	it("elevated boundary: 80 true, 79 false, 100 true", () => {
+		const at80 = computeFamilyWeeklyUsage(
+			[mkScopedAccount("a", [scopedEntry("Fable", 80)])],
+			NOW,
+		);
+		expect(at80[0].elevated).toBe(true);
+		expect(FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT).toBe(80);
+
+		const at79 = computeFamilyWeeklyUsage(
+			[mkScopedAccount("a", [scopedEntry("Fable", 79)])],
+			NOW,
+		);
+		expect(at79[0].elevated).toBe(false);
+
+		const at100 = computeFamilyWeeklyUsage(
+			[mkScopedAccount("a", [scopedEntry("Fable", 100)])],
+			NOW,
+		);
+		expect(at100[0].elevated).toBe(true);
+	});
+
+	it("excludes paused and rate-limited accounts", () => {
+		const paused = computeFamilyWeeklyUsage(
+			[
+				mkScopedAccount("paused", [scopedEntry("Fable", 99)], {
+					paused: true,
+				}),
+			],
+			NOW,
+		);
+		expect(paused).toEqual([]);
+
+		const rl = computeFamilyWeeklyUsage(
+			[
+				mkScopedAccount("rl", [scopedEntry("Fable", 99)], {
+					rateLimitedUntil: NOW + 60_000,
+				}),
+			],
+			NOW,
+		);
+		expect(rl).toEqual([]);
+	});
+
+	it("surfaces a family limit even when the account-wide weekly window is healthy", () => {
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "mixed",
+				provider: "anthropic",
+				usageData: {
+					limits: [
+						{
+							kind: "weekly_all",
+							group: "weekly",
+							percent: 20,
+							resets_at: new Date(FUTURE_RESET).toISOString(),
+							scope: null,
+							is_active: true,
+						},
+						scopedEntry("Fable", 100),
+					],
+				} as never,
+			}),
+		];
+
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		// Account-wide weekly stays healthy at 20% (family limit does not fold in).
+		expect(seven.average).toBe(20);
+		expect(seven.familyWeekly).toHaveLength(1);
+		expect(seven.familyWeekly[0].family).toBe("fable");
+		expect(seven.familyWeekly[0].worstPct).toBe(100);
+		expect(seven.familyWeekly[0].elevated).toBe(true);
+	});
+
+	it("excludes weekly_scoped entries with a PAST resets_at (normalizer drops them)", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("stale", [
+				scopedEntry("Fable", 99, NOW - 1 * 86_400_000),
+			]),
+		];
+		expect(computeFamilyWeeklyUsage(accounts, NOW)).toEqual([]);
+	});
+
+	it("computePoolUsage familyWeekly is [] for five_hour even when seven_day is non-empty", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("a", [scopedEntry("Fable", 60)]),
+		];
+		const five = computePoolUsage(accounts, "five_hour", NOW);
+		expect(five.familyWeekly).toEqual([]);
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		expect(seven.familyWeekly.length).toBeGreaterThan(0);
+	});
+
+	it("computePoolUsage seven_day familyWeekly deep-equals computeFamilyWeeklyUsage", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("a", [scopedEntry("Fable", 60)]),
+			mkScopedAccount("b", [scopedEntry("Claude Opus 4.8", 91)]),
+		];
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		expect(seven.familyWeekly).toEqual(computeFamilyWeeklyUsage(accounts, NOW));
 	});
 });

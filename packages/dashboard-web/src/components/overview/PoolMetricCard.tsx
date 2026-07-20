@@ -2,6 +2,7 @@ import { formatPercentage } from "@clankermux/ui-common";
 import { Info } from "lucide-react";
 import type {
 	ExcludedReason,
+	FamilyWeeklyUsage,
 	PoolUsageResult,
 	PoolWindow,
 } from "../../lib/pool-usage";
@@ -119,6 +120,25 @@ function atRiskBadge(
 	};
 }
 
+export function familyWeeklyBadge(familyWeekly: FamilyWeeklyUsage[]): {
+	label: string | null;
+	colorClass: string | null;
+} {
+	const elevated = familyWeekly.filter((f) => f.elevated);
+	if (elevated.length === 0) return { label: null, colorClass: null };
+	const anyExhausted = elevated.some((f) => f.worstPct >= 100);
+	const colorClass = anyExhausted ? "text-destructive" : "text-warning";
+	if (elevated.length === 1) {
+		const f = elevated[0];
+		const label =
+			f.worstPct >= 100
+				? `${f.label} weekly limit exhausted`
+				: `${f.label} weekly limit at ${f.worstPct.toFixed(0)}%`;
+		return { label, colorClass };
+	}
+	return { label: `${elevated.length} model limits elevated`, colorClass };
+}
+
 function PoolDetailSection({
 	result,
 	window,
@@ -135,6 +155,7 @@ function PoolDetailSection({
 		earliestResetMs,
 		earliestResetAccountName,
 		atRisk,
+		familyWeekly,
 	} = result;
 
 	const sortedContributing = contributing.slice().sort((a, b) => b.pct - a.pct);
@@ -178,6 +199,61 @@ function PoolDetailSection({
 									{c.name}
 								</span>
 								<span className="tabular-nums">{c.pct.toFixed(0)}%</span>
+							</li>
+						))}
+					</ul>
+				</div>
+			)}
+			{familyWeekly.length > 0 && (
+				<div>
+					<div className="font-medium mb-1">
+						Model limits ({familyWeekly.length})
+					</div>
+					<div className="text-muted-foreground mb-1">
+						Per-model weekly quota — can throttle one model while the pool looks
+						healthy.
+					</div>
+					<ul className="space-y-0.5">
+						{familyWeekly.map((f) => (
+							<li key={f.family}>
+								<div className="flex items-center justify-between gap-2">
+									<span className="truncate" title={f.label}>
+										{f.label}
+									</span>
+									<span
+										className={cn(
+											"tabular-nums",
+											f.worstPct >= 100
+												? "text-destructive"
+												: f.elevated
+													? "text-warning"
+													: undefined,
+										)}
+									>
+										{f.worstPct.toFixed(0)}%
+									</span>
+								</div>
+								<div className="text-muted-foreground">
+									{f.accounts.length === 1 && `${f.worstAccountName} · `}
+									resets {nextQuotaTimeLabel(f.earliestResetMs, "seven_day")}
+								</div>
+								{f.accounts.length > 1 && (
+									<ul className="ml-2 space-y-0.5">
+										{f.accounts.map((a) => (
+											<li
+												key={a.name}
+												className="flex items-center justify-between gap-2"
+											>
+												<span className="truncate" title={a.name}>
+													{a.name}
+												</span>
+												<span className="tabular-nums">
+													{a.pct.toFixed(0)}%
+												</span>
+											</li>
+										))}
+									</ul>
+								)}
 							</li>
 						))}
 					</ul>
@@ -296,6 +372,7 @@ export function PoolMetricCard({
 		excluded,
 		earliestResetMs,
 		atRisk,
+		familyWeekly,
 	} = result;
 
 	const eligibleTotal =
@@ -306,6 +383,8 @@ export function PoolMetricCard({
 		willRunOutCount,
 		capacityCount,
 	);
+	const { label: familyWeeklyText, colorClass: familyWeeklyColor } =
+		familyWeeklyBadge(familyWeekly);
 	const showChip = eligibleTotal > 0;
 	const colorClass = headlineColor(average);
 	const headline = average != null ? formatPercentage(average, 0) : "—";
@@ -364,6 +443,11 @@ export function PoolMetricCard({
 					{willRunOutText && (
 						<p className={cn("text-xs truncate", willRunOutColor)}>
 							{willRunOutText}
+						</p>
+					)}
+					{familyWeeklyText && (
+						<p className={cn("text-xs truncate", familyWeeklyColor)}>
+							{familyWeeklyText}
 						</p>
 					)}
 				</div>
