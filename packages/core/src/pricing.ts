@@ -286,7 +286,7 @@ class PriceCatalogue {
 		try {
 			await fs.mkdir(this.getCacheDir(), { recursive: true });
 		} catch (error) {
-			this.logger?.warn("Failed to create cache directory: %s", error);
+			this.logger?.warn("Failed to create cache directory", error);
 		}
 	}
 
@@ -309,22 +309,43 @@ class PriceCatalogue {
 			}
 		}
 
-		// Then add remaining providers from remote data, filtering out problematic ones
+		// Then add remaining providers from remote data, filtering out problematic ones.
+		// Collect filtered names per reason so we can log one summary line each instead
+		// of thousands of per-provider DEBUG lines on every pricing load.
+		const filteredByPattern: string[] = [];
+		const filteredByZeroCost: string[] = [];
 		for (const [providerName, providerData] of Object.entries(remote)) {
-			if (
-				!merged[providerName] &&
-				!this.shouldFilterProvider(providerName, providerData)
-			) {
+			if (merged[providerName]) {
+				continue;
+			}
+			const filterReason = this.getProviderFilterReason(
+				providerName,
+				providerData,
+			);
+			if (filterReason === "pattern") {
+				filteredByPattern.push(providerName);
+			} else if (filterReason === "zero-cost") {
+				filteredByZeroCost.push(providerName);
+			} else {
 				merged[providerName] = providerData;
 			}
+		}
+		if (filteredByPattern.length > 0) {
+			this.logger?.debug(
+				`Filtered out ${filteredByPattern.length} providers due to problematic name patterns: ${filteredByPattern.join(", ")}`,
+			);
+		}
+		if (filteredByZeroCost.length > 0) {
+			this.logger?.debug(
+				`Filtered out ${filteredByZeroCost.length} providers because all models have zero cost: ${filteredByZeroCost.join(", ")}`,
+			);
 		}
 
 		// For each provider in bundled pricing, ensure it exists in merged data
 		for (const [providerName, providerData] of Object.entries(bundled)) {
 			if (!merged[providerName]) {
 				this.logger?.warn(
-					"Provider %s not found in remote pricing, using bundled data",
-					providerName,
+					`Provider "${providerName}" not found in remote pricing, using bundled data`,
 				);
 				merged[providerName] = providerData;
 			} else if (providerData.models) {
@@ -346,9 +367,7 @@ class PriceCatalogue {
 
 				if (addedModels > 0) {
 					this.logger?.debug(
-						"Added %d missing models for provider %s from bundled pricing",
-						addedModels,
-						providerName,
+						`Added ${addedModels} missing models for provider "${providerName}" from bundled pricing`,
 					);
 				}
 			}
@@ -358,12 +377,15 @@ class PriceCatalogue {
 	}
 
 	/**
-	 * Determine if a provider should be filtered out (e.g., zero-cost duplicates)
+	 * Determine whether a provider should be filtered out (e.g. zero-cost
+	 * duplicates or coding-plan variants). Returns the filter reason
+	 * ("pattern" | "zero-cost"), or null to keep the provider. Callers
+	 * aggregate the reasons into summary log lines.
 	 */
-	private shouldFilterProvider(
+	private getProviderFilterReason(
 		providerName: string,
 		providerData: { models?: Record<string, unknown> },
-	): boolean {
+	): "pattern" | "zero-cost" | null {
 		// Filter out providers with names that suggest they're coding plans or special variants
 		const problematicPatterns = [
 			/-coding-plan$/,
@@ -374,11 +396,7 @@ class PriceCatalogue {
 		];
 
 		if (problematicPatterns.some((pattern) => pattern.test(providerName))) {
-			this.logger?.debug(
-				"Filtering out provider %s due to problematic name pattern",
-				providerName,
-			);
-			return true;
+			return "pattern";
 		}
 
 		// Filter out providers that have models with all zero costs
@@ -402,16 +420,12 @@ class PriceCatalogue {
 				});
 
 				if (allZeroCost) {
-					this.logger?.debug(
-						"Filtering out provider %s because all models have zero cost",
-						providerName,
-					);
-					return true;
+					return "zero-cost";
 				}
 			}
 		}
 
-		return false;
+		return null;
 	}
 
 	private async loadFromCache(): Promise<ApiResponse | null> {
@@ -436,7 +450,7 @@ class PriceCatalogue {
 			const cachePath = this.getCachePath();
 			await fs.writeFile(cachePath, JSON.stringify(data, null, 2));
 		} catch (error) {
-			this.logger?.warn("Failed to save pricing cache: %s", error);
+			this.logger?.warn("Failed to save pricing cache", error);
 		}
 	}
 
@@ -471,7 +485,7 @@ class PriceCatalogue {
 			await this.saveToCache(data);
 			return data;
 		} catch (error) {
-			this.logger?.warn("Failed to fetch pricing data: %s", error);
+			this.logger?.warn("Failed to fetch pricing data", error);
 			return null;
 		} finally {
 			clearTimeout(timer);
@@ -567,14 +581,11 @@ class PriceCatalogue {
 			this.warnedModels.add(modelId);
 			if (error) {
 				this.logger?.warn(
-					"Price for model %s not found - cost set to 0 (reason: %s)",
-					modelId,
-					error instanceof Error ? error.message : error,
+					`Price for model "${modelId}" not found - cost set to 0 (reason: ${error instanceof Error ? error.message : error})`,
 				);
 			} else {
 				this.logger?.warn(
-					"Price for model %s not found - cost set to 0",
-					modelId,
+					`Price for model "${modelId}" not found - cost set to 0`,
 				);
 			}
 		}
