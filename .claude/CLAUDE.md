@@ -105,7 +105,7 @@ Always run: `bun run lint && bun run typecheck && bun run format`
 - First run: `bun run build` (builds dashboard + DB workers)
 - Start: `bun start` (port 8080) or `bun start --serve --port 8081` (testing)
 - Startup: Takes ~15 seconds, wait before testing with curl
-- Production: runs on port 8080 (`PORT=8080` in the systemd unit). Test local changes on port 8081.
+- Production: the app listens on `127.0.0.1:8090` (systemd `backend-port.conf` drop-in) behind a Caddy front proxy on `:8080` — the client-facing port is still 8080 (see `deploy/caddy/README.md`). Test local changes on port 8081.
 
 ### Account Management
 Accounts are managed via the **web dashboard** (Accounts tab) or the **HTTP API** — there is no CLI:
