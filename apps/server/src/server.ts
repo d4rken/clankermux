@@ -1609,10 +1609,14 @@ Available endpoints:
 	};
 }
 
-// Max wall-clock time between SIGTERM and process exit. Long enough to let
-// most in-flight streaming responses complete; short enough that systemd's
-// default TimeoutStopSec (90s) doesn't have to escalate to SIGKILL.
-const SHUTDOWN_WATCHDOG_MS = 30_000;
+// Max wall-clock time between SIGTERM and process exit. Raised from 30s to
+// 85s: the Caddy front proxy (deploy/caddy/) now holds NEW connections during
+// the drain (re-dialing until the app is back), so a long drain no longer
+// extends the client-visible outage — it only lets long agentic streams on the
+// draining process run to completion. 85s stays under systemd's default
+// TimeoutStopSec (90s) so systemd never escalates to SIGKILL. Streams that
+// outlive the watchdog are still severed when it fires.
+const SHUTDOWN_WATCHDOG_MS = 85_000;
 
 // Deduplicates concurrent shutdown invocations (e.g. SIGINT arriving while
 // SIGTERM is still awaiting serverInstance.stop()). Without this, the second

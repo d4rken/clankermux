@@ -1,0 +1,62 @@
+# ClankerMux front proxy — /etc/caddy/Caddyfile
+#
+# Caddy owns the client-facing port :8080 and NEVER restarts alongside the app.
+# The ClankerMux app itself listens on 127.0.0.1:8090 (see
+# deploy/systemd/clankermux.service.d/backend-port.conf). During an app
+# restart, established SSE streams keep flowing through Caddy to the draining
+# process, while NEW connections are held by Caddy (lb_try_duration) and
+# re-dialed until the new process is up — clients never see ECONNREFUSED.
+#
+# Ops notes (see deploy/caddy/README.md):
+# - Reload config with `systemctl reload caddy` (graceful; stream_close_delay
+#   keeps in-flight streams alive). Restarting the caddy PROCESS severs every
+#   connection — only do that when the proxy is idle.
+# - Do NOT add active health checks (health_uri/health_interval). The
+#   dial-retry loop is what provides the restart hold; an actively
+#   health-checked-down backend would be marked unavailable and 502 new
+#   requests instead of holding them.
+
+{
+	# Plain HTTP on the LAN — no certificate automation, no HTTP->HTTPS
+	# redirects. (The site address below also carries an explicit http://
+	# prefix, since auto_https off alone doesn't force plain HTTP.)
+	auto_https off
+
+	# Deliberately NOT setting `grace_period`: its default is eternal, meaning
+	# Caddy never forcefully closes active connections on config reload/stop.
+	# Setting e.g. `grace_period 90s` would force-close long SSE streams 90s
+	# into a reload — defeating stream_close_delay below. We rely on the
+	# eternal default + stream_close_delay instead.
+}
+
+http://:8080 {
+	reverse_proxy 127.0.0.1:8090 {
+		# Keep retrying the backend dial for up to 100s per request before
+		# giving up with a 502. Covers the worst-case app restart: 85s drain
+		# (SHUTDOWN_WATCHDOG_MS in apps/server/src/server.ts) + a few seconds
+		# of boot + margin. Trade-off: if the app is genuinely down (crash
+		# loop, failed build), new clients hang for up to 100s before seeing
+		# the 502 instead of failing fast.
+		lb_try_duration 100s
+
+		# Wait between dial attempts while lb_try_duration is running.
+		lb_try_interval 250ms
+
+		# When the CADDY config is reloaded/unloaded, delay forcibly closing
+		# streaming requests (SSE/WebSockets) for up to 35 minutes so
+		# long-running agentic streams survive Caddy config changes. Has no
+		# effect on app restarts (those are handled by the drain + retry
+		# above); only matters when Caddy itself reloads its config.
+		stream_close_delay 35m
+
+		# No flush_interval needed: Caddy bypasses response buffering and
+		# flushes immediately for Content-Type: text/event-stream (and for
+		# responses with unknown Content-Length), so SSE streams in real time
+		# by default.
+		#
+		# No timeout tuning needed either: Caddy's read/write timeouts default
+		# to none, and the 5m idle timeout only applies BETWEEN keep-alive
+		# requests, not to an active stream — long streams are never cut by a
+		# default timeout.
+	}
+}
