@@ -1,6 +1,4 @@
-import { useState } from "react";
 import type { TimeRange } from "../../constants";
-import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import { CacheEffectivenessPanel } from "./CacheEffectivenessPanel";
 import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
 
@@ -20,27 +18,16 @@ import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
  * *effectiveness* summary. The live headline tiles in the first panel are
  * cumulative-since-restart and are NOT range-scoped — the description says so.
  */
-export function CacheKeepaliveSection() {
-	const [range, setRange] = useState<TimeRange>("7d");
-
+export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
 		<section className="space-y-6 border-t pt-6">
-			<div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-				<div>
-					<h2 className="text-lg font-semibold">Cache Keep-Alive</h2>
-					<p className="text-sm text-muted-foreground max-w-prose">
-						Live cache status, historical activity, and effectiveness. The
-						selected window applies to history and effectiveness; live counters
-						are cumulative since the last restart.
-					</p>
-				</div>
-				<div className="flex items-center gap-2 shrink-0">
-					<span className="text-xs text-muted-foreground">Window</span>
-					<TimeRangeSelector
-						value={range}
-						onChange={(value) => setRange(value as TimeRange)}
-					/>
-				</div>
+			<div>
+				<h2 className="text-lg font-semibold">Cache Keep-Alive</h2>
+				<p className="text-sm text-muted-foreground max-w-prose">
+					Live cache status, historical activity, and effectiveness. The
+					selected window applies to history and effectiveness; live counters
+					are cumulative since the last restart.
+				</p>
 			</div>
 			<CacheKeepalivePanel range={range} />
 			<CacheEffectivenessPanel range={range} />
