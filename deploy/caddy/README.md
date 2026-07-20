@@ -23,7 +23,15 @@ no `reusePort` / blue-green machinery needed.
 
 ## Applying (manual, sudo)
 
+> ⚠️ **Install Caddy from the official Caddy apt repository** (per
+> <https://caddyserver.com/docs/install#debian-ubuntu-raspbian>), not from the
+> distro's own repo. The Debian-repo build (observed with a v2.11.4 package)
+> rejects `stream_close_delay` as an unrecognized subdirective; the upstream
+> package accepts the full config. Validate before touching anything:
+> `caddy validate --config deploy/caddy/Caddyfile --adapter caddyfile`.
+
 ```bash
+# after adding the official Caddy apt repo per the link above:
 sudo apt install caddy
 sudo cp deploy/caddy/Caddyfile /etc/caddy/Caddyfile
 sudo cp deploy/systemd/clankermux.service.d/backend-port.conf /etc/systemd/system/clankermux.service.d/
