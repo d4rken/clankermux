@@ -69,6 +69,11 @@ export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100;
 // the cheapest currently-served model.
 export const CODEX_PING_MODEL = "gpt-5.4-mini";
 
+// Structured (non-text) tool_result blocks larger than this are replaced with a
+// size marker: replaying megabyte payloads (e.g. base64 documents) into every
+// subsequent turn bloats context and destroys prompt-cache reuse.
+const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
+
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
 		typeof value === "object" && value !== null
@@ -175,6 +180,12 @@ interface CodexRequest {
 	instructions?: string;
 	tools?: CodexTool[];
 	prompt_cache_key?: string;
+	tool_choice?:
+		| "auto"
+		| "required"
+		| "none"
+		| { type: "function"; name: string };
+	parallel_tool_calls?: boolean;
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -194,7 +205,14 @@ interface AnthropicToolUse {
 interface AnthropicToolResult {
 	type: "tool_result";
 	tool_use_id: string;
-	content: string | AnthropicTextContent[];
+	is_error?: boolean;
+	content:
+		| string
+		| Array<{
+				type: string;
+				text?: string;
+				[key: string]: unknown;
+		  }>;
 }
 
 type AnthropicContentBlock =
@@ -213,6 +231,12 @@ interface AnthropicTool {
 	input_schema?: Record<string, unknown>;
 }
 
+interface AnthropicToolChoice {
+	type: "auto" | "any" | "none" | "tool";
+	name?: string;
+	disable_parallel_tool_use?: boolean;
+}
+
 interface AnthropicRequest {
 	model: string;
 	max_tokens: number;
@@ -220,6 +244,7 @@ interface AnthropicRequest {
 	system?: string | { type: string; text: string }[];
 	stream?: boolean;
 	tools?: AnthropicTool[];
+	tool_choice?: AnthropicToolChoice;
 	reasoning?: { effort?: string };
 	/** Claude Code sends a JSON-encoded object with a session_id here. */
 	metadata?: { user_id?: string };
@@ -815,6 +840,86 @@ export class CodexProvider extends BaseProvider {
 		return skillCallIds.has(lastBlock.tool_use_id);
 	}
 
+	/**
+	 * Map an Anthropic `tool_choice` to the Responses API `tool_choice`.
+	 * `auto`→auto, `any`→required, `none`→none, `tool`→a forced function (validated
+	 * against the declared tools). Unknown types and named choices that reference a
+	 * tool the request did not declare throw ValidationError so the bad request is
+	 * surfaced to the client rather than silently dropped. `disable_parallel_tool_use`
+	 * is handled separately at the request-build site (it maps to
+	 * `parallel_tool_calls`, not to `tool_choice`).
+	 */
+	private convertToolChoice(
+		choice: AnthropicToolChoice | undefined,
+		tools: readonly CodexTool[],
+	): CodexRequest["tool_choice"] | undefined {
+		if (!choice) return undefined;
+		if (typeof choice !== "object") {
+			throw new ValidationError("tool_choice must be an object");
+		}
+		if (choice.type === "auto") return "auto";
+		if (choice.type === "any") return "required";
+		if (choice.type === "none") return "none";
+		if (choice.type === "tool") {
+			if (
+				typeof choice.name !== "string" ||
+				!tools.some((tool) => tool.name === choice.name)
+			) {
+				throw new ValidationError(
+					`tool_choice references unknown tool: ${choice.name}`,
+				);
+			}
+			return { type: "function", name: choice.name };
+		}
+		throw new ValidationError(
+			`tool_choice has unsupported type: ${String(
+				(choice as { type?: unknown }).type,
+			)}`,
+		);
+	}
+
+	/**
+	 * Serialize an Anthropic tool_result `content` into the single output string
+	 * the Codex `function_call_output` item requires. Degrades non-text blocks
+	 * safely: image blocks become a marker, other structured blocks are JSON'd
+	 * (with an 8 KiB cap replacing oversized payloads), and malformed input
+	 * (missing/null/non-array content, null blocks) yields empty output instead of
+	 * throwing — a throw here is swallowed by transformRequestBody, which then
+	 * forwards the UNtranslated Anthropic body upstream.
+	 */
+	private serializeToolResultContent(
+		content: AnthropicToolResult["content"],
+	): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		const parts: string[] = [];
+		for (const block of content) {
+			if (!block || typeof block !== "object") continue;
+			if (block.type === "text" && typeof block.text === "string") {
+				parts.push(block.text);
+				continue;
+			}
+			if (block.type === "image") {
+				parts.push("[image content not supported in Codex tool results]");
+				continue;
+			}
+			let serialized: string;
+			try {
+				serialized = JSON.stringify(block);
+			} catch {
+				continue;
+			}
+			if (serialized.length > CODEX_MAX_STRUCTURED_BLOCK_CHARS) {
+				parts.push(
+					`[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
+				);
+				continue;
+			}
+			parts.push(serialized);
+		}
+		return parts.join("\n");
+	}
+
 	private convertMessage(
 		msg: AnthropicMessage,
 	): (CodexMessage | CodexFunctionCallItem | CodexFunctionCallOutputItem)[] {
@@ -837,55 +942,49 @@ export class CodexProvider extends BaseProvider {
 			return items;
 		}
 
-		// Complex content array — may contain tool_use, tool_result, text
-		const textBlocks: CodexContentItem[] = [];
-		const functionCalls: CodexFunctionCallItem[] = [];
-		const functionCallOutputs: CodexFunctionCallOutputItem[] = [];
+		// Complex content array: may contain tool_use, tool_result, text.
+		// Preserve source order so Codex sees the same block chronology the client
+		// sent — outputs stay adjacent to their calls, and follow-up text stays
+		// after the results it refers to. Consecutive text blocks batch into one
+		// message wrapper; function_call* items are top-level.
+		let pendingText: CodexContentItem[] = [];
+		const flushText = () => {
+			if (pendingText.length === 0) return;
+			items.push({ role, content: pendingText } as CodexMessage);
+			pendingText = [];
+		};
 
 		for (const block of msg.content) {
+			if (!block || typeof block !== "object") continue;
 			if (block.type === "text") {
-				textBlocks.push({
+				pendingText.push({
 					type: textType,
 					text: block.text,
 				} as CodexContentItem);
 			} else if (block.type === "tool_use") {
-				functionCalls.push({
+				flushText();
+				items.push({
 					type: "function_call",
 					call_id: block.id,
 					name: block.name,
 					arguments: JSON.stringify(
 						this.sanitizeToolUseInput(block.name, block.input),
 					),
+					status: "completed",
 				});
 			} else if (block.type === "tool_result") {
-				const outputText =
-					typeof block.content === "string"
-						? block.content
-						: Array.isArray(block.content)
-							? block.content
-									.filter((b) => b.type === "text")
-									.map((b) => b.text)
-									.join("\n")
-							: "";
-				functionCallOutputs.push({
+				flushText();
+				const serialized = this.serializeToolResultContent(block.content);
+				items.push({
 					type: "function_call_output",
 					call_id: block.tool_use_id,
-					output: outputText,
+					output:
+						block.is_error === true ? `[tool error] ${serialized}` : serialized,
 					status: "completed",
 				});
 			}
 		}
-
-		// Text content goes in a message wrapper; function_call* are top-level items
-		if (textBlocks.length > 0) {
-			items.push({ role, content: textBlocks } as CodexMessage);
-		}
-		for (const fc of functionCalls) {
-			items.push({ ...fc, status: "completed" });
-		}
-		for (const fco of functionCallOutputs) {
-			items.push(fco);
-		}
+		flushText();
 
 		return items;
 	}
@@ -1182,6 +1281,27 @@ export class CodexProvider extends BaseProvider {
 		const promptCacheKey = this.derivePromptCacheKey(body, input, account);
 		if (promptCacheKey) {
 			codexRequest.prompt_cache_key = promptCacheKey;
+		}
+		// Honor an explicit Anthropic tool_choice; validate named choices even when
+		// no tools are declared (so a bad request is rejected, not silently sent).
+		const explicitToolChoice = this.convertToolChoice(
+			body.tool_choice,
+			tools ?? [],
+		);
+		if (explicitToolChoice) {
+			codexRequest.tool_choice = explicitToolChoice;
+		} else if (tools?.some((t) => t.name === "StructuredOutput")) {
+			// Claude Code schema agents provide a StructuredOutput tool but do not set
+			// Anthropic tool_choice. Native Claude reliably follows the hidden schema
+			// instruction; Codex models often end_turn with text instead. Force the
+			// function when this sentinel tool is present to preserve workflow semantics.
+			codexRequest.tool_choice = {
+				type: "function",
+				name: "StructuredOutput",
+			};
+		}
+		if (body.tool_choice?.disable_parallel_tool_use === true) {
+			codexRequest.parallel_tool_calls = false;
 		}
 		if (tools) {
 			codexRequest.tools = tools;

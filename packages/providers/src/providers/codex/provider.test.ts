@@ -2780,3 +2780,355 @@ describe("count_tokens synthetic response", () => {
 		expect(body.input_tokens).toBeGreaterThanOrEqual(1);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tranche 3: tool_choice honoring, StructuredOutput forcing, and tool_result
+// serialization fidelity (upstream 543bb543, 02f66d92, 2704e310, 02408f72,
+// 31aa0d73). Our translator previously (a) sent no tool_choice at all,
+// (b) dropped image/structured tool_result blocks and could throw on a null
+// block, and (c) grouped message blocks instead of preserving source order.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface T3CodexBody {
+	input: Array<Record<string, unknown>>;
+	tools?: Array<{ name: string }>;
+	tool_choice?: unknown;
+	parallel_tool_calls?: boolean;
+}
+
+async function t3transform(body: unknown): Promise<T3CodexBody> {
+	const provider = new CodexProvider();
+	const request = new Request("https://example.com/v1/messages", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	const out = await provider.transformRequestBody(request, undefined);
+	return (await out.json()) as T3CodexBody;
+}
+
+const t3outputs = (input: T3CodexBody["input"]) =>
+	input.filter((it) => it.type === "function_call_output");
+
+/** Minimal valid history: one Task call awaiting its result. */
+function t3taskTurn(
+	resultContent: unknown,
+	extra: Record<string, unknown> = {},
+): unknown {
+	return {
+		model: "claude-opus-4-8",
+		max_tokens: 10,
+		messages: [
+			{ role: "user", content: "run it" },
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "t1", name: "Task", input: {} }],
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "t1",
+						...(resultContent === "__omit__" ? {} : { content: resultContent }),
+						...extra,
+					},
+				],
+			},
+		],
+	};
+}
+
+describe("CodexProvider Tranche 3 — StructuredOutput forcing", () => {
+	it("forces StructuredOutput tool_choice when the schema tool is present", async () => {
+		const body = await t3transform({
+			model: "claude-haiku-4-5-20251001",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "return structured output" }],
+			tools: [
+				{
+					name: "StructuredOutput",
+					description: "Return the validated payload.",
+					input_schema: { type: "object" },
+				},
+			],
+		});
+		expect(body.tools?.map((t) => t.name)).toContain("StructuredOutput");
+		expect(body.tool_choice).toEqual({
+			type: "function",
+			name: "StructuredOutput",
+		});
+	});
+
+	it("does not force tool_choice for ordinary tool-enabled requests", async () => {
+		const body = await t3transform({
+			model: "claude-haiku-4-5-20251001",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "read a file" }],
+			tools: [{ name: "Read", description: "Read a file.", input_schema: {} }],
+		});
+		expect(body.tool_choice).toBeUndefined();
+	});
+
+	it("lets an explicit tool_choice override the StructuredOutput fallback", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "return text" }],
+			tools: [{ name: "StructuredOutput", input_schema: {} }],
+			tool_choice: { type: "none" },
+		});
+		expect(body.tool_choice).toBe("none");
+	});
+});
+
+describe("CodexProvider Tranche 3 — tool_choice mapping", () => {
+	it.each([
+		[{ type: "auto" }, "auto"],
+		[{ type: "any" }, "required"],
+		[{ type: "none" }, "none"],
+		[
+			{ type: "tool", name: "Read" },
+			{ type: "function", name: "Read" },
+		],
+	] as const)("maps Anthropic tool_choice %j to Codex", async (choice, expected) => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "read a file" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: choice,
+		});
+		expect(body.tool_choice).toEqual(expected);
+	});
+
+	it("maps disable_parallel_tool_use to parallel_tool_calls=false (auto)", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "auto", disable_parallel_tool_use: true },
+		});
+		expect(body.tool_choice).toBe("auto");
+		expect(body.parallel_tool_calls).toBe(false);
+	});
+
+	it("maps any + disable_parallel_tool_use to required + parallel_tool_calls=false", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "any", disable_parallel_tool_use: true },
+		});
+		expect(body.tool_choice).toBe("required");
+		expect(body.parallel_tool_calls).toBe(false);
+	});
+
+	it("leaves parallel_tool_calls unset when the flag is absent", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "auto" },
+		});
+		expect(body.parallel_tool_calls).toBeUndefined();
+	});
+
+	it("rejects a named tool_choice absent from tools", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tools: [{ name: "Read", input_schema: { type: "object" } }],
+				tool_choice: { type: "tool", name: "WebSearch" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			"tool_choice references unknown tool: WebSearch",
+		);
+	});
+
+	it("rejects a named tool_choice when no tools are present", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tool_choice: { type: "tool", name: "Read" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			/tool_choice/,
+		);
+	});
+
+	it("rejects an unsupported tool_choice variant instead of coercing it", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tools: [{ name: "Read", input_schema: { type: "object" } }],
+				tool_choice: { type: "bogus", name: "Read" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			/tool_choice/,
+		);
+	});
+});
+
+describe("CodexProvider Tranche 3 — tool_result serialization fidelity", () => {
+	it("renders image blocks as a bounded placeholder, not the base64 payload", async () => {
+		const body = await t3transform(
+			t3taskTurn([
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data: "AAAA" },
+				},
+			]),
+		);
+		const out = t3outputs(body.input)[0]?.output as string;
+		expect(out).toBe("[image content not supported in Codex tool results]");
+		expect(out).not.toContain("AAAA");
+	});
+
+	it("preserves small structured (non-text) blocks as JSON", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "tool_reference", tool_name: "TaskCreate" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe(
+			'{"type":"tool_reference","tool_name":"TaskCreate"}',
+		);
+	});
+
+	it("caps oversized structured blocks with an omission marker", async () => {
+		const bigData = "A".repeat(200_000);
+		const body = await t3transform(
+			t3taskTurn([
+				{
+					type: "document",
+					source: {
+						type: "base64",
+						media_type: "application/pdf",
+						data: bigData,
+					},
+				},
+			]),
+		);
+		const out = t3outputs(body.input)[0]?.output as string;
+		expect(out.length).toBeLessThan(10_000);
+		expect(out).not.toContain(bigData);
+		expect(out).toContain("omitted");
+	});
+
+	it("marks errored tool results with an explicit error prefix", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "text", text: "boom" }], { is_error: true }),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("[tool error] boom");
+	});
+
+	it("leaves successful tool results unmarked", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "text", text: "fine" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("fine");
+	});
+
+	it("degrades missing/null/non-array content to empty output instead of throwing", async () => {
+		for (const content of ["__omit__", null, { oops: true }]) {
+			const body = await t3transform(t3taskTurn(content));
+			expect(Array.isArray(body.input)).toBe(true);
+			expect(t3outputs(body.input)[0]?.output).toBe("");
+		}
+	});
+
+	it("skips null blocks inside a content array but keeps surviving text", async () => {
+		const body = await t3transform(
+			t3taskTurn([null, { type: "text", text: "ok" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("ok");
+	});
+});
+
+describe("CodexProvider Tranche 3 — source-order preservation", () => {
+	it("keeps a tool_result before the follow-up text in the same message", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "t1", name: "Task", input: {} }],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "t1",
+							content: [{ type: "text", text: "finding" }],
+						},
+						{ type: "text", text: "now summarize the finding" },
+					],
+				},
+			],
+		});
+		const outputIdx = body.input.findIndex(
+			(it) => it.type === "function_call_output",
+		);
+		const followupIdx = body.input.findIndex(
+			(it) =>
+				it.role === "user" &&
+				Array.isArray(it.content) &&
+				(it.content as Array<Record<string, unknown>>).some(
+					(c) => c.text === "now summarize the finding",
+				),
+		);
+		expect(outputIdx).toBeGreaterThanOrEqual(0);
+		expect(followupIdx).toBeGreaterThan(outputIdx);
+	});
+
+	it("keeps a tool_use before the follow-up text in an assistant message", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [
+				{ role: "user", content: "go" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "t1", name: "Bash", input: {} },
+						{ type: "text", text: "dispatched, waiting" },
+					],
+				},
+			],
+		});
+		const callIdx = body.input.findIndex((it) => it.type === "function_call");
+		const textIdx = body.input.findIndex(
+			(it) =>
+				it.role === "assistant" &&
+				Array.isArray(it.content) &&
+				(it.content as Array<Record<string, unknown>>).some(
+					(c) => c.text === "dispatched, waiting",
+				),
+		);
+		expect(callIdx).toBeGreaterThanOrEqual(0);
+		expect(textIdx).toBeGreaterThan(callIdx);
+	});
+});
