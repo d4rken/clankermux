@@ -362,6 +362,7 @@ export function createAccountsListHandler(
 			auto_pause_on_overage_enabled: 0 | 1;
 			peak_hours_pause_enabled: 0 | 1;
 			codex_auto_apply_reset_credits_enabled: 0 | 1;
+			codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			model_fallbacks: string | null;
@@ -400,6 +401,7 @@ export function createAccountsListHandler(
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
+					COALESCE(codex_auto_apply_reset_on_weekly_limit_enabled, 0) as codex_auto_apply_reset_on_weekly_limit_enabled,
 
 					model_mappings,
 					model_fallbacks,
@@ -880,6 +882,8 @@ export function createAccountsListHandler(
 					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
 					autoApplyResetCreditsEnabled:
 						account.codex_auto_apply_reset_credits_enabled === 1,
+					autoApplyResetOnWeeklyLimitEnabled:
+						account.codex_auto_apply_reset_on_weekly_limit_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					usageUtilization,
@@ -3732,8 +3736,10 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 /**
  * Consume one earned Codex rate-limit reset credit.
  *
- * This endpoint is intentionally not used by the dashboard. It is a typed
- * building block for explicit operator actions and future expiry automation.
+ * Both consume paths go through this endpoint's dispatch: the dashboard's
+ * "Apply now" button (in the reset-credit chip popover) calls it directly, and
+ * the auto-apply scheduler (`CodexResetCreditApplyScheduler`) uses the same
+ * underlying `consumeCodexResetCreditForAccount` registry dispatch.
  * The caller owns the idempotency key and must reuse it when retrying.
  */
 export function createAccountConsumeRateLimitResetCreditHandler(
@@ -3914,6 +3920,76 @@ export function createAccountAutoApplyResetCreditsHandler(
 	};
 }
 
+/**
+ * Create an account auto-apply-on-weekly-limit toggle handler (Codex accounts
+ * only). Opt-in: when enabled, a usage-limit reset credit is consumed
+ * automatically as soon as the account hits its weekly limit, instead of only
+ * when a credit is about to expire.
+ */
+export function createAccountAutoApplyResetOnWeeklyLimitHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate enabled parameter
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Only codex accounts earn usage reset credits
+			if (account.provider !== "codex") {
+				return errorResponse(
+					BadRequest(
+						"Auto-apply of reset credits is only available for Codex accounts",
+					),
+				);
+			}
+
+			// Update auto-apply-on-weekly-limit setting
+			await dbOps.setCodexAutoApplyResetOnWeeklyLimitEnabled(
+				accountId,
+				enabled === 1,
+			);
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Auto-apply of reset credits at the weekly limit ${action} for account '${account.name}'`,
+				autoApplyResetOnWeeklyLimitEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error(
+				"Account auto-apply-reset-on-weekly-limit toggle error:",
+				error,
+			);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle auto-apply-reset-on-weekly-limit"),
+			);
+		}
+	};
+}
+
 const RESET_CREDIT_EVENTS_DEFAULT_LIMIT = 20;
 const RESET_CREDIT_EVENTS_MAX_LIMIT = 100;
 
@@ -3966,6 +4042,10 @@ export function createAccountResetCreditEventsHandler(
 					id: row.id,
 					creditId: row.credit_id,
 					trigger: row.trigger === "auto" ? "auto" : "manual",
+					cause:
+						row.cause === "expiry" || row.cause === "weekly-limit"
+							? row.cause
+							: null,
 					attemptSeq: row.attempt_seq,
 					status: row.status as CodexResetCreditEventStatus,
 					windowsReset: row.windows_reset,

@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { deriveAccountStatus } from "../../lib/account-status";
 import {
 	AccountStatusChips,
+	ResetCreditApplyPanel,
 	ResetCreditEventsPanel,
 } from "./AccountStatusChips";
 
@@ -293,6 +294,42 @@ describe("AccountStatusChips — auto-apply tooltip line", () => {
 		expect(html).not.toContain("Auto-apply armed");
 	});
 
+	it("mentions the weekly-limit variant when only the weekly toggle is enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: false,
+				autoApplyResetOnWeeklyLimitEnabled: true,
+			}),
+		);
+		expect(html).toContain("Auto-apply armed (weekly limit)");
+		expect(html).not.toContain("expiry + weekly limit");
+		expect(html).not.toContain("Auto-apply is off");
+	});
+
+	it("mentions both causes when both toggles are enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: true,
+				autoApplyResetOnWeeklyLimitEnabled: true,
+			}),
+		);
+		expect(html).toContain("Auto-apply armed (expiry + weekly limit)");
+		expect(html).not.toContain("Auto-apply is off");
+	});
+
+	it("keeps the expiry-only wording when only the expiry toggle is enabled", () => {
+		const html = render(
+			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString(), {
+				autoApplyResetCreditsEnabled: true,
+				autoApplyResetOnWeeklyLimitEnabled: false,
+			}),
+		);
+		expect(html).toContain(
+			"Auto-apply armed — a reset will be consumed automatically shortly before expiry.",
+		);
+		expect(html).not.toContain("weekly limit");
+	});
+
 	it("omits the auto-apply line entirely when no credits are available", () => {
 		const html = render(
 			makeAccount({
@@ -317,6 +354,7 @@ describe("ResetCreditEventsPanel — popover history states", () => {
 			id: "ev1",
 			creditId: "credit-1",
 			trigger: "auto",
+			cause: null,
 			attemptSeq: 1,
 			status: "reset",
 			windowsReset: 2,
@@ -395,5 +433,135 @@ describe("ResetCreditEventsPanel — popover history states", () => {
 		expect(html).not.toContain(`${"x".repeat(102)}…`);
 		// …while the title attribute carries the full message.
 		expect(html).toContain(`title="${longMessage}"`);
+	});
+
+	it("labels auto events with their cause (expiry vs weekly limit)", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [
+						makeEvent({ id: "ev-exp", cause: "expiry" }),
+						makeEvent({ id: "ev-wk", cause: "weekly-limit" }),
+					],
+				}}
+			/>,
+		);
+		expect(html).toContain("auto · expiry");
+		expect(html).toContain("auto · weekly limit");
+	});
+
+	it("keeps manual rows unchanged (no cause suffix) and plain 'auto' when cause is unknown", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel
+				state={{
+					kind: "loaded",
+					events: [
+						makeEvent({ id: "ev-m", trigger: "manual", cause: null }),
+						makeEvent({ id: "ev-a", trigger: "auto", cause: null }),
+					],
+				}}
+			/>,
+		);
+		expect(html).toContain(">manual<");
+		expect(html).toContain(">auto<");
+		expect(html).not.toContain("manual ·");
+		expect(html).not.toContain("auto ·");
+	});
+});
+
+describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
+	const noop = () => {};
+	function renderPanel(
+		state: Parameters<typeof ResetCreditApplyPanel>[0]["state"],
+		availableCount = 1,
+	): string {
+		return renderToStaticMarkup(
+			<ResetCreditApplyPanel
+				accountName="acct"
+				availableCount={availableCount}
+				state={state}
+				onArm={noop}
+				onConfirm={noop}
+				onCancel={noop}
+				onRetry={noop}
+				onDismiss={noop}
+			/>,
+		);
+	}
+
+	it("shows the Apply now button when a reset credit is available", () => {
+		const html = renderPanel({ kind: "idle" }, 1);
+		expect(html).toContain("Apply now");
+	});
+
+	it("renders nothing at zero available credits", () => {
+		expect(renderPanel({ kind: "idle" }, 0)).toBe("");
+	});
+
+	it("renders the inline confirm step naming the account", () => {
+		const html = renderPanel({ kind: "confirm" });
+		expect(html).toContain("Consume 1 reset for");
+		expect(html).toContain("acct");
+		expect(html).toContain("Confirm");
+		expect(html).toContain("Cancel");
+		expect(html).not.toContain("Apply now");
+	});
+
+	it("renders an in-flight indicator while applying", () => {
+		const html = renderPanel({ kind: "applying" });
+		expect(html).toContain("Applying reset…");
+		expect(html).not.toContain("Confirm");
+	});
+
+	it.each([
+		["reset", "Reset applied — usage windows cleared"],
+		["nothingToReset", "Nothing to reset"],
+		["noCredit", "No credit available"],
+		["alreadyRedeemed", "Already redeemed"],
+	] as const)("renders the '%s' business outcome", (outcome, message) => {
+		const html = renderPanel({ kind: "done", outcome, message });
+		expect(html).toContain(message);
+		expect(html).not.toContain("Retry");
+	});
+
+	it("colors only the successful reset outcome green", () => {
+		expect(
+			renderPanel({
+				kind: "done",
+				outcome: "reset",
+				message: "Reset applied — usage windows cleared",
+			}),
+		).toContain("text-green-600");
+		expect(
+			renderPanel({
+				kind: "done",
+				outcome: "noCredit",
+				message: "No credit available",
+			}),
+		).not.toContain("text-green-600");
+	});
+
+	it("renders a dismiss control in the done state (path back to idle)", () => {
+		// Without this, the Apply-now button would disappear permanently after
+		// one use — "done" had no way back to idle.
+		const html = renderPanel({
+			kind: "done",
+			outcome: "reset",
+			message: "Reset applied — usage windows cleared",
+		});
+		expect(html).toContain("Done");
+		expect(html).not.toContain("Retry");
+	});
+
+	it("renders the error state with the message and a Retry affordance", () => {
+		const html = renderPanel({
+			kind: "error",
+			message: "upstream 500: transport failed",
+		});
+		expect(html).toContain("Failed to apply reset");
+		expect(html).toContain("upstream 500: transport failed");
+		expect(html).toContain("Retry");
+		expect(html).toContain("Cancel");
 	});
 });

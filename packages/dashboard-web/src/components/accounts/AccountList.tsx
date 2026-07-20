@@ -21,6 +21,7 @@ interface AccountListProps {
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
+	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
@@ -48,6 +49,7 @@ export function AccountList({
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
 	onAutoApplyResetCreditsToggle,
+	onAutoApplyResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
 	onModelMappingsChange,
 	onReauth,
@@ -82,6 +84,9 @@ export function AccountList({
 					onAutoPauseOnOverageToggle={onAutoPauseOnOverageToggle}
 					onPeakHoursPauseToggle={onPeakHoursPauseToggle}
 					onAutoApplyResetCreditsToggle={onAutoApplyResetCreditsToggle}
+					onAutoApplyResetOnWeeklyLimitToggle={
+						onAutoApplyResetOnWeeklyLimitToggle
+					}
 					onCustomEndpointChange={onCustomEndpointChange}
 					onModelMappingsChange={onModelMappingsChange}
 					onReauth={onReauth}

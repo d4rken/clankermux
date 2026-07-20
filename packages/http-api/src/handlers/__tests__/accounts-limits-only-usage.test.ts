@@ -37,6 +37,7 @@ interface AccountRow {
 	auto_pause_on_overage_enabled: 0 | 1;
 	peak_hours_pause_enabled: 0 | 1;
 	codex_auto_apply_reset_credits_enabled: 0 | 1;
+	codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
 	custom_endpoint: string | null;
 	model_mappings: string | null;
 	model_fallbacks: string | null;
@@ -74,6 +75,7 @@ function makeAccountRow(overrides: Partial<AccountRow>): AccountRow {
 		auto_pause_on_overage_enabled: 0,
 		peak_hours_pause_enabled: 0,
 		codex_auto_apply_reset_credits_enabled: 0,
+		codex_auto_apply_reset_on_weekly_limit_enabled: 0,
 		custom_endpoint: null,
 		model_mappings: null,
 		model_fallbacks: null,
@@ -239,6 +241,36 @@ describe("accounts list — Codex earned reset metadata", () => {
 		).toBe(true);
 		expect(
 			body.find((a) => a.id === "acc-plain")?.autoApplyResetCreditsEnabled,
+		).toBe(false);
+	});
+
+	it("surfaces the per-account auto-apply-on-weekly-limit toggle", async () => {
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id: ACCOUNT_ID,
+					name: "Codex resets",
+					provider: "codex",
+					codex_auto_apply_reset_on_weekly_limit_enabled: 1,
+				}),
+				makeAccountRow({ id: "acc-plain", name: "Plain" }),
+			]),
+			config,
+		);
+
+		const response = await handler();
+		const body = (await response.json()) as AccountResponse[];
+
+		expect(
+			body.find((a) => a.id === ACCOUNT_ID)?.autoApplyResetOnWeeklyLimitEnabled,
+		).toBe(true);
+		// Independent of the sibling expiring-credits toggle.
+		expect(
+			body.find((a) => a.id === ACCOUNT_ID)?.autoApplyResetCreditsEnabled,
+		).toBe(false);
+		expect(
+			body.find((a) => a.id === "acc-plain")
+				?.autoApplyResetOnWeeklyLimitEnabled,
 		).toBe(false);
 	});
 });

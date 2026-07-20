@@ -2,6 +2,7 @@ import { validateNumber } from "@clankermux/core";
 import {
 	createAccountAddHandler,
 	createAccountAutoApplyResetCreditsHandler,
+	createAccountAutoApplyResetOnWeeklyLimitHandler,
 	createAccountAutoFallbackHandler,
 	createAccountAutoPauseOnOverageHandler,
 	createAccountAutoRefreshHandler,
@@ -537,6 +538,20 @@ export class APIRouter {
 					createAccountAutoApplyResetCreditsHandler(this.context.dbOps);
 				return await this.wrapHandler((req) =>
 					autoApplyResetCreditsHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Per-account opt-in: auto-consume a Codex reset credit at the weekly limit
+			if (
+				parts.length === 6 &&
+				parts[4] === "rate-limit-reset-credits" &&
+				parts[5] === "auto-apply-on-weekly-limit" &&
+				method === "POST"
+			) {
+				const autoApplyOnWeeklyLimitHandler =
+					createAccountAutoApplyResetOnWeeklyLimitHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					autoApplyOnWeeklyLimitHandler(req, accountId),
 				)(req, url);
 			}
 

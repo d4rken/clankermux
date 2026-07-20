@@ -58,6 +58,7 @@ export function ensureSchema(db: Database): void {
 			auto_pause_on_overage_enabled INTEGER DEFAULT 1,
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
+			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
 			rate_limited_reason TEXT,
 			rate_limited_at INTEGER,
@@ -434,6 +435,7 @@ export function ensureSchema(db: Database): void {
 			account_name TEXT NOT NULL,
 			credit_id TEXT,
 			trigger TEXT NOT NULL CHECK (trigger IN ('manual','auto')),
+			cause TEXT CHECK (cause IN ('expiry','weekly-limit')),
 			attempt_seq INTEGER,
 			idempotency_key TEXT NOT NULL,
 			status TEXT NOT NULL CHECK (status IN ('pending','reset','nothingToReset','noCredit','alreadyRedeemed','failed')),
@@ -583,6 +585,25 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "codex_auto_apply_reset_credits_enabled",
 		ddl: "ALTER TABLE accounts ADD COLUMN codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	// Opt-in per-account toggle: automatically consume a Codex usage-limit
+	// reset credit as soon as the account hits its weekly limit (instead of
+	// waiting for the credit to be about to expire). Default OFF.
+	{
+		table: "accounts",
+		column: "codex_auto_apply_reset_on_weekly_limit_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	// Why an auto consume attempt was claimed ('expiry' | 'weekly-limit'); NULL
+	// on manual rows. Defense-in-depth: the table and this column shipped
+	// together, so no live DB should lack it — this entry insures partial-deploy
+	// scenarios where the table was created from an older CREATE TABLE. (The
+	// column CHECK travels with ALTER TABLE ADD COLUMN; existing rows read NULL,
+	// which the CHECK accepts.)
+	{
+		table: "codex_reset_credit_events",
+		column: "cause",
+		ddl: "ALTER TABLE codex_reset_credit_events ADD COLUMN cause TEXT CHECK (cause IN ('expiry','weekly-limit'))",
 	},
 ];
 

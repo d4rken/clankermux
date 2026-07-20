@@ -578,6 +578,18 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAutoApplyResetOnWeeklyLimitToggle = async (account: Account) => {
+		try {
+			await api.updateAccountAutoApplyResetOnWeeklyLimit(
+				account.id,
+				!account.autoApplyResetOnWeeklyLimitEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleUpdateCustomEndpoint = async (
 		accountId: string,
 		customEndpoint: string | null,
@@ -713,6 +725,9 @@ export function AccountsTab() {
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
 						onAutoApplyResetCreditsToggle={handleAutoApplyResetCreditsToggle}
+						onAutoApplyResetOnWeeklyLimitToggle={
+							handleAutoApplyResetOnWeeklyLimitToggle
+						}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
 						onReauth={handleReauth}

@@ -1157,6 +1157,16 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async setCodexAutoApplyResetOnWeeklyLimitEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET codex_auto_apply_reset_on_weekly_limit_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
 	async hasAccountsForProvider(provider: string): Promise<boolean> {
 		return this.accounts.hasAccountsForProvider(provider);
 	}
@@ -2498,6 +2508,7 @@ OAuth tokens will need to be re-authenticated.
 		accountName: string;
 		creditId: string;
 		creditExpiresAt: number | null;
+		cause: "expiry" | "weekly-limit";
 		now?: number;
 	}): Promise<CodexResetCreditAutoClaim | null> {
 		return withDatabaseRetry(
@@ -2561,6 +2572,19 @@ OAuth tokens will need to be re-authenticated.
 				this.codexResetCreditEvents.getTerminallyResolvedCreditIds(accountId),
 			this.retryConfig,
 			"getTerminallyResolvedCodexResetCreditIds",
+		);
+	}
+
+	async getCodexResetCreditAutoApplyCooldownAnchorAt(
+		accountId: string,
+	): Promise<number | null> {
+		return withDatabaseRetry(
+			() =>
+				this.codexResetCreditEvents.getLatestAutoApplyCooldownAnchorAt(
+					accountId,
+				),
+			this.retryConfig,
+			"getCodexResetCreditAutoApplyCooldownAnchorAt",
 		);
 	}
 

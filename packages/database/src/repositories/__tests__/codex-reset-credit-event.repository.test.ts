@@ -36,6 +36,7 @@ const CLAIM_INPUT = {
 	accountName: "Codex One",
 	creditId: "credit-a",
 	creditExpiresAt: 1_790_000_000,
+	cause: "expiry" as const,
 	now: NOW,
 };
 
@@ -68,6 +69,29 @@ describe("CodexResetCreditEventRepository", () => {
 			expect(rows[0]?.credit_expires_at).toBe(1_790_000_000);
 			expect(rows[0]?.created_at).toBe(NOW);
 			expect(rows[0]?.resolved_at).toBeNull();
+			expect(rows[0]?.cause).toBe("expiry");
+		});
+
+		it("stores cause 'weekly-limit' on the claimed row", async () => {
+			await repo.claimAutoAttempt({ ...CLAIM_INPUT, cause: "weekly-limit" });
+
+			const rows = await repo.findRecentForAccount("acc-1", 10);
+			expect(rows[0]?.cause).toBe("weekly-limit");
+		});
+
+		it("reusing a pending claim keeps the ORIGINAL stored cause", async () => {
+			await repo.claimAutoAttempt(CLAIM_INPUT); // cause: expiry
+			const reused = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				cause: "weekly-limit",
+				now: NOW + 60_000,
+			});
+			expect(reused?.reused).toBe(true);
+
+			const rows = await repo.findRecentForAccount("acc-1", 10);
+			expect(rows.length).toBe(1);
+			// The stored cause reflects the ORIGINAL attempt, not the retry's.
+			expect(rows[0]?.cause).toBe("expiry");
 		});
 
 		it("reuses a pending claim — same id and idempotency key", async () => {
@@ -235,6 +259,8 @@ describe("CodexResetCreditEventRepository", () => {
 			expect(rows[0]?.idempotency_key).toBe("manual-key-1");
 			expect(rows[0]?.created_at).toBe(NOW);
 			expect(rows[0]?.resolved_at).toBe(NOW);
+			// Manual rows carry no automation cause.
+			expect(rows[0]?.cause).toBeNull();
 		});
 
 		it("manual rows never collide with auto rows or each other", async () => {
@@ -365,6 +391,125 @@ describe("CodexResetCreditEventRepository", () => {
 		});
 	});
 
+	describe("getLatestAutoApplyCooldownAnchorAt", () => {
+		it("returns null when the account has no ledger rows at all", async () => {
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();
+		});
+
+		it("picks the MAX resolved_at across reset and alreadyRedeemed auto rows", async () => {
+			const first = await repo.claimAutoAttempt(CLAIM_INPUT);
+			await repo.resolveAttempt(
+				first?.id as string,
+				"reset",
+				1,
+				null,
+				NOW + 10,
+			);
+
+			const second = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				creditId: "credit-b",
+				now: NOW + 20,
+			});
+			await repo.resolveAttempt(
+				second?.id as string,
+				"alreadyRedeemed",
+				null,
+				null,
+				NOW + 30,
+			);
+
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBe(
+				NOW + 30,
+			);
+		});
+
+		it("anchors on a nothingToReset resolution (weekly retry-storm guard)", async () => {
+			// A nothingToReset outcome re-arms the CLAIM (a later attempt may fire),
+			// but it must still anchor the weekly cooldown — otherwise a weekly
+			// usage stuck at >=100% would hit the redeem endpoint every tick.
+			const attempt = await repo.claimAutoAttempt(CLAIM_INPUT);
+			await repo.resolveAttempt(
+				attempt?.id as string,
+				"nothingToReset",
+				0,
+				null,
+				NOW + 40,
+			);
+
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBe(
+				NOW + 40,
+			);
+		});
+
+		it("ignores manual, pending, failed and noCredit rows", async () => {
+			// Successful MANUAL row — excluded (only auto rows count).
+			await repo.recordManual({
+				accountId: "acc-1",
+				accountName: "Codex One",
+				creditId: "credit-m",
+				idempotencyKey: "manual-key-1",
+				status: "reset",
+				windowsReset: 1,
+				errorMessage: null,
+				now: NOW + 100,
+			});
+			// Pending auto row — excluded (unresolved).
+			await repo.claimAutoAttempt({ ...CLAIM_INPUT, creditId: "credit-p" });
+			// failed auto row — excluded (terminal claims never re-fire, so they
+			// don't need to anchor the cooldown).
+			const failed = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				creditId: "credit-f",
+			});
+			await repo.resolveAttempt(
+				failed?.id as string,
+				"failed",
+				null,
+				"boom",
+				NOW + 200,
+			);
+			// noCredit auto row — excluded (terminal, same reasoning).
+			const noCredit = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				creditId: "credit-nc",
+			});
+			await repo.resolveAttempt(
+				noCredit?.id as string,
+				"noCredit",
+				null,
+				null,
+				NOW + 300,
+			);
+
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();
+
+			// An anchoring AUTO row on another account never leaks in.
+			const other = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				accountId: "acc-2",
+			});
+			await repo.resolveAttempt(other?.id as string, "reset", 1, null, NOW + 5);
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();
+
+			// And once acc-1 gains an anchoring auto row, it is returned.
+			const success = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				creditId: "credit-s",
+			});
+			await repo.resolveAttempt(
+				success?.id as string,
+				"reset",
+				1,
+				null,
+				NOW + 50,
+			);
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBe(
+				NOW + 50,
+			);
+		});
+	});
+
 	describe("CHECK constraints", () => {
 		it("rejects a bad trigger", () => {
 			expect(() =>
@@ -382,6 +527,22 @@ describe("CodexResetCreditEventRepository", () => {
 					 VALUES ('x', 'a', 'A', 'manual', 'k', 'exploded', 0)`,
 				),
 			).toThrow();
+		});
+
+		it("rejects a bad cause but allows NULL", () => {
+			expect(() =>
+				db.run(
+					`INSERT INTO codex_reset_credit_events (id, account_id, account_name, trigger, cause, idempotency_key, status, created_at)
+					 VALUES ('x', 'a', 'A', 'auto', 'because', 'k', 'pending', 0)`,
+				),
+			).toThrow();
+
+			expect(() =>
+				db.run(
+					`INSERT INTO codex_reset_credit_events (id, account_id, account_name, trigger, cause, idempotency_key, status, created_at)
+					 VALUES ('x', 'a', 'A', 'manual', NULL, 'k', 'pending', 0)`,
+				),
+			).not.toThrow();
 		});
 	});
 });

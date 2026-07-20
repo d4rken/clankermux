@@ -102,6 +102,8 @@ export interface AccountStatus {
 	resetCreditUrgency: ResetCreditUrgency;
 	/** Per-account auto-apply of expiring reset credits is enabled (opt-in). */
 	resetCreditAutoApplyArmed: boolean;
+	/** Per-account auto-apply of a reset credit at the weekly limit is enabled (opt-in). */
+	resetCreditAutoApplyOnWeeklyLimitArmed: boolean;
 }
 
 /**
@@ -208,6 +210,8 @@ export function deriveAccountStatus(
 	}
 	const resetCreditAutoApplyArmed =
 		account.autoApplyResetCreditsEnabled === true;
+	const resetCreditAutoApplyOnWeeklyLimitArmed =
+		account.autoApplyResetOnWeeklyLimitEnabled === true;
 
 	return {
 		isPrimary: account.isPrimary,
@@ -240,5 +244,6 @@ export function deriveAccountStatus(
 		resetCreditNextExpiry,
 		resetCreditUrgency,
 		resetCreditAutoApplyArmed,
+		resetCreditAutoApplyOnWeeklyLimitArmed,
 	};
 }

@@ -127,6 +127,7 @@ export interface AccountRow {
 	auto_pause_on_overage_enabled?: boolean | number | null;
 	peak_hours_pause_enabled?: boolean | number | null;
 	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
+	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks?: string | null; // JSON string for model family fallback mappings
@@ -169,6 +170,7 @@ export interface Account {
 	auto_pause_on_overage_enabled: boolean;
 	peak_hours_pause_enabled: boolean;
 	codex_auto_apply_reset_credits_enabled: boolean;
+	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	model_fallbacks: string | null; // JSON string for model family fallback mappings
@@ -235,6 +237,8 @@ export interface AccountResponse {
 	peakHoursPauseEnabled?: boolean;
 	/** Codex-only: auto-consume expiring usage-limit reset credits (opt-in). */
 	autoApplyResetCreditsEnabled?: boolean;
+	/** Codex-only: auto-consume a reset credit when the weekly limit is hit (opt-in). */
+	autoApplyResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
@@ -349,6 +353,8 @@ export interface CodexResetCreditEventResponse {
 	id: string;
 	creditId: string | null;
 	trigger: "manual" | "auto";
+	/** Why an auto attempt was claimed; null on manual rows. */
+	cause: "expiry" | "weekly-limit" | null;
 	attemptSeq: number | null;
 	status: CodexResetCreditEventStatus;
 	windowsReset: number | null;
@@ -477,6 +483,8 @@ export function toAccount(row: AccountRow): Account {
 		peak_hours_pause_enabled: !!row.peak_hours_pause_enabled,
 		codex_auto_apply_reset_credits_enabled:
 			!!row.codex_auto_apply_reset_credits_enabled,
+		codex_auto_apply_reset_on_weekly_limit_enabled:
+			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		model_fallbacks: row.model_fallbacks || null,
@@ -570,6 +578,8 @@ export function toAccountResponse(account: Account): AccountResponse {
 		peakHoursPauseEnabled: account.peak_hours_pause_enabled,
 		autoApplyResetCreditsEnabled:
 			account.codex_auto_apply_reset_credits_enabled,
+		autoApplyResetOnWeeklyLimitEnabled:
+			account.codex_auto_apply_reset_on_weekly_limit_enabled,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
 		usageUtilization: null, // Will be filled in by API handler from cache

@@ -1,8 +1,9 @@
 /**
- * Regression test: the `codex_auto_apply_reset_credits_enabled` toggle must be
- * projected by AccountRepository's SELECT lists (findAll/findById).
+ * Regression test: the `codex_auto_apply_reset_credits_enabled` and
+ * `codex_auto_apply_reset_on_weekly_limit_enabled` toggles must be projected by
+ * AccountRepository's SELECT lists (findAll/findById).
  *
- * If the column is missing from the SELECT, `toAccount()` sees `undefined` and
+ * If a column is missing from the SELECT, `toAccount()` sees `undefined` and
  * coerces the toggle to false (`!!undefined`), so getAccount()/getAllAccounts()
  * silently report it disabled even when the row has it set — which makes the
  * CodexResetCreditApplyScheduler find no candidates and the feature inert.
@@ -50,6 +51,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
 			peak_hours_pause_enabled INTEGER DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
+			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			custom_endpoint TEXT,
 			model_mappings TEXT,
 			cross_region_mode TEXT,
@@ -96,6 +98,7 @@ describe("AccountRepository — codex_auto_apply_reset_credits_enabled projectio
 		const account = await repo.findById("acc-1");
 		expect(account).not.toBeNull();
 		expect(account?.codex_auto_apply_reset_credits_enabled).toBe(false);
+		expect(account?.codex_auto_apply_reset_on_weekly_limit_enabled).toBe(false);
 	});
 
 	it("findById surfaces the toggle after it is enabled", async () => {
@@ -121,5 +124,32 @@ describe("AccountRepository — codex_auto_apply_reset_credits_enabled projectio
 		const all = await repo.findAll();
 		const found = all.find((a) => a.id === "acc-3");
 		expect(found?.codex_auto_apply_reset_credits_enabled).toBe(true);
+	});
+
+	it("findById surfaces the weekly-limit toggle after it is enabled", async () => {
+		insertAccount(db, "acc-4");
+
+		// Same UPDATE DatabaseOperations.setCodexAutoApplyResetOnWeeklyLimitEnabled runs.
+		db.run(
+			`UPDATE accounts SET codex_auto_apply_reset_on_weekly_limit_enabled = 1 WHERE id = ?`,
+			["acc-4"],
+		);
+
+		const account = await repo.findById("acc-4");
+		expect(account?.codex_auto_apply_reset_on_weekly_limit_enabled).toBe(true);
+		// Independent toggles — enabling one must not flip the other.
+		expect(account?.codex_auto_apply_reset_credits_enabled).toBe(false);
+	});
+
+	it("findAll surfaces the weekly-limit toggle after it is enabled", async () => {
+		insertAccount(db, "acc-5");
+		db.run(
+			`UPDATE accounts SET codex_auto_apply_reset_on_weekly_limit_enabled = 1 WHERE id = ?`,
+			["acc-5"],
+		);
+
+		const all = await repo.findAll();
+		const found = all.find((a) => a.id === "acc-5");
+		expect(found?.codex_auto_apply_reset_on_weekly_limit_enabled).toBe(true);
 	});
 });

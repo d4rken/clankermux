@@ -22,8 +22,10 @@ import type {
 import {
 	type CodexResetCreditApplyDeps,
 	CodexResetCreditApplyScheduler,
+	createCodexResetCreditApplyScheduler,
 	decideResetCreditAction,
 	RESET_CREDIT_AUTO_APPLY_LEAD_MS,
+	RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS,
 } from "../codex-reset-credit-applier";
 import type { CodexResetCreditConsumeDispatchOutcome } from "../handlers/token-manager";
 
@@ -68,6 +70,7 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 		auto_pause_on_overage_enabled: false,
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: true,
+		codex_auto_apply_reset_on_weekly_limit_enabled: false,
 		custom_endpoint: null,
 		model_mappings: null,
 		cross_region_mode: null,
@@ -98,6 +101,8 @@ function decide(inputs: {
 	account?: Partial<Account>;
 	credits?: CodexRateLimitResetCredit[] | null;
 	resolved?: ReadonlySet<string>;
+	weeklyUsedPercent?: number | null;
+	autoApplyCooldownAnchorAt?: number | null;
 	now?: number;
 }) {
 	return decideResetCreditAction({
@@ -105,6 +110,8 @@ function decide(inputs: {
 		// `null` is a meaningful input (no detail list) — only default undefined.
 		credits: inputs.credits === undefined ? [makeCredit()] : inputs.credits,
 		terminallyResolvedCreditIds: inputs.resolved ?? new Set(),
+		weeklyUsedPercent: inputs.weeklyUsedPercent ?? null,
+		autoApplyCooldownAnchorAt: inputs.autoApplyCooldownAnchorAt ?? null,
 		now: inputs.now ?? NOW,
 	});
 }
@@ -216,6 +223,7 @@ describe("decideResetCreditAction — skip gates", () => {
 			action: "consume",
 			creditId: credit.id,
 			expiresAt: credit.expiresAt as number,
+			cause: "expiry",
 		});
 	});
 });
@@ -234,7 +242,12 @@ describe("decideResetCreditAction — boundaries and ordering", () => {
 				credits: [makeCredit({ expiresAt: boundary })],
 				now: alignedNow,
 			}),
-		).toEqual({ action: "consume", creditId: "credit-1", expiresAt: boundary });
+		).toEqual({
+			action: "consume",
+			creditId: "credit-1",
+			expiresAt: boundary,
+			cause: "expiry",
+		});
 	});
 
 	it("skips one millisecond beyond the lead-time boundary", () => {
@@ -261,6 +274,7 @@ describe("decideResetCreditAction — boundaries and ordering", () => {
 			action: "consume",
 			creditId: "c-soon",
 			expiresAt: sooner.expiresAt as number,
+			cause: "expiry",
 		});
 	});
 
@@ -279,6 +293,7 @@ describe("decideResetCreditAction — boundaries and ordering", () => {
 			action: "consume",
 			creditId: "c-next",
 			expiresAt: next.expiresAt as number,
+			cause: "expiry",
 		});
 	});
 
@@ -292,7 +307,220 @@ describe("decideResetCreditAction — boundaries and ordering", () => {
 			action: "consume",
 			creditId: "c-near",
 			expiresAt: near.expiresAt as number,
+			cause: "expiry",
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// decideResetCreditAction — weekly-limit trigger
+// ---------------------------------------------------------------------------
+
+describe("decideResetCreditAction — weekly-limit trigger", () => {
+	/** Weekly-only account: weekly toggle ON, expiry toggle OFF. */
+	const weeklyOnly: Partial<Account> = {
+		codex_auto_apply_reset_credits_enabled: false,
+		codex_auto_apply_reset_on_weekly_limit_enabled: true,
+	};
+	/** A credit far outside the expiry lead window — expiry trigger ignores it. */
+	const farCredit = () =>
+		makeCredit({ id: "c-far", expiresAt: expirySec(3 * 3600_000) });
+
+	it("fires at exactly 100% weekly usage (cause weekly-limit)", () => {
+		const credit = farCredit();
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [credit],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: "c-far",
+			expiresAt: credit.expiresAt as number,
+			cause: "weekly-limit",
+		});
+	});
+
+	it("fires above 100% too", () => {
+		const credit = farCredit();
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [credit],
+				weeklyUsedPercent: 104.5,
+			}),
+		).toMatchObject({ action: "consume", cause: "weekly-limit" });
+	});
+
+	it("does NOT fire at 99.9%", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 99.9,
+			}),
+		).toEqual({ action: "skip", reason: "weekly-not-exhausted" });
+	});
+
+	it("does NOT fire on null usage (fail-closed)", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: null,
+			}),
+		).toEqual({ action: "skip", reason: "weekly-not-exhausted" });
+	});
+
+	it("does NOT fire with the weekly toggle off even at 100%", () => {
+		// Expiry toggle on (default) but the only credit is far from expiry:
+		// the weekly exhaustion alone must not consume it.
+		expect(decide({ credits: [farCredit()], weeklyUsedPercent: 100 })).toEqual({
+			action: "skip",
+			reason: "no-credit-near-expiry",
+		});
+	});
+
+	it("both toggles off → toggle-disabled", () => {
+		expect(
+			decide({
+				account: {
+					codex_auto_apply_reset_credits_enabled: false,
+					codex_auto_apply_reset_on_weekly_limit_enabled: false,
+				},
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({ action: "skip", reason: "toggle-disabled" });
+	});
+
+	it("cooldown suppresses a weekly fire (last success just under the window)", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				autoApplyCooldownAnchorAt:
+					NOW - RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS + 1,
+			}),
+		).toEqual({ action: "skip", reason: "cooldown" });
+	});
+
+	it("fires again at exactly the cooldown boundary (elapsed === cooldown)", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				autoApplyCooldownAnchorAt: NOW - RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS,
+			}),
+		).toMatchObject({ action: "consume", cause: "weekly-limit" });
+	});
+
+	it("both triggers apply → cause is expiry (credit was about to be lost anyway)", () => {
+		const near = makeCredit(); // 5 min out — inside the expiry lead
+		expect(
+			decide({
+				account: { codex_auto_apply_reset_on_weekly_limit_enabled: true },
+				credits: [near],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: near.id,
+			expiresAt: near.expiresAt as number,
+			cause: "expiry",
+		});
+	});
+
+	it("weekly-only account never fires the expiry path (near-expiry credit, weekly not exhausted)", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [makeCredit()], // inside the expiry lead window
+				weeklyUsedPercent: 50,
+			}),
+		).toEqual({ action: "skip", reason: "weekly-not-exhausted" });
+	});
+
+	it("chooses a non-expiring credit when it is the only one available", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [makeCredit({ id: "c-forever", expiresAt: null })],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: "c-forever",
+			expiresAt: null,
+			cause: "weekly-limit",
+		});
+	});
+
+	it("prefers the soonest-expiring credit over a non-expiring one", () => {
+		const expiring = farCredit();
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [makeCredit({ id: "c-forever", expiresAt: null }), expiring],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: "c-far",
+			expiresAt: expiring.expiresAt as number,
+			cause: "weekly-limit",
+		});
+	});
+
+	it("skips terminally-resolved ids on the weekly path", () => {
+		const expiring = farCredit();
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [expiring, makeCredit({ id: "c-forever", expiresAt: null })],
+				resolved: new Set(["c-far"]),
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: "c-forever",
+			expiresAt: null,
+			cause: "weekly-limit",
+		});
+	});
+
+	it("all weekly candidates terminally resolved → already-resolved", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				resolved: new Set(["c-far"]),
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({ action: "skip", reason: "already-resolved" });
+	});
+
+	it("an already-expired credit is not weekly-eligible", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [makeCredit({ expiresAt: expirySec(-60_000) })],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({ action: "skip", reason: "no-credit-available" });
+	});
+
+	it("no credits at all on the weekly path → no-credit-available", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({ action: "skip", reason: "no-credit-available" });
 	});
 });
 
@@ -312,6 +540,10 @@ interface HarnessOptions {
 	 */
 	credits?: (forceRefreshes: number) => CodexRateLimitResetCredit[] | null;
 	resolvedIds?: Set<string>;
+	/** Weekly used percent served by getWeeklyUsedPercent (default null). */
+	weeklyUsedPercent?: number | null;
+	/** Cooldown anchor timestamp (ms) served to the weekly cooldown gate. */
+	autoApplyCooldownAnchorAt?: number | null;
 	claim?: {
 		id: string;
 		idempotencyKey: string;
@@ -354,6 +586,9 @@ function makeHarness(opts: HarnessOptions = {}) {
 		},
 		getTerminallyResolvedCreditIds: async () =>
 			opts.resolvedIds ?? new Set<string>(),
+		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		getAutoApplyCooldownAnchorAt: async () =>
+			opts.autoApplyCooldownAnchorAt ?? null,
 		claimAutoAttempt: async (input) => {
 			claimCalls.push({ ...input });
 			if (opts.claim === null) return null;
@@ -409,6 +644,7 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 				accountName: "codex-account",
 				creditId: "credit-1",
 				creditExpiresAt: makeCredit().expiresAt,
+				cause: "expiry",
 				now: NOW,
 			},
 		]);
@@ -541,5 +777,290 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 
 		expect(dispatchCalls).toHaveLength(1);
 		expect(dispatchCalls[0]?.request.creditId).toBe("c-1");
+	});
+
+	it("weekly-only account claims with cause weekly-limit and null creditExpiresAt for a non-expiring credit", async () => {
+		const { scheduler, claimCalls, dispatchCalls } = makeHarness({
+			getAccount: async (id) =>
+				makeCodexAccount({
+					id,
+					codex_auto_apply_reset_credits_enabled: false,
+					codex_auto_apply_reset_on_weekly_limit_enabled: true,
+				}),
+			credits: () => [makeCredit({ id: "c-forever", expiresAt: null })],
+			weeklyUsedPercent: 100,
+		});
+
+		await scheduler.tick();
+
+		expect(claimCalls).toEqual([
+			{
+				accountId: "acct-1",
+				accountName: "codex-account",
+				creditId: "c-forever",
+				creditExpiresAt: null,
+				cause: "weekly-limit",
+				now: NOW,
+			},
+		]);
+		expect(dispatchCalls).toHaveLength(1);
+		expect(dispatchCalls[0]?.request.creditId).toBe("c-forever");
+	});
+
+	it("weekly cooldown suppresses the consume at the scheduler level", async () => {
+		const { scheduler, claimCalls, dispatchCalls } = makeHarness({
+			getAccount: async (id) =>
+				makeCodexAccount({
+					id,
+					codex_auto_apply_reset_credits_enabled: false,
+					codex_auto_apply_reset_on_weekly_limit_enabled: true,
+				}),
+			credits: () => [makeCredit({ id: "c-forever", expiresAt: null })],
+			weeklyUsedPercent: 100,
+			autoApplyCooldownAnchorAt:
+				NOW - RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS + 1,
+		});
+
+		await scheduler.tick();
+
+		expect(claimCalls).toEqual([]);
+		expect(dispatchCalls).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// nothingToReset resolutions anchor the weekly cooldown (retry-storm guard)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stateful harness with a fake LEDGER whose claim/resolve/anchor semantics
+ * mirror CodexResetCreditEventRepository (including the widened cooldown
+ * anchor: nothingToReset anchors, noCredit/failed/pending do not) plus a
+ * mutable clock. dispatchConsume always resolves the claimed row to
+ * `nothingToReset` — the outcome behind the weekly retry-storm finding.
+ */
+function makeLedgerHarness(opts: {
+	account?: Partial<Account>;
+	credits?: CodexRateLimitResetCredit[];
+	weeklyUsedPercent?: number | null;
+}) {
+	let nowMs = NOW;
+	interface LedgerRow {
+		id: string;
+		creditId: string;
+		attemptSeq: number;
+		status: "pending" | "nothingToReset";
+		resolvedAt: number | null;
+	}
+	const rows: LedgerRow[] = [];
+	const dispatchCalls: Array<{ idempotencyKey: string; ledgerRowId: string }> =
+		[];
+	const credits = opts.credits ?? [makeCredit()];
+
+	const deps: CodexResetCreditApplyDeps = {
+		listCandidateAccounts: async () => [
+			{ id: "acct-1", name: "codex-account" },
+		],
+		getAccount: async (id) => makeCodexAccount({ id, ...opts.account }),
+		getCachedCredits: () => ({
+			summary: { availableCount: credits.length, credits },
+			fetchedAt: nowMs,
+		}),
+		refreshCredits: async () => {},
+		// This fake ledger only ever holds pending/nothingToReset rows, and
+		// neither status is terminal for automation.
+		getTerminallyResolvedCreditIds: async () => new Set<string>(),
+		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		// Widened anchor semantics: nothingToReset resolutions anchor too.
+		getAutoApplyCooldownAnchorAt: async () => {
+			const anchors = rows.flatMap((r) =>
+				r.status === "nothingToReset" && r.resolvedAt !== null
+					? [r.resolvedAt]
+					: [],
+			);
+			return anchors.length ? Math.max(...anchors) : null;
+		},
+		claimAutoAttempt: async (input) => {
+			const latest = rows
+				.filter((r) => r.creditId === input.creditId)
+				.sort((a, b) => b.attemptSeq - a.attemptSeq)[0];
+			if (latest?.status === "pending") {
+				return {
+					id: latest.id,
+					idempotencyKey: `codex-reset-auto:${latest.id}`,
+					attemptSeq: latest.attemptSeq,
+					reused: true,
+				};
+			}
+			// nothingToReset (or no row) → mint the next attempt with a NEW key.
+			const attemptSeq = (latest?.attemptSeq ?? 0) + 1;
+			const id = `${input.accountId}:${input.creditId}:${attemptSeq}`;
+			rows.push({
+				id,
+				creditId: input.creditId,
+				attemptSeq,
+				status: "pending",
+				resolvedAt: null,
+			});
+			return {
+				id,
+				idempotencyKey: `codex-reset-auto:${id}`,
+				attemptSeq,
+				reused: false,
+			};
+		},
+		dispatchConsume: async (_accountId, request) => {
+			const ledgerRowId = request.autoApply?.ledgerRowId as string;
+			dispatchCalls.push({
+				idempotencyKey: request.idempotencyKey,
+				ledgerRowId,
+			});
+			const row = rows.find((r) => r.id === ledgerRowId);
+			if (row) {
+				row.status = "nothingToReset";
+				row.resolvedAt = nowMs;
+			}
+			return {
+				status: "completed",
+				accountName: "codex-account",
+				result: { outcome: "nothingToReset", windowsReset: 0 },
+				resetMetadataRefreshed: true,
+				availableResetCount: credits.length,
+				localRateLimitStateCleared: false,
+			};
+		},
+		now: () => nowMs,
+	};
+
+	return {
+		scheduler: new CodexResetCreditApplyScheduler(deps),
+		dispatchCalls,
+		setNow: (t: number) => {
+			nowMs = t;
+		},
+	};
+}
+
+describe("nothingToReset anchors the weekly cooldown (no 60s retry storm)", () => {
+	const weeklyOnlyOverrides: Partial<Account> = {
+		codex_auto_apply_reset_credits_enabled: false,
+		codex_auto_apply_reset_on_weekly_limit_enabled: true,
+	};
+
+	it("weekly trigger: nothingToReset suppresses re-fire for the cooldown hour, then fires again", async () => {
+		const { scheduler, dispatchCalls, setNow } = makeLedgerHarness({
+			account: weeklyOnlyOverrides,
+			credits: [makeCredit({ id: "c-forever", expiresAt: null })],
+			weeklyUsedPercent: 100,
+		});
+
+		// Tick 1: weekly usage stuck at 100% → consume fires, resolves
+		// nothingToReset at NOW.
+		await scheduler.tick();
+		expect(dispatchCalls).toHaveLength(1);
+		expect(dispatchCalls[0]?.idempotencyKey).toBe(
+			"codex-reset-auto:acct-1:c-forever:1",
+		);
+
+		// Tick 2 (next minute, still inside the hour): suppressed — the
+		// nothingToReset resolution anchors the cooldown.
+		setNow(NOW + 60_000);
+		await scheduler.tick();
+		expect(dispatchCalls).toHaveLength(1);
+
+		// The suppression surfaces as the "cooldown" skip reason.
+		expect(
+			decideResetCreditAction({
+				account: makeCodexAccount(weeklyOnlyOverrides),
+				credits: [makeCredit({ id: "c-forever", expiresAt: null })],
+				terminallyResolvedCreditIds: new Set(),
+				weeklyUsedPercent: 100,
+				autoApplyCooldownAnchorAt: NOW,
+				now: NOW + 60_000,
+			}),
+		).toEqual({ action: "skip", reason: "cooldown" });
+
+		// Tick 3 (past the cooldown): fires again with a NEW attempt/key.
+		setNow(NOW + RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS + 60_000);
+		await scheduler.tick();
+		expect(dispatchCalls).toHaveLength(2);
+		expect(dispatchCalls[1]?.idempotencyKey).toBe(
+			"codex-reset-auto:acct-1:c-forever:2",
+		);
+	});
+
+	it("expiry trigger: nothingToReset re-arms on the very next tick — no cooldown suppression", async () => {
+		// Default account has ONLY the expiry toggle on; the credit stays inside
+		// the 10-min lead window across both ticks.
+		const { scheduler, dispatchCalls, setNow } = makeLedgerHarness({});
+
+		await scheduler.tick();
+		expect(dispatchCalls).toHaveLength(1);
+		expect(dispatchCalls[0]?.idempotencyKey).toBe(
+			"codex-reset-auto:acct-1:credit-1:1",
+		);
+
+		// Next tick, one minute later — well inside the weekly cooldown window,
+		// but the EXPIRY trigger ignores the cooldown entirely.
+		setNow(NOW + 60_000);
+		await scheduler.tick();
+		expect(dispatchCalls).toHaveLength(2);
+		expect(dispatchCalls[1]?.idempotencyKey).toBe(
+			"codex-reset-auto:acct-1:credit-1:2",
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// createCodexResetCreditApplyScheduler — default candidate listing
+// ---------------------------------------------------------------------------
+
+describe("createCodexResetCreditApplyScheduler default listCandidateAccounts", () => {
+	it("includes codex accounts with EITHER auto-apply toggle on", async () => {
+		const accounts: Account[] = [
+			makeCodexAccount({ id: "expiry-only", name: "expiry-only" }),
+			makeCodexAccount({
+				id: "weekly-only",
+				name: "weekly-only",
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			}),
+			makeCodexAccount({
+				id: "both",
+				name: "both",
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			}),
+			makeCodexAccount({
+				id: "neither",
+				name: "neither",
+				codex_auto_apply_reset_credits_enabled: false,
+			}),
+			makeCodexAccount({
+				id: "not-codex",
+				name: "not-codex",
+				provider: "anthropic",
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			}),
+		];
+		const evaluatedIds: string[] = [];
+		const scheduler = createCodexResetCreditApplyScheduler({
+			dbOps: {
+				getAllAccounts: async () => accounts,
+				// Return null so each candidate stops right after discovery — the
+				// point of this test is WHO gets evaluated, not what happens next.
+				getAccount: async (id) => {
+					evaluatedIds.push(id);
+					return null;
+				},
+				getTerminallyResolvedCodexResetCreditIds: async () => new Set<string>(),
+				claimCodexResetCreditAutoAttempt: async () => null,
+				getCodexResetCreditAutoApplyCooldownAnchorAt: async () => null,
+			},
+			coordinator: { refreshResetCredits: async () => undefined },
+		});
+
+		await scheduler.tick();
+
+		expect(evaluatedIds.sort()).toEqual(["both", "expiry-only", "weekly-only"]);
 	});
 });

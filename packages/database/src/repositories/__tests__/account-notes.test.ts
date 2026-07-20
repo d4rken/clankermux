@@ -46,6 +46,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			auto_pause_on_overage_enabled INTEGER DEFAULT 0,
 			peak_hours_pause_enabled INTEGER DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
+			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			custom_endpoint TEXT,
 			model_mappings TEXT,
 			cross_region_mode TEXT,

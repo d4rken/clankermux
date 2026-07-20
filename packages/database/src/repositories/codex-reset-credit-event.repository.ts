@@ -8,6 +8,8 @@ export interface CodexResetCreditEventRow {
 	account_name: string;
 	credit_id: string | null;
 	trigger: string;
+	/** Why an auto attempt was claimed; NULL on manual rows. */
+	cause: "expiry" | "weekly-limit" | null;
 	attempt_seq: number | null;
 	idempotency_key: string;
 	status: string;
@@ -56,13 +58,16 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 	/**
 	 * Claim (or reuse) the next auto consume attempt for a credit. Returns
 	 * null when the latest attempt is terminal — automation is done with this
-	 * credit.
+	 * credit. `cause` is stored on freshly minted rows only: when a pending
+	 * row is reused, the stored cause stays as-is (it reflects the ORIGINAL
+	 * attempt, not the retry's trigger).
 	 */
 	async claimAutoAttempt(input: {
 		accountId: string;
 		accountName: string;
 		creditId: string;
 		creditExpiresAt: number | null;
+		cause: "expiry" | "weekly-limit";
 		now: number;
 	}): Promise<CodexResetCreditAutoClaim | null> {
 		const latest = await this.latestAutoRow(input.accountId, input.creditId);
@@ -88,17 +93,18 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 		const changes = await this.runWithChanges(
 			`
 			INSERT OR IGNORE INTO codex_reset_credit_events (
-				id, account_id, account_name, credit_id, trigger, attempt_seq,
+				id, account_id, account_name, credit_id, trigger, cause, attempt_seq,
 				idempotency_key, status, windows_reset, error_message,
 				credit_expires_at, created_at, resolved_at
 			)
-			VALUES (?, ?, ?, ?, 'auto', ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+			VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
 		`,
 			[
 				id,
 				input.accountId,
 				input.accountName,
 				input.creditId,
+				input.cause,
 				attemptSeq,
 				idempotencyKey,
 				input.creditExpiresAt,
@@ -152,11 +158,11 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 		await this.run(
 			`
 			INSERT INTO codex_reset_credit_events (
-				id, account_id, account_name, credit_id, trigger, attempt_seq,
+				id, account_id, account_name, credit_id, trigger, cause, attempt_seq,
 				idempotency_key, status, windows_reset, error_message,
 				credit_expires_at, created_at, resolved_at
 			)
-			VALUES (?, ?, ?, ?, 'manual', NULL, ?, ?, ?, ?, NULL, ?, ?)
+			VALUES (?, ?, ?, ?, 'manual', NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)
 		`,
 			[
 				crypto.randomUUID(),
@@ -189,6 +195,32 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 			[accountId],
 		);
 		return new Set(rows.map((row) => row.credit_id));
+	}
+
+	/**
+	 * When the last cooldown-anchoring auto attempt resolved for an account —
+	 * MAX resolved_at over auto rows whose outcome consumed a credit (`reset`),
+	 * found it already consumed (`alreadyRedeemed`), or confirmed there was
+	 * nothing to reset (`nothingToReset`). Null when the account has none.
+	 *
+	 * Gates ONLY the weekly-limit trigger's 1h cooldown. `nothingToReset`
+	 * anchors even though it re-arms the claim: without it, weekly usage stuck
+	 * at >=100% would re-claim and hit the redeem endpoint every tick (60s)
+	 * indefinitely. Terminal-for-automation outcomes (`noCredit`/`failed`) and
+	 * manual/pending rows never anchor.
+	 */
+	async getLatestAutoApplyCooldownAnchorAt(
+		accountId: string,
+	): Promise<number | null> {
+		const row = await this.get<{ latest: number | null }>(
+			`
+			SELECT MAX(resolved_at) as latest FROM codex_reset_credit_events
+			WHERE account_id = ? AND trigger = 'auto'
+				AND status IN ('reset','alreadyRedeemed','nothingToReset')
+		`,
+			[accountId],
+		);
+		return row?.latest ?? null;
 	}
 
 	/** Most recent ledger rows for an account, newest first. */

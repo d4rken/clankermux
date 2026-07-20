@@ -737,4 +737,34 @@ describe("deriveAccountStatus — reset-credit urgency", () => {
 		const absent = deriveAccountStatus(makeAccount(), NOW);
 		expect(absent.resetCreditAutoApplyArmed).toBe(false);
 	});
+
+	it("passes the weekly-limit armed flag through from autoApplyResetOnWeeklyLimitEnabled", () => {
+		const armed = deriveAccountStatus(
+			makeResetAccount([], { autoApplyResetOnWeeklyLimitEnabled: true }),
+			NOW,
+		);
+		expect(armed.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(true);
+
+		const unarmed = deriveAccountStatus(
+			makeResetAccount([], { autoApplyResetOnWeeklyLimitEnabled: false }),
+			NOW,
+		);
+		expect(unarmed.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(false);
+
+		// Absent field (older server) → not armed.
+		const absent = deriveAccountStatus(makeAccount(), NOW);
+		expect(absent.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(false);
+	});
+
+	it("derives the two auto-apply flags independently", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([], {
+				autoApplyResetCreditsEnabled: true,
+				autoApplyResetOnWeeklyLimitEnabled: false,
+			}),
+			NOW,
+		);
+		expect(status.resetCreditAutoApplyArmed).toBe(true);
+		expect(status.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(false);
+	});
 });

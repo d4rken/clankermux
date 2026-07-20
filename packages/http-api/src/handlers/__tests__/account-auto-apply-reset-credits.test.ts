@@ -6,6 +6,7 @@ import type {
 import type { CodexResetCreditEventResponse } from "@clankermux/types";
 import {
 	createAccountAutoApplyResetCreditsHandler,
+	createAccountAutoApplyResetOnWeeklyLimitHandler,
 	createAccountResetCreditEventsHandler,
 } from "../accounts";
 
@@ -17,6 +18,7 @@ interface AccountLookupRow {
 function makeDbOps(options: {
 	account: AccountLookupRow | null;
 	setEnabled?: ReturnType<typeof mock>;
+	setWeeklyEnabled?: ReturnType<typeof mock>;
 	getEvents?: ReturnType<typeof mock>;
 }): DatabaseOperations {
 	return {
@@ -26,6 +28,8 @@ function makeDbOps(options: {
 		}),
 		setCodexAutoApplyResetCreditsEnabled:
 			options.setEnabled ?? mock(async () => {}),
+		setCodexAutoApplyResetOnWeeklyLimitEnabled:
+			options.setWeeklyEnabled ?? mock(async () => {}),
 		getRecentCodexResetCreditEvents: options.getEvents ?? mock(async () => []),
 	} as unknown as DatabaseOperations;
 }
@@ -33,6 +37,17 @@ function makeDbOps(options: {
 function toggleRequest(body: unknown): Request {
 	return new Request(
 		"http://localhost/api/accounts/account-1/rate-limit-reset-credits/auto-apply",
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		},
+	);
+}
+
+function weeklyToggleRequest(body: unknown): Request {
+	return new Request(
+		"http://localhost/api/accounts/account-1/rate-limit-reset-credits/auto-apply-on-weekly-limit",
 		{
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -56,6 +71,7 @@ function makeEventRow(
 		account_name: "Codex One",
 		credit_id: "credit-1",
 		trigger: "auto",
+		cause: "expiry",
 		attempt_seq: 1,
 		idempotency_key: "idem-1",
 		status: "reset",
@@ -157,6 +173,123 @@ describe("createAccountAutoApplyResetCreditsHandler", () => {
 	});
 });
 
+describe("createAccountAutoApplyResetOnWeeklyLimitHandler", () => {
+	const codexAccount: AccountLookupRow = {
+		name: "Codex One",
+		provider: "codex",
+	};
+
+	it("rejects a missing enabled field", async () => {
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: codexAccount, setWeeklyEnabled }),
+		);
+
+		const response = await handler(weeklyToggleRequest({}), "account-1");
+
+		expect(response.status).toBe(400);
+		expect(setWeeklyEnabled).not.toHaveBeenCalled();
+	});
+
+	it("rejects an enabled value outside 0/1", async () => {
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: codexAccount, setWeeklyEnabled }),
+		);
+
+		const response = await handler(
+			weeklyToggleRequest({ enabled: 2 }),
+			"account-1",
+		);
+
+		expect(response.status).toBe(400);
+		expect(setWeeklyEnabled).not.toHaveBeenCalled();
+	});
+
+	it("returns 404 for an unknown account", async () => {
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: null }),
+		);
+
+		const response = await handler(
+			weeklyToggleRequest({ enabled: 1 }),
+			"account-1",
+		);
+
+		expect(response.status).toBe(404);
+	});
+
+	it("returns 400 for non-codex accounts and mentions the Codex-only rule", async () => {
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({
+				account: { name: "Claude", provider: "anthropic" },
+				setWeeklyEnabled,
+			}),
+		);
+
+		const response = await handler(
+			weeklyToggleRequest({ enabled: 1 }),
+			"account-1",
+		);
+		const body = (await response.json()) as { error: string };
+
+		expect(response.status).toBe(400);
+		expect(body.error).toContain("Codex");
+		expect(setWeeklyEnabled).not.toHaveBeenCalled();
+	});
+
+	it("enables auto-apply-on-weekly-limit and reports the new state", async () => {
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: codexAccount, setWeeklyEnabled }),
+		);
+
+		const response = await handler(
+			weeklyToggleRequest({ enabled: 1 }),
+			"account-1",
+		);
+		const body = (await response.json()) as Record<string, unknown>;
+
+		expect(response.status).toBe(200);
+		expect(setWeeklyEnabled).toHaveBeenCalledWith("account-1", true);
+		expect(body.success).toBe(true);
+		expect(body.autoApplyResetOnWeeklyLimitEnabled).toBe(true);
+		expect(String(body.message)).toContain("Codex One");
+	});
+
+	it("disables auto-apply-on-weekly-limit and reports the new state", async () => {
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: codexAccount, setWeeklyEnabled }),
+		);
+
+		const response = await handler(
+			weeklyToggleRequest({ enabled: 0 }),
+			"account-1",
+		);
+		const body = (await response.json()) as Record<string, unknown>;
+
+		expect(response.status).toBe(200);
+		expect(setWeeklyEnabled).toHaveBeenCalledWith("account-1", false);
+		expect(body.success).toBe(true);
+		expect(body.autoApplyResetOnWeeklyLimitEnabled).toBe(false);
+	});
+
+	it("never touches the sibling expiring-credits toggle", async () => {
+		const setEnabled = mock(async () => {});
+		const setWeeklyEnabled = mock(async () => {});
+		const handler = createAccountAutoApplyResetOnWeeklyLimitHandler(
+			makeDbOps({ account: codexAccount, setEnabled, setWeeklyEnabled }),
+		);
+
+		await handler(weeklyToggleRequest({ enabled: 1 }), "account-1");
+
+		expect(setWeeklyEnabled).toHaveBeenCalledTimes(1);
+		expect(setEnabled).not.toHaveBeenCalled();
+	});
+});
+
 describe("createAccountResetCreditEventsHandler", () => {
 	const codexAccount: AccountLookupRow = {
 		name: "Codex One",
@@ -238,6 +371,7 @@ describe("createAccountResetCreditEventsHandler", () => {
 				id: "account-1:credit-1:1",
 				creditId: "credit-1",
 				trigger: "auto",
+				cause: "expiry",
 				attemptSeq: 1,
 				status: "reset",
 				windowsReset: 2,
@@ -253,11 +387,28 @@ describe("createAccountResetCreditEventsHandler", () => {
 		expect(JSON.stringify(body)).not.toContain("idem-1");
 	});
 
+	it("maps the weekly-limit cause through unchanged", async () => {
+		const getEvents = mock(async () => [
+			makeEventRow({ cause: "weekly-limit" }),
+		]);
+		const handler = createAccountResetCreditEventsHandler(
+			makeDbOps({ account: codexAccount, getEvents }),
+		);
+
+		const response = await handler(eventsUrl(), "account-1");
+		const body = (await response.json()) as {
+			events: CodexResetCreditEventResponse[];
+		};
+
+		expect(body.events[0]?.cause).toBe("weekly-limit");
+	});
+
 	it("maps null credit_expires_at and resolved_at to null", async () => {
 		const getEvents = mock(async () => [
 			makeEventRow({
 				credit_id: null,
 				trigger: "manual",
+				cause: null,
 				attempt_seq: null,
 				status: "pending",
 				windows_reset: null,
@@ -278,6 +429,7 @@ describe("createAccountResetCreditEventsHandler", () => {
 		expect(body.events[0]).toMatchObject({
 			creditId: null,
 			trigger: "manual",
+			cause: null,
 			attemptSeq: null,
 			status: "pending",
 			windowsReset: null,
