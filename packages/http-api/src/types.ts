@@ -2,6 +2,8 @@
 export type {
 	AccountDeleteRequest,
 	AccountResponse,
+	ActiveSessionsAnalytics,
+	ActiveSessionsTimePoint,
 	AnalyticsResponse,
 	APIContext,
 	CacheFlowPoint,

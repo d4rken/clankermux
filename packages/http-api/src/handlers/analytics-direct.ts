@@ -7,6 +7,8 @@ import {
 import { Logger } from "@clankermux/logger";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type {
+	ActiveSessionsAnalytics,
+	ActiveSessionsTimePoint,
 	AnalyticsResponse,
 	APIContext,
 	CacheFlowPoint,
@@ -782,6 +784,98 @@ export function createAnalyticsHandler(context: APIContext) {
 					medianTps: Number(row.median_tps),
 				}));
 
+			// Distinct-active-sessions series, bucketed by requests.timestamp and
+			// split by affinity scope.
+			//
+			// Bucket on r.timestamp (NOT rr.created_at): the shared whereClause
+			// bounds the range on r.timestamp, and every other time series in this
+			// handler buckets on r.timestamp too. request_routing.created_at is the
+			// request START time while requests.timestamp is the persist/completion
+			// time — for long agentic turns those differ by the whole request
+			// duration, so bucketing on created_at could place a point outside the
+			// filtered window and misalign this panel against the others. Using
+			// r.timestamp keeps the time axis consistent with the range filter and
+			// with every sibling chart.
+			//
+			// Base table is request_routing INNER JOIN requests (deliberately
+			// asymmetric with the routing panels above, which LEFT JOIN so untracked
+			// requests still show up as an "untracked" account flow): a request with
+			// no affinity_key_hash was never a tracked session, so it must not count
+			// toward any session gauge. The JOIN back to requests is what makes the
+			// shared whereClause (range + account/model/apiKey/project/status)
+			// apply identically to this panel — filtering the same rows every other
+			// panel filters.
+			//
+			// Per-bucket PRESENCE semantics: a session whose requests span multiple
+			// buckets is counted once in EACH bucket it touches (COUNT(DISTINCT hash)
+			// GROUP BY bucket), so the series is NOT summable to a range total. The
+			// 'total' row is a separate COUNT(DISTINCT hash) across the whole filtered
+			// range, counting each session exactly once — that is the honest headline.
+			//
+			// Param order: queryParams (whereClause lives inside the CTE, which is
+			// emitted first in the SQL string) precede the two bucket placeholders
+			// (the bucket sub-select comes after the CTE).
+			phaseStartedAt = performance.now();
+			const activeSessionRows = await db.query<{
+				row_type: string;
+				ts: number | null;
+				scope: string | null;
+				sessions: number;
+			}>(
+				`
+				WITH session_requests AS (
+					SELECT
+						rr.affinity_key_hash AS hash,
+						rr.affinity_scope AS scope,
+						r.timestamp AS ts_source
+					FROM request_routing rr
+					JOIN requests r ON r.id = rr.request_id
+					WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
+				)
+				SELECT
+					'total' AS row_type,
+					CAST(NULL AS INTEGER) AS ts,
+					CAST(NULL AS TEXT) AS scope,
+					COUNT(DISTINCT hash) AS sessions
+				FROM session_requests
+
+				UNION ALL
+
+				SELECT * FROM (
+					SELECT
+						'bucket' AS row_type,
+						(ts_source / ?) * ? AS ts,
+						scope,
+						COUNT(DISTINCT hash) AS sessions
+					FROM session_requests
+					WHERE scope IS NOT NULL
+					GROUP BY ts, scope
+					ORDER BY ts, scope
+				)
+			`,
+				[...queryParams, bucket.bucketMs, bucket.bucketMs],
+			);
+			recordPhase(phaseTimings, "active_sessions", phaseStartedAt);
+
+			const activeSessions: ActiveSessionsAnalytics = {
+				totalDistinctSessions:
+					Number(
+						activeSessionRows.find((row) => row.row_type === "total")?.sessions,
+					) || 0,
+				timeSeries: activeSessionRows
+					.filter(
+						(row) =>
+							row.row_type === "bucket" && row.ts != null && row.scope != null,
+					)
+					.map(
+						(row): ActiveSessionsTimePoint => ({
+							ts: Number(row.ts),
+							scope: row.scope as ActiveSessionsTimePoint["scope"],
+							sessions: Number(row.sessions) || 0,
+						}),
+					),
+			};
+
 			// Routing analytics: "why did this account get selected?"
 			// Requests without request_routing rows predate telemetry and are
 			// labeled "untracked" so the overview still shows account flow.
@@ -1448,6 +1542,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				projectBreakdown,
 				contextComposition,
 				toolCallErrors,
+				activeSessions,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

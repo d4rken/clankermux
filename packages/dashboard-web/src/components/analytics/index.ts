@@ -1,3 +1,4 @@
+export { ActiveSessionsPanel } from "./ActiveSessionsPanel";
 export {
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
