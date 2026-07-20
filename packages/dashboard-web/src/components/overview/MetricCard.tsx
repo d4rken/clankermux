@@ -18,6 +18,7 @@ export interface MetricCardProps {
 	trend?: "up" | "down" | "flat";
 	trendPeriod?: string;
 	subRows?: MetricCardSubRow[];
+	caption?: string;
 }
 
 export function MetricCard({
@@ -28,6 +29,7 @@ export function MetricCard({
 	trend,
 	trendPeriod,
 	subRows,
+	caption,
 }: MetricCardProps) {
 	const trendElement = trend !== "flat" && change !== undefined && (
 		<div
@@ -51,6 +53,11 @@ export function MetricCard({
 					<div className="flex items-center gap-1.5 min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						<p className="text-sm text-muted-foreground truncate">{title}</p>
+						{caption && (
+							<span className="text-xs text-muted-foreground/70 shrink-0">
+								{caption}
+							</span>
+						)}
 					</div>
 					{trendPeriod && trendElement ? (
 						<Popover>

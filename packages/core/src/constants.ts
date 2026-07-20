@@ -20,6 +20,17 @@ export const TIME_CONSTANTS = {
 	 */
 	SESSION_DURATION_DEFAULT: 5 * 60 * 60 * 1000, // 5 hours - kept for backward compatibility - new code should use ANTHROPIC_SESSION_DURATION_DEFAULT
 
+	// "Active Sessions" live gauge (Overview) + Analytics time-series: trailing
+	// lookback window for counting a distinct request_routing.affinity_key_hash
+	// (a client session pinned for account affinity) as "currently active". A
+	// session counts as active if its most recent routed request landed within
+	// this window. Fixed definition of "recent activity", not an operator knob —
+	// a single named constant, no env override (see feedback_no_env_feature_gates).
+	// Deliberately far shorter than the 5h account-pin lifetime above: a pin
+	// survives long idle gaps so the session snaps back to its account, but
+	// "active right now" should reflect genuine recent traffic.
+	ACTIVE_SESSION_WINDOW_MS: 15 * 60 * 1000, // 15 minutes
+
 	// Timeouts
 	STREAM_TIMEOUT_DEFAULT: 1000 * 60 * 1, // 1 minute
 	STREAM_READ_TIMEOUT_MS: 60000, // 60 seconds - overall timeout for stream reads

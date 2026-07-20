@@ -11,6 +11,19 @@ import type {
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 
+/**
+ * Distinct active client-session counts split by affinity scope.
+ *
+ * The window is applied by the caller (via `sinceMs`); this shape carries only
+ * the per-scope counts, not the window itself (the handler adds `windowMs`).
+ */
+export interface ActiveSessionScopeCounts {
+	claude: number;
+	codex: number;
+	other: number;
+	total: number;
+}
+
 export interface AggregatedStats {
 	totalRequests: number;
 	successfulRequests: number;
@@ -113,6 +126,54 @@ export class StatsRepository {
 			"SELECT COUNT(*) as count FROM accounts WHERE request_count > 0",
 		);
 		return Number(result?.count) || 0;
+	}
+
+	/**
+	 * Count distinct active client sessions from request_routing, split by
+	 * affinity scope.
+	 *
+	 * A "session" is a distinct affinity_key_hash (the SHA-256 of the client's
+	 * Claude session id / Codex thread id / project key). Rows with a NULL hash
+	 * (no affinity) are ignored. The counts are GLOBAL/unfiltered: request_routing
+	 * has no account or model column, so there is nothing to scope on beyond the
+	 * time window.
+	 *
+	 * `total` is computed with its own COUNT(DISTINCT) rather than summing the
+	 * per-scope columns, so it stays correct if a hash is reused across scopes and
+	 * remains accurate should a new scope be added without updating this method.
+	 *
+	 * The `affinity_key_hash IS NOT NULL` predicate matches the partial index
+	 * idx_request_routing_affinity so this is a single indexed round-trip.
+	 *
+	 * @param sinceMs - Only include rows with created_at strictly greater than
+	 *   this timestamp (ms since epoch). The caller computes it as
+	 *   `Date.now() - window`.
+	 */
+	async getActiveSessionCounts(
+		sinceMs: number,
+	): Promise<ActiveSessionScopeCounts> {
+		const row = await this.adapter.get<{
+			claude: unknown;
+			codex: unknown;
+			other: unknown;
+			total: unknown;
+		}>(
+			`SELECT
+				COUNT(DISTINCT CASE WHEN affinity_scope = 'claude_session' THEN affinity_key_hash END) as claude,
+				COUNT(DISTINCT CASE WHEN affinity_scope = 'codex_thread'  THEN affinity_key_hash END) as codex,
+				COUNT(DISTINCT CASE WHEN affinity_scope = 'project'       THEN affinity_key_hash END) as other,
+				COUNT(DISTINCT affinity_key_hash) as total
+			FROM request_routing
+			WHERE affinity_key_hash IS NOT NULL AND created_at > ?`,
+			[sinceMs],
+		);
+
+		return {
+			claude: Number(row?.claude) || 0,
+			codex: Number(row?.codex) || 0,
+			other: Number(row?.other) || 0,
+			total: Number(row?.total) || 0,
+		};
 	}
 
 	/**

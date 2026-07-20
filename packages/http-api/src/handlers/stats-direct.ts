@@ -1,3 +1,4 @@
+import { TIME_CONSTANTS } from "@clankermux/core";
 import { StatsRepository } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { APIContext } from "../types";
@@ -33,6 +34,11 @@ export function createStatsHandler(context: APIContext) {
 		const stats = await statsRepository.getAggregatedStats(sinceMs);
 		const activeAccounts = await statsRepository.getActiveAccountCount();
 
+		const activeSessionWindowMs = TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS;
+		const activeSessionCounts = await statsRepository.getActiveSessionCounts(
+			Date.now() - activeSessionWindowMs,
+		);
+
 		const successRate =
 			stats.totalRequests > 0
 				? Math.round((stats.successfulRequests / stats.totalRequests) * 100)
@@ -48,6 +54,10 @@ export function createStatsHandler(context: APIContext) {
 			totalRequests: stats.totalRequests,
 			successRate,
 			activeAccounts,
+			activeSessions: {
+				windowMs: activeSessionWindowMs,
+				...activeSessionCounts,
+			},
 			avgResponseTime: Math.round(stats.avgResponseTime || 0),
 			totalTokens: stats.totalTokens,
 			totalCostUsd: stats.totalCostUsd,

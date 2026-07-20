@@ -4,6 +4,7 @@ import { useAnalytics } from "../hooks/queries";
 import { toCumulativeSeries } from "../lib/cumulative";
 import { formatAxisTime } from "../lib/time-format";
 import {
+	ActiveSessionsPanel,
 	AnalyticsControls,
 	CacheFlowPanel,
 	CacheKeepaliveSection,
@@ -345,6 +346,13 @@ export const AnalyticsTab = React.memo(() => {
 
 			<RoutingAnalyticsPanel
 				routing={analytics?.routing}
+				loading={loading}
+				timeRange={timeRange}
+			/>
+
+			{/* Active Sessions — distinct sessions active per bucket, split by client */}
+			<ActiveSessionsPanel
+				activeSessions={analytics?.activeSessions}
 				loading={loading}
 				timeRange={timeRange}
 			/>

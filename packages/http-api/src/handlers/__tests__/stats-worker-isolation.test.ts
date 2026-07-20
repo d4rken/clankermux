@@ -9,6 +9,7 @@ import {
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TIME_CONSTANTS } from "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
 import { createAnalyticsHandler } from "../analytics";
 import {
@@ -54,6 +55,20 @@ async function insertAccount(name: string): Promise<string> {
 	return id;
 }
 
+async function insertRouting(
+	requestId: string,
+	affinityScope: string,
+	affinityKeyHash: string,
+	createdAt: number,
+): Promise<void> {
+	await dbOps.getAdapter().run(
+		`INSERT INTO request_routing
+			(request_id, strategy, decision, affinity_scope, affinity_key_hash, created_at)
+		 VALUES (?, 'session', 'affinity_hit', ?, ?, ?)`,
+		[requestId, affinityScope, affinityKeyHash, createdAt],
+	);
+}
+
 describe("stats worker isolation", () => {
 	it("serves /api/stats through the SQLite worker with the same shape", async () => {
 		await insertAccount("acct-1");
@@ -79,6 +94,24 @@ describe("stats worker isolation", () => {
 		expect(data.recentErrors).toHaveLength(1);
 		expect(data.recentErrors[0].errorCode).toBe("upstream exploded");
 		expect(data.recentErrors[0].occurrenceCount).toBe(1);
+	});
+
+	it("surfaces active-session counts within the configured window", async () => {
+		const now = Date.now();
+		await insertRequest(dbOps, "req-session", now);
+		await insertRouting("req-session", "claude_session", "hash-a", now);
+
+		const response = await createStatsHandler(makeContext(dbOps))(statsUrl());
+		const data = await response.json();
+
+		expect(response.status).toBe(200);
+		expect(data.activeSessions.windowMs).toBe(
+			TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS,
+		);
+		expect(data.activeSessions.claude).toBe(1);
+		expect(data.activeSessions.codex).toBe(0);
+		expect(data.activeSessions.other).toBe(0);
+		expect(data.activeSessions.total).toBe(1);
 	});
 
 	it("keeps stats and analytics cache entries isolated for identical params", async () => {

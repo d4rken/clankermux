@@ -66,6 +66,33 @@ export interface IntegrityStatus {
 	lastFullSkipReason: string | null;
 }
 
+/**
+ * Live "Active Sessions" gauge: distinct client sessions (request_routing
+ * affinity_key_hash) that made a routed request within the trailing
+ * ACTIVE_SESSION_WINDOW_MS. Split by affinity scope.
+ *
+ * The three scope buckets are disjoint by construction — the affinity scope is
+ * embedded in the pre-hash key (see routing-telemetry.ts), so a given hash only
+ * ever appears under one scope — but `total` is computed independently server-
+ * side (COUNT(DISTINCT) across all scopes) so it stays correct even if a future
+ * scope value is added without updating every consumer.
+ */
+export interface ActiveSessionCounts {
+	/** Lookback window (ms) used to compute this snapshot, echoed from the
+	 *  server so the frontend never has to duplicate ACTIVE_SESSION_WINDOW_MS. */
+	windowMs: number;
+	/** Sessions pinned by a Claude Code session id (affinity_scope='claude_session'). */
+	claude: number;
+	/** Sessions pinned by a Codex thread id (affinity_scope='codex_thread'). */
+	codex: number;
+	/** Sessions pinned only by project label (affinity_scope='project') — a
+	 *  fallback when no Claude/Codex session identifier was present, so it can't
+	 *  be attributed to either provider. Surfaced separately, never merged. */
+	other: number;
+	/** Distinct sessions across ALL scopes in the window. */
+	total: number;
+}
+
 // Stats types
 export interface Stats {
 	totalRequests: number;
@@ -75,6 +102,9 @@ export interface Stats {
 	totalTokens: number;
 	totalCostUsd: number;
 	avgTokensPerSecond: number | null;
+	// Live active-sessions gauge. Optional because an older server may not
+	// populate it — consumers should treat absence as undefined.
+	activeSessions?: ActiveSessionCounts;
 }
 
 export interface StatsResponse {
@@ -85,6 +115,9 @@ export interface StatsResponse {
 	totalTokens: number;
 	totalCostUsd: number;
 	avgTokensPerSecond: number | null;
+	// Live active-sessions gauge. Optional because an older server may not
+	// populate it — consumers should treat absence as undefined.
+	activeSessions?: ActiveSessionCounts;
 }
 
 export interface RecentErrorGroup {
@@ -255,6 +288,37 @@ export interface ToolCallErrorAnalytics {
 	topMessages: ToolErrorMessage[];
 }
 
+// Active-session analytics (Analytics tab), derived from request_routing's
+// affinity_key_hash (session identity) joined back to requests so the same
+// account/model/apiKey/project/status filters as every other panel apply.
+
+/**
+ * One per-scope point in the distinct-active-sessions time series.
+ *
+ * IMPORTANT semantics: this is a per-bucket PRESENCE count — "how many distinct
+ * sessions were active in THIS bucket" — not a running total and not a count of
+ * newly-started sessions. A session whose requests span 3 consecutive buckets
+ * is counted once in EACH of the 3 buckets. Do NOT sum this series to get a
+ * range total — that double-counts multi-bucket sessions; use
+ * {@link ActiveSessionsAnalytics.totalDistinctSessions} instead.
+ */
+export interface ActiveSessionsTimePoint {
+	ts: number; // bucket start (ms), same floor as TimePoint.ts
+	scope: "claude_session" | "codex_thread" | "project";
+	sessions: number; // COUNT(DISTINCT affinity_key_hash) within this bucket+scope
+}
+
+export interface ActiveSessionsAnalytics {
+	/** Distinct sessions per bucket per scope — see
+	 *  {@link ActiveSessionsTimePoint} for the "counted in every bucket it
+	 *  touches" caveat. */
+	timeSeries: ActiveSessionsTimePoint[];
+	/** COUNT(DISTINCT affinity_key_hash) across the WHOLE filtered range — the
+	 *  honest "N distinct sessions" headline. Deliberately NOT the sum of
+	 *  timeSeries[].sessions, which would double-count multi-bucket sessions. */
+	totalDistinctSessions: number;
+}
+
 export interface AnalyticsResponse {
 	meta?: {
 		range: string;
@@ -388,6 +452,12 @@ export interface AnalyticsResponse {
 	// don't aggregate). Optional because an older server may not populate it —
 	// consumers should treat absence as undefined.
 	toolCallErrors?: ToolCallErrorAnalytics;
+	// Distinct-active-sessions analytics from request_routing.affinity_key_hash,
+	// bucketed like timeSeries and honoring the same filters. Only requests with
+	// an affinity key (a client session/thread/project pin) contribute. Optional
+	// because an older server may not populate it — consumers should treat
+	// absence as undefined.
+	activeSessions?: ActiveSessionsAnalytics;
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

@@ -1,6 +1,6 @@
-import { registerUIRefresh } from "@clankermux/core";
+import { registerUIRefresh, TIME_CONSTANTS } from "@clankermux/core";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { Activity, BarChart3, Database, Gauge } from "lucide-react";
+import { Activity, BarChart3, Database, Gauge, Users } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import {
@@ -9,6 +9,7 @@ import {
 	useMemoryHistory,
 	useStats,
 } from "../hooks/queries";
+import { SESSION_SCOPE_SHORT_LABELS } from "../lib/active-sessions";
 import { computePoolUsage } from "../lib/pool-usage";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
@@ -171,7 +172,7 @@ export const OverviewTab = React.memo(() => {
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals.requests || 0)}
@@ -199,6 +200,32 @@ export const OverviewTab = React.memo(() => {
 					trend={trends.trendCacheHitRate}
 					trendPeriod={trendPeriod}
 					icon={Database}
+				/>
+				<MetricCard
+					title="Active Sessions"
+					caption={`· last ${Math.round((stats?.activeSessions?.windowMs ?? TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS) / 60000)}m`}
+					value={formatNumber(stats?.activeSessions?.total ?? 0)}
+					icon={Users}
+					subRows={[
+						{
+							label: SESSION_SCOPE_SHORT_LABELS.claude,
+							value: formatNumber(stats?.activeSessions?.claude ?? 0),
+						},
+						{
+							label: SESSION_SCOPE_SHORT_LABELS.codex,
+							value: formatNumber(stats?.activeSessions?.codex ?? 0),
+						},
+						...(stats?.activeSessions?.other
+							? [
+									{
+										label: SESSION_SCOPE_SHORT_LABELS.other,
+										value: formatNumber(stats.activeSessions.other),
+										tooltip:
+											"Sessions identified only by a project label (no Claude Code session id or Codex thread id) — can't be reliably attributed to either provider.",
+									},
+								]
+							: []),
+					]}
 				/>
 				<PoolMetricCard
 					title="5h Pool"
