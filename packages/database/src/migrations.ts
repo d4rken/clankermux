@@ -57,6 +57,7 @@ export function ensureSchema(db: Database): void {
 			refresh_token_issued_at INTEGER,
 			auto_pause_on_overage_enabled INTEGER DEFAULT 1,
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
+			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
 			rate_limited_reason TEXT,
 			rate_limited_at INTEGER,
@@ -417,6 +418,47 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_account_payments_account ON account_payments(account_id, paid_at_ms DESC)`,
 	);
 
+	// Create codex_reset_credit_events table — durable ledger of Codex
+	// usage-limit reset-credit consume attempts (manual button presses and the
+	// opt-in auto-apply scheduler). Auto rows use a deterministic id
+	// "{account_id}:{credit_id}:{attempt_seq}" so the idempotency key survives
+	// crashes; manual rows use crypto.randomUUID(). created_at/resolved_at are
+	// ms epoch; credit_expires_at is a unix-SECONDS snapshot of the credit's
+	// expiry as reported by the backend. Deliberately NO foreign key on
+	// account_id: the ledger must survive account deletion (account_name is
+	// denormalized for display after the account is gone).
+	db.run(`
+		CREATE TABLE IF NOT EXISTS codex_reset_credit_events (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			account_name TEXT NOT NULL,
+			credit_id TEXT,
+			trigger TEXT NOT NULL CHECK (trigger IN ('manual','auto')),
+			attempt_seq INTEGER,
+			idempotency_key TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('pending','reset','nothingToReset','noCredit','alreadyRedeemed','failed')),
+			windows_reset INTEGER,
+			error_message TEXT,
+			credit_expires_at INTEGER,
+			created_at INTEGER NOT NULL,
+			resolved_at INTEGER
+		)
+	`);
+
+	// One auto attempt row per (account, credit, seq) — INSERT OR IGNORE against
+	// this index makes concurrent auto claims race-safe (the loser reuses the
+	// winner's row and idempotency key).
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_reset_credit_events_auto_attempt
+			ON codex_reset_credit_events(account_id, credit_id, attempt_seq)
+			WHERE trigger = 'auto' AND credit_id IS NOT NULL`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_codex_reset_credit_events_account
+			ON codex_reset_credit_events(account_id, created_at DESC)`,
+	);
+
 	// Performance indexes (covering/partial indexes for hot query paths)
 	addPerformanceIndexes(db);
 }
@@ -533,6 +575,14 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "cache_keepalive_snapshots",
 		column: "saved_usd_5m",
 		ddl: "ALTER TABLE cache_keepalive_snapshots ADD COLUMN saved_usd_5m REAL NOT NULL DEFAULT 0",
+	},
+	// Opt-in per-account toggle: automatically consume expiring Codex
+	// usage-limit reset credits when the account is rate-limited. Default OFF
+	// (no automation without explicit operator consent).
+	{
+		table: "accounts",
+		column: "codex_auto_apply_reset_credits_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0",
 	},
 ];
 

@@ -566,6 +566,18 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAutoApplyResetCreditsToggle = async (account: Account) => {
+		try {
+			await api.updateAccountAutoApplyResetCredits(
+				account.id,
+				!account.autoApplyResetCreditsEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleUpdateCustomEndpoint = async (
 		accountId: string,
 		customEndpoint: string | null,
@@ -700,6 +712,7 @@ export function AccountsTab() {
 						onBillingTypeToggle={handleBillingTypeToggle}
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
+						onAutoApplyResetCreditsToggle={handleAutoApplyResetCreditsToggle}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
 						onReauth={handleReauth}

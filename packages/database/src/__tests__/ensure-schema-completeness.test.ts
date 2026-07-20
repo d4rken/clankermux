@@ -86,6 +86,7 @@ describe("ensureSchema completeness", () => {
 			"refresh_token_issued_at",
 			"auto_pause_on_overage_enabled",
 			"peak_hours_pause_enabled",
+			"codex_auto_apply_reset_credits_enabled",
 			"pause_reason",
 			"rate_limited_reason",
 			"rate_limited_at",
@@ -167,6 +168,38 @@ describe("ensureSchema completeness", () => {
 			"idx_account_payments_import_key",
 			"idx_account_payments_paid_at",
 			"idx_account_payments_account",
+		]) {
+			expect(indexExists(db, idx)).toBe(true);
+		}
+	});
+
+	it("creates the codex_reset_credit_events table with every current column", () => {
+		expect(tableExists(db, "codex_reset_credit_events")).toBe(true);
+		const cols = columnNames(db, "codex_reset_credit_events");
+		const expected = [
+			"id",
+			"account_id",
+			"account_name",
+			"credit_id",
+			"trigger",
+			"attempt_seq",
+			"idempotency_key",
+			"status",
+			"windows_reset",
+			"error_message",
+			"credit_expires_at",
+			"created_at",
+			"resolved_at",
+		];
+		for (const col of expected) {
+			expect(cols.has(col)).toBe(true);
+		}
+	});
+
+	it("creates the codex_reset_credit_events indexes", () => {
+		for (const idx of [
+			"idx_codex_reset_credit_events_auto_attempt",
+			"idx_codex_reset_credit_events_account",
 		]) {
 			expect(indexExists(db, idx)).toBe(true);
 		}

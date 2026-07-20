@@ -146,6 +146,7 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 		auto_refresh_enabled: true,
 		auto_pause_on_overage_enabled: false,
 		peak_hours_pause_enabled: false,
+		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
 		model_mappings: null,
 		cross_region_mode: null,
@@ -161,6 +162,16 @@ function makeCtx() {
 	const accounts = new Map<string, Account>();
 	const getAccountCalls: string[] = [];
 	const forceResetCalls: string[] = [];
+	const resolveLedgerCalls: Array<{
+		id: string;
+		status: string;
+		windowsReset: number | null;
+		errorMessage: string | null;
+	}> = [];
+	const manualLedgerEvents: Array<Record<string, unknown>> = [];
+	// Toggle: when true, every ledger write throws (proves writes never break
+	// the consume flow).
+	const ledgerFailure = { throwOnWrite: false };
 	const ctx = {
 		dbOps: {
 			// Return a shallow COPY so a mid-flight mutation of the stored account
@@ -174,6 +185,23 @@ function makeCtx() {
 				forceResetCalls.push(id);
 				return true;
 			}),
+			resolveCodexResetCreditAttempt: mock(
+				async (
+					id: string,
+					status: string,
+					windowsReset: number | null,
+					errorMessage: string | null,
+				) => {
+					if (ledgerFailure.throwOnWrite) throw new Error("ledger down");
+					resolveLedgerCalls.push({ id, status, windowsReset, errorMessage });
+				},
+			),
+			recordManualCodexResetCreditEvent: mock(
+				async (input: Record<string, unknown>) => {
+					if (ledgerFailure.throwOnWrite) throw new Error("ledger down");
+					manualLedgerEvents.push({ ...input });
+				},
+			),
 		},
 		asyncWriter: {
 			enqueue: (job: () => void | Promise<void>) => {
@@ -185,6 +213,9 @@ function makeCtx() {
 		ctx,
 		getAccountCalls,
 		forceResetCalls,
+		resolveLedgerCalls,
+		manualLedgerEvents,
+		ledgerFailure,
 		setAccount: (a: Account) => accounts.set(a.id, a),
 		mutateAccount: (id: string, patch: Partial<Account>) => {
 			const a = accounts.get(id);
@@ -412,6 +443,210 @@ describe("CodexSpendCoordinator.consumeResetCredit", () => {
 		});
 		expect(forceResetCalls).toEqual([]);
 		expect(mockFetchCodexRateLimitResetCredits).not.toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// consumeResetCredit — reset-credit ledger writes (auto resolve vs manual event)
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.consumeResetCredit — ledger", () => {
+	const businessOutcomes = [
+		{ outcome: "reset", windowsReset: 2 },
+		{ outcome: "nothingToReset", windowsReset: 0 },
+		{ outcome: "noCredit", windowsReset: 0 },
+		{ outcome: "alreadyRedeemed", windowsReset: 1 },
+	] as const;
+
+	for (const business of businessOutcomes) {
+		it(`auto path resolves the claimed ledger row with outcome '${business.outcome}'`, async () => {
+			const {
+				coordinator,
+				setAccount,
+				resolveLedgerCalls,
+				manualLedgerEvents,
+			} = makeCoordinator();
+			const id = seedId(`ledger-auto-${business.outcome}`);
+			setAccount(makeCodexAccount({ id, name: "codex-ledger" }));
+			consumeImpl = async () => ({ ...business });
+
+			const outcome = await coordinator.consumeResetCredit(id, {
+				idempotencyKey: `codex-reset-auto:${id}:credit-1:1`,
+				creditId: "credit-1",
+				autoApply: { ledgerRowId: `${id}:credit-1:1` },
+			});
+
+			expect(outcome.status).toBe("completed");
+			expect(resolveLedgerCalls).toEqual([
+				{
+					id: `${id}:credit-1:1`,
+					status: business.outcome,
+					windowsReset: business.windowsReset,
+					errorMessage: null,
+				},
+			]);
+			// Auto attempts never double-book a manual event.
+			expect(manualLedgerEvents).toEqual([]);
+		});
+	}
+
+	it("manual path records a manual ledger event with the business outcome", async () => {
+		const { coordinator, setAccount, resolveLedgerCalls, manualLedgerEvents } =
+			makeCoordinator();
+		const id = seedId("ledger-manual");
+		setAccount(makeCodexAccount({ id, name: "codex-manual" }));
+		consumeImpl = async () => ({ outcome: "reset", windowsReset: 3 });
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "manual-key-1",
+			creditId: "credit-9",
+		});
+
+		expect(outcome.status).toBe("completed");
+		expect(resolveLedgerCalls).toEqual([]);
+		expect(manualLedgerEvents).toEqual([
+			{
+				accountId: id,
+				accountName: "codex-manual",
+				creditId: "credit-9",
+				idempotencyKey: "manual-key-1",
+				status: "reset",
+				windowsReset: 3,
+				errorMessage: null,
+			},
+		]);
+	});
+
+	it("manual path records creditId null when the request omits it", async () => {
+		const { coordinator, setAccount, manualLedgerEvents } = makeCoordinator();
+		const id = seedId("ledger-manual-nocredit");
+		setAccount(makeCodexAccount({ id, name: "codex-manual" }));
+		consumeImpl = async () => ({ outcome: "noCredit", windowsReset: 0 });
+
+		await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "manual-key-2",
+		});
+
+		expect(manualLedgerEvents).toEqual([
+			{
+				accountId: id,
+				accountName: "codex-manual",
+				creditId: null,
+				idempotencyKey: "manual-key-2",
+				status: "noCredit",
+				windowsReset: 0,
+				errorMessage: null,
+			},
+		]);
+	});
+
+	it("a failed AUTO dispatch leaves the pending row untouched (same-key retry)", async () => {
+		const { coordinator, setAccount, resolveLedgerCalls, manualLedgerEvents } =
+			makeCoordinator();
+		const id = seedId("ledger-auto-fail");
+		setAccount(makeCodexAccount({ id, name: "codex-fail" }));
+		consumeImpl = async () => {
+			throw new Error("upstream timed out");
+		};
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: `codex-reset-auto:${id}:credit-1:1`,
+			creditId: "credit-1",
+			autoApply: { ledgerRowId: `${id}:credit-1:1` },
+		});
+
+		expect(outcome.status).toBe("failed");
+		// The pending auto row must NOT be resolved (nor a manual event booked):
+		// the next tick retries with the same idempotency key.
+		expect(resolveLedgerCalls).toEqual([]);
+		expect(manualLedgerEvents).toEqual([]);
+	});
+
+	it("a failed MANUAL dispatch records a manual 'failed' event with the message", async () => {
+		const { coordinator, setAccount, resolveLedgerCalls, manualLedgerEvents } =
+			makeCoordinator();
+		const id = seedId("ledger-manual-fail");
+		setAccount(makeCodexAccount({ id, name: "codex-fail" }));
+		consumeImpl = async () => {
+			throw new Error("upstream timed out");
+		};
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "manual-key-3",
+			creditId: "credit-1",
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(resolveLedgerCalls).toEqual([]);
+		expect(manualLedgerEvents).toEqual([
+			{
+				accountId: id,
+				accountName: "codex-fail",
+				creditId: "credit-1",
+				idempotencyKey: "manual-key-3",
+				status: "failed",
+				windowsReset: null,
+				errorMessage:
+					"Failed to consume a reset credit for 'codex-fail': upstream timed out",
+			},
+		]);
+	});
+
+	it("a MANUAL validation failure (non-codex account) records a manual 'failed' event", async () => {
+		const { coordinator, setAccount, manualLedgerEvents } = makeCoordinator();
+		const id = seedId("ledger-manual-validation");
+		setAccount(
+			makeCodexAccount({ id, name: "not-codex", provider: "anthropic" }),
+		);
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "manual-key-4",
+		});
+
+		expect(outcome.status).toBe("failed");
+		expect(manualLedgerEvents).toHaveLength(1);
+		expect(manualLedgerEvents[0]).toMatchObject({
+			accountId: id,
+			accountName: "not-codex",
+			status: "failed",
+			windowsReset: null,
+		});
+	});
+
+	it("a ledger-write throw does not break the AUTO consume result", async () => {
+		const { coordinator, setAccount, ledgerFailure } = makeCoordinator();
+		const id = seedId("ledger-throw-auto");
+		setAccount(makeCodexAccount({ id, name: "codex-ledger-down" }));
+		ledgerFailure.throwOnWrite = true;
+		consumeImpl = async () => ({ outcome: "reset", windowsReset: 2 });
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: `codex-reset-auto:${id}:credit-1:1`,
+			creditId: "credit-1",
+			autoApply: { ledgerRowId: `${id}:credit-1:1` },
+		});
+
+		expect(outcome.status).toBe("completed");
+		if (outcome.status === "completed") {
+			expect(outcome.result).toEqual({ outcome: "reset", windowsReset: 2 });
+		}
+	});
+
+	it("a ledger-write throw does not break the MANUAL consume result", async () => {
+		const { coordinator, setAccount, ledgerFailure } = makeCoordinator();
+		const id = seedId("ledger-throw-manual");
+		setAccount(makeCodexAccount({ id, name: "codex-ledger-down" }));
+		ledgerFailure.throwOnWrite = true;
+		consumeImpl = async () => ({ outcome: "noCredit", windowsReset: 0 });
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "manual-key-5",
+		});
+
+		expect(outcome.status).toBe("completed");
+		if (outcome.status === "completed") {
+			expect(outcome.result.outcome).toBe("noCredit");
+		}
 	});
 });
 

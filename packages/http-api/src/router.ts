@@ -1,6 +1,7 @@
 import { validateNumber } from "@clankermux/core";
 import {
 	createAccountAddHandler,
+	createAccountAutoApplyResetCreditsHandler,
 	createAccountAutoFallbackHandler,
 	createAccountAutoPauseOnOverageHandler,
 	createAccountAutoRefreshHandler,
@@ -22,6 +23,7 @@ import {
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
 	createAccountRenewalUpdateHandler,
+	createAccountResetCreditEventsHandler,
 	createAccountResetStickinessHandler,
 	createAccountResumeHandler,
 	createAccountsListHandler,
@@ -521,6 +523,35 @@ export class APIRouter {
 					createAccountConsumeRateLimitResetCreditHandler(this.context.dbOps);
 				return await this.wrapHandler((req) =>
 					consumeResetCreditHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Per-account opt-in: auto-consume expiring Codex usage reset credits
+			if (
+				parts.length === 6 &&
+				parts[4] === "rate-limit-reset-credits" &&
+				parts[5] === "auto-apply" &&
+				method === "POST"
+			) {
+				const autoApplyResetCreditsHandler =
+					createAccountAutoApplyResetCreditsHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					autoApplyResetCreditsHandler(req, accountId),
+				)(req, url);
+			}
+
+			// Recent reset-credit ledger events (newest first)
+			if (
+				parts.length === 6 &&
+				parts[4] === "rate-limit-reset-credits" &&
+				parts[5] === "events" &&
+				method === "GET"
+			) {
+				const resetCreditEventsHandler = createAccountResetCreditEventsHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((_req, url) =>
+					resetCreditEventsHandler(url, accountId),
 				)(req, url);
 			}
 

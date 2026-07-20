@@ -48,7 +48,9 @@ import {
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
+	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
+	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
 	handleProxy,
@@ -237,6 +239,8 @@ let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let usageSnapshotSampler: UsageSnapshotSampler | null = null;
 let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
+let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
+	null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1626,6 +1630,17 @@ Available endpoints:
 	});
 	subscriptionPaymentRecorder.start();
 
+	// Start the Codex reset-credit auto-applier: redeems expiring usage reset
+	// credits for Codex accounts with the auto-apply toggle enabled (immediate
+	// catch-up tick for credits that neared expiry while down, then every
+	// minute). Metadata refreshes route through the shared CodexSpendCoordinator
+	// so this stays behind the single Codex spend authority.
+	codexResetCreditApplyScheduler = createCodexResetCreditApplyScheduler({
+		dbOps,
+		coordinator: codexSpendCoordinator,
+	});
+	codexResetCreditApplyScheduler.start();
+
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {
 		throw new Error("Server instance has no valid port");
@@ -1726,6 +1741,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (subscriptionPaymentRecorder) {
 			subscriptionPaymentRecorder.stop();
 			subscriptionPaymentRecorder = null;
+		}
+		if (codexResetCreditApplyScheduler) {
+			codexResetCreditApplyScheduler.stop();
+			codexResetCreditApplyScheduler = null;
 		}
 
 		// Stop memory monitoring

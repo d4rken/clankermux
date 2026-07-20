@@ -587,3 +587,154 @@ describe("deriveAccountStatus — codex on-credits", () => {
 		expect(status.creditsPlanType).toBeNull();
 	});
 });
+
+describe("deriveAccountStatus — reset-credit urgency", () => {
+	function makeResetAccount(
+		expiries: Array<{
+			status: "available" | "redeeming" | "redeemed" | "unknown";
+			expiresAt: string | null;
+		}>,
+		overrides: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return makeAccount({
+			provider: "codex",
+			codexRateLimitResetCredits: {
+				availableCount: expiries.filter((e) => e.status === "available").length,
+				credits: expiries.map((e) => ({
+					status: e.status,
+					expiresAt: e.expiresAt,
+					title: "Full reset",
+					description: null,
+				})),
+				fetchedAt: new Date(NOW).toISOString(),
+			},
+			...overrides,
+		});
+	}
+
+	it("reports 'none' with no reset-credit metadata at all", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.resetCreditUrgency).toBe("none");
+		expect(status.resetCreditNextExpiry).toBeNull();
+		expect(status.resetCreditAvailableExpiries).toEqual([]);
+	});
+
+	it("reports 'imminent' when the soonest expiry is 59 minutes out", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 59 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("imminent");
+	});
+
+	it("reports 'soon' when the soonest expiry is 61 minutes out", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 61 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("soon");
+	});
+
+	it("reports 'soon' when the soonest expiry is 23 hours out", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 23 * 60 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("soon");
+	});
+
+	it("reports 'none' when the soonest expiry is 25 hours out", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 25 * 60 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("none");
+		expect(status.resetCreditNextExpiry?.getTime()).toBe(
+			NOW + 25 * 60 * MINUTE,
+		);
+	});
+
+	it("uses the soonest of several available expiries", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 48 * 60 * MINUTE).toISOString(),
+				},
+				{
+					status: "available",
+					expiresAt: new Date(NOW + 30 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("imminent");
+		expect(status.resetCreditAvailableExpiries).toHaveLength(2);
+		expect(status.resetCreditNextExpiry?.getTime()).toBe(NOW + 30 * MINUTE);
+	});
+
+	it("ignores already-expired credits (expired-only → 'none')", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "available",
+					expiresAt: new Date(NOW - 5 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("none");
+		expect(status.resetCreditNextExpiry).toBeNull();
+	});
+
+	it("ignores non-available (redeemed) credits even with near expiries", () => {
+		const status = deriveAccountStatus(
+			makeResetAccount([
+				{
+					status: "redeemed",
+					expiresAt: new Date(NOW + 10 * MINUTE).toISOString(),
+				},
+			]),
+			NOW,
+		);
+		expect(status.resetCreditUrgency).toBe("none");
+	});
+
+	it("passes the armed flag through from autoApplyResetCreditsEnabled", () => {
+		const armed = deriveAccountStatus(
+			makeResetAccount([], { autoApplyResetCreditsEnabled: true }),
+			NOW,
+		);
+		expect(armed.resetCreditAutoApplyArmed).toBe(true);
+
+		const unarmed = deriveAccountStatus(
+			makeResetAccount([], { autoApplyResetCreditsEnabled: false }),
+			NOW,
+		);
+		expect(unarmed.resetCreditAutoApplyArmed).toBe(false);
+
+		// Absent field (older server) → not armed.
+		const absent = deriveAccountStatus(makeAccount(), NOW);
+		expect(absent.resetCreditAutoApplyArmed).toBe(false);
+	});
+});

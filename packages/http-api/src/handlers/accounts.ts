@@ -10,7 +10,10 @@ import {
 	validatePriority,
 	validateString,
 } from "@clankermux/core";
-import type { DatabaseOperations } from "@clankermux/database";
+import type {
+	CodexResetCreditEventRow,
+	DatabaseOperations,
+} from "@clankermux/database";
 import { ValidationError } from "@clankermux/errors";
 import {
 	BadRequest,
@@ -53,6 +56,8 @@ import type {
 	AnthropicUsageData,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResponse,
+	CodexResetCreditEventResponse,
+	CodexResetCreditEventStatus,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
@@ -356,6 +361,7 @@ export function createAccountsListHandler(
 			auto_refresh_enabled: 0 | 1;
 			auto_pause_on_overage_enabled: 0 | 1;
 			peak_hours_pause_enabled: 0 | 1;
+			codex_auto_apply_reset_credits_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			model_fallbacks: string | null;
@@ -393,6 +399,7 @@ export function createAccountsListHandler(
 					custom_endpoint,
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
+					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
 
 					model_mappings,
 					model_fallbacks,
@@ -871,6 +878,8 @@ export function createAccountsListHandler(
 					autoPauseOnOverageEnabled:
 						account.auto_pause_on_overage_enabled === 1,
 					peakHoursPauseEnabled: account.peak_hours_pause_enabled === 1,
+					autoApplyResetCreditsEnabled:
+						account.codex_auto_apply_reset_credits_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					usageUtilization,
@@ -3834,6 +3843,153 @@ export function createAccountConsumeRateLimitResetCreditHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to consume rate-limit reset credit"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account auto-apply reset-credits toggle handler (Codex accounts
+ * only). Opt-in: when enabled, expiring Codex usage reset credits are consumed
+ * automatically instead of silently lapsing.
+ */
+export function createAccountAutoApplyResetCreditsHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate enabled parameter
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Only codex accounts earn usage reset credits
+			if (account.provider !== "codex") {
+				return errorResponse(
+					BadRequest(
+						"Auto-apply of reset credits is only available for Codex accounts",
+					),
+				);
+			}
+
+			// Update auto-apply setting
+			await dbOps.setCodexAutoApplyResetCreditsEnabled(
+				accountId,
+				enabled === 1,
+			);
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Auto-apply of reset credits ${action} for account '${account.name}'`,
+				autoApplyResetCreditsEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error("Account auto-apply-reset-credits toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle auto-apply-reset-credits"),
+			);
+		}
+	};
+}
+
+const RESET_CREDIT_EVENTS_DEFAULT_LIMIT = 20;
+const RESET_CREDIT_EVENTS_MAX_LIMIT = 100;
+
+/**
+ * List recent reset-credit ledger events for a Codex account, newest first.
+ * The repository already orders by recency; this handler only maps rows to the
+ * API boundary shape (ISO timestamps, camelCase, no idempotency key).
+ */
+export function createAccountResetCreditEventsHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (url: URL, accountId: string): Promise<Response> => {
+		try {
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider !== "codex") {
+				return errorResponse(
+					BadRequest(
+						"Rate-limit reset credits are only available for Codex accounts",
+					),
+				);
+			}
+
+			// Clamp like the other list endpoints (see createRequestsDetailHandler):
+			// non-numeric falls back to the default, numeric is clamped to [1, 100].
+			const limitParam = url.searchParams.get("limit");
+			const parsedLimit = limitParam !== null ? Number(limitParam) : Number.NaN;
+			const limit = Number.isFinite(parsedLimit)
+				? Math.min(
+						Math.max(Math.trunc(parsedLimit), 1),
+						RESET_CREDIT_EVENTS_MAX_LIMIT,
+					)
+				: RESET_CREDIT_EVENTS_DEFAULT_LIMIT;
+
+			const rows = await dbOps.getRecentCodexResetCreditEvents(
+				accountId,
+				limit,
+			);
+			const events: CodexResetCreditEventResponse[] = rows.map(
+				(row: CodexResetCreditEventRow) => ({
+					id: row.id,
+					creditId: row.credit_id,
+					trigger: row.trigger === "auto" ? "auto" : "manual",
+					attemptSeq: row.attempt_seq,
+					status: row.status as CodexResetCreditEventStatus,
+					windowsReset: row.windows_reset,
+					errorMessage: row.error_message,
+					// The ledger snapshots expiry in unix SECONDS (null = never expires)
+					creditExpiresAt:
+						row.credit_expires_at == null
+							? null
+							: new Date(row.credit_expires_at * 1_000).toISOString(),
+					createdAt: new Date(row.created_at).toISOString(),
+					resolvedAt:
+						row.resolved_at == null
+							? null
+							: new Date(row.resolved_at).toISOString(),
+				}),
+			);
+
+			return jsonResponse({ events });
+		} catch (error) {
+			log.error("Account reset-credit events error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to list reset-credit events"),
 			);
 		}
 	};

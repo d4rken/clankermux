@@ -43,6 +43,12 @@ import {
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
 } from "./repositories/cache-keepalive-snapshot.repository";
+import {
+	type CodexResetCreditAutoClaim,
+	CodexResetCreditEventRepository,
+	type CodexResetCreditEventResolvedStatus,
+	type CodexResetCreditEventRow,
+} from "./repositories/codex-reset-credit-event.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
@@ -370,6 +376,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
+	private codexResetCreditEvents: CodexResetCreditEventRepository;
 
 	constructor(
 		dbPath?: string,
@@ -440,6 +447,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			this.adapter,
 		);
 		this.accountPayments = new AccountPaymentRepository(this.adapter);
+		this.codexResetCreditEvents = new CodexResetCreditEventRepository(
+			this.adapter,
+		);
 	}
 
 	setRuntimeConfig(runtime: RuntimeConfig): void {
@@ -1133,6 +1143,16 @@ OAuth tokens will need to be re-authenticated.
 	): Promise<void> {
 		await this.adapter.run(
 			"UPDATE accounts SET peak_hours_pause_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
+	async setCodexAutoApplyResetCreditsEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET codex_auto_apply_reset_credits_enabled = ? WHERE id = ?",
 			[enabled ? 1 : 0, accountId],
 		);
 	}
@@ -2468,6 +2488,90 @@ OAuth tokens will need to be re-authenticated.
 			() => this.accountPayments.latestSubscriptionDueDate(accountId),
 			this.retryConfig,
 			"latestSubscriptionPaymentDueDate",
+		);
+	}
+
+	// ── Codex reset-credit ledger operations delegated to repository ──────────
+
+	async claimCodexResetCreditAutoAttempt(input: {
+		accountId: string;
+		accountName: string;
+		creditId: string;
+		creditExpiresAt: number | null;
+		now?: number;
+	}): Promise<CodexResetCreditAutoClaim | null> {
+		return withDatabaseRetry(
+			() =>
+				this.codexResetCreditEvents.claimAutoAttempt({
+					...input,
+					now: input.now ?? Date.now(),
+				}),
+			this.retryConfig,
+			"claimCodexResetCreditAutoAttempt",
+		);
+	}
+
+	async resolveCodexResetCreditAttempt(
+		id: string,
+		status: CodexResetCreditEventResolvedStatus,
+		windowsReset: number | null,
+		errorMessage: string | null,
+		now: number = Date.now(),
+	): Promise<void> {
+		await withDatabaseRetry(
+			() =>
+				this.codexResetCreditEvents.resolveAttempt(
+					id,
+					status,
+					windowsReset,
+					errorMessage,
+					now,
+				),
+			this.retryConfig,
+			"resolveCodexResetCreditAttempt",
+		);
+	}
+
+	async recordManualCodexResetCreditEvent(input: {
+		accountId: string;
+		accountName: string;
+		creditId: string | null;
+		idempotencyKey: string;
+		status: CodexResetCreditEventResolvedStatus;
+		windowsReset: number | null;
+		errorMessage: string | null;
+		now?: number;
+	}): Promise<void> {
+		await withDatabaseRetry(
+			() =>
+				this.codexResetCreditEvents.recordManual({
+					...input,
+					now: input.now ?? Date.now(),
+				}),
+			this.retryConfig,
+			"recordManualCodexResetCreditEvent",
+		);
+	}
+
+	async getTerminallyResolvedCodexResetCreditIds(
+		accountId: string,
+	): Promise<Set<string>> {
+		return withDatabaseRetry(
+			() =>
+				this.codexResetCreditEvents.getTerminallyResolvedCreditIds(accountId),
+			this.retryConfig,
+			"getTerminallyResolvedCodexResetCreditIds",
+		);
+	}
+
+	async getRecentCodexResetCreditEvents(
+		accountId: string,
+		limit: number,
+	): Promise<CodexResetCreditEventRow[]> {
+		return withDatabaseRetry(
+			() => this.codexResetCreditEvents.findRecentForAccount(accountId, limit),
+			this.retryConfig,
+			"getRecentCodexResetCreditEvents",
 		);
 	}
 }
