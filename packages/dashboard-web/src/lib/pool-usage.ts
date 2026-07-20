@@ -1,3 +1,4 @@
+import type { ModelFamily } from "@clankermux/core";
 import {
 	computeWindowStartMs,
 	isAnthropicUsageShape,
@@ -45,6 +46,41 @@ export interface PoolUsageFallback {
 	provider: string;
 }
 
+/**
+ * Percent at/above which a per-model-family weekly window is surfaced as
+ * "elevated" in the pool view (worth a callout even when account-wide capacity
+ * is healthy). Inline named constant — NO env var / feature gate.
+ */
+export const FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT = 80;
+
+/** One account's contribution to a per-family weekly bucket. */
+export interface FamilyWeeklyAccountUsage {
+	name: string;
+	pct: number;
+	resetMs: number;
+}
+
+/**
+ * Aggregated per-model-family weekly usage across the pool. A family limit is
+ * independent, actionable info even when the account-wide weekly window is
+ * healthy (or exhausted), so this is computed separately from the pool average.
+ */
+export interface FamilyWeeklyUsage {
+	family: ModelFamily;
+	/** Anthropic display name for the family, e.g. "Fable". */
+	label: string;
+	/** Max pct across contributing accounts for this family. */
+	worstPct: number;
+	/** The account driving worstPct. */
+	worstAccountName: string;
+	/** Soonest reset across this family's accounts. */
+	earliestResetMs: number;
+	/** worstPct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT. */
+	elevated: boolean;
+	/** Per-account rows, sorted desc by pct. */
+	accounts: FamilyWeeklyAccountUsage[];
+}
+
 export interface PoolUsageResult {
 	average: number | null;
 	activeAverage: number | null;
@@ -56,6 +92,7 @@ export interface PoolUsageResult {
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
 	atRisk: PoolUsageProjection[];
+	familyWeekly: FamilyWeeklyUsage[];
 }
 
 const FIVE_HOUR_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
@@ -246,6 +283,71 @@ function classifyQuotaExhaustion(
 	return null;
 }
 
+/**
+ * Aggregate per-model-family weekly usage across the pool. A family's weekly
+ * quota is independent of the account-wide 5h/7d windows, so this is NOT gated
+ * on quota exhaustion — it's still actionable info when an account-wide window
+ * is also spent. Accounts unavailable for structural reasons (paused /
+ * rate-limited / token-expired / usage-429-with-no-data) are excluded via
+ * {@link classifyExclusion}. Only Anthropic-style payloads carry scoped windows.
+ *
+ * The per-family scoped windows come from {@link normalizeAnthropicUsage}, which
+ * already filters to finite percent, resolvable family, and finite FUTURE reset
+ * (stale/rolled-over windows are dropped) — so no staleness re-filtering here.
+ */
+export function computeFamilyWeeklyUsage(
+	accounts: AccountResponse[],
+	now: number,
+): FamilyWeeklyUsage[] {
+	const buckets = new Map<
+		ModelFamily,
+		{ label: string; accounts: FamilyWeeklyAccountUsage[] }
+	>();
+
+	for (const account of accounts) {
+		if (classifyExclusion(account, now) !== null) continue;
+		if (!account.usageData) continue;
+		if (!isAnthropicStyleShape(account.usageData)) continue;
+
+		const scoped = normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped;
+
+		for (const limit of scoped) {
+			let bucket = buckets.get(limit.family);
+			if (bucket === undefined) {
+				bucket = { label: limit.displayName, accounts: [] };
+				buckets.set(limit.family, bucket);
+			}
+			bucket.accounts.push({
+				name: account.name,
+				pct: limit.percent,
+				resetMs: limit.resetsAtMs,
+			});
+		}
+	}
+
+	const result: FamilyWeeklyUsage[] = [];
+	for (const [family, bucket] of buckets) {
+		const sortedAccounts = [...bucket.accounts].sort((a, b) => b.pct - a.pct);
+		const worst = sortedAccounts[0];
+		const earliestResetMs = Math.min(...bucket.accounts.map((a) => a.resetMs));
+		result.push({
+			family,
+			label: bucket.label,
+			worstPct: worst.pct,
+			worstAccountName: worst.name,
+			earliestResetMs,
+			elevated: worst.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+			accounts: sortedAccounts,
+		});
+	}
+
+	result.sort((a, b) => b.worstPct - a.worstPct);
+	return result;
+}
+
 export function computePoolUsage(
 	accounts: AccountResponse[],
 	window: PoolWindow,
@@ -374,6 +476,9 @@ export function computePoolUsage(
 		}
 	}
 
+	const familyWeekly =
+		window === "seven_day" ? computeFamilyWeeklyUsage(accounts, now) : [];
+
 	return {
 		average,
 		activeAverage,
@@ -385,5 +490,6 @@ export function computePoolUsage(
 		earliestResetMs,
 		earliestResetAccountName,
 		atRisk,
+		familyWeekly,
 	};
 }
