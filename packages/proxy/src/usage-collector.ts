@@ -2,6 +2,7 @@ import {
 	isPlausibleSpeed,
 	estimateCostUSD as realEstimateCostUSD,
 } from "@clankermux/core";
+import { normalizeCodexInputUsage } from "@clankermux/providers";
 import type { SlimUsageSummary } from "./request-recorder";
 
 /**
@@ -280,21 +281,32 @@ function applySseData(
 	if (isResponseCompleted) {
 		const usage = parsed.response?.usage;
 		if (usage) {
+			const inputTokenDetails = usage.input_tokens_details;
 			if (typeof usage.input_tokens === "number") {
-				state.inputTokens = usage.input_tokens;
+				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
+				// additive semantics so inputTokens excludes cache reads. Without
+				// this, cost estimation double-charges the cached tokens (once at
+				// the input rate, once at the cache_read rate), because
+				// estimateCostUSD sums inputTokens and cacheReadInputTokens.
+				const normalizedInput = normalizeCodexInputUsage(
+					usage.input_tokens,
+					inputTokenDetails?.cached_tokens,
+				);
+				state.inputTokens = normalizedInput.inputTokens;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
+			} else if (
+				typeof inputTokenDetails?.cached_tokens === "number" &&
+				inputTokenDetails.cached_tokens >= 0
+			) {
+				// No total to normalize against, but a valid cached count is still
+				// authoritative for the cache-read leg.
+				state.cacheReadInputTokens = inputTokenDetails.cached_tokens;
 			}
 			if (typeof usage.output_tokens === "number") {
 				// `response.completed` is the terminal event — its count is the Codex
 				// analogue of Anthropic's authoritative `message_delta`.
 				state.providerFinalOutputTokens = usage.output_tokens;
 				state.providerReportedOutput = true;
-			}
-			const inputTokenDetails = usage.input_tokens_details;
-			if (
-				typeof inputTokenDetails?.cached_tokens === "number" &&
-				inputTokenDetails.cached_tokens >= 0
-			) {
-				state.cacheReadInputTokens = inputTokenDetails.cached_tokens;
 			}
 			if (
 				typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&

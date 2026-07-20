@@ -889,7 +889,12 @@ describe("usage-collector", () => {
 			);
 
 			expect(state.model).toBe("gpt-5.5-codex");
-			expect(state.inputTokens).toBe(1117);
+			// Codex's input_tokens (1117) is cache-inclusive; it is normalized to
+			// Anthropic's additive semantics so inputTokens excludes the 1024
+			// cached tokens (1117 - 1024 = 93), which are reported separately as
+			// cacheReadInputTokens. Without this, cost estimation double-charged
+			// the cached tokens (once at input rate, once at cache_read rate).
+			expect(state.inputTokens).toBe(93);
 			expect(state.providerFinalOutputTokens).toBe(215);
 			expect(state.providerReportedOutput).toBe(true);
 			expect(state.cacheReadInputTokens).toBe(1024);
@@ -902,16 +907,47 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.model).toBe("gpt-5.5-codex");
-			expect(summary.usage.inputTokens).toBe(1117);
+			expect(summary.usage.inputTokens).toBe(93);
 			expect(summary.usage.outputTokens).toBe(215);
 			expect(summary.usage.cacheReadInputTokens).toBe(1024);
 			expect(summary.usage.cacheCreationInputTokens).toBe(64);
-			expect(summary.usage.totalTokens).toBe(1117 + 1024 + 64 + 215);
+			// inputTokens (93) + cacheRead (1024) reconstructs the 1117 total.
+			expect(summary.usage.totalTokens).toBe(93 + 1024 + 64 + 215);
 			// The provider reported — the bytes/4 fallback must NOT have been used.
 			expect(summary.outputApproximate).toBeUndefined();
 			expect(summary.usage.outputTokens).not.toBe(
 				Math.ceil(state.streamedBytes / 4),
 			);
+		});
+
+		it("translates cached input usage additively so inputTokens excludes cache reads", async () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 100,
+					output_tokens: 20,
+					input_tokens_details: { cached_tokens: 30 },
+				}),
+				1100,
+			);
+			// Codex reports a cache-inclusive 100; the additive split is 70 fresh
+			// input + 30 cache reads, which reconstructs the original total.
+			expect(state.inputTokens).toBe(70);
+			expect(state.cacheReadInputTokens).toBe(30);
+			expect(state.inputTokens + state.cacheReadInputTokens).toBe(100);
+
+			const cost = fakeCost();
+			const _summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+			// fakeCost = input*1 + output*2; the cached tokens are no longer
+			// double-counted in the input leg.
+			expect(cost.calls[0].tokens.inputTokens).toBe(70);
+			expect(cost.calls[0].tokens.cacheReadInputTokens).toBe(30);
 		});
 
 		it("handles a usage object without input_tokens_details (no cached info)", async () => {

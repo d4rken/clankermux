@@ -9,7 +9,10 @@ import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
-import { applyRateLimitCooldown } from "./rate-limit-cooldown";
+import {
+	applyRateLimitCooldown,
+	completeRateLimitProbe,
+} from "./rate-limit-cooldown";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	classify429Transient,
@@ -344,6 +347,15 @@ export async function processProxyResponse(
 	//       usable — e.g. after a seat reassignment resets usage mid-window
 	//       before the stored expiry fires.
 	if (!rateLimitInfo.isRateLimited) {
+		// Single-flight recovery probe terminal outcome: this attempt got a
+		// non-rate-limited response, so any in-flight probe lease for this account
+		// is resolved. `response.ok` means the account genuinely recovered; a
+		// non-ok, non-429 response (e.g. a 400/500) is treated as abandoned. The
+		// 429 branch above releases via applyRateLimitCooldown ("cooldown_reapplied")
+		// instead, and proxy.ts's try/finally is the belt-and-suspenders catch-all
+		// for exceptions/skips.
+		completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned");
+
 		// (a) Stability reset — gated only on rate_limited_at.
 		if (
 			account.rate_limited_at &&

@@ -18,6 +18,7 @@ import {
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
 
@@ -68,6 +69,11 @@ export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100;
 // the cheapest currently-served model.
 export const CODEX_PING_MODEL = "gpt-5.4-mini";
 
+// Structured (non-text) tool_result blocks larger than this are replaced with a
+// size marker: replaying megabyte payloads (e.g. base64 documents) into every
+// subsequent turn bloats context and destroys prompt-cache reuse.
+const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
+
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
 		typeof value === "object" && value !== null
@@ -85,6 +91,30 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 		cache_read_input_tokens: getNumber("cache_read_input_tokens"),
 		cache_creation_input_tokens: getNumber("cache_creation_input_tokens"),
 	};
+};
+
+// Known Codex failure codes -> Anthropic error types. This drives both the
+// error type we surface to the client and (via httpStatusForAnthropicErrorPayload)
+// the HTTP status our proxy failover/cooldown logic reacts to:
+//   rate_limit_error  -> 429 (account rate-limit cooldown)
+//   overloaded_error  -> 529 (transient provider-overload backoff)
+//   invalid_request_error -> 400 (permanent; do NOT retry as 5xx)
+//   permission_error  -> 403 (subscription/entitlement; do NOT retry)
+//   api_error         -> 502 (generic upstream failure)
+// Quota exhaustion (insufficient_quota) cools the account like a rate limit;
+// slow_down/server_is_overloaded are throttles; context/policy and
+// subscription errors are permanent and must not be retried as 5xx. Codes
+// mirror the reference client (openai/codex). Unrecognized codes fall through
+// to the existing echo-raw-type / 502 fallback.
+const CODEX_ERROR_TYPE_BY_CODE: Record<string, string> = {
+	rate_limit_exceeded: "rate_limit_error",
+	insufficient_quota: "rate_limit_error",
+	server_is_overloaded: "overloaded_error",
+	slow_down: "overloaded_error",
+	server_error: "api_error",
+	context_length_exceeded: "invalid_request_error",
+	cyber_policy: "invalid_request_error",
+	usage_not_included: "permission_error",
 };
 
 // The default Anthropic-family → Codex model mapping lives in @clankermux/core
@@ -150,6 +180,12 @@ interface CodexRequest {
 	instructions?: string;
 	tools?: CodexTool[];
 	prompt_cache_key?: string;
+	tool_choice?:
+		| "auto"
+		| "required"
+		| "none"
+		| { type: "function"; name: string };
+	parallel_tool_calls?: boolean;
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -169,7 +205,14 @@ interface AnthropicToolUse {
 interface AnthropicToolResult {
 	type: "tool_result";
 	tool_use_id: string;
-	content: string | AnthropicTextContent[];
+	is_error?: boolean;
+	content:
+		| string
+		| Array<{
+				type: string;
+				text?: string;
+				[key: string]: unknown;
+		  }>;
 }
 
 type AnthropicContentBlock =
@@ -188,6 +231,12 @@ interface AnthropicTool {
 	input_schema?: Record<string, unknown>;
 }
 
+interface AnthropicToolChoice {
+	type: "auto" | "any" | "none" | "tool";
+	name?: string;
+	disable_parallel_tool_use?: boolean;
+}
+
 interface AnthropicRequest {
 	model: string;
 	max_tokens: number;
@@ -195,6 +244,7 @@ interface AnthropicRequest {
 	system?: string | { type: string; text: string }[];
 	stream?: boolean;
 	tools?: AnthropicTool[];
+	tool_choice?: AnthropicToolChoice;
 	reasoning?: { effort?: string };
 	/** Claude Code sends a JSON-encoded object with a session_id here. */
 	metadata?: { user_id?: string };
@@ -790,6 +840,86 @@ export class CodexProvider extends BaseProvider {
 		return skillCallIds.has(lastBlock.tool_use_id);
 	}
 
+	/**
+	 * Map an Anthropic `tool_choice` to the Responses API `tool_choice`.
+	 * `auto`→auto, `any`→required, `none`→none, `tool`→a forced function (validated
+	 * against the declared tools). Unknown types and named choices that reference a
+	 * tool the request did not declare throw ValidationError so the bad request is
+	 * surfaced to the client rather than silently dropped. `disable_parallel_tool_use`
+	 * is handled separately at the request-build site (it maps to
+	 * `parallel_tool_calls`, not to `tool_choice`).
+	 */
+	private convertToolChoice(
+		choice: AnthropicToolChoice | undefined,
+		tools: readonly CodexTool[],
+	): CodexRequest["tool_choice"] | undefined {
+		if (!choice) return undefined;
+		if (typeof choice !== "object") {
+			throw new ValidationError("tool_choice must be an object");
+		}
+		if (choice.type === "auto") return "auto";
+		if (choice.type === "any") return "required";
+		if (choice.type === "none") return "none";
+		if (choice.type === "tool") {
+			if (
+				typeof choice.name !== "string" ||
+				!tools.some((tool) => tool.name === choice.name)
+			) {
+				throw new ValidationError(
+					`tool_choice references unknown tool: ${choice.name}`,
+				);
+			}
+			return { type: "function", name: choice.name };
+		}
+		throw new ValidationError(
+			`tool_choice has unsupported type: ${String(
+				(choice as { type?: unknown }).type,
+			)}`,
+		);
+	}
+
+	/**
+	 * Serialize an Anthropic tool_result `content` into the single output string
+	 * the Codex `function_call_output` item requires. Degrades non-text blocks
+	 * safely: image blocks become a marker, other structured blocks are JSON'd
+	 * (with an 8 KiB cap replacing oversized payloads), and malformed input
+	 * (missing/null/non-array content, null blocks) yields empty output instead of
+	 * throwing — a throw here is swallowed by transformRequestBody, which then
+	 * forwards the UNtranslated Anthropic body upstream.
+	 */
+	private serializeToolResultContent(
+		content: AnthropicToolResult["content"],
+	): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		const parts: string[] = [];
+		for (const block of content) {
+			if (!block || typeof block !== "object") continue;
+			if (block.type === "text" && typeof block.text === "string") {
+				parts.push(block.text);
+				continue;
+			}
+			if (block.type === "image") {
+				parts.push("[image content not supported in Codex tool results]");
+				continue;
+			}
+			let serialized: string;
+			try {
+				serialized = JSON.stringify(block);
+			} catch {
+				continue;
+			}
+			if (serialized.length > CODEX_MAX_STRUCTURED_BLOCK_CHARS) {
+				parts.push(
+					`[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
+				);
+				continue;
+			}
+			parts.push(serialized);
+		}
+		return parts.join("\n");
+	}
+
 	private convertMessage(
 		msg: AnthropicMessage,
 	): (CodexMessage | CodexFunctionCallItem | CodexFunctionCallOutputItem)[] {
@@ -812,55 +942,49 @@ export class CodexProvider extends BaseProvider {
 			return items;
 		}
 
-		// Complex content array — may contain tool_use, tool_result, text
-		const textBlocks: CodexContentItem[] = [];
-		const functionCalls: CodexFunctionCallItem[] = [];
-		const functionCallOutputs: CodexFunctionCallOutputItem[] = [];
+		// Complex content array: may contain tool_use, tool_result, text.
+		// Preserve source order so Codex sees the same block chronology the client
+		// sent — outputs stay adjacent to their calls, and follow-up text stays
+		// after the results it refers to. Consecutive text blocks batch into one
+		// message wrapper; function_call* items are top-level.
+		let pendingText: CodexContentItem[] = [];
+		const flushText = () => {
+			if (pendingText.length === 0) return;
+			items.push({ role, content: pendingText } as CodexMessage);
+			pendingText = [];
+		};
 
 		for (const block of msg.content) {
+			if (!block || typeof block !== "object") continue;
 			if (block.type === "text") {
-				textBlocks.push({
+				pendingText.push({
 					type: textType,
 					text: block.text,
 				} as CodexContentItem);
 			} else if (block.type === "tool_use") {
-				functionCalls.push({
+				flushText();
+				items.push({
 					type: "function_call",
 					call_id: block.id,
 					name: block.name,
 					arguments: JSON.stringify(
 						this.sanitizeToolUseInput(block.name, block.input),
 					),
+					status: "completed",
 				});
 			} else if (block.type === "tool_result") {
-				const outputText =
-					typeof block.content === "string"
-						? block.content
-						: Array.isArray(block.content)
-							? block.content
-									.filter((b) => b.type === "text")
-									.map((b) => b.text)
-									.join("\n")
-							: "";
-				functionCallOutputs.push({
+				flushText();
+				const serialized = this.serializeToolResultContent(block.content);
+				items.push({
 					type: "function_call_output",
 					call_id: block.tool_use_id,
-					output: outputText,
+					output:
+						block.is_error === true ? `[tool error] ${serialized}` : serialized,
 					status: "completed",
 				});
 			}
 		}
-
-		// Text content goes in a message wrapper; function_call* are top-level items
-		if (textBlocks.length > 0) {
-			items.push({ role, content: textBlocks } as CodexMessage);
-		}
-		for (const fc of functionCalls) {
-			items.push({ ...fc, status: "completed" });
-		}
-		for (const fco of functionCallOutputs) {
-			items.push(fco);
-		}
+		flushText();
 
 		return items;
 	}
@@ -959,17 +1083,18 @@ export class CodexProvider extends BaseProvider {
 		const inputTokenDetails = usageRecord?.input_tokens_details as
 			| Record<string, unknown>
 			| undefined;
-		const cachedTokens = inputTokenDetails?.cached_tokens;
+		// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
+		// additive semantics so the context-window gauge's input_tokens excludes
+		// cache reads instead of double-counting them.
+		const normalizedInput = normalizeCodexInputUsage(
+			inputTokens,
+			inputTokenDetails?.cached_tokens,
+		);
 
 		return {
 			current_usage: {
-				input_tokens: inputTokens,
-				cache_read_input_tokens:
-					typeof cachedTokens === "number" &&
-					Number.isFinite(cachedTokens) &&
-					cachedTokens >= 0
-						? cachedTokens
-						: 0,
+				input_tokens: normalizedInput.inputTokens,
+				cache_read_input_tokens: normalizedInput.cacheReadInputTokens,
 				cache_creation_input_tokens:
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					Number.isFinite(inputTokenDetails.cache_creation_input_tokens) &&
@@ -1156,6 +1281,27 @@ export class CodexProvider extends BaseProvider {
 		const promptCacheKey = this.derivePromptCacheKey(body, input, account);
 		if (promptCacheKey) {
 			codexRequest.prompt_cache_key = promptCacheKey;
+		}
+		// Honor an explicit Anthropic tool_choice; validate named choices even when
+		// no tools are declared (so a bad request is rejected, not silently sent).
+		const explicitToolChoice = this.convertToolChoice(
+			body.tool_choice,
+			tools ?? [],
+		);
+		if (explicitToolChoice) {
+			codexRequest.tool_choice = explicitToolChoice;
+		} else if (tools?.some((t) => t.name === "StructuredOutput")) {
+			// Claude Code schema agents provide a StructuredOutput tool but do not set
+			// Anthropic tool_choice. Native Claude reliably follows the hidden schema
+			// instruction; Codex models often end_turn with text instead. Force the
+			// function when this sentinel tool is present to preserve workflow semantics.
+			codexRequest.tool_choice = {
+				type: "function",
+				name: "StructuredOutput",
+			};
+		}
+		if (body.tool_choice?.disable_parallel_tool_use === true) {
+			codexRequest.parallel_tool_calls = false;
 		}
 		if (tools) {
 			codexRequest.tools = tools;
@@ -1609,15 +1755,31 @@ export class CodexProvider extends BaseProvider {
 		error: { type: string; message: string; code?: string };
 	} {
 		const code = error?.code;
-		const type =
-			code === "context_length_exceeded"
-				? "invalid_request_error"
-				: error?.type || "api_error";
+		const message = error?.message || "Codex upstream failed.";
+		// Recognized Codex codes map to the correct Anthropic error type so our
+		// failover/cooldown logic reacts to the right HTTP status. Unrecognized
+		// codes keep the existing behavior (echo the raw upstream type, else
+		// api_error -> 502).
+		const mappedFromCode = code
+			? CODEX_ERROR_TYPE_BY_CODE[code.toLowerCase()]
+			: undefined;
+		let type = mappedFromCode || error?.type || "api_error";
+		// Some Codex endpoints report context overflow without the
+		// context_length_exceeded code, only an "your input exceeds the context
+		// window..." message. Treat that message shape as a permanent 400-class
+		// error too, forcing invalid_request_error even when the code/type is
+		// generic (otherwise it would fall through to api_error -> 502).
+		const isContextOverflow =
+			code?.toLowerCase() === "context_length_exceeded" ||
+			/^your input exceeds the context window\b/i.test(message);
+		if (isContextOverflow) {
+			type = "invalid_request_error";
+		}
 		return {
 			type: "error",
 			error: {
 				type,
-				message: error?.message || "Codex upstream failed.",
+				message,
 				...(code ? { code } : {}),
 			},
 		};
@@ -1846,12 +2008,13 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "response.incomplete":
 			case "response.completed": {
-				// Guard against a stray response.completed that arrives AFTER a
-				// terminal/error event (e.g. response.failed set upstreamError +
-				// hasSentTerminalEvents and wrote an `error` SSE). Emitting
-				// message_delta/message_stop here would produce an invalid SSE
-				// sequence (terminal events after an error), so bail out.
+				// Guard against a stray response.completed/response.incomplete that
+				// arrives AFTER a terminal/error event (e.g. response.failed set
+				// upstreamError + hasSentTerminalEvents and wrote an `error` SSE).
+				// Emitting message_delta/message_stop here would produce an invalid
+				// SSE sequence (terminal events after an error), so bail out.
 				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
 				const usage = resp?.usage as
@@ -1865,22 +2028,28 @@ export class CodexProvider extends BaseProvider {
 					  }
 					| undefined;
 
-				// Extract cache fields from input_tokens_details (Codex format)
+				// Extract cache fields from input_tokens_details (Codex format).
+				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
+				// additive semantics so input_tokens excludes cache reads instead of
+				// double-counting them (our estimateCostUSD charges input_tokens and
+				// cache_read_input_tokens additively).
 				const inputTokenDetails = usage?.input_tokens_details;
-				const cacheRead =
-					typeof inputTokenDetails?.cached_tokens === "number" &&
-					inputTokenDetails.cached_tokens >= 0
-						? inputTokenDetails.cached_tokens
-						: 0;
+				const normalizedInput = normalizeCodexInputUsage(
+					usage?.input_tokens,
+					inputTokenDetails?.cached_tokens,
+				);
 				const cacheCreation =
 					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
 					inputTokenDetails.cache_creation_input_tokens >= 0
 						? inputTokenDetails.cache_creation_input_tokens
 						: 0;
 
-				state.inputTokens = usage?.input_tokens || state.inputTokens;
+				state.inputTokens =
+					usage?.input_tokens !== undefined
+						? normalizedInput.inputTokens
+						: state.inputTokens;
 				state.outputTokens = usage?.output_tokens || state.outputTokens;
-				state.cacheReadInputTokens = cacheRead;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens = cacheCreation;
 				state.contextWindow = this.extractContextWindow(resp, usage);
 				// Close any lingering content block
@@ -1892,9 +2061,32 @@ export class CodexProvider extends BaseProvider {
 					state.hasSentContentBlockStart = false;
 				}
 
+				const incompleteDetails = resp?.incomplete_details as
+					| { reason?: string }
+					| undefined;
+				const isIncomplete =
+					eventName === "response.incomplete" || resp?.status === "incomplete";
+				// An incomplete response never resolves to a success stop_reason,
+				// even mid tool call: content_filter -> refusal (client discards the
+				// partial output); every other reason, including unknown future ones
+				// (e.g. max_output_tokens), -> max_tokens (generic truncation). This
+				// stops a content-filtered or truncated Codex turn from being
+				// reported as a successful end_turn.
+				const stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal" =
+					isIncomplete
+						? incompleteDetails?.reason === "content_filter"
+							? "refusal"
+							: "max_tokens"
+						: state.sawToolUse
+							? "tool_use"
+							: "end_turn";
+
 				const messageDelta: {
 					type: "message_delta";
-					delta: { stop_reason: "end_turn" | "tool_use"; stop_sequence: null };
+					delta: {
+						stop_reason: "end_turn" | "tool_use" | "max_tokens" | "refusal";
+						stop_sequence: null;
+					};
 					usage: {
 						input_tokens: number;
 						output_tokens: number;
@@ -1905,7 +2097,7 @@ export class CodexProvider extends BaseProvider {
 				} = {
 					type: "message_delta",
 					delta: {
-						stop_reason: state.sawToolUse ? "tool_use" : "end_turn",
+						stop_reason: stopReason,
 						stop_sequence: null,
 					},
 					usage: {

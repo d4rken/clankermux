@@ -12,12 +12,16 @@ export {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,
 } from "./anthropic-compatible/index";
-export type { CodexCreditsInfo } from "./codex/index";
+export type {
+	CodexCreditsInfo,
+	NormalizedCodexInputUsage,
+} from "./codex/index";
 export {
 	CODEX_DEFAULT_ENDPOINT,
 	CodexOAuthProvider,
 	CodexProvider,
 	isCodexOnCredits,
+	normalizeCodexInputUsage,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	sendCodexNativePing,

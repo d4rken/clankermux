@@ -4,7 +4,7 @@ import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
 import { CodexProvider } from "./provider";
-import { parseCodexUsageHeaders } from "./usage";
+import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
 const eventLine = (name: string, data: unknown) => [
@@ -893,8 +893,50 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).not.toContain('"context_window"');
 		expect(messageDeltaLine).toContain('"usage":{');
 		expect(messageDeltaLine).toContain('"output_tokens":3');
-		expect(messageDeltaLine).toContain('"input_tokens":12');
+		// Codex's input_tokens (12) is cache-inclusive; Anthropic's input_tokens
+		// is additive and excludes the 4 cached tokens, which are reported
+		// separately as cache_read_input_tokens.
+		expect(messageDeltaLine).toContain('"input_tokens":8');
 		expect(messageDeltaLine).toContain('"cache_read_input_tokens":4');
+	});
+
+	it("translates cached input usage additively so input_tokens excludes cache reads", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_test", model: "gpt-5.3-codex" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.3-codex",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 20,
+						input_tokens_details: { cached_tokens: 30 },
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const transformedBody = await transformed.text();
+		const messageDeltaLine = transformedBody
+			.split("\n")
+			.find((line) => line.includes('"type":"message_delta"')) as string;
+		const payload = JSON.parse(messageDeltaLine.slice("data: ".length));
+
+		expect(payload.usage.cache_read_input_tokens).toBe(30);
+		expect(payload.usage.input_tokens).toBe(70);
+		// The additive input_tokens plus the cache read must reconstruct the
+		// original cache-inclusive total Codex reported.
+		expect(
+			payload.usage.input_tokens + payload.usage.cache_read_input_tokens,
+		).toBe(100);
 	});
 
 	it("normalizes message_delta usage and delta defaults when missing", async () => {
@@ -1789,6 +1831,134 @@ describe("CodexProvider.processResponse", () => {
 	});
 });
 
+describe("CodexProvider upstream error code classification", () => {
+	const errorForCode = async (code: string) => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("error", {
+				type: "error",
+				code,
+				message: `Codex reported ${code}`,
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = (await transformed.json()) as {
+			error: { type: string; code?: string };
+		};
+		return { status: transformed.status, body };
+	};
+
+	it("maps rate_limit_exceeded to rate_limit_error / 429", async () => {
+		const { status, body } = await errorForCode("rate_limit_exceeded");
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(status).toBe(429);
+	});
+
+	it("maps insufficient_quota to rate_limit_error / 429", async () => {
+		const { status, body } = await errorForCode("insufficient_quota");
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(status).toBe(429);
+	});
+
+	it("maps server_is_overloaded to overloaded_error / 529", async () => {
+		const { status, body } = await errorForCode("server_is_overloaded");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps slow_down to overloaded_error / 529", async () => {
+		const { status, body } = await errorForCode("slow_down");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps context_length_exceeded to invalid_request_error / 400", async () => {
+		const { status, body } = await errorForCode("context_length_exceeded");
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(status).toBe(400);
+	});
+
+	it("maps cyber_policy to invalid_request_error / 400", async () => {
+		const { status, body } = await errorForCode("cyber_policy");
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(status).toBe(400);
+	});
+
+	it("maps usage_not_included to permission_error / 403", async () => {
+		const { status, body } = await errorForCode("usage_not_included");
+		expect(body.error.type).toBe("permission_error");
+		expect(status).toBe(403);
+	});
+
+	it("maps server_error to api_error / 502", async () => {
+		const { status, body } = await errorForCode("server_error");
+		expect(body.error.type).toBe("api_error");
+		expect(status).toBe(502);
+	});
+
+	it("keeps unknown codes on the 502 fallback (not miscategorized)", async () => {
+		// Our tree echoes the raw upstream type when a code isn't in the map, so
+		// the load-bearing regression is that an unrecognized code neither maps
+		// to a retry-class Anthropic type nor changes the default 502 status.
+		const { status, body } = await errorForCode("some_brand_new_code");
+		expect(status).toBe(502);
+		expect(
+			[
+				"rate_limit_error",
+				"overloaded_error",
+				"invalid_request_error",
+				"permission_error",
+			].includes(body.error.type),
+		).toBe(false);
+	});
+
+	it("forces invalid_request_error / 400 for message-detected context overflow without a code", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						// Generic upstream type + no context_length_exceeded code:
+						// only the message-regex fallback can force invalid_request_error.
+						type: "api_error",
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = (await transformed.json()) as {
+			error: { type: string; message: string };
+		};
+
+		expect(transformed.status).toBe(400);
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.message).toBe(
+			"Your input exceeds the context window of this model. Please adjust your input and try again.",
+		);
+	});
+});
+
 describe("CodexProvider.transformRequestBody", () => {
 	it("maps sonnet-family models to the default Codex model", async () => {
 		const provider = new CodexProvider();
@@ -2299,6 +2469,169 @@ describe("CodexProvider native Responses passthrough", () => {
 	});
 });
 
+describe("normalizeCodexInputUsage", () => {
+	it("subtracts cached tokens from the cache-inclusive total", () => {
+		const result = normalizeCodexInputUsage(100, 30);
+		expect(result.totalInputTokens).toBe(100);
+		expect(result.inputTokens).toBe(70);
+		expect(result.cacheReadInputTokens).toBe(30);
+	});
+
+	it("treats a missing or non-numeric total as zero", () => {
+		expect(normalizeCodexInputUsage(undefined, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(Number.NaN, 5)).toEqual({
+			totalInputTokens: 0,
+			inputTokens: 0,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("treats a missing or negative cached count as zero", () => {
+		expect(normalizeCodexInputUsage(10, undefined)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+		expect(normalizeCodexInputUsage(10, -5)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 10,
+			cacheReadInputTokens: 0,
+		});
+	});
+
+	it("clamps a cached count larger than the total instead of going negative", () => {
+		const result = normalizeCodexInputUsage(10, 25);
+		expect(result.inputTokens).toBe(0);
+		expect(result.cacheReadInputTokens).toBe(10);
+	});
+});
+
+describe("CodexProvider response.incomplete stop reasons", () => {
+	it("maps response.incomplete with a content_filter reason to a refusal stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "content_filter" },
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"refusal"');
+		expect(body).toContain("event: message_delta");
+		expect(body).toContain("event: message_stop");
+	});
+
+	it("maps response.incomplete with a non-content_filter reason to max_tokens", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 512 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("treats a response.completed event carrying status incomplete the same as response.incomplete", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "unknown_future_reason" },
+					usage: { input_tokens: 3, output_tokens: 10 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+
+	it("never resolves an incomplete response with a pending tool call to a success stop_reason", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.output_item.done", {
+				item: { type: "function_call", call_id: "call_1", name: "search" },
+				output_index: 0,
+			}),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "max_output_tokens" },
+					usage: { input_tokens: 3, output_tokens: 50 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = await transformed.text();
+
+		expect(body).not.toContain('"stop_reason":"tool_use"');
+		expect(body).not.toContain('"stop_reason":"end_turn"');
+		expect(body).toContain('"stop_reason":"max_tokens"');
+	});
+});
+
 describe("parseCodexUsageHeaders", () => {
 	it("normalizes primary and secondary codex quota headers", () => {
 		const headers = new Headers({
@@ -2445,5 +2778,357 @@ describe("count_tokens synthetic response", () => {
 		const result = await provider.transformRequestBody(req);
 		const body = (await result.json()) as { input_tokens: number };
 		expect(body.input_tokens).toBeGreaterThanOrEqual(1);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tranche 3: tool_choice honoring, StructuredOutput forcing, and tool_result
+// serialization fidelity (upstream 543bb543, 02f66d92, 2704e310, 02408f72,
+// 31aa0d73). Our translator previously (a) sent no tool_choice at all,
+// (b) dropped image/structured tool_result blocks and could throw on a null
+// block, and (c) grouped message blocks instead of preserving source order.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface T3CodexBody {
+	input: Array<Record<string, unknown>>;
+	tools?: Array<{ name: string }>;
+	tool_choice?: unknown;
+	parallel_tool_calls?: boolean;
+}
+
+async function t3transform(body: unknown): Promise<T3CodexBody> {
+	const provider = new CodexProvider();
+	const request = new Request("https://example.com/v1/messages", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	const out = await provider.transformRequestBody(request, undefined);
+	return (await out.json()) as T3CodexBody;
+}
+
+const t3outputs = (input: T3CodexBody["input"]) =>
+	input.filter((it) => it.type === "function_call_output");
+
+/** Minimal valid history: one Task call awaiting its result. */
+function t3taskTurn(
+	resultContent: unknown,
+	extra: Record<string, unknown> = {},
+): unknown {
+	return {
+		model: "claude-opus-4-8",
+		max_tokens: 10,
+		messages: [
+			{ role: "user", content: "run it" },
+			{
+				role: "assistant",
+				content: [{ type: "tool_use", id: "t1", name: "Task", input: {} }],
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "t1",
+						...(resultContent === "__omit__" ? {} : { content: resultContent }),
+						...extra,
+					},
+				],
+			},
+		],
+	};
+}
+
+describe("CodexProvider Tranche 3 — StructuredOutput forcing", () => {
+	it("forces StructuredOutput tool_choice when the schema tool is present", async () => {
+		const body = await t3transform({
+			model: "claude-haiku-4-5-20251001",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "return structured output" }],
+			tools: [
+				{
+					name: "StructuredOutput",
+					description: "Return the validated payload.",
+					input_schema: { type: "object" },
+				},
+			],
+		});
+		expect(body.tools?.map((t) => t.name)).toContain("StructuredOutput");
+		expect(body.tool_choice).toEqual({
+			type: "function",
+			name: "StructuredOutput",
+		});
+	});
+
+	it("does not force tool_choice for ordinary tool-enabled requests", async () => {
+		const body = await t3transform({
+			model: "claude-haiku-4-5-20251001",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "read a file" }],
+			tools: [{ name: "Read", description: "Read a file.", input_schema: {} }],
+		});
+		expect(body.tool_choice).toBeUndefined();
+	});
+
+	it("lets an explicit tool_choice override the StructuredOutput fallback", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "return text" }],
+			tools: [{ name: "StructuredOutput", input_schema: {} }],
+			tool_choice: { type: "none" },
+		});
+		expect(body.tool_choice).toBe("none");
+	});
+});
+
+describe("CodexProvider Tranche 3 — tool_choice mapping", () => {
+	it.each([
+		[{ type: "auto" }, "auto"],
+		[{ type: "any" }, "required"],
+		[{ type: "none" }, "none"],
+		[
+			{ type: "tool", name: "Read" },
+			{ type: "function", name: "Read" },
+		],
+	] as const)("maps Anthropic tool_choice %j to Codex", async (choice, expected) => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "read a file" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: choice,
+		});
+		expect(body.tool_choice).toEqual(expected);
+	});
+
+	it("maps disable_parallel_tool_use to parallel_tool_calls=false (auto)", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "auto", disable_parallel_tool_use: true },
+		});
+		expect(body.tool_choice).toBe("auto");
+		expect(body.parallel_tool_calls).toBe(false);
+	});
+
+	it("maps any + disable_parallel_tool_use to required + parallel_tool_calls=false", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "any", disable_parallel_tool_use: true },
+		});
+		expect(body.tool_choice).toBe("required");
+		expect(body.parallel_tool_calls).toBe(false);
+	});
+
+	it("leaves parallel_tool_calls unset when the flag is absent", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [{ name: "Read", input_schema: { type: "object" } }],
+			tool_choice: { type: "auto" },
+		});
+		expect(body.parallel_tool_calls).toBeUndefined();
+	});
+
+	it("rejects a named tool_choice absent from tools", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tools: [{ name: "Read", input_schema: { type: "object" } }],
+				tool_choice: { type: "tool", name: "WebSearch" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			"tool_choice references unknown tool: WebSearch",
+		);
+	});
+
+	it("rejects a named tool_choice when no tools are present", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tool_choice: { type: "tool", name: "Read" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			/tool_choice/,
+		);
+	});
+
+	it("rejects an unsupported tool_choice variant instead of coercing it", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hi" }],
+				tools: [{ name: "Read", input_schema: { type: "object" } }],
+				tool_choice: { type: "bogus", name: "Read" },
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			/tool_choice/,
+		);
+	});
+});
+
+describe("CodexProvider Tranche 3 — tool_result serialization fidelity", () => {
+	it("renders image blocks as a bounded placeholder, not the base64 payload", async () => {
+		const body = await t3transform(
+			t3taskTurn([
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data: "AAAA" },
+				},
+			]),
+		);
+		const out = t3outputs(body.input)[0]?.output as string;
+		expect(out).toBe("[image content not supported in Codex tool results]");
+		expect(out).not.toContain("AAAA");
+	});
+
+	it("preserves small structured (non-text) blocks as JSON", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "tool_reference", tool_name: "TaskCreate" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe(
+			'{"type":"tool_reference","tool_name":"TaskCreate"}',
+		);
+	});
+
+	it("caps oversized structured blocks with an omission marker", async () => {
+		const bigData = "A".repeat(200_000);
+		const body = await t3transform(
+			t3taskTurn([
+				{
+					type: "document",
+					source: {
+						type: "base64",
+						media_type: "application/pdf",
+						data: bigData,
+					},
+				},
+			]),
+		);
+		const out = t3outputs(body.input)[0]?.output as string;
+		expect(out.length).toBeLessThan(10_000);
+		expect(out).not.toContain(bigData);
+		expect(out).toContain("omitted");
+	});
+
+	it("marks errored tool results with an explicit error prefix", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "text", text: "boom" }], { is_error: true }),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("[tool error] boom");
+	});
+
+	it("leaves successful tool results unmarked", async () => {
+		const body = await t3transform(
+			t3taskTurn([{ type: "text", text: "fine" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("fine");
+	});
+
+	it("degrades missing/null/non-array content to empty output instead of throwing", async () => {
+		for (const content of ["__omit__", null, { oops: true }]) {
+			const body = await t3transform(t3taskTurn(content));
+			expect(Array.isArray(body.input)).toBe(true);
+			expect(t3outputs(body.input)[0]?.output).toBe("");
+		}
+	});
+
+	it("skips null blocks inside a content array but keeps surviving text", async () => {
+		const body = await t3transform(
+			t3taskTurn([null, { type: "text", text: "ok" }]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toBe("ok");
+	});
+});
+
+describe("CodexProvider Tranche 3 — source-order preservation", () => {
+	it("keeps a tool_result before the follow-up text in the same message", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "t1", name: "Task", input: {} }],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "t1",
+							content: [{ type: "text", text: "finding" }],
+						},
+						{ type: "text", text: "now summarize the finding" },
+					],
+				},
+			],
+		});
+		const outputIdx = body.input.findIndex(
+			(it) => it.type === "function_call_output",
+		);
+		const followupIdx = body.input.findIndex(
+			(it) =>
+				it.role === "user" &&
+				Array.isArray(it.content) &&
+				(it.content as Array<Record<string, unknown>>).some(
+					(c) => c.text === "now summarize the finding",
+				),
+		);
+		expect(outputIdx).toBeGreaterThanOrEqual(0);
+		expect(followupIdx).toBeGreaterThan(outputIdx);
+	});
+
+	it("keeps a tool_use before the follow-up text in an assistant message", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [
+				{ role: "user", content: "go" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "t1", name: "Bash", input: {} },
+						{ type: "text", text: "dispatched, waiting" },
+					],
+				},
+			],
+		});
+		const callIdx = body.input.findIndex((it) => it.type === "function_call");
+		const textIdx = body.input.findIndex(
+			(it) =>
+				it.role === "assistant" &&
+				Array.isArray(it.content) &&
+				(it.content as Array<Record<string, unknown>>).some(
+					(c) => c.text === "dispatched, waiting",
+				),
+		);
+		expect(callIdx).toBeGreaterThanOrEqual(0);
+		expect(textIdx).toBeGreaterThan(callIdx);
 	});
 });
