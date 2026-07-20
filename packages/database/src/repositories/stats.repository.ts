@@ -177,6 +177,47 @@ export class StatsRepository {
 	}
 
 	/**
+	 * Count distinct active client sessions per account from request_routing.
+	 *
+	 * Like getActiveSessionCounts, a "session" is a distinct affinity_key_hash and
+	 * rows with a NULL hash (no affinity) are ignored. This variant groups by the
+	 * routed account (request_routing.selected_account_id) so the Accounts page can
+	 * show a per-account "N clients (15m)" count. Rows whose selected_account_id is
+	 * NULL are grouped under the NO_ACCOUNT_ID sentinel key.
+	 *
+	 * IMPORTANT: a single session hash can be routed to more than one account within
+	 * the window (e.g. after a failover), so it is counted once under EACH account it
+	 * hit. The per-account counts therefore intentionally DO NOT sum to the global
+	 * distinct total from getActiveSessionCounts.
+	 *
+	 * The `affinity_key_hash IS NOT NULL` predicate matches the partial index
+	 * idx_request_routing_affinity, reusing it as in getActiveSessionCounts.
+	 *
+	 * @param sinceMs - Only include rows with created_at strictly greater than this
+	 *   timestamp (ms since epoch). The caller computes it as `Date.now() - window`.
+	 * @returns Map of account id (or NO_ACCOUNT_ID) → distinct session count.
+	 */
+	async getActiveSessionCountsByAccount(
+		sinceMs: number,
+	): Promise<Map<string, number>> {
+		const rows = await this.adapter.query<{
+			account_id: unknown;
+			sessions: unknown;
+		}>(
+			`SELECT COALESCE(selected_account_id, ?) as account_id,
+				COUNT(DISTINCT affinity_key_hash) as sessions
+			FROM request_routing
+			WHERE affinity_key_hash IS NOT NULL AND created_at > ?
+			GROUP BY selected_account_id`,
+			[NO_ACCOUNT_ID, sinceMs],
+		);
+
+		return new Map(
+			rows.map((r) => [String(r.account_id), Number(r.sessions) || 0]),
+		);
+	}
+
+	/**
 	 * Get recent error groups within a time window.
 	 *
 	 * Groups requests by (error_message, account_used) and returns one entry per

@@ -4,6 +4,7 @@ import {
 	isAnthropicUsageShape,
 	patterns,
 	sanitizers,
+	TIME_CONSTANTS,
 	validateAndSanitizeModelMappings,
 	validateNumber,
 	validatePriority,
@@ -466,6 +467,16 @@ export function createAccountsListHandler(
 			)
 			.catch(() => new Map());
 
+		// Distinct active-client sessions per account in the trailing 15m window,
+		// for the Accounts "N clients (15m)" badge. Best-effort: on repo failure
+		// each account falls back to 0.
+		const activeSessionCountsByAccount = await dbOps
+			.getStatsRepository()
+			.getActiveSessionCountsByAccount(
+				now - TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS,
+			)
+			.catch(() => new Map<string, number>());
+
 		// Read the live usage cache exactly once per account: get() evicts
 		// entries past their TTL as a side effect, so a second read later in the
 		// request could see an entry the stale-candidate filter still saw —
@@ -845,6 +856,7 @@ export function createAccountsListHandler(
 							? microsToUsd(account.renewal_price_usd_micros)
 							: null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
+					activeSessionCount: activeSessionCountsByAccount.get(account.id) ?? 0,
 					isPrimary: account.id === primaryId,
 				};
 			}),

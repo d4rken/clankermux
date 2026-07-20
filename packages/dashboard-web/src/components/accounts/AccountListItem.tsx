@@ -1,3 +1,4 @@
+import { TIME_CONSTANTS } from "@clankermux/core";
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
 	CalendarClock,
@@ -46,6 +47,10 @@ function formatTokenCount(n: number): string {
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
 	return String(n);
 }
+
+const ACTIVE_SESSION_WINDOW_MINUTES = Math.round(
+	TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS / 60000,
+);
 
 interface AccountListItemProps {
 	account: Account;
@@ -485,6 +490,12 @@ export function AccountListItem({
 			<AccountStatusChips account={account} status={status} />
 			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
 				<span>{presenter.requestCount} requests</span>
+				{presenter.activeSessionCount > 0 && (
+					<span className="text-muted-foreground">
+						· {presenter.activeSessionCount} clients (
+						{ACTIVE_SESSION_WINDOW_MINUTES}m)
+					</span>
+				)}
 				<span className="text-muted-foreground">{presenter.sessionInfo}</span>
 				{status.showForceReset && (
 					<Button

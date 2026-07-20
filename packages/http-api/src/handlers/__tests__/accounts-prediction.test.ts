@@ -94,6 +94,7 @@ function makeDbOps(
 		}),
 		getStatsRepository: () => ({
 			getSessionStats: async () => new Map(),
+			getActiveSessionCountsByAccount: async () => new Map(),
 		}),
 		getLatestUsageSnapshots: async () => [],
 		getRecentUsageSnapshotsForAccounts: async (accountIds: string[]) =>
