@@ -7,8 +7,8 @@
 
 A multiplexing load-balancer proxy for Claude Code (and Codex/OpenAI). It fans your
 requests across multiple backend accounts through one local endpoint, so you stop
-hitting per-account rate limits. Point Claude Code at it with `ANTHROPIC_BASE_URL`,
-add your accounts in the dashboard, and it routes and falls back across them.
+hitting per-account rate limits. Point your coding client at it, add your accounts
+in the dashboard, and it routes and falls back across them.
 
 ## An opinionated fork
 
@@ -46,7 +46,7 @@ bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
-Add your provider accounts in the dashboard, then point Claude Code at the proxy.
+Add your provider accounts in the dashboard, then point your coding client at the proxy.
 
 ## Use it with Claude Code
 
@@ -71,6 +71,30 @@ claude
 > Don't set `ANTHROPIC_AUTH_TOKEN` alongside an active Claude CLI OAuth login — Claude
 > CLI warns about conflicting auth. Legacy `BETTER_CCFLARE_*` env vars and the
 > `x-better-ccflare-account-id` header are still accepted.
+
+## Use it with Codex
+
+Add a ClankerMux model provider to `~/.codex/config.toml`:
+
+```toml
+model_provider = "clankermux"
+
+[model_providers.clankermux]
+name = "ClankerMux"
+base_url = "http://localhost:8080/v1"
+wire_api = "responses"
+env_key = "CLANKERMUX_API_KEY"
+```
+
+Then set the proxy key and launch Codex:
+
+```bash
+export CLANKERMUX_API_KEY=dummy-key     # or a key generated in the dashboard
+codex
+```
+
+`dummy-key` is sufficient when ClankerMux runs open. Codex reads the variable named
+by `env_key` and sends it as a bearer token, so the secret stays out of `config.toml`.
 
 ## License
 
