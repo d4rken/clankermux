@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { cacheBodyStore } from "../cache-body-store";
 import { forwardToClient } from "../response-handler";
-// Captured at module-load time (BEFORE any mock.module) so the finalize-failure
-// test can restore the REAL usage-collector afterward — a dynamic import while
-// the mock is active would just return the mocked module again.
-import * as realUsageCollector from "../usage-collector";
+// Imported as a namespace so the finalize-failure test can spyOn finalizeUsage.
+// A spy is cleanly reverted by mock.restore(), unlike a mock.module("../usage-collector")
+// stub, which is process-global, cannot be reliably un-registered, and (depending
+// on `bun test` file ordering on a given machine) leaked its rejecting/empty
+// finalizeUsage + createUsageState into usage-collector.test.ts on CI.
+import * as usageCollector from "../usage-collector";
 
 /**
  * Inline usage-collection contract (post worker-retirement).
@@ -416,26 +418,21 @@ describe("forwardToClient inline usage collection", () => {
  */
 describe("forwardToClient finalize-failure path", () => {
 	afterEach(() => {
+		// spyOn(...) is cleanly reverted by mock.restore(); there is no
+		// mock.module("../usage-collector") to leak into other test files.
 		mock.restore();
-		// mock.restore() does NOT undo mock.module — restore the REAL usage-collector
-		// (captured at module load, above) so the finalize-reject mock can't leak
-		// into other test files in the shared `bun test` process (it would otherwise
-		// make finalizeUsage reject everywhere).
-		mock.module("../usage-collector", () => realUsageCollector);
 	});
 
 	it("rejected finalize discards staged body, persists usage-waived, skips attachUsageSummary", async () => {
-		// Mock the inline collector so finalize rejects. Re-import response-handler
-		// AFTER the mock so its module-scope import binds the mocked finalizeUsage.
-		mock.module("../usage-collector", () => ({
-			createUsageState: () => ({}),
-			feedChunk: () => {},
-			feedNonStreamBody: () => {},
-			finalizeUsage: () => Promise.reject(new Error("boom")),
-		}));
+		// Force finalize to reject via a spy on the real module. response-handler
+		// calls finalizeUsage through its live ESM import binding, so the spy is
+		// observed by the already-imported forwardToClient — no re-import needed.
+		spyOn(usageCollector, "finalizeUsage").mockImplementation(() =>
+			Promise.reject(new Error("boom")),
+		);
 
-		const { forwardToClient: forward } = await import("../response-handler");
-		const { cacheBodyStore: store } = await import("../cache-body-store");
+		const forward = forwardToClient;
+		const store = cacheBodyStore;
 		const discardStaged = spyOn(store, "discardStaged");
 
 		const attachUsageSummary = mock(() => {});
