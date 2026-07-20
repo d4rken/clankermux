@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
 	type CodexCreditsInfo,
+	codexRateLimitResetCreditsCache,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -38,6 +39,12 @@ import type { ProxyContext } from "../handlers/proxy-types";
 // concurrent caller join) or force a refresh failure.
 let tokenImpl: () => Promise<string> = async () => "token";
 const mockGetValidAccessToken = mock((..._args: unknown[]) => tokenImpl());
+const mockFetchCodexRateLimitResetCredits = mock(
+	async (..._args: unknown[]) => ({
+		availableCount: 2,
+		credits: [],
+	}),
+);
 
 // applyCodexObservation: records the opts it was called with and returns a
 // pluggable observation.
@@ -173,6 +180,7 @@ function makeCoordinator() {
 	const coordinator = new CodexSpendCoordinator(harness.ctx, {
 		getValidAccessToken: mockGetValidAccessToken,
 		applyCodexObservation: mockApplyCodexObservation,
+		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
 	});
 	return { coordinator, ...harness };
 }
@@ -223,6 +231,7 @@ function makeRealCoordinator() {
 	// getProvider fall through to the real defaults.
 	const coordinator = new CodexSpendCoordinator(ctx, {
 		getValidAccessToken: mockGetValidAccessToken,
+		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
 	});
 	return {
 		coordinator,
@@ -273,6 +282,8 @@ beforeEach(() => {
 	applyCalls.length = 0;
 	mockApplyCodexObservation.mockClear();
 	mockGetValidAccessToken.mockClear();
+	mockFetchCodexRateLimitResetCredits.mockClear();
+	codexRateLimitResetCreditsCache.clear();
 	tokenImpl = async () => "token";
 	observationResult = makeObservation();
 	fetchImpl = async () =>
@@ -292,6 +303,7 @@ afterEach(() => {
 	// shared singleton doesn't leak state into later files.
 	for (const id of seededCacheIds) usageCache.delete(id);
 	seededCacheIds.clear();
+	codexRateLimitResetCreditsCache.clear();
 });
 
 // ---------------------------------------------------------------------------
@@ -613,6 +625,41 @@ describe("CodexSpendCoordinator.observe — last-moment scheduled gate", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Read-only earned reset metadata
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.refreshResetCredits", () => {
+	it("stores a normalized reset summary without issuing a model request", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "reset-a" }));
+
+		const outcome = await coordinator.refreshResetCredits("reset-a", true);
+
+		expect(outcome.success).toBe(true);
+		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledWith("token");
+		expect(fetchCalls).toHaveLength(0);
+		expect(
+			codexRateLimitResetCreditsCache.get("reset-a")?.summary.availableCount,
+		).toBe(2);
+	});
+
+	it("uses the fresh cache for a background refresh", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "reset-b" }));
+		codexRateLimitResetCreditsCache.set("reset-b", {
+			availableCount: 1,
+			credits: [],
+		});
+
+		const outcome = await coordinator.refreshResetCredits("reset-b");
+
+		expect(outcome.success).toBe(true);
+		expect(mockFetchCodexRateLimitResetCredits).not.toHaveBeenCalled();
+		expect(mockGetValidAccessToken).not.toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // refreshManual — CodexUsageRefreshOutcome mapping
 // ---------------------------------------------------------------------------
 
@@ -628,6 +675,7 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 			success: true,
 			message: "Usage refreshed for 'codex-x' (5h: 12%, 7d: 34%).",
 		});
+		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledTimes(1);
 	});
 
 	it("maps a rate-limited refresh to a success outcome that does not celebrate", async () => {

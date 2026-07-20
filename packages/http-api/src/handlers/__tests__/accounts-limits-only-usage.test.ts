@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
-import { usageCache } from "@clankermux/providers";
+import {
+	codexRateLimitResetCreditsCache,
+	usageCache,
+} from "@clankermux/providers";
 import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -154,5 +157,61 @@ describe("accounts list — limits[]-only usage population", () => {
 		expect(acct?.usageWindow).toBe("seven_day");
 		// Full usage payload is surfaced (drives the dashboard usage bars).
 		expect(acct?.usageData).not.toBeNull();
+	});
+});
+
+describe("accounts list — Codex earned reset metadata", () => {
+	const ACCOUNT_ID = "acc-codex-resets";
+
+	beforeEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+	});
+	afterEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+	});
+
+	it("surfaces the cached authoritative count and ISO expiry details", async () => {
+		codexRateLimitResetCreditsCache.set(
+			ACCOUNT_ID,
+			{
+				availableCount: 3,
+				credits: [
+					{
+						id: "reset-1",
+						resetType: "codexRateLimits",
+						status: "available",
+						grantedAt: 1_782_935_292,
+						expiresAt: 1_785_527_292,
+						title: "Full reset",
+						description: "One free reset.",
+					},
+				],
+			},
+			1_784_000_000_000,
+		);
+
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id: ACCOUNT_ID,
+					name: "Codex resets",
+					provider: "codex",
+				}),
+			]),
+			config,
+		);
+
+		const response = await handler();
+		const body = (await response.json()) as AccountResponse[];
+		const resets = body[0]?.codexRateLimitResetCredits;
+
+		expect(resets?.availableCount).toBe(3);
+		expect(resets?.fetchedAt).toBe("2026-07-14T03:33:20.000Z");
+		expect(resets?.credits?.[0]?.expiresAt).toBe("2026-07-31T19:48:12.000Z");
+		// The opaque credit id is only useful for redemption, so the read-only
+		// dashboard contract intentionally does not expose it.
+		expect(JSON.stringify(resets)).not.toContain("reset-1");
 	});
 });

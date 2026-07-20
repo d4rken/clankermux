@@ -59,12 +59,15 @@ export {
 	clearAccountRefreshCache,
 	getValidAccessToken,
 	pauseAccountForReauthIfInvalidGrant,
+	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
+	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
 	restartUsagePollingForAccount,
+	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "./token-manager";
 export {

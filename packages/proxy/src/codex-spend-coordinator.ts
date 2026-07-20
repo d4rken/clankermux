@@ -1,6 +1,8 @@
 import { Logger } from "@clankermux/logger";
 import {
 	CODEX_DEFAULT_ENDPOINT,
+	codexRateLimitResetCreditsCache,
+	fetchCodexRateLimitResetCredits,
 	getProvider,
 	sendCodexNativePing,
 } from "@clankermux/providers";
@@ -88,6 +90,7 @@ export interface CodexSpendCoordinatorDeps {
 	getValidAccessToken?: typeof getValidAccessToken;
 	applyCodexObservation?: typeof applyCodexObservation;
 	sendCodexNativePing?: typeof sendCodexNativePing;
+	fetchCodexRateLimitResetCredits?: typeof fetchCodexRateLimitResetCredits;
 	getProvider?: typeof getProvider;
 }
 
@@ -109,7 +112,12 @@ export class CodexSpendCoordinator {
 	private readonly getValidAccessToken: typeof getValidAccessToken;
 	private readonly applyCodexObservation: typeof applyCodexObservation;
 	private readonly sendCodexNativePing: typeof sendCodexNativePing;
+	private readonly fetchCodexRateLimitResetCredits: typeof fetchCodexRateLimitResetCredits;
 	private readonly getProvider: typeof getProvider;
+	private readonly resetCreditsInflight = new Map<
+		string,
+		Promise<CodexUsageRefreshOutcome>
+	>();
 
 	constructor(ctx: ProxyContext, deps: CodexSpendCoordinatorDeps = {}) {
 		this.ctx = ctx;
@@ -117,7 +125,93 @@ export class CodexSpendCoordinator {
 		this.applyCodexObservation =
 			deps.applyCodexObservation ?? applyCodexObservation;
 		this.sendCodexNativePing = deps.sendCodexNativePing ?? sendCodexNativePing;
+		this.fetchCodexRateLimitResetCredits =
+			deps.fetchCodexRateLimitResetCredits ?? fetchCodexRateLimitResetCredits;
 		this.getProvider = deps.getProvider ?? getProvider;
+	}
+
+	/**
+	 * Refresh the read-only earned-reset summary for one Codex account. This is
+	 * deliberately separate from observe(): it sends no model request and has no
+	 * consume/redeem capability. Non-forced background callers are TTL/retry
+	 * gated; manual usage refreshes force a fresh read.
+	 */
+	async refreshResetCredits(
+		accountId: string,
+		force = false,
+	): Promise<CodexUsageRefreshOutcome> {
+		const existing = this.resetCreditsInflight.get(accountId);
+		if (existing) return existing;
+
+		if (!force && !codexRateLimitResetCreditsCache.needsRefresh(accountId)) {
+			const cached = codexRateLimitResetCreditsCache.get(accountId);
+			return cached
+				? {
+						success: true,
+						message: `Codex reset metadata is still fresh (${cached.summary.availableCount} available).`,
+					}
+				: {
+						success: false,
+						message:
+							"Codex reset metadata refresh is waiting for its retry window.",
+					};
+		}
+
+		const promise = this.runResetCreditsRefresh(accountId);
+		this.resetCreditsInflight.set(accountId, promise);
+		void promise.finally(() => {
+			if (this.resetCreditsInflight.get(accountId) === promise) {
+				this.resetCreditsInflight.delete(accountId);
+			}
+		});
+		return promise;
+	}
+
+	private async runResetCreditsRefresh(
+		accountId: string,
+	): Promise<CodexUsageRefreshOutcome> {
+		const account = await this.ctx.dbOps.getAccount(accountId);
+		if (!account) {
+			return { success: false, message: `Account ${accountId} not found` };
+		}
+		if (account.provider !== "codex") {
+			return {
+				success: false,
+				message: `Account '${account.name}' is not a Codex account`,
+			};
+		}
+		if (!account.access_token && !account.refresh_token) {
+			return {
+				success: false,
+				message: `Account '${account.name}' has no tokens — please re-authenticate`,
+			};
+		}
+
+		let accessToken: string;
+		try {
+			accessToken = await this.getValidAccessToken(account, this.ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				success: false,
+				message: `Could not refresh access token for '${account.name}': ${message}`,
+			};
+		}
+
+		codexRateLimitResetCreditsCache.markAttempt(accountId);
+		const summary = await this.fetchCodexRateLimitResetCredits(accessToken);
+		if (!summary) {
+			return {
+				success: false,
+				message: `Codex returned no reset-credit metadata for '${account.name}'`,
+			};
+		}
+
+		codexRateLimitResetCreditsCache.set(accountId, summary);
+		return {
+			success: true,
+			message: `Reset metadata refreshed for '${account.name}' (${summary.availableCount} available).`,
+		};
 	}
 
 	/**
@@ -189,7 +283,10 @@ export class CodexSpendCoordinator {
 	 * wired to the HTTP endpoint yet (Step 4 does that).
 	 */
 	async refreshManual(accountId: string): Promise<CodexUsageRefreshOutcome> {
-		const result = await this.observe(accountId, "manual-refresh");
+		const [result] = await Promise.all([
+			this.observe(accountId, "manual-refresh"),
+			this.refreshResetCredits(accountId, true),
+		]);
 		switch (result.status) {
 			case "skipped":
 				return { success: false, message: result.reason };

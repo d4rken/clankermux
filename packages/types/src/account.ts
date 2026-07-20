@@ -249,6 +249,21 @@ export interface AccountResponse {
 		planType: string | null;
 		weeklyUsedPct: number | null;
 	} | null;
+	/**
+	 * Codex-only earned usage-limit reset metadata. `availableCount` is
+	 * authoritative; `credits` may be null or shorter when the backend omits or
+	 * caps detail rows. Timestamps cross the API boundary as ISO strings.
+	 */
+	codexRateLimitResetCredits?: {
+		availableCount: number;
+		credits: Array<{
+			status: "available" | "redeeming" | "redeemed" | "unknown";
+			expiresAt: string | null;
+			title: string | null;
+			description: string | null;
+		}> | null;
+		fetchedAt: string;
+	} | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	prediction?: AccountUsagePrediction | null; // Server-computed regression-backed exhaustion prediction per window
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
@@ -485,6 +500,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
 		codexCredits: null, // Will be filled in by API handler from cache (codex only)
+		codexRateLimitResetCredits: null, // Filled from the read-only Codex reset metadata cache
 		usageRateLimitedUntil: null, // Will be filled in by API handler from cache
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],

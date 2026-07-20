@@ -22,6 +22,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
+	codexRateLimitResetCreditsCache,
 	fetchUsageData,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
@@ -39,6 +40,7 @@ import {
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
+	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
 	sessionCacheStore,
@@ -485,6 +487,24 @@ export function createAccountsListHandler(
 			accounts.map((a) => [a.id, usageCache.get(a.id)]),
 		);
 
+		// Earned Codex resets come from a separate read-only account endpoint, not
+		// the /responses headers. Snapshot the cache for this response, then kick a
+		// best-effort background refresh for missing/stale entries. The dashboard's
+		// normal account polling picks up the result without delaying this request.
+		const codexResetCreditsByAccount = new Map(
+			accounts
+				.filter((a) => a.provider === "codex")
+				.map((a) => [a.id, codexRateLimitResetCreditsCache.get(a.id)]),
+		);
+		for (const account of accounts) {
+			if (
+				account.provider === "codex" &&
+				codexRateLimitResetCreditsCache.needsRefresh(account.id, now)
+			) {
+				void refreshCodexResetCreditsForAccount(account.id);
+			}
+		}
+
 		// Last-known usage fallback: for Anthropic accounts whose live usage
 		// cache is empty (e.g. polling fails after the subscription lapsed),
 		// serve the most recent persisted usage snapshot so the dashboard can
@@ -621,6 +641,26 @@ export function createAccountsListHandler(
 							(usageCache.get(account.id) as UsageData | null)?.codexCredits ??
 							null)
 						: null;
+				const resetCreditsEntry =
+					account.provider === "codex"
+						? (codexResetCreditsByAccount.get(account.id) ?? null)
+						: null;
+				const codexRateLimitResetCredits = resetCreditsEntry
+					? {
+							availableCount: resetCreditsEntry.summary.availableCount,
+							credits:
+								resetCreditsEntry.summary.credits?.map((credit) => ({
+									status: credit.status,
+									expiresAt:
+										credit.expiresAt == null
+											? null
+											: new Date(credit.expiresAt * 1_000).toISOString(),
+									title: credit.title,
+									description: credit.description,
+								})) ?? null,
+							fetchedAt: new Date(resetCreditsEntry.fetchedAt).toISOString(),
+						}
+					: null;
 				let usageUtilization: number | null = null;
 				let usageWindow: string | null = null;
 				let fullUsageData: FullUsageData | null = null;
@@ -834,6 +874,7 @@ export function createAccountsListHandler(
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
 					codexCredits, // Codex-only credits state (null otherwise)
+					codexRateLimitResetCredits,
 					staleUsage,
 					prediction: predictionByAccount.get(account.id) ?? null,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
@@ -1118,6 +1159,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			if (account) {
 				// Clear usage cache for removed account to prevent memory leaks
 				usageCache.delete(account.id);
+				codexRateLimitResetCreditsCache.delete(account.id);
 				// Evict any warm session-cache slots owned by the removed account so
 				// the keepalive scheduler never tries to replay against a deleted id.
 				sessionCacheStore.evictAccount(account.id);

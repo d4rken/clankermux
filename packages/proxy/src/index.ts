@@ -43,8 +43,10 @@ export {
 	getUsageThrottleUntil,
 	getValidAccessToken,
 	isRefreshTokenLikelyExpired,
+	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
+	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
@@ -54,6 +56,7 @@ export {
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "./handlers";
 export {

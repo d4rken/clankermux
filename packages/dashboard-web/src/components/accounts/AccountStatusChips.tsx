@@ -1,6 +1,6 @@
 import type { AccountResponse } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
-import { AlertCircle, CalendarClock } from "lucide-react";
+import { AlertCircle, CalendarClock, RotateCcw } from "lucide-react";
 import {
 	type AccountStatus,
 	deriveAccountStatus,
@@ -27,6 +27,54 @@ interface AccountStatusChipsProps {
 	account: AccountResponse;
 	/** Pre-derived status; falls back to deriving from `account` when omitted. */
 	status?: AccountStatus;
+}
+
+function CodexUsageResetChip({ account }: { account: AccountResponse }) {
+	const summary = account.codexRateLimitResetCredits;
+	if (account.provider !== "codex" || !summary) return null;
+
+	const now = Date.now();
+	const availableExpiries =
+		summary.credits
+			?.flatMap((credit) => {
+				if (credit.status !== "available" || credit.expiresAt === null) {
+					return [];
+				}
+				const date = new Date(credit.expiresAt);
+				return date.getTime() > now ? [date] : [];
+			})
+			.sort((a, b) => a.getTime() - b.getTime()) ?? [];
+	const nextExpiry = availableExpiries[0] ?? null;
+	const countLabel = `${summary.availableCount} usage reset${summary.availableCount === 1 ? "" : "s"}`;
+	const shortExpiry = nextExpiry?.toLocaleDateString(undefined, {
+		month: "short",
+		day: "numeric",
+	});
+	const label = shortExpiry
+		? `${countLabel} · ${summary.availableCount === 1 ? "expires" : "next expires"} ${shortExpiry}`
+		: countLabel;
+
+	const expiryDetails = availableExpiries.length
+		? ` Expirations: ${availableExpiries
+				.map((date) => date.toLocaleString())
+				.join("; ")}.`
+		: summary.availableCount > 0
+			? " Per-reset expiration details are unavailable."
+			: "";
+
+	return (
+		<span
+			className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+				summary.availableCount > 0
+					? "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					: "bg-secondary text-muted-foreground"
+			}`}
+			title={`${countLabel} available.${expiryDetails}`}
+		>
+			<RotateCcw className="h-3.5 w-3.5" />
+			{label}
+		</span>
+	);
 }
 
 /**
@@ -130,6 +178,7 @@ export function AccountStatusChips({
 					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
 				</span>
 			)}
+			<CodexUsageResetChip account={account} />
 			{status.showPeakChip && (
 				<span
 					className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${

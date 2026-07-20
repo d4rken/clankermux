@@ -154,3 +154,64 @@ describe("AccountStatusChips — on-credits chip", () => {
 		expect(html).not.toContain("On credits");
 	});
 });
+
+describe("AccountStatusChips — earned usage resets", () => {
+	it("renders the authoritative count and nearest expiry for a Codex account", () => {
+		const html = render(
+			makeAccount({
+				provider: "codex",
+				codexRateLimitResetCredits: {
+					availableCount: 3,
+					credits: [
+						{
+							status: "available",
+							expiresAt: "2030-02-10T00:00:00.000Z",
+							title: "Full reset",
+							description: null,
+						},
+						{
+							status: "available",
+							expiresAt: "2030-01-05T00:00:00.000Z",
+							title: "Full reset",
+							description: null,
+						},
+					],
+					fetchedAt: "2030-01-01T00:00:00.000Z",
+				},
+			}),
+		);
+
+		expect(html).toContain("3 usage resets");
+		expect(html).toContain("next expires Jan 5");
+	});
+
+	it("shows a known zero balance", () => {
+		const html = render(
+			makeAccount({
+				provider: "codex",
+				codexRateLimitResetCredits: {
+					availableCount: 0,
+					credits: [],
+					fetchedAt: "2030-01-01T00:00:00.000Z",
+				},
+			}),
+		);
+
+		expect(html).toContain("0 usage resets");
+	});
+
+	it("does not render reset metadata on a non-Codex account", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				codexRateLimitResetCredits: {
+					availableCount: 3,
+					credits: null,
+					fetchedAt: "2030-01-01T00:00:00.000Z",
+				},
+			}),
+		);
+
+		expect(html).not.toContain("usage reset");
+	});
+});

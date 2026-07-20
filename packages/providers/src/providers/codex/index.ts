@@ -12,6 +12,21 @@ export {
 	CODEX_VERSION,
 	CodexProvider,
 } from "./provider";
+export type {
+	CodexRateLimitResetCredit,
+	CodexRateLimitResetCreditStatus,
+	CodexRateLimitResetCreditsCacheEntry,
+	CodexRateLimitResetCreditsSummary,
+	CodexRateLimitResetType,
+} from "./rate-limit-reset-credits";
+export {
+	CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT,
+	CODEX_RESET_CREDITS_REFRESH_MS,
+	CODEX_RESET_CREDITS_RETRY_MS,
+	codexRateLimitResetCreditsCache,
+	fetchCodexRateLimitResetCredits,
+	parseCodexRateLimitResetCredits,
+} from "./rate-limit-reset-credits";
 export type { CodexCreditsInfo, NormalizedCodexInputUsage } from "./usage";
 export {
 	isCodexOnCredits,

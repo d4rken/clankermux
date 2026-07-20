@@ -432,6 +432,17 @@ const codexUsageInflight: Map<
 	Promise<CodexUsageRefreshOutcome>
 > = new Map();
 
+// Read-only earned-reset metadata refreshers (one per server). Kept separate
+// from codexUsageRefreshers because these calls do not spend model quota.
+const codexResetCreditsRefreshers: Map<
+	string,
+	(accountId: string) => Promise<CodexUsageRefreshOutcome>
+> = new Map();
+const codexResetCreditsInflight = new Map<
+	string,
+	Promise<CodexUsageRefreshOutcome>
+>();
+
 /**
  * Register a function to restart usage polling for a specific account.
  * Used by the server to expose its polling restart capability to HTTP handlers.
@@ -487,6 +498,75 @@ export function registerCodexUsageRefresher(
  */
 export function unregisterCodexUsageRefresher(serverId: string): void {
 	codexUsageRefreshers.delete(serverId);
+}
+
+export function registerCodexResetCreditsRefresher(
+	serverId: string,
+	refresher: (accountId: string) => Promise<CodexUsageRefreshOutcome>,
+): void {
+	codexResetCreditsRefreshers.set(serverId, refresher);
+}
+
+export function unregisterCodexResetCreditsRefresher(serverId: string): void {
+	codexResetCreditsRefreshers.delete(serverId);
+}
+
+/**
+ * Refresh earned reset metadata through one registered proxy server. Concurrent
+ * dashboard polls for the same account share a single read-only request.
+ */
+export async function refreshCodexResetCreditsForAccount(
+	accountId: string,
+): Promise<CodexUsageRefreshOutcome> {
+	const existing = codexResetCreditsInflight.get(accountId);
+	if (existing) return existing;
+
+	const promise = (async (): Promise<CodexUsageRefreshOutcome> => {
+		if (codexResetCreditsRefreshers.size === 0) {
+			return {
+				success: false,
+				message:
+					"No proxy server is registered to refresh Codex reset metadata.",
+			};
+		}
+
+		let lastFailure: CodexUsageRefreshOutcome | null = null;
+		for (const [serverId, refresher] of codexResetCreditsRefreshers) {
+			try {
+				const result = await refresher(accountId);
+				if (result.success) {
+					log.debug(
+						`Refreshed Codex reset metadata for account ${accountId} via server ${serverId}`,
+					);
+					return result;
+				}
+				lastFailure = result;
+			} catch (error) {
+				log.error(
+					`Codex reset metadata refresh via server ${serverId} threw for account ${accountId}:`,
+					error,
+				);
+				lastFailure = {
+					success: false,
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		}
+		return (
+			lastFailure ?? {
+				success: false,
+				message: "Codex reset metadata refresh failed for unknown reasons.",
+			}
+		);
+	})();
+
+	codexResetCreditsInflight.set(accountId, promise);
+	void promise.finally(() => {
+		if (codexResetCreditsInflight.get(accountId) === promise) {
+			codexResetCreditsInflight.delete(accountId);
+		}
+	});
+	return promise;
 }
 
 /**

@@ -54,6 +54,7 @@ import {
 	type ProxyContext,
 	RequestRecorder,
 	registerAffinityClearer,
+	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
@@ -61,6 +62,7 @@ import {
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
 	stopGlobalTokenHealthChecks,
+	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
 import { validatePathOrThrow } from "@clankermux/security";
@@ -1039,6 +1041,31 @@ export default async function startServer(options?: {
 	registerCodexUsageRefresher(serverId, (accountId: string) =>
 		codexSpendCoordinator.refreshManual(accountId),
 	);
+	registerCodexResetCreditsRefresher(serverId, (accountId: string) =>
+		codexSpendCoordinator.refreshResetCredits(accountId),
+	);
+	// Warm the read-only earned-reset cache without delaying server startup. The
+	// accounts handler keeps it fresh afterward with a TTL-gated background read.
+	void dbOps
+		.getAdapter()
+		.query<{ id: string; name: string }>(
+			"SELECT id, name FROM accounts WHERE provider = 'codex'",
+		)
+		.then(async (accounts) => {
+			for (const account of accounts) {
+				const outcome = await codexSpendCoordinator.refreshResetCredits(
+					account.id,
+				);
+				if (!outcome.success) {
+					log.debug(
+						`Initial Codex reset metadata refresh skipped for ${account.name}: ${outcome.message}`,
+					);
+				}
+			}
+		})
+		.catch((error) =>
+			log.warn("Initial Codex reset metadata refresh failed:", error),
+		);
 
 	// Register this server's session-affinity clearing capability, so the
 	// "Reset session stickiness" HTTP action can wipe the in-memory affinity
@@ -1711,6 +1738,7 @@ async function handleGracefulShutdown(signal: string) {
 		// module-level registry doesn't keep a stale callback after restart.
 		// Mirrors the cleanup pattern used by the schedulers above.
 		if (registeredServerId) {
+			unregisterCodexResetCreditsRefresher(registeredServerId);
 			unregisterCodexUsageRefresher(registeredServerId);
 			registeredServerId = null;
 		}
