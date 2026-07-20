@@ -9,6 +9,111 @@ import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("RateLimitCooldown");
 
+// --- Single-flight recovery probe gate (upstream 8197364f) -------------------
+//
+// After an account racks up a mature streak of consecutive 429s, its cooldown
+// expiry is often optimistic relative to the real upstream quota window. If we
+// let every concurrently-selected request pile onto that account the instant
+// the cooldown clears, we re-trigger the same 429 storm that produced the
+// streak. This process-local gate admits exactly ONE recovery probe per account
+// within a short lease; other concurrent requests skip the account and fall
+// through to the next candidate in the selection order.
+//
+// This is orthogonal to the transparent burst-retry hold (which holds a SINGLE
+// account WITHIN one request): the gate arbitrates MANY concurrent requests
+// re-selecting a freshly-recovered account ACROSS requests. Both compose — a
+// held/reprobing request keeps its lease until it reaches a terminal outcome.
+const MATURE_COOLDOWN_STREAK = 5;
+const PROBE_LEASE_MS = 2 * 60 * 1000;
+const MAX_PROBE_GATES = 10_000;
+const probeLeases = new Map<string, number>();
+
+export type RateLimitProbeAdmission =
+	| "not_required"
+	| "admitted"
+	| "suppressed";
+
+function pruneProbeLeases(now: number): void {
+	for (const [accountId, leaseUntil] of probeLeases) {
+		if (leaseUntil <= now) probeLeases.delete(accountId);
+	}
+	while (probeLeases.size >= MAX_PROBE_GATES) {
+		const oldest = probeLeases.keys().next().value;
+		if (oldest === undefined) break;
+		probeLeases.delete(oldest);
+	}
+}
+
+/**
+ * Admits one process-local recovery probe after a mature cooldown expires.
+ * Ordinary accounts (streak below the threshold), accounts with no cooldown
+ * deadline, and accounts still cooling down are not gated ("not_required").
+ *
+ * Returns:
+ *   - "not_required": the account isn't a freshly-recovered mature-streak
+ *     account; the caller proxies as normal.
+ *   - "admitted": THIS request holds the single-flight lease and should probe
+ *     the account. The caller MUST release it via {@link completeRateLimitProbe}
+ *     on every terminal outcome of the attempt (see the callers in proxy.ts,
+ *     which wrap the proxy call in try/finally).
+ *   - "suppressed": another request is already probing this account; the caller
+ *     must skip it and try the next candidate.
+ */
+export function getRateLimitProbeAdmission(
+	account: Account,
+	now: number = Date.now(),
+): RateLimitProbeAdmission {
+	const expiredMatureCooldown =
+		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
+		account.rate_limited_until != null &&
+		account.rate_limited_until <= now;
+	if (!expiredMatureCooldown) return "not_required";
+
+	pruneProbeLeases(now);
+	const existingLease = probeLeases.get(account.id);
+	if (existingLease && existingLease > now) {
+		log.debug(
+			`[clankermux] account=${account.name} cooldown_probe_suppressed lease_until=${new Date(existingLease).toISOString()}`,
+		);
+		return "suppressed";
+	}
+
+	const leaseUntil = now + PROBE_LEASE_MS;
+	probeLeases.set(account.id, leaseUntil);
+	log.info(
+		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits} lease_until=${new Date(leaseUntil).toISOString()}`,
+	);
+	return "admitted";
+}
+
+/**
+ * Releases the single-flight probe lease for an account, if one is held.
+ * Must be called on every terminal outcome of a probed request: success
+ * (recovered), a fresh cooldown being reapplied (cooldown_reapplied), or the
+ * request being abandoned (exception, mid-loop skip, or any other early exit).
+ *
+ * Idempotent: if no lease is held this is a no-op, so it is safe to call it
+ * from a try/finally chokepoint even when an earlier path already released it.
+ */
+export function completeRateLimitProbe(
+	account: Account,
+	outcome: "recovered" | "cooldown_reapplied" | "abandoned",
+): void {
+	if (!probeLeases.delete(account.id)) return;
+	if (outcome === "recovered") {
+		log.info(
+			`[clankermux] account=${account.name} cooldown_probe_recovery_success`,
+		);
+	} else if (outcome === "abandoned") {
+		log.debug(`[clankermux] account=${account.name} cooldown_probe_abandoned`);
+	}
+}
+
+/** Test-only: clears all in-memory probe leases between test cases. */
+export function resetRateLimitProbeGatesForTests(): void {
+	probeLeases.clear();
+}
+
 /**
  * Single entry point for applying a 429-driven cooldown to an account.
  * Computes exponential-backoff cooldown capped by upstream reset (if any), updates
@@ -95,6 +200,19 @@ export function applyRateLimitCooldown(
 		);
 		logError(rateLimitError, log);
 		return;
+	}
+
+	// Single-flight recovery probe: reaching here means a REAL fresh cooldown is
+	// about to be (re)applied (Lever B server-directed reset OR the escalating
+	// no-reset path) — a terminal outcome for any in-flight recovery probe on
+	// this account. Release its lease so the account isn't sidelined for the full
+	// lease TTL; the next expiry re-arms a fresh single probe. The reprobe path
+	// above returns before this point, so gentle in-request re-probes never
+	// release the cross-request lease.
+	const wasRecoveryProbe = probeLeases.has(account.id);
+	completeRateLimitProbe(account, "cooldown_reapplied");
+	if (wasRecoveryProbe) {
+		log.info(`[clankermux] account=${account.name} cooldown_probe_reapplied`);
 	}
 
 	// Lever B: the upstream gave us an explicit reset time (it told us exactly when

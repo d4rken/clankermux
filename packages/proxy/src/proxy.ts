@@ -54,6 +54,10 @@ import {
 	type TransientlyCooledFamilySibling,
 	validateProviderPath,
 } from "./handlers";
+import {
+	completeRateLimitProbe,
+	getRateLimitProbeAdmission,
+} from "./handlers/rate-limit-cooldown";
 import { resolveProject } from "./project-extraction";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
@@ -1975,23 +1979,47 @@ export async function handleProxy(
 			);
 		}
 
-		response = await proxyWithAccount(
-			req,
-			url,
-			accounts[i],
-			requestMeta,
-			finalBodyBuffer,
-			finalCreateBodyStream,
-			i,
-			ctx,
-			modelOverride,
-			apiKeyId,
-			apiKeyName,
-			requestBodyContext,
-			!filteredComboInfo?.comboName &&
-				(i === accounts.length - 1 ||
-					shouldForwardProviderOverloadIfNoCrossProviderFallback(accounts, i)),
-		);
+		// Single-flight recovery probe gate: if this account's cooldown just
+		// expired on a mature 429 streak, admit only one probe. Concurrent
+		// requests that would re-select the just-recovered account are suppressed
+		// and skip to the next candidate instead of stampeding it.
+		const probeAdmission = getRateLimitProbeAdmission(accounts[i]);
+		if (probeAdmission === "suppressed") {
+			continue;
+		}
+
+		try {
+			response = await proxyWithAccount(
+				req,
+				url,
+				accounts[i],
+				requestMeta,
+				finalBodyBuffer,
+				finalCreateBodyStream,
+				i,
+				ctx,
+				modelOverride,
+				apiKeyId,
+				apiKeyName,
+				requestBodyContext,
+				!filteredComboInfo?.comboName &&
+					(i === accounts.length - 1 ||
+						shouldForwardProviderOverloadIfNoCrossProviderFallback(
+							accounts,
+							i,
+						)),
+			);
+		} finally {
+			// Belt-and-suspenders lease release. The terminal outcome usually
+			// releases the lease already (success/non-429 → response-processor
+			// "recovered"/"abandoned"; a fresh 429 → applyRateLimitCooldown
+			// "cooldown_reapplied"); completeRateLimitProbe is idempotent, so this
+			// only fires when none of those ran (thrown error, or the attempt
+			// fell through without a terminal classification).
+			if (probeAdmission === "admitted") {
+				completeRateLimitProbe(accounts[i], "abandoned");
+			}
+		}
 
 		if (response) {
 			return response;
@@ -2073,25 +2101,39 @@ export async function handleProxy(
 					continue;
 				}
 
-				response = await proxyWithAccount(
-					req,
-					url,
-					fallbackAccounts[i],
-					requestMeta,
-					finalBodyBuffer,
-					finalCreateBodyStream,
-					i,
-					ctx,
-					undefined, // No model override for fallback path
-					apiKeyId,
-					apiKeyName,
-					requestBodyContext,
-					i === fallbackAccounts.length - 1 ||
-						shouldForwardProviderOverloadIfNoCrossProviderFallback(
-							fallbackAccounts,
-							i,
-						),
-				);
+				// Single-flight recovery probe gate (same rationale as the primary
+				// failover loop above): admit only one probe for a freshly-recovered
+				// mature-streak account; suppress concurrent stampeders.
+				const probeAdmission = getRateLimitProbeAdmission(fallbackAccounts[i]);
+				if (probeAdmission === "suppressed") {
+					continue;
+				}
+
+				try {
+					response = await proxyWithAccount(
+						req,
+						url,
+						fallbackAccounts[i],
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						i,
+						ctx,
+						undefined, // No model override for fallback path
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						i === fallbackAccounts.length - 1 ||
+							shouldForwardProviderOverloadIfNoCrossProviderFallback(
+								fallbackAccounts,
+								i,
+							),
+					);
+				} finally {
+					if (probeAdmission === "admitted") {
+						completeRateLimitProbe(fallbackAccounts[i], "abandoned");
+					}
+				}
 
 				if (response) {
 					return response;
