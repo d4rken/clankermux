@@ -35,6 +35,7 @@ import {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearProviderOverloadCooldown,
+	consumeCodexResetCreditForAccount,
 	getForcedAccount,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
@@ -50,6 +51,8 @@ import type {
 	Account,
 	AccountUsagePrediction,
 	AnthropicUsageData,
+	CodexRateLimitResetCreditConsumeRequest,
+	CodexRateLimitResetCreditConsumeResponse,
 	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitReason,
@@ -3712,6 +3715,125 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to refresh usage data"),
+			);
+		}
+	};
+}
+
+/**
+ * Consume one earned Codex rate-limit reset credit.
+ *
+ * This endpoint is intentionally not used by the dashboard. It is a typed
+ * building block for explicit operator actions and future expiry automation.
+ * The caller owns the idempotency key and must reuse it when retrying.
+ */
+export function createAccountConsumeRateLimitResetCreditHandler(
+	dbOps: DatabaseOperations,
+	consume: typeof consumeCodexResetCreditForAccount = consumeCodexResetCreditForAccount,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body: unknown = await req.json();
+			if (!body || typeof body !== "object" || Array.isArray(body)) {
+				return errorResponse(BadRequest("Request body must be a JSON object"));
+			}
+			const input = body as Record<string, unknown>;
+			const idempotencyKey =
+				typeof input.idempotencyKey === "string"
+					? input.idempotencyKey.trim()
+					: "";
+			if (!idempotencyKey) {
+				return errorResponse(
+					BadRequest("idempotencyKey must be a non-empty string"),
+				);
+			}
+			if (idempotencyKey.length > 256) {
+				return errorResponse(
+					BadRequest("idempotencyKey must be at most 256 characters"),
+				);
+			}
+
+			let creditId: string | null = null;
+			if (input.creditId !== undefined && input.creditId !== null) {
+				creditId =
+					typeof input.creditId === "string" ? input.creditId.trim() : "";
+				if (!creditId) {
+					return errorResponse(
+						BadRequest("creditId must be a non-empty string when provided"),
+					);
+				}
+				if (creditId.length > 512) {
+					return errorResponse(
+						BadRequest("creditId must be at most 512 characters"),
+					);
+				}
+			}
+
+			const account = await dbOps.getAccount(accountId);
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+			if (account.provider !== "codex") {
+				return errorResponse(
+					BadRequest(
+						"Rate-limit reset credits are only available for Codex accounts",
+					),
+				);
+			}
+			if (!account.access_token && !account.refresh_token) {
+				return errorResponse(
+					BadRequest(
+						`Account '${account.name}' has no tokens - please re-authenticate`,
+					),
+				);
+			}
+
+			const consumeRequest: CodexRateLimitResetCreditConsumeRequest = {
+				idempotencyKey,
+				...(creditId ? { creditId } : {}),
+			};
+			const dispatched = await consume(accountId, consumeRequest);
+			if (dispatched.status === "failed") {
+				return errorResponse(InternalServerError(dispatched.message));
+			}
+
+			const { result } = dispatched;
+			const success =
+				result.outcome === "reset" || result.outcome === "alreadyRedeemed";
+			const message = (() => {
+				switch (result.outcome) {
+					case "reset":
+						return `Usage limits reset for account '${dispatched.accountName}'.`;
+					case "alreadyRedeemed":
+						return `This reset attempt already completed for account '${dispatched.accountName}'.`;
+					case "nothingToReset":
+						return `Account '${dispatched.accountName}' has no eligible usage window to reset.`;
+					case "noCredit":
+						return `Account '${dispatched.accountName}' has no usage reset credits available.`;
+				}
+			})();
+			const response: CodexRateLimitResetCreditConsumeResponse = {
+				success,
+				message,
+				...result,
+				resetMetadataRefreshed: dispatched.resetMetadataRefreshed,
+				availableResetCount: dispatched.availableResetCount,
+				localRateLimitStateCleared: dispatched.localRateLimitStateCleared,
+			};
+
+			log.info(
+				`Codex reset-credit consume requested for account '${account.name}' (outcome: ${result.outcome})`,
+			);
+			return jsonResponse(response);
+		} catch (error) {
+			log.error("Account consume rate-limit reset credit error:", error);
+			if (error instanceof SyntaxError) {
+				return errorResponse(BadRequest("Request body must be valid JSON"));
+			}
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to consume rate-limit reset credit"),
 			);
 		}
 	};

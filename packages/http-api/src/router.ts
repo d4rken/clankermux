@@ -5,6 +5,7 @@ import {
 	createAccountAutoPauseOnOverageHandler,
 	createAccountAutoRefreshHandler,
 	createAccountBillingTypeHandler,
+	createAccountConsumeRateLimitResetCreditHandler,
 	createAccountCustomEndpointUpdateHandler,
 	createAccountForceClearHandler,
 	createAccountForceGetHandler,
@@ -507,6 +508,21 @@ export class APIRouter {
 		if (path.startsWith("/api/accounts/")) {
 			const parts = path.split("/");
 			const accountId = parts[3];
+
+			// Consume one earned Codex usage reset. Callers must provide their own
+			// idempotency key and reuse it for retries of the same logical attempt.
+			if (
+				parts.length === 6 &&
+				parts[4] === "rate-limit-reset-credits" &&
+				parts[5] === "consume" &&
+				method === "POST"
+			) {
+				const consumeResetCreditHandler =
+					createAccountConsumeRateLimitResetCreditHandler(this.context.dbOps);
+				return await this.wrapHandler((req) =>
+					consumeResetCreditHandler(req, accountId),
+				)(req, url);
+			}
 
 			// Account pause
 			if (path.endsWith("/pause") && method === "POST") {

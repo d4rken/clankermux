@@ -20,11 +20,14 @@ export type {
 	CodexRateLimitResetType,
 } from "./rate-limit-reset-credits";
 export {
+	CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
 	CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT,
 	CODEX_RESET_CREDITS_REFRESH_MS,
 	CODEX_RESET_CREDITS_RETRY_MS,
 	codexRateLimitResetCreditsCache,
+	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
+	parseCodexRateLimitResetCreditConsumeResult,
 	parseCodexRateLimitResetCredits,
 } from "./rate-limit-reset-credits";
 export type { CodexCreditsInfo, NormalizedCodexInputUsage } from "./usage";

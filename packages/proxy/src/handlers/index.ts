@@ -54,19 +54,23 @@ export {
 	stopGlobalTokenHealthChecks,
 } from "./token-health-service";
 export {
+	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	clearAccountAffinity,
 	clearAccountRefreshCache,
+	consumeCodexResetCreditForAccount,
 	getValidAccessToken,
 	pauseAccountForReauthIfInvalidGrant,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
+	registerCodexResetCreditConsumer,
 	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
 	restartUsagePollingForAccount,
+	unregisterCodexResetCreditConsumer,
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "./token-manager";

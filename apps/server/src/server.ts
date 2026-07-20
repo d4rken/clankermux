@@ -55,6 +55,7 @@ import {
 	type ProxyContext,
 	RequestRecorder,
 	registerAffinityClearer,
+	registerCodexResetCreditConsumer,
 	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
@@ -63,6 +64,7 @@ import {
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
 	stopGlobalTokenHealthChecks,
+	unregisterCodexResetCreditConsumer,
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
@@ -1045,6 +1047,9 @@ export default async function startServer(options?: {
 	registerCodexResetCreditsRefresher(serverId, (accountId: string) =>
 		codexSpendCoordinator.refreshResetCredits(accountId),
 	);
+	registerCodexResetCreditConsumer(serverId, (accountId, request) =>
+		codexSpendCoordinator.consumeResetCredit(accountId, request),
+	);
 	// Warm the read-only earned-reset cache without delaying server startup. The
 	// accounts handler keeps it fresh afterward with a TTL-gated background read.
 	void dbOps
@@ -1739,6 +1744,7 @@ async function handleGracefulShutdown(signal: string) {
 		// module-level registry doesn't keep a stale callback after restart.
 		// Mirrors the cleanup pattern used by the schedulers above.
 		if (registeredServerId) {
+			unregisterCodexResetCreditConsumer(registeredServerId);
 			unregisterCodexResetCreditsRefresher(registeredServerId);
 			unregisterCodexUsageRefresher(registeredServerId);
 			registeredServerId = null;

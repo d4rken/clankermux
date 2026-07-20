@@ -30,11 +30,13 @@ export {
 } from "./codex-spend-coordinator";
 export { dispatchProxyRequest } from "./dispatch";
 export {
+	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
 	clearAccountAffinity,
 	clearAccountRefreshCache,
+	consumeCodexResetCreditForAccount,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
@@ -46,6 +48,7 @@ export {
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
+	registerCodexResetCreditConsumer,
 	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
@@ -56,6 +59,7 @@ export {
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	unregisterCodexResetCreditConsumer,
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "./handlers";
