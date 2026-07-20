@@ -1831,6 +1831,134 @@ describe("CodexProvider.processResponse", () => {
 	});
 });
 
+describe("CodexProvider upstream error code classification", () => {
+	const errorForCode = async (code: string) => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("error", {
+				type: "error",
+				code,
+				message: `Codex reported ${code}`,
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = (await transformed.json()) as {
+			error: { type: string; code?: string };
+		};
+		return { status: transformed.status, body };
+	};
+
+	it("maps rate_limit_exceeded to rate_limit_error / 429", async () => {
+		const { status, body } = await errorForCode("rate_limit_exceeded");
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(status).toBe(429);
+	});
+
+	it("maps insufficient_quota to rate_limit_error / 429", async () => {
+		const { status, body } = await errorForCode("insufficient_quota");
+		expect(body.error.type).toBe("rate_limit_error");
+		expect(status).toBe(429);
+	});
+
+	it("maps server_is_overloaded to overloaded_error / 529", async () => {
+		const { status, body } = await errorForCode("server_is_overloaded");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps slow_down to overloaded_error / 529", async () => {
+		const { status, body } = await errorForCode("slow_down");
+		expect(body.error.type).toBe("overloaded_error");
+		expect(status).toBe(529);
+	});
+
+	it("maps context_length_exceeded to invalid_request_error / 400", async () => {
+		const { status, body } = await errorForCode("context_length_exceeded");
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(status).toBe(400);
+	});
+
+	it("maps cyber_policy to invalid_request_error / 400", async () => {
+		const { status, body } = await errorForCode("cyber_policy");
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(status).toBe(400);
+	});
+
+	it("maps usage_not_included to permission_error / 403", async () => {
+		const { status, body } = await errorForCode("usage_not_included");
+		expect(body.error.type).toBe("permission_error");
+		expect(status).toBe(403);
+	});
+
+	it("maps server_error to api_error / 502", async () => {
+		const { status, body } = await errorForCode("server_error");
+		expect(body.error.type).toBe("api_error");
+		expect(status).toBe(502);
+	});
+
+	it("keeps unknown codes on the 502 fallback (not miscategorized)", async () => {
+		// Our tree echoes the raw upstream type when a code isn't in the map, so
+		// the load-bearing regression is that an unrecognized code neither maps
+		// to a retry-class Anthropic type nor changes the default 502 status.
+		const { status, body } = await errorForCode("some_brand_new_code");
+		expect(status).toBe(502);
+		expect(
+			[
+				"rate_limit_error",
+				"overloaded_error",
+				"invalid_request_error",
+				"permission_error",
+			].includes(body.error.type),
+		).toBe(false);
+	});
+
+	it("forces invalid_request_error / 400 for message-detected context overflow without a code", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.failed", {
+				response: {
+					status: "failed",
+					error: {
+						// Generic upstream type + no context_length_exceeded code:
+						// only the message-regex fallback can force invalid_request_error.
+						type: "api_error",
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+					},
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const body = (await transformed.json()) as {
+			error: { type: string; message: string };
+		};
+
+		expect(transformed.status).toBe(400);
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.message).toBe(
+			"Your input exceeds the context window of this model. Please adjust your input and try again.",
+		);
+	});
+});
+
 describe("CodexProvider.transformRequestBody", () => {
 	it("maps sonnet-family models to the default Codex model", async () => {
 		const provider = new CodexProvider();

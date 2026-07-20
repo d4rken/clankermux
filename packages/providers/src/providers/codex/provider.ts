@@ -88,6 +88,30 @@ const _normalizeUsage = (value: unknown): Record<string, number> => {
 	};
 };
 
+// Known Codex failure codes -> Anthropic error types. This drives both the
+// error type we surface to the client and (via httpStatusForAnthropicErrorPayload)
+// the HTTP status our proxy failover/cooldown logic reacts to:
+//   rate_limit_error  -> 429 (account rate-limit cooldown)
+//   overloaded_error  -> 529 (transient provider-overload backoff)
+//   invalid_request_error -> 400 (permanent; do NOT retry as 5xx)
+//   permission_error  -> 403 (subscription/entitlement; do NOT retry)
+//   api_error         -> 502 (generic upstream failure)
+// Quota exhaustion (insufficient_quota) cools the account like a rate limit;
+// slow_down/server_is_overloaded are throttles; context/policy and
+// subscription errors are permanent and must not be retried as 5xx. Codes
+// mirror the reference client (openai/codex). Unrecognized codes fall through
+// to the existing echo-raw-type / 502 fallback.
+const CODEX_ERROR_TYPE_BY_CODE: Record<string, string> = {
+	rate_limit_exceeded: "rate_limit_error",
+	insufficient_quota: "rate_limit_error",
+	server_is_overloaded: "overloaded_error",
+	slow_down: "overloaded_error",
+	server_error: "api_error",
+	context_length_exceeded: "invalid_request_error",
+	cyber_policy: "invalid_request_error",
+	usage_not_included: "permission_error",
+};
+
 // The default Anthropic-family → Codex model mapping lives in @clankermux/core
 // (DEFAULT_CODEX_MODEL_BY_FAMILY) so the context-window gate and this provider
 // resolve the same target model. Do not re-declare it here.
@@ -1611,15 +1635,31 @@ export class CodexProvider extends BaseProvider {
 		error: { type: string; message: string; code?: string };
 	} {
 		const code = error?.code;
-		const type =
-			code === "context_length_exceeded"
-				? "invalid_request_error"
-				: error?.type || "api_error";
+		const message = error?.message || "Codex upstream failed.";
+		// Recognized Codex codes map to the correct Anthropic error type so our
+		// failover/cooldown logic reacts to the right HTTP status. Unrecognized
+		// codes keep the existing behavior (echo the raw upstream type, else
+		// api_error -> 502).
+		const mappedFromCode = code
+			? CODEX_ERROR_TYPE_BY_CODE[code.toLowerCase()]
+			: undefined;
+		let type = mappedFromCode || error?.type || "api_error";
+		// Some Codex endpoints report context overflow without the
+		// context_length_exceeded code, only an "your input exceeds the context
+		// window..." message. Treat that message shape as a permanent 400-class
+		// error too, forcing invalid_request_error even when the code/type is
+		// generic (otherwise it would fall through to api_error -> 502).
+		const isContextOverflow =
+			code?.toLowerCase() === "context_length_exceeded" ||
+			/^your input exceeds the context window\b/i.test(message);
+		if (isContextOverflow) {
+			type = "invalid_request_error";
+		}
 		return {
 			type: "error",
 			error: {
 				type,
-				message: error?.message || "Codex upstream failed.",
+				message,
 				...(code ? { code } : {}),
 			},
 		};
