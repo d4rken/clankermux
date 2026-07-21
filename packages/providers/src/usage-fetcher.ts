@@ -530,11 +530,38 @@ export function getAccountCapacitySignal(
 			weeklyReset =
 				weeklyReset === null ? w.resetMs : Math.min(weeklyReset, w.resetMs);
 	}
+	// Binding weekly window = the MOST-constrained (max utilization). Among all
+	// windows tied at that max, the constraint persists until the LATEST reset, so
+	// take the max; but if ANY tied window has an unknown reset, the binding reset
+	// is ambiguous → null (the reservation gate then fails open on it).
+	let bindingWeeklyResetMs: number | null = null;
+	if (weeklyWindows.length > 0) {
+		let maxWeeklyUtil = Number.NEGATIVE_INFINITY;
+		for (const w of weeklyWindows)
+			maxWeeklyUtil = Math.max(maxWeeklyUtil, w.util);
+		const binding = weeklyWindows.filter((w) => w.util === maxWeeklyUtil);
+		if (binding.some((w) => w.resetMs === null)) {
+			bindingWeeklyResetMs = null;
+		} else {
+			bindingWeeklyResetMs = binding.reduce(
+				(mx, w) => Math.max(mx, w.resetMs as number),
+				Number.NEGATIVE_INFINITY,
+			);
+			if (!Number.isFinite(bindingWeeklyResetMs)) bindingWeeklyResetMs = null;
+		}
+	}
+	// The 5h session window's own headroom — NOT recoverable from minHeadroom
+	// (min() over all windows loses which window binds). 100 when absent.
+	const sessionHeadroom = normalized.session
+		? 100 - normalized.session.utilization
+		: 100;
 	return {
 		minHeadroom,
+		sessionHeadroom,
 		soonestResetMs: soonest,
 		bindingUtilization: binding,
 		weeklyResetMs: weeklyReset,
+		bindingWeeklyResetMs,
 		weeklyHeadroom,
 	};
 }

@@ -1,6 +1,7 @@
 import {
 	getModelFamily,
 	getModelList,
+	isProtectedFamily,
 	logError,
 	NETWORK,
 	ProviderError,
@@ -27,6 +28,7 @@ import {
 	type RequestMeta,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
+import { recordProtectedFamilyDemand } from "../protected-family-demand";
 import {
 	applyProviderOverloadCooldown,
 	completeProviderOverloadProbe,
@@ -2018,6 +2020,19 @@ export async function proxyWithAccount(
 		// "abandoned" itself before rethrowing (see forwardToClient). Null out
 		// the local reference so this side can't double-settle via the catch's
 		// fail() — single owner: after this line the token is forwardToClient's.
+		// Record that this account actually SERVED the protected family (Fable)
+		// upstream — keyed on activeUpstreamModel, which is re-assigned on every
+		// internal model-fallback, so cross-family fallback attributes demand to the
+		// family that actually answered (not the attempted primary). Only on a real
+		// 2xx success. This single organic-success chokepoint covers every serving
+		// path (main loop, combo, burst-hold, idle-wake, fallback), so callers no
+		// longer record demand. Feeds the reservation gate's 7d demand-targeting.
+		if (
+			response.ok &&
+			isProtectedFamily(getModelFamily(activeUpstreamModel ?? ""))
+		) {
+			recordProtectedFamilyDemand(account.id, Date.now());
+		}
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
 		return forwardToClient(

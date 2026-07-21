@@ -133,6 +133,73 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal).not.toBeNull();
 		expect(signal?.weeklyResetMs).toBe(NOW + 400_000_000); // min weekly reset
 		expect(signal?.weeklyHeadroom).toBe(45); // min(70, 45) = 100 - 55
+		// The MOST-CONSTRAINED weekly window is oauth_apps (util 55); its reset also
+		// happens to be the earliest here, so binding == earliest.
+		expect(signal?.bindingWeeklyResetMs).toBe(NOW + 400_000_000);
+	});
+
+	it("bindingWeeklyResetMs tracks the most-constrained window, not the earliest reset", () => {
+		// The MORE-constrained weekly window (oauth_apps, util 60) resets LATER than
+		// the healthier seven_day window (util 30). weeklyResetMs (FEFO) must be the
+		// EARLIEST reset, but bindingWeeklyResetMs must follow the binding (util 60)
+		// window — the reservation gate's harvest-yield tracks the constrained one.
+		const data: UsageData = {
+			five_hour: { utilization: 10, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 30, resets_at: iso(400_000_000) }, // healthier, sooner reset
+			seven_day_oauth_apps: { utilization: 60, resets_at: iso(600_000_000) }, // binding, later reset
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.weeklyHeadroom).toBe(40); // 100 - 60 (the binding window)
+		expect(signal?.weeklyResetMs).toBe(NOW + 400_000_000); // EARLIEST across weekly
+		expect(signal?.bindingWeeklyResetMs).toBe(NOW + 600_000_000); // the BINDING window
+	});
+
+	it("bindingWeeklyResetMs is null when the binding weekly window has no reset", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 20, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 40, resets_at: null }, // only weekly window, no reset
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.weeklyResetMs).toBeNull();
+		expect(signal?.bindingWeeklyResetMs).toBeNull();
+	});
+
+	it("bindingWeeklyResetMs keeps the FARTHEST reset among windows tied at max util", () => {
+		// Two weekly windows tied at the SAME (max) utilization but different resets:
+		// the constraint persists until the LATER reset, so the binding reset must be
+		// the farther one (5d), not the sooner (1h).
+		const data: UsageData = {
+			five_hour: { utilization: 10, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 60, resets_at: iso(3_600_000) }, // tied util, 1h reset
+			seven_day_oauth_apps: {
+				utilization: 60,
+				resets_at: iso(5 * 86_400_000),
+			}, // tied util, 5d reset
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.weeklyHeadroom).toBe(40); // 100 - 60
+		expect(signal?.weeklyResetMs).toBe(NOW + 3_600_000); // FEFO: earliest reset
+		expect(signal?.bindingWeeklyResetMs).toBe(NOW + 5 * 86_400_000); // farthest of the tied
+	});
+
+	it("bindingWeeklyResetMs is null when any window tied at max util has an unknown reset", () => {
+		// Two weekly windows tied at max util; one has a known reset, the other has
+		// none → the binding reset is ambiguous, so it must be null (fail open).
+		const data: UsageData = {
+			five_hour: { utilization: 10, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 60, resets_at: null }, // tied util, unknown reset
+			seven_day_oauth_apps: {
+				utilization: 60,
+				resets_at: iso(5 * 86_400_000),
+			}, // tied util, known reset
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.weeklyHeadroom).toBe(40); // 100 - 60
+		expect(signal?.bindingWeeklyResetMs).toBeNull();
 	});
 
 	it("ignores a sooner five_hour reset when computing the weekly deadline", () => {
@@ -246,6 +313,29 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal?.bindingUtilization).toBe(100);
 		// weekly fields fold in weekly_all(40) and the flat oauth_apps(20).
 		expect(signal?.weeklyHeadroom).toBe(60); // min(100-40, 100-20)
+	});
+
+	it("reports sessionHeadroom from the 5h session window (90% util → 10)", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 90, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 10, resets_at: iso(600_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		// sessionHeadroom tracks the 5h window ALONE (100 - 90), not the min across
+		// windows — the weekly window here is far healthier (headroom 90).
+		expect(signal?.sessionHeadroom).toBe(10);
+		expect(signal?.weeklyHeadroom).toBe(90);
+	});
+
+	it("reports sessionHeadroom 100 when no session window is present (weekly only)", () => {
+		const data: UsageData = {
+			// No five_hour / limits[] session window — only a weekly window.
+			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.sessionHeadroom).toBe(100);
 	});
 });
 

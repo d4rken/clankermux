@@ -1835,12 +1835,16 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		bindingUtilization = 100 - minHeadroom,
 		weeklyHeadroom = minHeadroom,
 		soonestResetMs: number | null = 60_000, // 5h-ish, sooner than any weekly reset
+		sessionHeadroom = minHeadroom,
+		bindingWeeklyResetMs: number | null = weeklyResetMs,
 	): CapacitySignal {
 		return {
 			minHeadroom,
+			sessionHeadroom,
 			soonestResetMs,
 			bindingUtilization,
 			weeklyResetMs,
+			bindingWeeklyResetMs,
 			weeklyHeadroom,
 		};
 	}
@@ -1886,9 +1890,11 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		// window (would-be HARVEST) must not rescue it from the safety gate.
 		mockStore.setCapacity(binding.id, {
 			minHeadroom: 40,
+			sessionHeadroom: 40,
 			soonestResetMs: 60_000,
 			bindingUtilization: 98,
 			weeklyResetMs: 30 * 60_000,
+			bindingWeeklyResetMs: 30 * 60_000,
 			weeklyHeadroom: 40,
 		});
 
@@ -2171,12 +2177,16 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 		bindingUtilization = 100 - minHeadroom,
 		weeklyHeadroom = minHeadroom,
 		soonestResetMs: number | null = 60_000,
+		sessionHeadroom = minHeadroom,
+		bindingWeeklyResetMs: number | null = weeklyResetMs,
 	): CapacitySignal {
 		return {
 			minHeadroom,
+			sessionHeadroom,
 			soonestResetMs,
 			bindingUtilization,
 			weeklyResetMs,
+			bindingWeeklyResetMs,
 			weeklyHeadroom,
 		};
 	}
