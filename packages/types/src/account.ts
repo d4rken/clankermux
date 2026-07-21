@@ -109,6 +109,14 @@ export interface AccountIdentity {
 	email: string | null;
 	organizationName: string | null;
 	planTier: string | null;
+	/**
+	 * Anthropic rate-limit multiplier token (e.g. "20x", "5x", "1x") derived from
+	 * `organization.rate_limit_tier`. Captured as a SEPARATE field from planTier
+	 * so an ~8h token-refresh envelope that lacks it writes null → COALESCE
+	 * preserves the profile-captured value. Always null for Codex (no such
+	 * concept).
+	 */
+	rateLimitTier: string | null;
 }
 
 // Database row types that match the actual database schema
@@ -156,6 +164,7 @@ export interface AccountRow {
 	identity_email?: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name?: string | null; // Organization/workspace name captured from profile
 	identity_plan_tier?: string | null; // Plan tier captured from profile (e.g. "pro", "max")
+	identity_rate_limit_tier?: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_captured_at?: number | null; // ms-epoch when identity fields were last captured/updated
 	identity_profile_fetched_at?: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
@@ -205,6 +214,7 @@ export interface Account {
 	identity_email: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name: string | null; // Organization/workspace name captured from profile
 	identity_plan_tier: string | null; // Plan tier captured from profile (e.g. "pro", "max")
+	identity_rate_limit_tier: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_captured_at: number | null; // ms-epoch when identity fields were last captured/updated
 	identity_profile_fetched_at: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
@@ -338,6 +348,8 @@ export interface AccountResponse {
 	identityEmail: string | null;
 	identityOrganizationName: string | null;
 	identityPlanTier: string | null;
+	/** Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex or when uncaptured. */
+	identityRateLimitTier: string | null;
 	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
 	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch
 	/** True when this account shares a provider identity (external id or email) with
@@ -553,6 +565,7 @@ export function toAccount(row: AccountRow): Account {
 		identity_email: row.identity_email ?? null,
 		identity_organization_name: row.identity_organization_name ?? null,
 		identity_plan_tier: row.identity_plan_tier ?? null,
+		identity_rate_limit_tier: row.identity_rate_limit_tier ?? null,
 		identity_captured_at: toNumOrNull(row.identity_captured_at),
 		identity_profile_fetched_at: toNumOrNull(row.identity_profile_fetched_at),
 	};
@@ -668,6 +681,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		identityEmail: account.identity_email,
 		identityOrganizationName: account.identity_organization_name,
 		identityPlanTier: account.identity_plan_tier,
+		identityRateLimitTier: account.identity_rate_limit_tier,
 		identityCapturedAt: account.identity_captured_at,
 		identityProfileFetchedAt: account.identity_profile_fetched_at,
 		// Duplicate detection needs sibling context; a single-account mapping

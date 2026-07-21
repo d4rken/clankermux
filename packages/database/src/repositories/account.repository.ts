@@ -15,14 +15,17 @@ import { BaseRepository } from "./base.repository";
 const IDENTITY_COALESCE_SET = `identity_external_id = COALESCE(?, identity_external_id),
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
-				identity_plan_tier = COALESCE(?, identity_plan_tier)`;
+				identity_plan_tier = COALESCE(?, identity_plan_tier),
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier)`;
 
 function identityBindParams(identity: AccountIdentity): Array<string | null> {
+	// Order MUST match the `?` placeholders in IDENTITY_COALESCE_SET above.
 	return [
 		identity.externalAccountId,
 		identity.email,
 		identity.organizationName,
 		identity.planTier,
+		identity.rateLimitTier,
 	];
 }
 
@@ -57,6 +60,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_email,
 				identity_organization_name,
 				identity_plan_tier,
+				identity_rate_limit_tier,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -97,6 +101,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_email,
 				identity_organization_name,
 				identity_plan_tier,
+				identity_rate_limit_tier,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits

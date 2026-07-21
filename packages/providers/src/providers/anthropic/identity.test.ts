@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { extractAnthropicIdentity } from "./identity";
 
 describe("extractAnthropicIdentity", () => {
-	it("extracts a full identity and normalizes the plan tier", () => {
+	it("extracts a full identity and normalizes the plan tier + rate-limit tier", () => {
 		expect(
 			extractAnthropicIdentity({
 				account: {
@@ -12,6 +12,7 @@ describe("extractAnthropicIdentity", () => {
 				organization: {
 					name: "Acme Inc",
 					organization_type: "claude_max",
+					rate_limit_tier: "default_claude_max_20x",
 				},
 			}),
 		).toEqual({
@@ -19,7 +20,37 @@ describe("extractAnthropicIdentity", () => {
 			email: "owner@example.com",
 			organizationName: "Acme Inc",
 			planTier: "max",
+			rateLimitTier: "20x",
 		});
+	});
+
+	it("normalizes rate_limit_tier multiplier suffixes to a short token", () => {
+		const cases: Array<[string, string]> = [
+			["default_claude_max_20x", "20x"],
+			["default_claude_max_5x", "5x"],
+			["default_claude_max_1x", "1x"],
+			["DEFAULT_CLAUDE_MAX_20X", "20x"], // case-insensitive suffix
+		];
+		for (const [raw, expected] of cases) {
+			const identity = extractAnthropicIdentity({
+				organization: { rate_limit_tier: raw },
+			});
+			expect(identity?.rateLimitTier).toBe(expected);
+		}
+	});
+
+	it("keeps a rate_limit_tier with no multiplier suffix, stripping the default_ prefix", () => {
+		const identity = extractAnthropicIdentity({
+			organization: { rate_limit_tier: "default_claude_pro" },
+		});
+		expect(identity?.rateLimitTier).toBe("pro");
+	});
+
+	it("returns rateLimitTier null when rate_limit_tier is absent", () => {
+		const identity = extractAnthropicIdentity({
+			organization: { name: "Org", organization_type: "claude_max" },
+		});
+		expect(identity?.rateLimitTier).toBeNull();
 	});
 
 	it("falls back to `email` when `email_address` is absent", () => {
@@ -68,6 +99,7 @@ describe("extractAnthropicIdentity", () => {
 			email: null,
 			organizationName: null,
 			planTier: null,
+			rateLimitTier: null,
 		});
 	});
 });

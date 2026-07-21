@@ -161,9 +161,10 @@ describe("OAuthFlow.completeReauth", () => {
 		expect(sql).toMatch(/identity_email\s*=\s*COALESCE/i);
 		// Params: [refreshToken, accessToken, expiresAt, refreshTokenIssuedAt,
 		//          identityExternalId, identityEmail, identityOrganizationName,
-		//          identityPlanTier, identityCapturedAt, identityProfileFetchedAt,
-		//          accountId]. Profile fetch failed open (null), so all identity
-		// params are null and the account id is the LAST bind param.
+		//          identityPlanTier, identityRateLimitTier, identityCapturedAt,
+		//          identityProfileFetchedAt, accountId]. Profile fetch failed open
+		// (null), so all identity params are null and the account id is the LAST
+		// bind param.
 		expect(params[0]).toBe("new-refresh-token");
 		expect(params[1]).toBe("new-access-token");
 		expect(typeof params[2]).toBe("number");

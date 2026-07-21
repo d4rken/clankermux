@@ -46,6 +46,7 @@ interface AccountRow {
 	identity_email: string | null;
 	identity_organization_name: string | null;
 	identity_plan_tier: string | null;
+	identity_rate_limit_tier: string | null;
 	identity_captured_at: number | null;
 	identity_profile_fetched_at: number | null;
 }
@@ -90,6 +91,7 @@ function makeAccountRow(overrides: Partial<AccountRow>): AccountRow {
 		identity_email: null,
 		identity_organization_name: null,
 		identity_plan_tier: null,
+		identity_rate_limit_tier: null,
 		identity_captured_at: null,
 		identity_profile_fetched_at: null,
 		...overrides,
@@ -133,6 +135,7 @@ describe("accounts list — identity fields round-trip", () => {
 					identity_email: "user@example.com",
 					identity_organization_name: "Acme Corp",
 					identity_plan_tier: "max",
+					identity_rate_limit_tier: "20x",
 					identity_captured_at: capturedAt,
 					identity_profile_fetched_at: profileFetchedAt,
 				}),
@@ -149,6 +152,7 @@ describe("accounts list — identity fields round-trip", () => {
 		expect(acct?.identityEmail).toBe("user@example.com");
 		expect(acct?.identityOrganizationName).toBe("Acme Corp");
 		expect(acct?.identityPlanTier).toBe("max");
+		expect(acct?.identityRateLimitTier).toBe("20x");
 		expect(acct?.identityCapturedAt).toBe(capturedAt);
 		expect(acct?.identityProfileFetchedAt).toBe(profileFetchedAt);
 	});
@@ -167,6 +171,7 @@ describe("accounts list — identity fields round-trip", () => {
 		expect(acct?.identityEmail).toBeNull();
 		expect(acct?.identityOrganizationName).toBeNull();
 		expect(acct?.identityPlanTier).toBeNull();
+		expect(acct?.identityRateLimitTier).toBeNull();
 		expect(acct?.identityCapturedAt).toBeNull();
 		expect(acct?.identityProfileFetchedAt).toBeNull();
 		// No sibling shares its identity → never flagged a duplicate.

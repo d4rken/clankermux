@@ -32,6 +32,32 @@ function normalizeEmail(value: unknown): string | null {
 }
 
 /**
+ * Normalize Anthropic's `organization.rate_limit_tier` string to a short
+ * multiplier token. The concrete field name/values are treated as best-effort
+ * (confirm at runtime — see the one-time profile-org-keys debug log): the known
+ * shape is `default_claude_max_20x` / `default_claude_max_5x` /
+ * `default_claude_max_1x`.
+ *
+ * Rules:
+ *   - A trailing `_(\d+x)` suffix (case-insensitive) → just that token, e.g.
+ *     "default_claude_max_20x" → "20x".
+ *   - No parseable `\d+x` suffix but a non-empty string → the cleaned string
+ *     with any leading `default_claude_`/`default_` prefix stripped, so nothing
+ *     is silently lost (e.g. "default_claude_pro" → "claude_pro").
+ *   - Empty/whitespace/non-string → null.
+ */
+function normalizeRateLimitTier(value: unknown): string | null {
+	const raw = nullableString(value);
+	if (raw === null) return null;
+	const trimmed = raw.trim();
+	if (trimmed === "") return null;
+	const suffix = trimmed.match(/_(\d+x)$/i);
+	if (suffix) return suffix[1].toLowerCase();
+	// No multiplier suffix — keep the value but drop the noisy default_ prefix(es).
+	return trimmed.replace(/^default_(claude_)?/i, "");
+}
+
+/**
  * Resolve a normalized {@link AccountIdentity} from an Anthropic OAuth profile
  * payload (the `GET /api/oauth/profile` response, which nests `account` and
  * `organization`).
@@ -63,5 +89,15 @@ export function extractAnthropicIdentity(
 		planTier = ANTHROPIC_TIER_MAP[key] ?? key;
 	}
 
-	return { externalAccountId, email, organizationName, planTier };
+	// The rate-limit multiplier lives in a SEPARATE field so it can't be clobbered
+	// by a token-refresh envelope that lacks it (COALESCE preserves the prior).
+	const rateLimitTier = normalizeRateLimitTier(organization?.rate_limit_tier);
+
+	return {
+		externalAccountId,
+		email,
+		organizationName,
+		planTier,
+		rateLimitTier,
+	};
 }

@@ -124,6 +124,18 @@ export function AccountListItem({
 	const [showSecondaryLimits, toggleSecondaryLimits] = useShowSecondaryLimits(
 		account.id,
 	);
+	// Combined plan label: Title-cased plan tier with the rate-limit multiplier
+	// appended when present, e.g. plan "max" + tier "20x" → "Max 20x". When only
+	// the multiplier is known (plan null), show it alone.
+	const identityPlanLabel = (() => {
+		const plan = account.identityPlanTier
+			? account.identityPlanTier.charAt(0).toUpperCase() +
+				account.identityPlanTier.slice(1)
+			: null;
+		const tier = account.identityRateLimitTier;
+		if (plan && tier) return `${plan} ${tier}`;
+		return plan ?? tier ?? null;
+	})();
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -152,7 +164,7 @@ export function AccountListItem({
 					</div>
 					{(account.identityEmail ||
 						account.identityOrganizationName ||
-						account.identityPlanTier) && (
+						identityPlanLabel) && (
 						<p
 							className="text-xs text-muted-foreground truncate"
 							title={
@@ -164,10 +176,7 @@ export function AccountListItem({
 							{[
 								account.identityEmail,
 								account.identityOrganizationName,
-								account.identityPlanTier
-									? account.identityPlanTier.charAt(0).toUpperCase() +
-										account.identityPlanTier.slice(1)
-									: null,
+								identityPlanLabel,
 							]
 								.filter(Boolean)
 								.join(" · ")}
