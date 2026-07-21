@@ -79,6 +79,7 @@ export {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadKey,
 	getProviderOverloadSnapshot,
 	getProviderOverloadUntil,
@@ -90,7 +91,6 @@ export {
 	type OverloadBreakerStatus,
 	type OverloadBucketSnapshot,
 	type OverloadProbeToken,
-	PROBE_LEASE_SAFETY_TTL_MS,
 	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,
 } from "./provider-overload-cooldown";

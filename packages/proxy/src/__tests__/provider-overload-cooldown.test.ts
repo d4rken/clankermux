@@ -6,12 +6,12 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadSnapshot,
 	getProviderOverloadUntil,
 	inspectProviderOverload,
 	isProviderOverloaded,
 	type OverloadProbeToken,
-	PROBE_LEASE_SAFETY_TTL_MS,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 
@@ -832,7 +832,7 @@ describe("family-scoped overload breaker", () => {
 
 			// Owner dies without completing; past the TTL the lease is
 			// treated as released.
-			now += PROBE_LEASE_SAFETY_TTL_MS + 1;
+			now += getProbeLeaseSafetyTtlMs() + 1;
 			expect(
 				inspectProviderOverload("anthropic", "claude-haiku-4-5", now)
 					.probeActive,

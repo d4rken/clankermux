@@ -28,6 +28,7 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getProviderWideOverloadUntil,
 	inspectProviderOverload,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
@@ -235,6 +236,28 @@ const MIDSTREAM_OVERLOAD_FRAMES = [
 	'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
 ];
 
+/**
+ * Wrap a per-test upstream handler so unrelated background fetches — the
+ * models.dev pricing-catalog refresh fired by the usage finalizer's cost
+ * lookup — never reach it. Without the shunt the catalog refresh lands
+ * mid-test through the mocked `globalThis.fetch`, skewing exact
+ * fetch-call-count assertions (order-dependent: only when no earlier test
+ * file already warmed the in-process catalog), and a mocked 200 would poison
+ * the on-disk pricing cache. The 500 makes pricing fall back to its bundled
+ * data.
+ */
+function upstreamOnlyFetch(
+	handler: (input: Request | string | URL) => Response | Promise<Response>,
+): typeof globalThis.fetch {
+	return mock(async (input: Request | string | URL) => {
+		const url = input instanceof Request ? input.url : String(input);
+		if (!url.includes("api.anthropic.com")) {
+			return new Response("unavailable", { status: 500 });
+		}
+		return handler(input);
+	}) as never;
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -282,7 +305,7 @@ describe("half-open overload probe lifecycle", () => {
 		const probeGate = new Promise<Response>((resolve) => {
 			releaseProbe = resolve;
 		});
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			if (fetchCalls === 1) return probeGate;
 			return ok200("claude-haiku-4-5");
@@ -328,7 +351,7 @@ describe("half-open overload probe lifecycle", () => {
 		const probeGate = new Promise<Response>((resolve) => {
 			releaseProbe = resolve;
 		});
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			if (fetchCalls === 1) return probeGate;
 			return ok200("claude-haiku-4-5");
@@ -366,7 +389,7 @@ describe("half-open overload probe lifecycle", () => {
 	});
 
 	it("closes the bucket after the probe's SSE stream completes cleanly", async () => {
-		globalThis.fetch = mock(async () =>
+		globalThis.fetch = upstreamOnlyFetch(async () =>
 			sseResponse(HEALTHY_SSE_FRAMES),
 		) as never;
 
@@ -401,7 +424,7 @@ describe("half-open overload probe lifecycle", () => {
 	});
 
 	it("re-opens the bucket on a mid-stream overloaded_error during the probe", async () => {
-		globalThis.fetch = mock(async () =>
+		globalThis.fetch = upstreamOnlyFetch(async () =>
 			sseResponse(MIDSTREAM_OVERLOAD_FRAMES),
 		) as never;
 
@@ -440,7 +463,7 @@ describe("half-open overload probe lifecycle", () => {
 	});
 
 	it("re-trips on a pre-stream 529 probe and releases the lease as reopened", async () => {
-		globalThis.fetch = mock(async () => overloaded529()) as never;
+		globalThis.fetch = upstreamOnlyFetch(async () => overloaded529()) as never;
 
 		await tripToHalfOpen();
 		const ctx = makeContext([makeAccount()]);
@@ -459,7 +482,9 @@ describe("half-open overload probe lifecycle", () => {
 	});
 
 	it("abandons the lease on a mid-stream error so another request can probe", async () => {
-		globalThis.fetch = mock(async () => sseErroringResponse()) as never;
+		globalThis.fetch = upstreamOnlyFetch(async () =>
+			sseErroringResponse(),
+		) as never;
 
 		await tripToHalfOpen();
 		const ctx = makeContext([makeAccount()]);
@@ -491,7 +516,9 @@ describe("half-open overload probe lifecycle", () => {
 	});
 
 	it("closes the bucket on a non-streaming 2xx probe at forward time", async () => {
-		globalThis.fetch = mock(async () => ok200("claude-haiku-4-5")) as never;
+		globalThis.fetch = upstreamOnlyFetch(async () =>
+			ok200("claude-haiku-4-5"),
+		) as never;
 
 		await tripToHalfOpen();
 		const ctx = makeContext([makeAccount()]);
@@ -505,5 +532,123 @@ describe("half-open overload probe lifecycle", () => {
 		expect(inspectProviderOverload("anthropic", "claude-haiku-4-5").state).toBe(
 			"closed",
 		);
+	});
+
+	it("trips the LOGICAL family bucket (not provider-wide) when the mapped model resolves to no family", async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => overloaded529());
+
+		// The account maps the haiku family to a model with NO Claude family —
+		// the 529 must be attributed to the LOGICAL haiku bucket, not the
+		// provider-wide bucket that would gate every family.
+		const account = makeAccount({
+			model_mappings: JSON.stringify({ haiku: "qwen/qwen-2.5" }),
+		});
+		const ctx = makeContext([account]);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(529);
+
+		// The trip landed on the haiku FAMILY bucket…
+		expect(inspectProviderOverload("anthropic", "claude-haiku-4-5").state).toBe(
+			"open",
+		);
+		// …while the provider-wide bucket stayed closed: other families route.
+		expect(getProviderWideOverloadUntil("anthropic")).toBeNull();
+		expect(
+			inspectProviderOverload("anthropic", "claude-sonnet-4-5").state,
+		).toBe("closed");
+	});
+
+	it("admits a mapped-model probe by its LOGICAL family while another family's probe is in flight", async () => {
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			fetchCalls++;
+			return ok200("claude-haiku-4-5");
+		});
+
+		// A half-open SONNET bucket with an in-flight probe. If admission gated
+		// the unresolvable mapped model by the provider-wide aggregate, the
+		// sonnet probe would wrongly suppress this haiku request.
+		await tripToHalfOpen("claude-sonnet-4-5");
+		const sonnetProbe = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-sonnet-4-5",
+		);
+		if (!sonnetProbe.admitted || !sonnetProbe.token) {
+			throw new Error("expected an admitted sonnet probe");
+		}
+
+		const account = makeAccount({
+			model_mappings: JSON.stringify({ haiku: "qwen/qwen-2.5" }),
+		});
+		const ctx = makeContext([account]);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		// Admitted against the healthy LOGICAL haiku family — one upstream hit.
+		expect(res.status).toBe(200);
+		expect(fetchCalls).toBe(1);
+
+		completeProviderOverloadProbe(sonnetProbe.token, "abandoned");
+	});
+
+	it("releases the probe lease when forwardToClient's setup throws", async () => {
+		await tripToHalfOpen();
+		const admission = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-haiku-4-5",
+		);
+		if (!admission.admitted || !admission.token) {
+			throw new Error("expected an admitted probe with a token");
+		}
+		const token = admission.token;
+
+		const ctx = makeContext([makeAccount()]);
+		(ctx.requestRecorder as unknown as { begin: () => void }).begin = () => {
+			throw new Error("recorder begin failed");
+		};
+
+		const { forwardToClient } = await import("../response-handler");
+		await expect(
+			forwardToClient(
+				{
+					requestId: "req-setup-throw",
+					method: "POST",
+					path: "/v1/messages",
+					account: makeAccount(),
+					requestHeaders: new Headers(),
+					requestBody: null,
+					response: ok200("claude-haiku-4-5"),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+					overloadProbeToken: token,
+				},
+				ctx,
+			),
+		).rejects.toThrow("recorder begin failed");
+
+		// The lease was settled "abandoned" before the rethrow — the bucket is
+		// still half-open and another request can probe IMMEDIATELY, instead of
+		// waiting out the lease-TTL safety valve.
+		const status = inspectProviderOverload("anthropic", "claude-haiku-4-5");
+		expect(status.state).toBe("half-open");
+		expect(status.probeActive).toBe(false);
+		const second = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-haiku-4-5",
+		);
+		expect(second.admitted).toBe(true);
+		if (second.admitted) {
+			expect(second.token).not.toBeNull();
+			completeProviderOverloadProbe(second.token, "abandoned");
+		}
 	});
 });

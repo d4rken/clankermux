@@ -28,6 +28,32 @@ const log = new Logger("OverloadHold");
  */
 export const OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET = 8;
 
+/**
+ * Max time (ms) proxy.ts holds a live client connection at an overload
+ * terminal — every candidate overload-gated, or every attempt suppressed
+ * behind an in-flight half-open probe — before falling back to the synthetic
+ * 529. 120s matches CW_HOLD_MAX_MS / FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS /
+ * PIN_HOLD_MAX_MS / BURST_RETRY_MAX_HOLD_MS: every bound on holding a live
+ * client connection. Lives here (next to the per-bucket holder cap) so the
+ * hold's two limits share one home.
+ */
+export const OVERLOAD_HOLD_MAX_MS = 120_000;
+
+// Test-only budget override (same spirit as the injectable
+// `maxConcurrentHolds` parameter below): the budget-expiry paths are
+// untestable against the real 120s without it. Production never sets it.
+let overloadHoldBudgetOverrideMs: number | null = null;
+
+/** Effective hold budget: the fixed constant unless a test override is set. */
+export function getOverloadHoldBudgetMs(): number {
+	return overloadHoldBudgetOverrideMs ?? OVERLOAD_HOLD_MAX_MS;
+}
+
+/** Test-only override of the hold budget. Pass null to restore the default. */
+export function setOverloadHoldBudgetOverrideForTests(ms: number | null): void {
+	overloadHoldBudgetOverrideMs = ms;
+}
+
 const holdSlots = createKeyedSemaphore(OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET);
 
 /**

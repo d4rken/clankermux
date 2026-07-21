@@ -908,6 +908,21 @@ export async function proxyWithAccount(
 		const transformedModel =
 			(transformedBodyJson?.model as string | undefined) ?? "";
 		activeUpstreamModel = transformedModel || null;
+
+		// ── Canonical overload-attribution model ────────────────────────────────
+		// Single source for probe admission, the pre-stream 529 trip,
+		// forwardToClient's `upstreamModel` (mid-stream trip), and fallback
+		// tracking: the model actually sent upstream when it resolves to a
+		// family; otherwise the request's LOGICAL model (combo/patched). Without
+		// the shared fallback, an account mapping (e.g. Haiku → "qwen/...")
+		// would probe the haiku bucket but TRIP the provider-wide bucket —
+		// gating every family off a single-family signal. Recomputed whenever
+		// `activeUpstreamModel` changes (model-fallback cycling below).
+		const computeOverloadAttributionModel = (): string | null =>
+			activeUpstreamModel && getModelFamily(activeUpstreamModel)
+				? activeUpstreamModel
+				: (effectiveBodyContext.getModel() ?? activeUpstreamModel);
+		let overloadAttributionModel = computeOverloadAttributionModel();
 		if (
 			transformedModel &&
 			cacheControlRejectors.has(
@@ -940,19 +955,15 @@ export async function proxyWithAccount(
 		// touching upstream. Skipped for the synthetic Codex count_tokens path:
 		// it never reaches the network, so its local 200 must not close a bucket.
 		if (!isCodexCountTokens) {
-			// Admission is family-scoped by the model actually sent upstream. When
-			// that model resolves to NO family (e.g. an account mapping to a
-			// non-Claude model), fall back to the request's logical model so the
-			// attempt is gated exactly like the pre-selection routing gate — not by
-			// the provider-wide conservative aggregate (which would let an
-			// unrelated family's bucket gate a mapped model).
-			const admissionModel =
-				activeUpstreamModel && getModelFamily(activeUpstreamModel)
-					? activeUpstreamModel
-					: (effectiveBodyContext.getModel() ?? activeUpstreamModel);
+			// Admission is family-scoped by the canonical attribution model (the
+			// model actually sent upstream, with the logical-model fallback when
+			// it resolves to no family) so the attempt is gated exactly like the
+			// pre-selection routing gate — not by the provider-wide conservative
+			// aggregate (which would let an unrelated family's bucket gate a
+			// mapped model).
 			const overloadAdmission = tryAcquireProviderOverloadProbe(
 				account.provider,
-				admissionModel,
+				overloadAttributionModel,
 			);
 			if (!overloadAdmission.admitted) {
 				log.info(
@@ -1622,8 +1633,10 @@ export async function proxyWithAccount(
 					}
 
 					// This fallback fetch sends nextModel upstream — keep the overload
-					// attribution current before the request goes out.
+					// attribution current before the request goes out (same
+					// family-resolvability fallback as the initial fetch).
 					activeUpstreamModel = nextModel;
+					overloadAttributionModel = computeOverloadAttributionModel();
 
 					// Acquire the retry first, then cancel the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
@@ -1871,13 +1884,15 @@ export async function proxyWithAccount(
 			response.status === 529
 		) {
 			const rateLimitInfo = provider.parseRateLimit(response);
-			// Family-scoped trip: attribute the 529 to the model actually sent
-			// upstream (post model-mapping / fallback cycling); fall back to the
-			// request's logical model when no transformed model was captured.
+			// Family-scoped trip via the canonical attribution model: the model
+			// actually sent upstream (post model-mapping / fallback cycling) when
+			// it resolves to a family, else the request's logical model — the
+			// SAME model the probe admission above was gated by, so probe and
+			// trip can never target different buckets.
 			applyProviderOverloadCooldown(
 				account.provider,
 				rateLimitInfo.resetTime,
-				activeUpstreamModel ?? effectiveBodyContext.getModel(),
+				overloadAttributionModel,
 			);
 			// Probe verdict: the probe itself hit the overload. The trip above
 			// already invalidated the lease on the tripped bucket (generation
@@ -1908,8 +1923,7 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
-						upstreamModel:
-							activeUpstreamModel ?? effectiveBodyContext.getModel(),
+						upstreamModel: overloadAttributionModel,
 						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
@@ -1976,8 +1990,7 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
-						upstreamModel:
-							activeUpstreamModel ?? effectiveBodyContext.getModel(),
+						upstreamModel: overloadAttributionModel,
 						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
@@ -1996,11 +2009,12 @@ export async function proxyWithAccount(
 		}
 
 		// Forward response to client. Ownership of a held overload-probe token
-		// TRANSFERS to forwardToClient here — it judges the probe verdict on full
-		// stream completion (clean EOF vs mid-stream overloaded_error vs error).
-		// Null out the local reference so a forwardToClient throw can't
-		// double-settle via the catch's fail() (the lease-TTL valve covers a
-		// pathological orphan).
+		// TRANSFERS to forwardToClient at CALL time — it judges the probe verdict
+		// on full stream completion (clean EOF vs mid-stream overloaded_error vs
+		// error), and on a throw during ITS setup it settles the token
+		// "abandoned" itself before rethrowing (see forwardToClient). Null out
+		// the local reference so this side can't double-settle via the catch's
+		// fail() — single owner: after this line the token is forwardToClient's.
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
 		return forwardToClient(
@@ -2023,7 +2037,7 @@ export async function proxyWithAccount(
 				apiKeyId,
 				apiKeyName,
 				routing: requestMeta.routing ?? null,
-				upstreamModel: activeUpstreamModel ?? effectiveBodyContext.getModel(),
+				upstreamModel: overloadAttributionModel,
 				overloadProbeToken: transferredProbeToken,
 				bumpIdleTimeout,
 			},

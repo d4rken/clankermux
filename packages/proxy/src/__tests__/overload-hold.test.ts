@@ -25,9 +25,11 @@ import {
 	getActiveOverloadHoldCount,
 	OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET,
 	resetOverloadHoldSlots,
+	setOverloadHoldBudgetOverrideForTests,
 	tryAcquireOverloadHoldSlot,
 } from "../overload-hold";
 import {
+	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
@@ -181,6 +183,28 @@ function ok200(model: string) {
 	);
 }
 
+/**
+ * Wrap a per-test upstream handler so unrelated background fetches — the
+ * models.dev pricing-catalog refresh fired by the usage finalizer's cost
+ * lookup — never reach it. Without the shunt the catalog refresh lands
+ * mid-test through the mocked `globalThis.fetch`, skewing exact
+ * fetch-call-count assertions (order-dependent: only when no earlier test
+ * file already warmed the in-process catalog), and a mocked 200 would poison
+ * the on-disk pricing cache. The 500 makes pricing fall back to its bundled
+ * data.
+ */
+function upstreamOnlyFetch(
+	handler: (input: Request | string | URL) => Response | Promise<Response>,
+): typeof globalThis.fetch {
+	return mock(async (input: Request | string | URL) => {
+		const url = input instanceof Request ? input.url : String(input);
+		if (!url.includes("api.anthropic.com")) {
+			return new Response("unavailable", { status: 500 });
+		}
+		return handler(input);
+	}) as never;
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -233,11 +257,12 @@ describe("transparent overload hold", () => {
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
 		resetOverloadHoldSlots();
+		setOverloadHoldBudgetOverrideForTests(null);
 	});
 
 	it("holds a fully overload-gated request and serves it when the breaker expires", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;
@@ -264,7 +289,7 @@ describe("transparent overload hold", () => {
 
 	it("returns an immediate 529 when the cooldown is beyond the hold budget", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;
@@ -290,7 +315,7 @@ describe("transparent overload hold", () => {
 
 	it("overflows to an immediate 529 when the bucket's holder cap is saturated", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;
@@ -326,7 +351,7 @@ describe("transparent overload hold", () => {
 		const probeGate = new Promise<Response>((resolve) => {
 			releaseProbe = resolve;
 		});
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			if (fetchCalls === 1) return probeGate;
 			return ok200(MODEL);
@@ -367,7 +392,7 @@ describe("transparent overload hold", () => {
 
 	it("exits the hold with the fresh Retry-After when the breaker re-trips beyond the remaining budget", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;
@@ -401,7 +426,7 @@ describe("transparent overload hold", () => {
 
 	it("releases the hold slot when the client aborts mid-hold", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;
@@ -427,9 +452,175 @@ describe("transparent overload hold", () => {
 		expect(tryAcquireOverloadHoldSlot(slotKey)).toBe(true);
 	}, 10_000);
 
+	it("aborts a hung wake fetch at the remaining hold deadline and falls back to the synthetic 529 (not 499)", async () => {
+		// Short budget so the remaining-budget abort is observable in test time;
+		// production keeps the fixed 120s.
+		setOverloadHoldBudgetOverrideForTests(2_000);
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch((input: Request | string | URL) => {
+			fetchCalls++;
+			// Hang forever unless aborted — models an upstream that accepts the
+			// connection and never responds (makeProxyRequest's own timeout is 30
+			// minutes, far beyond the hold budget).
+			return new Promise<Response>((_, reject) => {
+				const signal = input instanceof Request ? input.signal : undefined;
+				signal?.addEventListener("abort", () =>
+					reject(new DOMException("The operation was aborted.", "AbortError")),
+				);
+			});
+		}) as never;
+
+		// Breaker expires quickly → the hold wakes and attempts within budget.
+		applyProviderOverloadCooldown("anthropic", Date.now() + 200, MODEL);
+		const slotKey = getOverloadHoldSlotKey("anthropic", MODEL);
+		const ctx = makeContext([makeAccount()]);
+
+		const started = Date.now();
+		const res = await callHandleProxy(
+			modelRequest(MODEL),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Budget abort must fall through to the synthetic 529 — never the 499
+		// client-abort marker (the client is still connected).
+		expect(res.status).toBe(529);
+		expect(fetchCalls).toBe(1);
+		// Ended around the ~2s budget, nowhere near the 30-min upstream timeout.
+		expect(Date.now() - started).toBeLessThan(10_000);
+		// Every hold slot was released on the way out.
+		expect(getActiveOverloadHoldCount(slotKey)).toBe(0);
+	}, 15_000);
+
+	it("exits the hold after one round when a wake attempt fails with an ordinary (non-overload) error", async () => {
+		// Modest budget so a REGRESSION (re-polling the broken candidate every
+		// 1.5s) fails fast on the call-count assertion instead of timing out.
+		setOverloadHoldBudgetOverrideForTests(6_000);
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			fetchCalls++;
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "authentication_error", message: "bad token" },
+				}),
+				{ status: 401, headers: { "content-type": "application/json" } },
+			);
+		}) as never;
+
+		applyProviderOverloadCooldown("anthropic", Date.now() + 200, MODEL);
+		const ctx = makeContext([makeAccount()]);
+
+		const started = Date.now();
+		const res = await callHandleProxy(
+			modelRequest(MODEL),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// One wake round, ONE upstream attempt — a persistent 401 is not an
+		// overload verdict to wait for, so the hold breaks out immediately.
+		expect(fetchCalls).toBe(1);
+		expect(res.status).toBe(529);
+		expect(Date.now() - started).toBeLessThan(5_000);
+	}, 15_000);
+
+	it("serves a recovered combo slot with the slot's model override after a hold wake", async () => {
+		const sentBodies: string[] = [];
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch(
+			async (input: Request | string | URL) => {
+				fetchCalls++;
+				sentBodies.push(input instanceof Request ? await input.text() : "");
+				return ok200("claude-haiku-4-5");
+			},
+		) as never;
+
+		// Active combo for the requested (sonnet) family maps this account's
+		// slot to Haiku — and the HAIKU bucket is what is overloaded, so the
+		// account is gated out and the request enters the hold.
+		const account = makeAccount();
+		const ctx = makeContext([account]);
+		(
+			ctx.dbOps as unknown as {
+				getActiveComboForFamily: () => Promise<unknown>;
+			}
+		).getActiveComboForFamily = mock(async () => ({
+			name: "test-combo",
+			slots: [
+				{
+					account_id: account.id,
+					model: "claude-haiku-4-5",
+					enabled: true,
+					priority: 0,
+				},
+			],
+		}));
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 400,
+			"claude-haiku-4-5",
+		);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-sonnet-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(res.status).toBe(200);
+		expect(fetchCalls).toBe(1);
+		// The wake attempt must carry the combo slot's model override — not the
+		// request's sonnet model.
+		const sent = JSON.parse(sentBodies[0]) as { model: string };
+		expect(sent.model).toBe("claude-haiku-4-5");
+	}, 15_000);
+
+	it("enforces ONE provider-wide holder cap when provider-wide and family buckets coexist", async () => {
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			fetchCalls++;
+			return ok200(MODEL);
+		}) as never;
+
+		// A family bucket lingers from an earlier family-scoped trip, then a
+		// provider-wide trip lands (e.g. an unattributable 529).
+		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000, MODEL);
+		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
+		// With a LIVE provider-wide bucket the slot key collapses to the
+		// provider-wide key even for a family-resolvable request.
+		expect(getOverloadHoldSlotKey("anthropic", MODEL)).toBe(
+			ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
+		);
+
+		// Saturate the ONE shared cap.
+		for (let i = 0; i < OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET; i++) {
+			expect(tryAcquireOverloadHoldSlot(ANTHROPIC_UPSTREAM_OVERLOAD_KEY)).toBe(
+				true,
+			);
+		}
+		const ctx = makeContext([makeAccount()]);
+
+		const started = Date.now();
+		const res = await callHandleProxy(
+			modelRequest(MODEL),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The 9th holder overflows to the immediate synthetic 529 — it does NOT
+		// get a fresh 8-holder cap under the family key.
+		expect(res.status).toBe(529);
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(fetchCalls).toBe(0);
+		expect(
+			getActiveOverloadHoldCount(`${ANTHROPIC_UPSTREAM_OVERLOAD_KEY}:haiku`),
+		).toBe(0);
+	});
+
 	it("holds at the suppressed-exhaustion terminal and serves once the probe reports recovery", async () => {
 		let fetchCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
 			return ok200(MODEL);
 		}) as never;

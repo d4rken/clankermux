@@ -30,6 +30,7 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { PROVIDER_NAMES } from "@clankermux/types";
+import { getStreamForwardTotalTimeoutMs } from "./stream-timeouts";
 
 const log = new Logger("ProviderOverloadCooldown");
 
@@ -38,16 +39,31 @@ const MAX_PROVIDER_OVERLOAD_COOLDOWN_MS = 5 * 60_000;
 export const ANTHROPIC_UPSTREAM_OVERLOAD_KEY = "anthropic-upstream";
 
 /**
+ * Safety margin added on top of the request + stream-forward timeouts when
+ * computing a probe lease's TTL: the timeouts bound the upstream fetch and the
+ * stream forward themselves, but the verdict callbacks fire a beat after —
+ * the margin keeps a legitimately-slow completion from racing a TTL takeover.
+ */
+const PROBE_LEASE_SAFETY_MARGIN_MS = 60_000;
+
+/**
  * A probe whose owner dies without completing must not wedge the bucket
  * forever. Past this TTL the lease is treated as released and another
  * request may probe; the stale token's later completion no-ops via the
  * lease-identity check. Composed from the request-header timeout plus the
  * total stream-forward timeout — the longest a legitimate probe request
- * can possibly still be in flight.
+ * can possibly still be in flight — plus a safety margin. Computed per
+ * lease acquisition (not at module load) because forwardToClient honors the
+ * `CF_STREAM_TOTAL_TIMEOUT_MS` runtime override; the TTL must track the
+ * same effective value or a long-configured stream would outlive its lease.
  */
-export const PROBE_LEASE_SAFETY_TTL_MS =
-	TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS +
-	TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS;
+export function getProbeLeaseSafetyTtlMs(): number {
+	return (
+		TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS +
+		getStreamForwardTotalTimeoutMs() +
+		PROBE_LEASE_SAFETY_MARGIN_MS
+	);
+}
 
 export type OverloadBreakerState = "closed" | "open" | "half-open";
 
@@ -93,7 +109,12 @@ interface OverloadBucket {
 	 * fails the generation check and its completion no-ops.
 	 */
 	generation: number;
-	probe: { leaseId: number; acquiredAt: number } | null;
+	/**
+	 * `ttlMs` is captured at acquisition time from the then-effective
+	 * env-aware stream timeout (see {@link getProbeLeaseSafetyTtlMs}) so a
+	 * runtime override change never shortens an already-issued lease.
+	 */
+	probe: { leaseId: number; acquiredAt: number; ttlMs: number } | null;
 }
 
 const buckets = new Map<string, OverloadBucket>();
@@ -178,8 +199,7 @@ function relevantKeys(provider: string, model?: string | null): string[] {
 
 function isLeaseActive(bucket: OverloadBucket, now: number): boolean {
 	return (
-		bucket.probe !== null &&
-		now - bucket.probe.acquiredAt < PROBE_LEASE_SAFETY_TTL_MS
+		bucket.probe !== null && now - bucket.probe.acquiredAt < bucket.probe.ttlMs
 	);
 }
 
@@ -291,10 +311,14 @@ export function inspectProviderOverload(
 
 /**
  * Semaphore key for the transparent overload hold (see proxy.ts /
- * overload-hold.ts): the bucket that actually gates this (provider, model) —
- * the family bucket when one exists, else the provider-wide bucket, else the
- * key the request WOULD trip (deterministic even when no bucket is live, so a
- * racing clear can't strand holders on mismatched keys).
+ * overload-hold.ts): the bucket that actually gates this (provider, model).
+ * A LIVE provider-wide bucket wins over the family bucket — during a
+ * provider-wide incident every family is gated by that one bucket, so its
+ * holders must share ONE cap rather than getting a full cap per family
+ * (which would multiply the incident's held connections). With no live
+ * provider-wide bucket: the family bucket when one exists, else the key the
+ * request WOULD trip (deterministic even when no bucket is live, so a racing
+ * clear can't strand holders on mismatched keys).
  */
 export function getOverloadHoldSlotKey(
 	provider: string,
@@ -302,8 +326,8 @@ export function getOverloadHoldSlotKey(
 ): string {
 	const { providerKey, familyKey } = resolveOverloadKeyParts(provider, model);
 	if (!familyKey) return providerKey;
-	if (buckets.has(familyKey)) return familyKey;
 	if (buckets.has(providerKey)) return providerKey;
+	if (buckets.has(familyKey)) return familyKey;
 	return familyKey;
 }
 
@@ -340,11 +364,14 @@ export function tryAcquireProviderOverloadProbe(
 	}
 
 	const leases: ProbeLease[] = [];
+	// TTL snapshot at acquisition: every lease of this admission shares the
+	// same env-aware deadline.
+	const ttlMs = getProbeLeaseSafetyTtlMs();
 	for (const key of halfOpenKeys) {
 		const bucket = buckets.get(key);
 		if (!bucket) continue;
 		const leaseId = ++leaseIdCounter;
-		bucket.probe = { leaseId, acquiredAt: now };
+		bucket.probe = { leaseId, acquiredAt: now, ttlMs };
 		leases.push({ key, generation: bucket.generation, leaseId });
 	}
 	log.info(

@@ -31,6 +31,10 @@ import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { shouldRecordRequest } from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import {
+	getStreamForwardChunkTimeoutMs,
+	getStreamForwardTotalTimeoutMs,
+} from "./stream-timeouts";
+import {
 	createUsageState,
 	detectMissingMessageStop,
 	feedChunk,
@@ -209,23 +213,27 @@ export interface ResponseHandlerOptions {
 	comboName?: string | null;
 	routing?: RequestRoutingMeta | null;
 	/**
-	 * The model actually sent upstream (post model-mapping / fallback cycling),
-	 * for family-scoped overload attribution: a mid-stream `overloaded_error`
-	 * trips the overload breaker bucket of THIS model's family. Absent/null
-	 * falls back to the provider-wide bucket (conservatively gates every
-	 * family).
+	 * The canonical overload-attribution model (see proxyWithAccount): the
+	 * model actually sent upstream (post model-mapping / fallback cycling)
+	 * when it resolves to a family, else the request's logical model. A
+	 * mid-stream `overloaded_error` trips the overload breaker bucket of THIS
+	 * model's family. Absent/null falls back to the provider-wide bucket
+	 * (conservatively gates every family).
 	 */
 	upstreamModel?: string | null;
 	/**
 	 * Half-open overload-probe token whose OWNERSHIP transfers to
-	 * forwardToClient at the final forward. The caller must not settle it after
-	 * passing it here. The verdict is judged on FULL transport completion —
-	 * mid-stream overloads arrive after 200 headers, so headers alone prove
-	 * nothing:
+	 * forwardToClient at CALL time — the caller must not settle it after
+	 * passing it here, on ANY outcome including a throw. The verdict is judged
+	 * on FULL transport completion — mid-stream overloads arrive after 200
+	 * headers, so headers alone prove nothing:
 	 *   - streaming clean EOF + success + sniffer silent → "recovered"
 	 *   - sniffer `overloaded_error`                     → "reopened"
 	 *   - sniffer `rate_limit_error` / stream error      → "abandoned"
 	 *   - non-streaming: 2xx → "recovered", else "abandoned" (at forward time)
+	 *   - a throw anywhere in forwardToClient's setup (e.g. recorder.begin)
+	 *     → "abandoned" (settled by forwardToClient itself before rethrow, so
+	 *     a setup failure can never orphan the lease until the safety TTL)
 	 * Completion is idempotent, so overlapping paths are safe.
 	 */
 	overloadProbeToken?: OverloadProbeToken | null;
@@ -251,8 +259,35 @@ export interface ResponseHandlerOptions {
  * while computing usage inline (no worker). Per chunk: feed the UsageState +
  * capture the (capped) body for Request History; at transport finish: finalize
  * usage as a tracked async promise and attach it to the RequestRecorder.
+ *
+ * Single-owner story for `options.overloadProbeToken`: ownership transfers to
+ * forwardToClient the moment it is called. If the setup phase throws before
+ * the streaming callbacks / non-stream forward-time verdict take over (e.g.
+ * `requestRecorder.begin`), the lease is settled "abandoned" here and the
+ * error rethrown — the caller (proxyWithAccount) has already nulled its local
+ * reference and must NOT settle again. Completion is idempotent, so the
+ * belt-and-suspenders overlap with an already-armed stream verdict is safe.
  */
 export async function forwardToClient(
+	options: ResponseHandlerOptions,
+	ctx: ProxyContext,
+): Promise<Response> {
+	try {
+		return await forwardToClientInner(options, ctx);
+	} catch (err) {
+		// A throw during setup would otherwise orphan the probe lease until the
+		// safety TTL (~an hour), wedging the half-open bucket against every
+		// other would-be prober. Release it as "abandoned" — no verdict was
+		// reached — and surface the original error.
+		completeProviderOverloadProbe(
+			options.overloadProbeToken ?? null,
+			"abandoned",
+		);
+		throw err;
+	}
+}
+
+async function forwardToClientInner(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
 ): Promise<Response> {
@@ -406,15 +441,11 @@ export async function forwardToClient(
 
 		// Configurable via env vars to support long agentic workloads where
 		// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
-		// the outer stream silent for extended periods (issue #84).
-		const STREAM_TIMEOUT_MS = Number(
-			process.env.CF_STREAM_TOTAL_TIMEOUT_MS ??
-				TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
-		);
-		const CHUNK_TIMEOUT_MS = Number(
-			process.env.CF_STREAM_CHUNK_TIMEOUT_MS ??
-				TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
-		);
+		// the outer stream silent for extended periods (issue #84). Shared
+		// helper (stream-timeouts.ts) so the probe-lease safety TTL reads the
+		// SAME effective values and can never drift from what is honored here.
+		const STREAM_TIMEOUT_MS = getStreamForwardTotalTimeoutMs();
+		const CHUNK_TIMEOUT_MS = getStreamForwardChunkTimeoutMs();
 
 		// Computed once upfront from path + status only (isExpectedResponse does
 		// NOT read the body), matching the old analyticsResponse status.
