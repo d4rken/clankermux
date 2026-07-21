@@ -23,7 +23,8 @@
  * 2. **`rate_limit_error` and `overloaded_error` (Anthropic-shape providers
  *    only).** Both trigger a short probe cooldown so the account is bypassed
  *    while the overload persists. `overloaded_error` is only enabled for
- *    Anthropic and claude-oauth providers — other OpenAI-compatible providers
+ *    official Anthropic providers (`isOfficialAnthropicProvider`: "anthropic",
+ *    "claude-oauth", "claude-console-api") — other OpenAI-compatible providers
  *    do not emit this error type in the same SSE envelope and we should not
  *    misfire on their content. `api_error` is always excluded — it is
  *    request-scoped (server bug, not a quota/capacity issue) and marking an
@@ -39,8 +40,7 @@
  *    main thread never double-marks an account within a single request.
  */
 
-// Providers that emit `overloaded_error` in the Anthropic SSE error envelope.
-const ANTHROPIC_SHAPE_PROVIDERS = new Set(["anthropic", "claude-oauth"]);
+import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
 
 const MAX_BUFFER_BYTES = 16 * 1024;
 
@@ -69,14 +69,15 @@ export interface SseRateLimitSnifferOptions {
  * Create a stateful sniffer. One instance per streaming request.
  *
  * Pass `{ provider }` to enable provider-specific error detection.
- * `overloaded_error` is only matched for Anthropic-shape providers
- * ("anthropic", "claude-oauth"); all other providers only match
- * `rate_limit_error`.
+ * `overloaded_error` is only matched for official Anthropic providers
+ * ("anthropic", "claude-oauth", "claude-console-api" — the shared
+ * `isOfficialAnthropicProvider` allow-list); all other providers only
+ * match `rate_limit_error`.
  */
 export function createSseRateLimitSniffer(
 	opts: SseRateLimitSnifferOptions,
 ): SseRateLimitSniffer {
-	const isAnthropicShape = ANTHROPIC_SHAPE_PROVIDERS.has(opts.provider);
+	const isAnthropicShape = isOfficialAnthropicProvider(opts.provider);
 	const typePattern = isAnthropicShape
 		? "rate_limit_error|overloaded_error"
 		: "rate_limit_error";

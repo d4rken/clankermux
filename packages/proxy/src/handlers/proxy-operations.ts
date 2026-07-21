@@ -1,4 +1,5 @@
 import {
+	getModelFamily,
 	getModelList,
 	logError,
 	NETWORK,
@@ -28,7 +29,11 @@ import {
 import { cacheBodyStore } from "../cache-body-store";
 import {
 	applyProviderOverloadCooldown,
+	completeProviderOverloadProbe,
+	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
+	type OverloadProbeToken,
+	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
@@ -79,6 +84,13 @@ const log = new Logger("ProxyOperations");
  *  - `model_not_found` — a forwarded model-not-found (404/400). (Not a `null`
  *                         return — recorded for completeness when applicable.)
  *  - `network_error`   — a thrown error in the attempt (caught failover).
+ *  - `overload_suppressed` — the attempt was refused BEFORE any upstream fetch
+ *                         because the overload breaker denied admission: either
+ *                         a relevant bucket is open (`until` set) or another
+ *                         request already holds the half-open probe lease
+ *                         (`until` null). The outer loop treats it as failover;
+ *                         a suppressed-only exhaustion must surface the 529
+ *                         provider-overloaded terminal, not ALL_ACCOUNTS_FAILED.
  *  - `other`           — any other null-return failover not covered above.
  */
 export type ProxyAttemptOutcome =
@@ -90,6 +102,7 @@ export type ProxyAttemptOutcome =
 	| { kind: "hard_429"; cooldownUntil?: number }
 	| { kind: "auth" }
 	| { kind: "overload_529"; cooldownUntil?: number }
+	| { kind: "overload_suppressed"; until: number | null }
 	| { kind: "model_not_found" }
 	| { kind: "network_error" }
 	| { kind: "other" };
@@ -663,14 +676,33 @@ export async function proxyWithAccount(
 		}
 	};
 
+	// Half-open overload-probe token held by THIS attempt (null = closed buckets
+	// or admission not yet acquired). Ownership either transfers into
+	// forwardToClient (which judges the verdict on full stream completion) or is
+	// completed locally on every non-forwarding exit. Completion is idempotent
+	// and generation-checked, so belt-and-suspenders double-completion is safe.
+	let overloadProbeToken: OverloadProbeToken | null = null;
+	// Release the held probe lease locally and drop ownership. `fail()` calls
+	// this with "abandoned" as the universal chokepoint; the 529 trip site calls
+	// it with "reopened" first (fail's later "abandoned" then no-ops on null).
+	const settleOverloadProbe = (
+		outcome: "recovered" | "reopened" | "abandoned",
+	): void => {
+		completeProviderOverloadProbe(overloadProbeToken, outcome);
+		overloadProbeToken = null;
+	};
+
 	// Single helper that records a categorical outcome into the optional sink AND
 	// cancels the upstream body, so the many failover (`return null`) paths can't
 	// let recording and body-cancel drift apart (Codex's anti-drift requirement).
-	// Returns `null` so call sites can `return fail(...)` directly.
+	// Returns `null` so call sites can `return fail(...)` directly. Also releases
+	// a still-held overload-probe lease as "abandoned" — a failover means the
+	// probe never reached a verdict on this attempt.
 	const fail = async (
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
 	): Promise<null> => {
+		settleOverloadProbe("abandoned");
 		options?.onOutcome?.(outcome);
 		await discardUpstreamBody(response);
 		return null;
@@ -684,6 +716,12 @@ export async function proxyWithAccount(
 	// the forwardToClient returns transfer ownership (so the catch is unreached on
 	// success; if forwardToClient itself throws, discard's locked-guard no-ops).
 	let liveUpstream: Response | null = null;
+	// The model actually sent upstream for the CURRENT in-flight fetch: the
+	// transformed model (account model-mappings can rewrite it) before the
+	// initial fetch, then re-assigned before every model-fallback fetch. Feeds
+	// family-scoped overload attribution (the 529 trip + forwardToClient's
+	// upstreamModel) so a breaker opens for the family that actually failed.
+	let activeUpstreamModel: string | null = null;
 	try {
 		if (
 			process.env.DEBUG?.includes("proxy") ||
@@ -869,6 +907,7 @@ export async function proxyWithAccount(
 		}
 		const transformedModel =
 			(transformedBodyJson?.model as string | undefined) ?? "";
+		activeUpstreamModel = transformedModel || null;
 		if (
 			transformedModel &&
 			cacheControlRejectors.has(
@@ -889,6 +928,42 @@ export async function proxyWithAccount(
 			log.debug(
 				`Pre-stripped cache_control for known rejector: account=${account.name} model=${transformedModel}`,
 			);
+		}
+
+		// ── Half-open overload-probe admission (single authoritative chokepoint) ──
+		// Every real upstream attempt flows through here (main loop, combo
+		// fallback, hold re-probes, burst first attempt), so admission at this
+		// point cannot be bypassed by a path that skips the pre-selection gate.
+		// Closed buckets return `token: null` (the common case — zero overhead).
+		// A refusal means either an open bucket won a race against the gate or a
+		// concurrent request already owns the half-open probe — fail over without
+		// touching upstream. Skipped for the synthetic Codex count_tokens path:
+		// it never reaches the network, so its local 200 must not close a bucket.
+		if (!isCodexCountTokens) {
+			// Admission is family-scoped by the model actually sent upstream. When
+			// that model resolves to NO family (e.g. an account mapping to a
+			// non-Claude model), fall back to the request's logical model so the
+			// attempt is gated exactly like the pre-selection routing gate — not by
+			// the provider-wide conservative aggregate (which would let an
+			// unrelated family's bucket gate a mapped model).
+			const admissionModel =
+				activeUpstreamModel && getModelFamily(activeUpstreamModel)
+					? activeUpstreamModel
+					: (effectiveBodyContext.getModel() ?? activeUpstreamModel);
+			const overloadAdmission = tryAcquireProviderOverloadProbe(
+				account.provider,
+				admissionModel,
+			);
+			if (!overloadAdmission.admitted) {
+				log.info(
+					`Overload probe admission refused for account ${account.name} (${overloadAdmission.reason}) — failing over without an upstream attempt`,
+				);
+				return await fail({
+					kind: "overload_suppressed",
+					until: overloadAdmission.until,
+				});
+			}
+			overloadProbeToken = overloadAdmission.token;
 		}
 
 		// Make the request. Thread the caller's AbortSignal (if any) into the
@@ -1440,12 +1515,54 @@ export async function proxyWithAccount(
 					// forwardToClient (→ onSummary) or is a `return null` failover the
 					// proxy.ts caller cleans up via discardStaged.
 					cacheBodyStore.discardStaged(requestMeta.id);
+					// Direct return that bypasses forwardToClient — no stream verdict
+					// will ever arrive, so release a held probe lease here.
+					settleOverloadProbe("abandoned");
 					options?.onOutcome?.({ kind: "model_not_found" });
 					return withSanitizedProxyHeaders(rawResponse);
 				}
 
 				for (let i = 1; i < modelList.length; i++) {
 					const nextModel = modelList[i];
+
+					// Switching models abandons the previous fetch's outcome — a probe
+					// lease held for the previous model's family must be released
+					// (never "recovered": the response that got us here was a
+					// model-unavailable/429, not a health verdict).
+					settleOverloadProbe("abandoned");
+
+					// Family-overload gate: a fallback list can cross model families
+					// (e.g. a Haiku request falling back into Sonnet, or vice versa).
+					// Skip any candidate whose family breaker (or the provider-wide
+					// bucket) is open — cycling into it would hammer a family that is
+					// already known-sick.
+					const fallbackOverloadedUntil = getProviderOverloadUntil(
+						account.provider,
+						Date.now(),
+						nextModel,
+					);
+					if (fallbackOverloadedUntil !== null) {
+						log.debug(
+							`Skipping model-fallback candidate '${nextModel}' on account ${account.name}: overload breaker open until ${new Date(fallbackOverloadedUntil).toISOString()}`,
+						);
+						continue;
+					}
+
+					// Probe admission for THIS candidate's family (the fallback can
+					// cross into a half-open family): suppressed → skip the candidate
+					// rather than pile onto a bucket another request is probing.
+					const fallbackAdmission = tryAcquireProviderOverloadProbe(
+						account.provider,
+						nextModel,
+					);
+					if (!fallbackAdmission.admitted) {
+						log.debug(
+							`Skipping model-fallback candidate '${nextModel}' on account ${account.name}: overload probe admission refused (${fallbackAdmission.reason})`,
+						);
+						continue;
+					}
+					overloadProbeToken = fallbackAdmission.token;
+
 					log.info(
 						`Model '${modelList[i - 1]}' unavailable/rate-limited on account ${account.name}, ` +
 							`retrying with: ${nextModel} (${i}/${modelList.length - 1})`,
@@ -1503,6 +1620,10 @@ export async function proxyWithAccount(
 					} catch {
 						// If re-patching fails, proceed with the transformed request as-is
 					}
+
+					// This fallback fetch sends nextModel upstream — keep the overload
+					// attribution current before the request goes out.
+					activeUpstreamModel = nextModel;
 
 					// Acquire the retry first, then cancel the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
@@ -1716,6 +1837,9 @@ export async function proxyWithAccount(
 					log.info(
 						`Refreshed token for account ${account.name} after 401; retrying same account`,
 					);
+					// The recursion acquires its own admission — release this attempt's
+					// lease first, or the retry would suppress itself ("probe-active").
+					settleOverloadProbe("abandoned");
 					return await proxyWithAccount(
 						req,
 						url,
@@ -1747,7 +1871,18 @@ export async function proxyWithAccount(
 			response.status === 529
 		) {
 			const rateLimitInfo = provider.parseRateLimit(response);
-			applyProviderOverloadCooldown(account.provider, rateLimitInfo.resetTime);
+			// Family-scoped trip: attribute the 529 to the model actually sent
+			// upstream (post model-mapping / fallback cycling); fall back to the
+			// request's logical model when no transformed model was captured.
+			applyProviderOverloadCooldown(
+				account.provider,
+				rateLimitInfo.resetTime,
+				activeUpstreamModel ?? effectiveBodyContext.getModel(),
+			);
+			// Probe verdict: the probe itself hit the overload. The trip above
+			// already invalidated the lease on the tripped bucket (generation
+			// bump); "reopened" releases any remaining sibling-bucket lease too.
+			settleOverloadProbe("reopened");
 
 			if (returnRateLimitedResponseOnExhaustion) {
 				log.warn(
@@ -1773,6 +1908,8 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
+						upstreamModel:
+							activeUpstreamModel ?? effectiveBodyContext.getModel(),
 						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
@@ -1815,6 +1952,10 @@ export async function proxyWithAccount(
 				log.warn(
 					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
+				// A non-official-provider 529 terminal (the official-Anthropic 529
+				// was intercepted above): no family trip fires here, and streaming a
+				// known-error body yields no health verdict — release the lease.
+				settleOverloadProbe("abandoned");
 				return forwardToClient(
 					{
 						requestId: requestMeta.id,
@@ -1835,6 +1976,8 @@ export async function proxyWithAccount(
 						apiKeyId,
 						apiKeyName,
 						routing: requestMeta.routing ?? null,
+						upstreamModel:
+							activeUpstreamModel ?? effectiveBodyContext.getModel(),
 						bumpIdleTimeout,
 					},
 					{ ...ctx, provider },
@@ -1852,7 +1995,14 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Forward response to client
+		// Forward response to client. Ownership of a held overload-probe token
+		// TRANSFERS to forwardToClient here — it judges the probe verdict on full
+		// stream completion (clean EOF vs mid-stream overloaded_error vs error).
+		// Null out the local reference so a forwardToClient throw can't
+		// double-settle via the catch's fail() (the lease-TTL valve covers a
+		// pathological orphan).
+		const transferredProbeToken = overloadProbeToken;
+		overloadProbeToken = null;
 		return forwardToClient(
 			{
 				requestId: requestMeta.id,
@@ -1873,6 +2023,8 @@ export async function proxyWithAccount(
 				apiKeyId,
 				apiKeyName,
 				routing: requestMeta.routing ?? null,
+				upstreamModel: activeUpstreamModel ?? effectiveBodyContext.getModel(),
+				overloadProbeToken: transferredProbeToken,
 				bumpIdleTimeout,
 			},
 			{ ...ctx, provider },

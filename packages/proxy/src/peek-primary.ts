@@ -3,7 +3,7 @@ import { Logger } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import type { Account, LoadBalancingStrategy } from "@clankermux/types";
 import { getUsageThrottleUntil } from "./handlers/usage-throttling";
-import { getProviderOverloadUntil } from "./provider-overload-cooldown";
+import { getProviderWideOverloadUntil } from "./provider-overload-cooldown";
 
 const log = new Logger("PrimaryAccountPeek");
 
@@ -32,10 +32,15 @@ let lastPrimaryAccountId: string | null | undefined;
  *    eligible (a huge prompt that wouldn't fit Codex is not the "next session").
  *  - Burst-throttle — it only delays a request, it does not change its target.
  *  - Combo / model-family routing — request-shape dependent.
+ *  - Family-scoped overload buckets — request-shape dependent for the same
+ *    reason: which family bucket applies depends on the request's model. Only
+ *    a PROVIDER-WIDE open bucket skips an account here (via
+ *    `getProviderWideOverloadUntil`); a Haiku-only incident must not move the
+ *    badge while Sonnet/Opus traffic still routes to the account.
  *
  * Purity note: this is read-only with respect to routing state, but not strictly
- * pure — `getProviderOverloadUntil` / `getUsageThrottleUntil` (via `usageCache.get`)
- * may evict their own expired entries as a side effect of being read.
+ * pure — `getUsageThrottleUntil` (via `usageCache.get`) may evict its own
+ * expired entries as a side effect of being read.
  */
 export function peekPrimaryAccountId(
 	accounts: Account[],
@@ -60,7 +65,7 @@ export function peekPrimaryAccountId(
 	let primaryId: string | null = null;
 
 	for (const account of strategy.peekRanked(accounts)) {
-		const ov = getProviderOverloadUntil(account.provider, now);
+		const ov = getProviderWideOverloadUntil(account.provider, now);
 		if (ov && ov > now) {
 			skippedOverloaded.push(account.id);
 			continue;

@@ -10,6 +10,7 @@ import {
 import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../../cache-body-store";
 import {
+	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
 } from "../../provider-overload-cooldown";
@@ -845,6 +846,118 @@ describe("proxyWithAccount — 529 failover", () => {
 			{ status: 529, headers: { "content-type": "application/json" } },
 		);
 		expect(await isModelUnavailableError(response)).toBe(false);
+	});
+});
+
+describe("proxyWithAccount — model-fallback loop skips overloaded families", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
+	});
+
+	function fetch429Then200() {
+		const fetchCalls: string[] = [];
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const req = input instanceof Request ? input : new Request(String(input));
+			const bodyText = await req.text().catch(() => "{}");
+			const body = JSON.parse(bodyText);
+			fetchCalls.push(body.model ?? "unknown");
+			if (fetchCalls.length === 1) {
+				return jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message: "Rate limit exceeded: limit_rpm/model/abc",
+						},
+					},
+					429,
+				);
+			}
+			return jsonResponse(
+				{
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					content: [{ type: "text", text: "hi" }],
+					model: body.model,
+					stop_reason: "end_turn",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+				200,
+			);
+		});
+		return fetchCalls;
+	}
+
+	it("skips a fallback candidate whose family breaker is open (no upstream hammering)", async () => {
+		const fetchCalls = fetch429Then200();
+		// The haiku family of THIS provider is overloaded — the fallback list's
+		// haiku candidate must be skipped, leaving no candidate → failover (null).
+		applyProviderOverloadCooldown(
+			"openai-compatible",
+			undefined,
+			"claude-haiku-4-5",
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount({
+				model_mappings: JSON.stringify({
+					sonnet: ["qwen/qwen3.6-plus:free", "claude-haiku-4-5"],
+				}),
+			}),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).toBeNull();
+		// Only the primary was fetched; the haiku fallback never hit upstream.
+		expect(fetchCalls).toHaveLength(1);
+		expect(fetchCalls[0]).toBe("qwen/qwen3.6-plus:free");
+	});
+
+	it("still attempts a fallback candidate when only a DIFFERENT family's breaker is open", async () => {
+		const fetchCalls = fetch429Then200();
+		applyProviderOverloadCooldown(
+			"openai-compatible",
+			undefined,
+			"claude-opus-4-6",
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeAccount({
+				model_mappings: JSON.stringify({
+					sonnet: ["qwen/qwen3.6-plus:free", "claude-haiku-4-5"],
+				}),
+			}),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).not.toBeNull();
+		expect(result?.status).toBe(200);
+		expect(fetchCalls).toHaveLength(2);
+		expect(fetchCalls[1]).toBe("claude-haiku-4-5");
 	});
 });
 

@@ -5,6 +5,7 @@ import {
 	PROVIDER_NAMES,
 	supportsUsageTracking,
 } from "@clankermux/types";
+import { getProviderOverloadUntil } from "../provider-overload-cooldown";
 import {
 	getActiveHoldCount,
 	markAnthropicBurstThrottle,
@@ -262,6 +263,14 @@ export async function holdAndRetryCacheAccount(args: {
 	confidence: "fresh_headroom" | "stale_should_retry";
 	signal: AbortSignal;
 	reprobe: ReprobeFn;
+	/**
+	 * The request's model, for family-scoped provider-overload precedence: an
+	 * overload breaker that opens for this model's family (or provider-wide)
+	 * while the hold is waiting means the upstream is sick — re-probing would
+	 * only feed more 529s into it, so the hold gives up instead. Null/absent
+	 * checks the provider's conservative aggregate (every open bucket).
+	 */
+	model?: string | null;
 	/** Injectable clock for tests; defaults to Date.now. */
 	now?: () => number;
 	/**
@@ -308,6 +317,24 @@ export async function holdAndRetryCacheAccount(args: {
 			if (signal.aborted) {
 				log.info(
 					`Burst-retry hold aborted for ${account.name} after ${heldMs}ms (${attempt}/${maxAttempts} attempts)`,
+				);
+				return null;
+			}
+
+			// Provider-overload precedence (defense in depth — the caller already
+			// skips the hold when the breaker was open at entry): a breaker that
+			// opened for this request's family (or provider-wide) mid-hold means
+			// the upstream itself is sick, so a re-probe can only feed the
+			// incident. Give up like any other failed precondition; the caller's
+			// give-up path (normal failover + its overload gate) takes over.
+			const overloadedUntil = getProviderOverloadUntil(
+				account.provider,
+				clock(),
+				args.model ?? null,
+			);
+			if (overloadedUntil !== null) {
+				log.warn(
+					`Burst-retry giving up on ${account.name}: provider-overload breaker open until ${new Date(overloadedUntil).toISOString()} — not re-probing a sick upstream`,
 				);
 				return null;
 			}

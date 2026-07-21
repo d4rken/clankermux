@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+} from "../../provider-overload-cooldown";
+import {
 	BURST_RETRY_MAX_CONCURRENT_HOLDS,
 	clearAnthropicBurstThrottle,
 	getActiveHoldCount,
@@ -67,11 +71,13 @@ describe("holdAndRetryCacheAccount", () => {
 	beforeEach(() => {
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
 	});
 
 	afterEach(() => {
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
 	});
 
 	it("returns the first successful re-probe Response and releases the slot", async () => {
@@ -355,6 +361,48 @@ describe("holdAndRetryCacheAccount", () => {
 			// No maxHoldMs override — exercise the real 120s BURST_RETRY_MAX_HOLD_MS.
 			maxAttempts: 3,
 			jitterMs: 0,
+		});
+		expect(result).toBeInstanceOf(Response);
+		expect(probes).toBe(1);
+	});
+
+	it("stops before any reprobe when the request model's family breaker is open (overload precedence)", async () => {
+		// Provider-overload precedence: an open family breaker means the upstream
+		// is sick — re-probing the held account would only feed more 529s into it.
+		applyProviderOverloadCooldown("anthropic", undefined, "claude-haiku-4-5");
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			model: "claude-haiku-4-5",
+			reprobe: async () => {
+				probes += 1;
+				return okResponse();
+			},
+			...TEST_HOLD_OVERRIDES,
+		});
+		expect(result).toBeNull();
+		expect(probes).toBe(0);
+		// Slot released in finally.
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("keeps reprobing when only a DIFFERENT family's breaker is open", async () => {
+		applyProviderOverloadCooldown("anthropic", undefined, "claude-haiku-4-5");
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			model: "claude-sonnet-4-5",
+			reprobe: async () => {
+				probes += 1;
+				return okResponse();
+			},
+			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeInstanceOf(Response);
 		expect(probes).toBe(1);

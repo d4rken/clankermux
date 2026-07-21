@@ -181,6 +181,63 @@ describe("peekPrimaryAccountId", () => {
 		).toBe("anthropicA");
 	});
 
+	it("(g) does NOT skip an account for a family-scoped open bucket", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const codex = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([a, codex]);
+
+		// Haiku-only incident: Sonnet/Opus traffic still routes to Anthropic, so
+		// the Primary badge must stay put.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			now + 60_000,
+			"claude-haiku-4-5",
+		);
+
+		expect(
+			peekPrimaryAccountId([a, codex], strategy, throttleDisabledConfig, now),
+		).toBe("anthropicA");
+	});
+
+	it("(h) skips on a provider-wide open bucket even when family buckets also exist", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const codex = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([a, codex]);
+
+		applyProviderOverloadCooldown(
+			"anthropic",
+			now + 60_000,
+			"claude-haiku-4-5",
+		);
+		applyProviderOverloadCooldown("anthropic", now + 60_000); // provider-wide
+
+		expect(
+			peekPrimaryAccountId([a, codex], strategy, throttleDisabledConfig, now),
+		).toBe("codex");
+	});
+
+	it("(i) does not skip on a half-open provider-wide bucket", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const codex = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([a, codex]);
+
+		const until = applyProviderOverloadCooldown("anthropic", now + 60_000);
+
+		// Past the deadline the bucket persists half-open; the badge treats the
+		// account as routable again (probe admission is a request-path concern).
+		expect(
+			peekPrimaryAccountId(
+				[a, codex],
+				strategy,
+				throttleDisabledConfig,
+				until + 1,
+			),
+		).toBe("anthropicA");
+	});
+
 	it("(f) never calls strategy.select", () => {
 		const now = 1_000_000;
 		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });

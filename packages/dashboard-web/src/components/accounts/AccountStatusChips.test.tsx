@@ -162,6 +162,90 @@ describe("AccountStatusChips — on-credits chip", () => {
 	});
 });
 
+describe("AccountStatusChips — family-scoped overload chips", () => {
+	it("renders a per-family chip for an open family bucket, without the generic chip", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				providerOverloadedUntil: NOW + 90_000,
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW + 90_000,
+						probeActive: false,
+					},
+				],
+			}),
+		);
+		expect(html).toContain("Overloaded: Haiku (2m)");
+		expect(html).not.toContain("Provider overloaded");
+	});
+
+	it("renders the generic chip for a provider-wide open bucket", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				providerOverloadedUntil: NOW + 90_000,
+				providerOverload: [
+					{
+						family: null,
+						state: "open",
+						until: NOW + 90_000,
+						probeActive: false,
+					},
+				],
+			}),
+		);
+		expect(html).toContain("Provider overloaded (2m)");
+		expect(html).not.toContain("Overloaded:");
+	});
+
+	it("renders probing chips for half-open buckets", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "half-open",
+						until: null,
+						probeActive: true,
+					},
+					{ family: null, state: "half-open", until: null, probeActive: false },
+				],
+			}),
+		);
+		expect(html).toContain("Probing: Haiku");
+		expect(html).toContain("Probing recovery");
+		expect(html).not.toContain("Overloaded");
+	});
+
+	it("renders one chip per family for a multi-family incident", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				providerOverload: [
+					{
+						family: "sonnet",
+						state: "open",
+						until: NOW + 60_000,
+						probeActive: false,
+					},
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW + 60_000,
+						probeActive: false,
+					},
+				],
+			}),
+		);
+		expect(html).toContain("Overloaded: Haiku (1m)");
+		expect(html).toContain("Overloaded: Sonnet (1m)");
+	});
+});
+
 describe("AccountStatusChips — earned usage resets", () => {
 	it("renders the authoritative count and nearest expiry for a Codex account", () => {
 		const html = render(

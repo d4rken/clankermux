@@ -288,6 +288,141 @@ describe("deriveAccountStatus — provider overload", () => {
 	});
 });
 
+describe("deriveAccountStatus — family-scoped overload buckets", () => {
+	it("defaults to no bucket-derived state when the field is absent", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.overloadedFamilies).toEqual([]);
+		expect(status.probingFamilies).toEqual([]);
+		expect(status.isProviderProbing).toBe(false);
+	});
+
+	it("drives the generic chip from the PROVIDER-WIDE bucket only", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				// Legacy scalar carries the max across all buckets; the structured
+				// field must win and scope the generic chip to the wide bucket.
+				providerOverloadedUntil: NOW + 5 * MINUTE,
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW + 5 * MINUTE,
+						probeActive: false,
+					},
+					{
+						family: null,
+						state: "open",
+						until: NOW + 2 * MINUTE,
+						probeActive: false,
+					},
+				],
+			}),
+			NOW,
+		);
+		expect(status.providerOverloadedUntil).toBe(NOW + 2 * MINUTE);
+		expect(status.providerOverloadMinutes).toBe(2);
+		expect(status.overloadedFamilies).toEqual([
+			{ family: "haiku", until: NOW + 5 * MINUTE, minutes: 5 },
+		]);
+	});
+
+	it("a family-only incident yields family chips but no generic chip", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				providerOverloadedUntil: NOW + 90_000, // legacy max — must be ignored
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW + 90_000,
+						probeActive: false,
+					},
+				],
+			}),
+			NOW,
+		);
+		expect(status.providerOverloadedUntil).toBeNull();
+		expect(status.providerOverloadMinutes).toBeNull();
+		expect(status.overloadedFamilies).toEqual([
+			{ family: "haiku", until: NOW + 90_000, minutes: 2 },
+		]);
+	});
+
+	it("sorts multiple open families by name", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				providerOverload: [
+					{
+						family: "sonnet",
+						state: "open",
+						until: NOW + MINUTE,
+						probeActive: false,
+					},
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW + MINUTE,
+						probeActive: false,
+					},
+				],
+			}),
+			NOW,
+		);
+		expect(status.overloadedFamilies.map((f) => f.family)).toEqual([
+			"haiku",
+			"sonnet",
+		]);
+	});
+
+	it("reports half-open buckets as probing (family and provider-wide)", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "half-open",
+						until: null,
+						probeActive: true,
+					},
+					{ family: null, state: "half-open", until: null, probeActive: false },
+				],
+			}),
+			NOW,
+		);
+		expect(status.probingFamilies).toEqual(["haiku"]);
+		expect(status.isProviderProbing).toBe(true);
+		expect(status.overloadedFamilies).toEqual([]);
+		expect(status.providerOverloadedUntil).toBeNull();
+	});
+
+	it("drops an open bucket whose deadline has already passed", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				providerOverload: [
+					{
+						family: "haiku",
+						state: "open",
+						until: NOW - 10_000,
+						probeActive: false,
+					},
+				],
+			}),
+			NOW,
+		);
+		expect(status.overloadedFamilies).toEqual([]);
+		expect(status.probingFamilies).toEqual([]);
+	});
+
+	it("still honors the legacy scalar when the structured field is absent", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ providerOverloadedUntil: NOW + 90_000 }),
+			NOW,
+		);
+		expect(status.providerOverloadedUntil).toBe(NOW + 90_000);
+		expect(status.providerOverloadMinutes).toBe(2);
+	});
+});
+
 describe("deriveAccountStatus — peak windows", () => {
 	// Zai peak: 14:00–18:00 SGT (UTC+8). 07:00 UTC == 15:00 SGT.
 	it("flags a zai account during peak hours", () => {
