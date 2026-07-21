@@ -17,6 +17,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import { createOAuthFlow } from "@clankermux/oauth-flow";
 import {
+	extractCodexIdentity,
 	initiateCodexDeviceFlow,
 	pollCodexForToken,
 } from "@clankermux/providers/codex";
@@ -381,13 +382,25 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 					const accountId = crypto.randomUUID();
 					const now = Date.now();
 
+					// Capture identity from the Codex token claims (id_token carries
+					// email/plan; access_token carries the account id). Codex has no
+					// org name and no profile endpoint, so organization_name and
+					// identity_profile_fetched_at stay null. First creation writes
+					// directly; identity_captured_at only when we actually captured.
+					const identity = extractCodexIdentity(
+						tokens.access_token,
+						tokens.id_token ?? null,
+					);
+
 					await dbOps.getAdapter().run(
 						`INSERT INTO accounts (
 							id, name, provider, api_key, refresh_token, access_token,
 							expires_at, created_at, request_count, total_requests, priority,
 							custom_endpoint, model_mappings, model_fallbacks,
+							identity_external_id, identity_email, identity_plan_tier,
+							identity_captured_at,
 							auto_pause_on_overage_enabled
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 1)`,
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 						[
 							accountId,
 							name,
@@ -401,6 +414,10 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 							null,
 							null,
 							null,
+							identity?.externalAccountId ?? null,
+							identity?.email ?? null,
+							identity?.planTier ?? null,
+							identity ? now : null,
 						],
 					);
 
@@ -506,18 +523,22 @@ export function createCodexReauthHandler(dbOps: DatabaseOperations) {
 						180,
 					);
 
-					await dbOps.getAdapter().run(
-						`UPDATE accounts SET
-							refresh_token = ?,
-							access_token = ?,
-							expires_at = ?
-						WHERE id = ?`,
-						[
-							tokens.refresh_token,
-							tokens.access_token,
-							Date.now() + tokens.expires_in * 1000,
-							account.id,
-						],
+					// Re-capture identity from the fresh Codex token claims and persist
+					// via the canonical token-write path, which COALESCE-merges identity
+					// (a refresh lacking an id_token never erases a previously-captured
+					// value; identity_captured_at advances only when something was
+					// captured) and stamps refresh_token_issued_at. Codex has no org name
+					// / profile endpoint, so those columns are left untouched.
+					const identity = extractCodexIdentity(
+						tokens.access_token,
+						tokens.id_token ?? null,
+					);
+					await dbOps.updateAccountTokens(
+						account.id,
+						tokens.access_token,
+						Date.now() + tokens.expires_in * 1000,
+						tokens.refresh_token,
+						identity,
 					);
 
 					// Auto-resume an oauth_invalid_grant pause and drop stale refresh

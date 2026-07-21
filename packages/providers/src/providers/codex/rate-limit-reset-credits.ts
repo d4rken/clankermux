@@ -4,6 +4,7 @@ import type {
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
+import { decodeJwtPayloadSafe } from "../../oauth/jwt";
 import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
 
 const log = new Logger("CodexRateLimitResetCredits");
@@ -84,17 +85,9 @@ function nullableString(value: unknown): string | null {
 }
 
 function readChatgptAccountId(accessToken: string): string | null {
-	try {
-		const payload = accessToken.split(".")[1];
-		if (!payload) return null;
-		const claims = asRecord(
-			JSON.parse(Buffer.from(payload, "base64url").toString("utf8")),
-		);
-		const auth = asRecord(claims?.["https://api.openai.com/auth"]);
-		return nullableString(auth?.chatgpt_account_id);
-	} catch {
-		return null;
-	}
+	const claims = decodeJwtPayloadSafe(accessToken);
+	const auth = asRecord(claims?.["https://api.openai.com/auth"]);
+	return nullableString(auth?.chatgpt_account_id);
 }
 
 function normalizeResetType(value: unknown): CodexRateLimitResetType {

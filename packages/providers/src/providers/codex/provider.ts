@@ -18,6 +18,7 @@ import {
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage } from "./usage";
 
 const log = new Logger("CodexProvider");
@@ -409,6 +410,7 @@ export class CodexProvider extends BaseProvider {
 			access_token: string;
 			refresh_token: string;
 			expires_in: number;
+			id_token?: string;
 		};
 
 		log.debug(`[CodexProvider] token refresh response for ${account.name}:`, {
@@ -416,11 +418,17 @@ export class CodexProvider extends BaseProvider {
 			responseKeys: Object.keys(json),
 		});
 
+		const identity = extractCodexIdentity(
+			json.access_token,
+			json.id_token ?? null,
+		);
+
 		return {
 			accessToken: json.access_token,
 			// OpenAI issues a new refresh token on each refresh (rotating)
 			refreshToken: json.refresh_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
+			identity,
 		};
 	}
 

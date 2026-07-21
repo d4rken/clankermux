@@ -11,6 +11,7 @@ import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
+import { extractAnthropicIdentity } from "./identity";
 
 /**
  * Hard rate limit statuses that should block account usage.
@@ -110,6 +111,11 @@ function clampResetTime(candidateMs: number, now: number): number | undefined {
 }
 
 const log = new Logger("AnthropicProvider");
+
+// One-time, VALUES-FREE debug log to confirm Anthropic's real account/
+// organization subfield names on the next natural refresh. A follow-up will
+// prune the extractor's key-guessing and delete this log.
+let loggedIdentityShapeOnce = false;
 
 export class AnthropicProvider extends BaseProvider {
 	name = "anthropic";
@@ -259,7 +265,21 @@ export class AnthropicProvider extends BaseProvider {
 			access_token: string;
 			expires_in: number;
 			refresh_token?: string;
+			account?: unknown;
+			organization?: unknown;
 		};
+
+		if (!loggedIdentityShapeOnce) {
+			loggedIdentityShapeOnce = true;
+			log.debug("[identity-capture] token response identity shape:", {
+				accountKeys: json.account ? Object.keys(json.account as object) : null,
+				organizationKeys: json.organization
+					? Object.keys(json.organization as object)
+					: null,
+			});
+		}
+
+		const identity = extractAnthropicIdentity(json);
 
 		log.debug(`token response for ${account.name}:`, {
 			expiresIn: json.expires_in,
@@ -283,6 +303,7 @@ export class AnthropicProvider extends BaseProvider {
 			accessToken: json.access_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
 			refreshToken: refreshToken,
+			identity,
 		};
 	}
 

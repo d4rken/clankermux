@@ -98,6 +98,19 @@ export type FullUsageData =
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData;
 
+/**
+ * Normalized account profile identity, resolved from provider token claims
+ * and/or profile endpoints. Every field is nullable — an account may expose
+ * only some of these (or none, before capture). Used to label accounts by their
+ * real upstream identity and to detect duplicate logins.
+ */
+export interface AccountIdentity {
+	externalAccountId: string | null;
+	email: string | null;
+	organizationName: string | null;
+	planTier: string | null;
+}
+
 // Database row types that match the actual database schema
 export interface AccountRow {
 	id: string;
@@ -139,6 +152,12 @@ export interface AccountRow {
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros?: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
 	renewal_auto_start_date?: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
+	identity_external_id?: string | null; // Provider-side account/user id captured from token claims or profile endpoint
+	identity_email?: string | null; // Account email captured from token claims or profile endpoint
+	identity_organization_name?: string | null; // Organization/workspace name captured from profile
+	identity_plan_tier?: string | null; // Plan tier captured from profile (e.g. "pro", "max")
+	identity_captured_at?: number | null; // ms-epoch when identity fields were last captured/updated
+	identity_profile_fetched_at?: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
 
 // Domain model - used throughout the application
@@ -182,6 +201,12 @@ export interface Account {
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
 	renewal_auto_start_date: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
+	identity_external_id: string | null; // Provider-side account/user id captured from token claims or profile endpoint
+	identity_email: string | null; // Account email captured from token claims or profile endpoint
+	identity_organization_name: string | null; // Organization/workspace name captured from profile
+	identity_plan_tier: string | null; // Plan tier captured from profile (e.g. "pro", "max")
+	identity_captured_at: number | null; // ms-epoch when identity fields were last captured/updated
+	identity_profile_fetched_at: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
 
 // Session statistics for 5-hour token window
@@ -308,6 +333,19 @@ export interface AccountResponse {
 	 *  not populate it; server-computed and best-effort (defaults to 0 on repo failure). */
 	activeSessionCount?: number;
 	isPrimary: boolean; // True if this is the account the load balancer would pick next
+	// Account profile identity (captured from provider tokens/profile endpoints).
+	identityExternalId: string | null;
+	identityEmail: string | null;
+	identityOrganizationName: string | null;
+	identityPlanTier: string | null;
+	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
+	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch
+	/** True when this account shares a provider identity (external id or email) with
+	 *  another account — i.e. it is a duplicate login. Requires sibling context to
+	 *  compute; a single-account mapping always reports false. */
+	isDuplicateAccount: boolean;
+	/** Ids of the other accounts this account duplicates (empty when not a duplicate). */
+	duplicateAccountIds: string[];
 }
 
 /**
@@ -511,6 +549,12 @@ export function toAccount(row: AccountRow): Account {
 		renewal_cadence: row.renewal_cadence || null,
 		renewal_price_usd_micros: toNumOrNull(row.renewal_price_usd_micros),
 		renewal_auto_start_date: row.renewal_auto_start_date || null,
+		identity_external_id: row.identity_external_id ?? null,
+		identity_email: row.identity_email ?? null,
+		identity_organization_name: row.identity_organization_name ?? null,
+		identity_plan_tier: row.identity_plan_tier ?? null,
+		identity_captured_at: toNumOrNull(row.identity_captured_at),
+		identity_profile_fetched_at: toNumOrNull(row.identity_profile_fetched_at),
 	};
 }
 
@@ -620,6 +664,17 @@ export function toAccountResponse(account: Account): AccountResponse {
 				: null,
 		sessionStats: null,
 		isPrimary: false,
+		identityExternalId: account.identity_external_id,
+		identityEmail: account.identity_email,
+		identityOrganizationName: account.identity_organization_name,
+		identityPlanTier: account.identity_plan_tier,
+		identityCapturedAt: account.identity_captured_at,
+		identityProfileFetchedAt: account.identity_profile_fetched_at,
+		// Duplicate detection needs sibling context; a single-account mapping
+		// can't see other accounts, so default to "not a duplicate". Callers with
+		// the full account set overlay computeDuplicateAccountFlags() results.
+		isDuplicateAccount: false,
+		duplicateAccountIds: [],
 	};
 }
 
@@ -656,4 +711,67 @@ export function toAccountDisplay(account: Account): AccountDisplay {
 		autoFallbackEnabled: account.auto_fallback_enabled,
 		autoRefreshEnabled: account.auto_refresh_enabled,
 	};
+}
+
+/**
+ * Compute duplicate-account relationships across a set of accounts.
+ *
+ * Two accounts are duplicates when they share the SAME provider and either:
+ *   - a non-null `identityExternalId` (strong match), or
+ *   - a non-null `identityEmail`, compared case-insensitively (weak match).
+ *
+ * Matches are always scoped to the provider — the same email under two
+ * different providers is NOT a duplicate. Accounts with both a null external id
+ * AND a null email are never flagged (nothing to match on).
+ *
+ * @returns a Map from account `id` to the sorted, de-duplicated list of ids of
+ *   the OTHER accounts it duplicates. Only accounts that duplicate at least one
+ *   sibling appear in the map.
+ */
+export function computeDuplicateAccountFlags(
+	accounts: AccountResponse[],
+): Map<string, string[]> {
+	// Group ids by a provider-scoped signature; any group with >=2 members is a
+	// mutual-duplicate cluster. We run one pass for external-id and one for email
+	// and union the results per account.
+	const groups = new Map<string, string[]>();
+	const addToGroup = (key: string, id: string): void => {
+		const existing = groups.get(key);
+		if (existing) existing.push(id);
+		else groups.set(key, [id]);
+	};
+
+	for (const acc of accounts) {
+		if (acc.identityExternalId != null) {
+			addToGroup(`${acc.provider} external:${acc.identityExternalId}`, acc.id);
+		}
+		if (acc.identityEmail != null) {
+			addToGroup(
+				`${acc.provider} email:${acc.identityEmail.toLowerCase()}`,
+				acc.id,
+			);
+		}
+	}
+
+	// Accumulate the union of duplicate-siblings for each account across passes.
+	const dupSets = new Map<string, Set<string>>();
+	for (const ids of groups.values()) {
+		if (ids.length < 2) continue;
+		for (const id of ids) {
+			let set = dupSets.get(id);
+			if (!set) {
+				set = new Set<string>();
+				dupSets.set(id, set);
+			}
+			for (const other of ids) {
+				if (other !== id) set.add(other);
+			}
+		}
+	}
+
+	const result = new Map<string, string[]>();
+	for (const [id, set] of dupSets) {
+		if (set.size > 0) result.set(id, [...set].sort());
+	}
+	return result;
 }

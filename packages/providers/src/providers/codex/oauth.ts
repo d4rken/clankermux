@@ -6,6 +6,7 @@ import type {
 	PKCEChallenge,
 	TokenResult,
 } from "../../types";
+import { extractCodexIdentity } from "./identity";
 
 const oauthLog = new Logger("CodexOAuthProvider");
 
@@ -106,10 +107,16 @@ export class CodexOAuthProvider implements OAuthProvider {
 			id_token?: string;
 		};
 
+		const identity = extractCodexIdentity(
+			json.access_token,
+			json.id_token ?? null,
+		);
+
 		return {
 			refreshToken: json.refresh_token,
 			accessToken: json.access_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
+			identity,
 		};
 	}
 

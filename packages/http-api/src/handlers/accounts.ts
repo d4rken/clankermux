@@ -65,6 +65,7 @@ import type {
 	StaleUsageInfo,
 } from "@clankermux/types";
 import {
+	computeDuplicateAccountFlags,
 	microsToUsd,
 	requiresSessionDurationTracking,
 	usdToMicros,
@@ -373,6 +374,12 @@ export function createAccountsListHandler(
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
 			renewal_price_usd_micros: number | null;
+			identity_external_id: string | null;
+			identity_email: string | null;
+			identity_organization_name: string | null;
+			identity_plan_tier: string | null;
+			identity_captured_at: number | null;
+			identity_profile_fetched_at: number | null;
 		}>(
 			`
 				SELECT
@@ -412,6 +419,12 @@ export function createAccountsListHandler(
 					renewal_anchor,
 					renewal_cadence,
 					renewal_price_usd_micros,
+					identity_external_id,
+					identity_email,
+					identity_organization_name,
+					identity_plan_tier,
+					identity_captured_at,
+					identity_profile_fetched_at,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -930,9 +943,36 @@ export function createAccountsListHandler(
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					activeSessionCount: activeSessionCountsByAccount.get(account.id) ?? 0,
 					isPrimary: account.id === primaryId,
+					identityExternalId: account.identity_external_id ?? null,
+					identityEmail: account.identity_email ?? null,
+					identityOrganizationName: account.identity_organization_name ?? null,
+					identityPlanTier: account.identity_plan_tier ?? null,
+					identityCapturedAt:
+						account.identity_captured_at != null
+							? Number(account.identity_captured_at)
+							: null,
+					identityProfileFetchedAt:
+						account.identity_profile_fetched_at != null
+							? Number(account.identity_profile_fetched_at)
+							: null,
+					// Overwritten below by computeDuplicateAccountFlags once the full
+					// AccountResponse[] is assembled (needs sibling context).
+					isDuplicateAccount: false,
+					duplicateAccountIds: [],
 				};
 			}),
 		);
+
+		// Duplicate-login detection needs the whole account set, so it runs once
+		// after the array is fully built — mirroring how isPrimary is stamped per
+		// row above. computeDuplicateAccountFlags groups by provider-scoped identity
+		// (external id / email) and returns each account's sibling ids.
+		const duplicateFlags = computeDuplicateAccountFlags(response);
+		for (const account of response) {
+			const dupIds = duplicateFlags.get(account.id) ?? [];
+			account.isDuplicateAccount = dupIds.length > 0;
+			account.duplicateAccountIds = dupIds;
+		}
 
 		return jsonResponse(response);
 	};

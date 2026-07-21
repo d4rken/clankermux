@@ -10,6 +10,7 @@ import {
 } from "@clankermux/core";
 import type {
 	Account,
+	AccountIdentity,
 	AccountPaymentRow,
 	Combo,
 	ComboFamily,
@@ -880,6 +881,7 @@ OAuth tokens will need to be re-authenticated.
 		accessToken: string,
 		expiresAt: number,
 		refreshToken?: string,
+		identity?: AccountIdentity | null,
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -888,9 +890,26 @@ OAuth tokens will need to be re-authenticated.
 					accessToken,
 					expiresAt,
 					refreshToken,
+					identity,
 				),
 			this.retryConfig,
 			"updateAccountTokens",
+		);
+	}
+
+	/**
+	 * Persist an account identity captured from a successful profile-endpoint
+	 * fetch, stamping `identity_profile_fetched_at` (the one-time-backfill gate).
+	 * See {@link AccountRepository.setAccountIdentityFromProfile}.
+	 */
+	async setAccountIdentityFromProfile(
+		accountId: string,
+		identity: AccountIdentity,
+	): Promise<void> {
+		await withDatabaseRetry(
+			() => this.accounts.setAccountIdentityFromProfile(accountId, identity),
+			this.retryConfig,
+			"setAccountIdentityFromProfile",
 		);
 	}
 

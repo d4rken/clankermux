@@ -649,6 +649,12 @@ export class AutoRefreshScheduler {
 				renewal_cadence: null,
 				renewal_price_usd_micros: null,
 				renewal_auto_start_date: null,
+				identity_external_id: null,
+				identity_email: null,
+				identity_organization_name: null,
+				identity_plan_tier: null,
+				identity_captured_at: null,
+				identity_profile_fetched_at: null,
 				consecutive_rate_limits: 0,
 			};
 
@@ -1172,6 +1178,12 @@ export class AutoRefreshScheduler {
 					renewal_cadence: null,
 					renewal_price_usd_micros: null,
 					renewal_auto_start_date: null,
+					identity_external_id: null,
+					identity_email: null,
+					identity_organization_name: null,
+					identity_plan_tier: null,
+					identity_captured_at: null,
+					identity_profile_fetched_at: null,
 					consecutive_rate_limits: 0,
 				};
 
@@ -1314,6 +1326,12 @@ export class AutoRefreshScheduler {
 					renewal_cadence: null,
 					renewal_price_usd_micros: null,
 					renewal_auto_start_date: null,
+					identity_external_id: null,
+					identity_email: null,
+					identity_organization_name: null,
+					identity_plan_tier: null,
+					identity_captured_at: null,
+					identity_profile_fetched_at: null,
 					consecutive_rate_limits: 0,
 				};
 
@@ -1322,15 +1340,18 @@ export class AutoRefreshScheduler {
 					.refreshToken(account, this.proxyContext.runtime.clientId)
 					.then(async (result) => {
 						const newRefreshToken = result.refreshToken ?? row.refresh_token;
-						await this.db.run(
-							`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
-							[
-								result.accessToken,
-								result.expiresAt,
-								newRefreshToken,
-								Date.now(),
-								row.id,
-							],
+						// Persist via the canonical token-write path, which COALESCE-merges
+						// identity (a null from a refresh lacking an id_token never erases a
+						// previously-captured value; identity_captured_at advances only when
+						// identity is present) and stamps refresh_token_issued_at. Codex
+						// exposes no org name / profile endpoint, so identity_organization_name
+						// COALESCEs to itself and identity_profile_fetched_at is never touched.
+						await this.proxyContext.dbOps.updateAccountTokens(
+							row.id,
+							result.accessToken,
+							result.expiresAt,
+							newRefreshToken,
+							result.identity ?? null,
 						);
 						log.info(
 							`Codex token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,

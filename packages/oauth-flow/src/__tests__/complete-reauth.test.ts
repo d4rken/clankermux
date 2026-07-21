@@ -1,4 +1,13 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { OAuthProviderConfig, OAuthTokens } from "@clankermux/providers";
@@ -73,6 +82,14 @@ const mockExchangeCode = mock(
 // usage-collector imports) leaks across the shared `bun test` process — the mock
 // is never restored, so a provider-dependent module first-loading afterward would
 // bind to `undefined`. Keeping the real surface makes the mock order-independent.
+//
+// We deliberately do NOT override `fetchAnthropicProfile` in this module mock:
+// doing so swaps the real function out process-wide (Bun's mock.module leaks via
+// the shared ESM binding) and breaks `anthropic/profile.test.ts`, which tests the
+// real implementation. Instead, reauth's identity-enrichment call is neutralized
+// below by a scoped `fetch` spy that returns 401, so the real
+// `fetchAnthropicProfile` fails open to null (the "no identity captured" path)
+// without any real network call — and the spy is restored so it can't leak.
 mock.module("@clankermux/providers", () => ({
 	...realProviders,
 	getOAuthProvider: (_name: string) => ({
@@ -81,6 +98,19 @@ mock.module("@clankermux/providers", () => ({
 		generateAuthUrl: mock(() => "https://example.com/oauth/authorize?mock"),
 	}),
 }));
+
+// Neutralize the Anthropic profile-enrichment network call: a 401 makes the real
+// `fetchAnthropicProfile` fail open to null. Restored in afterAll so global
+// `fetch` state never leaks into other test files.
+let fetchSpy: ReturnType<typeof spyOn>;
+beforeAll(() => {
+	fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+		new Response("", { status: 401 }),
+	);
+});
+afterAll(() => {
+	fetchSpy.mockRestore();
+});
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -127,12 +157,19 @@ describe("OAuthFlow.completeReauth", () => {
 		expect(sql).toMatch(/refresh_token/i);
 		expect(sql).toMatch(/access_token/i);
 		expect(sql).toMatch(/expires_at/i);
-		// Params: [refreshToken, accessToken, expiresAt, refreshTokenIssuedAt, accountId]
+		// The UPDATE now also COALESCE-merges the identity columns.
+		expect(sql).toMatch(/identity_email\s*=\s*COALESCE/i);
+		// Params: [refreshToken, accessToken, expiresAt, refreshTokenIssuedAt,
+		//          identityExternalId, identityEmail, identityOrganizationName,
+		//          identityPlanTier, identityCapturedAt, identityProfileFetchedAt,
+		//          accountId]. Profile fetch failed open (null), so all identity
+		// params are null and the account id is the LAST bind param.
 		expect(params[0]).toBe("new-refresh-token");
 		expect(params[1]).toBe("new-access-token");
 		expect(typeof params[2]).toBe("number");
 		expect(typeof params[3]).toBe("number");
-		expect(params[4]).toBe(accountId);
+		expect(params[4]).toBeNull();
+		expect(params[params.length - 1]).toBe(accountId);
 	});
 
 	it("should UPDATE api_key for console mode (no refreshToken)", async () => {

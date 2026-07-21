@@ -22,7 +22,13 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			rate_limit_reset INTEGER,
 			rate_limit_status TEXT,
 			rate_limit_remaining INTEGER,
-			consecutive_rate_limits INTEGER DEFAULT 0
+			consecutive_rate_limits INTEGER DEFAULT 0,
+			identity_external_id TEXT,
+			identity_email TEXT,
+			identity_organization_name TEXT,
+			identity_plan_tier TEXT,
+			identity_captured_at INTEGER,
+			identity_profile_fetched_at INTEGER
 		)
 	`);
 	const adapter = new BunSqlAdapter(db);

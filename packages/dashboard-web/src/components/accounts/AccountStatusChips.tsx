@@ -4,7 +4,7 @@ import type {
 	CodexResetCreditEventResponse,
 } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
-import { AlertCircle, CalendarClock, RotateCcw } from "lucide-react";
+import { AlertCircle, CalendarClock, Copy, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { api } from "../../api";
 import {
@@ -618,6 +618,15 @@ export function AccountStatusChips({
 			)}
 			{status.showRenewalChip && (
 				<RenewalChip account={account} status={status} />
+			)}
+			{status.isDuplicateAccount && (
+				<span
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					title={`Shares provider identity with ${status.duplicateAccountIds.length} other account(s)`}
+				>
+					<Copy className="h-3.5 w-3.5" />
+					Duplicate
+				</span>
 			)}
 		</div>
 	);
