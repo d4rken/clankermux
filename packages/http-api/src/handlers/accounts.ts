@@ -41,6 +41,7 @@ import {
 	consumeCodexResetCreditForAccount,
 	getForcedAccount,
 	getProviderOverloadKey,
+	getProviderOverloadSnapshot,
 	getProviderOverloadUntil,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
@@ -601,6 +602,19 @@ export function createAccountsListHandler(
 				const providerOverloadKey = providerOverloadedUntil
 					? getProviderOverloadKey(provider)
 					: null;
+				// Family-scoped breaker buckets (open/half-open only — closed buckets
+				// never appear in the snapshot). Null when the breaker is fully closed.
+				const overloadBuckets = getProviderOverloadSnapshot(provider, now);
+				const providerOverload =
+					overloadBuckets.length > 0
+						? overloadBuckets.map((bucket) => ({
+								family: bucket.family,
+								// The snapshot only ever emits live buckets; narrow the type.
+								state: bucket.state as "open" | "half-open",
+								until: bucket.until,
+								probeActive: bucket.probeActive,
+							}))
+						: null;
 
 				// Get usage data from cache for providers that expose account-page quota or credit data
 				const cachedUsageData = liveUsageByAccount.get(account.id) ?? null;
@@ -898,6 +912,7 @@ export function createAccountsListHandler(
 					usageThrottledWindows,
 					providerOverloadKey,
 					providerOverloadedUntil,
+					providerOverload,
 					hasRefreshToken:
 						!!account.refresh_token &&
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields

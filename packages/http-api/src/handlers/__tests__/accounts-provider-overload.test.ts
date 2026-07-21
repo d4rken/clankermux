@@ -5,7 +5,10 @@ import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
+	completeProviderOverloadProbe,
+	getProviderOverloadSnapshot,
 	isProviderOverloaded,
+	tryAcquireProviderOverloadProbe,
 } from "@clankermux/proxy";
 import type {
 	Account,
@@ -200,6 +203,102 @@ describe("accounts list provider overload state", () => {
 		expect(codex?.providerOverloadedUntil).toBeNull();
 	});
 
+	it("surfaces family-scoped breaker buckets in providerOverload", async () => {
+		const now = Date.now();
+		const haikuUntil = applyProviderOverloadCooldown(
+			"anthropic",
+			now + 60_000,
+			"claude-haiku-4-5",
+		);
+		const wideUntil = applyProviderOverloadCooldown("anthropic", now + 120_000);
+
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id: "anthropic-oauth",
+					name: "Anthropic OAuth",
+					provider: "anthropic",
+				}),
+				makeAccountRow({
+					id: "codex",
+					name: "Codex",
+					provider: "codex",
+				}),
+			]),
+			config,
+		);
+
+		const response = await handler();
+		const body = (await response.json()) as AccountResponse[];
+		const anthropic = body.find((account) => account.id === "anthropic-oauth");
+		const codex = body.find((account) => account.id === "codex");
+
+		expect(anthropic?.providerOverload).toHaveLength(2);
+		expect(anthropic?.providerOverload).toEqual(
+			expect.arrayContaining([
+				{
+					family: "haiku",
+					state: "open",
+					until: haikuUntil,
+					probeActive: false,
+				},
+				{ family: null, state: "open", until: wideUntil, probeActive: false },
+			]),
+		);
+		// The legacy scalar stays the max across ALL buckets (source-compatible).
+		expect(anthropic?.providerOverloadedUntil).toBe(wideUntil);
+		// A fully-closed provider carries no bucket list.
+		expect(codex?.providerOverload).toBeNull();
+	});
+
+	it("reports half-open buckets with an active probe", async () => {
+		const originalDateNow = Date.now;
+		let now = originalDateNow();
+		Date.now = () => now;
+		try {
+			const until = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now = until + 1; // cooldown elapsed → bucket is half-open
+			const admission = tryAcquireProviderOverloadProbe(
+				"anthropic",
+				"claude-haiku-4-5",
+				now,
+			);
+			expect(admission.admitted).toBe(true);
+
+			const handler = createAccountsListHandler(
+				makeDbOps([
+					makeAccountRow({
+						id: "anthropic-oauth",
+						name: "Anthropic OAuth",
+						provider: "anthropic",
+					}),
+				]),
+				config,
+			);
+			const response = await handler();
+			const body = (await response.json()) as AccountResponse[];
+			const anthropic = body.find(
+				(account) => account.id === "anthropic-oauth",
+			);
+
+			expect(anthropic?.providerOverload).toEqual([
+				{ family: "haiku", state: "half-open", until: null, probeActive: true },
+			]);
+			// Half-open buckets never block routing, so the legacy scalar is null.
+			expect(anthropic?.providerOverloadedUntil).toBeNull();
+
+			if (admission.admitted) {
+				completeProviderOverloadProbe(admission.token, "abandoned");
+			}
+		} finally {
+			Date.now = originalDateNow;
+		}
+	});
+
 	it("moves the Primary badge to Codex when Anthropic is provider-overloaded", async () => {
 		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
 
@@ -234,10 +333,21 @@ describe("accounts list provider overload state", () => {
 		expect(codex?.isPrimary).toBe(true);
 	});
 
-	it("force reset clears the shared provider overload cooldown", async () => {
+	it("force reset clears every breaker bucket of the provider (family + provider-wide)", async () => {
 		applyProviderOverloadCooldown("anthropic", Date.now() + 60_000);
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-haiku-4-5",
+		);
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-sonnet-4-5",
+		);
 		expect(isProviderOverloaded("anthropic")).toBe(true);
 		expect(isProviderOverloaded("claude-console-api")).toBe(true);
+		expect(getProviderOverloadSnapshot("anthropic")).toHaveLength(3);
 
 		const resetCalls: string[] = [];
 		const handler = createAccountForceResetRateLimitHandler(
@@ -267,6 +377,10 @@ describe("accounts list provider overload state", () => {
 		expect(body.usagePollTriggered).toBe(false);
 		expect(isProviderOverloaded("anthropic")).toBe(false);
 		expect(isProviderOverloaded("claude-console-api")).toBe(false);
+		expect(
+			isProviderOverloaded("anthropic", Date.now(), "claude-haiku-4-5"),
+		).toBe(false);
+		expect(getProviderOverloadSnapshot("anthropic")).toHaveLength(0);
 	});
 
 	it("does not clear provider overload when the async reset fails", async () => {

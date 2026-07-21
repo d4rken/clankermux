@@ -157,13 +157,10 @@ describe("SseRateLimitSniffer", () => {
 		const sniffer = createSseRateLimitSniffer({
 			provider: "claude-console-api",
 		});
-		expect(
-			sniffer.feed(
-				encode(
-					'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
-				),
-			),
-		).toBe(true);
+		const frame = encode(
+			'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+		);
+		expect(sniffer.feed(frame)).toBe(true);
 		expect(sniffer.firedReason).toBe("overloaded_error");
 	});
 

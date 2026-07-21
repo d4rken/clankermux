@@ -1,15 +1,24 @@
 /**
- * Mid-stream overloaded_error test.
+ * Mid-stream rate-limit / overload sniffer tests.
  *
- * Tests that when an SSE stream contains an overloaded_error frame mid-stream,
- * the account gets marked rate-limited with reason "upstream_529_overloaded_with_reset".
+ * Split behavior (family-overload breaker):
+ * - A mid-stream `overloaded_error` frame is a provider/family incident: it
+ *   trips the family-scoped overload breaker (attributed via the upstream
+ *   model) and does NOT set a per-account rate-limit cooldown.
+ * - A mid-stream `rate_limit_error` frame is a per-account 429: it applies the
+ *   per-account cooldown (auto-derived reason) and trips the shared
+ *   OAuth-Anthropic burst marker.
  *
  * Note: Mid-stream detection cannot rescue the current response — the stream
  * headers were already sent to the client. It only prevents future requests
- * from being routed to the overloaded account until the cooldown expires.
+ * from being routed into the overloaded family / throttled account.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
+import {
+	clearProviderOverloadCooldown,
+	getProviderOverloadUntil,
+} from "../../provider-overload-cooldown";
 import { forwardToClient } from "../../response-handler";
 import {
 	clearAnthropicBurstThrottle,
@@ -119,12 +128,13 @@ function makeCtxWithReason() {
 	return { ctx, calls };
 }
 
-describe("applyRateLimitCooldown — mid-stream 529 overload", () => {
+describe("applyRateLimitCooldown — 529 overload reason overrides", () => {
 	it("marks account with reason='upstream_529_overloaded_with_reset' when passed reason override and resetTime", async () => {
-		// This simulates what response-handler.ts does when rateLimitSniffer fires
-		// for an overloaded_error frame mid-stream (firedReason === "overloaded_error").
-		// The handler passes reason="upstream_529_overloaded_with_reset" so the audit trail
-		// reflects the 529 overload rather than a 429 rate-limit.
+		// Exercises the reason-override plumbing still used by the pre-stream 529
+		// paths (response-processor.ts). The mid-stream sniffer no longer routes
+		// overloaded_error through applyRateLimitCooldown — it trips the
+		// family-scoped overload breaker instead (see the forwardToClient
+		// family-breaker describe below).
 		const account = makeAccount();
 		const resetTime = Date.now() + 60_000;
 		const { ctx, calls } = makeCtxWithReason();
@@ -186,20 +196,17 @@ describe("applyRateLimitCooldown — mid-stream 529 overload", () => {
 });
 
 describe("production sniffer integration — overloaded_error mid-stream", () => {
-	it("sniffer fires on mid-stream overloaded_error and maps to 529 reason", () => {
+	it("sniffer fires on mid-stream overloaded_error with firedReason='overloaded_error'", () => {
 		const sniffer = createSseRateLimitSniffer({ provider: "anthropic" });
 		const encode = (s: string) => new TextEncoder().encode(s);
 		const frame = encode(
 			'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
 		);
 		expect(sniffer.feed(frame)).toBe(true);
+		// response-handler.ts branches on firedReason: "overloaded_error" trips
+		// the family-scoped overload breaker; "rate_limit_error" applies the
+		// per-account cooldown.
 		expect(sniffer.firedReason).toBe("overloaded_error");
-		// The mapping used by response-handler.ts:
-		const reason =
-			sniffer.firedReason === "overloaded_error"
-				? "upstream_529_overloaded_with_reset"
-				: undefined;
-		expect(reason).toBe("upstream_529_overloaded_with_reset");
 	});
 
 	it("sniffer with non-Anthropic provider does NOT fire on overloaded_error", () => {
@@ -220,60 +227,85 @@ describe("production sniffer integration — overloaded_error mid-stream", () =>
 // THIS response — but the session's NEXT affinity_hold requests must hold their
 // cache account. Drives the REAL forwardToClient stream path.
 // ---------------------------------------------------------------------------
+// Shared by the burst-marker (Part 1) and family-breaker describes below.
+// `markCalls` (optional) captures per-account cooldown writes so tests can
+// assert the overloaded_error path never marks the account rate-limited.
+function makeStreamCtx(
+	markCalls?: Array<{ accountId: string; reason: string }>,
+) {
+	return {
+		strategy: {},
+		dbOps: {
+			markAccountRateLimited: (
+				accountId: string,
+				_reset: number,
+				reason: string,
+			) => {
+				markCalls?.push({ accountId, reason });
+				return Promise.resolve(1);
+			},
+			markAccountRateLimitedDeadlineOnly: (
+				accountId: string,
+				_reset: number,
+				reason: string,
+			) => {
+				markCalls?.push({ accountId, reason });
+				return Promise.resolve();
+			},
+			updateAccountUsage: () => {},
+			updateAccountRateLimitMeta: () => {},
+			getAdapter: () => ({
+				get: async () => ({ rate_limited_until: null }),
+				run: async () => {},
+			}),
+			updateRequestUsage: async () => {},
+		},
+		runtime: { port: 8080, tlsEnabled: false },
+		config: { getStorePayloads: () => false },
+		provider: { name: "anthropic", isStreamingResponse: () => true },
+		refreshInFlight: new Map<string, Promise<string>>(),
+		asyncWriter: {
+			enqueue: (job: () => void | Promise<void>) => {
+				void job();
+				return Promise.resolve();
+			},
+		},
+		requestRecorder: {
+			begin: () => {},
+			captureResponseChunk: () => {},
+			finishTransport: () => {},
+			attachUsageSummary: () => {},
+			markUsageUnavailable: () => {},
+			recordSynthetic: () => {},
+			sweep: () => {},
+			dispose: () => {},
+		},
+	} as unknown as ProxyContext;
+}
+
+function streamWithErrorFrame(errorType: string): ReadableStream<Uint8Array> {
+	const enc = new TextEncoder();
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(
+				enc.encode(
+					`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"x"}}\n\n`,
+				),
+			);
+			controller.close();
+		},
+	});
+}
+
 describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
-	function makeStreamCtx() {
-		return {
-			strategy: {},
-			dbOps: {
-				markAccountRateLimited: () => Promise.resolve(1),
-				markAccountRateLimitedDeadlineOnly: () => Promise.resolve(),
-				updateAccountUsage: () => {},
-				updateAccountRateLimitMeta: () => {},
-				getAdapter: () => ({
-					get: async () => ({ rate_limited_until: null }),
-					run: async () => {},
-				}),
-				updateRequestUsage: async () => {},
-			},
-			runtime: { port: 8080, tlsEnabled: false },
-			config: { getStorePayloads: () => false },
-			provider: { name: "anthropic", isStreamingResponse: () => true },
-			refreshInFlight: new Map<string, Promise<string>>(),
-			asyncWriter: {
-				enqueue: (job: () => void | Promise<void>) => {
-					void job();
-					return Promise.resolve();
-				},
-			},
-			requestRecorder: {
-				begin: () => {},
-				captureResponseChunk: () => {},
-				finishTransport: () => {},
-				attachUsageSummary: () => {},
-				markUsageUnavailable: () => {},
-				recordSynthetic: () => {},
-				sweep: () => {},
-				dispose: () => {},
-			},
-		} as unknown as ProxyContext;
-	}
-
-	function streamWithErrorFrame(errorType: string): ReadableStream<Uint8Array> {
-		const enc = new TextEncoder();
-		return new ReadableStream<Uint8Array>({
-			start(controller) {
-				controller.enqueue(
-					enc.encode(
-						`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"x"}}\n\n`,
-					),
-				);
-				controller.close();
-			},
-		});
-	}
-
-	beforeEach(() => clearAnthropicBurstThrottle());
-	afterEach(() => clearAnthropicBurstThrottle());
+	beforeEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
+	afterEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
 
 	it("sets the burst marker on a mid-stream rate_limit_error for an OAuth-Anthropic account", async () => {
 		const account = makeAccount(); // anthropic + refresh_token
@@ -303,7 +335,7 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
 	});
 
-	it("does NOT set the burst marker on a mid-stream overloaded_error (529, separate cooldown)", async () => {
+	it("does NOT set the burst marker on a mid-stream overloaded_error (trips the family breaker instead)", async () => {
 		const account = makeAccount();
 		const ctx = makeStreamCtx();
 
@@ -397,5 +429,116 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		);
 		await response.text();
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Family-overload breaker: a mid-stream overloaded_error is a provider/family
+// incident, NOT an account-level limit. It must trip the family-scoped breaker
+// (attributed via options.upstreamModel) and must NOT set a per-account
+// cooldown — the old per-account marking meant a client retry walked every
+// account in the pool during a one-family incident.
+// ---------------------------------------------------------------------------
+describe("forwardToClient — mid-stream overloaded_error trips the family breaker", () => {
+	beforeEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
+	afterEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
+
+	function overloadedOptions(account: Account, upstreamModel?: string | null) {
+		return {
+			requestId: "req-mid-family",
+			method: "POST",
+			path: "/v1/messages",
+			account,
+			requestHeaders: new Headers({ "content-type": "application/json" }),
+			requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+			upstreamModel,
+			response: new Response(streamWithErrorFrame("overloaded_error"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			timestamp: Date.now(),
+			retryAttempt: 0,
+			failoverAttempts: 0,
+		};
+	}
+
+	it("trips the same-family bucket only and leaves the account's per-account cooldown untouched", async () => {
+		const account = makeAccount();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
+
+		const response = await forwardToClient(
+			overloadedOptions(account, "claude-haiku-4-5"),
+			ctx,
+		);
+		await response.text();
+
+		const now = Date.now();
+		// Same family: gated.
+		expect(
+			getProviderOverloadUntil("anthropic", now, "claude-haiku-4-5"),
+		).not.toBeNull();
+		// Different family: NOT gated (the whole point of the family scoping).
+		expect(
+			getProviderOverloadUntil("anthropic", now, "claude-sonnet-4-5"),
+		).toBeNull();
+		// No per-account cooldown: the family breaker replaces it.
+		expect(account.rate_limited_until).toBeNull();
+		expect(markCalls).toHaveLength(0);
+	});
+
+	it("without upstreamModel, trips the provider-wide bucket (conservatively gates every family)", async () => {
+		const account = makeAccount();
+		const ctx = makeStreamCtx();
+
+		const response = await forwardToClient(overloadedOptions(account), ctx);
+		await response.text();
+
+		const now = Date.now();
+		expect(
+			getProviderOverloadUntil("anthropic", now, "claude-sonnet-4-5"),
+		).not.toBeNull();
+		expect(account.rate_limited_until).toBeNull();
+	});
+
+	it("rate_limit_error is unchanged: per-account cooldown, no breaker trip", async () => {
+		const account = makeAccount();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-rl-split",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				upstreamModel: "claude-haiku-4-5",
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		// Give the async cooldown enqueue a beat.
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(markCalls.length).toBeGreaterThan(0);
+		expect(
+			getProviderOverloadUntil("anthropic", Date.now(), "claude-haiku-4-5"),
+		).toBeNull();
 	});
 });

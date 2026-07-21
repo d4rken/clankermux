@@ -1,4 +1,5 @@
 import { Logger } from "@clankermux/logger";
+import { createKeyedSemaphore } from "../keyed-semaphore";
 
 const log = new Logger("BurstCooldown");
 
@@ -102,16 +103,16 @@ export function clearAnthropicBurstThrottle(): void {
 // ---------------------------------------------------------------------------
 // Concurrency semaphore for simultaneous transparent-retry holds.
 //
-// A minimal counting semaphore capping how many requests may concurrently hold
+// A counting semaphore capping how many requests may concurrently hold
 // & re-probe a cache account, so our own re-probes don't pile onto the same
 // per-IP window. The cap is the fixed `BURST_RETRY_MAX_CONCURRENT_HOLDS`
-// constant.
-//
-// JS is single-threaded, so "atomic" check-and-increment is just a synchronous
-// compare-and-set — no locking required.
+// constant. Backed by its OWN `keyed-semaphore.ts` instance under a single
+// fixed key (the throttle is provider-global, not per-bucket) — state is
+// never shared with `overload-hold.ts`'s per-bucket instance.
 // ---------------------------------------------------------------------------
 
-let activeHoldCount = 0;
+const HOLD_SLOT_KEY = "burst-retry";
+const holdSlots = createKeyedSemaphore(BURST_RETRY_MAX_CONCURRENT_HOLDS);
 
 /**
  * Atomically acquire a hold slot if the current count is below the cap.
@@ -124,32 +125,26 @@ let activeHoldCount = 0;
 export function tryAcquireHoldSlot(
 	maxConcurrentHolds = BURST_RETRY_MAX_CONCURRENT_HOLDS,
 ): boolean {
-	if (activeHoldCount >= maxConcurrentHolds) {
-		return false;
-	}
-	activeHoldCount += 1;
-	return true;
+	return holdSlots.tryAcquire(HOLD_SLOT_KEY, maxConcurrentHolds);
 }
 
 /**
  * Release a previously-acquired hold slot. Never decrements below 0.
  */
 export function releaseHoldSlot(): void {
-	if (activeHoldCount > 0) {
-		activeHoldCount -= 1;
-	}
+	holdSlots.release(HOLD_SLOT_KEY);
 }
 
 /**
  * Current number of held slots. For tests / observability.
  */
 export function getActiveHoldCount(): number {
-	return activeHoldCount;
+	return holdSlots.count(HOLD_SLOT_KEY);
 }
 
 /**
  * Reset the hold-slot counter to 0. For tests.
  */
 export function resetHoldSlots(): void {
-	activeHoldCount = 0;
+	holdSlots.reset();
 }

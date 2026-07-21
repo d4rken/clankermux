@@ -7,7 +7,6 @@ import { Logger } from "@clankermux/logger";
 import type {
 	Account,
 	ContextComposition,
-	RateLimitReason,
 	RequestRoutingMeta,
 	ToolCallStat,
 } from "@clankermux/types";
@@ -18,6 +17,11 @@ import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
 import { missingMessageStopStats } from "./missing-message-stop-stats";
+import {
+	applyProviderOverloadCooldown,
+	completeProviderOverloadProbe,
+	type OverloadProbeToken,
+} from "./provider-overload-cooldown";
 import { RequestBodyContext } from "./request-body-context";
 import {
 	NO_ACCOUNT_ID,
@@ -27,6 +31,10 @@ import {
 import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { shouldRecordRequest } from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
+import {
+	getStreamForwardChunkTimeoutMs,
+	getStreamForwardTotalTimeoutMs,
+} from "./stream-timeouts";
 import {
 	createUsageState,
 	detectMissingMessageStop,
@@ -208,6 +216,31 @@ export interface ResponseHandlerOptions {
 	comboName?: string | null;
 	routing?: RequestRoutingMeta | null;
 	/**
+	 * The canonical overload-attribution model (see proxyWithAccount): the
+	 * model actually sent upstream (post model-mapping / fallback cycling)
+	 * when it resolves to a family, else the request's logical model. A
+	 * mid-stream `overloaded_error` trips the overload breaker bucket of THIS
+	 * model's family. Absent/null falls back to the provider-wide bucket
+	 * (conservatively gates every family).
+	 */
+	upstreamModel?: string | null;
+	/**
+	 * Half-open overload-probe token whose OWNERSHIP transfers to
+	 * forwardToClient at CALL time — the caller must not settle it after
+	 * passing it here, on ANY outcome including a throw. The verdict is judged
+	 * on FULL transport completion — mid-stream overloads arrive after 200
+	 * headers, so headers alone prove nothing:
+	 *   - streaming clean EOF + success + sniffer silent → "recovered"
+	 *   - sniffer `overloaded_error`                     → "reopened"
+	 *   - sniffer `rate_limit_error` / stream error      → "abandoned"
+	 *   - non-streaming: 2xx → "recovered", else "abandoned" (at forward time)
+	 *   - a throw anywhere in forwardToClient's setup (e.g. recorder.begin)
+	 *     → "abandoned" (settled by forwardToClient itself before rethrow, so
+	 *     a setup failure can never orphan the lease until the safety TTL)
+	 * Completion is idempotent, so overlapping paths are safe.
+	 */
+	overloadProbeToken?: OverloadProbeToken | null;
+	/**
 	 * When true, the mid-stream rate-limit cooldown sniffer is disabled: a
 	 * streamed 429/529 error is still streamed and recorded, but does NOT mutate
 	 * the account's rate-limit/provider-overload cooldown state. Used by the
@@ -229,8 +262,35 @@ export interface ResponseHandlerOptions {
  * while computing usage inline (no worker). Per chunk: feed the UsageState +
  * capture the (capped) body for Request History; at transport finish: finalize
  * usage as a tracked async promise and attach it to the RequestRecorder.
+ *
+ * Single-owner story for `options.overloadProbeToken`: ownership transfers to
+ * forwardToClient the moment it is called. If the setup phase throws before
+ * the streaming callbacks / non-stream forward-time verdict take over (e.g.
+ * `requestRecorder.begin`), the lease is settled "abandoned" here and the
+ * error rethrown — the caller (proxyWithAccount) has already nulled its local
+ * reference and must NOT settle again. Completion is idempotent, so the
+ * belt-and-suspenders overlap with an already-armed stream verdict is safe.
  */
 export async function forwardToClient(
+	options: ResponseHandlerOptions,
+	ctx: ProxyContext,
+): Promise<Response> {
+	try {
+		return await forwardToClientInner(options, ctx);
+	} catch (err) {
+		// A throw during setup would otherwise orphan the probe lease until the
+		// safety TTL (~an hour), wedging the half-open bucket against every
+		// other would-be prober. Release it as "abandoned" — no verdict was
+		// reached — and surface the original error.
+		completeProviderOverloadProbe(
+			options.overloadProbeToken ?? null,
+			"abandoned",
+		);
+		throw err;
+	}
+}
+
+async function forwardToClientInner(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
 ): Promise<Response> {
@@ -255,6 +315,7 @@ export async function forwardToClient(
 		comboName,
 		routing,
 		disableCooldown,
+		overloadProbeToken,
 	} = options;
 
 	// Always strip compression headers *before* we do anything else
@@ -389,15 +450,11 @@ export async function forwardToClient(
 
 		// Configurable via env vars to support long agentic workloads where
 		// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
-		// the outer stream silent for extended periods (issue #84).
-		const STREAM_TIMEOUT_MS = Number(
-			process.env.CF_STREAM_TOTAL_TIMEOUT_MS ??
-				TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
-		);
-		const CHUNK_TIMEOUT_MS = Number(
-			process.env.CF_STREAM_CHUNK_TIMEOUT_MS ??
-				TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
-		);
+		// the outer stream silent for extended periods (issue #84). Shared
+		// helper (stream-timeouts.ts) so the probe-lease safety TTL reads the
+		// SAME effective values and can never drift from what is honored here.
+		const STREAM_TIMEOUT_MS = getStreamForwardTotalTimeoutMs();
+		const CHUNK_TIMEOUT_MS = getStreamForwardChunkTimeoutMs();
 
 		// Computed once upfront from path + status only (isExpectedResponse does
 		// NOT read the body), matching the old analyticsResponse status.
@@ -423,52 +480,87 @@ export async function forwardToClient(
 				// after that feed() is a no-op. Detection still runs when cooldown
 				// mutation is disabled so Request History gets the correct outcome.
 				if (rateLimitSniffer.feed(value) && account && !disableCooldown) {
-					// Map firedReason to the correct RateLimitReason override:
-					//   "overloaded_error" → upstream_529_overloaded_with_reset
-					//   "rate_limit_error" → let applyRateLimitCooldown auto-derive (429)
-					const reason: RateLimitReason | undefined =
-						rateLimitSniffer.firedReason === "overloaded_error"
-							? "upstream_529_overloaded_with_reset"
-							: undefined;
-					applyRateLimitCooldown(
-						account,
-						{
-							resetTime: Date.now() + getMidStreamRateLimitCooldownMs(),
-							reason,
-						},
-						ctx,
-					);
+					if (rateLimitSniffer.firedReason === "overloaded_error") {
+						// Mid-stream `overloaded_error` (SSE 529 shape) is a
+						// provider/family incident, not an account-level limit: trip the
+						// family-scoped overload breaker (attributed via the model
+						// actually sent upstream) so ALL same-family routing across the
+						// provider's accounts backs off at once. Deliberately NO
+						// per-account cooldown here — pre-stream 529s don't mark
+						// individual accounts either, and marking here inflated
+						// consecutive_rate_limits during provider incidents while a
+						// client retry walked every account in the pool.
+						applyProviderOverloadCooldown(
+							account.provider,
+							Date.now() + getMidStreamRateLimitCooldownMs(),
+							options.upstreamModel ?? null,
+						);
+						// Probe verdict: the probe stream itself carried the overload.
+						// The trip above invalidated the tripped bucket's lease;
+						// "reopened" releases any sibling-bucket lease too.
+						completeProviderOverloadProbe(
+							overloadProbeToken ?? null,
+							"reopened",
+						);
+					} else {
+						// Mid-stream `rate_limit_error` is a per-account 429: apply the
+						// per-account cooldown (auto-derived reason).
+						applyRateLimitCooldown(
+							account,
+							{ resetTime: Date.now() + getMidStreamRateLimitCooldownMs() },
+							ctx,
+						);
+						// A mid-stream rate_limit_error is a per-ACCOUNT signal, not an
+						// overload-health verdict for the family — release the probe
+						// lease without closing or re-opening the bucket.
+						completeProviderOverloadProbe(
+							overloadProbeToken ?? null,
+							"abandoned",
+						);
 
-					// Reliable burst marker (storm-affinity-hold Part 1). A mid-stream
-					// `rate_limit_error` frame is the per-IP burst throttle revealing
-					// itself after the 200 headers were already sent — it can't rescue
-					// THIS response, but it must trip the shared Anthropic-OAuth burst
-					// marker so the session's NEXT affinity_hold requests hold their
-					// cache account instead of diverting to a sibling. Only for a
-					// genuine OAuth-Anthropic 429 (rate_limit_error, not the 529
-					// overloaded_error which drives the separate provider-overload
-					// cooldown). The SSE frame carries no HTTP status, so there is no
-					// hard-limit-status check here — a mid-stream rate_limit_error is by
-					// nature the transient burst shape.
-					//
-					// Exclude synthetic cache-keepalive replays: the keepalive scheduler
-					// fires parallel requests across every cached account at once, so a
-					// burst of 4+ trips Anthropic's per-IP limit and a keepalive replay
-					// can itself surface a mid-stream rate_limit_error. That is a
-					// self-inflicted probe artifact, not a user-driven storm — tripping
-					// the marker on it would suppress sibling diversion for real requests
-					// off a synthetic burst. Mirrors the keepalive guard in
-					// response-processor.ts / proxy-operations.ts.
-					if (
-						rateLimitSniffer.firedReason === "rate_limit_error" &&
-						isOAuthAnthropicAccount(account) &&
-						requestHeaders.get("x-clankermux-keepalive") !== "true"
-					) {
-						markAnthropicBurstThrottle(Date.now());
+						// Reliable burst marker (storm-affinity-hold Part 1). A mid-stream
+						// `rate_limit_error` frame is the per-IP burst throttle revealing
+						// itself after the 200 headers were already sent — it can't rescue
+						// THIS response, but it must trip the shared Anthropic-OAuth burst
+						// marker so the session's NEXT affinity_hold requests hold their
+						// cache account instead of diverting to a sibling. Only for a
+						// genuine OAuth-Anthropic 429 (the 529 overloaded_error branch
+						// above drives the family-scoped provider-overload breaker
+						// instead). The SSE frame carries no HTTP status, so there is no
+						// hard-limit-status check here — a mid-stream rate_limit_error is
+						// by nature the transient burst shape.
+						//
+						// Exclude synthetic cache-keepalive replays: the keepalive
+						// scheduler fires parallel requests across every cached account at
+						// once, so a burst of 4+ trips Anthropic's per-IP limit and a
+						// keepalive replay can itself surface a mid-stream
+						// rate_limit_error. That is a self-inflicted probe artifact, not a
+						// user-driven storm — tripping the marker on it would suppress
+						// sibling diversion for real requests off a synthetic burst.
+						// Mirrors the keepalive guard in response-processor.ts /
+						// proxy-operations.ts.
+						if (
+							isOAuthAnthropicAccount(account) &&
+							requestHeaders.get("x-clankermux-keepalive") !== "true"
+						) {
+							markAnthropicBurstThrottle(Date.now());
+						}
 					}
 				}
 			},
 			onEnd: () => {
+				// Probe verdict on natural stream end: recovered only when the
+				// response was successful AND the sniffer never fired mid-stream
+				// (a fired sniffer already settled the token — idempotent no-op
+				// here). A non-success stream that drained cleanly is no health
+				// proof, so its lease is released without closing the bucket.
+				// Outside the usageState guard: filtered requests still settle.
+				completeProviderOverloadProbe(
+					overloadProbeToken ?? null,
+					success && rateLimitSniffer?.firedReason == null
+						? "recovered"
+						: "abandoned",
+				);
 				if (usageState) {
 					// R3: finish transport FIRST (terminal responseTimeMs computed
 					// here), then finalize usage as a tracked async promise. The stream
@@ -508,6 +600,9 @@ export async function forwardToClient(
 				}
 			},
 			onError: (err) => {
+				// Probe verdict: the stream was cut (disconnect/timeout/read error)
+				// before a verdict — release the lease so another request may probe.
+				completeProviderOverloadProbe(overloadProbeToken ?? null, "abandoned");
 				if (usageState) {
 					// R3: finish transport FIRST, then finalize on the partial stream.
 					// The stream was cut (disconnect/timeout/error) → NOT endedCleanly,
@@ -544,6 +639,14 @@ export async function forwardToClient(
 	/*********************************************************************
 	 *  NON-STREAMING RESPONSES — read body in background, finalize once
 	 *********************************************************************/
+	// Probe verdict for non-streaming responses at forward time: the status is
+	// the whole verdict (the mid-stream overload failure mode is SSE-specific).
+	// 2xx proves the family answered healthily; anything else releases the
+	// lease without closing the bucket.
+	completeProviderOverloadProbe(
+		overloadProbeToken ?? null,
+		response.ok ? "recovered" : "abandoned",
+	);
 	if (!response.body) {
 		if (usageState) {
 			// No body to parse — finish transport, then finalize (empty usage state

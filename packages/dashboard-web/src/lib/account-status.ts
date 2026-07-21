@@ -56,10 +56,20 @@ export interface AccountStatus {
 	staleLockDetected: boolean;
 	/** Proactive usage throttling is delaying requests right now. */
 	isUsageThrottled: boolean;
-	/** Provider-overload cooldown end (ms epoch) if active, else null. */
+	/** Provider-wide overload cooldown end (ms epoch) if active, else null. */
 	providerOverloadedUntil: number | null;
-	/** Whole minutes left on the provider-overload cooldown (min 1), else null. */
+	/** Whole minutes left on the provider-wide overload cooldown (min 1), else null. */
 	providerOverloadMinutes: number | null;
+	/** Provider-wide breaker is half-open: cooldown elapsed, recovery probe pending/running. */
+	isProviderProbing: boolean;
+	/**
+	 * Family-scoped OPEN overload buckets (e.g. a Haiku-only 529 storm), sorted
+	 * by family name. Other families keep routing to the account, so these render
+	 * as their own chips instead of the provider-wide one.
+	 */
+	overloadedFamilies: Array<{ family: string; until: number; minutes: number }>;
+	/** Family-scoped half-open buckets: cooldown elapsed, recovery probe pending/running. */
+	probingFamilies: string[];
 	/** Provider has peak / off-peak windows (zai, anthropic). */
 	showPeakChip: boolean;
 	/** Currently within the provider's peak window. */
@@ -140,11 +150,50 @@ export function deriveAccountStatus(
 	const isUsageThrottled =
 		typeof account.usageThrottledUntil === "number" &&
 		account.usageThrottledUntil > now;
-	const providerOverloadedUntil =
-		typeof account.providerOverloadedUntil === "number" &&
-		account.providerOverloadedUntil > now
-			? account.providerOverloadedUntil
-			: null;
+	// Overload breaker state. When the structured family-scoped field is present
+	// (newer servers), the generic chip is driven by the PROVIDER-WIDE bucket
+	// only and family buckets get their own chips; the legacy scalar (max across
+	// all buckets) is the fallback for older servers that don't send the field.
+	const overloadBuckets = account.providerOverload ?? null;
+	let providerOverloadedUntil: number | null = null;
+	let isProviderProbing = false;
+	const overloadedFamilies: Array<{
+		family: string;
+		until: number;
+		minutes: number;
+	}> = [];
+	const probingFamilies: string[] = [];
+	if (overloadBuckets) {
+		for (const bucket of overloadBuckets) {
+			const isOpen =
+				bucket.state === "open" &&
+				typeof bucket.until === "number" &&
+				bucket.until > now;
+			if (bucket.family === null) {
+				if (isOpen && bucket.until !== null) {
+					providerOverloadedUntil = bucket.until;
+				} else if (bucket.state === "half-open") {
+					isProviderProbing = true;
+				}
+			} else if (isOpen && bucket.until !== null) {
+				overloadedFamilies.push({
+					family: bucket.family,
+					until: bucket.until,
+					minutes: Math.max(1, Math.ceil((bucket.until - now) / 60000)),
+				});
+			} else if (bucket.state === "half-open") {
+				probingFamilies.push(bucket.family);
+			}
+		}
+		overloadedFamilies.sort((a, b) => a.family.localeCompare(b.family));
+		probingFamilies.sort((a, b) => a.localeCompare(b));
+	} else {
+		providerOverloadedUntil =
+			typeof account.providerOverloadedUntil === "number" &&
+			account.providerOverloadedUntil > now
+				? account.providerOverloadedUntil
+				: null;
+	}
 	const providerOverloadMinutes = providerOverloadedUntil
 		? Math.max(1, Math.ceil((providerOverloadedUntil - now) / 60000))
 		: null;
@@ -227,6 +276,9 @@ export function deriveAccountStatus(
 		isUsageThrottled,
 		providerOverloadedUntil,
 		providerOverloadMinutes,
+		isProviderProbing,
+		overloadedFamilies,
+		probingFamilies,
 		showPeakChip,
 		isPeak,
 		peakChipLabel,

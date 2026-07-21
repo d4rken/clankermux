@@ -464,6 +464,11 @@ function CodexUsageResetChip({
 	);
 }
 
+/** "haiku" → "Haiku" for the family-scoped overload/probing chips. */
+function formatFamilyLabel(family: string): string {
+	return family.charAt(0).toUpperCase() + family.slice(1);
+}
+
 /**
  * The per-account status chip row shared by the Accounts page (`AccountListItem`)
  * and the Limits page (`AccountUtilizationCard`): Primary / priority / OAuth
@@ -546,6 +551,37 @@ export function AccountStatusChips({
 					Provider overloaded ({status.providerOverloadMinutes}m)
 				</span>
 			)}
+			{status.isProviderProbing && (
+				<span
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					title="Provider overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes"
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Probing recovery
+				</span>
+			)}
+			{status.overloadedFamilies.map((entry) => (
+				<span
+					key={entry.family}
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					title={`Upstream overload for the ${formatFamilyLabel(entry.family)} model family — breaker open until ${new Date(
+						entry.until,
+					).toLocaleString()}. Other model families keep routing to this account.`}
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Overloaded: {formatFamilyLabel(entry.family)} ({entry.minutes}m)
+				</span>
+			))}
+			{status.probingFamilies.map((family) => (
+				<span
+					key={family}
+					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					title={`${formatFamilyLabel(family)} overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes`}
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Probing: {formatFamilyLabel(family)}
+				</span>
+			))}
 			{status.isOnCredits && (
 				<span
 					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"

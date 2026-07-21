@@ -278,7 +278,22 @@ export interface AccountResponse {
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled
 	providerOverloadKey?: string | null; // Shared upstream overload group, e.g. "anthropic-upstream"
-	providerOverloadedUntil?: number | null; // In-memory provider overload cooldown; null if provider is routable
+	providerOverloadedUntil?: number | null; // Max block-until across ALL of the provider's overload buckets; null if fully routable
+	/**
+	 * Live overload-breaker buckets for this account's provider — one entry per
+	 * open/half-open bucket; closed buckets are omitted. `family` is null for the
+	 * provider-wide bucket that gates every family, otherwise a model family
+	 * (e.g. "haiku"). `until` is the ms-epoch block deadline while `state` is
+	 * "open" and null while "half-open" (cooldown elapsed, awaiting a recovery
+	 * probe); `probeActive` is true while a single-flight probe is in flight.
+	 * Null when the provider's breaker is fully closed.
+	 */
+	providerOverload?: Array<{
+		family: string | null;
+		state: "open" | "half-open";
+		until: number | null;
+		probeActive: boolean;
+	}> | null;
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
