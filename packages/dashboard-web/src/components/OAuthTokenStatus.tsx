@@ -1,6 +1,13 @@
 import { AlertTriangle, CheckCircle, RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import {
+	fetchAccountTokenStatus,
+	OAUTH_TOKEN_STATUS_RETRY_MS,
+	resolveTokenStatusDisplay,
+	type TokenStatus,
+	tokenStatusTooltip,
+} from "../lib/oauth-token-status";
 import { APIErrorBoundary } from "./ErrorBoundary";
 
 interface OAuthTokenStatusProps {
@@ -9,155 +16,94 @@ interface OAuthTokenStatusProps {
 	provider?: string; // Optional for backward compatibility
 }
 
-type TokenStatus =
-	| "healthy"
-	| "warning"
-	| "critical"
-	| "expired"
-	| "no-refresh-token"
-	| "loading"
-	| "error";
-
 export function OAuthTokenStatus({
 	accountName,
 	hasRefreshToken,
 }: Omit<OAuthTokenStatusProps, "provider">) {
 	const [status, setStatus] = useState<TokenStatus>("loading");
 	const [message, setMessage] = useState("Loading...");
-	const [fallbackAttempted, setFallbackAttempted] = useState(false);
 
 	useEffect(() => {
 		if (!hasRefreshToken) {
-			// Immediately set status for non-OAuth accounts
+			// Non-OAuth accounts don't support token-health monitoring.
 			setStatus("no-refresh-token");
 			setMessage("This account type doesn't support token health monitoring");
 			return;
 		}
 
-		// Add cancellation only - no artificial delay for better UX
 		let cancelled = false;
+		let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-		const fetchTokenStatus = async () => {
+		// Try the per-account endpoint, then the global fallback. On total
+		// failure, land on a static "unavailable" indicator and re-check on a
+		// bounded interval so the indicator self-heals when the backend recovers
+		// — without ever flashing the loading spinner again.
+		const attempt = async () => {
 			if (cancelled) return;
 
-			try {
-				const response = await api.getAccountTokenHealth(accountName);
-				if (cancelled) return;
+			const result = await fetchAccountTokenStatus({
+				accountName,
+				getAccountHealth: (name) => api.getAccountTokenHealth(name),
+				getGlobalHealth: () => api.getTokenHealth(),
+			});
+			if (cancelled) return;
 
-				if (response?.success) {
-					setStatus(response.data.status);
-					setMessage(response.data.message);
-				} else {
-					console.error("API returned error:", response);
-					setStatus("error");
-					setMessage("Failed to load token status");
-				}
-			} catch (error) {
-				if (cancelled) return;
-				console.error("Failed to fetch token status:", error);
+			if (result) {
+				setStatus(result.status);
+				setMessage(result.message);
+			} else {
 				setStatus("error");
-				setMessage("Failed to check token status");
+				setMessage("Token status unavailable — retrying…");
+				retryTimer = setTimeout(attempt, OAUTH_TOKEN_STATUS_RETRY_MS);
 			}
 		};
 
-		// Execute immediately without delay
-		fetchTokenStatus();
+		void attempt();
 
 		return () => {
 			cancelled = true;
+			if (retryTimer !== undefined) {
+				clearTimeout(retryTimer);
+			}
 		};
 	}, [accountName, hasRefreshToken]);
 
-	// Fallback: if initial fetch fails, try global token health
-	useEffect(() => {
-		if (status === "error" && hasRefreshToken && !fallbackAttempted) {
-			setFallbackAttempted(true);
-			let cancelled = false;
-
-			const checkGlobalHealth = async () => {
-				try {
-					const globalResponse = await api.getTokenHealth();
-					if (cancelled) return;
-
-					if (globalResponse?.success && globalResponse.data?.accounts) {
-						const accountData = globalResponse.data.accounts.find(
-							(acc: {
-								accountName: string;
-								status: TokenStatus;
-								message: string;
-							}) => acc.accountName === accountName,
-						);
-						if (accountData) {
-							setStatus(accountData.status);
-							setMessage(accountData.message);
-						}
-					}
-				} catch (error) {
-					if (cancelled) return;
-					console.error("Failed to fetch global health:", error);
-				}
-			};
-
-			checkGlobalHealth();
-
-			return () => {
-				cancelled = true;
-			};
-		}
-	}, [status, accountName, hasRefreshToken, fallbackAttempted]);
-
-	// Don't show anything for non-OAuth accounts
+	// Don't show anything for non-OAuth accounts.
 	if (!hasRefreshToken) {
 		return null;
 	}
 
-	// Show loading during fallback attempt
-	if (status === "error") {
-		return (
-			<span
-				className="inline-flex items-center ml-2"
-				title="OAuth refresh token status unknown - checking..."
-			>
-				<RefreshCw className="h-4 w-4 text-gray-400 animate-spin" />
-			</span>
-		);
-	}
+	const display = resolveTokenStatusDisplay(status);
+	const tone = {
+		green: "text-green-600",
+		yellow: "text-yellow-600",
+		red: "text-red-600",
+		muted: "text-gray-400",
+	}[display.tone];
+	const className = `h-4 w-4 ${tone}${display.spin ? " animate-spin" : ""}`;
 
-	const getIcon = () => {
-		switch (status) {
+	const icon = (() => {
+		switch (display.icon) {
 			case "healthy":
-				return <CheckCircle className="h-4 w-4 text-green-600" />;
+				return <CheckCircle className={className} />;
 			case "warning":
-				return <AlertTriangle className="h-4 w-4 text-yellow-600" />;
+				return <AlertTriangle className={className} />;
 			case "critical":
-			case "expired":
-				return <XCircle className="h-4 w-4 text-red-600" />;
+				return <XCircle className={className} />;
 			case "loading":
-				return <RefreshCw className="h-4 w-4 text-gray-400 animate-spin" />;
+				return <RefreshCw className={className} />;
 			default:
-				return <AlertTriangle className="h-4 w-4 text-gray-500" />;
+				// "unavailable": static muted triangle, never a spinner.
+				return <AlertTriangle className={className} />;
 		}
-	};
-
-	const getTooltip = () => {
-		switch (status) {
-			case "healthy":
-				return "OAuth token available";
-			case "warning":
-				return `OAuth token expiring soon - ${message}`;
-			case "critical":
-			case "expired":
-				return `OAuth token expired - ${message} - Re-authenticate account "${accountName}" from the dashboard (Accounts tab).`;
-			case "loading":
-				return "Checking OAuth token status...";
-			default:
-				return "OAuth token status unknown";
-		}
-	};
+	})();
 
 	return (
-		<span className="inline-flex items-center ml-2" title={getTooltip()}>
-			{getIcon()}
+		<span
+			className="inline-flex items-center ml-2"
+			title={tokenStatusTooltip(status, accountName, message)}
+		>
+			{icon}
 		</span>
 	);
 }
