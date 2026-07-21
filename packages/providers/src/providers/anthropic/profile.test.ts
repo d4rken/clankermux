@@ -11,7 +11,11 @@ describe("fetchAnthropicProfile", () => {
 			new Response(
 				JSON.stringify({
 					account: { uuid: "acct-1", email_address: "User@Example.com" },
-					organization: { name: "Acme", organization_type: "claude_pro" },
+					organization: {
+						name: "Acme",
+						organization_type: "claude_pro",
+						rate_limit_tier: "default_claude_max_5x",
+					},
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			),
@@ -22,6 +26,7 @@ describe("fetchAnthropicProfile", () => {
 			email: "user@example.com",
 			organizationName: "Acme",
 			planTier: "pro",
+			rateLimitTier: "5x",
 		});
 	});
 

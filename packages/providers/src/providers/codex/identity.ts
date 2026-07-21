@@ -54,5 +54,7 @@ export function extractCodexIdentity(
 		email,
 		organizationName: null,
 		planTier,
+		// Codex has no rate-limit multiplier concept (Anthropic-only) → always null.
+		rateLimitTier: null,
 	};
 }

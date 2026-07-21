@@ -239,6 +239,7 @@ export class OAuthFlow {
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
 				identity_plan_tier = COALESCE(?, identity_plan_tier),
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
 				identity_captured_at = COALESCE(?, identity_captured_at),
 				identity_profile_fetched_at = COALESCE(?, identity_profile_fetched_at)
 			WHERE id = ?`,
@@ -251,6 +252,7 @@ export class OAuthFlow {
 				identity.email,
 				identity.organizationName,
 				identity.planTier,
+				identity.rateLimitTier,
 				identity.hasIdentity ? now : null,
 				identity.profileFetchedAt,
 				id,
@@ -299,6 +301,7 @@ export class OAuthFlow {
 		email: string | null;
 		organizationName: string | null;
 		planTier: string | null;
+		rateLimitTier: string | null;
 		hasIdentity: boolean;
 		profileFetchedAt: number | null;
 	}> {
@@ -312,16 +315,20 @@ export class OAuthFlow {
 		const organizationName =
 			profileIdentity?.organizationName ?? envelope?.organizationName ?? null;
 		const planTier = profileIdentity?.planTier ?? envelope?.planTier ?? null;
+		const rateLimitTier =
+			profileIdentity?.rateLimitTier ?? envelope?.rateLimitTier ?? null;
 		const hasIdentity =
 			externalAccountId !== null ||
 			email !== null ||
 			organizationName !== null ||
-			planTier !== null;
+			planTier !== null ||
+			rateLimitTier !== null;
 		return {
 			externalAccountId,
 			email,
 			organizationName,
 			planTier,
+			rateLimitTier,
 			hasIdentity,
 			profileFetchedAt: profileIdentity ? Date.now() : null,
 		};
@@ -392,9 +399,10 @@ export class OAuthFlow {
 				created_at, request_count, total_requests, priority, custom_endpoint,
 				refresh_token_issued_at,
 				identity_external_id, identity_email, identity_organization_name,
-				identity_plan_tier, identity_captured_at, identity_profile_fetched_at,
+				identity_plan_tier, identity_rate_limit_tier,
+				identity_captured_at, identity_profile_fetched_at,
 				auto_pause_on_overage_enabled
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 			`,
 			[
 				id,
@@ -411,6 +419,7 @@ export class OAuthFlow {
 				identity.email,
 				identity.organizationName,
 				identity.planTier,
+				identity.rateLimitTier,
 				identity.hasIdentity ? now : null,
 				identity.profileFetchedAt,
 			],

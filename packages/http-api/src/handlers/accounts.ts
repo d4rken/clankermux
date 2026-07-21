@@ -378,6 +378,7 @@ export function createAccountsListHandler(
 			identity_email: string | null;
 			identity_organization_name: string | null;
 			identity_plan_tier: string | null;
+			identity_rate_limit_tier: string | null;
 			identity_captured_at: number | null;
 			identity_profile_fetched_at: number | null;
 		}>(
@@ -423,6 +424,7 @@ export function createAccountsListHandler(
 					identity_email,
 					identity_organization_name,
 					identity_plan_tier,
+					identity_rate_limit_tier,
 					identity_captured_at,
 					identity_profile_fetched_at,
 					CASE
@@ -947,6 +949,7 @@ export function createAccountsListHandler(
 					identityEmail: account.identity_email ?? null,
 					identityOrganizationName: account.identity_organization_name ?? null,
 					identityPlanTier: account.identity_plan_tier ?? null,
+					identityRateLimitTier: account.identity_rate_limit_tier ?? null,
 					identityCapturedAt:
 						account.identity_captured_at != null
 							? Number(account.identity_captured_at)

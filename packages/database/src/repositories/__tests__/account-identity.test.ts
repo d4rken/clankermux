@@ -67,6 +67,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_email TEXT,
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
+			identity_rate_limit_tier TEXT,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER
 		)
@@ -105,6 +106,7 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 			email: "user@example.com",
 			organizationName: "Acme Inc",
 			planTier: "max",
+			rateLimitTier: "20x",
 		};
 		await repo.updateTokens("acc-1", "tok-1", 1_000, "refresh-1", identity);
 
@@ -113,6 +115,7 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 		expect(account?.identity_email).toBe("user@example.com");
 		expect(account?.identity_organization_name).toBe("Acme Inc");
 		expect(account?.identity_plan_tier).toBe("max");
+		expect(account?.identity_rate_limit_tier).toBe("20x");
 		expect(account?.identity_captured_at).not.toBeNull();
 		// Token-write path must not stamp the profile-fetch timestamp.
 		expect(account?.identity_profile_fetched_at).toBeNull();
@@ -127,6 +130,7 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 			email: "keep@example.com",
 			organizationName: "Org One",
 			planTier: "pro",
+			rateLimitTier: "20x",
 		});
 		const first = await repo.findById("acc-2");
 		const firstCapturedAt = first?.identity_captured_at ?? 0;
@@ -136,12 +140,14 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 		await new Promise((r) => setTimeout(r, 5));
 
 		// Second: email arrives null (e.g. Codex refresh without id_token), but a
-		// new plan tier is provided.
+		// new plan tier is provided. rateLimitTier arrives null (envelope refresh
+		// lacks it) and MUST NOT erase the profile-captured "20x".
 		await repo.updateTokens("acc-2", "tok-2", 2_000, "refresh-2", {
 			externalAccountId: null,
 			email: null,
 			organizationName: null,
 			planTier: "max",
+			rateLimitTier: null,
 		});
 
 		const second = await repo.findById("acc-2");
@@ -149,6 +155,8 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 		expect(second?.identity_email).toBe("keep@example.com");
 		expect(second?.identity_external_id).toBe("ext-abc");
 		expect(second?.identity_organization_name).toBe("Org One");
+		// ...including the rate-limit tier the null write must not have clobbered.
+		expect(second?.identity_rate_limit_tier).toBe("20x");
 		// ...but the newly-provided plan tier was updated.
 		expect(second?.identity_plan_tier).toBe("max");
 		// captured_at advanced (monotonic non-decrease).
@@ -168,6 +176,7 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 			email: "a@b.com",
 			organizationName: null,
 			planTier: null,
+			rateLimitTier: null,
 		});
 		const before = await repo.findById("acc-3");
 
@@ -192,6 +201,7 @@ describe("AccountRepository — identity persistence (updateTokens)", () => {
 			email: "nr@example.com",
 			organizationName: null,
 			planTier: null,
+			rateLimitTier: null,
 		});
 
 		const account = await repo.findById("acc-4");
@@ -224,6 +234,7 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 			email: "p@example.com",
 			organizationName: "Org",
 			planTier: "max",
+			rateLimitTier: "5x",
 		});
 
 		const after = await repo.findById("acc-1");
@@ -231,6 +242,7 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 		expect(after?.identity_email).toBe("p@example.com");
 		expect(after?.identity_organization_name).toBe("Org");
 		expect(after?.identity_plan_tier).toBe("max");
+		expect(after?.identity_rate_limit_tier).toBe("5x");
 		// Both timestamps advance — this is the profile-fetch write path.
 		expect(after?.identity_captured_at).not.toBeNull();
 		expect(after?.identity_profile_fetched_at).not.toBeNull();
@@ -245,15 +257,17 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 			email: "keep@example.com",
 			organizationName: "Keep Org",
 			planTier: "pro",
+			rateLimitTier: "20x",
 		});
 
 		// A later profile fetch resolves only the plan tier; every other field is
-		// null and MUST NOT erase the prior value.
+		// null and MUST NOT erase the prior value (including the rate-limit tier).
 		await repo.setAccountIdentityFromProfile("acc-2", {
 			externalAccountId: null,
 			email: null,
 			organizationName: null,
 			planTier: "max",
+			rateLimitTier: null,
 		});
 
 		const after = await repo.findById("acc-2");
@@ -261,6 +275,7 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 		expect(after?.identity_email).toBe("keep@example.com");
 		expect(after?.identity_organization_name).toBe("Keep Org");
 		expect(after?.identity_plan_tier).toBe("max");
+		expect(after?.identity_rate_limit_tier).toBe("20x");
 		expect(after?.identity_profile_fetched_at).not.toBeNull();
 	});
 });

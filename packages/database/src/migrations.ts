@@ -72,6 +72,7 @@ export function ensureSchema(db: Database): void {
 			identity_email TEXT,
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
+			identity_rate_limit_tier TEXT,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER
 		)
@@ -642,6 +643,15 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_plan_tier",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_plan_tier TEXT",
+	},
+	// Anthropic rate-limit multiplier token (e.g. "20x", "5x") captured from
+	// organization.rate_limit_tier — a SEPARATE column from identity_plan_tier so
+	// a token-refresh envelope that lacks it writes null → COALESCE preserves the
+	// profile-captured value. NULL for Codex / uncaptured accounts.
+	{
+		table: "accounts",
+		column: "identity_rate_limit_tier",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_rate_limit_tier TEXT",
 	},
 	// ms-epoch of when the identity fields were last captured/updated.
 	{
