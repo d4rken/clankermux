@@ -43,6 +43,8 @@ export interface RequestData {
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
+	/** Model named at ingress; independent of provider-reported usage.model. */
+	requestedModel?: string | null;
 	/**
 	 * Ingest-time context composition (the requests.context_* columns).
 	 * Absent/null = "not recorded" → columns stay NULL; 0 is a valid recorded
@@ -87,7 +89,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				INSERT INTO requests (
 					id, timestamp, method, path, account_used,
 					status_code, success, error_message, response_time_ms, failover_attempts,
-					model, prompt_tokens, completion_tokens, total_tokens, cost_usd,
+					model, requested_model, prompt_tokens, completion_tokens, total_tokens, cost_usd,
 					input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 					output_tokens_per_second, output_tokens_per_second_approx,
 					api_key_id, api_key_name, project,
@@ -96,7 +98,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_messages_chars, context_message_count, context_tool_result_chars,
 					context_largest_tool_chars, context_largest_tool_name
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -108,6 +110,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				response_time_ms = EXCLUDED.response_time_ms,
 				failover_attempts = EXCLUDED.failover_attempts,
 				model = EXCLUDED.model,
+				requested_model = COALESCE(EXCLUDED.requested_model, requests.requested_model),
 				prompt_tokens = EXCLUDED.prompt_tokens,
 				completion_tokens = EXCLUDED.completion_tokens,
 				total_tokens = EXCLUDED.total_tokens,
@@ -145,6 +148,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.responseTime,
 				data.failoverAttempts,
 				usage?.model || null,
+				data.requestedModel || null,
 				usage?.promptTokens || null,
 				usage?.completionTokens || null,
 				usage?.totalTokens || null,

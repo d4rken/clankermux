@@ -73,6 +73,12 @@ export interface RecordMeta {
 	requestHeaders: Record<string, string>;
 	isStream: boolean;
 	providerName: string;
+	/** Model named by the request, independent of any provider-reported model. */
+	requestedModel?: string | null;
+	/** True when the proxy produced the terminal response without an upstream call. */
+	synthetic?: boolean;
+	/** Machine-readable origin for a locally produced terminal response. */
+	failureSource?: string | null;
 	accountBillingType: string | null;
 	accountAutoPauseOnOverageEnabled: number | null;
 	/** True when accountId is set and != NO_ACCOUNT_ID. */
@@ -127,6 +133,11 @@ export interface SlimUsageSummary {
 	tokensPerSecondApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
+}
+
+/** Optional response bytes captured for a locally produced terminal response. */
+export interface SyntheticRecordDetails {
+	responseBody?: ArrayBuffer | null;
 }
 
 export type TransportOutcome = "success" | "error" | "disconnect" | "timeout";
@@ -188,6 +199,7 @@ interface DbOpsLike {
 		comboName?: string | null,
 		reasoningEffort?: string | null,
 		contextComposition?: ContextComposition | null,
+		requestedModel?: string | null,
 	): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
 	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
@@ -450,12 +462,17 @@ export class RequestRecorder {
 	 * Transport finished (onEnd/onError/disconnect/timeout). Arm the
 	 * summary-grace timer and try to persist.
 	 */
-	finishTransport(requestId: string, outcome: TransportOutcome): void {
+	finishTransport(
+		requestId: string,
+		outcome: TransportOutcome,
+		errorMessage?: string,
+	): void {
 		const record = this.records.get(requestId);
 		if (!record || record.persisted) return;
 		// First finish wins; ignore re-finishes.
 		if (record.transport === null) {
 			record.transport = { outcome };
+			if (errorMessage) record.errorMessage = errorMessage;
 			// Arm the grace timer: if no usage arrives within the window, persist
 			// without usage but keep a patch record.
 			record.graceTimer = this.scheduleTimer(() => {
@@ -541,13 +558,16 @@ export class RequestRecorder {
 	}
 
 	/**
-	 * Record a synthetic terminal response (pool/provider-exhaustion) — a
-	 * request row with no body and no usage. Emits a dashboard event.
+	 * Record a synthetic terminal response (pool/provider-exhaustion). It has no
+	 * provider usage, but when payload storage is enabled it preserves the capped
+	 * incoming request and locally generated response so Request History remains
+	 * inspectable instead of presenting empty detail tabs.
 	 */
 	recordSynthetic(
 		meta: RecordMeta,
 		outcome: TransportOutcome,
 		errorMessage?: string,
+		details: SyntheticRecordDetails = {},
 	): void {
 		const billingType = this.deriveBillingType(meta);
 		const success = outcome === "success";
@@ -558,18 +578,53 @@ export class RequestRecorder {
 			? null
 			: (errorMessage ?? this.outcomeToErrorString(outcome) ?? "synthetic");
 
-		this.enqueueMetadata(
+		const storePayloads = this.getStorePayloads();
+		let reqBytes: Uint8Array | null = null;
+		let respChunks: Uint8Array[] = [];
+		let respBytes = 0;
+		if (storePayloads && meta.requestBody?.byteLength) {
+			const raw = new Uint8Array(meta.requestBody);
+			const take = Math.min(raw.byteLength, this.config.MAX_REQUEST_BODY_BYTES);
+			reqBytes = new Uint8Array(raw.subarray(0, take));
+		}
+		if (storePayloads && details.responseBody?.byteLength) {
+			const raw = new Uint8Array(details.responseBody);
+			const take = Math.min(
+				raw.byteLength,
+				this.config.MAX_RESPONSE_BODY_BYTES,
+			);
+			respChunks = [new Uint8Array(raw.subarray(0, take))];
+			respBytes = take;
+		}
+
+		// Synthetic records never enter the live-record map: both transport and
+		// payload are already complete. Reuse the normal ordered persistence path
+		// so request -> routing -> payload FK ordering and payload admission remain
+		// identical to upstream responses.
+		const record: InternalRecord = {
 			meta,
 			billingType,
-			success,
-			responseTime,
-			undefined,
-			error,
-		);
+			reqBytes,
+			respChunks,
+			respBytes,
+			chargedBytes: 0,
+			transport: { outcome },
+			errorMessage: error,
+			usage: null,
+			usageWaived: true,
+			bodyDiscarded: !storePayloads,
+			persisted: true,
+			createdAt: this.now(),
+			persistedAt: this.now(),
+			graceTimer: null,
+			patchTimer: null,
+		};
+		this.persistOrdered(record, success, responseTime, error, undefined);
 
 		this.emitSummaryEvent(
 			this.buildEventResponse(meta, billingType, success, responseTime, null, {
 				outcome,
+				errorMessage: error,
 			}),
 		);
 	}
@@ -733,6 +788,7 @@ export class RequestRecorder {
 					meta.comboName ?? null,
 					meta.reasoningEffort ?? null,
 					meta.contextComposition ?? null,
+					meta.requestedModel ?? null,
 				);
 				if (routing) {
 					await this.dbOps.saveRequestRouting({
@@ -791,70 +847,6 @@ export class RequestRecorder {
 					`Payload write rejected post-serialization for ${meta.requestId} (bytes=${payloadBytes})`,
 				);
 			}
-		}
-	}
-
-	/**
-	 * Direct metadata write for synthetic rows (no payload, no grace, no map
-	 * entry needed). Mirrors persistOrdered's request→routing ordering.
-	 */
-	private enqueueMetadata(
-		meta: RecordMeta,
-		billingType: string,
-		success: boolean,
-		responseTime: number,
-		usage: unknown,
-		errorMessage: string | null = null,
-	): void {
-		const routing = meta.routing;
-		const accepted = this.asyncWriter.enqueue(async () => {
-			try {
-				await this.dbOps.saveRequest(
-					meta.requestId,
-					meta.method,
-					meta.path,
-					meta.accountId,
-					meta.responseStatus,
-					success,
-					success ? null : (errorMessage ?? "synthetic"),
-					responseTime,
-					meta.failoverAttempts,
-					usage as never,
-					meta.apiKeyId ?? undefined,
-					meta.apiKeyName ?? undefined,
-					meta.project ?? null,
-					billingType,
-					meta.comboName ?? null,
-					meta.reasoningEffort ?? null,
-				);
-				if (routing) {
-					await this.dbOps.saveRequestRouting({
-						requestId: meta.requestId,
-						strategy: routing.strategy,
-						decision: routing.decision,
-						affinityScope: routing.affinityScope,
-						affinityKeyHash: routing.affinityKeyHash,
-						selectedAccountId: routing.selectedAccountId,
-						previousAccountId: routing.previousAccountId,
-						candidatesCount: routing.candidatesCount,
-						failoverAttempts: meta.failoverAttempts,
-						failoverReason: routing.failoverReason,
-						createdAt: meta.timestamp,
-					});
-				}
-			} catch (error) {
-				log.error(
-					`Failed to save synthetic request for ${meta.requestId}:`,
-					error,
-				);
-			}
-		});
-		if (!accepted) {
-			this.metadataDropped++;
-			this.onMetadataDrop?.(meta.requestId);
-			log.warn(
-				`Metadata enqueue dropped for synthetic ${meta.requestId} (total dropped: ${this.metadataDropped})`,
-			);
 		}
 	}
 
@@ -925,6 +917,10 @@ export class RequestRecorder {
 				retry: meta.retryAttempt,
 				project: meta.project ?? undefined,
 				reasoningEffort: meta.reasoningEffort ?? undefined,
+				providerName: meta.providerName,
+				requestedModel: meta.requestedModel ?? undefined,
+				synthetic: meta.synthetic || undefined,
+				failureSource: meta.failureSource ?? undefined,
 			},
 		});
 	}
@@ -971,6 +967,7 @@ export class RequestRecorder {
 			responseTimeMs: responseTime,
 			failoverAttempts: meta.failoverAttempts,
 			model: usage?.model,
+			requestedModel: meta.requestedModel ?? undefined,
 			promptTokens: usage?.inputTokens,
 			completionTokens: usage?.outputTokens,
 			totalTokens: usage?.totalTokens,
@@ -1031,7 +1028,9 @@ export class RequestRecorder {
 	 * recognizable error (disconnect/timeout/synthetic, HTML error pages, etc.).
 	 */
 	private buildErrorMessage(record: InternalRecord): string | null {
-		const generic = this.outcomeToErrorString(record.transport?.outcome);
+		const generic =
+			record.errorMessage ??
+			this.outcomeToErrorString(record.transport?.outcome);
 		if (generic === null) return null; // success
 		if (record.respBytes === 0) return generic; // no captured body
 		const body = this.combineChunks(

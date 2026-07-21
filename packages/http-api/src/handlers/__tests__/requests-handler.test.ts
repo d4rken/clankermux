@@ -41,7 +41,7 @@ describe("createRequestsSummaryHandler", () => {
 		});
 		const { sql, params } = last();
 		expect(normalize(sql)).toContain(
-			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300) AND r.timestamp >= ?",
+			"WHERE r.success = 0 AND r.timestamp >= ?",
 		);
 		// filter params (timestamp) first, then limit, then offset
 		expect(params).toEqual([100, 25, 50]);
@@ -61,6 +61,7 @@ describe("createRequestsSummaryHandler", () => {
 				error_message: null,
 				project: "clankermux",
 				reasoning_effort: "thinking:2048",
+				requested_model: "claude-haiku-4-5-20251001",
 			},
 		]);
 		const res = await createRequestsSummaryHandler(db)();
@@ -71,6 +72,7 @@ describe("createRequestsSummaryHandler", () => {
 			accountUsed: string | null;
 			project?: string;
 			reasoningEffort?: string;
+			requestedModel?: string;
 		}>;
 		expect(body[0].id).toBe("r1");
 		expect(body[0].statusCode).toBe(429);
@@ -78,6 +80,7 @@ describe("createRequestsSummaryHandler", () => {
 		expect(body[0].accountUsed).toBe("Primary");
 		expect(body[0].project).toBe("clankermux");
 		expect(body[0].reasoningEffort).toBe("thinking:2048");
+		expect(body[0].requestedModel).toBe("claude-haiku-4-5-20251001");
 	});
 
 	it("omits reasoningEffort when the row has none", async () => {
@@ -111,9 +114,7 @@ describe("createRequestsCountHandler", () => {
 		expect(body.total).toBe(7);
 		const { sql, params } = last();
 		expect(normalize(sql)).toContain("SELECT COUNT(*) as total");
-		expect(normalize(sql)).toContain(
-			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300)",
-		);
+		expect(normalize(sql)).toContain("WHERE r.success = 0");
 		expect(params).toEqual([]);
 	});
 

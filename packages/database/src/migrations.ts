@@ -85,6 +85,7 @@ export function ensureSchema(db: Database): void {
 			response_time_ms INTEGER,
 			failover_attempts INTEGER DEFAULT 0,
 			model TEXT,
+			requested_model TEXT,
 			prompt_tokens INTEGER DEFAULT 0,
 			completion_tokens INTEGER DEFAULT 0,
 			total_tokens INTEGER DEFAULT 0,
@@ -501,6 +502,13 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "reasoning_effort",
 		ddl: "ALTER TABLE requests ADD COLUMN reasoning_effort TEXT",
+	},
+	// Model named at request ingress. Unlike `model` (provider-reported), this is
+	// available for upstream errors and local synthetic rejections with no usage.
+	{
+		table: "requests",
+		column: "requested_model",
+		ddl: "ALTER TABLE requests ADD COLUMN requested_model TEXT",
 	},
 	// Ingest-time context composition: per-bucket character counts computed
 	// from the parsed /v1/messages body. All nullable — NULL = "composition

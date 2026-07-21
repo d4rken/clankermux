@@ -55,6 +55,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			response_time_ms: number | null;
 			failover_attempts: number;
 			model: string | null;
+			requested_model: string | null;
 			prompt_tokens: number | null;
 			completion_tokens: number | null;
 			total_tokens: number | null;
@@ -98,6 +99,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			responseTimeMs: request.response_time_ms,
 			failoverAttempts: request.failover_attempts,
 			model: request.model || undefined,
+			requestedModel: request.requested_model || undefined,
 			promptTokens: request.prompt_tokens || undefined,
 			completionTokens: request.completion_tokens || undefined,
 			totalTokens: request.total_tokens || undefined,

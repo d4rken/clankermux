@@ -1,3 +1,4 @@
+import { HttpError } from "@clankermux/http-common";
 import {
 	formatCost,
 	formatDuration,
@@ -43,6 +44,7 @@ import {
 	type RequestFilterState,
 	type StatusCategory,
 } from "../lib/request-filters";
+import { getRequestModelPresentation } from "../lib/request-model";
 import { cn } from "../lib/utils";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
@@ -297,7 +299,7 @@ export function RequestsTab() {
 	};
 
 	const statusCategoryLabel = (cat: StatusCategory) =>
-		cat === "success" ? "Success (2xx)" : "Errors (non-2xx)";
+		cat === "success" ? "Successful" : "Errors";
 
 	return (
 		<Card>
@@ -563,8 +565,8 @@ export function RequestsTab() {
 												{cat === "all"
 													? "All"
 													: cat === "success"
-														? "2xx"
-														: "Non-2xx"}
+														? "Success"
+														: "Errors"}
 											</button>
 										))}
 									</div>
@@ -730,6 +732,7 @@ export function RequestsTab() {
 							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
 							const summary = data?.summaries.get(request.id);
+							const modelPresentation = getRequestModelPresentation(summary);
 							const method = request.meta.method || summary?.method;
 							const path = request.meta.path || summary?.path;
 							const accountLabel =
@@ -762,8 +765,9 @@ export function RequestsTab() {
 							const isAnthropicPeak =
 								oauthAccountNames.has(request.meta.accountName ?? "") &&
 								isAnthropicPeakHour(request.meta.timestamp);
-							const statusClass =
-								statusCode == null
+							const statusClass = isError
+								? "bg-red-500/10 text-red-600 dark:text-red-400"
+								: statusCode == null
 									? ""
 									: statusCode >= 200 && statusCode < 300
 										? "bg-green-500/10 text-green-600 dark:text-green-400"
@@ -863,9 +867,24 @@ export function RequestsTab() {
 												className="h-7 w-7"
 												title="Copy as JSON"
 												getValueAsync={async () => {
-													const full = request.meta.bodiesOmitted
-														? await api.getRequestPayload(request.id)
-														: request;
+													let full = request;
+													if (request.meta.bodiesOmitted) {
+														try {
+															full = await api.getRequestPayload(request.id);
+														} catch (error) {
+															// Historical synthetic rows deliberately had no
+															// payload. Copy their summary placeholder rather
+															// than turning a useful action into a 404.
+															if (
+																!(
+																	error instanceof HttpError &&
+																	error.status === 404
+																)
+															) {
+																throw error;
+															}
+														}
+													}
 													const decoded: RequestPayload & {
 														decoded?: true;
 													} = {
@@ -937,7 +956,7 @@ export function RequestsTab() {
 									)}
 
 									{/* Row 3 "what/outcome": wraps freely — model, usage, cost, flags */}
-									{(summary?.model ||
+									{(modelPresentation ||
 										summary?.reasoningEffort ||
 										summary?.totalTokens != null ||
 										(summary?.tokensPerSecond ?? 0) > 0 ||
@@ -946,11 +965,21 @@ export function RequestsTab() {
 										isZaiPeak ||
 										isAnthropicPeak) && (
 										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
-											{(summary?.model || summary?.reasoningEffort) && (
-												<Badge variant="secondary" className="text-xs">
+											{(modelPresentation || summary?.reasoningEffort) && (
+												<Badge
+													variant="secondary"
+													className="text-xs"
+													title={
+														modelPresentation?.requestedOnly
+															? "Requested model; the provider did not report a served model"
+															: undefined
+													}
+												>
 													{[
-														summary.model,
-														summary.reasoningEffort
+														modelPresentation
+															? `${modelPresentation.value}${modelPresentation.requestedOnly ? " · requested" : ""}`
+															: null,
+														summary?.reasoningEffort
 															? formatReasoningEffort(summary.reasoningEffort)
 															: null,
 													]

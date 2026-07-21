@@ -8,7 +8,7 @@
  * component focused on rendering.
  */
 
-/** Status-code category. `success` = 2xx, `error` = everything else. */
+/** Recorded outcome category. Explicit code filters still use raw HTTP status. */
 export type StatusCategory = "all" | "success" | "error";
 
 /** Sentinel `apiKey` value meaning "requests that carried no API key". */

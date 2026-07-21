@@ -312,8 +312,21 @@ describe("provider overload cooldown", () => {
 				accountId: null,
 				responseStatus: 529,
 				providerName: "anthropic",
+				requestedModel: "claude-sonnet-4-5",
+				synthetic: true,
+				failureSource: "local_provider_cooldown",
 			});
+			expect(recordSynthetic.mock.calls[0][0].requestBody).toBeInstanceOf(
+				ArrayBuffer,
+			);
 			expect(recordSynthetic.mock.calls[0][1]).toBe("error");
+			expect(recordSynthetic.mock.calls[0][2]).toBe("provider_overloaded");
+			const recordedBody = new TextDecoder().decode(
+				recordSynthetic.mock.calls[0][3].responseBody as ArrayBuffer,
+			);
+			expect(JSON.parse(recordedBody)).toMatchObject({
+				error: { type: "overloaded_error", providers: ["anthropic"] },
+			});
 		} finally {
 			Date.now = originalDateNow;
 		}
