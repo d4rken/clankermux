@@ -6,6 +6,7 @@ import {
 	getModelFamily,
 	mapModelName,
 	NETWORK,
+	PROTECTED_FAMILY,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	ServiceUnavailableError,
@@ -56,6 +57,7 @@ import {
 	type TransientlyCooledFamilySibling,
 	validateProviderPath,
 } from "./handlers";
+import { resolveReservationDemotion } from "./handlers/family-reservation-gate";
 import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
@@ -66,6 +68,7 @@ import {
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
 import { resolveProject } from "./project-extraction";
+import { getLastProtectedFamilyDemand } from "./protected-family-demand";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getOverloadHoldSlotKey,
@@ -1020,12 +1023,70 @@ export async function handleProxy(
 		return passed;
 	};
 
+	// 6d. Shared-window reservation reorder — a SOFT demotion (never an
+	// exclusion). For a NON-protected request against an Anthropic account whose
+	// shared 5h/7d window is near its limit, move the account to the BACK of the
+	// candidate list so a less-constrained peer is tried first, reserving the tail
+	// of the shared window for the protected family (Fable). This only reorders —
+	// it never drops an account, so it can't empty the pool. Combo requests are
+	// skipped entirely (the attempt loop matches accounts[i] to slots[i]
+	// POSITIONALLY, so reordering would desync that mapping); for the non-combo
+	// path each account is classified by its EFFECTIVE (mapped) model via
+	// modelForAccount, matching the demand-recording site and the overload gate.
+	const applyReservationReorder = (
+		candidates: Account[],
+		comboInfo?: {
+			slots: Array<{ accountId: string; modelOverride: string }>;
+		} | null,
+	): Account[] => {
+		// Combos pin each slot to a specific account POSITIONALLY (the attempt loop
+		// matches accounts[i] to slots[i]); reordering would desync that mapping and
+		// null out slot model overrides. Reservation is a fan-out routing concern, so
+		// skip combos entirely.
+		if (comboInfo) return candidates;
+		const now = Date.now();
+		const kept: Account[] = [];
+		const demoted: Account[] = [];
+		for (const account of candidates) {
+			// Classify by the account's EFFECTIVE (mapped) model — the family it will
+			// actually serve — via modelForAccount, matching demand recording below and
+			// the provider-overload gate. Non-combo path only, so modelForAccount's
+			// initialComboInfo dependency is inert (null).
+			const modelForGate = modelForAccount(account);
+			const demote = resolveReservationDemotion(
+				account,
+				modelForGate,
+				usageCache.get(account.id),
+				getFreshCapacity(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+				),
+				getLastProtectedFamilyDemand(account.id),
+				now,
+			);
+			if (demote) {
+				demoted.push(account);
+				log.debug(
+					`Reservation gate: demoting "${account.name}" (non-protected request, ` +
+						`shared window near limit; reserving for ${PROTECTED_FAMILY})`,
+				);
+			} else {
+				kept.push(account);
+			}
+		}
+		// Stable partition — never drops an account, only reorders.
+		return [...kept, ...demoted];
+	};
+
 	const postFamilyGateAccounts = applyFamilyWeeklyGate(
 		postThrottleAccounts,
 		initialComboInfo,
 	);
-	const accounts = applyContextWindowGate(
-		postFamilyGateAccounts,
+	const accounts = applyReservationReorder(
+		applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
 		initialComboInfo,
 	);
 	if (requestMeta.routing) {
@@ -1305,8 +1366,11 @@ export async function handleProxy(
 				const wakeComboInfo = requestMeta.comboName
 					? getComboSlotInfo(requestMeta)
 					: null;
-				const candidates = applyContextWindowGate(
-					applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+				const candidates = applyReservationReorder(
+					applyContextWindowGate(
+						applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+						wakeComboInfo,
+					),
 					wakeComboInfo,
 				);
 				// Bound the wake attempt by the REMAINING hold budget (mirrors the
@@ -1895,6 +1959,7 @@ export async function handleProxy(
 				// family is weekly-exhausted (it would only 429 again). The gate
 				// honors the CURRENT combo info (re-selection re-populates it) so a
 				// combo slot's model override is evaluated, not the request model.
+				// (reservation reorder intentionally omitted on the failover/fallback tail — already-degraded path)
 				const candidates = applyFamilyWeeklyGate(
 					rePostThrottle.filter((a) => isEligible(a)),
 					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
@@ -2589,6 +2654,7 @@ export async function handleProxy(
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(providerFallbackAccounts);
+		// (reservation reorder intentionally omitted on the failover/fallback tail — already-degraded path)
 		fallbackAccounts = applyContextWindowGate(
 			applyFamilyWeeklyGate(filteredFallbackAccounts),
 		);

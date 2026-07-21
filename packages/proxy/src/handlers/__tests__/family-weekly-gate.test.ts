@@ -71,9 +71,11 @@ function usage(limits: AnthropicLimitEntry[]): AnthropicUsageData {
 
 const capacity = (minHeadroom: number): CapacitySignal => ({
 	minHeadroom,
+	sessionHeadroom: 100,
 	soonestResetMs: null,
 	bindingUtilization: 100 - minHeadroom,
 	weeklyResetMs: null,
+	bindingWeeklyResetMs: null,
 	weeklyHeadroom: 100,
 });
 
