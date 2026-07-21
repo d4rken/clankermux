@@ -11,6 +11,30 @@ export const ANTHROPIC_PROFILE_ENDPOINT =
 const REQUEST_TIMEOUT_MS = 5_000;
 
 /**
+ * One-time diagnostic latch: log the KEY NAMES (never values — the org name is
+ * PII) of the profile response's `organization` object the first time we parse a
+ * successful profile. Confirms the real `rate_limit_tier` field name post-deploy;
+ * a follow-up will remove this.
+ */
+let loggedProfileOrgShapeOnce = false;
+
+function logProfileOrgKeysOnce(json: unknown): void {
+	if (loggedProfileOrgShapeOnce) return;
+	const root =
+		json != null && typeof json === "object" && !Array.isArray(json)
+			? (json as Record<string, unknown>)
+			: null;
+	const org = root?.organization;
+	if (org != null && typeof org === "object" && !Array.isArray(org)) {
+		loggedProfileOrgShapeOnce = true;
+		// Keys only — NO values, since organization.name contains PII.
+		log.debug("[identity-capture] profile organization keys:", {
+			keys: Object.keys(org as Record<string, unknown>),
+		});
+	}
+}
+
+/**
  * Fetch and normalize an Anthropic OAuth account's profile identity.
  *
  * This is a USER-INITIATED / opt-in call — it runs only on account add/reauth
@@ -48,7 +72,9 @@ export async function fetchAnthropicProfile(
 			return null;
 		}
 
-		return extractAnthropicIdentity(await response.json());
+		const json = await response.json();
+		logProfileOrgKeysOnce(json);
+		return extractAnthropicIdentity(json);
 	} catch (error) {
 		log.warn(
 			"Failed to fetch Anthropic profile:",

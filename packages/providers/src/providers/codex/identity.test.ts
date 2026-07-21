@@ -27,6 +27,7 @@ describe("extractCodexIdentity", () => {
 			email: "person@example.com",
 			organizationName: null,
 			planTier: "plus",
+			rateLimitTier: null,
 		});
 	});
 
@@ -43,6 +44,7 @@ describe("extractCodexIdentity", () => {
 			email: null,
 			organizationName: null,
 			planTier: "pro",
+			rateLimitTier: null,
 		});
 	});
 
@@ -57,6 +59,7 @@ describe("extractCodexIdentity", () => {
 			email: null,
 			organizationName: null,
 			planTier: null,
+			rateLimitTier: null,
 		});
 	});
 
@@ -67,6 +70,7 @@ describe("extractCodexIdentity", () => {
 			email: null,
 			organizationName: null,
 			planTier: null,
+			rateLimitTier: null,
 		});
 	});
 });
