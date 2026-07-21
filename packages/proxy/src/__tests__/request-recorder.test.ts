@@ -33,6 +33,7 @@ interface SaveRequestCall {
 	billingType: string | undefined;
 	comboName: string | null | undefined;
 	reasoningEffort: string | null | undefined;
+	requestedModel: string | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
@@ -70,6 +71,8 @@ class FakeDbOps {
 		billingType?: string,
 		comboName?: string | null,
 		reasoningEffort?: string | null,
+		_contextComposition?: unknown,
+		requestedModel?: string | null,
 	): Promise<void> {
 		this.order.push("request");
 		this.saveRequestCalls.push({
@@ -89,6 +92,7 @@ class FakeDbOps {
 			billingType,
 			comboName,
 			reasoningEffort,
+			requestedModel,
 		});
 	}
 
@@ -255,6 +259,7 @@ function makeMeta(overrides: Partial<RecordMeta> = {}): RecordMeta {
 		requestHeaders: { "content-type": "application/json" },
 		isStream: false,
 		providerName: "anthropic",
+		requestedModel: "claude",
 		accountBillingType: null,
 		accountAutoPauseOnOverageEnabled: 0,
 		authed: true,
@@ -1070,17 +1075,27 @@ describe("RequestRecorder — sweep", () => {
 });
 
 describe("RequestRecorder — recordSynthetic", () => {
-	it("writes a request row with no body/usage and emits an event", async () => {
+	it("writes an inspectable request/response payload, requested model, and event", async () => {
 		const h = makeHarness();
+		const responseBody = makeArrayBuffer(
+			JSON.stringify({
+				type: "error",
+				error: { type: "overloaded_error", message: "Overloaded" },
+			}),
+		);
 		h.recorder.recordSynthetic(
 			makeMeta({
 				requestId: "syn-1",
 				accountId: null,
 				authed: false,
 				responseStatus: 529,
-				requestBody: null,
+				requestedModel: "claude-haiku-4-5-20251001",
+				synthetic: true,
+				failureSource: "local_provider_cooldown",
 			}),
 			"error",
+			"provider_overloaded",
+			{ responseBody },
 		);
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(1);
@@ -1088,12 +1103,47 @@ describe("RequestRecorder — recordSynthetic", () => {
 		expect(row.id).toBe("syn-1");
 		expect(row.success).toBe(false);
 		expect(row.usage).toBeUndefined();
-		// No payload for a synthetic row.
-		expect(h.dbOps.savePayloadCalls.length).toBe(0);
+		expect(row.requestedModel).toBe("claude-haiku-4-5-20251001");
+		expect(h.dbOps.savePayloadCalls.length).toBe(1);
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			request: { body: string | null };
+			response: { body: string | null };
+			meta: Record<string, unknown>;
+		};
+		expect(
+			JSON.parse(Buffer.from(envelope.request.body ?? "", "base64").toString()),
+		).toEqual({ model: "claude" });
+		expect(
+			JSON.parse(
+				Buffer.from(envelope.response.body ?? "", "base64").toString(),
+			),
+		).toMatchObject({ error: { type: "overloaded_error" } });
+		expect(envelope.meta).toMatchObject({
+			providerName: "anthropic",
+			requestedModel: "claude-haiku-4-5-20251001",
+			synthetic: true,
+			failureSource: "local_provider_cooldown",
+		});
 		// Event emitted.
 		expect(h.emitted.length).toBe(1);
 		expect(h.emitted[0].id).toBe("syn-1");
 		expect(h.emitted[0].statusCode).toBe(529);
+		expect(h.emitted[0].errorMessage).toBe("provider_overloaded");
+		expect(h.emitted[0].requestedModel).toBe("claude-haiku-4-5-20251001");
+	});
+
+	it("keeps synthetic records metadata-only when payload storage is disabled", async () => {
+		const h = makeHarness();
+		h.storePayloads.value = false;
+		h.recorder.recordSynthetic(
+			makeMeta({ requestId: "syn-no-payload", responseStatus: 529 }),
+			"error",
+			"provider_overloaded",
+			{ responseBody: makeArrayBuffer('{"error":"overloaded"}') },
+		);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.dbOps.savePayloadCalls).toHaveLength(0);
 	});
 
 	it("writes routing for a synthetic row when routing is present", async () => {
@@ -1115,7 +1165,7 @@ describe("RequestRecorder — recordSynthetic", () => {
 			"error",
 		);
 		await h.flush();
-		expect(h.writer.order).toEqual(["request", "routing"]);
+		expect(h.writer.order).toEqual(["request", "routing", "payload"]);
 	});
 });
 
@@ -1398,6 +1448,47 @@ describe("RequestRecorder — synthetic error reason", () => {
 });
 
 describe("RequestRecorder — dashboard event carries the error message", () => {
+	it("persists a parsed HTTP 200 SSE overload as an error with requested-model attribution", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				requestId: "req-midstream-overload",
+				responseStatus: 200,
+				isStream: true,
+				requestedModel: "claude-haiku-4-5-20251001",
+			}),
+		);
+		h.recorder.captureResponseChunk(
+			"req-midstream-overload",
+			new TextEncoder().encode(
+				'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+			),
+		);
+		h.recorder.attachUsageSummary("req-midstream-overload", {
+			requestId: "req-midstream-overload",
+			usage: {},
+		});
+		h.recorder.finishTransport(
+			"req-midstream-overload",
+			"error",
+			"overloaded_error",
+		);
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0]).toMatchObject({
+			success: false,
+			errorMessage: "200 overloaded_error: Overloaded",
+			requestedModel: "claude-haiku-4-5-20251001",
+			usage: undefined,
+		});
+		expect(h.emitted[0]).toMatchObject({
+			statusCode: 200,
+			success: false,
+			errorMessage: "200 overloaded_error: Overloaded",
+			requestedModel: "claude-haiku-4-5-20251001",
+		});
+	});
+
 	it("populates errorMessage on the emitted event for a disconnect terminal", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta({ isStream: true }));

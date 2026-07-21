@@ -20,6 +20,8 @@ export interface RequestMeta {
 	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
 	affinityPartition?: string | null;
 	project?: string | null;
+	/** Model resolved at ingress before an upstream response is available. */
+	requestedModel?: string | null;
 	/**
 	 * Ingest-time context composition computed once in handleProxy from the
 	 * parsed POST /v1/messages body; null/absent when not computed (other

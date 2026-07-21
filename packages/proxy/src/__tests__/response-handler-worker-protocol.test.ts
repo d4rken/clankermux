@@ -120,6 +120,32 @@ describe("forwardToClient inline usage collection", () => {
 		expect(recorderBeginMetas[0].requestId).toBe("req-1");
 	});
 
+	it("captures requestedModel from ingress even before provider usage exists", async () => {
+		const { ctx, recorderBeginMetas } = createCtx();
+
+		await forwardToClient(
+			{
+				requestId: "req-requested-model",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: toArrayBuffer(
+					JSON.stringify({ model: "claude-haiku-4-5-20251001" }),
+				),
+				response: new Response('{"error":"overloaded"}', { status: 529 }),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		expect(recorderBeginMetas[0].requestedModel).toBe(
+			"claude-haiku-4-5-20251001",
+		);
+	});
+
 	it("strips client identity headers from the recorded request headers", async () => {
 		const { ctx, recorderBeginMetas } = createCtx();
 
@@ -330,6 +356,58 @@ describe("forwardToClient inline usage collection", () => {
 		expect(summary.usage.inputTokens).toBe(100);
 		// message_delta count is authoritative (not the message_start placeholder).
 		expect(summary.usage.outputTokens).toBe(42);
+		expect(requestRecorder.finishTransport).toHaveBeenCalledWith(
+			"req-stream",
+			"success",
+			undefined,
+		);
+	});
+
+	it("records an HTTP 200 stream ending in overloaded_error as a failed outcome", async () => {
+		const { ctx, requestRecorder, recorderBeginMetas } = createCtx();
+		ctx.provider.isStreamingResponse = () => true;
+		const enc = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(
+					enc.encode(
+						'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+					),
+				);
+				controller.close();
+			},
+		});
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-stream-overloaded",
+				method: "POST",
+				path: "/v1/messages",
+				account: null,
+				requestHeaders: new Headers({ "content-type": "application/json" }),
+				requestBody: toArrayBuffer(
+					JSON.stringify({ model: "claude-haiku-4-5-20251001" }),
+				),
+				response: new Response(body, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		await response.text();
+		expect(recorderBeginMetas[0].requestedModel).toBe(
+			"claude-haiku-4-5-20251001",
+		);
+		expect(requestRecorder.finishTransport).toHaveBeenCalledWith(
+			"req-stream-overloaded",
+			"error",
+			"overloaded_error",
+		);
 	});
 
 	it("R3: finishTransport is called BEFORE finalize resolves (attachUsageSummary)", async () => {

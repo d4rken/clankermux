@@ -56,6 +56,7 @@ export interface RequestRow {
 	response_time_ms: number | null;
 	failover_attempts: number;
 	model: string | null;
+	requested_model: string | null;
 	prompt_tokens: number | null;
 	completion_tokens: number | null;
 	total_tokens: number | null;
@@ -91,6 +92,8 @@ export interface Request {
 	responseTimeMs: number | null;
 	failoverAttempts: number;
 	model?: string;
+	/** Model named by the request, available even when no provider response arrived. */
+	requestedModel?: string;
 	promptTokens?: number;
 	completionTokens?: number;
 	totalTokens?: number;
@@ -122,6 +125,8 @@ export interface RequestResponse {
 	responseTimeMs: number | null;
 	failoverAttempts: number;
 	model?: string;
+	/** Model named by the request, available even when no provider response arrived. */
+	requestedModel?: string;
 	promptTokens?: number;
 	completionTokens?: number;
 	totalTokens?: number;
@@ -183,6 +188,14 @@ export interface RequestPayload {
 		// the "Rate Limited" badge from a summary-only payload (no body
 		// hydration required).
 		rateLimited?: boolean;
+		/** Provider selected for, or locally gating, this request. */
+		providerName?: string;
+		/** Model named by the request before any provider response was available. */
+		requestedModel?: string;
+		/** True when the proxy produced the terminal response without dispatching upstream. */
+		synthetic?: boolean;
+		/** Machine-readable origin for a locally produced terminal response. */
+		failureSource?: string;
 	};
 }
 
@@ -201,6 +214,7 @@ export function toRequest(row: RequestRow): Request {
 			row.response_time_ms != null ? Number(row.response_time_ms) : null,
 		failoverAttempts: Number(row.failover_attempts) || 0,
 		model: row.model || undefined,
+		requestedModel: row.requested_model || undefined,
 		promptTokens:
 			row.prompt_tokens != null ? Number(row.prompt_tokens) : undefined,
 		completionTokens:
@@ -249,6 +263,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		responseTimeMs: request.responseTimeMs,
 		failoverAttempts: request.failoverAttempts,
 		model: request.model,
+		requestedModel: request.requestedModel,
 		promptTokens: request.promptTokens,
 		completionTokens: request.completionTokens,
 		totalTokens: request.totalTokens,

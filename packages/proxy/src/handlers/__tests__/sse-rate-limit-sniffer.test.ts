@@ -153,6 +153,20 @@ describe("SseRateLimitSniffer", () => {
 		expect(sniffer.firedReason).toBe("overloaded_error");
 	});
 
+	it("claude-console-api provider fires on overloaded_error (Anthropic-shape)", () => {
+		const sniffer = createSseRateLimitSniffer({
+			provider: "claude-console-api",
+		});
+		expect(
+			sniffer.feed(
+				encode(
+					'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
+				),
+			),
+		).toBe(true);
+		expect(sniffer.firedReason).toBe("overloaded_error");
+	});
+
 	it("non-Anthropic provider does NOT fire on overloaded_error", () => {
 		const sniffer = createSseRateLimitSniffer({
 			provider: "openai-compatible",

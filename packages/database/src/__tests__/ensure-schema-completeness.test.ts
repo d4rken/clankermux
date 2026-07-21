@@ -113,6 +113,7 @@ describe("ensureSchema completeness", () => {
 		expect(cols.has("api_key_id")).toBe(true);
 		expect(cols.has("api_key_name")).toBe(true);
 		expect(cols.has("combo_name")).toBe(true);
+		expect(cols.has("requested_model")).toBe(true);
 		expect(cols.has("agent_used")).toBe(false);
 	});
 

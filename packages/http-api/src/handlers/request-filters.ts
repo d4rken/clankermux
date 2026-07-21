@@ -11,7 +11,7 @@
  * `requests r LEFT JOIN accounts a` queries.
  */
 
-/** Status-code category. `success` = 2xx, `error` = everything else. */
+/** Recorded outcome category. Explicit `codes` still filters raw HTTP status. */
 export type StatusFilter = "all" | "success" | "error";
 
 /** Sentinel `apiKey` value meaning "requests that carried no API key". */
@@ -21,7 +21,7 @@ export const NO_API_KEY = "no-api-key";
 export const NO_PROJECT = "no-project";
 
 export interface RequestFilters {
-	/** Status-code category. Ignored when `codes` is non-empty. */
+	/** Recorded success/error outcome. Ignored when `codes` is non-empty. */
 	status?: StatusFilter;
 	/** Explicit status codes; when present these win over `status`. */
 	codes?: number[];
@@ -58,13 +58,11 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		clauses.push(`r.status_code IN (${placeholders})`);
 		params.push(...filters.codes);
 	} else if (filters.status === "success") {
-		clauses.push("r.status_code >= 200 AND r.status_code < 300");
+		clauses.push("r.success = 1");
 	} else if (filters.status === "error") {
-		// Non-2xx. status_code is effectively never NULL in practice, but guard
-		// for it so a stray null row still counts as an error rather than vanishing.
-		clauses.push(
-			"(r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300)",
-		);
+		// Outcome, not status code: Anthropic can return HTTP 200 and later send a
+		// terminal overloaded_error/rate_limit_error inside the SSE stream.
+		clauses.push("r.success = 0");
 	}
 
 	if (typeof filters.from === "number") {

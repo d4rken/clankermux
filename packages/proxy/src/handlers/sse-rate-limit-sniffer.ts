@@ -40,7 +40,11 @@
  */
 
 // Providers that emit `overloaded_error` in the Anthropic SSE error envelope.
-const ANTHROPIC_SHAPE_PROVIDERS = new Set(["anthropic", "claude-oauth"]);
+const ANTHROPIC_SHAPE_PROVIDERS = new Set([
+	"anthropic",
+	"claude-oauth",
+	"claude-console-api",
+]);
 
 const MAX_BUFFER_BYTES = 16 * 1024;
 

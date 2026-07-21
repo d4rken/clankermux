@@ -439,6 +439,7 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
 	// Per-request reasoning effort, derived once for all failover attempts. The
@@ -603,10 +604,10 @@ export async function handleProxy(
 	const providerOverloadResponseLabel = (overloadKey: string): string =>
 		overloadKey === ANTHROPIC_UPSTREAM_OVERLOAD_KEY ? "anthropic" : overloadKey;
 
-	const recordSyntheticErrorResponse = (
+	const recordSyntheticErrorResponse = async (
 		response: Response,
 		error: string,
-	): void => {
+	): Promise<void> => {
 		// Same recordable-request predicate as forwardToClient (S1) — keeps
 		// synthetic pool/provider-exhaustion rows out of history for the same
 		// filtered set (auto-refresh probes, etc.).
@@ -623,8 +624,18 @@ export async function handleProxy(
 		}
 
 		// Synthetic terminal responses (pool/provider-exhaustion) write a request
-		// row directly via the recorder — the slim worker no longer persists, so
-		// posting start/end to it would vanish (amendment B1). No body, no usage.
+		// row directly via the recorder. Preserve the already-buffered incoming body
+		// and the small local response when payload storage is enabled so the details
+		// modal can explain the rejection. There is still no provider usage/account.
+		const storePayloads = ctx.config.getStorePayloads?.() ?? true;
+		let responseBody: ArrayBuffer | null = null;
+		if (storePayloads) {
+			try {
+				responseBody = await response.clone().arrayBuffer();
+			} catch {
+				// Metadata/model attribution is still valuable if cloning ever fails.
+			}
+		}
 		const meta: RecordMeta = {
 			requestId: requestMeta.id,
 			method: req.method,
@@ -638,6 +649,12 @@ export async function handleProxy(
 			),
 			isStream: false,
 			providerName: ctx.provider.name,
+			requestedModel: effectiveRequestModel ?? null,
+			synthetic: true,
+			failureSource:
+				error === "provider_overloaded"
+					? "local_provider_cooldown"
+					: "local_proxy_rejection",
 			accountBillingType: null,
 			accountAutoPauseOnOverageEnabled: 0,
 			authed: false,
@@ -661,16 +678,18 @@ export async function handleProxy(
 					}
 				: null,
 			timestamp: requestMeta.timestamp,
-			requestBody: null,
+			requestBody: storePayloads ? finalBodyBuffer : null,
 			retryAttempt: 0,
 			failoverAttempts: 0,
 		};
-		ctx.requestRecorder.recordSynthetic(meta, "error", error);
+		ctx.requestRecorder.recordSynthetic(meta, "error", error, {
+			responseBody,
+		});
 	};
 
-	const createProviderOverloadedResponse = (
+	const createProviderOverloadedResponse = async (
 		overloaded: ProviderOverloadedAccount[],
-	): Response => {
+	): Promise<Response> => {
 		const now = Date.now();
 		const nextAvailableAt = Math.min(...overloaded.map(({ until }) => until));
 		const retryAfterSeconds = Math.max(
@@ -704,7 +723,7 @@ export async function handleProxy(
 				},
 			},
 		);
-		recordSyntheticErrorResponse(response, "provider_overloaded");
+		await recordSyntheticErrorResponse(response, "provider_overloaded");
 		return response;
 	};
 
@@ -1150,7 +1169,10 @@ export async function handleProxy(
 			const pinnedResponse = createPinnedTargetUnavailableResponse(
 				requestMeta.pinFailure,
 			);
-			recordSyntheticErrorResponse(pinnedResponse, requestMeta.pinFailure.code);
+			await recordSyntheticErrorResponse(
+				pinnedResponse,
+				requestMeta.pinFailure.code,
+			);
 			return pinnedResponse;
 		}
 
@@ -1311,7 +1333,10 @@ export async function handleProxy(
 			const giveUpResponse = createBurstRetryGiveUpResponse(
 				burstHeldAccountForGiveUp,
 			);
-			recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
+			await recordSyntheticErrorResponse(
+				giveUpResponse,
+				"burst_retry_exhausted",
+			);
 			return giveUpResponse;
 		}
 
@@ -1648,7 +1673,10 @@ export async function handleProxy(
 						availableAt: soonestSibling.availableAt,
 					},
 				);
-				recordSyntheticErrorResponse(familyResponse, "family_weekly_exhausted");
+				await recordSyntheticErrorResponse(
+					familyResponse,
+					"family_weekly_exhausted",
+				);
 				return familyResponse;
 			}
 
@@ -1660,7 +1688,10 @@ export async function handleProxy(
 				effectiveRequestModel,
 				Date.now(),
 			);
-			recordSyntheticErrorResponse(familyResponse, "family_weekly_exhausted");
+			await recordSyntheticErrorResponse(
+				familyResponse,
+				"family_weekly_exhausted",
+			);
 			return familyResponse;
 		}
 
@@ -1673,7 +1704,7 @@ export async function handleProxy(
 			providerAvailableAccounts.length === 0 &&
 			providerOverloadedAccounts.length > 0
 		) {
-			return createProviderOverloadedResponse(providerOverloadedAccounts);
+			return await createProviderOverloadedResponse(providerOverloadedAccounts);
 		}
 
 		// A pin or the Codex-CLI Anthropic floor was active but post-selection
@@ -1690,7 +1721,10 @@ export async function handleProxy(
 				message:
 					"The account/provider pinned to this API key has no available account for this request.",
 			});
-			recordSyntheticErrorResponse(pinnedResponse, "pinned_target_unavailable");
+			await recordSyntheticErrorResponse(
+				pinnedResponse,
+				"pinned_target_unavailable",
+			);
 			return pinnedResponse;
 		}
 
@@ -1712,7 +1746,7 @@ export async function handleProxy(
 		// reflecting any real client impact (issue #199, bug 2). The keepalive
 		// scheduler already gets the equivalent treatment via its loop-prevention
 		// header path; this brings auto-refresh in line.
-		recordSyntheticErrorResponse(poolExhaustedResponse, "pool_exhausted");
+		await recordSyntheticErrorResponse(poolExhaustedResponse, "pool_exhausted");
 
 		return poolExhaustedResponse;
 	}
@@ -2048,7 +2082,7 @@ export async function handleProxy(
 		const giveUpResponse = createBurstRetryGiveUpResponse(
 			burstHeldAccountForGiveUp,
 		);
-		recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
+		await recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
 		return giveUpResponse;
 	}
 
@@ -2151,7 +2185,7 @@ export async function handleProxy(
 			providerFallbackOverloadedAccounts.length > 0
 		) {
 			cacheBodyStore.discardStaged(requestMeta.id);
-			return createProviderOverloadedResponse(
+			return await createProviderOverloadedResponse(
 				providerFallbackOverloadedAccounts,
 			);
 		}

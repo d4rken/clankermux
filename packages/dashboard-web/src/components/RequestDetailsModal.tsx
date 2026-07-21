@@ -8,6 +8,7 @@ import { Eye } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { decodeBase64Utf8 } from "../lib/base64";
+import { getRequestModelPresentation } from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
@@ -30,6 +31,26 @@ interface RequestDetailsModalProps {
 	onClose: () => void;
 }
 
+/**
+ * Execution errors do not imply that payload hydration failed. In particular,
+ * persisted error summaries deliberately carry `request.error`, so using that
+ * field as a hydration guard made every historical error row permanently empty.
+ */
+export function shouldHydrateRequestPayload(
+	request: RequestPayload,
+	isOpen: boolean,
+	hydratedId: string | null,
+	failedId: string | null,
+): boolean {
+	return (
+		isOpen &&
+		!request.meta?.pending &&
+		hydratedId !== request.id &&
+		(!request.request || request.meta?.bodiesOmitted === true) &&
+		failedId !== request.id
+	);
+}
+
 export function RequestDetailsModal({
 	request,
 	summary,
@@ -39,18 +60,22 @@ export function RequestDetailsModal({
 	const [beautifyMode, setBeautifyMode] = useState(true);
 	const [hydrated, setHydrated] = useState<RequestPayload | null>(null);
 	const [failedId, setFailedId] = useState<string | null>(null);
+	const [loadError, setLoadError] = useState<{
+		id: string;
+		message: string;
+	} | null>(null);
 
 	const effective: RequestPayload =
 		hydrated && hydrated.id === request.id ? hydrated : request;
 
 	// Hydrate when we have no request payload at all (legacy case), or when
 	// the list view handed us a body-less summary placeholder.
-	const needsHydration =
-		isOpen &&
-		!effective.error &&
-		!effective.meta?.pending &&
-		(!effective.request || effective.meta?.bodiesOmitted === true) &&
-		failedId !== request.id;
+	const needsHydration = shouldHydrateRequestPayload(
+		request,
+		isOpen,
+		hydrated?.id ?? null,
+		failedId,
+	);
 
 	useEffect(() => {
 		if (!needsHydration) return;
@@ -58,11 +83,22 @@ export function RequestDetailsModal({
 		api
 			.getRequestPayload(request.id)
 			.then((payload) => {
-				if (!cancelled) setHydrated(payload);
+				if (!cancelled) {
+					setHydrated(payload);
+					setLoadError(null);
+				}
 			})
 			.catch((err) => {
-				if (!cancelled && err instanceof HttpError && err.status === 404)
+				if (cancelled) return;
+				if (err instanceof HttpError && err.status === 404) {
 					setFailedId(request.id);
+					return;
+				}
+				setFailedId(request.id);
+				setLoadError({
+					id: request.id,
+					message: err instanceof Error ? err.message : String(err),
+				});
 			});
 		return () => {
 			cancelled = true;
@@ -96,6 +132,13 @@ export function RequestDetailsModal({
 
 	const _isError = effective.error || !request.meta.success;
 	const statusCode = effective.response?.status;
+	const executionError =
+		request.error ?? summary?.errorMessage ?? effective.error ?? null;
+	const payloadUnavailable = failedId === request.id;
+	const currentLoadError =
+		loadError?.id === request.id ? loadError.message : null;
+	const modelPresentation = getRequestModelPresentation(summary);
+	const requestSucceeded = summary?.success ?? effective.meta?.success;
 
 	return (
 		<Dialog open={isOpen} onOpenChange={onClose}>
@@ -113,18 +156,30 @@ export function RequestDetailsModal({
 							{statusCode && (
 								<Badge
 									variant={
-										statusCode >= 200 && statusCode < 300
-											? "success"
-											: statusCode >= 400 && statusCode < 500
-												? "warning"
-												: "destructive"
+										requestSucceeded === false
+											? "destructive"
+											: statusCode >= 200 && statusCode < 300
+												? "success"
+												: statusCode >= 400 && statusCode < 500
+													? "warning"
+													: "destructive"
 									}
 								>
 									{statusCode}
 								</Badge>
 							)}
-							{summary?.model && (
-								<Badge variant="secondary">{summary.model}</Badge>
+							{modelPresentation && (
+								<Badge
+									variant="secondary"
+									title={
+										modelPresentation.requestedOnly
+											? "Requested model; the provider did not report a served model"
+											: "Provider-reported model"
+									}
+								>
+									{modelPresentation.value}
+									{modelPresentation.requestedOnly ? " · requested" : ""}
+								</Badge>
 							)}
 							{summary?.totalTokens && (
 								<Badge variant="outline">
@@ -147,6 +202,31 @@ export function RequestDetailsModal({
 						</div>
 					</DialogDescription>
 				</DialogHeader>
+
+				{executionError && (
+					<div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+						Error: {executionError}
+					</div>
+				)}
+				{effective.meta?.synthetic && (
+					<div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 px-3 py-2 text-sm text-muted-foreground">
+						Rejected locally before upstream dispatch
+						{effective.meta.providerName
+							? ` by the ${effective.meta.providerName} provider gate`
+							: ""}
+						{effective.meta.failureSource
+							? ` (${effective.meta.failureSource})`
+							: ""}
+						.
+					</div>
+				)}
+				{payloadUnavailable && (
+					<div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 px-3 py-2 text-sm text-muted-foreground">
+						{currentLoadError
+							? `Could not load the stored payload: ${currentLoadError}`
+							: "No payload was recorded for this request. Older local rejections and requests recorded while payload storage was disabled only have summary metadata."}
+					</div>
+				)}
 
 				<Tabs defaultValue="conversation" className="flex-1 overflow-hidden">
 					<TabsList className="grid w-full grid-cols-5">
@@ -263,10 +343,10 @@ export function RequestDetailsModal({
 							</>
 						) : (
 							<div className="text-center text-muted-foreground py-8">
-								{effective.error ? (
+								{executionError ? (
 									<>
 										<p className="text-destructive font-medium">
-											Error: {effective.error}
+											Error: {executionError}
 										</p>
 										<p className="mt-2">No response data available</p>
 									</>
@@ -289,8 +369,8 @@ export function RequestDetailsModal({
 									size="sm"
 									getValue={() =>
 										beautifyMode
-											? JSON.stringify(request.meta, null, 2)
-											: JSON.stringify(request.meta)
+											? JSON.stringify(effective.meta, null, 2)
+											: JSON.stringify(effective.meta)
 									}
 								>
 									Copy
@@ -298,8 +378,8 @@ export function RequestDetailsModal({
 							</div>
 							<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
 								{beautifyMode
-									? JSON.stringify(request.meta, null, 2)
-									: JSON.stringify(request.meta)}
+									? JSON.stringify(effective.meta, null, 2)
+									: JSON.stringify(effective.meta)}
 							</pre>
 						</div>
 					</TabsContent>
