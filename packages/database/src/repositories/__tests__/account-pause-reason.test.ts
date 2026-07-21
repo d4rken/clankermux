@@ -53,7 +53,13 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			cross_region_mode TEXT,
 			model_fallbacks TEXT,
 			billing_type TEXT,
-			pause_reason TEXT
+			pause_reason TEXT,
+			identity_external_id TEXT,
+			identity_email TEXT,
+			identity_organization_name TEXT,
+			identity_plan_tier TEXT,
+			identity_captured_at INTEGER,
+			identity_profile_fetched_at INTEGER
 		)
 	`);
 

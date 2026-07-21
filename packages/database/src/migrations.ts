@@ -67,7 +67,13 @@ export function ensureSchema(db: Database): void {
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
 			renewal_auto_start_date TEXT,
-			notes TEXT
+			notes TEXT,
+			identity_external_id TEXT,
+			identity_email TEXT,
+			identity_organization_name TEXT,
+			identity_plan_tier TEXT,
+			identity_captured_at INTEGER,
+			identity_profile_fetched_at INTEGER
 		)
 	`);
 
@@ -612,6 +618,43 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "codex_reset_credit_events",
 		column: "cause",
 		ddl: "ALTER TABLE codex_reset_credit_events ADD COLUMN cause TEXT CHECK (cause IN ('expiry','weekly-limit'))",
+	},
+	// Account profile identity — captured from provider tokens/profile endpoints
+	// so accounts can be labeled by their real upstream identity and duplicate
+	// logins (same provider + external id/email) can be detected. All nullable;
+	// NULL = identity not yet captured for this account.
+	{
+		table: "accounts",
+		column: "identity_external_id",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_external_id TEXT",
+	},
+	{
+		table: "accounts",
+		column: "identity_email",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_email TEXT",
+	},
+	{
+		table: "accounts",
+		column: "identity_organization_name",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_organization_name TEXT",
+	},
+	{
+		table: "accounts",
+		column: "identity_plan_tier",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_plan_tier TEXT",
+	},
+	// ms-epoch of when the identity fields were last captured/updated.
+	{
+		table: "accounts",
+		column: "identity_captured_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_captured_at INTEGER",
+	},
+	// ms-epoch of the last successful profile-endpoint fetch (distinct from
+	// identity_captured_at, which may be set from token claims without a fetch).
+	{
+		table: "accounts",
+		column: "identity_profile_fetched_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_profile_fetched_at INTEGER",
 	},
 ];
 

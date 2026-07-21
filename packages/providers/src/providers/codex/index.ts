@@ -3,6 +3,7 @@ export {
 	initiateCodexDeviceFlow,
 	pollCodexForToken,
 } from "./device-oauth";
+export { extractCodexIdentity } from "./identity";
 export { sendCodexNativePing } from "./native-ping";
 export { CodexOAuthProvider } from "./oauth";
 export {

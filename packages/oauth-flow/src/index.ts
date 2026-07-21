@@ -1,6 +1,7 @@
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
+	fetchAnthropicProfile,
 	generatePKCE,
 	getOAuthProvider,
 	type OAuthProviderConfig,
@@ -220,14 +221,38 @@ export class OAuthFlow {
 			return;
 		}
 
-		// Handle claude-oauth mode — update OAuth tokens in place
+		// Handle claude-oauth mode — update OAuth tokens in place.
+		// Re-enrich identity: merge the envelope identity with a fresh profile
+		// fetch (fails open), then COALESCE-merge so a null never erases a
+		// previously-captured value. identity_captured_at advances only when this
+		// reauth captured something; identity_profile_fetched_at advances only when
+		// the profile fetch returned data.
+		const identity = await this.resolveAnthropicIdentity(tokens);
+		const now = Date.now();
 		await adapter.run(
-			`UPDATE accounts SET refresh_token = ?, access_token = ?, expires_at = ?, refresh_token_issued_at = ? WHERE id = ?`,
+			`UPDATE accounts SET
+				refresh_token = ?,
+				access_token = ?,
+				expires_at = ?,
+				refresh_token_issued_at = ?,
+				identity_external_id = COALESCE(?, identity_external_id),
+				identity_email = COALESCE(?, identity_email),
+				identity_organization_name = COALESCE(?, identity_organization_name),
+				identity_plan_tier = COALESCE(?, identity_plan_tier),
+				identity_captured_at = COALESCE(?, identity_captured_at),
+				identity_profile_fetched_at = COALESCE(?, identity_profile_fetched_at)
+			WHERE id = ?`,
 			[
 				tokens.refreshToken,
 				tokens.accessToken,
 				tokens.expiresAt,
-				Date.now(),
+				now,
+				identity.externalAccountId,
+				identity.email,
+				identity.organizationName,
+				identity.planTier,
+				identity.hasIdentity ? now : null,
+				identity.profileFetchedAt,
 				id,
 			],
 		);
@@ -250,6 +275,56 @@ export class OAuthFlow {
 				err,
 			);
 		}
+	}
+
+	/**
+	 * Resolve the account profile identity for an Anthropic OAuth account at
+	 * add/reauth time. Merges the envelope identity carried on the OAuth tokens
+	 * (derived from exchangeCode's JWT claims) with a live profile-endpoint
+	 * fetch — the profile wins for any non-null field, the envelope is the
+	 * fallback. Fails open: a profile-fetch error yields a null profile and never
+	 * throws (fetchAnthropicProfile already returns null on error, and the extra
+	 * `.catch` is belt-and-braces), so account creation/reauth is never broken by
+	 * it.
+	 *
+	 * This flow is anthropic-only — the OAuthFlow class only ever creates/updates
+	 * provider="anthropic" OAuth accounts — so the profile fetch is unconditional.
+	 *
+	 * `hasIdentity` is true when any merged field is non-null (drives whether
+	 * `identity_captured_at` advances); `profileFetchedAt` is now-ms only when the
+	 * profile fetch actually returned data (drives `identity_profile_fetched_at`).
+	 */
+	private async resolveAnthropicIdentity(tokens: OAuthTokens): Promise<{
+		externalAccountId: string | null;
+		email: string | null;
+		organizationName: string | null;
+		planTier: string | null;
+		hasIdentity: boolean;
+		profileFetchedAt: number | null;
+	}> {
+		const profileIdentity = await fetchAnthropicProfile(
+			tokens.accessToken,
+		).catch(() => null);
+		const envelope = tokens.identity ?? null;
+		const externalAccountId =
+			profileIdentity?.externalAccountId ?? envelope?.externalAccountId ?? null;
+		const email = profileIdentity?.email ?? envelope?.email ?? null;
+		const organizationName =
+			profileIdentity?.organizationName ?? envelope?.organizationName ?? null;
+		const planTier = profileIdentity?.planTier ?? envelope?.planTier ?? null;
+		const hasIdentity =
+			externalAccountId !== null ||
+			email !== null ||
+			organizationName !== null ||
+			planTier !== null;
+		return {
+			externalAccountId,
+			email,
+			organizationName,
+			planTier,
+			hasIdentity,
+			profileFetchedAt: profileIdentity ? Date.now() : null,
+		};
 	}
 
 	/**
@@ -304,13 +379,22 @@ export class OAuthFlow {
 	): Promise<AccountCreated> {
 		const adapter = this.dbOps.getAdapter();
 
+		// Enrich identity at creation: merge the envelope identity on the OAuth
+		// tokens with a live Anthropic profile fetch (fails open). First creation
+		// writes the merged values directly (nothing to preserve).
+		const identity = await this.resolveAnthropicIdentity(tokens);
+		const now = Date.now();
+
 		await adapter.run(
 			`
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
 				created_at, request_count, total_requests, priority, custom_endpoint,
-				refresh_token_issued_at, auto_pause_on_overage_enabled
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, 1)
+				refresh_token_issued_at,
+				identity_external_id, identity_email, identity_organization_name,
+				identity_plan_tier, identity_captured_at, identity_profile_fetched_at,
+				auto_pause_on_overage_enabled
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 			`,
 			[
 				id,
@@ -319,10 +403,16 @@ export class OAuthFlow {
 				tokens.refreshToken || "",
 				tokens.accessToken,
 				tokens.expiresAt,
-				Date.now(),
+				now,
 				priority,
 				customEndpoint || null,
-				Date.now(),
+				now,
+				identity.externalAccountId,
+				identity.email,
+				identity.organizationName,
+				identity.planTier,
+				identity.hasIdentity ? now : null,
+				identity.profileFetchedAt,
 			],
 		);
 

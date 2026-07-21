@@ -19,6 +19,13 @@ export interface CodexTokenResponse {
 	access_token: string;
 	refresh_token: string;
 	expires_in: number;
+	/**
+	 * OpenAI's token endpoint returns an id_token on the initial device-code
+	 * exchange (it carries the account's email claim). Carried through so the
+	 * http-api oauth handler can later call extractCodexIdentity(access_token,
+	 * id_token). Often absent on plain refreshes; optional here.
+	 */
+	id_token?: string;
 }
 
 /**
@@ -140,6 +147,7 @@ async function exchangeCodexDeviceCode(
 		access_token: string;
 		refresh_token: string;
 		expires_in: number;
+		id_token?: string;
 	};
 
 	console.log("[CodexDeviceOAuth] token exchange response:", {
@@ -152,6 +160,7 @@ async function exchangeCodexDeviceCode(
 		access_token: data.access_token,
 		refresh_token: data.refresh_token,
 		expires_in: data.expires_in,
+		id_token: data.id_token,
 	};
 }
 

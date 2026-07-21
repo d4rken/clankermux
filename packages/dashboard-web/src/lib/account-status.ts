@@ -114,6 +114,10 @@ export interface AccountStatus {
 	resetCreditAutoApplyArmed: boolean;
 	/** Per-account auto-apply of a reset credit at the weekly limit is enabled (opt-in). */
 	resetCreditAutoApplyOnWeeklyLimitArmed: boolean;
+	/** Account shares a provider identity (external id / email) with another account. */
+	isDuplicateAccount: boolean;
+	/** Ids of the other accounts this account duplicates (empty when not a duplicate). */
+	duplicateAccountIds: string[];
 }
 
 /**
@@ -297,5 +301,7 @@ export function deriveAccountStatus(
 		resetCreditUrgency,
 		resetCreditAutoApplyArmed,
 		resetCreditAutoApplyOnWeeklyLimitArmed,
+		isDuplicateAccount: account.isDuplicateAccount,
+		duplicateAccountIds: account.duplicateAccountIds ?? [],
 	};
 }

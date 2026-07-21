@@ -6,6 +6,7 @@ import type {
 	PKCEChallenge,
 	TokenResult,
 } from "../../types";
+import { extractAnthropicIdentity } from "./identity";
 
 const oauthLog = new Logger("AnthropicOAuthProvider");
 
@@ -150,6 +151,8 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 			refresh_token: string;
 			access_token: string;
 			expires_in: number;
+			account?: unknown;
+			organization?: unknown;
 		};
 
 		console.log("[AnthropicOAuth] exchange response:", {
@@ -158,10 +161,13 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 			responseKeys: Object.keys(json),
 		});
 
+		const identity = extractAnthropicIdentity(json);
+
 		return {
 			refreshToken: json.refresh_token,
 			accessToken: json.access_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
+			identity,
 		};
 	}
 }

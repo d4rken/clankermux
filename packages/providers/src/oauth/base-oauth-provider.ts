@@ -1,3 +1,4 @@
+import type { AccountIdentity } from "@clankermux/types";
 import { generatePKCE } from "./pkce";
 
 export interface OAuthConfig {
@@ -12,6 +13,8 @@ export interface OAuthTokens {
 	accessToken: string;
 	refreshToken?: string;
 	expiresAt: number;
+	/** Optional account identity resolved from the token response / claims. */
+	identity?: AccountIdentity | null;
 }
 
 /**

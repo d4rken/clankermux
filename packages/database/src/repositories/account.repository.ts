@@ -1,10 +1,30 @@
 import {
 	type Account,
+	type AccountIdentity,
 	type AccountRow,
 	type RateLimitReason,
 	toAccount,
 } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
+
+// Shared identity COALESCE-merge fragment. Each field is COALESCE'd against its
+// existing column so a null arriving piecemeal never erases a previously-captured
+// value. Used by both updateTokens (token-path capture) and
+// setAccountIdentityFromProfile (profile-fetch capture); keeping it in one place
+// guarantees the two paths can never drift.
+const IDENTITY_COALESCE_SET = `identity_external_id = COALESCE(?, identity_external_id),
+				identity_email = COALESCE(?, identity_email),
+				identity_organization_name = COALESCE(?, identity_organization_name),
+				identity_plan_tier = COALESCE(?, identity_plan_tier)`;
+
+function identityBindParams(identity: AccountIdentity): Array<string | null> {
+	return [
+		identity.externalAccountId,
+		identity.email,
+		identity.organizationName,
+		identity.planTier,
+	];
+}
 
 export class AccountRepository extends BaseRepository<Account> {
 	async findAll(): Promise<Account[]> {
@@ -33,6 +53,12 @@ export class AccountRepository extends BaseRepository<Account> {
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
+				identity_external_id,
+				identity_email,
+				identity_organization_name,
+				identity_plan_tier,
+				identity_captured_at,
+				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			ORDER BY priority DESC
@@ -67,6 +93,12 @@ export class AccountRepository extends BaseRepository<Account> {
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
+				identity_external_id,
+				identity_email,
+				identity_organization_name,
+				identity_plan_tier,
+				identity_captured_at,
+				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
 			WHERE id = ?
@@ -82,19 +114,71 @@ export class AccountRepository extends BaseRepository<Account> {
 		accessToken: string,
 		expiresAt: number,
 		refreshToken?: string,
+		identity?: AccountIdentity | null,
 	): Promise<void> {
 		const now = Date.now();
+		// When identity is provided, COALESCE-merge each field so a null arriving
+		// piecemeal (e.g. a Codex refresh that lacks an id_token → no email that
+		// cycle) never erases a previously-captured value. identity_captured_at is
+		// advanced whenever ANY identity field is written. identity_profile_fetched_at
+		// is deliberately NOT touched here — it is set only by the profile-fetch
+		// paths (account add/reauth and the startup backfill).
+		const identitySet = identity
+			? `,
+				${IDENTITY_COALESCE_SET},
+				identity_captured_at = ?`
+			: "";
+		const identityParams: Array<string | number | null> = identity
+			? [...identityBindParams(identity), now]
+			: [];
 		if (refreshToken) {
 			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
-				[accessToken, expiresAt, refreshToken, now, accountId],
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?${identitySet} WHERE id = ?`,
+				[
+					accessToken,
+					expiresAt,
+					refreshToken,
+					now,
+					...identityParams,
+					accountId,
+				],
 			);
 		} else {
 			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ? WHERE id = ?`,
-				[accessToken, expiresAt, accountId],
+				`UPDATE accounts SET access_token = ?, expires_at = ?${identitySet} WHERE id = ?`,
+				[accessToken, expiresAt, ...identityParams, accountId],
 			);
 		}
+	}
+
+	/**
+	 * Persist an account identity captured from a successful profile-endpoint
+	 * fetch (account add/reauth OR the one-time startup backfill).
+	 *
+	 * Differs from {@link updateTokens}'s identity arg in ONE key way: it stamps
+	 * `identity_profile_fetched_at = now`. That timestamp is the gate that makes
+	 * the startup backfill one-time — an account with a non-null
+	 * `identity_profile_fetched_at` is never re-selected. Call this ONLY when the
+	 * profile fetch actually returned data; on a null (failed/rate-limited) fetch
+	 * the caller must skip the write so the account stays eligible next boot.
+	 *
+	 * Each identity field is COALESCE-merged so a null arriving in a later fetch
+	 * never erases a previously-captured value; `identity_captured_at` advances
+	 * whenever this write runs (it always carries identity).
+	 */
+	async setAccountIdentityFromProfile(
+		accountId: string,
+		identity: AccountIdentity,
+	): Promise<void> {
+		const now = Date.now();
+		await this.run(
+			`UPDATE accounts SET
+				${IDENTITY_COALESCE_SET},
+				identity_captured_at = ?,
+				identity_profile_fetched_at = ?
+			WHERE id = ?`,
+			[...identityBindParams(identity), now, now, accountId],
+		);
 	}
 
 	async incrementUsage(

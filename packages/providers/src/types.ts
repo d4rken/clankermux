@@ -1,9 +1,11 @@
-import type { Account } from "@clankermux/types";
+import type { Account, AccountIdentity } from "@clankermux/types";
 
 export interface TokenRefreshResult {
 	accessToken: string;
 	expiresAt: number;
 	refreshToken: string; // Always required - either new token or existing one
+	/** Optional account identity resolved during refresh (token claims / profile). */
+	identity?: AccountIdentity | null;
 }
 
 export interface RateLimitInfo {
@@ -145,4 +147,6 @@ export interface TokenResult {
 	refreshToken: string;
 	accessToken: string;
 	expiresAt: number;
+	/** Optional account identity resolved during code exchange (token claims / profile). */
+	identity?: AccountIdentity | null;
 }

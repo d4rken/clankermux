@@ -334,6 +334,7 @@ export async function refreshAccessTokenSafe(
 						result.accessToken,
 						result.expiresAt,
 						result.refreshToken,
+						result.identity,
 					),
 				);
 

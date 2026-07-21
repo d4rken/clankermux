@@ -39,6 +39,7 @@ import {
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
 import {
+	fetchAnthropicProfile,
 	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
@@ -79,6 +80,7 @@ import {
 	type StrategyStore,
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
+import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -1640,6 +1642,21 @@ Available endpoints:
 		coordinator: codexSpendCoordinator,
 	});
 	codexResetCreditApplyScheduler.start();
+
+	// One-time, staggered, fail-open profile backfill: fetch GET /api/oauth/profile
+	// for Anthropic OAuth accounts that have never had a successful profile fetch
+	// (identity_profile_fetched_at IS NULL) and merge the identity into their
+	// columns. Fire-and-forget AFTER the server is already listening — the routine
+	// self-guards (never throws) and sleeps an initial delay + staggers between
+	// accounts, so it neither blocks startup nor bursts the shared profile/usage
+	// rate-limit bucket. Gated on identity_profile_fetched_at, so it's idempotent
+	// across restarts (successes never re-fetch; failures retry next boot).
+	void runAnthropicProfileBackfill({
+		getAccounts: () => dbOps.getAllAccounts(),
+		fetchProfile: fetchAnthropicProfile,
+		setIdentity: (accountId, identity) =>
+			dbOps.setAccountIdentityFromProfile(accountId, identity),
+	});
 
 	const serverPort = serverInstance.port;
 	if (typeof serverPort !== "number") {

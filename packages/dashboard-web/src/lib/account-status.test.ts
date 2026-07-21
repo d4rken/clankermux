@@ -76,6 +76,24 @@ describe("deriveAccountStatus — identity fields", () => {
 		expect(status.providerOverloadedUntil).toBeNull();
 		expect(status.providerOverloadMinutes).toBeNull();
 	});
+
+	it("passes through the duplicate-account flags", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				isDuplicateAccount: true,
+				duplicateAccountIds: ["b2", "c3"],
+			}),
+			NOW,
+		);
+		expect(status.isDuplicateAccount).toBe(true);
+		expect(status.duplicateAccountIds).toEqual(["b2", "c3"]);
+	});
+
+	it("defaults duplicate flags to false / empty when absent", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.isDuplicateAccount).toBeFalsy();
+		expect(status.duplicateAccountIds).toEqual([]);
+	});
 });
 
 describe("deriveAccountStatus — rate-limit status", () => {

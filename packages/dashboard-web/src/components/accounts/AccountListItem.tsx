@@ -144,8 +144,36 @@ export function AccountListItem({
 	return (
 		<div className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
-				<div className="flex items-center gap-2 min-w-0">
+				<div className="flex flex-col min-w-0">
 					<p className="font-medium truncate">{account.name}</p>
+					{(account.identityEmail ||
+						account.identityOrganizationName ||
+						account.identityPlanTier) && (
+						<p
+							className="text-xs text-muted-foreground truncate"
+							title={
+								account.identityExternalId
+									? `Account ID: ${account.identityExternalId}`
+									: undefined
+							}
+						>
+							{[
+								account.identityEmail,
+								account.identityOrganizationName,
+								account.identityPlanTier
+									? account.identityPlanTier.charAt(0).toUpperCase() +
+										account.identityPlanTier.slice(1)
+									: null,
+							]
+								.filter(Boolean)
+								.join(" · ")}
+							{account.identityExternalId && (
+								<span className="ml-1 opacity-60">
+									#{account.identityExternalId.slice(0, 8)}
+								</span>
+							)}
+						</p>
+					)}
 				</div>
 				<div className="flex items-center gap-1 shrink-0">
 					{(account.provider === "anthropic" ||
