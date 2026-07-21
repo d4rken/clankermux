@@ -18,17 +18,15 @@ describe("buildRequestFilterClause", () => {
 		});
 	});
 
-	it("maps status 'success' to the 2xx range", () => {
+	it("maps status 'success' to the recorded outcome", () => {
 		const { sql, params } = buildRequestFilterClause({ status: "success" });
-		expect(sql).toBe("WHERE r.status_code >= 200 AND r.status_code < 300");
+		expect(sql).toBe("WHERE r.success = 1");
 		expect(params).toEqual([]);
 	});
 
-	it("maps status 'error' to everything outside 2xx (null-defensive)", () => {
+	it("maps status 'error' to the recorded outcome, including HTTP 200 stream errors", () => {
 		const { sql, params } = buildRequestFilterClause({ status: "error" });
-		expect(sql).toBe(
-			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300)",
-		);
+		expect(sql).toBe("WHERE r.success = 0");
 		expect(params).toEqual([]);
 	});
 
@@ -101,7 +99,7 @@ describe("buildRequestFilterClause", () => {
 			project: "my-proj",
 		});
 		expect(sql).toBe(
-			"WHERE (r.status_code IS NULL OR r.status_code < 200 OR r.status_code >= 300) " +
+			"WHERE r.success = 0 " +
 				"AND r.timestamp >= ? AND r.timestamp <= ? " +
 				"AND (a.name = ? OR r.account_used = ?) " +
 				"AND COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ? " +

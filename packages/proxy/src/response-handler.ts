@@ -18,6 +18,7 @@ import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
 import { missingMessageStopStats } from "./missing-message-stop-stats";
+import { RequestBodyContext } from "./request-body-context";
 import {
 	NO_ACCOUNT_ID,
 	type RecordMeta,
@@ -189,6 +190,8 @@ export interface ResponseHandlerOptions {
 	account: Account | null;
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
+	/** Ingress model, supplied by the already-parsed request path when available. */
+	requestedModel?: string | null;
 	project?: string | null;
 	/** Ingest-time context composition (see RequestMeta.contextComposition). */
 	contextComposition?: ContextComposition | null;
@@ -238,6 +241,7 @@ export async function forwardToClient(
 		account,
 		requestHeaders,
 		requestBody,
+		requestedModel: requestedModelOption,
 		project,
 		contextComposition,
 		toolCallStats,
@@ -299,6 +303,13 @@ export async function forwardToClient(
 	const usageState: UsageState | null = shouldProcessRequest
 		? createUsageState()
 		: null;
+	// Production supplies this from the request's existing parse. Keep the body
+	// fallback for direct callers/tests without imposing a second large JSON parse
+	// on every normal proxied request.
+	const requestedModel =
+		requestedModelOption === undefined
+			? new RequestBodyContext(requestBody).getModel()
+			: requestedModelOption;
 
 	if (shouldProcessRequest) {
 		// Begin recording on the main thread. The recorder fires account
@@ -318,6 +329,7 @@ export async function forwardToClient(
 			requestHeaders: requestHeadersObj,
 			isStream,
 			providerName: ctx.provider.name,
+			requestedModel,
 			accountBillingType: account?.billing_type ?? null,
 			accountAutoPauseOnOverageEnabled: account?.auto_pause_on_overage_enabled
 				? 1
@@ -368,15 +380,12 @@ export async function forwardToClient(
 	 *  at client pace, so there is no second buffer.
 	 *********************************************************************/
 	if (isStream && response.body) {
-		// Mid-stream rate-limit detection for issue #114 Fix 1.2. Only
-		// create a sniffer when we know which account to mark — anonymous
-		// or unauthenticated requests can't be failed over. The force-account
-		// path passes disableCooldown so a forced 429/529 streamed mid-response
-		// does not mutate cooldown state (errors are returned as-is).
-		const rateLimitSniffer =
-			account && !disableCooldown
-				? createSseRateLimitSniffer({ provider: account.provider })
-				: null;
+		// Detection is independent of cooldown mutation: even anonymous/forced
+		// requests must be recorded as failures when a nominal HTTP 200 stream ends
+		// in an SSE error frame. `disableCooldown` only suppresses account state.
+		const rateLimitSniffer = createSseRateLimitSniffer({
+			provider: account?.provider ?? ctx.provider.name,
+		});
 
 		// Configurable via env vars to support long agentic workloads where
 		// nested sub-calls (e.g. recursive claude-code-sdk sessions) can leave
@@ -410,9 +419,10 @@ export async function forwardToClient(
 					ctx.requestRecorder.captureResponseChunk(requestId, value);
 				}
 
-				// Mid-stream rate-limit detection. The sniffer
-				// fires exactly once; after that feed() is a no-op.
-				if (account && rateLimitSniffer?.feed(value)) {
+				// Mid-stream rate-limit detection. The sniffer fires exactly once;
+				// after that feed() is a no-op. Detection still runs when cooldown
+				// mutation is disabled so Request History gets the correct outcome.
+				if (rateLimitSniffer.feed(value) && account && !disableCooldown) {
 					// Map firedReason to the correct RateLimitReason override:
 					//   "overloaded_error" → upstream_529_overloaded_with_reset
 					//   "rate_limit_error" → let applyRateLimitCooldown auto-derive (429)
@@ -467,7 +477,12 @@ export async function forwardToClient(
 					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
-						success ? "success" : "error",
+						rateLimitSniffer.firedReason
+							? "error"
+							: success
+								? "success"
+								: "error",
+						rateLimitSniffer.firedReason ?? undefined,
 					);
 					trackFinalize(
 						usageState,
