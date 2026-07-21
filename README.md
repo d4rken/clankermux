@@ -22,12 +22,23 @@ Features:
 * Multiplexes one endpoint across multiple Anthropic, Codex/OpenAI, and OpenAI-compatible accounts.
 * Capacity-aware account selection (FEFO) — maximizes total token availability across the pool.
 * Sticky session routing for high prompt-cache hit rates; survives priority edits and failover.
-* Transparent burst-429 retry — rides out rate-limit storms without losing the prompt cache.
-* Overload (529) detection, cooldowns, and cross-provider fallback.
+* Transparent 429 recovery — burst retries and failover ride out rate-limit storms
+  without losing the prompt cache; single-flight probes keep parallel clients from
+  stampeding an account as its cooldown expires.
+* Family-scoped 529 circuit breakers — isolate the overloaded model family, admit
+  one recovery probe, and briefly hold concurrent requests for transparent recovery
+  before falling back to another model or provider.
 * Manual control: priorities, pause/resume, force-account mode, pin an API key to an account.
 * Native Responses-API passthrough for Codex CLI.
+* Codex usage-reset credits — see balances and expiry, apply a reset manually, or opt
+  in to automatic application before expiry or when the weekly limit is reached,
+  with an audit history.
 * Proxy API keys separate from dashboard access.
-* Web dashboard: accounts, request history, rate-limit graphs with burn-rate forecasts, analytics, spend tracking, logs.
+* Web dashboard: accounts, request history, rate-limit graphs with burn-rate
+  forecasts, active-session and per-account client metrics, per-model-family weekly
+  limits, analytics, spend tracking, logs.
+* Optional [Caddy front proxy](deploy/caddy/README.md) holds new connections across
+  app restarts while in-flight agent streams drain.
 * Small dependency tree; memory-leak and stability hardening for long-running deployments.
 
 ## Related projects
