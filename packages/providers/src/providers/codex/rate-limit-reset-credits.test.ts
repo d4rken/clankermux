@@ -50,6 +50,38 @@ describe("parseCodexRateLimitResetCredits", () => {
 		});
 	});
 
+	it("parses ISO timestamp strings returned by the backend", () => {
+		expect(
+			parseCodexRateLimitResetCredits({
+				available_count: 1,
+				credits: [
+					{
+						id: "credit-iso",
+						reset_type: "codex_rate_limits",
+						status: "available",
+						granted_at: "2026-07-01T00:00:00.000Z",
+						expires_at: "2026-08-01T00:00:00.000Z",
+						title: "Full reset",
+						description: "One free reset.",
+					},
+				],
+			}),
+		).toEqual({
+			availableCount: 1,
+			credits: [
+				{
+					id: "credit-iso",
+					resetType: "codexRateLimits",
+					status: "available",
+					grantedAt: 1_782_864_000,
+					expiresAt: 1_785_542_400,
+					title: "Full reset",
+					description: "One free reset.",
+				},
+			],
+		});
+	});
+
 	it("parses the app-server camelCase wrapper", () => {
 		expect(
 			parseCodexRateLimitResetCredits({

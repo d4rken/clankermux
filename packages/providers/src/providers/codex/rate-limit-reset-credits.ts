@@ -66,7 +66,15 @@ function finiteInteger(value: unknown): number | null {
 }
 
 function unixSeconds(value: unknown): number | null {
-	const seconds = finiteInteger(value);
+	let seconds: number | null;
+	if (typeof value === "string") {
+		const milliseconds = Date.parse(value);
+		seconds = Number.isFinite(milliseconds)
+			? Math.floor(milliseconds / 1_000)
+			: null;
+	} else {
+		seconds = finiteInteger(value);
+	}
 	if (seconds === null || seconds < 0) return null;
 	return Number.isFinite(new Date(seconds * 1_000).getTime()) ? seconds : null;
 }
