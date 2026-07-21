@@ -39,6 +39,7 @@ import {
 } from "../ui/dropdown-menu";
 import { Textarea } from "../ui/textarea";
 import { AccountStatusChips } from "./AccountStatusChips";
+import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
 import { useShowSecondaryLimits } from "./useShowSecondaryLimits";
 
@@ -145,7 +146,10 @@ export function AccountListItem({
 		<div className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
 				<div className="flex flex-col min-w-0">
-					<p className="font-medium truncate">{account.name}</p>
+					<div className="flex items-center gap-2 min-w-0">
+						<p className="font-medium truncate">{account.name}</p>
+						<ProviderChip provider={account.provider} className="shrink-0" />
+					</div>
 					{(account.identityEmail ||
 						account.identityOrganizationName ||
 						account.identityPlanTier) && (
@@ -475,9 +479,6 @@ export function AccountListItem({
 					</Button>
 				</div>
 			</div>
-			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-				<span>{account.provider}</span>
-			</div>
 			{isEditingNotes ? (
 				<div className="space-y-2">
 					<Textarea
@@ -551,54 +552,56 @@ export function AccountListItem({
 				</Button>
 			)}
 			<AccountStatusChips account={account} status={status} />
-			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-				<span>{presenter.requestCount} requests</span>
-				{presenter.activeSessionCount > 0 && (
-					<span className="text-muted-foreground">
-						· {presenter.activeSessionCount} clients (
-						{ACTIVE_SESSION_WINDOW_MINUTES}m)
-					</span>
-				)}
-				<span className="text-muted-foreground">{presenter.sessionInfo}</span>
-				{status.showForceReset && (
-					<Button
-						variant="outline"
-						size="sm"
-						className="h-7 gap-1 text-xs"
-						onClick={() => onForceResetRateLimit(account)}
-						title={
-							status.staleLockDetected
-								? "Reset stale rate limit lock (usage shows capacity available)"
-								: "Force clear rate limit state from database"
-						}
-					>
-						<RefreshCw className="h-3.5 w-3.5" />
-						Force Reset
-					</Button>
-				)}
-			</div>
-			{account.sessionStats && (
-				<div className="text-xs text-muted-foreground">
-					Session: {account.sessionStats.requests} req
-					{" · "}↑{formatTokenCount(account.sessionStats.inputTokens)} in
-					{" · "}✦
-					{formatTokenCount(account.sessionStats.cacheCreationInputTokens)}{" "}
-					cache↑
-					{" · "}✦{formatTokenCount(account.sessionStats.cacheReadInputTokens)}{" "}
-					cache↓
-					{" · "}↓{formatTokenCount(account.sessionStats.outputTokens)} out
-					{account.sessionStats.planCostUsd > 0 && (
-						<>
-							{" · "}${account.sessionStats.planCostUsd.toFixed(2)} plan
-						</>
+			<div className="space-y-1">
+				<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+					<span>{presenter.requestCount} requests</span>
+					{presenter.activeSessionCount > 0 && (
+						<span className="text-muted-foreground">
+							· {presenter.activeSessionCount} clients (
+							{ACTIVE_SESSION_WINDOW_MINUTES}m)
+						</span>
 					)}
-					{account.sessionStats.apiCostUsd > 0 && (
-						<>
-							{" · "}${account.sessionStats.apiCostUsd.toFixed(2)} api
-						</>
+					<span className="text-muted-foreground">{presenter.sessionInfo}</span>
+					{status.showForceReset && (
+						<Button
+							variant="outline"
+							size="sm"
+							className="h-7 gap-1 text-xs"
+							onClick={() => onForceResetRateLimit(account)}
+							title={
+								status.staleLockDetected
+									? "Reset stale rate limit lock (usage shows capacity available)"
+									: "Force clear rate limit state from database"
+							}
+						>
+							<RefreshCw className="h-3.5 w-3.5" />
+							Force Reset
+						</Button>
 					)}
 				</div>
-			)}
+				{account.sessionStats && (
+					<div className="text-sm text-muted-foreground">
+						Session: {account.sessionStats.requests} req
+						{" · "}↑{formatTokenCount(account.sessionStats.inputTokens)} in
+						{" · "}✦
+						{formatTokenCount(account.sessionStats.cacheCreationInputTokens)}{" "}
+						cache↑
+						{" · "}✦
+						{formatTokenCount(account.sessionStats.cacheReadInputTokens)} cache↓
+						{" · "}↓{formatTokenCount(account.sessionStats.outputTokens)} out
+						{account.sessionStats.planCostUsd > 0 && (
+							<>
+								{" · "}${account.sessionStats.planCostUsd.toFixed(2)} plan
+							</>
+						)}
+						{account.sessionStats.apiCostUsd > 0 && (
+							<>
+								{" · "}${account.sessionStats.apiCostUsd.toFixed(2)} api
+							</>
+						)}
+					</div>
+				)}
+			</div>
 			{(account.rateLimitReset ||
 				account.usageData ||
 				account.staleUsage ||

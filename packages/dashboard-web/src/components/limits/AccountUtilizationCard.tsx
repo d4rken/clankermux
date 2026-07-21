@@ -2,6 +2,7 @@ import type { AccountResponse } from "@clankermux/types";
 import { extractFiveHour, extractSevenDay } from "../../lib/pool-usage";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
+import { ProviderChip } from "../accounts/ProviderChip";
 import { RateLimitProgress } from "../accounts/RateLimitProgress";
 import {
 	Card,
@@ -70,9 +71,10 @@ export function AccountUtilizationCard({
 									>
 										{account.name}
 									</span>
-									<span className="shrink-0 text-xs text-muted-foreground">
-										{account.provider}
-									</span>
+									<ProviderChip
+										provider={account.provider}
+										className="shrink-0"
+									/>
 								</div>
 								<AccountStatusChips account={account} />
 								<RateLimitProgress
