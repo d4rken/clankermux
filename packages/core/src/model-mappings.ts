@@ -38,6 +38,26 @@ export function getModelFamily(modelId: string): ModelFamily | null {
 }
 
 /**
+ * Model families ordered most-advanced first. Index 0 is the single protected
+ * family whose shared quota we reserve capacity for (see {@link PROTECTED_FAMILY}).
+ * When a newer flagship family ships, bump this one line to prepend it.
+ */
+export const FAMILY_PRIORITY: readonly ModelFamily[] = [
+	"fable",
+	"opus",
+	"sonnet",
+	"haiku",
+] as const;
+
+/** The single most-advanced family we reserve shared-quota capacity for. */
+export const PROTECTED_FAMILY: ModelFamily = FAMILY_PRIORITY[0];
+
+/** True if `family` is the protected (most-advanced) family. */
+export function isProtectedFamily(family: ModelFamily | null): boolean {
+	return family === PROTECTED_FAMILY;
+}
+
+/**
  * Validate if a model ID is a valid Claude model
  * Accepts any model containing opus, sonnet, haiku, fable, or mythos
  * (case-insensitive)

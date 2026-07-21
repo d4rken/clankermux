@@ -8,12 +8,22 @@ export enum StrategyName {
 export interface CapacitySignal {
 	/** min(100 - utilization) across present HARD windows (excludes extra_usage). */
 	minHeadroom: number;
+	/** min(100 - utilization) of the 5h session window; 100 if no session window present. */
+	sessionHeadroom: number;
 	/** earliest FUTURE reset (ms) across present hard windows; null if none have a reset time. */
 	soonestResetMs: number | null;
 	/** max utilization across hard windows + extra_usage (used for NEAR_LIMIT ordering). */
 	bindingUtilization: number;
 	/** soonest reset (ms) among WEEKLY windows {seven_day, seven_day_oauth_apps}; null if none. HARVEST deadline. */
 	weeklyResetMs: number | null;
+	/**
+	 * Reset (ms) of the MOST-CONSTRAINED weekly window — the one whose headroom
+	 * equals `weeklyHeadroom` (max utilization). null when that window has no known
+	 * reset. Distinct from `weeklyResetMs` (earliest across ALL weekly windows,
+	 * used for HARVEST ranking): the reservation gate's harvest-yield must track the
+	 * binding window's reset, not an unrelated sooner-resetting window's.
+	 */
+	bindingWeeklyResetMs: number | null;
 	/** min(100 - util) over weekly windows; 100 if none present. HARVEST tie-break. */
 	weeklyHeadroom: number;
 }
