@@ -112,11 +112,6 @@ function clampResetTime(candidateMs: number, now: number): number | undefined {
 
 const log = new Logger("AnthropicProvider");
 
-// One-time, VALUES-FREE debug log to confirm Anthropic's real account/
-// organization subfield names on the next natural refresh. A follow-up will
-// prune the extractor's key-guessing and delete this log.
-let loggedIdentityShapeOnce = false;
-
 export class AnthropicProvider extends BaseProvider {
 	name = "anthropic";
 
@@ -268,16 +263,6 @@ export class AnthropicProvider extends BaseProvider {
 			account?: unknown;
 			organization?: unknown;
 		};
-
-		if (!loggedIdentityShapeOnce) {
-			loggedIdentityShapeOnce = true;
-			log.debug("[identity-capture] token response identity shape:", {
-				accountKeys: json.account ? Object.keys(json.account as object) : null,
-				organizationKeys: json.organization
-					? Object.keys(json.organization as object)
-					: null,
-			});
-		}
 
 		const identity = extractAnthropicIdentity(json);
 
