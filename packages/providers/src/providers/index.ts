@@ -32,6 +32,7 @@ export {
 	CodexProvider,
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
+	extractCodexIdentity,
 	fetchCodexRateLimitResetCredits,
 	isCodexOnCredits,
 	normalizeCodexInputUsage,

@@ -39,6 +39,7 @@ import {
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
 import {
+	extractCodexIdentity,
 	fetchAnthropicProfile,
 	getFreshCapacity,
 	getProvider,
@@ -87,6 +88,7 @@ import {
 	liveStats,
 } from "./cache-keepalive-snapshot-sampler";
 import { clearRateLimitOnCapacityRestored } from "./capacity-restored";
+import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
@@ -1656,6 +1658,20 @@ Available endpoints:
 		fetchProfile: fetchAnthropicProfile,
 		setIdentity: (accountId, identity) =>
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
+	});
+
+	// Codex identity backfill: a Codex account whose token hasn't refreshed since
+	// the identity feature shipped shows no identity in the dashboard (Codex
+	// identity is captured on token refresh via JWT decode, with no profile
+	// endpoint). This decodes the stored access token LOCALLY (no network) and
+	// merges any resolved fields. Fire-and-forget; it self-guards (never throws)
+	// and is idempotent across restarts (an account with both external id AND
+	// email is never re-selected).
+	void runCodexIdentityBackfill({
+		getAccounts: () => dbOps.getAllAccounts(),
+		extractIdentity: (accessToken) => extractCodexIdentity(accessToken, null),
+		setIdentity: (accountId, identity) =>
+			dbOps.setAccountIdentity(accountId, identity),
 	});
 
 	const serverPort = serverInstance.port;

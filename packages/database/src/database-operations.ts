@@ -913,6 +913,23 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	/**
+	 * Persist an account identity captured from a local token decode WITHOUT
+	 * stamping `identity_profile_fetched_at` (the token-agnostic sibling used by
+	 * the Codex startup identity backfill).
+	 * See {@link AccountRepository.setAccountIdentity}.
+	 */
+	async setAccountIdentity(
+		accountId: string,
+		identity: AccountIdentity,
+	): Promise<void> {
+		await withDatabaseRetry(
+			() => this.accounts.setAccountIdentity(accountId, identity),
+			this.retryConfig,
+			"setAccountIdentity",
+		);
+	}
+
 	async updateAccountUsage(accountId: string): Promise<void> {
 		const sessionDuration =
 			this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
