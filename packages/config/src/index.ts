@@ -296,12 +296,14 @@ export class Config extends EventEmitter {
 	getUsageSnapshotRetentionDays(): number {
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		// Default lowered 3650 → 90 (2026-07): the Limits/sawtooth graph only needs
-		// ~90 days of history, and a 10-year default let usage_snapshots grow
-		// unbounded (past DB-size incidents). The clamp max stays 3650, so an
-		// EXPLICITLY saved larger value (including 3650) is still honored — this new
-		// default only applies when usage_snapshot_retention_days is ABSENT.
-		return 90;
+		// Default kept at 3650 (10 years) DELIBERATELY: lowering it would trigger a
+		// one-time prune of >N-day usage_snapshots on the live DB at next restart,
+		// which we chose to avoid. The retention MECHANISM is still hardened — the
+		// worker prune is batched (see incremental-vacuum-worker.ts) and manual
+		// "Clean up now" now honors this configured value (see maintenance.ts) — so
+		// an operator can lower usage_snapshot_retention_days explicitly and the
+		// prune will be safe. It just no longer happens by default.
+		return 3650;
 	}
 
 	setUsageSnapshotRetentionDays(days: number): void {

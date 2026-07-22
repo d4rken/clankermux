@@ -31,7 +31,7 @@ export function DataRetentionCard() {
 	const [usageSnapshotDays, setUsageSnapshotDays] = useState<number>(
 		// Matches the server default (getUsageSnapshotRetentionDays = 90); avoids
 		// the UI briefly flashing the old 3650 before the config query resolves.
-		data?.usageSnapshotDays ?? 90,
+		data?.usageSnapshotDays ?? 3650,
 	);
 	const [memorySnapshotDays, setMemorySnapshotDays] = useState<number>(
 		data?.memorySnapshotDays ?? 14,
