@@ -55,4 +55,79 @@ describe("UsageCache poll-loop generation guard", () => {
 		// completion bails on the identity guard instead of rescheduling.
 		expect(callsA - callsAAtSwap).toBe(0);
 	});
+
+	// The generation token is the AUTHORITATIVE replacement guard — it holds even
+	// when the caller reuses the same tokenProvider reference (which defeats the
+	// tokenProviders identity guard). These are whitebox checks against the two
+	// arm entry points, gating deterministically on the generation value.
+	type WhiteboxCache = {
+		pollGenerations: Map<string, number>;
+		pollTimeouts: Map<string, NodeJS.Timeout>;
+		pollSchedule: Map<string, unknown>;
+		armNextPoll: (
+			accountId: string,
+			tokenProvider: () => Promise<string>,
+			generation: number,
+			activeBaseMs: number,
+			provider: string | undefined,
+			customEndpoint: string | null | undefined,
+			retryAfterMs: number | null,
+			lastActivityMs: number | null,
+		) => void;
+		armAfterResolve: (
+			accountId: string,
+			tokenProvider: () => Promise<string>,
+			generation: number,
+			baseIntervalMs: number,
+			provider: string | undefined,
+			customEndpoint: string | null | undefined,
+			resolved: number | null,
+		) => void;
+	};
+
+	function cleanupWhitebox(cache: WhiteboxCache, id: string): void {
+		const t = cache.pollTimeouts.get(id);
+		if (t) clearTimeout(t);
+		cache.pollTimeouts.delete(id);
+		cache.pollSchedule.delete(id);
+		cache.pollGenerations.delete(id);
+	}
+
+	it("a superseded generation cannot arm a timer via armNextPoll", () => {
+		const id = freshId("arm-gen");
+		const cache = usageCache as unknown as WhiteboxCache;
+		const tp = async () => "";
+		cache.pollGenerations.set(id, 2); // current generation is 2
+
+		// Stale generation-1 arm attempt → NO-OP (no timer created).
+		cache.armNextPoll(id, tp, 1, 90_000, "anthropic", null, null, Date.now());
+		expect(cache.pollTimeouts.has(id)).toBe(false);
+
+		// Current generation-2 arm → arms exactly one timer.
+		cache.armNextPoll(id, tp, 2, 90_000, "anthropic", null, null, Date.now());
+		expect(cache.pollTimeouts.has(id)).toBe(true);
+
+		cleanupWhitebox(cache, id);
+	});
+
+	it("a superseded generation's async cold-start resolver cannot arm (armAfterResolve)", () => {
+		const id = freshId("resolve-gen");
+		const cache = usageCache as unknown as WhiteboxCache;
+		cache.pollGenerations.set(id, 5); // current generation is 5
+
+		// A stale generation-4 resolver settling AFTER replacement must not arm,
+		// even though it would have passed the old `pollTimeouts.has` guard.
+		cache.armAfterResolve(
+			id,
+			async () => "",
+			4,
+			90_000,
+			"anthropic",
+			null,
+			Date.now(),
+		);
+		expect(cache.pollTimeouts.has(id)).toBe(false);
+
+		cleanupWhitebox(cache, id);
+	});
 });

@@ -246,4 +246,156 @@ describe("demand-aware cadence — noteActivity re-arm (integration)", () => {
 		await wait(120);
 		expect(fetchCalls).toBe(afterImmediate);
 	});
+
+	// SF2 regression: replacing an ACTIVE demand-aware poller via startPolling
+	// (WITHOUT a prior stopPolling) must leave it scheduled. The old code cleared
+	// the existing timer but left its stale `pollTimeouts` entry, so the fresh
+	// generation's async cold-start resolver bailed on the `pollTimeouts.has`
+	// guard and the poller silently died. The fix deletes the entry on replacement
+	// (and gates arming on a per-account generation token).
+	it("replacing an active demand-aware poller (no stopPolling) keeps it scheduled", async () => {
+		const id = freshId();
+		const ACTIVE_MS = 40;
+		// Async cold-start resolver reporting recent activity → active cadence. This
+		// forces the armAfterResolve path that the SF2 bug broke.
+		const policy = {
+			demandAware: true,
+			idleIntervalMs: 100_000,
+			getLastActivityMs: async () => Date.now(),
+		};
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			ACTIVE_MS,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			policy,
+		);
+		// Let gen-1 arm its active timer and poll a couple of times.
+		await wait(80);
+		expect(fetchCalls).toBeGreaterThanOrEqual(1);
+
+		// Replace WITHOUT stopPolling — this is the path the reauth flow does NOT
+		// take (it stops first), so it exercises the direct-replacement bug.
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			ACTIVE_MS,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			policy,
+		);
+		// Let the replacement's immediate fetch settle, then snapshot.
+		await wait(40);
+		const afterReplaceImmediate = fetchCalls;
+		// The replaced generation must keep polling at the active cadence. With the
+		// SF2 bug the poller would be permanently unscheduled here and the count
+		// would stall at `afterReplaceImmediate`.
+		await wait(250);
+		expect(fetchCalls).toBeGreaterThan(afterReplaceImmediate);
+	});
+
+	// Also verify the reauth-shaped path (explicit stopPolling then startPolling)
+	// ends with a single live, actively-polling timer.
+	it("stopPolling() then startPolling() leaves one live active timer", async () => {
+		const id = freshId();
+		const ACTIVE_MS = 40;
+		const policy = {
+			demandAware: true,
+			idleIntervalMs: 100_000,
+			getLastActivityMs: async () => Date.now(),
+		};
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			ACTIVE_MS,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			policy,
+		);
+		await wait(80);
+		usageCache.stopPolling(id);
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			ACTIVE_MS,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			policy,
+		);
+		await wait(40);
+		const afterRestartImmediate = fetchCalls;
+		await wait(250);
+		expect(fetchCalls).toBeGreaterThan(afterRestartImmediate);
+	});
+
+	// FIX 3: noteActivity must not grow `lastActivityAt` unbounded. It records
+	// activity ONLY when a demand-aware poller is actually active for the account,
+	// and stopPolling prunes the entry — so late responses after polling stops, or
+	// traffic on non-demand-aware accounts, never leak an entry.
+	it("noteActivity never leaves a lingering lastActivityAt entry", async () => {
+		const id = freshId();
+		const activityMap = (
+			usageCache as unknown as { lastActivityAt: Map<string, number> }
+		).lastActivityAt;
+
+		// (a) No poller configured at all → pure no-op, no entry recorded.
+		usageCache.noteActivity(id);
+		expect(activityMap.has(id)).toBe(false);
+
+		// (b) A NON-demand-aware poller → still a no-op (no entry recorded).
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			100_000,
+			null,
+		);
+		await wait(20);
+		usageCache.noteActivity(id);
+		expect(activityMap.has(id)).toBe(false);
+		usageCache.stopPolling(id);
+
+		// (c) A demand-aware poller → records; stopPolling prunes; post-stop no-op.
+		usageCache.startPolling(
+			id,
+			async () => "fake-token",
+			"anthropic",
+			100_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ demandAware: true, idleIntervalMs: 100_000 },
+		);
+		await wait(20);
+		usageCache.noteActivity(id);
+		expect(activityMap.has(id)).toBe(true); // active demand-aware poller → recorded
+		usageCache.stopPolling(id);
+		expect(activityMap.has(id)).toBe(false); // pruned on stop
+		usageCache.noteActivity(id); // stopped poller → no-op, stays absent
+		expect(activityMap.has(id)).toBe(false);
+	});
 });

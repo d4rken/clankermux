@@ -32,10 +32,11 @@ import type {
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
 import { CodexSpendCoordinator } from "../codex-spend-coordinator";
-import type {
-	ApplyCodexObservationOptions,
-	ApplyCodexUsageStatusOptions,
-	CodexObservationResult,
+import {
+	type ApplyCodexObservationOptions,
+	type ApplyCodexUsageStatusOptions,
+	applyCodexUsageStatus,
+	type CodexObservationResult,
 } from "../handlers/codex-observation";
 import type { ProxyContext } from "../handlers/proxy-types";
 
@@ -1460,5 +1461,285 @@ describe("CodexSpendCoordinator.refreshManual — free-GET application (end-to-e
 		expect(
 			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
 		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// applyCodexUsageStatus — exhausted-200 recovery guard (both signals null).
+// A 200 that reports NEITHER `allowed` NOR `limit_reached` cannot confirm
+// recovery, so the account's rate_limited_until lock must be left intact.
+// Tested directly against the applicator (not through the coordinator) so the
+// null-signal case is exercised without a JSON-parse round trip.
+// ---------------------------------------------------------------------------
+
+describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
+	function makeRecoveryCtx() {
+		const runSql: Array<{ sql: string; params: unknown[] }> = [];
+		const ctx = {
+			dbOps: {
+				updateAccountUsage: () => {},
+				resetConsecutiveRateLimits: async () => {},
+				getAdapter: () => ({
+					run: async (sql: string, params: unknown[]) => {
+						runSql.push({ sql, params });
+					},
+				}),
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+		return { ctx, runSql };
+	}
+
+	it("both signals null does NOT clear rate_limited_until (fail-safe)", () => {
+		const { ctx, runSql } = makeRecoveryCtx();
+		const id = seedId("null-signals-200");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-null",
+			rate_limited_until: Date.now() + 3600_000,
+			rate_limited_at: Date.now(),
+		});
+		const status: CodexUsageStatus = {
+			usage: {
+				five_hour: { utilization: 50, resets_at: null },
+				seven_day: { utilization: 50, resets_at: null },
+			},
+			allowed: null,
+			limitReached: null,
+			rateLimitReachedType: null,
+			resetCreditsAvailableCount: null,
+			ok: true,
+			status: 200,
+		};
+
+		const result = applyCodexUsageStatus(account, status, ctx, {
+			requestAccounting: "none",
+		});
+
+		// A missing signal is "cannot confirm", not "recovered": no cooldown clear.
+		expect(result.isRateLimited).toBe(false);
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(false);
+	});
+
+	it("a positive allowed=true signal DOES clear rate_limited_until", () => {
+		const { ctx, runSql } = makeRecoveryCtx();
+		const id = seedId("allowed-signal-200");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-ok",
+			rate_limited_until: Date.now() + 3600_000,
+			rate_limited_at: null,
+		});
+		const status: CodexUsageStatus = {
+			usage: {
+				five_hour: { utilization: 20, resets_at: null },
+				seven_day: { utilization: 20, resets_at: null },
+			},
+			allowed: true,
+			limitReached: false,
+			rateLimitReachedType: null,
+			resetCreditsAvailableCount: null,
+			ok: true,
+			status: 200,
+		};
+
+		applyCodexUsageStatus(account, status, ctx, { requestAccounting: "none" });
+
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cross-transport application ordering (SF1). A free-GET read and a native-ping
+// spend for the SAME account can complete out of order; an observation that
+// BEGAN before another observation was APPLIED must not overwrite the newer
+// state. Completion order is controlled deterministically with a deferred GET.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — cross-transport application ordering (SF1)", () => {
+	it("a stale read completing AFTER a newer spend applied does NOT apply (no overwrite)", async () => {
+		const accounts = new Map<string, Account>();
+		const id = "ordering-stale-read";
+		accounts.set(
+			id,
+			makeCodexAccount({ id, name: "codex-order", auto_refresh_enabled: true }),
+		);
+		const ctx = {
+			dbOps: {
+				getAccount: async (i: string) => {
+					const a = accounts.get(i);
+					return a ? { ...a } : null;
+				},
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+
+		// Deferred GET: the read blocks here until we release it, so we can force
+		// the spend to apply FIRST and the read to return SECOND.
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		const readGate = new Promise<CodexUsageStatus>((res) => {
+			releaseRead = res;
+		});
+
+		const obsApplyCount = { n: 0 };
+		const statusApplyCount = { n: 0 };
+
+		const coordinator = new CodexSpendCoordinator(ctx, {
+			getValidAccessToken: async () => "token",
+			readChatgptAccountId: () => "acct-123",
+			fetchCodexUsageStatus: async () => readGate,
+			applyCodexObservation: (_a, response) => {
+				obsApplyCount.n += 1;
+				return makeObservation({ responseStatus: response.status });
+			},
+			applyCodexUsageStatus: (_a, status) => {
+				statusApplyCount.n += 1;
+				return makeObservation({ responseStatus: status.status ?? 200 });
+			},
+			fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		});
+
+		// 1. Start the READ first so it reserves the LOWER (older) sequence, then
+		//    parks on the deferred GET.
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		// 2. Run the SPEND to completion; it reserves the HIGHER sequence and applies
+		//    (its native ping resolves against the mocked global fetch immediately).
+		const spend = await coordinator.observe(id, "scheduled-prime");
+		expect(spend.status).toBe("completed");
+		expect(obsApplyCount.n).toBe(1); // the newer spend applied
+
+		// 3. Release the now-stale read; it completes and tries to apply.
+		releaseRead(makeUsageStatus());
+		const read = await readP;
+
+		// The read still reports success (the GET succeeded) but its applicator was
+		// SKIPPED — the sole cache/reset/cooldown writer never ran, so nothing the
+		// newer spend wrote was overwritten.
+		expect(read.success).toBe(true);
+		expect(read.message).toContain("superseded by a newer observation");
+		expect(statusApplyCount.n).toBe(0);
+	});
+
+	it("normal order (read issued, then spend) applies BOTH observations", async () => {
+		const accounts = new Map<string, Account>();
+		const id = "ordering-normal";
+		accounts.set(
+			id,
+			makeCodexAccount({ id, name: "codex-order", auto_refresh_enabled: true }),
+		);
+		const ctx = {
+			dbOps: {
+				getAccount: async (i: string) => {
+					const a = accounts.get(i);
+					return a ? { ...a } : null;
+				},
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+
+		const obsApplyCount = { n: 0 };
+		const statusApplyCount = { n: 0 };
+		const coordinator = new CodexSpendCoordinator(ctx, {
+			getValidAccessToken: async () => "token",
+			readChatgptAccountId: () => "acct-123",
+			fetchCodexUsageStatus: async () => makeUsageStatus(),
+			applyCodexObservation: (_a, response) => {
+				obsApplyCount.n += 1;
+				return makeObservation({ responseStatus: response.status });
+			},
+			applyCodexUsageStatus: (_a, status) => {
+				statusApplyCount.n += 1;
+				return makeObservation({ responseStatus: status.status ?? 200 });
+			},
+			fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		});
+
+		// Read fully completes and applies (seq 1) BEFORE the spend is issued (seq 2).
+		const read = await coordinator.readUsageStatus(id);
+		const spend = await coordinator.observe(id, "scheduled-prime");
+
+		expect(read.success).toBe(true);
+		expect(spend.status).toBe("completed");
+		expect(statusApplyCount.n).toBe(1);
+		expect(obsApplyCount.n).toBe(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Unhandled-rejection safety (SF3). An in-flight body whose applicator throws
+// must reject to the caller that awaits it, WITHOUT the in-flight-map cleanup
+// copy surfacing an unhandledRejection.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — in-flight cleanup rejection safety", () => {
+	it("a read whose applicator throws rejects to the caller with NO unhandled rejection", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const { coordinator, setAccount } = makeCoordinator();
+			setAccount(makeCodexAccount({ id: "throw-read", name: "codex-x" }));
+			mockApplyCodexUsageStatus.mockImplementationOnce(() => {
+				throw new Error("applicator boom");
+			});
+
+			await expect(coordinator.readUsageStatus("throw-read")).rejects.toThrow(
+				"applicator boom",
+			);
+
+			// Give any stray finally-chained rejection a chance to surface.
+			await flush();
+			await flush();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
+	});
+
+	it("a spend whose applicator throws rejects to the caller with NO unhandled rejection", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const { coordinator, setAccount } = makeCoordinator();
+			setAccount(
+				makeCodexAccount({
+					id: "throw-spend",
+					name: "codex-x",
+					auto_refresh_enabled: true,
+				}),
+			);
+			mockApplyCodexObservation.mockImplementationOnce(() => {
+				throw new Error("applicator boom");
+			});
+
+			await expect(
+				coordinator.observe("throw-spend", "manual-refresh"),
+			).rejects.toThrow("applicator boom");
+
+			await flush();
+			await flush();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
 	});
 });

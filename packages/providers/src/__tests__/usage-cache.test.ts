@@ -570,4 +570,39 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 		expect(usageCache.peek("no-such-account")).toBeNull();
 		expect(usageCache.peekAge("no-such-account")).toBeNull();
 	});
+
+	// The usage-snapshot sampler gates on its OWN freshness threshold
+	// (`age === null || age > freshnessMs`) using peekAge, independent of the
+	// cache TTL, and reads data via peek(). This proves the chosen peekAge
+	// contract (true age, even when stale) keeps that gating correct: because the
+	// sampler's freshnessMs is always well under the 10-min TTL, every entry it
+	// would accept is also non-stale for peek(), so peekAge returning the true age
+	// (rather than null) never changes the accept/reject decision.
+	it("sampler-style freshness gating with peekAge stays correct", () => {
+		const FRESHNESS_MS = 180_000; // matches max(2*pollInterval, 150s) in practice
+
+		// Emulate the sampler's per-account gate over peekAge + peek.
+		const samplerAccepts = (id: string): boolean => {
+			const age = usageCache.peekAge(id);
+			if (age === null || age > FRESHNESS_MS) return false; // honest gap
+			return usageCache.peek(id) !== null;
+		};
+
+		usageCache.set(ACCOUNT, sample); // stamped at BASE
+
+		// Within freshnessMs → accepted, and peek() has real data.
+		nowSpy.mockReturnValue(BASE + 60_000);
+		expect(samplerAccepts(ACCOUNT)).toBe(true);
+
+		// Past freshnessMs but still under the TTL → the sampler skips on its OWN
+		// age gate (peekAge reports the true age > freshnessMs). peek() would still
+		// return data here, so it's peekAge's true-age return that drives the skip.
+		nowSpy.mockReturnValue(BASE + FRESHNESS_MS + 1);
+		expect(usageCache.peek(ACCOUNT)).not.toBeNull(); // not yet TTL-stale
+		expect(samplerAccepts(ACCOUNT)).toBe(false);
+
+		// Past the TTL → skipped as well (age gate fires first; peek() is null too).
+		nowSpy.mockReturnValue(BASE + TTL_MS + 1);
+		expect(samplerAccepts(ACCOUNT)).toBe(false);
+	});
 });

@@ -159,6 +159,25 @@ export class CodexSpendCoordinator {
 		string,
 		Promise<CodexUsageRefreshOutcome>
 	>();
+	/**
+	 * Per-account monotonic ISSUE counter for the cross-transport application
+	 * ordering guard (SF1). Each COORDINATOR-driven observation — a free-GET usage
+	 * read ({@link runUsageStatusRead}) or a native-ping spend
+	 * ({@link runSharedSpend}) — reserves the next value the instant its network
+	 * call is issued ({@link reserveApplicationSeq}). Values only ever increase.
+	 */
+	private readonly applicationSeqCounter = new Map<string, number>();
+	/**
+	 * Per-account highest ISSUE sequence whose observation has already been
+	 * APPLIED to the usage cache / DB. An observation may apply only when its
+	 * reserved sequence is strictly greater ({@link claimApplication}); an older
+	 * read that returns AFTER a newer spend already applied is skipped rather than
+	 * overwriting the fresher window/reset state (or clearing a cooldown the newer
+	 * spend just set). Real-traffic {@link applyCodexObservation} calls made by the
+	 * response pipeline do NOT flow through the coordinator and deliberately do NOT
+	 * participate in this guard — they stay the authoritative freshest signal.
+	 */
+	private readonly lastAppliedSeq = new Map<string, number>();
 
 	constructor(ctx: ProxyContext, deps: CodexSpendCoordinatorDeps = {}) {
 		this.ctx = ctx;
@@ -177,6 +196,48 @@ export class CodexSpendCoordinator {
 		this.consumeCodexRateLimitResetCredit =
 			deps.consumeCodexRateLimitResetCredit ?? consumeCodexRateLimitResetCredit;
 		this.getProvider = deps.getProvider ?? getProvider;
+	}
+
+	/**
+	 * Attach an in-flight-map cleanup that runs on BOTH settle branches WITHOUT
+	 * leaking an unhandled rejection (SF3). `promise.finally(cleanup)` returns a
+	 * NEW promise that rejects whenever `promise` rejects; because that returned
+	 * promise is never awaited or caught, a rejecting in-flight body (whose awaited
+	 * copy the HTTP caller already handles) still surfaces as an
+	 * `unhandledRejection`. `then(cleanup, cleanup)` runs the cleanup on the
+	 * fulfilled AND the rejected branch and resolves the cleanup copy to
+	 * `undefined`, so nothing escapes. Callers keep awaiting the ORIGINAL
+	 * `promise` — its semantics are unchanged.
+	 */
+	private settleInflight<T>(promise: Promise<T>, cleanup: () => void): void {
+		void promise.then(cleanup, cleanup);
+	}
+
+	/**
+	 * Reserve the next application sequence for `accountId`, called at the instant
+	 * a coordinator-driven network call (free-GET read or native-ping spend) is
+	 * ISSUED. Monotonic per account; two observations issued before either applies
+	 * receive distinct, increasing values so their relative issue order is
+	 * preserved.
+	 */
+	private reserveApplicationSeq(accountId: string): number {
+		const next = (this.applicationSeqCounter.get(accountId) ?? 0) + 1;
+		this.applicationSeqCounter.set(accountId, next);
+		return next;
+	}
+
+	/**
+	 * Decide whether the observation reserved at `seq` may APPLY, and if so record
+	 * it as the newest applied for `accountId`. Returns `false` when a
+	 * later-issued observation already applied — this one is stale and must not
+	 * overwrite the newer cache / rate_limit_reset (nor clear a cooldown a newer
+	 * spend set).
+	 */
+	private claimApplication(accountId: string, seq: number): boolean {
+		const lastApplied = this.lastAppliedSeq.get(accountId) ?? 0;
+		if (seq <= lastApplied) return false;
+		this.lastAppliedSeq.set(accountId, seq);
+		return true;
 	}
 
 	/**
@@ -400,7 +461,7 @@ export class CodexSpendCoordinator {
 
 		const promise = this.runResetCreditsRefresh(accountId);
 		this.resetCreditsInflight.set(accountId, promise);
-		void promise.finally(() => {
+		this.settleInflight(promise, () => {
 			if (this.resetCreditsInflight.get(accountId) === promise) {
 				this.resetCreditsInflight.delete(accountId);
 			}
@@ -509,7 +570,7 @@ export class CodexSpendCoordinator {
 		this.inflight.set(accountId, entry);
 		// Clear the entry once settled, guarded by identity so a superseding entry
 		// (should one ever exist) is never deleted out from under itself.
-		void promise.finally(() => {
+		this.settleInflight(promise, () => {
 			if (this.inflight.get(accountId) === entry) {
 				this.inflight.delete(accountId);
 			}
@@ -550,7 +611,7 @@ export class CodexSpendCoordinator {
 
 		const promise = this.runUsageStatusRead(accountId);
 		this.readInflight.set(accountId, promise);
-		void promise.finally(() => {
+		this.settleInflight(promise, () => {
 			if (this.readInflight.get(accountId) === promise) {
 				this.readInflight.delete(accountId);
 			}
@@ -590,6 +651,10 @@ export class CodexSpendCoordinator {
 		}
 
 		const chatgptAccountId = this.readChatgptAccountId(accessToken);
+		// Reserve this read's application sequence at the moment its network call is
+		// ISSUED — pairs with the native-ping spend's reservation so a read that
+		// BEGAN before a later spend APPLIED cannot overwrite the newer state.
+		const applicationSeq = this.reserveApplicationSeq(accountId);
 		const status = await this.fetchCodexUsageStatus({
 			accessToken,
 			chatgptAccountId,
@@ -610,6 +675,19 @@ export class CodexSpendCoordinator {
 			return {
 				success: false,
 				message: `Codex returned no usage windows for '${account.name}' (status ${status.status}).`,
+			};
+		}
+
+		// Cross-transport ordering guard (SF1): if a newer observation for this
+		// account already applied while this GET was in flight (e.g. a scheduled
+		// prime opened a NEW 5h window), applying this now-stale old-window snapshot
+		// would clobber the fresher cache + persisted rate_limit_reset and could
+		// clear a cooldown the newer spend just set. Skip the application but still
+		// report a successful read (the GET itself succeeded).
+		if (!this.claimApplication(accountId, applicationSeq)) {
+			return {
+				success: true,
+				message: `Usage read for '${account.name}' superseded by a newer observation; kept the fresher state.`,
 			};
 		}
 
@@ -667,6 +745,10 @@ export class CodexSpendCoordinator {
 		// 7. Issue the single native ping (the ONLY transport — no translated
 		//    fallback on failure).
 		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
+		// Reserve this spend's application sequence at the instant its native ping
+		// is ISSUED — pairs with the free-GET read's reservation so whichever
+		// observation was issued LATER wins the cache/DB (see claimApplication).
+		const applicationSeq = this.reserveApplicationSeq(accountId);
 		let response: Response;
 		try {
 			response = await this.sendCodexNativePing(accessToken, endpoint);
@@ -705,6 +787,33 @@ export class CodexSpendCoordinator {
 			: "none";
 		const rateLimitAction: CodexRateLimitAction =
 			response.status === 429 ? { kind: "apply" } : { kind: "skip" };
+
+		// Cross-transport ordering guard (SF1): if a newer observation for this
+		// account already applied while this ping was in flight, skip the ENTIRE
+		// application (cache/reset persistence, 429 cooldown, and success recovery)
+		// so a stale snapshot cannot overwrite the fresher state. The transport
+		// status is still reported to the caller. Skipping also drops this spend's
+		// request-count increment — an accepted one-request undercount in this rare
+		// reverse-completion race, in exchange for never clobbering newer state.
+		if (!this.claimApplication(accountId, applicationSeq)) {
+			log.debug(
+				`Codex spend for '${account.name}' [${[...causes].join("+")}] superseded by a newer observation (status=${response.status}); skipped application.`,
+			);
+			return {
+				status: "completed",
+				responseOk: response.ok,
+				responseStatus: response.status,
+				accountName: account.name,
+				observation: {
+					usage: null,
+					effectiveCredits: null,
+					earliestResetMs: null,
+					windowRolledOver: false,
+					isRateLimited: rateLimitInfo.isRateLimited,
+					responseStatus: response.status,
+				},
+			};
+		}
 
 		const observation = this.applyCodexObservation(
 			account,
