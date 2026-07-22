@@ -1,3 +1,4 @@
+import type { AnthropicLimitEntry } from "@clankermux/types";
 import type { UsageData, UsageWindow } from "../../usage-fetcher";
 
 export interface ParseCodexUsageHeadersOptions {
@@ -135,7 +136,7 @@ export function normalizeCodexWindow(
 
 function readWindow(
 	headers: Headers,
-	prefix: "primary" | "secondary",
+	prefix: string,
 	baseTimeMs: number,
 	allowRelativeResetAfter: boolean,
 	defaultUtilization: number,
@@ -225,6 +226,96 @@ export function isCodexOnCredits(info: CodexCreditsInfo | null): boolean {
 	);
 }
 
+type ReadWindowResult = {
+	window: "five_hour" | "seven_day" | null;
+	data: UsageWindow | null;
+};
+
+/**
+ * Pick the window whose slot matches `slot`, preferring the `primary` reading
+ * over `secondary` when both land in the same slot. Shared by the account-wide
+ * (`parseCodexUsageHeaders`) and per-family (`parseCodexScopedLimits`) paths so
+ * the "primary wins, secondary is the fallback" rule lives in one place.
+ */
+function pickWindowBySlot(
+	primary: ReadWindowResult,
+	secondary: ReadWindowResult,
+	slot: "five_hour" | "seven_day",
+): UsageWindow | null {
+	return (
+		(primary.window === slot ? primary.data : null) ??
+		(secondary.window === slot ? secondary.data : null)
+	);
+}
+
+/**
+ * Discover per-model Codex limit families and emit each one's WEEKLY window as a
+ * synthetic `AnthropicLimitEntry`. Codex's backend advertises a family via an
+ * `x-codex-<family>-limit-name` header (value = human display name, e.g.
+ * "GPT-5.3-Codex-Spark") and then reports that family's quota under prefixed
+ * windows `x-codex-<family>-primary-*` / `-secondary-*`. The un-prefixed
+ * `primary`/`secondary` windows (the account-wide limit) are handled separately
+ * by `parseCodexUsageHeaders` and are NOT touched here.
+ *
+ * Families are classified by window duration, not by the primary/secondary name:
+ * the weekly window is whichever prefix slots to `seven_day` (preferring the
+ * higher-minute `primary` when both somehow qualify). The dashboard renders these
+ * `weekly_scoped` entries as per-model "secondary" cards via a shape-gated path,
+ * so we only emit when both a finite `percent` and a non-null `resets_at` are
+ * present (the client filter requires both plus a display name).
+ */
+export function parseCodexScopedLimits(
+	headers: Headers,
+	options: { baseTimeMs: number; allowRelativeResetAfter: boolean },
+): AnthropicLimitEntry[] {
+	const { baseTimeMs, allowRelativeResetAfter } = options;
+	// Map family codename (capture group) -> display name (header value). The
+	// `-limit-name` suffix keeps `x-codex-active-limit` from matching.
+	const familyNamePattern = /^x-codex-([a-z0-9]+)-limit-name$/i;
+	const families = new Map<string, string>();
+	headers.forEach((value, key) => {
+		const match = familyNamePattern.exec(key);
+		if (!match) return;
+		families.set(match[1].toLowerCase(), value);
+	});
+
+	const limits: AnthropicLimitEntry[] = [];
+	// Alphabetical order keeps the emitted array deterministic across runs.
+	for (const codename of [...families.keys()].sort()) {
+		const displayName = families.get(codename) as string;
+		const primary = readWindow(
+			headers,
+			`${codename}-primary`,
+			baseTimeMs,
+			allowRelativeResetAfter,
+			DEFAULT_UTILIZATION,
+		);
+		const secondary = readWindow(
+			headers,
+			`${codename}-secondary`,
+			baseTimeMs,
+			allowRelativeResetAfter,
+			DEFAULT_UTILIZATION,
+		);
+		// Prefer the primary weekly window; fall back to secondary if that is where
+		// the seven-day window landed. Empty placeholder windows collapse to null.
+		const weekly = pickWindowBySlot(primary, secondary, "seven_day");
+		if (!weekly) continue;
+		if (!Number.isFinite(weekly.utilization) || weekly.resets_at === null) {
+			continue;
+		}
+		limits.push({
+			kind: "weekly_scoped",
+			group: "codex",
+			percent: weekly.utilization,
+			resets_at: weekly.resets_at,
+			scope: { model: { id: displayName, display_name: displayName } },
+			is_active: true,
+		});
+	}
+	return limits;
+}
+
 export function parseCodexUsageHeaders(
 	headers: Headers,
 	options: ParseCodexUsageHeadersOptions = {},
@@ -257,14 +348,12 @@ export function parseCodexUsageHeaders(
 	);
 
 	const fiveHour =
-		(primary.window === "five_hour" ? primary.data : null) ??
-		(secondary.window === "five_hour" ? secondary.data : null) ??
+		pickWindowBySlot(primary, secondary, "five_hour") ??
 		(legacyFiveHourReset
 			? toUsageWindow(defaultUtilization, legacyFiveHourReset)
 			: null);
 	const sevenDay =
-		(primary.window === "seven_day" ? primary.data : null) ??
-		(secondary.window === "seven_day" ? secondary.data : null) ??
+		pickWindowBySlot(primary, secondary, "seven_day") ??
 		(legacySevenDayReset
 			? toUsageWindow(defaultUtilization, legacySevenDayReset)
 			: null);
@@ -273,8 +362,19 @@ export function parseCodexUsageHeaders(
 		return null;
 	}
 
-	return {
+	const limits = parseCodexScopedLimits(headers, {
+		baseTimeMs,
+		allowRelativeResetAfter,
+	});
+
+	const usage: UsageData = {
 		five_hour: fiveHour ?? { utilization: defaultUtilization, resets_at: null },
 		seven_day: sevenDay ?? { utilization: defaultUtilization, resets_at: null },
 	};
+	// Only attach `limits` when a per-model family surfaced — an empty array would
+	// add noise the downstream filter has to strip.
+	if (limits.length > 0) {
+		usage.limits = limits;
+	}
+	return usage;
 }

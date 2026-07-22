@@ -247,25 +247,43 @@ export function presentRateLimitStatus(
 	return "OK";
 }
 
-function normalizeCodexUsageData(usage: UsageData): UsageData | null {
+export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
+	const now = Date.now();
 	const normalized: UsageData = {
 		five_hour: { ...usage.five_hour },
 		seven_day: { ...usage.seven_day },
 	};
 	if (
 		normalized.five_hour.resets_at &&
-		new Date(normalized.five_hour.resets_at).getTime() <= Date.now()
+		new Date(normalized.five_hour.resets_at).getTime() <= now
 	) {
 		normalized.five_hour = { utilization: 0, resets_at: null };
 	}
 	if (
 		normalized.seven_day.resets_at &&
-		new Date(normalized.seven_day.resets_at).getTime() <= Date.now()
+		new Date(normalized.seven_day.resets_at).getTime() <= now
 	) {
 		normalized.seven_day = { utilization: 0, resets_at: null };
 	}
+	// Preserve the synthetic per-model `limits[]` (Codex scoped weekly windows),
+	// dropping any entry whose reset has already passed — parity with the flat
+	// window zeroing above. A stale-reset entry is a spent window, not a live one.
+	if (usage.limits) {
+		normalized.limits = usage.limits.filter((entry) => {
+			if (!entry.resets_at) return true;
+			const resetMs = new Date(entry.resets_at).getTime();
+			return !Number.isFinite(resetMs) || resetMs > now;
+		});
+	}
+	// Keep the payload alive when any per-model scoped weekly limit survived the
+	// filter above, even if both flat windows have gone stale. Codex no longer
+	// reports a 5-hour window (`five_hour.resets_at` is always null), so gating
+	// solely on the flat windows would discard a still-live Spark scoped card the
+	// moment the account-wide weekly reset lapses in a stale cache snapshot.
+	const hasLiveLimits = (normalized.limits?.length ?? 0) > 0;
 	return normalized.five_hour.resets_at !== null ||
-		normalized.seven_day.resets_at !== null
+		normalized.seven_day.resets_at !== null ||
+		hasLiveLimits
 		? normalized
 		: null;
 }

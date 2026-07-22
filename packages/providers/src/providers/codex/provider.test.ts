@@ -2718,6 +2718,113 @@ describe("parseCodexUsageHeaders reset-after handling", () => {
 	});
 });
 
+describe("parseCodexUsageHeaders per-model scoped limits", () => {
+	it("emits a weekly_scoped limits entry from real bengalfox headers", () => {
+		const headers = new Headers({
+			"x-codex-active-limit": "premium",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-used-percent": "21",
+			"x-codex-primary-reset-at": "1785258194",
+			"x-codex-secondary-window-minutes": "0",
+			"x-codex-secondary-used-percent": "0",
+			"x-codex-secondary-reset-after-seconds": "0",
+			"x-codex-bengalfox-limit-name": "GPT-5.3-Codex-Spark",
+			"x-codex-bengalfox-primary-window-minutes": "10080",
+			"x-codex-bengalfox-primary-used-percent": "0",
+			"x-codex-bengalfox-primary-reset-at": "1785335948",
+			"x-codex-bengalfox-secondary-window-minutes": "0",
+			"x-codex-bengalfox-secondary-used-percent": "0",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage).not.toBeNull();
+		// Regular un-prefixed weekly window is unchanged.
+		expect(usage?.seven_day).toEqual({
+			utilization: 21,
+			resets_at: new Date(1785258194 * 1000).toISOString(),
+		});
+		expect(usage?.limits).toHaveLength(1);
+		expect(usage?.limits?.[0]).toEqual({
+			kind: "weekly_scoped",
+			group: "codex",
+			percent: 0,
+			resets_at: new Date(1785335948 * 1000).toISOString(),
+			scope: {
+				model: {
+					id: "GPT-5.3-Codex-Spark",
+					display_name: "GPT-5.3-Codex-Spark",
+				},
+			},
+			is_active: true,
+		});
+	});
+
+	it("discovers multiple families deterministically", () => {
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-used-percent": "21",
+			"x-codex-primary-reset-at": "1785258194",
+			"x-codex-otterpaw-limit-name": "Some-Model",
+			"x-codex-otterpaw-primary-window-minutes": "10080",
+			"x-codex-otterpaw-primary-used-percent": "5",
+			"x-codex-otterpaw-primary-reset-at": "1900000000",
+			"x-codex-bengalfox-limit-name": "GPT-5.3-Codex-Spark",
+			"x-codex-bengalfox-primary-window-minutes": "10080",
+			"x-codex-bengalfox-primary-used-percent": "0",
+			"x-codex-bengalfox-primary-reset-at": "1785335948",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		// Alphabetical family order: bengalfox before otterpaw.
+		expect(usage?.limits).toHaveLength(2);
+		expect(usage?.limits?.map((l) => l.scope?.model?.display_name)).toEqual([
+			"GPT-5.3-Codex-Spark",
+			"Some-Model",
+		]);
+		expect(usage?.limits?.[1]).toEqual({
+			kind: "weekly_scoped",
+			group: "codex",
+			percent: 5,
+			resets_at: new Date(1900000000 * 1000).toISOString(),
+			scope: { model: { id: "Some-Model", display_name: "Some-Model" } },
+			is_active: true,
+		});
+	});
+
+	it("omits limits when no family headers are present", () => {
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-used-percent": "21",
+			"x-codex-primary-reset-at": "1785258194",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage).not.toBeNull();
+		expect(usage?.limits).toBeUndefined();
+	});
+
+	it("does not emit a family whose weekly window is an empty placeholder", () => {
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-used-percent": "21",
+			"x-codex-primary-reset-at": "1785258194",
+			"x-codex-otterpaw-limit-name": "Placeholder-Model",
+			"x-codex-otterpaw-primary-window-minutes": "0",
+			"x-codex-otterpaw-primary-used-percent": "0",
+			"x-codex-otterpaw-secondary-window-minutes": "0",
+			"x-codex-otterpaw-secondary-used-percent": "0",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage).not.toBeNull();
+		expect(usage?.limits).toBeUndefined();
+	});
+});
+
 describe("count_tokens synthetic response", () => {
 	it("returns synthetic 200 with input_tokens for valid JSON body", async () => {
 		const provider = new CodexProvider();

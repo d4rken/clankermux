@@ -235,6 +235,84 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
+	describe("empty placeholder window suppression", () => {
+		const future = () =>
+			new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+
+		it("suppresses the Codex 5-hour placeholder (0% / no reset / not rate-limited) but keeps the weekly card", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageWindow="seven_day"
+					usageData={{
+						five_hour: { utilization: 0, resets_at: null },
+						seven_day: { utilization: 21, resets_at: future() },
+					}}
+					provider="codex"
+					showWeekly
+				/>,
+			);
+
+			expect(html).not.toContain("5-hour");
+			expect(html).toContain("Weekly");
+			expect(html).toContain("21%");
+		});
+
+		it("still renders an Anthropic 5-hour window at 0% when it carries a real reset", () => {
+			const reset = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset}
+					usageUtilization={0}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 0, resets_at: reset },
+						seven_day: { utilization: 20, resets_at: reset },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("5-hour");
+		});
+
+		it("renders a Codex scoped weekly (Spark) secondary card even when the 5-hour placeholder is suppressed", () => {
+			const reset = future();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageWindow="seven_day"
+					usageData={{
+						five_hour: { utilization: 0, resets_at: null },
+						seven_day: { utilization: 21, resets_at: reset },
+						limits: [
+							{
+								kind: "weekly_scoped",
+								group: "codex",
+								percent: 0,
+								resets_at: reset,
+								scope: {
+									model: {
+										id: "GPT-5.3-Codex-Spark",
+										display_name: "GPT-5.3-Codex-Spark",
+									},
+									surface: null,
+								},
+								is_active: true,
+							},
+						],
+					}}
+					provider="codex"
+					showWeekly
+				/>,
+			);
+
+			expect(html).not.toContain("5-hour");
+			expect(html).toContain("GPT-5.3-Codex-Spark");
+		});
+	});
+
 	describe("caption reset status", () => {
 		it("shows a 24-hour reset time with the remaining time in brackets and no AM/PM", () => {
 			const reset = new Date(Date.now() + 2 * 60 * 60 * 1000 + 30 * 60 * 1000);
