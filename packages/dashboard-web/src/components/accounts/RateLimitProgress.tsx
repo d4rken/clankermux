@@ -34,7 +34,6 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
-	showSecondaryWeekly?: boolean; // Show the model-specific weekly windows (Opus/Sonnet). Defaults true so callers that don't opt into the compact view are unaffected.
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
 }
@@ -55,9 +54,23 @@ function predictionForWindow(
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
 
-// Tints the "all available windows" usage block so it reads as a distinct
-// sub-panel set apart from the rest of the account card.
-const USAGE_BOX_CLASS = "rounded-lg border border-border/60 bg-muted/40 p-3";
+// Each usage window renders as its own card. Primary windows (the 5-hour and
+// unscoped weekly quota) get a filled muted card; the secondary,
+// model-family-specific weekly cards are left unfilled (outline only). A
+// filled-vs-outline distinction reads clearly in BOTH light and dark themes,
+// whereas a mere opacity difference on `bg-muted` is near-invisible in light
+// mode (muted is ~96% lightness, so it barely differs from a white surface).
+const WINDOW_CARD_CLASS = "rounded-lg border p-3";
+const PRIMARY_WINDOW_TINT = "border-border/60 bg-muted/50";
+const SECONDARY_WINDOW_TINT = "border-border/50 bg-transparent";
+
+// The three standalone message blocks (rate-limited, stale, Kilo credits) all
+// render as a single primary card.
+const PRIMARY_CARD_CLASS = cn(
+	WINDOW_CARD_CLASS,
+	PRIMARY_WINDOW_TINT,
+	"space-y-2",
+);
 
 function computeExpectedPct(
 	resetTime: string | null,
@@ -111,6 +124,7 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
 	return new Date(roundedUpToMinuteMs).toLocaleTimeString(undefined, {
 		hour: "2-digit",
 		minute: "2-digit",
+		hour12: false,
 	});
 }
 
@@ -156,6 +170,31 @@ function projectionToneClass(
 		return tone === "danger" ? "text-destructive" : "text-success";
 	}
 	return tone === "danger" ? "text-red-400" : "text-green-400";
+}
+
+// Compact "time left until reset" for the caption bracket, showing the two
+// largest meaningful units: days+hours when a day or more remains, else
+// hours+minutes, else minutes.
+function formatRemaining(ms: number): string {
+	const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+	if (totalMinutes < 1) return "<1m";
+	const days = Math.floor(totalMinutes / (60 * 24));
+	const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+	const minutes = totalMinutes % 60;
+	if (days > 0) return `${days}d ${hours}h`;
+	if (hours > 0) return `${hours}h ${minutes}m`;
+	return `${minutes}m`;
+}
+
+// The model-family weekly windows (e.g. "Fable"/Opus/Sonnet) are secondary to
+// the primary 5-hour and unscoped weekly windows and get the subtler card tint.
+function isSecondaryWindow(window: string | null, label?: string): boolean {
+	if (label != null) return true;
+	return (
+		window === "seven_day_scoped" ||
+		window === "seven_day_opus" ||
+		window === "seven_day_sonnet"
+	);
 }
 
 // Format window name for display
@@ -226,11 +265,13 @@ function formatResetText(
 			day: "numeric",
 			hour: "2-digit",
 			minute: "2-digit",
+			hour12: false,
 		})}`;
 	}
 	return `Resets ${resetDate.toLocaleTimeString(undefined, {
 		hour: "2-digit",
 		minute: "2-digit",
+		hour12: false,
 	})}`;
 }
 
@@ -240,6 +281,7 @@ function formatAsOfText(asOfIso: string, now: number): string {
 		return asOfDate.toLocaleTimeString(undefined, {
 			hour: "2-digit",
 			minute: "2-digit",
+			hour12: false,
 		});
 	}
 	return asOfDate.toLocaleString(undefined, {
@@ -247,6 +289,7 @@ function formatAsOfText(asOfIso: string, now: number): string {
 		day: "numeric",
 		hour: "2-digit",
 		minute: "2-digit",
+		hour12: false,
 	});
 }
 
@@ -269,7 +312,6 @@ export function RateLimitProgress({
 	provider,
 	className,
 	showWeekly = false,
-	showSecondaryWeekly = true,
 	inlineProjection = false,
 	prediction = null,
 }: RateLimitProgressProps) {
@@ -311,9 +353,10 @@ export function RateLimitProgress({
 		const retryTimeText = retryAfterDate.toLocaleTimeString(undefined, {
 			hour: "2-digit",
 			minute: "2-digit",
+			hour12: false,
 		});
 		return (
-			<div className={cn(USAGE_BOX_CLASS, "space-y-2", className)}>
+			<div className={cn(PRIMARY_CARD_CLASS, className)}>
 				<div className="flex items-center justify-between">
 					<span className="text-xs text-amber-600 dark:text-amber-400">
 						Rate limited — usage data unavailable
@@ -334,7 +377,7 @@ export function RateLimitProgress({
 	// Wording never implies the value is live — "last known as of HH:MM".
 	if (!usageData && staleUsage) {
 		return (
-			<div className={cn(USAGE_BOX_CLASS, "space-y-2", className)}>
+			<div className={cn(PRIMARY_CARD_CLASS, className)}>
 				<div className="space-y-1.5">
 					{staleUsage.fiveHour && (
 						<>
@@ -343,18 +386,18 @@ export function RateLimitProgress({
 								className="h-2"
 							/>
 							<div className="flex items-center justify-between gap-2 text-xs">
-								<span className="text-muted-foreground">
+								<span className="min-w-0 flex-1 truncate text-muted-foreground">
 									5h: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
 								</span>
-								<span className="font-medium text-muted-foreground">
-									{staleUsage.fiveHour.utilization.toFixed(0)}%
-								</span>
-								<span className="text-right text-muted-foreground">
+								<span className="shrink-0 text-muted-foreground">
 									{formatResetText(
 										staleUsage.fiveHour.resetIso,
 										"five_hour",
 										now,
 									)}
+								</span>
+								<span className="shrink-0 font-medium text-muted-foreground">
+									{staleUsage.fiveHour.utilization.toFixed(0)}%
 								</span>
 							</div>
 						</>
@@ -366,19 +409,19 @@ export function RateLimitProgress({
 								className="h-2"
 							/>
 							<div className="flex items-center justify-between gap-2 text-xs">
-								<span className="text-muted-foreground">
+								<span className="min-w-0 flex-1 truncate text-muted-foreground">
 									Weekly: last known as of{" "}
 									{formatAsOfText(staleUsage.asOfIso, now)}
 								</span>
-								<span className="font-medium text-muted-foreground">
-									{staleUsage.sevenDay.utilization.toFixed(0)}%
-								</span>
-								<span className="text-right text-muted-foreground">
+								<span className="shrink-0 text-muted-foreground">
 									{formatResetText(
 										staleUsage.sevenDay.resetIso,
 										"seven_day",
 										now,
 									)}
+								</span>
+								<span className="shrink-0 font-medium text-muted-foreground">
+									{staleUsage.sevenDay.utilization.toFixed(0)}%
 								</span>
 							</div>
 						</>
@@ -402,7 +445,14 @@ export function RateLimitProgress({
 		if (typeof kiloData.remainingUsd === "number") {
 			const hasCredits = (kiloData.totalMicrodollarsAcquired ?? 0) > 0;
 			return (
-				<div className={cn(USAGE_BOX_CLASS, "space-y-2", className)}>
+				<div
+					className={cn(
+						WINDOW_CARD_CLASS,
+						PRIMARY_WINDOW_TINT,
+						"space-y-2",
+						className,
+					)}
+				>
 					<div className="flex items-center justify-between">
 						<span className="text-xs text-muted-foreground">
 							Kilo Gateway credits
@@ -419,10 +469,6 @@ export function RateLimitProgress({
 	}
 
 	const resetTime = resetIso ? new Date(resetIso).getTime() : Date.now();
-	const remainingMs = Math.max(0, resetTime - now);
-	const remainingMinutes = Math.ceil(remainingMs / 60000);
-	const _remainingHours = Math.floor(remainingMinutes / 60);
-	const _remainingMins = remainingMinutes % 60;
 
 	// Determine which usage windows to display
 	const usages: UsageDisplay[] = [];
@@ -545,19 +591,15 @@ export function RateLimitProgress({
 			});
 		}
 
-		// Model-specific weekly windows (e.g. "Fable") are "secondary": shown
-		// only when opted in, and only when the window would actually render.
-		// The eligibility check is shared with the overflow-menu gate via
-		// getScopedWeeklyLimits so the two never drift apart.
-		if (showSecondaryWeekly) {
-			for (const limit of getScopedWeeklyLimits(usageData)) {
-				usages.push({
-					utilization: limit.utilization,
-					window: "seven_day_scoped",
-					resetTime: limit.resetsAt,
-					label: limit.label,
-				});
-			}
+		// Model-specific weekly windows (e.g. "Fable") always render as their own
+		// secondary cards when the payload carries them.
+		for (const limit of getScopedWeeklyLimits(usageData)) {
+			usages.push({
+				utilization: limit.utilization,
+				window: "seven_day_scoped",
+				resetTime: limit.resetsAt,
+				label: limit.label,
+			});
 		}
 	} else if (
 		providerShowsWeeklyUsage(provider) &&
@@ -587,13 +629,7 @@ export function RateLimitProgress({
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	return (
-		<div
-			className={cn(
-				USAGE_BOX_CLASS,
-				"grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2",
-				className,
-			)}
-		>
+		<div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", className)}>
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
@@ -610,7 +646,11 @@ export function RateLimitProgress({
 									? `${usage.window}-${usage.label}`
 									: usage.window || "default"
 							}
-							className="space-y-1.5"
+							className={cn(
+								WINDOW_CARD_CLASS,
+								PRIMARY_WINDOW_TINT,
+								"space-y-1.5",
+							)}
 						>
 							<div className="flex items-center justify-between">
 								<span className="text-xs text-muted-foreground">
@@ -646,6 +686,7 @@ export function RateLimitProgress({
 				const windowLabel =
 					usage.label ??
 					(usage.window ? formatWindowName(usage.window) : "Rate limit");
+				const isSecondary = isSecondaryWindow(usage.window, usage.label);
 				// Prefer the server-computed regression prediction when it's
 				// trustworthy (recent slope, not lifetime average) AND we have a live
 				// reading to anchor it. When usable, its message is authoritative —
@@ -668,16 +709,19 @@ export function RateLimitProgress({
 								now,
 							);
 
-				// Compact caption: the bar sits on top; below it line 1 shows the
-				// window label (start) and utilization % (end), and line 2 shows a
-				// single reset-status string. `windowLabel` (defined above) is reused
-				// as the label, so the window name is no longer wrapped in "Usage (…)".
+				// Compact caption on a single row: window label (start), the reset
+				// status (center), utilization % (end). The reset status pairs the
+				// absolute 24-hour reset time with the time remaining in brackets,
+				// e.g. "Resets Jul 26, 08:59 (2d 13h)".
 				let resetStatus = "";
 				if (usage.resetTime) {
+					const resetMs = new Date(usage.resetTime).getTime();
 					resetStatus =
-						new Date(usage.resetTime).getTime() <= now
+						resetMs <= now
 							? "Ready to refresh"
-							: formatResetText(usage.resetTime, usage.window, now);
+							: `${formatResetText(usage.resetTime, usage.window, now)} (${formatRemaining(
+									resetMs - now,
+								)})`;
 				} else if (
 					usage.window === "seven_day" ||
 					usage.window === "seven_day_scoped"
@@ -699,7 +743,11 @@ export function RateLimitProgress({
 								? `${usage.window}-${usage.label}`
 								: usage.window || "default"
 						}
-						className="space-y-1.5"
+						className={cn(
+							WINDOW_CARD_CLASS,
+							isSecondary ? SECONDARY_WINDOW_TINT : PRIMARY_WINDOW_TINT,
+							"space-y-1.5",
+						)}
 					>
 						<div className={cn(!inlineProjection && "group", "relative")}>
 							{!inlineProjection && (
@@ -746,9 +794,14 @@ export function RateLimitProgress({
 							)}
 						</div>
 						<div className="flex items-center justify-between gap-2 text-xs">
-							<span className="min-w-0 truncate text-muted-foreground">
+							<span className="shrink-0 text-muted-foreground">
 								{windowLabel}
 							</span>
+							{resetStatus && (
+								<span className="min-w-0 flex-1 truncate text-center text-muted-foreground">
+									{resetStatus}
+								</span>
+							)}
 							<span
 								className={cn(
 									"shrink-0 font-medium text-muted-foreground",
@@ -758,11 +811,6 @@ export function RateLimitProgress({
 								{isAvailable ? `${percentage?.toFixed(0)}%` : "N/A"}
 							</span>
 						</div>
-						{resetStatus && (
-							<div className="truncate text-xs text-muted-foreground">
-								{resetStatus}
-							</div>
-						)}
 						{inlineProjection && projection && (
 							<p
 								className={cn(

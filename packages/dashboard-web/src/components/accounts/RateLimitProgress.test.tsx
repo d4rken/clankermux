@@ -165,7 +165,7 @@ describe("RateLimitProgress", () => {
 			],
 		});
 
-		it("hides the scoped weekly bars when showSecondaryWeekly is false", () => {
+		it("always shows the scoped weekly bars", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -174,26 +174,6 @@ describe("RateLimitProgress", () => {
 					usageData={usageData()}
 					provider="anthropic"
 					showWeekly
-					showSecondaryWeekly={false}
-				/>,
-			);
-
-			expect(html).toContain("5-hour");
-			expect(html).toContain("Weekly");
-			expect(html).not.toContain("Opus");
-			expect(html).not.toContain("Sonnet");
-		});
-
-		it("shows the scoped weekly bars when showSecondaryWeekly is true", () => {
-			const html = renderToStaticMarkup(
-				<RateLimitProgress
-					resetIso={future()}
-					usageUtilization={10}
-					usageWindow="five_hour"
-					usageData={usageData()}
-					provider="anthropic"
-					showWeekly
-					showSecondaryWeekly
 				/>,
 			);
 
@@ -201,22 +181,6 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("30%");
 			expect(html).toContain("Sonnet");
 			expect(html).toContain("5%");
-		});
-
-		it("shows the scoped weekly bars by default (prop omitted)", () => {
-			const html = renderToStaticMarkup(
-				<RateLimitProgress
-					resetIso={future()}
-					usageUtilization={10}
-					usageWindow="five_hour"
-					usageData={usageData()}
-					provider="anthropic"
-					showWeekly
-				/>,
-			);
-
-			expect(html).toContain("Opus");
-			expect(html).toContain("Sonnet");
 		});
 
 		it("shows a weekly_scoped limit for a model family other than Opus/Sonnet (regression for the Fable bug)", () => {
@@ -245,12 +209,75 @@ describe("RateLimitProgress", () => {
 					}}
 					provider="anthropic"
 					showWeekly
-					showSecondaryWeekly
 				/>,
 			);
 
 			expect(html).toContain("Fable");
 			expect(html).toContain("69%");
+		});
+
+		it("gives primary and secondary family windows different card tints", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={usageData()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			// Primary 5-hour/weekly cards are filled; the scoped model-family
+			// cards (Opus/Sonnet) are left unfilled (outline only).
+			expect(html).toContain("bg-muted/50");
+			expect(html).toContain("bg-transparent");
+		});
+	});
+
+	describe("caption reset status", () => {
+		it("shows a 24-hour reset time with the remaining time in brackets and no AM/PM", () => {
+			const reset = new Date(Date.now() + 2 * 60 * 60 * 1000 + 30 * 60 * 1000);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset.toISOString()}
+					usageUtilization={40}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 40, resets_at: reset.toISOString() },
+						seven_day: null,
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			// Time remaining rendered in brackets (largest units first)...
+			expect(html).toContain("(2h ");
+			// ...and the absolute reset time uses a 24-hour clock, never AM/PM.
+			expect(html).not.toContain("AM");
+			expect(html).not.toContain("PM");
+		});
+
+		it("shows days for a multi-day reset", () => {
+			const reset = new Date(
+				Date.now() + 4 * 24 * 60 * 60 * 1000 + 3 * 60 * 60 * 1000,
+			);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={reset.toISOString()}
+					usageUtilization={20}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 20, resets_at: reset.toISOString() },
+						seven_day: null,
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("(4d ");
 		});
 	});
 
@@ -374,6 +401,7 @@ describe("RateLimitProgress", () => {
 				day: "numeric",
 				hour: "2-digit",
 				minute: "2-digit",
+				hour12: false,
 			});
 			expect(html).toContain("Rate limit");
 			expect(html).toContain(`Resets ${expectedDate}`);
@@ -394,12 +422,14 @@ describe("RateLimitProgress", () => {
 			const timeOnly = reset.toLocaleTimeString(undefined, {
 				hour: "2-digit",
 				minute: "2-digit",
+				hour12: false,
 			});
 			const withDate = reset.toLocaleString(undefined, {
 				month: "short",
 				day: "numeric",
 				hour: "2-digit",
 				minute: "2-digit",
+				hour12: false,
 			});
 			const sameDay = new Date().getDate() === reset.getDate();
 			expect(html).toContain(
@@ -439,6 +469,7 @@ describe("RateLimitProgress", () => {
 				day: "numeric",
 				hour: "2-digit",
 				minute: "2-digit",
+				hour12: false,
 			});
 			expect(html).toContain("Weekly: last known as of");
 			expect(html).toContain("85%");

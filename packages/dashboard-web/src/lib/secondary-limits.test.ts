@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { FullUsageData } from "@clankermux/types";
-import {
-	getScopedWeeklyLimits,
-	hasSecondaryWeeklyWindows,
-	parseSecondaryLimitIds,
-} from "./secondary-limits";
+import { getScopedWeeklyLimits } from "./secondary-limits";
 
 const ISO = "2024-01-03T12:00:00.000Z";
 
@@ -222,105 +218,5 @@ describe("getScopedWeeklyLimits", () => {
 				time_limit: null,
 			} as unknown as FullUsageData),
 		).toEqual([]);
-	});
-});
-
-describe("hasSecondaryWeeklyWindows", () => {
-	it("is true when a weekly_scoped limit entry would render", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				five_hour: { utilization: 10, resets_at: ISO },
-				seven_day: { utilization: 20, resets_at: ISO },
-				limits: [scopedEntry()],
-			} as unknown as FullUsageData),
-		).toBe(true);
-	});
-
-	it("is false when only five_hour / seven_day are present", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				five_hour: { utilization: 10, resets_at: ISO },
-				seven_day: { utilization: 20, resets_at: ISO },
-			} as unknown as FullUsageData),
-		).toBe(false);
-	});
-
-	it("is false when limits has no weekly_scoped entries", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				five_hour: { utilization: 10, resets_at: ISO },
-				seven_day: { utilization: 20, resets_at: ISO },
-				limits: [sessionEntry, weeklyAllEntry],
-			} as unknown as FullUsageData),
-		).toBe(false);
-	});
-
-	it("is false for null and undefined usageData", () => {
-		expect(hasSecondaryWeeklyWindows(null)).toBe(false);
-		expect(hasSecondaryWeeklyWindows(undefined)).toBe(false);
-	});
-
-	it("is false for a Zai-shaped object", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				tokens_limit: {
-					used: 0,
-					remaining: 0,
-					percentage: 0,
-					resetAt: null,
-					type: "tokens",
-				},
-				time_limit: null,
-			} as unknown as FullUsageData),
-		).toBe(false);
-	});
-
-	it("is true from a limits[]-only payload with a scoped window (no flat keys)", () => {
-		// The old both-flat-keys guard has been dropped: upstream is moving to a
-		// `limits[]`-only payload, so a scoped window there must still be offered.
-		expect(
-			hasSecondaryWeeklyWindows({
-				limits: [scopedEntry()],
-			} as unknown as FullUsageData),
-		).toBe(true);
-	});
-
-	it("is still true when only five_hour + scoped limits are present (partial flat)", () => {
-		expect(
-			hasSecondaryWeeklyWindows({
-				five_hour: { utilization: 10, resets_at: ISO },
-				limits: [scopedEntry()],
-			} as unknown as FullUsageData),
-		).toBe(true);
-	});
-});
-
-describe("parseSecondaryLimitIds", () => {
-	it("parses a valid JSON array of strings", () => {
-		expect(parseSecondaryLimitIds('["a","b"]')).toEqual(["a", "b"]);
-	});
-
-	it("returns [] for null", () => {
-		expect(parseSecondaryLimitIds(null)).toEqual([]);
-	});
-
-	it("returns [] for invalid JSON", () => {
-		expect(parseSecondaryLimitIds("not json")).toEqual([]);
-	});
-
-	it("returns [] for a JSON object (not an array)", () => {
-		expect(parseSecondaryLimitIds("{}")).toEqual([]);
-	});
-
-	it("returns [] for a JSON number (not an array)", () => {
-		expect(parseSecondaryLimitIds("123")).toEqual([]);
-	});
-
-	it("de-duplicates while preserving first-seen order", () => {
-		expect(parseSecondaryLimitIds('["a","a","b"]')).toEqual(["a", "b"]);
-	});
-
-	it("filters out non-string entries", () => {
-		expect(parseSecondaryLimitIds('["a", 1, null, "b"]')).toEqual(["a", "b"]);
 	});
 });
