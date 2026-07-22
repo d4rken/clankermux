@@ -60,18 +60,10 @@ function streamErrorToOutcome(err: Error): TransportOutcome {
 // Default cooldown for rate-limit errors detected mid-stream. SSE error
 // frames don't carry reset headers (HTTP headers were sent before the
 // error occurred), so we fall back to the same probe-friendly default
-// that response-processor.ts uses for headerless 429 responses.
-//
-// Read on every call (not module load) so a runtime change to the env
-// var is picked up without a server restart. Use `||` (not `??`) so an
-// empty-string env value (Number("") === 0) falls through to the default
-// instead of silently disabling the cooldown.
-function getMidStreamRateLimitCooldownMs(): number {
-	return (
-		Number(process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) ||
-		TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS
-	);
-}
+// (TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS) that
+// response-processor.ts uses for headerless 429 responses.
+const MID_STREAM_RATE_LIMIT_COOLDOWN_MS =
+	TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
 
 const log = new Logger("ResponseHandler");
 const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
@@ -492,7 +484,7 @@ async function forwardToClientInner(
 						// client retry walked every account in the pool.
 						applyProviderOverloadCooldown(
 							account.provider,
-							Date.now() + getMidStreamRateLimitCooldownMs(),
+							Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS,
 							options.upstreamModel ?? null,
 						);
 						// Probe verdict: the probe stream itself carried the overload.
@@ -507,7 +499,7 @@ async function forwardToClientInner(
 						// per-account cooldown (auto-derived reason).
 						applyRateLimitCooldown(
 							account,
-							{ resetTime: Date.now() + getMidStreamRateLimitCooldownMs() },
+							{ resetTime: Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS },
 							ctx,
 						);
 						// A mid-stream rate_limit_error is a per-ACCOUNT signal, not an

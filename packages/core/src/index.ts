@@ -34,7 +34,7 @@ export type ModelMappingData = {
 	modelMappings?: ModelMapping;
 };
 export type ModelFallback = { [modelFamily: string]: string };
-export { readEnv } from "./env";
+export { isDebugEnabled, readEnv } from "./env";
 export {
 	drainEventLoopSnapshotMaxLagMs,
 	EVENT_LOOP_ERROR_THRESHOLD_MS,

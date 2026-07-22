@@ -14,9 +14,33 @@ import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
 
+// Deterministic timing for the burst-retry hold, injected through handleProxy's
+// `burstHoldTimingOverride` seam (forwarded verbatim to holdAndRetryCacheAccount)
+// instead of the retired CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS env var. The hold
+// waits out the held account's rate-limit cooldown — now the fixed 60s no-reset
+// default — before each re-probe. Rather than shorten that cooldown (the env var
+// used to pin it to ~1s), we drive the hold's injectable clock ~10 minutes ahead
+// so the 60s cooldown always reads as already-elapsed (each re-probe fires
+// immediately, no wall-clock sleep), zero the jitter, and cap the total budget.
+// Same intent as the old env pin — a re-probe fits well within the per-test
+// timeout — with no env var and no change to the 60s production default.
+const HOLD_TIMING_OVERRIDE = {
+	now: () => Date.now() + 10 * 60 * 1000, // >> 60s no-reset cooldown horizon
+	jitterMs: 0,
+	maxHoldMs: 2_000,
+};
+
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 	const { handleProxy } = await import("../proxy");
-	return handleProxy(req, url, ctx);
+	return handleProxy(
+		req,
+		url,
+		ctx,
+		undefined,
+		undefined,
+		false,
+		HOLD_TIMING_OVERRIDE,
+	);
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
@@ -332,13 +356,11 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
-		// Deterministic timing. The first 429 sets its no-reset cooldown from
-		// CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS; pin it to ~1s so a single
-		// re-probe wait fits within the hold budget (otherwise the default 60s
-		// cooldown makes the real hold-sleep exceed the per-test timeout). The
-		// burst-retry tuning constants are now fixed in source, so only this
-		// cooldown-length knob needs pinning here.
-		process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS = "1000";
+		// Deterministic hold timing is injected per-call via HOLD_TIMING_OVERRIDE
+		// (see callHandleProxy) — no env var needed. The burst-retry tuning
+		// constants are fixed in source; the held account's no-reset cooldown uses
+		// its 60s production default and the override's forward-dated clock makes
+		// each re-probe fire immediately without a wall-clock sleep.
 	});
 
 	afterEach(() => {
@@ -346,7 +368,6 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
-		delete process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS;
 	});
 
 	it("holds the cache account on a transient 429 + quota (429→200), with NO sibling attempt", async () => {
@@ -676,8 +697,9 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(codexHit).toBe(false);
 		expect(res.status).toBe(429);
 		expect(res.headers.get("x-clankermux-burst-retry")).toBe("exhausted");
-		// Full 120s budget multi-attempt loop: held first attempt + up to
-		// MAX_ATTEMPTS=3 re-probes.
+		// Multi-attempt hold loop runs to attempt-exhaustion (the forward-dated
+		// override clock lets every re-probe fire immediately): held first attempt
+		// + up to MAX_ATTEMPTS=3 re-probes.
 		expect(anthropicCalls).toBeGreaterThanOrEqual(3);
 	});
 

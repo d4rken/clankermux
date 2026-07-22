@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	getModelFamily,
+	isDebugEnabled,
 	mapModelName,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
@@ -1210,7 +1211,7 @@ export class CodexProvider extends BaseProvider {
 		requestId?: string,
 	): CodexRequest {
 		const model = this.mapModel(body.model, account);
-		if (process.env.DEBUG?.includes("model") || process.env.DEBUG === "true") {
+		if (isDebugEnabled("model")) {
 			log.info(
 				`[codex:model-debug] request_id=${requestId ?? "unknown"} request_model=${body.model} mapped_model=${model} account=${account?.name ?? "unknown"}`,
 			);
@@ -1486,10 +1487,7 @@ export class CodexProvider extends BaseProvider {
 		};
 		const resolvedModel =
 			typeof startMessage.model === "string" ? startMessage.model : "gpt-5.4";
-		if (
-			resolvedModel === "gpt-5.4" &&
-			(process.env.DEBUG?.includes("model") || process.env.DEBUG === "true")
-		) {
+		if (resolvedModel === "gpt-5.4" && isDebugEnabled("model")) {
 			log.info(
 				`[codex:model-debug] request_id=${requestId} transformSseResponseToJson used fallback model=gpt-5.4 (startMessage.model missing)`,
 			);
@@ -1522,7 +1520,7 @@ export class CodexProvider extends BaseProvider {
 	private transformStreamingResponse(response: Response): Response {
 		const requestId =
 			response.headers.get("x-clankermux-request-id") ?? "unknown";
-		if (process.env.DEBUG?.includes("model") || process.env.DEBUG === "true") {
+		if (isDebugEnabled("model")) {
 			log.info(
 				`[codex:model-debug] request_id=${requestId} transformStreamingResponse initial fallback model=gpt-5.4 until response.created arrives`,
 			);

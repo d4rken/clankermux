@@ -28,3 +28,27 @@ export function readEnv(suffix: string): string | undefined {
 	}
 	return undefined;
 }
+
+/**
+ * Whether debug logging is enabled, resolved through {@link readEnv} so the one
+ * authoritative variable is CLANKERMUX_DEBUG (with the usual BETTER_CCFLARE_ /
+ * ccflare_ legacy fallbacks) — never a bare `DEBUG`.
+ *
+ * Enabled globally when the value is "1" or "true". When a `namespace` is given
+ * (e.g. "model", "proxy"), also enabled if the value contains that namespace, so
+ * `CLANKERMUX_DEBUG=model,proxy` turns on just those areas.
+ */
+export function isDebugEnabled(namespace?: string): boolean {
+	// Guard non-Node environments (readEnv touches process.env directly).
+	if (typeof process === "undefined" || !process.env) {
+		return false;
+	}
+	const value = readEnv("DEBUG");
+	if (value === undefined) {
+		return false;
+	}
+	if (value === "1" || value === "true") {
+		return true;
+	}
+	return namespace !== undefined && value.includes(namespace);
+}

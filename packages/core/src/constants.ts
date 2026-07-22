@@ -62,7 +62,6 @@ export const TIME_CONSTANTS = {
 	// Real upstream rate-limit replies ship a retry-after / reset
 	// header and use the precise value from the header — those flows
 	// are unaffected by this default.
-	// Override at runtime via CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS.
 	DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS: 60 * 1000, // 60s
 
 	// Adaptive rate-limit cooldown with exponential backoff.

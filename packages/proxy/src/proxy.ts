@@ -4,6 +4,7 @@ import {
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	getModelFamily,
+	isDebugEnabled,
 	mapModelName,
 	NETWORK,
 	PROTECTED_FAMILY,
@@ -279,6 +280,20 @@ export async function handleProxy(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 	isInternal = false,
+	/**
+	 * Deterministic-timing seam for the burst-retry hold, forwarded verbatim to
+	 * {@link holdAndRetryCacheAccount} (its `maxHoldMs`/`now`/`jitterMs` overrides).
+	 * Production never passes this — the hold uses its fixed source-level defaults.
+	 * It exists purely so integration tests can force a short, deterministic hold
+	 * without touching wall-clock time (same rationale as the injectable `now`
+	 * clock on the hold itself). NOT a global, NOT an env var, NOT test-only state
+	 * read from inside the hold — an explicit, opt-in override on the entry point.
+	 */
+	burstHoldTimingOverride?: {
+		maxHoldMs?: number;
+		now?: () => number;
+		jitterMs?: number;
+	},
 ): Promise<Response> {
 	// 0. Silently ignore Claude Code internal endpoints (non-critical, not supported by all providers)
 	if (
@@ -1560,6 +1575,9 @@ export async function handleProxy(
 			// Family-scoped overload precedence inside the hold's reprobe loop
 			// (defense in depth for a breaker that opens mid-hold).
 			model: effectiveRequestModel ?? null,
+			// Deterministic-timing overrides (maxHoldMs/now/jitterMs). Undefined in
+			// production — the hold falls back to its fixed source-level defaults.
+			...(burstHoldTimingOverride ?? {}),
 		});
 
 		if (holdResult instanceof Response) {
@@ -2285,11 +2303,7 @@ export async function handleProxy(
 	log.info(
 		`Selected ${accounts.length} accounts: ${accounts.map((a) => a.name).join(", ")}`,
 	);
-	if (
-		process.env.DEBUG?.includes("proxy") ||
-		process.env.DEBUG === "true" ||
-		process.env.NODE_ENV === "development"
-	) {
+	if (isDebugEnabled("proxy") || process.env.NODE_ENV === "development") {
 		log.info(`Request: ${req.method} ${url.pathname}`);
 	}
 

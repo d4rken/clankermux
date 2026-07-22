@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 // re-exports modules (interval-manager, model-mappings) that construct a Logger
 // at import time, which would re-enter this module mid-evaluation and TDZ-crash
 // depending on test-file discovery order. See src/__guards__/*.test.ts.
-import { readEnv } from "@clankermux/core/env";
+import { isDebugEnabled } from "@clankermux/core/env";
 import type { LogEvent } from "@clankermux/types";
 import { logFileWriter } from "./file-writer";
 
@@ -51,9 +51,7 @@ export class Logger {
 		this.level = this.getLogLevelFromEnv() ?? level;
 		this.format = this.getFormatFromEnv();
 		// Only show console output in debug mode or if CLANKERMUX_DEBUG (or legacy BETTER_CCFLARE_DEBUG/ccflare_DEBUG) is set
-		this.silentConsole = !(
-			this.isDebugEnabled() || this.level === LogLevel.DEBUG
-		);
+		this.silentConsole = !(isDebugEnabled() || this.level === LogLevel.DEBUG);
 	}
 
 	private getLogLevelFromEnv(): LogLevel | null {
@@ -74,14 +72,6 @@ export class Logger {
 			return "pretty";
 		}
 		return (process.env.LOG_FORMAT as LogFormat) || "pretty";
-	}
-
-	private isDebugEnabled(): boolean {
-		// Check if we're in a Node.js environment
-		if (typeof process === "undefined" || !process.env) {
-			return false;
-		}
-		return readEnv("DEBUG") === "1";
 	}
 
 	// biome-ignore lint/suspicious/noExplicitAny: Logger needs to accept any data type
@@ -175,9 +165,7 @@ export class Logger {
 	setLevel(level: LogLevel): void {
 		this.level = level;
 		// Update silentConsole when level changes
-		this.silentConsole = !(
-			this.isDebugEnabled() || this.level === LogLevel.DEBUG
-		);
+		this.silentConsole = !(isDebugEnabled() || this.level === LogLevel.DEBUG);
 	}
 
 	getLevel(): LogLevel {
