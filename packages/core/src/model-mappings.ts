@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { Account, ContextComposition } from "@clankermux/types";
+import { isDebugEnabled } from "./env";
 import { safeJsonParse, validateModelMappings } from "./validation";
 
 const log = new Logger("ModelMappings");
@@ -273,11 +274,7 @@ export function mapModelName(anthropicModel: string, account: Account): string {
 
 	const mapped = list[0];
 
-	if (
-		process.env.DEBUG?.includes("model") ||
-		process.env.DEBUG === "true" ||
-		process.env.NODE_ENV === "development"
-	) {
+	if (isDebugEnabled("model") || process.env.NODE_ENV === "development") {
 		log.info(`Model mapping: ${anthropicModel} -> ${mapped}`);
 	}
 

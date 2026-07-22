@@ -1,6 +1,7 @@
 import {
 	getModelFamily,
 	getModelList,
+	isDebugEnabled,
 	isProtectedFamily,
 	logError,
 	NETWORK,
@@ -181,8 +182,7 @@ export function isSyntheticInternalRequest(headers: Headers): boolean {
  *   1. retry-after / x-ratelimit-reset response header (actual upstream backoff)
  *   2. getRateLimitedUntil — usage-window reset time if known
  *   3. probe-cooldown default (TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS,
- *      60s by default, overridable via CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) as
- *      last resort. Was a 1-hour ban prior to v3.5.x — that locked accounts
+ *      60s) as last resort. Was a 1-hour ban prior to v3.5.x — that locked accounts
  *      out unnecessarily when upstream returned a transient 429 without a
  *      reset hint, draining small pools to zero routable accounts on a
  *      single burst. Aligns with the same default used in
@@ -201,12 +201,7 @@ export function extractCooldownUntil(
 	getRateLimitedUntil: (accountId: string) => number | null,
 ): number {
 	const MIN_COOLDOWN_MS = 60 * 1000; // 60 seconds floor
-	// Use `||` (not `??`) so empty-string and non-numeric env values
-	// (Number("") === 0, Number("abc") === NaN) fall through to the
-	// default — `??` would coalesce the empty string to 0 and silently
-	// disable the cooldown entirely.
 	const DEFAULT_COOLDOWN_MS =
-		Number(process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS) ||
 		TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
 	const now = Date.now();
 
@@ -726,11 +721,7 @@ export async function proxyWithAccount(
 	// upstreamModel) so a breaker opens for the family that actually failed.
 	let activeUpstreamModel: string | null = null;
 	try {
-		if (
-			process.env.DEBUG?.includes("proxy") ||
-			process.env.DEBUG === "true" ||
-			process.env.NODE_ENV === "development"
-		) {
+		if (isDebugEnabled("proxy") || process.env.NODE_ENV === "development") {
 			log.info(
 				`Attempting request with account: ${account.name} (provider: ${account.provider})`,
 			);
@@ -747,11 +738,7 @@ export async function proxyWithAccount(
 				effectiveBodyContext = overriddenContext;
 				effectiveBodyBuffer = overriddenContext.getBuffer();
 
-				if (
-					process.env.DEBUG?.includes("proxy") ||
-					process.env.DEBUG === "true" ||
-					process.env.NODE_ENV === "development"
-				) {
+				if (isDebugEnabled("proxy") || process.env.NODE_ENV === "development") {
 					log.info(
 						`Combo model override: applying model "${modelOverride}" for account ${account.name}`,
 					);
