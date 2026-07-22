@@ -81,6 +81,46 @@ export function tokenStatusTooltip(
 	}
 }
 
+/** Visual config for the OAuth token chip, or null when nothing actionable. */
+export interface TokenChip {
+	label: string;
+	/** Tailwind color-pair className for the StatusChip. */
+	className: string;
+	/** Which lucide icon the chip should show. */
+	icon: "warning" | "critical";
+}
+
+/**
+ * Map a token status to a chip, or null when no chip should render. Healthy,
+ * loading, error, and non-OAuth (no-refresh-token) states return null — a
+ * working (or merely unknown/transient) token is the boring default and gets
+ * no chip. Only an expiring or expired/critical token is surfaced, since those
+ * need the user to re-authenticate. Pure.
+ */
+export function resolveTokenChip(status: TokenStatus): TokenChip | null {
+	switch (status) {
+		case "warning":
+			return {
+				label: "Token expiring",
+				className:
+					"bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+				icon: "warning",
+			};
+		case "critical":
+		case "expired":
+			return {
+				label: "Token expired",
+				className:
+					"bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+				icon: "critical",
+			};
+		default:
+			// healthy, loading, error, no-refresh-token, and any unexpected value:
+			// no chip.
+			return null;
+	}
+}
+
 /** Shape of the per-account token-health payload (from either endpoint). */
 interface AccountHealthEntry {
 	accountName: string;

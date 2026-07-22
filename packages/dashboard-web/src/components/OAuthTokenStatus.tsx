@@ -1,13 +1,14 @@
-import { AlertTriangle, CheckCircle, RefreshCw, XCircle } from "lucide-react";
+import { AlertTriangle, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import {
 	fetchAccountTokenStatus,
 	OAUTH_TOKEN_STATUS_RETRY_MS,
-	resolveTokenStatusDisplay,
+	resolveTokenChip,
 	type TokenStatus,
 	tokenStatusTooltip,
 } from "../lib/oauth-token-status";
+import { StatusChip } from "./accounts/StatusChip";
 import { APIErrorBoundary } from "./ErrorBoundary";
 
 interface OAuthTokenStatusProps {
@@ -68,43 +69,23 @@ export function OAuthTokenStatus({
 		};
 	}, [accountName, hasRefreshToken]);
 
-	// Don't show anything for non-OAuth accounts.
-	if (!hasRefreshToken) {
+	// A chip only renders for actionable problems (expiring/expired). Healthy,
+	// loading, error, and non-OAuth states resolve to null — the boring default
+	// gets no chip at all.
+	const chip = resolveTokenChip(status);
+	if (!hasRefreshToken || !chip) {
 		return null;
 	}
-
-	const display = resolveTokenStatusDisplay(status);
-	const tone = {
-		green: "text-green-600",
-		yellow: "text-yellow-600",
-		red: "text-red-600",
-		muted: "text-gray-400",
-	}[display.tone];
-	const className = `h-4 w-4 ${tone}${display.spin ? " animate-spin" : ""}`;
-
-	const icon = (() => {
-		switch (display.icon) {
-			case "healthy":
-				return <CheckCircle className={className} />;
-			case "warning":
-				return <AlertTriangle className={className} />;
-			case "critical":
-				return <XCircle className={className} />;
-			case "loading":
-				return <RefreshCw className={className} />;
-			default:
-				// "unavailable": static muted triangle, never a spinner.
-				return <AlertTriangle className={className} />;
-		}
-	})();
+	const Icon = chip.icon === "critical" ? XCircle : AlertTriangle;
 
 	return (
-		<span
-			className="inline-flex items-center ml-2"
+		<StatusChip
+			className={chip.className}
 			title={tokenStatusTooltip(status, accountName, message)}
 		>
-			{icon}
-		</span>
+			<Icon className="h-3.5 w-3.5" />
+			{chip.label}
+		</StatusChip>
 	);
 }
 

@@ -27,6 +27,7 @@ import {
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
+import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Button } from "../ui/button";
 import {
 	DropdownMenu,
@@ -161,6 +162,10 @@ export function AccountListItem({
 					<div className="flex items-center gap-2 min-w-0">
 						<p className="font-medium truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
+						<OAuthTokenStatusWithBoundary
+							accountName={account.name}
+							hasRefreshToken={account.hasRefreshToken}
+						/>
 					</div>
 					{(account.identityEmail ||
 						account.identityOrganizationName ||
@@ -362,6 +367,18 @@ export function AccountListItem({
 									<DropdownMenuSeparator />
 								</>
 							)}
+							{!account.notes && (
+								<DropdownMenuItem
+									onClick={() => {
+										setNotesDraft("");
+										setIsEditingNotes(true);
+									}}
+									title="Add a note for this account"
+								>
+									<StickyNote className="mr-2 h-4 w-4" />
+									Add note
+								</DropdownMenuItem>
+							)}
 							<DropdownMenuItem onClick={() => onRename(account)}>
 								<Edit2 className="mr-2 h-4 w-4" />
 								Rename
@@ -545,21 +562,7 @@ export function AccountListItem({
 						<Edit2 className="h-3.5 w-3.5" />
 					</Button>
 				</div>
-			) : (
-				<Button
-					variant="ghost"
-					size="sm"
-					className="h-6 gap-1 px-1 text-xs text-muted-foreground"
-					title="Add a note for this account"
-					onClick={() => {
-						setNotesDraft("");
-						setIsEditingNotes(true);
-					}}
-				>
-					<StickyNote className="h-3.5 w-3.5" />
-					Add note
-				</Button>
-			)}
+			) : null}
 			<AccountStatusChips account={account} status={status} />
 			<div className="space-y-1">
 				<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">

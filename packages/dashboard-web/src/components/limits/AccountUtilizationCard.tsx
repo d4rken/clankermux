@@ -4,6 +4,7 @@ import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
 import { ProviderChip } from "../accounts/ProviderChip";
 import { RateLimitProgress } from "../accounts/RateLimitProgress";
+import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import {
 	Card,
 	CardContent,
@@ -74,6 +75,10 @@ export function AccountUtilizationCard({
 									<ProviderChip
 										provider={account.provider}
 										className="shrink-0"
+									/>
+									<OAuthTokenStatusWithBoundary
+										accountName={account.name}
+										hasRefreshToken={account.hasRefreshToken}
 									/>
 								</div>
 								<AccountStatusChips account={account} />

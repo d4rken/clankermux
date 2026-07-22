@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	fetchAccountTokenStatus,
+	resolveTokenChip,
 	resolveTokenStatusDisplay,
 	type TokenStatus,
 	tokenStatusTooltip,
@@ -182,5 +183,40 @@ describe("fetchAccountTokenStatus", () => {
 		});
 		expect(globalCalled).toBe(true);
 		expect(result).toEqual({ status: "critical", message: "bad" });
+	});
+});
+
+describe("resolveTokenChip", () => {
+	it.each<TokenStatus>([
+		"healthy",
+		"loading",
+		"error",
+		"no-refresh-token",
+	])("returns null (no chip) for %s", (status) => {
+		expect(resolveTokenChip(status)).toBeNull();
+	});
+
+	it("returns an amber warning chip for warning", () => {
+		const chip = resolveTokenChip("warning");
+		expect(chip).not.toBeNull();
+		expect(chip?.label).toBe("Token expiring");
+		expect(chip?.icon).toBe("warning");
+		expect(chip?.className).toContain("amber");
+	});
+
+	it("returns a red critical chip for critical", () => {
+		const chip = resolveTokenChip("critical");
+		expect(chip).not.toBeNull();
+		expect(chip?.label).toBe("Token expired");
+		expect(chip?.icon).toBe("critical");
+		expect(chip?.className).toContain("red");
+	});
+
+	it("returns a red critical chip for expired", () => {
+		const chip = resolveTokenChip("expired");
+		expect(chip).not.toBeNull();
+		expect(chip?.label).toBe("Token expired");
+		expect(chip?.icon).toBe("critical");
+		expect(chip?.className).toContain("red");
 	});
 });
