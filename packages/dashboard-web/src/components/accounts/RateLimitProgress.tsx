@@ -12,6 +12,7 @@ import {
 	formatPredictionMessage,
 	type ProjectedUsage,
 	type ProjectionTone,
+	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "../../lib/format-prediction";
 import { getScopedWeeklyLimits } from "../../lib/secondary-limits";
 import { cn } from "../../lib/utils";
@@ -137,7 +138,7 @@ function computeProjectedMessage(
 		};
 	}
 	return {
-		message: `Resets ${formatDuration(timeToExhaustMs - remaining)} before exhaustion`,
+		message: RESETS_BEFORE_EXHAUSTION_MESSAGE,
 		tone: "safe",
 	};
 }
@@ -186,11 +187,6 @@ function formatWindowName(window: string | null): string {
 	}
 }
 
-function formatUsageTitle(window: string | null, label?: string): string {
-	const resolvedName = label ?? (window ? formatWindowName(window) : null);
-	return resolvedName ? `Usage (${resolvedName})` : "Rate limit window";
-}
-
 function shouldShowResetDate(window: string | null): boolean {
 	return (
 		window === "seven_day" ||
@@ -230,12 +226,12 @@ function formatResetText(
 			day: "numeric",
 			hour: "2-digit",
 			minute: "2-digit",
-		})} (local)`;
+		})}`;
 	}
 	return `Resets ${resetDate.toLocaleTimeString(undefined, {
 		hour: "2-digit",
 		minute: "2-digit",
-	})} (local)`;
+	})}`;
 }
 
 function formatAsOfText(asOfIso: string, now: number): string {
@@ -252,12 +248,6 @@ function formatAsOfText(asOfIso: string, now: number): string {
 		hour: "2-digit",
 		minute: "2-digit",
 	});
-}
-
-function formatRefreshText(windowTimeText: string): string {
-	return windowTimeText === "Ready to refresh"
-		? windowTimeText
-		: `${windowTimeText} until refresh`;
 }
 
 interface UsageDisplay {
@@ -344,8 +334,7 @@ export function RateLimitProgress({
 					<Progress value={staleUsage.sevenDayUtilization} className="h-2" />
 					<div className="flex items-center justify-between gap-2 text-xs">
 						<span className="text-muted-foreground">
-							Usage (Weekly): last known as of{" "}
-							{formatAsOfText(staleUsage.asOfIso, now)}
+							Weekly: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
 						</span>
 						<span className="font-medium text-muted-foreground">
 							{staleUsage.sevenDayUtilization.toFixed(0)}%
@@ -556,44 +545,16 @@ export function RateLimitProgress({
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	return (
-		<div className={cn(USAGE_BOX_CLASS, "space-y-2", className)}>
+		<div
+			className={cn(
+				USAGE_BOX_CLASS,
+				"grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2",
+				className,
+			)}
+		>
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
-
-				// Calculate time remaining for this specific window
-				let windowTimeText = "";
-				if (usage.resetTime) {
-					const windowResetTime = new Date(usage.resetTime).getTime();
-					const windowRemainingMs = Math.max(0, windowResetTime - now);
-					const windowRemainingMinutes = Math.ceil(windowRemainingMs / 60000);
-					const windowRemainingHours = Math.floor(windowRemainingMinutes / 60);
-					const windowRemainingMins = windowRemainingMinutes % 60;
-
-					if (windowRemainingMs <= 0) {
-						windowTimeText = "Ready to refresh";
-					} else if (windowRemainingHours > 0) {
-						windowTimeText = `${windowRemainingHours}h ${windowRemainingMins}m`;
-					} else {
-						windowTimeText = `${windowRemainingMinutes}m`;
-					}
-				} else if (
-					usage.window === "seven_day" ||
-					usage.window === "seven_day_scoped"
-				) {
-					// Weekly window with no reset timestamp — keyed on utilization so the
-					// copy is precise and non-alarming (0 = window hasn't started yet).
-					if (usage.utilization === 0) {
-						windowTimeText = "Not started yet";
-					} else if (usage.utilization === null) {
-						windowTimeText = "Usage data unavailable";
-					} else {
-						windowTimeText = "No reset data available";
-					}
-				} else if (usage.window === "daily" || usage.window === "monthly") {
-					// Special handling when no subscription is active (PayG mode)
-					windowTimeText = "No subscription (PayG mode)";
-				}
 
 				// Special rendering for PayG mode - just show message without progress bar
 				if (
@@ -665,31 +626,29 @@ export function RateLimitProgress({
 								now,
 							);
 
-				// Two-row layout: the progress bar sits on top; below it a single
-				// text row reads "Usage (<window>): <time> until refresh" (start),
-				// the utilization percentage (middle), and the reset timestamp (end).
-				let leftStatus = "";
-				let rightStatus = "";
+				// Compact caption: the bar sits on top; below it line 1 shows the
+				// window label (start) and utilization % (end), and line 2 shows a
+				// single reset-status string. `windowLabel` (defined above) is reused
+				// as the label, so the window name is no longer wrapped in "Usage (…)".
+				let resetStatus = "";
 				if (usage.resetTime) {
-					leftStatus = formatRefreshText(windowTimeText);
-					rightStatus = formatResetText(usage.resetTime, usage.window, now);
+					resetStatus =
+						new Date(usage.resetTime).getTime() <= now
+							? "Ready to refresh"
+							: formatResetText(usage.resetTime, usage.window, now);
 				} else if (
 					usage.window === "seven_day" ||
-					usage.window === "seven_day_scoped" ||
-					usage.window === "daily" ||
-					usage.window === "monthly"
+					usage.window === "seven_day_scoped"
 				) {
-					leftStatus = windowTimeText;
-					rightStatus =
-						usage.window === "daily" || usage.window === "monthly"
-							? "Using pay-as-you-go"
-							: usage.utilization === 0
-								? "No usage this week"
+					// Weekly window with no reset timestamp — keyed on utilization so the
+					// copy is precise and non-alarming (0 = window hasn't started yet).
+					resetStatus =
+						usage.utilization === 0
+							? "Not started yet"
+							: usage.utilization === null
+								? "Usage data unavailable"
 								: "No reset data available";
 				}
-				const titleText = leftStatus
-					? `${formatUsageTitle(usage.window, usage.label)}: ${leftStatus}`
-					: formatUsageTitle(usage.window, usage.label);
 
 				return (
 					<div
@@ -745,19 +704,23 @@ export function RateLimitProgress({
 							)}
 						</div>
 						<div className="flex items-center justify-between gap-2 text-xs">
-							<span className="text-muted-foreground">{titleText}</span>
+							<span className="min-w-0 truncate text-muted-foreground">
+								{windowLabel}
+							</span>
 							<span
 								className={cn(
-									"font-medium text-muted-foreground",
+									"shrink-0 font-medium text-muted-foreground",
 									isWindowThrottled && "text-amber-600 dark:text-amber-400",
 								)}
 							>
 								{isAvailable ? `${percentage?.toFixed(0)}%` : "N/A"}
 							</span>
-							<span className="text-right text-muted-foreground">
-								{rightStatus}
-							</span>
 						</div>
+						{resetStatus && (
+							<div className="truncate text-xs text-muted-foreground">
+								{resetStatus}
+							</div>
+						)}
 						{inlineProjection && projection && (
 							<p
 								className={cn(

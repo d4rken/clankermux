@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { UsagePrediction } from "@clankermux/types";
-import { formatDuration, formatPredictionMessage } from "./format-prediction";
+import {
+	formatDuration,
+	formatPredictionMessage,
+	RESETS_BEFORE_EXHAUSTION_MESSAGE,
+} from "./format-prediction";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -64,12 +68,15 @@ describe("formatPredictionMessage", () => {
 		).toEqual({ message: "Runs out 2h 15m before reset", tone: "danger" });
 	});
 
-	it("says the reset precedes exhaustion (safe) when reset comes first", () => {
+	it("gives a qualitative safe message (no unbounded number) when reset comes first", () => {
 		const eta = now + 4 * HOUR;
 		const reset = now + 2 * HOUR + 30 * 60 * 1000;
 		expect(
 			formatPredictionMessage(pred({ etaExhaustMs: eta }), reset, now),
-		).toEqual({ message: "Resets 1h 30m before exhaustion", tone: "safe" });
+		).toEqual({
+			message: RESETS_BEFORE_EXHAUSTION_MESSAGE,
+			tone: "safe",
+		});
 	});
 
 	it("says time-to-exhaustion from now (danger) when there is no reset time", () => {
