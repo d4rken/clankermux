@@ -34,7 +34,6 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
-	showSecondaryWeekly?: boolean; // Show the model-specific weekly windows (Opus/Sonnet). Defaults true so callers that don't opt into the compact view are unaffected.
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
 }
@@ -313,7 +312,6 @@ export function RateLimitProgress({
 	provider,
 	className,
 	showWeekly = false,
-	showSecondaryWeekly = true,
 	inlineProjection = false,
 	prediction = null,
 }: RateLimitProgressProps) {
@@ -551,19 +549,15 @@ export function RateLimitProgress({
 			});
 		}
 
-		// Model-specific weekly windows (e.g. "Fable") are "secondary": shown
-		// only when opted in, and only when the window would actually render.
-		// The eligibility check is shared with the overflow-menu gate via
-		// getScopedWeeklyLimits so the two never drift apart.
-		if (showSecondaryWeekly) {
-			for (const limit of getScopedWeeklyLimits(usageData)) {
-				usages.push({
-					utilization: limit.utilization,
-					window: "seven_day_scoped",
-					resetTime: limit.resetsAt,
-					label: limit.label,
-				});
-			}
+		// Model-specific weekly windows (e.g. "Fable") always render as their own
+		// secondary cards when the payload carries them.
+		for (const limit of getScopedWeeklyLimits(usageData)) {
+			usages.push({
+				utilization: limit.utilization,
+				window: "seven_day_scoped",
+				resetTime: limit.resetsAt,
+				label: limit.label,
+			});
 		}
 	} else if (
 		providerShowsWeeklyUsage(provider) &&

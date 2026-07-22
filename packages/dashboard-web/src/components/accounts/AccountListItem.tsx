@@ -20,7 +20,6 @@ import {
 import { useState } from "react";
 import type { Account } from "../../api";
 import { deriveAccountStatus } from "../../lib/account-status";
-import { hasSecondaryWeeklyWindows } from "../../lib/secondary-limits";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -42,7 +41,6 @@ import { Textarea } from "../ui/textarea";
 import { AccountStatusChips } from "./AccountStatusChips";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
-import { useShowSecondaryLimits } from "./useShowSecondaryLimits";
 
 function formatTokenCount(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -117,14 +115,6 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
-	// The model-specific weekly bars (e.g. a named model family like "Fable")
-	// are hidden by default on the Accounts page and revealed per-account via
-	// the overflow-menu toggle below. The hook is always called (Rules of
-	// Hooks); the checkbox only renders when those bars exist for this account.
-	const canShowSecondary = hasSecondaryWeeklyWindows(account.usageData);
-	const [showSecondaryLimits, toggleSecondaryLimits] = useShowSecondaryLimits(
-		account.id,
-	);
 	// Combined plan label: Title-cased plan tier with the rate-limit multiplier
 	// appended when present, e.g. plan "max" + tier "20x" → "Max 20x". When only
 	// the multiplier is known (plan null), show it alone.
@@ -350,20 +340,6 @@ export function AccountListItem({
 												Auto-apply reset at weekly limit
 											</DropdownMenuCheckboxItem>
 										)}
-									<DropdownMenuSeparator />
-								</>
-							)}
-							{canShowSecondary && (
-								<>
-									<DropdownMenuLabel>Display</DropdownMenuLabel>
-									<DropdownMenuCheckboxItem
-										checked={showSecondaryLimits}
-										onCheckedChange={toggleSecondaryLimits}
-										onSelect={(e) => e.preventDefault()}
-										title="Show the per-model weekly limits in addition to the 5-hour and overall weekly limits."
-									>
-										Show secondary limits
-									</DropdownMenuCheckboxItem>
 									<DropdownMenuSeparator />
 								</>
 							)}
@@ -630,7 +606,6 @@ export function AccountListItem({
 					usageThrottledWindows={account.usageThrottledWindows}
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
-					showSecondaryWeekly={showSecondaryLimits}
 					prediction={account.prediction}
 				/>
 			)}

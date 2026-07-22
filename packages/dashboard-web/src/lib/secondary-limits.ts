@@ -1,9 +1,6 @@
 import { isAnthropicUsageShape } from "@clankermux/core";
 import type { AnthropicUsageData, FullUsageData } from "@clankermux/types";
 
-/** localStorage key for the per-account "show secondary limits" preference. */
-export const SECONDARY_LIMITS_STORAGE_KEY = "clankermux:show-secondary-limits";
-
 export interface ScopedWeeklyLimit {
 	key: string;
 	label: string;
@@ -46,40 +43,4 @@ export function getScopedWeeklyLimits(
 		});
 	}
 	return results;
-}
-
-/**
- * True iff the account's usage data is Anthropic-shaped AND has at least one
- * scoped weekly window that would render. Gates the "Show secondary limits"
- * toggle in AccountListItem.tsx so it's never offered when toggling it would
- * be a no-op.
- */
-export function hasSecondaryWeeklyWindows(
-	usageData: FullUsageData | null | undefined,
-): boolean {
-	return getScopedWeeklyLimits(usageData).length > 0;
-}
-
-/**
- * Parse a JSON array of account-id strings from localStorage. Returns `[]` for
- * null / invalid / non-array / parse errors. Filters to strings only and
- * de-duplicates, preserving first-seen order.
- */
-export function parseSecondaryLimitIds(raw: string | null): string[] {
-	if (!raw) return [];
-	try {
-		const parsed = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return [];
-		const seen = new Set<string>();
-		const ids: string[] = [];
-		for (const entry of parsed) {
-			if (typeof entry === "string" && !seen.has(entry)) {
-				seen.add(entry);
-				ids.push(entry);
-			}
-		}
-		return ids;
-	} catch {
-		return [];
-	}
 }

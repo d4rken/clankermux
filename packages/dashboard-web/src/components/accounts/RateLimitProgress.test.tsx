@@ -165,7 +165,7 @@ describe("RateLimitProgress", () => {
 			],
 		});
 
-		it("hides the scoped weekly bars when showSecondaryWeekly is false", () => {
+		it("always shows the scoped weekly bars", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -174,26 +174,6 @@ describe("RateLimitProgress", () => {
 					usageData={usageData()}
 					provider="anthropic"
 					showWeekly
-					showSecondaryWeekly={false}
-				/>,
-			);
-
-			expect(html).toContain("5-hour");
-			expect(html).toContain("Weekly");
-			expect(html).not.toContain("Opus");
-			expect(html).not.toContain("Sonnet");
-		});
-
-		it("shows the scoped weekly bars when showSecondaryWeekly is true", () => {
-			const html = renderToStaticMarkup(
-				<RateLimitProgress
-					resetIso={future()}
-					usageUtilization={10}
-					usageWindow="five_hour"
-					usageData={usageData()}
-					provider="anthropic"
-					showWeekly
-					showSecondaryWeekly
 				/>,
 			);
 
@@ -201,22 +181,6 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("30%");
 			expect(html).toContain("Sonnet");
 			expect(html).toContain("5%");
-		});
-
-		it("shows the scoped weekly bars by default (prop omitted)", () => {
-			const html = renderToStaticMarkup(
-				<RateLimitProgress
-					resetIso={future()}
-					usageUtilization={10}
-					usageWindow="five_hour"
-					usageData={usageData()}
-					provider="anthropic"
-					showWeekly
-				/>,
-			);
-
-			expect(html).toContain("Opus");
-			expect(html).toContain("Sonnet");
 		});
 
 		it("shows a weekly_scoped limit for a model family other than Opus/Sonnet (regression for the Fable bug)", () => {
@@ -245,7 +209,6 @@ describe("RateLimitProgress", () => {
 					}}
 					provider="anthropic"
 					showWeekly
-					showSecondaryWeekly
 				/>,
 			);
 
@@ -262,7 +225,6 @@ describe("RateLimitProgress", () => {
 					usageData={usageData()}
 					provider="anthropic"
 					showWeekly
-					showSecondaryWeekly
 				/>,
 			);
 
