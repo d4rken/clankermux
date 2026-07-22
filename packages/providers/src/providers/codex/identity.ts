@@ -24,11 +24,15 @@ function normalizeEmail(value: unknown): string | null {
  * Resolve a normalized {@link AccountIdentity} from Codex OAuth token claims.
  *
  * The external id and plan tier come from the access token's
- * `https://api.openai.com/auth` claim; the email (when available) comes from the
- * id token's top-level `email` claim. `organizationName` is always null for
- * Codex — the ChatGPT tokens carry no workspace/org name. Every field access is
- * guarded, so a missing claim yields a null field rather than a throw. Returns
- * null only when the access token itself cannot be decoded.
+ * `https://api.openai.com/auth` claim. The email is resolved with a precedence:
+ * the id token's top-level `email` claim wins when present, otherwise it falls
+ * back to the access token's `https://api.openai.com/profile` claim's `email`
+ * (Codex omits the id_token on a plain refresh, but the access token still
+ * carries the profile email — so email is captured even without an id_token).
+ * `organizationName` is always null for Codex — the ChatGPT tokens carry no
+ * workspace/org name. Every field access is guarded, so a missing claim yields a
+ * null field rather than a throw. Returns null only when the access token itself
+ * cannot be decoded.
  */
 export function extractCodexIdentity(
 	accessToken: string,
@@ -43,10 +47,15 @@ export function extractCodexIdentity(
 	// Codex already emits plus/pro/team/enterprise; lowercase for consistency.
 	const planTier = rawPlan ? rawPlan.toLowerCase() : null;
 
-	let email: string | null = null;
+	// Email precedence: prefer the id_token's top-level email when an id_token is
+	// present, else fall back to the access token's profile-claim email (present
+	// even on a plain refresh that omits the id_token).
+	const profile = asRecord(payload["https://api.openai.com/profile"]);
+	const accessTokenEmail = normalizeEmail(profile?.email);
+	let email = accessTokenEmail;
 	if (idToken) {
 		const idPayload = decodeJwtPayloadSafe(idToken);
-		email = normalizeEmail(idPayload?.email);
+		email = normalizeEmail(idPayload?.email) ?? accessTokenEmail;
 	}
 
 	return {

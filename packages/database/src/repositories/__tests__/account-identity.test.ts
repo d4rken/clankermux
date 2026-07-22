@@ -279,3 +279,72 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 		expect(after?.identity_profile_fetched_at).not.toBeNull();
 	});
 });
+
+describe("AccountRepository — setAccountIdentity (token decode, no profile fetch)", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("writes identity and bumps identity_captured_at WITHOUT stamping identity_profile_fetched_at", async () => {
+		insertAccount(db, "acc-1");
+
+		const before = await repo.findById("acc-1");
+		expect(before?.identity_captured_at).toBeNull();
+		expect(before?.identity_profile_fetched_at).toBeNull();
+
+		await repo.setAccountIdentity("acc-1", {
+			externalAccountId: "ext-codex",
+			email: "codex@example.com",
+			organizationName: null,
+			planTier: "team",
+			rateLimitTier: null,
+		});
+
+		const after = await repo.findById("acc-1");
+		expect(after?.identity_external_id).toBe("ext-codex");
+		expect(after?.identity_email).toBe("codex@example.com");
+		expect(after?.identity_plan_tier).toBe("team");
+		// captured_at advances...
+		expect(after?.identity_captured_at).not.toBeNull();
+		// ...but the profile-fetch gate is left untouched (Codex has no profile fetch).
+		expect(after?.identity_profile_fetched_at).toBeNull();
+	});
+
+	it("COALESCE-merges: a null field preserves a previously-captured value", async () => {
+		insertAccount(db, "acc-2");
+
+		// Seed a prior identity via the token-write path.
+		await repo.updateTokens("acc-2", "tok-1", 1_000, "refresh-1", {
+			externalAccountId: "ext-keep",
+			email: "keep@example.com",
+			organizationName: "Keep Org",
+			planTier: "pro",
+			rateLimitTier: null,
+		});
+
+		// A later decode resolves only the plan tier; every other field is null and
+		// MUST NOT erase the prior value.
+		await repo.setAccountIdentity("acc-2", {
+			externalAccountId: null,
+			email: null,
+			organizationName: null,
+			planTier: "team",
+			rateLimitTier: null,
+		});
+
+		const after = await repo.findById("acc-2");
+		expect(after?.identity_external_id).toBe("ext-keep");
+		expect(after?.identity_email).toBe("keep@example.com");
+		expect(after?.identity_organization_name).toBe("Keep Org");
+		expect(after?.identity_plan_tier).toBe("team");
+		// Never stamps the profile-fetch gate.
+		expect(after?.identity_profile_fetched_at).toBeNull();
+	});
+});

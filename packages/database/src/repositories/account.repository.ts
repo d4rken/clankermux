@@ -186,6 +186,33 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
+	/**
+	 * Persist an account identity captured from a token decode (no network) —
+	 * the token-agnostic sibling of {@link setAccountIdentityFromProfile}.
+	 *
+	 * Used by the Codex startup identity backfill, which locally decodes the
+	 * access-token JWT. Unlike {@link setAccountIdentityFromProfile}, it does NOT
+	 * stamp `identity_profile_fetched_at` — that column is Anthropic-profile-fetch
+	 * specific (its one-time gate), and Codex identity has no profile fetch. Only
+	 * `identity_captured_at` advances.
+	 *
+	 * Each identity field is COALESCE-merged so a null arriving here never erases
+	 * a previously-captured value.
+	 */
+	async setAccountIdentity(
+		accountId: string,
+		identity: AccountIdentity,
+	): Promise<void> {
+		const now = Date.now();
+		await this.run(
+			`UPDATE accounts SET
+				${IDENTITY_COALESCE_SET},
+				identity_captured_at = ?
+			WHERE id = ?`,
+			[...identityBindParams(identity), now, accountId],
+		);
+	}
+
 	async incrementUsage(
 		accountId: string,
 		sessionDurationMs: number,
