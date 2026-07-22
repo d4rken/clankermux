@@ -296,7 +296,12 @@ export class Config extends EventEmitter {
 	getUsageSnapshotRetentionDays(): number {
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		return 3650; // default usage snapshot retention (10 years for the Limits graph)
+		// Default lowered 3650 → 90 (2026-07): the Limits/sawtooth graph only needs
+		// ~90 days of history, and a 10-year default let usage_snapshots grow
+		// unbounded (past DB-size incidents). The clamp max stays 3650, so an
+		// EXPLICITLY saved larger value (including 3650) is still honored — this new
+		// default only applies when usage_snapshot_retention_days is ABSENT.
+		return 90;
 	}
 
 	setUsageSnapshotRetentionDays(days: number): void {

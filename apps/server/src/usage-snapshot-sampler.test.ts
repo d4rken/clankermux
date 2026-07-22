@@ -30,10 +30,10 @@ interface SeedEntry {
 /** Minimal SamplerCache backed by a plain map of accountId → {data, age}. */
 function makeCache(entries: Record<string, SeedEntry>): SamplerCache {
 	return {
-		get(id: string): AnyUsageData | null {
+		peek(id: string): AnyUsageData | null {
 			return entries[id]?.data ?? null;
 		},
-		getAge(id: string): number | null {
+		peekAge(id: string): number | null {
 			const e = entries[id];
 			return e ? e.ageMs : null;
 		},

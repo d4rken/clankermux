@@ -22,10 +22,14 @@ const REQUEST_TIMEOUT_MS = 10_000;
  * {@link import("../../../..").CodexSpendCoordinator}) read the returned
  * response; the applicator/coordinator own all policy.
  *
- * Like Anthropic's `/api/oauth/usage`, OpenAI does NOT expose a free
- * usage-introspection endpoint, so this call always consumes a small slice of
- * the account's Codex quota (bounded by `reasoning.effort: "none"` plus the
- * abort-after-headers body cancel).
+ * This is a SPEND: it always consumes a small slice of the account's Codex quota
+ * (bounded by `reasoning.effort: "none"` plus the abort-after-headers body
+ * cancel). Its purpose is window-PRIMING — the native POST is the operation that
+ * actually STARTS a new 5h window. For pure telemetry (observing usage/limits
+ * WITHOUT spending) there is now a free read, `fetchCodexUsageStatus`
+ * (`GET /backend-api/wham/usage`); the manual "Refresh usage" click uses that. A
+ * successful free read is NOT a substitute for priming, since it never starts a
+ * window.
  *
  * @param accessToken Bearer token for the Codex account. Empty/whitespace
  *   throws BEFORE any fetch is issued.

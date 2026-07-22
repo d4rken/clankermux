@@ -231,15 +231,22 @@ export interface SessionStats {
 }
 
 /**
- * Last-known weekly usage recovered from the persisted `usage_snapshots`
- * time-series, served when the live usage cache has nothing for an account
- * (e.g. usage polling fails because the subscription lapsed). Only the weekly
- * window is carried: a stale 5-hour reading is meaningless minutes after
- * polling stops, while the weekly utilization/reset stays relevant for days.
+ * Last-known usage recovered from the persisted `usage_snapshots` time-series,
+ * served when the live usage cache has nothing for an account (e.g. right after
+ * a restart before the poller warms the cache, or when polling fails because the
+ * subscription lapsed). DISPLAY-ONLY — never feeds routing, throttling, health,
+ * prediction, or capacity; it exists purely so the dashboard can show a
+ * last-known reading rather than a blank card.
+ *
+ * Each window is optional and carried independently so a fresh 5-hour reading can
+ * surface even when the weekly window is absent or already rolled. The weekly
+ * window stays relevant for days, so it is not age-gated; the fast-moving 5-hour
+ * window is only carried while the snapshot is still fresh (see the builder in
+ * `accounts.ts`).
  */
 export interface StaleUsageInfo {
-	sevenDayUtilization: number;
-	sevenDayResetIso: string;
+	fiveHour?: { utilization: number; resetIso: string };
+	sevenDay?: { utilization: number; resetIso: string };
 	/** When the snapshot was sampled — the "as of" timestamp shown in the UI. */
 	asOfIso: string;
 }

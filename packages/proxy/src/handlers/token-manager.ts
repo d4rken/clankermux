@@ -436,7 +436,9 @@ export type CodexResetCreditConsumeDispatchOutcome =
 	  }
 	| { status: "failed"; message: string };
 
-// Global registry for codex on-demand usage refreshers (one per server)
+// Global registry for codex on-demand usage refreshers (one per server). The
+// manual "Refresh usage" click dispatches here; the registered refresher reads
+// the FREE `GET /wham/usage` status (zero quota) — it does not spend.
 const codexUsageRefreshers: Map<
 	string,
 	(accountId: string) => Promise<CodexUsageRefreshOutcome>
@@ -449,7 +451,8 @@ const codexUsageInflight: Map<
 > = new Map();
 
 // Read-only earned-reset metadata refreshers (one per server). Kept separate
-// from codexUsageRefreshers because these calls do not spend model quota.
+// from codexUsageRefreshers because it targets a different free endpoint
+// (`/rate-limit-reset-credits`); neither spends model quota.
 const codexResetCreditsRefreshers: Map<
 	string,
 	(accountId: string) => Promise<CodexUsageRefreshOutcome>

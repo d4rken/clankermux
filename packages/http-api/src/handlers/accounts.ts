@@ -121,6 +121,24 @@ const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
 const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Mirror of the usage-snapshot sampler cadence
+ * (`SAMPLE_INTERVAL_MS = 120_000` in
+ * `apps/server/src/usage-snapshot-sampler.ts`). http-api is a package and must
+ * not import from apps/server, so the value is duplicated here and kept in sync
+ * by hand. Inline named constant (no env knobs, per project rule).
+ */
+const SNAPSHOT_SAMPLE_INTERVAL_MS = 120_000;
+
+/**
+ * A persisted snapshot only surfaces its fast-moving 5-hour reading as a stale
+ * fallback if it was sampled within two sample intervals (~4 min) of now. The
+ * 5h window moves fast, so an older snapshot would be actively misleading; the
+ * common fresh case is right after a restart, before the poller warms the live
+ * cache. The weekly window is NOT age-gated (it stays relevant for days).
+ */
+const STALE_USAGE_MAX_AGE_MS = 2 * SNAPSHOT_SAMPLE_INTERVAL_MS;
+
+/**
  * Status prefixes that mean the account is actually blocked (vs soft warnings
  * like "allowed_warning" / "queueing_soft" which mean it is still usable).
  * Must mirror HARD_LIMIT_PREFIXES in
@@ -672,14 +690,18 @@ export function createAccountsListHandler(
 				);
 				// Codex-only credits state for the response chip; null for other
 				// providers or when unknown. Prefer the resolved usage object, but
-				// fall back to the live cache directly: normalizeCodexUsageData
-				// returns null when both windows have no reset time (fresh account /
-				// just after a window roll), which would otherwise drop the credits
-				// chip even though the cache knows the account is on credits.
+				// fall back to the RAW cached usage: normalizeCodexUsageData returns
+				// null when both windows have no reset time (fresh account / just
+				// after a window roll), which would otherwise drop the credits chip
+				// even though the cache knows the account is on credits. Reuse the
+				// already-read `cachedUsageData` (the single per-account cache read
+				// from `liveUsageByAccount`, line 510) rather than reading the cache
+				// a second time — a second get() could evict a TTL-expired entry the
+				// stale-candidate filter still needs.
 				const codexCredits =
 					account.provider === "codex"
 						? ((usageData as UsageData | null)?.codexCredits ??
-							(usageCache.get(account.id) as UsageData | null)?.codexCredits ??
+							(cachedUsageData as UsageData | null)?.codexCredits ??
 							null)
 						: null;
 				const resetCreditsEntry =
@@ -794,23 +816,47 @@ export function createAccountsListHandler(
 					}
 				}
 
-				// Only the weekly window is recovered from a stale snapshot: a 5-hour
-				// reading is meaningless minutes after polling stops, while the weekly
-				// stays relevant until its reset. Skip if the weekly already rolled.
+				// Last-known usage recovered from a persisted snapshot when the live
+				// cache is cold. DISPLAY-ONLY — never read by routing/throttle/health/
+				// prediction/capacity. Each window is carried independently:
+				//  - Weekly: NOT age-gated. It stays relevant for days (e.g. a lapsed
+				//    subscription whose polling stopped long ago), so any snapshot with
+				//    a still-future weekly reset qualifies.
+				//  - 5-hour: age-gated to within STALE_USAGE_MAX_AGE_MS (~4 min). The 5h
+				//    window moves fast, so an older reading would mislead; the fresh
+				//    case is right after a restart, before the poller warms the cache.
+				// A snapshot timestamped in the future is a clock anomaly — drop both.
 				let staleUsage: StaleUsageInfo | null = null;
 				if (!fullUsageData) {
 					const snapshot = latestSnapshotByAccount.get(account.id);
-					if (
-						snapshot &&
-						snapshot.sevenDayPct != null &&
-						snapshot.sevenDayReset != null &&
-						snapshot.sevenDayReset > now
-					) {
-						staleUsage = {
-							sevenDayUtilization: snapshot.sevenDayPct,
-							sevenDayResetIso: new Date(snapshot.sevenDayReset).toISOString(),
-							asOfIso: new Date(snapshot.ts).toISOString(),
-						};
+					if (snapshot && snapshot.ts <= now) {
+						const ageMs = now - snapshot.ts;
+						const fiveHour =
+							snapshot.fiveHourPct != null &&
+							snapshot.fiveHourReset != null &&
+							snapshot.fiveHourReset > now &&
+							ageMs <= STALE_USAGE_MAX_AGE_MS
+								? {
+										utilization: snapshot.fiveHourPct,
+										resetIso: new Date(snapshot.fiveHourReset).toISOString(),
+									}
+								: undefined;
+						const sevenDay =
+							snapshot.sevenDayPct != null &&
+							snapshot.sevenDayReset != null &&
+							snapshot.sevenDayReset > now
+								? {
+										utilization: snapshot.sevenDayPct,
+										resetIso: new Date(snapshot.sevenDayReset).toISOString(),
+									}
+								: undefined;
+						if (fiveHour || sevenDay) {
+							staleUsage = {
+								...(fiveHour ? { fiveHour } : {}),
+								...(sevenDay ? { sevenDay } : {}),
+								asOfIso: new Date(snapshot.ts).toISOString(),
+							};
+						}
 					}
 				}
 
@@ -3720,10 +3766,11 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 /**
  * Force an immediate usage data refresh for an OAuth account.
  *
- * For Anthropic accounts this restarts the free `/api/oauth/usage` polling
- * loop. For Codex accounts there is no free usage endpoint, so this sends a
- * minimal real `/responses` request (capped via `max_output_tokens: 1` and
- * abort-after-headers) and parses the `x-codex-*` headers off the response.
+ * For Anthropic accounts this restarts the free `/api/oauth/usage` polling loop.
+ * For Codex accounts this reads the FREE `GET /backend-api/wham/usage` status
+ * (via the spend coordinator's `readUsageStatus`) — ZERO quota; it never sends a
+ * `/responses` request. On a read failure the prior usage cache is kept and the
+ * failure is reported (no spend fallback).
  */
 export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {

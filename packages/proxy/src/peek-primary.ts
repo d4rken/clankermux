@@ -38,9 +38,9 @@ let lastPrimaryAccountId: string | null | undefined;
  *    `getProviderWideOverloadUntil`); a Haiku-only incident must not move the
  *    badge while Sonnet/Opus traffic still routes to the account.
  *
- * Purity note: this is read-only with respect to routing state, but not strictly
- * pure — `getUsageThrottleUntil` (via `usageCache.get`) may evict its own
- * expired entries as a side effect of being read.
+ * Purity note: this reads usage via `usageCache.peek`, which is fully read-only —
+ * it returns null for a stale entry but never evicts it. (The badge inspection
+ * must not mutate cache state that routing / window-reset comparisons depend on.)
  */
 export function peekPrimaryAccountId(
 	accounts: Account[],
@@ -73,7 +73,7 @@ export function peekPrimaryAccountId(
 
 		if (throttlingActive) {
 			const tu = getUsageThrottleUntil(
-				usageCache.get(account.id),
+				usageCache.peek(account.id),
 				settings,
 				now,
 			);

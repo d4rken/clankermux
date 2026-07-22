@@ -19,10 +19,32 @@ function makeConfig(): { config: Config; cleanup: () => void } {
 }
 
 describe("usage snapshot retention days", () => {
-	it("defaults to 3650 days", () => {
+	it("defaults to 90 days when the key is absent", () => {
 		const { config, cleanup } = makeConfig();
 		try {
+			expect(config.getUsageSnapshotRetentionDays()).toBe(90);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("honors an explicitly saved value above the new default (e.g. 3650)", () => {
+		// The 3650 → 90 default change must NOT clobber a user who explicitly
+		// opted into a longer window; the clamp max stays 3650.
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setUsageSnapshotRetentionDays(3650);
 			expect(config.getUsageSnapshotRetentionDays()).toBe(3650);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("honors an explicitly saved value below the new default (e.g. 30)", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setUsageSnapshotRetentionDays(30);
+			expect(config.getUsageSnapshotRetentionDays()).toBe(30);
 		} finally {
 			cleanup();
 		}

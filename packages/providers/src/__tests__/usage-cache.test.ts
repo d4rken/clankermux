@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { type AnyUsageData, usageCache } from "../usage-fetcher";
 
 // Mock the import that's causing issues to isolate our test
 const mockUsageCache = {
@@ -496,5 +497,77 @@ describe("UsageCache - Memory Management", () => {
 			const age = mockUsageCache.getAge(nonExistentAccount);
 			expect(age).toBeNull();
 		});
+	});
+});
+
+// Exercises the REAL exported `usageCache` singleton (not the mock above) so the
+// non-evicting reads are proven against the shipping implementation. Time is
+// driven by a Date.now spy so a "stale" entry can be produced deterministically.
+describe("UsageCache - non-evicting peek()/peekAge()", () => {
+	const ACCOUNT = "peek-nonevict-account";
+	const TTL_MS = 10 * 60 * 1000;
+	const BASE = 1_000_000_000_000; // fixed epoch base for deterministic ages
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	const sample: AnyUsageData = {
+		five_hour: { utilization: 12, resets_at: null },
+		seven_day: { utilization: 34, resets_at: null },
+	};
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(ACCOUNT);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ACCOUNT);
+		nowSpy.mockRestore();
+	});
+
+	it("peek() returns fresh data and peekAge() reports its age within TTL", () => {
+		usageCache.set(ACCOUNT, sample); // stamped at BASE
+		nowSpy.mockReturnValue(BASE + 30_000); // 30s later, still fresh
+
+		expect(usageCache.peek(ACCOUNT)).toEqual(sample);
+		expect(usageCache.peekAge(ACCOUNT)).toBe(30_000);
+	});
+
+	it("peek() on a stale entry returns null but does NOT evict it", () => {
+		usageCache.set(ACCOUNT, sample);
+		nowSpy.mockReturnValue(BASE + TTL_MS + 1); // just past the 10-min TTL
+
+		// Stale → peek yields null...
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+
+		// ...but the entry survives: peekAge still reports the (stale) age, and a
+		// second peek() is still null without ever having deleted the entry.
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 1);
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 1);
+
+		// A real evicting read (get) is what finally removes the stale entry.
+		expect(usageCache.get(ACCOUNT)).toBeNull();
+		// Now the entry is gone: the non-evicting reads report absence.
+		expect(usageCache.peekAge(ACCOUNT)).toBeNull();
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+	});
+
+	it("peekAge() returns the true age even when stale and never deletes", () => {
+		usageCache.set(ACCOUNT, sample);
+		nowSpy.mockReturnValue(BASE + TTL_MS + 5_000); // stale
+
+		// Age is returned (not null) even though it exceeds the TTL...
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 5_000);
+		// ...and repeated calls keep seeing it (no eviction side effect).
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 5_000);
+
+		// By contrast getAge() treats the stale entry as absent AND evicts it.
+		expect(usageCache.getAge(ACCOUNT)).toBeNull();
+		expect(usageCache.peekAge(ACCOUNT)).toBeNull(); // now truly gone
+	});
+
+	it("peek()/peekAge() return null for a missing account", () => {
+		expect(usageCache.peek("no-such-account")).toBeNull();
+		expect(usageCache.peekAge("no-such-account")).toBeNull();
 	});
 });

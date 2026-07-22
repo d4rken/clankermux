@@ -16,7 +16,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
-import { CLEANUP_DELETE_BATCH_ROWS } from "../incremental-vacuum-worker";
+import {
+	CLEANUP_DELETE_BATCH_ROWS,
+	SNAPSHOT_DELETE_BATCH_ROWS,
+} from "../incremental-vacuum-worker";
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-cleanup-test-"));
@@ -218,6 +221,66 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 			await dbOps.close();
 		}
 		expect(count(dbPath, "request_payloads")).toBe(0);
+	});
+
+	it("prunes a large usage_snapshots table across many batches, keeping recent rows", async () => {
+		// Regression for the 3650 → 90 day default drop: the first prune can remove
+		// millions of rows, so the worker must batch it (tryDeleteSnapshotsBatched)
+		// rather than issue one writer-slot-holding DELETE. Seed > 2 * batch aged
+		// rows so the loop runs at least three iterations, plus a few recent rows
+		// that must survive.
+		const OLD_BASE = 1_000_000;
+		const RECENT = 9_000_000_000_000;
+		const CUTOFF = 5_000_000_000_000;
+		const oldCount = 2 * SNAPSHOT_DELETE_BATCH_ROWS + 37;
+		const recentCount = 4;
+
+		const seedDb = new Database(dbPath);
+		try {
+			const insUsage = seedDb.prepare(
+				"INSERT INTO usage_snapshots (account_id, sampled_at) VALUES ('acct', ?)",
+			);
+			seedDb.exec("BEGIN");
+			// Distinct sampled_at values (composite PK is account_id, sampled_at).
+			for (let i = 0; i < oldCount; i++) insUsage.run(OLD_BASE + i);
+			for (let i = 0; i < recentCount; i++) insUsage.run(RECENT + i);
+			seedDb.exec("COMMIT");
+		} finally {
+			seedDb.close();
+		}
+		expect(count(dbPath, "usage_snapshots")).toBe(oldCount + recentCount);
+
+		const worker = new Worker(
+			new URL("../incremental-vacuum-worker.ts", import.meta.url).href,
+		);
+		let result: {
+			ok: boolean;
+			cleanup?: { removedSnapshots: number };
+			error?: string;
+		};
+		try {
+			result = await new Promise((resolve, reject) => {
+				worker.onmessage = (e: MessageEvent) => resolve(e.data);
+				worker.onerror = (e: ErrorEvent) =>
+					reject(new Error(e.message ?? "worker error"));
+				worker.postMessage({
+					dbPath,
+					kind: "cleanup",
+					// Nothing seeded in payloads/requests; only the snapshot prune matters.
+					payloadCutoff: CUTOFF,
+					requestCutoff: CUTOFF,
+					usageSnapshotCutoff: CUTOFF,
+					memorySnapshotCutoff: CUTOFF,
+				});
+			});
+		} finally {
+			worker.terminate();
+		}
+
+		expect(result.ok).toBe(true);
+		expect(result.cleanup?.removedSnapshots).toBe(oldCount);
+		// Only the recent rows survive — batching drained everything below the cutoff.
+		expect(count(dbPath, "usage_snapshots")).toBe(recentCount);
 	});
 
 	it("returns an all-zero count shape when nothing is old enough", async () => {

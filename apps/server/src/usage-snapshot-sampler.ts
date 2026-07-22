@@ -10,12 +10,18 @@
  * Design notes:
  *  - Only `anthropic` and `codex` accounts have the windowed `UsageData`
  *    (five_hour / seven_day). All other providers are excluded.
- *  - The cache is kept warm WITHOUT the sampler's help: by real user traffic
- *    (both providers, via `updateAccountMetadata`), by the Anthropic 90s usage
- *    poller (`startUsagePollingWithRefresh`), and by the auto-refresh scheduler's
- *    priming (gated per-account by `auto_refresh_enabled`) — anthropic/zai via the
+ *  - The cache is kept warm WITHOUT the sampler's help, but the source differs by
+ *    provider. For CODEX, real user traffic warms it: `updateAccountMetadata`
+ *    writes `usageCache` through `applyCodexObservation` (Codex usage rides on
+ *    `/responses` response headers). For ANTHROPIC, real inference traffic does
+ *    NOT populate the windowed cache — the quota windows come only from the direct
+ *    Anthropic 90s usage poller (`startUsagePollingWithRefresh`, GET /oauth/usage),
+ *    now demand-aware (active cadence for recently-used accounts, ~10min idle).
+ *    Both providers are additionally warmed by the auto-refresh scheduler's priming
+ *    (gated per-account by `auto_refresh_enabled`) — anthropic/zai via the
  *    translated Claude prime, Codex via the CodexSpendCoordinator's native
- *    `/responses` ping (which writes `usageCache` through `applyCodexObservation`).
+ *    `/responses` ping (which writes `usageCache` through `applyCodexObservation`);
+ *    a Codex manual "Refresh usage" instead reads the FREE `/wham/usage` GET.
  *    The sampler just reads whatever those have populated — for Codex too. Because
  *    it never probes, paused Codex accounts are treated no differently from any
  *    other: pause is irrelevant to reading, so a paused account with a fresh cache
@@ -44,10 +50,15 @@ const log = new Logger("UsageSnapshotSampler");
 /** Sample cadence (2 minutes). */
 export const SAMPLE_INTERVAL_MS = 120_000;
 
-/** Minimal cache surface the pure projection needs (matches `usageCache`). */
+/**
+ * Minimal cache surface the pure projection needs (matches `usageCache`). The
+ * sampler is a pure observer, so it uses the NON-evicting reads: leaving stale
+ * entries in place keeps its sampling side-effect-free (no impact on routing or
+ * window-reset comparisons that read the raw cache).
+ */
 export interface SamplerCache {
-	get(accountId: string): AnyUsageData | null;
-	getAge(accountId: string): number | null;
+	peek(accountId: string): AnyUsageData | null;
+	peekAge(accountId: string): number | null;
 }
 
 /** The slice of an account the sampler reasons about. */
@@ -81,10 +92,10 @@ export function buildSnapshotRows(
 		const { id, provider } = account;
 		if (provider !== "anthropic" && provider !== "codex") continue;
 
-		const age = cache.getAge(id);
+		const age = cache.peekAge(id);
 		if (age === null || age > freshnessMs) continue; // missing/stale → honest gap
 
-		const data = cache.get(id) as UsageData | null;
+		const data = cache.peek(id) as UsageData | null;
 		if (!data) continue;
 
 		const normalized = normalizeAnthropicUsage(

@@ -37,6 +37,18 @@ export const CLEANUP_DELETE_BATCH_ROWS = 50;
 const CLEANUP_DELETE_YIELD_MS = 25;
 
 /**
+ * Rows per batch for the snapshot-table retention DELETEs (usage_snapshots /
+ * memory_snapshots). Larger than CLEANUP_DELETE_BATCH_ROWS because these rows are
+ * tiny fixed-width numeric records (no multi-MB blobs), so a 5000-row batch still
+ * commits fast. Batching matters on the FIRST prune after the usage-snapshot
+ * retention default dropped 3650 → 90 days: that one tick can delete millions of
+ * rows, and a single `DELETE ... WHERE sampled_at < ?` would hold SQLite's writer
+ * slot for the whole delete and balloon the WAL. Each bounded, auto-committed
+ * batch releases the slot and lets the off-thread checkpointer truncate the WAL.
+ */
+export const SNAPSHOT_DELETE_BATCH_ROWS = 5000;
+
+/**
  * Row cap for `PRAGMA optimize`'s internal ANALYZE, set via `PRAGMA
  * analysis_limit` before it. Without a limit (SQLite's default of 0 = unbounded)
  * ANALYZE does a full index scan on every table it deems stale — on our multi-GB
@@ -339,19 +351,57 @@ async function deleteBatched(
 	return total;
 }
 
-/** Best-effort single-statement delete for the tiny snapshot tables. */
-function tryDelete(db: Database, sql: string, cutoff: number): number {
+/**
+ * Best-effort BATCHED delete of aged rows from a snapshot table by `sampled_at`.
+ * `table` is a trusted internal constant, not caller input.
+ *
+ * Was a single `DELETE ... WHERE sampled_at < ?` — fine while the table stayed
+ * tiny, but the usage-snapshot retention default dropped 3650 → 90 days, so the
+ * first prune after that change can delete millions of rows. A single statement
+ * would hold SQLite's one writer slot for the whole delete and balloon the WAL;
+ * instead we delete in SNAPSHOT_DELETE_BATCH_ROWS-sized slices, each its own
+ * auto-committed transaction (no explicit BEGIN), yielding the slot between
+ * batches so a main-thread write can slip through and the off-thread
+ * checkpointer can truncate the WAL.
+ *
+ * Portable delete pattern — `DELETE ... WHERE rowid IN (SELECT rowid ... LIMIT
+ * N)` works regardless of whether this SQLite build was compiled with
+ * SQLITE_ENABLE_UPDATE_DELETE_LIMIT (DELETE ... LIMIT). Both snapshot tables have
+ * an implicit rowid and no child tables, so `.changes` is an accurate per-table
+ * count and a short batch reliably signals "drained".
+ *
+ * NOTE (disk): this deletes rows but does NOT run incremental_vacuum, so freed
+ * pages return to the freelist for reuse, not to the OS — the DB file will not
+ * shrink on disk after the one-time large prune. The hourly "vacuum" kind
+ * reclaims the freelist back to the OS over subsequent ticks; page reuse keeps
+ * the file from growing further in the meantime.
+ *
+ * Best-effort: snapshot volume is non-critical, so a transient lock (or any
+ * error) mid-loop is swallowed with a warning rather than aborting a tick that
+ * already reclaimed payload/request rows — rows deleted before the error persist
+ * and the next tick resumes. Mirrors the old tryDelete's tolerance.
+ */
+async function tryDeleteSnapshotsBatched(
+	db: Database,
+	table: string,
+	cutoff: number,
+): Promise<number> {
+	const sql = `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE sampled_at < ? LIMIT ?)`;
+	let total = 0;
 	try {
-		return db.run(sql, [cutoff]).changes;
+		for (;;) {
+			const changes = db.run(sql, [cutoff, SNAPSHOT_DELETE_BATCH_ROWS]).changes;
+			total += changes;
+			// A short batch means everything older than the cutoff is drained.
+			if (changes < SNAPSHOT_DELETE_BATCH_ROWS) break;
+			await Bun.sleep(CLEANUP_DELETE_YIELD_MS);
+		}
 	} catch (err) {
-		// Snapshot volume is tiny and non-critical — never let it abort a tick
-		// that already reclaimed payload/request rows. Mirrors the per-pass
-		// try/catch in the main-thread cleanupOldRequests().
 		console.warn(
-			`[cleanup-worker] snapshot delete skipped: ${err instanceof Error ? err.message : String(err)}`,
+			`[cleanup-worker] snapshot batched delete on ${table} stopped early: ${err instanceof Error ? err.message : String(err)}`,
 		);
-		return 0;
 	}
+	return total;
 }
 
 /**
@@ -410,14 +460,19 @@ async function runCleanup(
 			);
 		}
 
-		const removedSnapshots = tryDelete(
+		// Batched (see tryDeleteSnapshotsBatched): the first prune after the
+		// usage-snapshot retention default dropped 3650 → 90 days can remove
+		// millions of rows, so it must not run as one writer-slot-holding
+		// statement. Deletes rows only — page reclamation to disk is the hourly
+		// "vacuum" kind's job.
+		const removedSnapshots = await tryDeleteSnapshotsBatched(
 			db,
-			`DELETE FROM usage_snapshots WHERE sampled_at < ?`,
+			"usage_snapshots",
 			usageSnapshotCutoff,
 		);
-		const removedMemorySnapshots = tryDelete(
+		const removedMemorySnapshots = await tryDeleteSnapshotsBatched(
 			db,
-			`DELETE FROM memory_snapshots WHERE sampled_at < ?`,
+			"memory_snapshots",
 			memorySnapshotCutoff,
 		);
 
