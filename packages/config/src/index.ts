@@ -21,11 +21,6 @@ const log = new Logger("Config");
  * (predictive promotion + de-stick). */
 export type CacheWarmingMode = "off" | "static" | "dynamic";
 
-function parseEnabledEnvFlag(value: string | undefined): boolean | undefined {
-	if (value === undefined) return undefined;
-	return value === "true" || value === "1";
-}
-
 export interface RuntimeConfig {
 	clientId: string;
 	retry: { attempts: number; delayMs: number; backoff: number };
@@ -299,11 +294,6 @@ export class Config extends EventEmitter {
 	}
 
 	getUsageSnapshotRetentionDays(): number {
-		const fromEnv = process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
-		}
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
 		return 3650; // default usage snapshot retention (10 years for the Limits graph)
@@ -315,11 +305,6 @@ export class Config extends EventEmitter {
 	}
 
 	getMemorySnapshotRetentionDays(): number {
-		const fromEnv = process.env.MEMORY_SNAPSHOT_RETENTION_DAYS;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
-		}
 		const fromFile = this.data.memory_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
 		return 14; // default memory snapshot retention (14 days for the Memory Usage graph)
@@ -331,11 +316,6 @@ export class Config extends EventEmitter {
 	}
 
 	getCacheKeepaliveSnapshotRetentionDays(): number {
-		const fromEnv = process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
-		}
 		const fromFile = this.data.cache_keepalive_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
 		return 30; // default cache keepalive snapshot retention (30 days)
@@ -347,10 +327,6 @@ export class Config extends EventEmitter {
 	}
 
 	getStorePayloads(): boolean {
-		const fromEnv = process.env.STORE_PAYLOADS;
-		if (fromEnv) {
-			return fromEnv !== "false" && fromEnv !== "0";
-		}
 		const fromFile = this.data.store_payloads;
 		if (typeof fromFile === "boolean") return fromFile;
 		return true; // default: store payloads
@@ -361,11 +337,6 @@ export class Config extends EventEmitter {
 	}
 
 	getUsagePollIntervalMs(): number {
-		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 10000, 3600000);
-		}
 		const fromFile = this.data.usage_poll_interval_ms;
 		if (typeof fromFile === "number")
 			return this.clamp(fromFile, 10000, 3600000);
@@ -378,23 +349,7 @@ export class Config extends EventEmitter {
 	}
 
 	getCacheWarmingMode(): CacheWarmingMode {
-		// 1. Explicit mode env (only if it names a valid mode).
-		const fromModeEnv = process.env.CACHE_WARMING_MODE;
-		if (
-			fromModeEnv === "off" ||
-			fromModeEnv === "static" ||
-			fromModeEnv === "dynamic"
-		) {
-			return fromModeEnv;
-		}
-		// 2. Legacy boolean env: truthy → dynamic, otherwise off.
-		const fromEnabledEnv = process.env.CACHE_WARMING_ENABLED;
-		if (fromEnabledEnv) {
-			return fromEnabledEnv !== "false" && fromEnabledEnv !== "0"
-				? "dynamic"
-				: "off";
-		}
-		// 3. File mode field (only if valid).
+		// 1. File mode field (only if valid).
 		const fromModeFile = this.data.cache_warming_mode;
 		if (
 			fromModeFile === "off" ||
@@ -403,12 +358,12 @@ export class Config extends EventEmitter {
 		) {
 			return fromModeFile;
 		}
-		// 4. Legacy file boolean: true → dynamic, false → off.
+		// 2. Legacy file boolean: true → dynamic, false → off.
 		const fromEnabledFile = this.data.cache_warming_enabled;
 		if (typeof fromEnabledFile === "boolean") {
 			return fromEnabledFile ? "dynamic" : "off";
 		}
-		// 5. Default: disabled.
+		// 3. Default: disabled.
 		return "off";
 	}
 
@@ -428,11 +383,6 @@ export class Config extends EventEmitter {
 		// Default mirrors bridge-policy's DEFAULT_MIN_CACHE_TOKENS (duplicated here
 		// because the config package must not depend on the proxy package).
 		const DEFAULT_CACHE_WARMING_MIN_TOKENS = 100_000;
-		const fromEnv = process.env.CACHE_WARMING_MIN_TOKENS;
-		if (fromEnv) {
-			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return Math.max(0, n);
-		}
 		const fromFile = this.data.cache_warming_min_tokens;
 		if (typeof fromFile === "number") return Math.max(0, fromFile);
 		return DEFAULT_CACHE_WARMING_MIN_TOKENS;
@@ -470,24 +420,12 @@ export class Config extends EventEmitter {
 	}
 
 	getUsageThrottlingFiveHourEnabled(): boolean {
-		const fromEnv = parseEnabledEnvFlag(
-			process.env.USAGE_THROTTLING_FIVE_HOUR_ENABLED,
-		);
-		if (fromEnv !== undefined) {
-			return fromEnv;
-		}
 		const fromFile = this.data.usage_throttling_five_hour_enabled;
 		if (typeof fromFile === "boolean") return fromFile;
 		return false;
 	}
 
 	getUsageThrottlingWeeklyEnabled(): boolean {
-		const fromEnv = parseEnabledEnvFlag(
-			process.env.USAGE_THROTTLING_WEEKLY_ENABLED,
-		);
-		if (fromEnv !== undefined) {
-			return fromEnv;
-		}
 		const fromFile = this.data.usage_throttling_weekly_enabled;
 		if (typeof fromFile === "boolean") return fromFile;
 		return false;
@@ -558,24 +496,6 @@ export class Config extends EventEmitter {
 		};
 
 		// Override with environment variables if present
-		if (process.env.CLIENT_ID) {
-			defaults.clientId = process.env.CLIENT_ID;
-		}
-		if (process.env.RETRY_ATTEMPTS) {
-			defaults.retry.attempts = parseInt(process.env.RETRY_ATTEMPTS, 10);
-		}
-		if (process.env.RETRY_DELAY_MS) {
-			defaults.retry.delayMs = parseInt(process.env.RETRY_DELAY_MS, 10);
-		}
-		if (process.env.RETRY_BACKOFF) {
-			defaults.retry.backoff = parseFloat(process.env.RETRY_BACKOFF);
-		}
-		if (process.env.SESSION_DURATION_MS) {
-			defaults.sessionDurationMs = parseInt(
-				process.env.SESSION_DURATION_MS,
-				10,
-			);
-		}
 		if (process.env.PORT) {
 			defaults.port = parseInt(process.env.PORT, 10);
 		}

@@ -29,7 +29,7 @@ const KNOWN_ERROR_META: Record<
 		description:
 			"The upstream provider returned 429 without a reset header; entering probe cooldown.",
 		suggestion:
-			"Cooldown defaults to 60s. Set `CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS` in your environment to change it.",
+			"The account enters a short probe cooldown (about 60s), then the next request re-probes it automatically.",
 		severity: "warning",
 	},
 	upstream_429_no_reset_default_5h: {
@@ -58,7 +58,7 @@ const KNOWN_ERROR_META: Record<
 		description:
 			"The upstream provider returned 529 (overloaded) without a Retry-After header; entering probe cooldown.",
 		suggestion:
-			"Cooldown defaults to 60s. Set `CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS` in your environment to change it.",
+			"The account enters a short probe cooldown (about 60s), then the next request re-probes it automatically.",
 		severity: "warning",
 	},
 	out_of_credits: {

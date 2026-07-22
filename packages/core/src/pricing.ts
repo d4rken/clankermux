@@ -239,9 +239,12 @@ interface Logger {
 }
 
 /** Default models.dev fetch timeout. Kept short so a hung remote never stalls
- * the per-request usage finalizer (which awaits estimateCostUSD). Overridable
- * via CF_PRICING_FETCH_TIMEOUT_MS. */
+ * the per-request usage finalizer (which awaits estimateCostUSD). */
 const DEFAULT_PRICING_FETCH_TIMEOUT_MS = 4_000;
+
+/** How long a fetched pricing catalogue is treated as fresh before a background
+ * refresh is triggered. */
+const PRICING_REFRESH_HOURS = 24;
 
 class PriceCatalogue {
 	private static instance: PriceCatalogue;
@@ -278,8 +281,7 @@ class PriceCatalogue {
 	}
 
 	private getCacheDurationMs(): number {
-		const hours = Number(process.env.CF_PRICING_REFRESH_HOURS) || 24;
-		return hours * TIME_CONSTANTS.HOUR;
+		return PRICING_REFRESH_HOURS * TIME_CONSTANTS.HOUR;
 	}
 
 	private async ensureCacheDir(): Promise<void> {
@@ -455,17 +457,10 @@ class PriceCatalogue {
 	}
 
 	private getFetchTimeoutMs(): number {
-		const raw = Number(process.env.CF_PRICING_FETCH_TIMEOUT_MS);
-		return Number.isFinite(raw) && raw > 0
-			? raw
-			: DEFAULT_PRICING_FETCH_TIMEOUT_MS;
+		return DEFAULT_PRICING_FETCH_TIMEOUT_MS;
 	}
 
 	private async fetchRemote(): Promise<ApiResponse | null> {
-		if (process.env.CF_PRICING_OFFLINE === "1") {
-			return null;
-		}
-
 		// Bound the fetch with an AbortController timeout so a hung models.dev
 		// connection can never stall the caller (estimateCostUSD must always
 		// resolve quickly — it's awaited on the per-request usage finalize path).

@@ -27,7 +27,7 @@ const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
  * through the worker.
  *
  * Race the worker promise against a configurable timeout (default 10 min,
- * env override `CCFLARE_INTEGRITY_CHECK_WORKER_TIMEOUT_MS`). On timeout the
+ * overridable per-call via the `timeoutMs` option). On timeout the
  * worker is terminated and the runner returns
  * `{ ok: false, verdict: "timeout", error: "worker timed out …" }` — callers
  * translate that to a `skipped` result (NOT corrupt: a timeout is an
@@ -107,11 +107,5 @@ function resolveTimeoutMs(override?: number): number {
 	if (override !== undefined && Number.isInteger(override) && override > 0) {
 		return override;
 	}
-	const raw = process.env.CCFLARE_INTEGRITY_CHECK_WORKER_TIMEOUT_MS;
-	if (raw === undefined || raw === "") return DEFAULT_WORKER_TIMEOUT_MS;
-	const parsed = Number(raw);
-	if (!Number.isInteger(parsed) || parsed <= 0) {
-		return DEFAULT_WORKER_TIMEOUT_MS;
-	}
-	return parsed;
+	return DEFAULT_WORKER_TIMEOUT_MS;
 }

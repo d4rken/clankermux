@@ -4,28 +4,11 @@
  * Licensed under the CAT Commercial License.
  * See LICENSE.md in the project root for license terms.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "./index";
-
-const ORIGINAL_ENV = {
-	CACHE_WARMING_MODE: process.env.CACHE_WARMING_MODE,
-	CACHE_WARMING_ENABLED: process.env.CACHE_WARMING_ENABLED,
-	CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS:
-		process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS,
-};
-
-function restoreEnv(): void {
-	for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
-		if (value === undefined) {
-			delete process.env[key];
-		} else {
-			process.env[key] = value;
-		}
-	}
-}
 
 function makeConfig(): { config: Config; cleanup: () => void } {
 	const dir = mkdtempSync(join(tmpdir(), "clankermux-config-"));
@@ -36,13 +19,7 @@ function makeConfig(): { config: Config; cleanup: () => void } {
 }
 
 describe("cache warming mode", () => {
-	afterEach(() => {
-		restoreEnv();
-	});
-
 	it("defaults to off", () => {
-		delete process.env.CACHE_WARMING_MODE;
-		delete process.env.CACHE_WARMING_ENABLED;
 		const { config, cleanup } = makeConfig();
 		try {
 			expect(config.getCacheWarmingMode()).toBe("off");
@@ -53,8 +30,6 @@ describe("cache warming mode", () => {
 	});
 
 	it("persists set values and reads them back", () => {
-		delete process.env.CACHE_WARMING_MODE;
-		delete process.env.CACHE_WARMING_ENABLED;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheWarmingMode("static");
@@ -70,60 +45,21 @@ describe("cache warming mode", () => {
 		}
 	});
 
-	it("CACHE_WARMING_MODE env wins when a valid mode", () => {
-		delete process.env.CACHE_WARMING_ENABLED;
+	it("ignores an invalid cache_warming_mode file value", () => {
 		const { config, cleanup } = makeConfig();
 		try {
-			config.setCacheWarmingMode("off");
-			process.env.CACHE_WARMING_MODE = "dynamic";
+			// Legacy file boolean present → dynamic.
+			config.set("cache_warming_enabled", true);
+			// Simulate a hand-edited file with a bogus mode; falls through to the
+			// legacy boolean.
+			config.set("cache_warming_mode", "bogus");
 			expect(config.getCacheWarmingMode()).toBe("dynamic");
-			process.env.CACHE_WARMING_MODE = "static";
-			expect(config.getCacheWarmingMode()).toBe("static");
-		} finally {
-			cleanup();
-		}
-	});
-
-	it("ignores an invalid CACHE_WARMING_MODE env value", () => {
-		delete process.env.CACHE_WARMING_ENABLED;
-		const { config, cleanup } = makeConfig();
-		try {
-			config.setCacheWarmingMode("static");
-			process.env.CACHE_WARMING_MODE = "bogus";
-			// falls through to the file value
-			expect(config.getCacheWarmingMode()).toBe("static");
-		} finally {
-			cleanup();
-		}
-	});
-
-	it("legacy CACHE_WARMING_ENABLED env maps to dynamic/off", () => {
-		delete process.env.CACHE_WARMING_MODE;
-		const { config, cleanup } = makeConfig();
-		try {
-			process.env.CACHE_WARMING_ENABLED = "true";
-			expect(config.getCacheWarmingMode()).toBe("dynamic");
-			process.env.CACHE_WARMING_ENABLED = "false";
-			expect(config.getCacheWarmingMode()).toBe("off");
-		} finally {
-			cleanup();
-		}
-	});
-
-	it("CACHE_WARMING_MODE env takes precedence over legacy CACHE_WARMING_ENABLED", () => {
-		const { config, cleanup } = makeConfig();
-		try {
-			process.env.CACHE_WARMING_MODE = "static";
-			process.env.CACHE_WARMING_ENABLED = "false";
-			expect(config.getCacheWarmingMode()).toBe("static");
 		} finally {
 			cleanup();
 		}
 	});
 
 	it("legacy cache_warming_enabled file value maps to dynamic/off", () => {
-		delete process.env.CACHE_WARMING_MODE;
-		delete process.env.CACHE_WARMING_ENABLED;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheWarmingEnabled(true);
@@ -135,9 +71,18 @@ describe("cache warming mode", () => {
 		}
 	});
 
+	it("cache_warming_mode file field takes precedence over legacy boolean", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			config.set("cache_warming_enabled", false); // legacy boolean → off
+			config.set("cache_warming_mode", "static"); // explicit mode wins
+			expect(config.getCacheWarmingMode()).toBe("static");
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("includes cache_warming_mode in getAllSettings()", () => {
-		delete process.env.CACHE_WARMING_MODE;
-		delete process.env.CACHE_WARMING_ENABLED;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheWarmingMode("static");
@@ -149,12 +94,7 @@ describe("cache warming mode", () => {
 });
 
 describe("cache keepalive snapshot retention days", () => {
-	afterEach(() => {
-		restoreEnv();
-	});
-
 	it("defaults to 30 days", () => {
-		delete process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			expect(config.getCacheKeepaliveSnapshotRetentionDays()).toBe(30);
@@ -164,7 +104,6 @@ describe("cache keepalive snapshot retention days", () => {
 	});
 
 	it("persists set values and reads them back", () => {
-		delete process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheKeepaliveSnapshotRetentionDays(60);
@@ -175,7 +114,6 @@ describe("cache keepalive snapshot retention days", () => {
 	});
 
 	it("clamps set values to the 1..3650 range", () => {
-		delete process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheKeepaliveSnapshotRetentionDays(0);
@@ -187,13 +125,12 @@ describe("cache keepalive snapshot retention days", () => {
 		}
 	});
 
-	it("lets the env override win and clamps it", () => {
+	it("clamps a raw on-disk value on read", () => {
 		const { config, cleanup } = makeConfig();
 		try {
-			config.setCacheKeepaliveSnapshotRetentionDays(20);
-			process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS = "200";
-			expect(config.getCacheKeepaliveSnapshotRetentionDays()).toBe(200);
-			process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS = "999999";
+			// Simulate a hand-edited file value above the cap (raw set bypasses the
+			// clamping setter, so the clamp must happen on read).
+			config.set("cache_keepalive_snapshot_retention_days", 999999);
 			expect(config.getCacheKeepaliveSnapshotRetentionDays()).toBe(3650);
 		} finally {
 			cleanup();
@@ -201,7 +138,6 @@ describe("cache keepalive snapshot retention days", () => {
 	});
 
 	it("includes the value in getAllSettings()", () => {
-		delete process.env.CACHE_KEEPALIVE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setCacheKeepaliveSnapshotRetentionDays(21);

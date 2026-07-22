@@ -30,11 +30,7 @@
  *    `packages/http-api/src/handlers/usage-history.ts`.
  */
 
-import {
-	intervalManager,
-	normalizeAnthropicUsage,
-	readEnv,
-} from "@clankermux/core";
+import { intervalManager, normalizeAnthropicUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
 import type {
@@ -45,10 +41,8 @@ import type {
 
 const log = new Logger("UsageSnapshotSampler");
 
-/** Default sample cadence (2 minutes). */
+/** Sample cadence (2 minutes). */
 export const SAMPLE_INTERVAL_MS = 120_000;
-/** Floor for the env-overridable sample cadence (30s). */
-const SAMPLE_INTERVAL_FLOOR_MS = 30_000;
 
 /** Minimal cache surface the pure projection needs (matches `usageCache`). */
 export interface SamplerCache {
@@ -117,13 +111,8 @@ export function buildSnapshotRows(
 	return rows;
 }
 
-/** Resolve the sample cadence from env (with a sane floor) or the constant. */
+/** The sample cadence shared by the usage and cache-keepalive samplers. */
 export function resolveSampleIntervalMs(): number {
-	const fromEnv = readEnv("USAGE_SNAPSHOT_SAMPLE_INTERVAL_MS");
-	if (fromEnv) {
-		const n = parseInt(fromEnv, 10);
-		if (Number.isFinite(n)) return Math.max(n, SAMPLE_INTERVAL_FLOOR_MS);
-	}
 	return SAMPLE_INTERVAL_MS;
 }
 

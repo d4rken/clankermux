@@ -1,4 +1,3 @@
-import { readEnv } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	errorResponse,
@@ -214,8 +213,8 @@ async function getCommitDistance(
 
 export function createVersionCheckHandler() {
 	return async (): Promise<Response> => {
-		const repo = readEnv("UPDATE_REPO") || DEFAULT_REPO;
-		const branch = readEnv("UPDATE_BRANCH") || DEFAULT_BRANCH;
+		const repo = DEFAULT_REPO;
+		const branch = DEFAULT_BRANCH;
 
 		try {
 			const current = getCurrentCommit();

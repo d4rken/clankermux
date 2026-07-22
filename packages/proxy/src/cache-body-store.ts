@@ -97,39 +97,22 @@ export interface CachedRequestEntry {
 export const MAX_STAGING_ENTRIES = 500;
 
 /**
- * Resolve a positive-millisecond env override, falling back to `fallback` when
- * unset or invalid. Mirrors the parsing forwardToClient uses for the stream
- * timeouts so the staging age stays in lockstep with how long a stream may run.
- */
-function resolveEnvMs(name: string, fallback: number): number {
-	const raw = process.env[name];
-	if (raw === undefined) return fallback;
-	const parsed = Number(raw);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-/**
  * Maximum age of an in-flight staged entry before it's treated as an orphan and
  * evicted. Must exceed the longest a LIVE request can stay staged, so we never
  * evict one mid-flight: staging happens BEFORE the upstream call, so a request
  * can wait up to PROXY_REQUEST_TIMEOUT_MS for response headers and THEN stream
  * for up to the stream-forward total timeout (plus a chunk-timeout of margin).
- * The stream portions honor the same CF_STREAM_TOTAL_TIMEOUT_MS /
- * CF_STREAM_CHUNK_TIMEOUT_MS overrides forwardToClient uses, so raising them for
- * long agentic workloads (issue #84) widens this window in lockstep. Anything
- * older never got an onSummary/discardStaged signal (e.g. an error before the
- * response handler ran) and would otherwise leak its off-heap body (bun#5709).
+ * Composed from the same STREAM_FORWARD_TOTAL_TIMEOUT_MS /
+ * STREAM_FORWARD_CHUNK_TIMEOUT_MS constants forwardToClient uses, so the window
+ * stays in lockstep with how long a stream may run for long agentic workloads
+ * (issue #84). Anything older never got an onSummary/discardStaged signal (e.g.
+ * an error before the response handler ran) and would otherwise leak its
+ * off-heap body (bun#5709).
  */
 export const STAGING_MAX_AGE_MS =
 	TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS +
-	resolveEnvMs(
-		"CF_STREAM_TOTAL_TIMEOUT_MS",
-		TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS,
-	) +
-	resolveEnvMs(
-		"CF_STREAM_CHUNK_TIMEOUT_MS",
-		TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS,
-	);
+	TIME_CONSTANTS.STREAM_FORWARD_TOTAL_TIMEOUT_MS +
+	TIME_CONSTANTS.STREAM_FORWARD_CHUNK_TIMEOUT_MS;
 
 class CacheBodyStore {
 	/**

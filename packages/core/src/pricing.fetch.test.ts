@@ -15,16 +15,16 @@ import { __pricingTestHooks, estimateCostUSD } from "./pricing";
 // satisfy loadPricing() — we want to exercise the remote-fetch path. Restore in
 // afterAll-equivalent teardown (bun shares one process across files).
 const originalTmpdir = process.env.TMPDIR;
-const originalOffline = process.env.CF_PRICING_OFFLINE;
-const originalTimeout = process.env.CF_PRICING_FETCH_TIMEOUT_MS;
 const originalFetch = globalThis.fetch;
 let cacheDir: string;
+
+// Matches DEFAULT_PRICING_FETCH_TIMEOUT_MS in pricing.ts (the fetch timeout is
+// no longer overridable via env, so the abort test waits out the real default).
+const PRICING_FETCH_TIMEOUT_MS = 4_000;
 
 beforeEach(() => {
 	cacheDir = mkdtempSync(join(tmpdir(), "cmux-pricing-fetch-"));
 	process.env.TMPDIR = cacheDir;
-	// Ensure the remote path is taken (not short-circuited offline).
-	delete process.env.CF_PRICING_OFFLINE;
 	__pricingTestHooks.reset();
 });
 
@@ -33,11 +33,6 @@ afterEach(() => {
 	__pricingTestHooks.reset();
 	if (originalTmpdir === undefined) delete process.env.TMPDIR;
 	else process.env.TMPDIR = originalTmpdir;
-	if (originalOffline === undefined) delete process.env.CF_PRICING_OFFLINE;
-	else process.env.CF_PRICING_OFFLINE = originalOffline;
-	if (originalTimeout === undefined)
-		delete process.env.CF_PRICING_FETCH_TIMEOUT_MS;
-	else process.env.CF_PRICING_FETCH_TIMEOUT_MS = originalTimeout;
 	rmSync(cacheDir, { recursive: true, force: true });
 });
 
@@ -70,8 +65,7 @@ describe("pricing fetch bounding + de-dupe (B3)", () => {
 		expect(aborted).toBe(false);
 	});
 
-	it("aborts a fetch that exceeds the configured timeout", async () => {
-		process.env.CF_PRICING_FETCH_TIMEOUT_MS = "50";
+	it("aborts a fetch that exceeds the default timeout", async () => {
 		let aborted = false;
 		globalThis.fetch = ((_url: string, init?: { signal?: AbortSignal }) => {
 			return new Promise((_resolve, reject) => {
@@ -82,12 +76,12 @@ describe("pricing fetch bounding + de-dupe (B3)", () => {
 			});
 		}) as unknown as typeof fetch;
 
-		// Trigger the background load directly and wait for it to settle (it falls
-		// back to bundled after the abort fires).
+		// Trigger the background load directly and wait past the default timeout for
+		// it to settle (it falls back to bundled after the abort fires).
 		await __pricingTestHooks.getPricing();
-		await new Promise((r) => setTimeout(r, 120));
+		await new Promise((r) => setTimeout(r, PRICING_FETCH_TIMEOUT_MS + 200));
 		expect(aborted).toBe(true);
-	});
+	}, 10_000);
 
 	it("de-dupes concurrent cold loads behind a single fetch", async () => {
 		let fetchCalls = 0;

@@ -205,7 +205,7 @@ function createIsolatedDashboardHandler(
 		const existing = inFlight.get(key);
 		if (existing) return (await existing).clone();
 
-		if (inFlight.size >= resolveMaxInFlightEntries()) {
+		if (inFlight.size >= DEFAULT_MAX_IN_FLIGHT_ENTRIES) {
 			log.warn(
 				`Rejecting ${kind} request: ${inFlight.size} worker requests already in flight`,
 			);
@@ -266,7 +266,7 @@ function runDashboardWorker(
 	return new Promise<Response>((resolve, reject) => {
 		const timeoutHandle = setTimeout(() => {
 			resetDashboardWorker(new DashboardWorkerTimeoutError());
-		}, resolveWorkerTimeoutMs());
+		}, DEFAULT_WORKER_TIMEOUT_MS);
 
 		pendingWorkerRequests.set(id, {
 			resolve,
@@ -395,7 +395,7 @@ async function cacheIfSuccessful(
 	try {
 		const body = await response.clone().text();
 		responseCache.set(cacheKey, {
-			expiresAt: Date.now() + resolveCacheTtlMs(),
+			expiresAt: Date.now() + DEFAULT_CACHE_TTL_MS,
 			status: response.status,
 			body,
 		});
@@ -412,8 +412,7 @@ function pruneResponseCache(now: number): void {
 		}
 	}
 
-	const maxEntries = resolveMaxResponseCacheEntries();
-	while (responseCache.size > maxEntries) {
+	while (responseCache.size > DEFAULT_MAX_RESPONSE_CACHE_ENTRIES) {
 		const oldestKey = responseCache.keys().next().value;
 		if (typeof oldestKey !== "string") break;
 		responseCache.delete(oldestKey);
@@ -432,43 +431,9 @@ function responseFromCached(cached: CachedResponse): Response {
 
 class DashboardWorkerTimeoutError extends Error {
 	constructor() {
-		super(`dashboard worker timed out after ${resolveWorkerTimeoutMs()}ms`);
+		super(`dashboard worker timed out after ${DEFAULT_WORKER_TIMEOUT_MS}ms`);
 		this.name = "DashboardWorkerTimeoutError";
 	}
-}
-
-function resolveCacheTtlMs(): number {
-	return resolvePositiveInt(
-		process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS,
-		DEFAULT_CACHE_TTL_MS,
-	);
-}
-
-function resolveWorkerTimeoutMs(): number {
-	return resolvePositiveInt(
-		process.env.CLANKERMUX_ANALYTICS_WORKER_TIMEOUT_MS,
-		DEFAULT_WORKER_TIMEOUT_MS,
-	);
-}
-
-function resolveMaxResponseCacheEntries(): number {
-	return resolvePositiveInt(
-		process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES,
-		DEFAULT_MAX_RESPONSE_CACHE_ENTRIES,
-	);
-}
-
-function resolveMaxInFlightEntries(): number {
-	return resolvePositiveInt(
-		process.env.CLANKERMUX_ANALYTICS_INFLIGHT_MAX_ENTRIES,
-		DEFAULT_MAX_IN_FLIGHT_ENTRIES,
-	);
-}
-
-function resolvePositiveInt(raw: string | undefined, fallback: number): number {
-	if (!raw) return fallback;
-	const parsed = Number(raw);
-	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function clearAnalyticsCachesForTests(): void {
