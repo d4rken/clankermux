@@ -32,7 +32,7 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain(
 			"Usage throttling enabled; requests are being delayed",
 		);
-		expect(html).toContain("Usage (5-hour)");
+		expect(html).toContain("5-hour");
 	});
 
 	describe("weekly window with no reset timestamp", () => {
@@ -41,7 +41,7 @@ describe("RateLimitProgress", () => {
 			resets_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
 		});
 
-		it("shows 'Not started yet' / 'No usage this week' when seven_day utilization is 0", () => {
+		it("shows 'Not started yet' when seven_day utilization is 0", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
@@ -57,11 +57,10 @@ describe("RateLimitProgress", () => {
 			);
 
 			expect(html).toContain("Not started yet");
-			expect(html).toContain("No usage this week");
 			expect(html).not.toContain("Data unavailable");
 		});
 
-		it("shows 'Not started yet' / 'No usage this week' for seven_day_sonnet with utilization 0", () => {
+		it("shows 'Not started yet' for seven_day_sonnet with utilization 0", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={new Date(Date.now() + 60 * 60 * 1000).toISOString()}
@@ -78,7 +77,6 @@ describe("RateLimitProgress", () => {
 			);
 
 			expect(html).toContain("Not started yet");
-			expect(html).toContain("No usage this week");
 			expect(html).not.toContain("Data unavailable");
 		});
 
@@ -260,11 +258,12 @@ describe("RateLimitProgress", () => {
 		// Legacy-path smoke test: no `prediction` prop, so this flows through
 		// computeProjectedMessage. 5% used one hour into a five-hour window is
 		// *behind* the flat 20% pace, so exhaustion is projected far past the reset
-		// and the reassuring "Resets … before exhaustion" line renders green. The
+		// and the reassuring "on track" line renders green. The safe case is stated
+		// qualitatively (no unbounded "resets N hours before exhaustion" number). The
 		// legacy path was always internally consistent (safe ⟺ not over-pacing), so
 		// this only guards the render wiring — see the prediction-path test below
 		// for the actual regression case.
-		it("renders a legacy 'before exhaustion' projection green (text-success)", () => {
+		it("renders a legacy safe projection green (text-success)", () => {
 			const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
@@ -281,7 +280,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("before exhaustion");
+			expect(html).toContain("On track to reset before running out");
 			expect(html).toContain("text-success");
 			expect(html).not.toContain("text-destructive");
 		});
@@ -324,7 +323,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("before exhaustion");
+			expect(html).toContain("On track to reset before running out");
 			expect(html).toContain("text-success");
 			expect(html).not.toContain("text-destructive");
 		});
@@ -376,8 +375,8 @@ describe("RateLimitProgress", () => {
 				hour: "2-digit",
 				minute: "2-digit",
 			});
-			expect(html).toContain("Rate limit window");
-			expect(html).toContain(`Resets ${expectedDate} (local)`);
+			expect(html).toContain("Rate limit");
+			expect(html).toContain(`Resets ${expectedDate}`);
 		});
 
 		it("keeps the time-only label when the reset is later today", () => {
@@ -404,7 +403,7 @@ describe("RateLimitProgress", () => {
 			});
 			const sameDay = new Date().getDate() === reset.getDate();
 			expect(html).toContain(
-				sameDay ? `Resets ${timeOnly} (local)` : `Resets ${withDate} (local)`,
+				sameDay ? `Resets ${timeOnly}` : `Resets ${withDate}`,
 			);
 		});
 	});
@@ -442,9 +441,9 @@ describe("RateLimitProgress", () => {
 				hour: "2-digit",
 				minute: "2-digit",
 			});
-			expect(html).toContain("Usage (Weekly): last known as of");
+			expect(html).toContain("Weekly: last known as of");
 			expect(html).toContain("85%");
-			expect(html).toContain(`Resets ${expectedDate} (local)`);
+			expect(html).toContain(`Resets ${expectedDate}`);
 			expect(html).toContain(
 				"Live usage unavailable — showing last known data",
 			);
@@ -462,7 +461,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("Usage (Weekly): last known as of");
+			expect(html).toContain("Weekly: last known as of");
 		});
 
 		it("prefers live usage data over the stale snapshot", () => {

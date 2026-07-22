@@ -18,6 +18,17 @@ export interface ProjectedUsage {
 }
 
 /**
+ * Copy for the reassuring "safe" projection — the window will reset before it
+ * would exhaust. The time-until-exhaustion is an unbounded linear extrapolation
+ * that balloons to hundreds of hours when a window is barely used (e.g. "Resets
+ * 1000h before exhaustion"), so the gap is stated qualitatively rather than as a
+ * meaningless large number. The bounded "danger" case still shows a concrete
+ * figure. Shared by both projection paths so they read identically.
+ */
+export const RESETS_BEFORE_EXHAUSTION_MESSAGE =
+	"On track to reset before running out";
+
+/**
  * Formats a positive millisecond duration as "Xh Ym" (or "Ym" under an hour).
  * Shared with RateLimitProgress so the regression-backed projection copy reads
  * identically to the legacy single-snapshot burn-rate message.
@@ -61,7 +72,7 @@ export function formatPredictionMessage(
 				};
 			}
 			return {
-				message: `Resets ${formatDuration(pred.etaExhaustMs - resetTimeMs)} before exhaustion`,
+				message: RESETS_BEFORE_EXHAUSTION_MESSAGE,
 				tone: "safe",
 			};
 		}
