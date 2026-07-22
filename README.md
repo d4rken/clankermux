@@ -52,8 +52,8 @@ Features:
 Requires [Bun](https://bun.sh).
 
 ```bash
-git clone https://github.com/d4rken/better-ccflare
-cd better-ccflare
+git clone https://github.com/d4rken/clankermux
+cd clankermux
 bun install
 bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
