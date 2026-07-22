@@ -14,8 +14,10 @@ in the dashboard, and it routes and falls back across them.
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
 (itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)).
-After 30+ upstream PRs I just decided to just have my own bespoke solution.
+After 30+ upstream PRs I decided to have my own bespoke solution.
 Fast iteration and tailored to my use-case, mostly Anthropic and OpenAI accounts.
+It's since diverged substantially and is developed independently, but stays
+MIT-licensed and keeps the original authors' copyright intact.
 
 Features:
 
