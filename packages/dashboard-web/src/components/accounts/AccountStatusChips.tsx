@@ -12,10 +12,10 @@ import {
 	deriveAccountStatus,
 	type ResetCreditUrgency,
 } from "../../lib/account-status";
-import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
+import { StatusChip } from "./StatusChip";
 
 /**
  * Codex sells credits at a flat €0.04 each — the rate card is perfectly linear
@@ -436,13 +436,13 @@ function CodexUsageResetChip({
 	return (
 		<Popover onOpenChange={handleOpenChange}>
 			<PopoverTrigger asChild>
-				<span
-					className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full cursor-pointer ${colorClasses}`}
+				<StatusChip
+					className={`cursor-pointer ${colorClasses}`}
 					title={`${countLabel} available.${expiryDetails}${autoApplyLine} Click for reset history.`}
 				>
 					<RotateCcw className="h-3.5 w-3.5" />
 					{label}
-				</span>
+				</StatusChip>
 			</PopoverTrigger>
 			<PopoverContent align="start" className="w-80 p-3 space-y-3">
 				<ResetCreditApplyPanel
@@ -486,17 +486,13 @@ export function AccountStatusChips({
 	return (
 		<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
 			{status.isPrimary && (
-				<span className="px-2 py-0.5 text-xs font-medium bg-primary text-primary-foreground rounded-full">
+				<StatusChip className="bg-primary text-primary-foreground">
 					Primary
-				</span>
+				</StatusChip>
 			)}
-			<span className="px-2 py-0.5 text-xs font-medium bg-secondary text-secondary-foreground rounded-full">
+			<StatusChip className="bg-secondary text-secondary-foreground">
 				Priority: {status.priority}
-			</span>
-			<OAuthTokenStatusWithBoundary
-				accountName={account.name}
-				hasRefreshToken={account.hasRefreshToken}
-			/>
+			</StatusChip>
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
 					<AlertCircle className="h-4 w-4 text-yellow-600" />
@@ -504,22 +500,22 @@ export function AccountStatusChips({
 			)}
 			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
 			{status.isSubscriptionExpired && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+				<StatusChip
+					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
 					title="The provider reports this account's subscription has lapsed (OAuth no longer allowed for the organization). The account was auto-paused and will auto-resume once usage data is reachable again after renewal."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Subscription expired
-				</span>
+				</StatusChip>
 			)}
 			{status.isNeedsReauth && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+				<StatusChip
+					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
 					title="This account's OAuth refresh token was rejected (invalid_grant). It was auto-paused and removed from rotation. Re-authenticate it from the Accounts tab — it will auto-resume on success."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Needs re-authentication
-				</span>
+				</StatusChip>
 			)}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip status={status.rateLimitStatus} />
@@ -541,50 +537,50 @@ export function AccountStatusChips({
 				</span>
 			)}
 			{status.providerOverloadedUntil && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+				<StatusChip
+					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
 					title={`Provider overload cooldown active until ${new Date(
 						status.providerOverloadedUntil,
 					).toLocaleString()}`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Provider overloaded ({status.providerOverloadMinutes}m)
-				</span>
+				</StatusChip>
 			)}
 			{status.isProviderProbing && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+				<StatusChip
+					className="bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
 					title="Provider overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes"
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Probing recovery
-				</span>
+				</StatusChip>
 			)}
 			{status.overloadedFamilies.map((entry) => (
-				<span
+				<StatusChip
 					key={entry.family}
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
 					title={`Upstream overload for the ${formatFamilyLabel(entry.family)} model family — breaker open until ${new Date(
 						entry.until,
 					).toLocaleString()}. Other model families keep routing to this account.`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Overloaded: {formatFamilyLabel(entry.family)} ({entry.minutes}m)
-				</span>
+				</StatusChip>
 			))}
 			{status.probingFamilies.map((family) => (
-				<span
+				<StatusChip
 					key={family}
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					className="bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
 					title={`${formatFamilyLabel(family)} overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Probing: {formatFamilyLabel(family)}
-				</span>
+				</StatusChip>
 			))}
 			{status.isOnCredits && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+				<StatusChip
+					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
 					title={`Weekly limit reached — account is drawing on purchased credits.${
 						status.creditsBalance != null
 							? ` ${Math.round(status.creditsBalance)} credits remaining ≈ €${(
@@ -599,34 +595,34 @@ export function AccountStatusChips({
 						? ` · ${formatCodexCreditBalance(status.creditsBalance)}`
 						: ""}
 					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
-				</span>
+				</StatusChip>
 			)}
 			<CodexUsageResetChip account={account} status={status} />
 			{status.showPeakChip && (
-				<span
-					className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
+				<StatusChip
+					className={
 						status.isPeak
 							? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
 							: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-					}`}
+					}
 				>
 					<span
 						className={`h-1.5 w-1.5 rounded-full ${status.isPeak ? "bg-orange-500" : "bg-green-500"}`}
 					/>
 					{status.peakChipLabel}
-				</span>
+				</StatusChip>
 			)}
 			{status.showRenewalChip && (
 				<RenewalChip account={account} status={status} />
 			)}
 			{status.isDuplicateAccount && (
-				<span
-					className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+				<StatusChip
+					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
 					title={`Shares provider identity with ${status.duplicateAccountIds.length} other account(s)`}
 				>
 					<Copy className="h-3.5 w-3.5" />
 					Duplicate
-				</span>
+				</StatusChip>
 			)}
 		</div>
 	);
@@ -693,12 +689,9 @@ function RenewalChip({
 		RENEWAL_URGENCY_CLASSES.none;
 
 	return (
-		<span
-			className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${colorClasses}`}
-			title={title}
-		>
+		<StatusChip className={colorClasses} title={title}>
 			<CalendarClock className="h-3.5 w-3.5" />
 			{label}
-		</span>
+		</StatusChip>
 	);
 }

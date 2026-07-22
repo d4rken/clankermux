@@ -21,14 +21,14 @@ describe("RateLimitStatusChip", () => {
 		expect(html).not.toContain("allowed_warning");
 		// 602 minutes -> 10h 2m
 		expect(html).toContain("10h 2m");
-		// warning variant uses the yellow background
-		expect(html).toContain("bg-yellow-500");
+		// warning variant uses the light amber tint shared by sibling chips
+		expect(html).toContain("bg-amber-100");
 	});
 
 	it("maps hard-limit statuses to a destructive chip", () => {
 		const html = render("rate_limited (30m)");
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-destructive");
+		expect(html).toContain("bg-red-100");
 		expect(html).toContain("30m");
 	});
 

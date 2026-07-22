@@ -1,11 +1,25 @@
 import type { ComponentProps } from "react";
-import { Badge } from "../ui/badge";
+import type { Badge } from "../ui/badge";
+import { StatusChip } from "./StatusChip";
 
 type BadgeVariant = ComponentProps<typeof Badge>["variant"];
 
+// Old Badge variants → the light-tint color pairs used by the sibling status
+// chips, so the rate-limit chip is the same size/weight as the rest.
+const VARIANT_CLASSES: Record<NonNullable<BadgeVariant>, string> = {
+	default: "bg-primary text-primary-foreground",
+	secondary: "bg-secondary text-secondary-foreground",
+	success:
+		"bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+	warning:
+		"bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+	destructive: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+	outline: "text-foreground",
+};
+
 interface StatusDescriptor {
 	label: string;
-	variant: BadgeVariant;
+	variant: NonNullable<BadgeVariant>;
 	description: string;
 }
 
@@ -83,9 +97,9 @@ function parseStatus(raw: string): ParsedStatus {
 	const resetMinutes = match?.[2] ? Number(match[2]) : null;
 	const key = rawBase.toLowerCase().replace(/\s+/g, "_");
 
-	const descriptor = STATUS_MAP[key] ?? {
+	const descriptor: StatusDescriptor = STATUS_MAP[key] ?? {
 		label: humanizeFallback(rawBase) || rawBase,
-		variant: "secondary" as BadgeVariant,
+		variant: "secondary",
 		description: `Provider rate-limit status: ${rawBase}`,
 	};
 
@@ -109,15 +123,11 @@ export function RateLimitStatusChip({ status }: RateLimitStatusChipProps) {
 		: descriptor.description;
 
 	return (
-		<Badge
-			variant={descriptor.variant}
-			className="gap-1 font-medium"
-			title={title}
-		>
+		<StatusChip className={VARIANT_CLASSES[descriptor.variant]} title={title}>
 			{descriptor.label}
 			{resetLabel && (
 				<span className="font-normal opacity-80">· {resetLabel}</span>
 			)}
-		</Badge>
+		</StatusChip>
 	);
 }
