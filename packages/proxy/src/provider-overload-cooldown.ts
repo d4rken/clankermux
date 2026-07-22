@@ -52,10 +52,10 @@ const PROBE_LEASE_SAFETY_MARGIN_MS = 60_000;
  * request may probe; the stale token's later completion no-ops via the
  * lease-identity check. Composed from the request-header timeout plus the
  * total stream-forward timeout — the longest a legitimate probe request
- * can possibly still be in flight — plus a safety margin. Computed per
- * lease acquisition (not at module load) because forwardToClient honors the
- * `CF_STREAM_TOTAL_TIMEOUT_MS` runtime override; the TTL must track the
- * same effective value or a long-configured stream would outlive its lease.
+ * can possibly still be in flight — plus a safety margin. Resolved via the
+ * shared getStreamForwardTotalTimeoutMs() accessor so the TTL always tracks
+ * the same effective stream-forward total timeout forwardToClient uses; a
+ * long stream must never outlive its lease.
  */
 export function getProbeLeaseSafetyTtlMs(): number {
 	return (

@@ -63,7 +63,7 @@ describe("getErrorMeta", () => {
 		expect(meta.title).toBe("Provider overload (no Retry-After)");
 		expect(meta.severity).toBe("warning");
 		expect(meta.description).toContain("529");
-		expect(meta.suggestion).toContain("CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS");
+		expect(meta.suggestion).toContain("probe cooldown");
 	});
 
 	test("out_of_credits returns an error-severity entry about depleted credits", () => {

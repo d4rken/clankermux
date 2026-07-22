@@ -24,7 +24,6 @@ let tmpDir: string;
 let dbOps: DatabaseOperations;
 
 beforeEach(() => {
-	process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS = "50";
 	clearAnalyticsCachesForTests();
 	tmpDir = mkdtempSync(join(tmpdir(), "clankermux-stats-"));
 	dbOps = new DatabaseOperations(join(tmpDir, "test.db"));
@@ -32,7 +31,6 @@ beforeEach(() => {
 
 afterEach(async () => {
 	clearAnalyticsCachesForTests();
-	delete process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS;
 	await dbOps.dispose();
 	rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -144,14 +142,16 @@ describe("stats worker isolation", () => {
 		expect((await cachedStats.json()).totalRequests).toBe(1);
 	});
 
-	it("caches successful worker-backed stats briefly", async () => {
+	it("serves repeat stats reads from cache until the cache is cleared", async () => {
 		const handler = createStatsHandler(makeContext(dbOps));
 		await insertRequest(dbOps, "req-1", Date.now());
 
 		const first = await (await handler(statsUrl())).json();
 		await insertRequest(dbOps, "req-2", Date.now());
+		// Within the cache TTL, the second read is served from cache.
 		const cached = await (await handler(statsUrl())).json();
-		await new Promise((resolve) => setTimeout(resolve, 80));
+		// Dropping the cache forces a fresh worker read, which now sees req-2.
+		clearAnalyticsCachesForTests();
 		const refreshed = await (await handler(statsUrl())).json();
 
 		expect(first.totalRequests).toBe(1);

@@ -4,18 +4,14 @@
  * Licensed under the CAT Commercial License.
  * See LICENSE.md in the project root for license terms.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "./index";
 
-const ORIGINAL_ENV = {
-	USAGE_SNAPSHOT_RETENTION_DAYS: process.env.USAGE_SNAPSHOT_RETENTION_DAYS,
-};
-
 function makeConfig(): { config: Config; cleanup: () => void } {
-	const dir = mkdtempSync(join(tmpdir(), "better-ccflare-config-"));
+	const dir = mkdtempSync(join(tmpdir(), "clankermux-config-"));
 	return {
 		config: new Config(join(dir, "config.json")),
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -23,17 +19,7 @@ function makeConfig(): { config: Config; cleanup: () => void } {
 }
 
 describe("usage snapshot retention days", () => {
-	afterEach(() => {
-		if (ORIGINAL_ENV.USAGE_SNAPSHOT_RETENTION_DAYS === undefined) {
-			delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
-		} else {
-			process.env.USAGE_SNAPSHOT_RETENTION_DAYS =
-				ORIGINAL_ENV.USAGE_SNAPSHOT_RETENTION_DAYS;
-		}
-	});
-
 	it("defaults to 3650 days", () => {
-		delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			expect(config.getUsageSnapshotRetentionDays()).toBe(3650);
@@ -43,7 +29,6 @@ describe("usage snapshot retention days", () => {
 	});
 
 	it("persists set values and reads them back", () => {
-		delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setUsageSnapshotRetentionDays(180);
@@ -54,7 +39,6 @@ describe("usage snapshot retention days", () => {
 	});
 
 	it("clamps set values to the 1..3650 range", () => {
-		delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setUsageSnapshotRetentionDays(0);
@@ -66,13 +50,11 @@ describe("usage snapshot retention days", () => {
 		}
 	});
 
-	it("lets the env override win and clamps it", () => {
+	it("clamps a raw on-disk value on read", () => {
 		const { config, cleanup } = makeConfig();
 		try {
-			config.setUsageSnapshotRetentionDays(30);
-			process.env.USAGE_SNAPSHOT_RETENTION_DAYS = "200";
-			expect(config.getUsageSnapshotRetentionDays()).toBe(200);
-			process.env.USAGE_SNAPSHOT_RETENTION_DAYS = "999999";
+			// Raw set bypasses the clamping setter, so the clamp must happen on read.
+			config.set("usage_snapshot_retention_days", 999999);
 			expect(config.getUsageSnapshotRetentionDays()).toBe(3650);
 		} finally {
 			cleanup();
@@ -80,7 +62,6 @@ describe("usage snapshot retention days", () => {
 	});
 
 	it("includes the value in getAllSettings()", () => {
-		delete process.env.USAGE_SNAPSHOT_RETENTION_DAYS;
 		const { config, cleanup } = makeConfig();
 		try {
 			config.setUsageSnapshotRetentionDays(45);

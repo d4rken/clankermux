@@ -14,7 +14,7 @@
  * e.g. an in-memory DB whose path can't be resolved); tests with
  * `dbPath: "/tmp/anything"` exercise the worker branch.
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import * as nodeFs from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { IntegrityStatus } from "@clankermux/types";
@@ -224,11 +224,6 @@ beforeEach(() => {
 });
 
 describe("startIntegrityScheduler", () => {
-	afterEach(() => {
-		delete process.env.CCFLARE_INTEGRITY_CHECK_INTERVAL;
-		delete process.env.CCFLARE_FULL_INTEGRITY_CHECK_INTERVAL;
-	});
-
 	it("returns a stop function that doesn't throw", () => {
 		const dbOps = makeDbOps();
 		const stop = startIntegrityScheduler(dbOps, {
@@ -239,32 +234,17 @@ describe("startIntegrityScheduler", () => {
 		expect(() => stop()).not.toThrow();
 	});
 
-	it("CCFLARE_INTEGRITY_CHECK_INTERVAL=0 disables only the quick check", () => {
-		process.env.CCFLARE_INTEGRITY_CHECK_INTERVAL = "0";
+	it("both interval overrides = 0 returns a no-op stop", () => {
 		const dbOps = makeDbOps();
-		const stop = startIntegrityScheduler(dbOps, { fullIntervalHours: 500 });
-		expect(typeof stop).toBe("function");
-		stop();
-	});
-
-	it("setting both env vars to 0 returns a no-op stop", () => {
-		process.env.CCFLARE_INTEGRITY_CHECK_INTERVAL = "0";
-		process.env.CCFLARE_FULL_INTEGRITY_CHECK_INTERVAL = "0";
-		const dbOps = makeDbOps();
-		const stop = startIntegrityScheduler(dbOps);
+		const stop = startIntegrityScheduler(dbOps, {
+			quickIntervalHours: 0,
+			fullIntervalHours: 0,
+		});
 		expect(() => stop()).not.toThrow();
 		expect(
 			(dbOps.runQuickIntegrityCheck as ReturnType<typeof mock>).mock.calls
 				.length,
 		).toBe(0);
-	});
-
-	it("garbled env values fall back to default", () => {
-		process.env.CCFLARE_INTEGRITY_CHECK_INTERVAL = "6abc";
-		const dbOps = makeDbOps();
-		const stop = startIntegrityScheduler(dbOps, { fullIntervalHours: 500 });
-		expect(typeof stop).toBe("function");
-		stop();
 	});
 
 	it("override quickIntervalHours=0 disables the quick probe (not setInterval(0))", () => {

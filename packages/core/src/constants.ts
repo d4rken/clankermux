@@ -41,11 +41,8 @@ export const TIME_CONSTANTS = {
 	// quiet periods between chunks while sub-calls run. These defaults are set
 	// conservatively high so nested calls don't trigger a false timeout and cause
 	// the outer request to appear failed/missing in the UI (issue #84).
-	// Both can be overridden at runtime via env vars:
-	//   CF_STREAM_TOTAL_TIMEOUT_MS  — max total stream duration
-	//   CF_STREAM_CHUNK_TIMEOUT_MS  — max silence between consecutive chunks
-	STREAM_FORWARD_TOTAL_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes
-	STREAM_FORWARD_CHUNK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes
+	STREAM_FORWARD_TOTAL_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes (max total stream duration)
+	STREAM_FORWARD_CHUNK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes (max silence between chunks)
 	OAUTH_STATE_TTL: 10, // 10 minutes (stored separately as minutes)
 	RETRY_DELAY_DEFAULT: 1000, // 1 second
 	PROXY_REQUEST_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes — covers long agent calls

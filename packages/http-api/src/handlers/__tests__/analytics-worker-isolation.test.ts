@@ -22,8 +22,6 @@ let tmpDir: string;
 let dbOps: DatabaseOperations;
 
 beforeEach(() => {
-	process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS = "50";
-	process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES = "2";
 	clearAnalyticsCachesForTests();
 	tmpDir = mkdtempSync(join(tmpdir(), "clankermux-analytics-"));
 	dbOps = new DatabaseOperations(join(tmpDir, "test.db"));
@@ -31,8 +29,6 @@ beforeEach(() => {
 
 afterEach(async () => {
 	clearAnalyticsCachesForTests();
-	delete process.env.CLANKERMUX_ANALYTICS_CACHE_TTL_MS;
-	delete process.env.CLANKERMUX_ANALYTICS_CACHE_MAX_ENTRIES;
 	await dbOps.dispose();
 	rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -64,7 +60,7 @@ describe("analytics worker isolation", () => {
 		expect(data.totals.totalTokens).toBe(10);
 	});
 
-	it("caches successful worker-backed analytics briefly", async () => {
+	it("serves repeat analytics reads from cache until the cache is cleared", async () => {
 		const handler = createAnalyticsHandler(makeContext(dbOps));
 		await insertRequest(dbOps, "req-1", Date.now());
 
@@ -72,10 +68,13 @@ describe("analytics worker isolation", () => {
 			await handler(new URLSearchParams({ range: "24h" }))
 		).json();
 		await insertRequest(dbOps, "req-2", Date.now());
+		// Within the cache TTL, the second read is served from cache and does not
+		// reflect req-2.
 		const cached = await (
 			await handler(new URLSearchParams({ range: "24h" }))
 		).json();
-		await new Promise((resolve) => setTimeout(resolve, 80));
+		// Dropping the cache forces a fresh worker read, which now sees req-2.
+		clearAnalyticsCachesForTests();
 		const refreshed = await (
 			await handler(new URLSearchParams({ range: "24h" }))
 		).json();
@@ -85,7 +84,7 @@ describe("analytics worker isolation", () => {
 		expect(refreshed.totals.requests).toBe(2);
 	});
 
-	it("caps cached analytics responses across rotating filter combinations", async () => {
+	it("caches distinct filter combinations as separate entries", async () => {
 		const handler = createAnalyticsHandler(makeContext(dbOps));
 		await insertRequest(dbOps, "req-1", Date.now());
 
@@ -93,9 +92,7 @@ describe("analytics worker isolation", () => {
 		await handler(new URLSearchParams({ range: "6h" }));
 		await handler(new URLSearchParams({ range: "24h" }));
 
-		expect(
-			getAnalyticsCacheStatsForTests().responseCacheSize,
-		).toBeLessThanOrEqual(2);
+		expect(getAnalyticsCacheStatsForTests().responseCacheSize).toBe(3);
 	});
 
 	it("reuses the analytics worker across uncached requests", async () => {

@@ -2,14 +2,8 @@
  * Version utility that works in both development and production environments
  */
 
-import { readEnv } from "./env";
-
 // Claude CLI version to use in user-agent headers
 export const CLAUDE_CLI_VERSION = "2.1.143";
-
-// Build-time injected version via --define __CLANKERMUX_VERSION__="x.y.z"
-// Replaced by bun bundler with a string literal; undefined at dev/runtime.
-declare const __CLANKERMUX_VERSION__: string | undefined;
 
 // Cache the version to avoid repeated file reads
 let cachedVersion: string | null = null;
@@ -19,25 +13,13 @@ export async function getVersion(): Promise<string> {
 		return cachedVersion;
 	}
 
-	// 1. Build-time injected version (reliable for compiled binaries)
-	if (typeof __CLANKERMUX_VERSION__ !== "undefined" && __CLANKERMUX_VERSION__) {
-		cachedVersion = __CLANKERMUX_VERSION__;
-		return cachedVersion;
-	}
-
-	// 2. Runtime env var fallback (dev/test environments)
-	const envVersion = readEnv("VERSION");
-	if (envVersion) {
-		cachedVersion = envVersion;
-		return cachedVersion;
-	}
-
+	// 1. Runtime env var (set by npm/bun when running via package scripts)
 	if (process.env.npm_package_version) {
 		cachedVersion = process.env.npm_package_version;
 		return cachedVersion;
 	}
 
-	// 3. Try reading from the repo-root package.json (dev environment)
+	// 2. Try reading from the repo-root package.json (dev environment)
 	try {
 		const packageJsonPath = new URL("../../../package.json", import.meta.url);
 		const packageJson = await fetch(packageJsonPath);
@@ -50,7 +32,7 @@ export async function getVersion(): Promise<string> {
 		// Continue to fallback
 	}
 
-	// 4. Final fallback
+	// 3. Final fallback
 	cachedVersion = CLAUDE_CLI_VERSION;
 	return cachedVersion;
 }
@@ -61,24 +43,13 @@ export function getVersionSync(): string {
 		return cachedVersion;
 	}
 
-	// 1. Build-time injected version (reliable for compiled binaries)
-	if (typeof __CLANKERMUX_VERSION__ !== "undefined" && __CLANKERMUX_VERSION__) {
-		cachedVersion = __CLANKERMUX_VERSION__;
-		return cachedVersion;
-	}
-
-	// 2. Runtime env var fallback
-	const envVersion = readEnv("VERSION");
-	if (envVersion) {
-		cachedVersion = envVersion;
-		return cachedVersion;
-	}
-
+	// 1. Runtime env var (set by npm/bun when running via package scripts)
 	if (process.env.npm_package_version) {
 		cachedVersion = process.env.npm_package_version;
 		return cachedVersion;
 	}
 
+	// 2. Final fallback
 	cachedVersion = CLAUDE_CLI_VERSION;
 	return cachedVersion;
 }

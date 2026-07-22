@@ -10,13 +10,13 @@ import { Logger } from "@clankermux/logger";
 /**
  * Periodic integrity scheduler. Two probes run on independent timers:
  *
- *  - **quick** (`PRAGMA quick_check`) every `CCFLARE_INTEGRITY_CHECK_INTERVAL`
- *    hours (default 6). Catches page-structure corruption and most
- *    freelist issues.
+ *  - **quick** (`PRAGMA quick_check`) every `DEFAULT_QUICK_INTERVAL_HOURS`
+ *    (6h). Catches page-structure corruption and most freelist issues.
  *  - **full** (`PRAGMA integrity_check` + `PRAGMA foreign_key_check`) every
- *    `CCFLARE_FULL_INTEGRITY_CHECK_INTERVAL` hours (default 24). Catches
- *    the silent-wrong-results class that `quick_check` misses (index/table
- *    cross-checks, UNIQUE/CHECK, foreign-key violations).
+ *    `DEFAULT_FULL_INTERVAL_HOURS` (24h). Catches the silent-wrong-results
+ *    class that `quick_check` misses (index/table cross-checks, UNIQUE/CHECK,
+ *    foreign-key violations). Both intervals are overridable per call via the
+ *    `overrides` argument.
  *
  * Both probes run in a dedicated `bun:sqlite` worker (see
  * `integrity-check-worker.ts`) when a SQLite path is available. `bun:sqlite`
@@ -32,8 +32,8 @@ import { Logger } from "@clankermux/logger";
  * tick logs and skips rather than queueing — checks are idempotent reads,
  * so dropping a tick is harmless.
  *
- * Setting either env var to `0` disables that probe; the corresponding
- * status field stays at its last value (or `null` if never run).
+ * Setting either interval override to `0` disables that probe; the
+ * corresponding status field stays at its last value (or `null` if never run).
  */
 
 const DEFAULT_QUICK_INTERVAL_HOURS = 6;
@@ -44,60 +44,37 @@ const QUICK_INITIAL_DELAY_MS = 30 * TIME_CONSTANTS.SECOND;
  *  startup latency. */
 const FULL_INITIAL_DELAY_MS = 30 * TIME_CONSTANTS.MINUTE;
 
-function parseIntervalEnv(
-	envVar: string,
-	defaultHours: number,
-	logger: Logger,
-): number | null {
-	const raw = process.env[envVar];
-	if (raw === undefined || raw === "") {
-		return defaultHours * TIME_CONSTANTS.HOUR;
-	}
-	const parsed = Number(raw);
-	if (!Number.isInteger(parsed) || parsed < 0) {
-		logger.warn(`Invalid ${envVar}="${raw}", using default ${defaultHours}h`);
-		return defaultHours * TIME_CONSTANTS.HOUR;
-	}
-	if (parsed === 0) return null;
-	return parsed * TIME_CONSTANTS.HOUR;
-}
-
 export function startIntegrityScheduler(
 	dbOps: DatabaseOperations,
 	overrides?: { quickIntervalHours?: number; fullIntervalHours?: number },
 ): () => void {
 	const logger = new Logger("IntegrityScheduler");
 
-	// Mirror the env-var convention in `parseIntervalEnv`: 0 disables the
-	// probe. Without this branch, `overrides.quickIntervalHours = 0` would
-	// multiply to 0ms and pass the `!== null` guard, scheduling
+	// An explicit `0` override disables the probe. Without this branch, a `0`
+	// would multiply to 0ms and pass the `!== null` guard, scheduling
 	// `setInterval(runQuick, 0)` — a tight loop hammering the DB every tick.
-	const resolveOverrideOrEnv = (
+	// `undefined` falls back to the default interval.
+	const resolveInterval = (
 		override: number | undefined,
-		envVar: string,
 		defaultHours: number,
 	): number | null => {
-		if (override === undefined) {
-			return parseIntervalEnv(envVar, defaultHours, logger);
-		}
-		if (override === 0) return null;
-		return override * TIME_CONSTANTS.HOUR;
+		const hours = override ?? defaultHours;
+		if (hours === 0) return null;
+		return hours * TIME_CONSTANTS.HOUR;
 	};
 
-	const quickInterval = resolveOverrideOrEnv(
+	const quickInterval = resolveInterval(
 		overrides?.quickIntervalHours,
-		"CCFLARE_INTEGRITY_CHECK_INTERVAL",
 		DEFAULT_QUICK_INTERVAL_HOURS,
 	);
 
-	const fullInterval = resolveOverrideOrEnv(
+	const fullInterval = resolveInterval(
 		overrides?.fullIntervalHours,
-		"CCFLARE_FULL_INTEGRITY_CHECK_INTERVAL",
 		DEFAULT_FULL_INTERVAL_HOURS,
 	);
 
 	if (quickInterval === null && fullInterval === null) {
-		logger.info("Integrity scheduler fully disabled by env");
+		logger.info("Integrity scheduler fully disabled");
 		return () => {};
 	}
 
@@ -150,18 +127,14 @@ export function startIntegrityScheduler(
 		handles.push(setTimeout(runQuick, QUICK_INITIAL_DELAY_MS));
 		intervals.push(setInterval(runQuick, quickInterval));
 	} else {
-		logger.info(
-			"Quick integrity check disabled (CCFLARE_INTEGRITY_CHECK_INTERVAL=0)",
-		);
+		logger.info("Quick integrity check disabled (interval override = 0)");
 	}
 
 	if (fullInterval !== null) {
 		handles.push(setTimeout(runFull, FULL_INITIAL_DELAY_MS));
 		intervals.push(setInterval(runFull, fullInterval));
 	} else {
-		logger.info(
-			"Full integrity check disabled (CCFLARE_FULL_INTEGRITY_CHECK_INTERVAL=0)",
-		);
+		logger.info("Full integrity check disabled (interval override = 0)");
 	}
 
 	return () => {

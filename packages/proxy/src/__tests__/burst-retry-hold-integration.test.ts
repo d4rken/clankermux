@@ -332,12 +332,12 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
-		// Deterministic timing. The first 429 sets a cooldown of
-		// min(default-no-reset, backoff-base); floor both to ~1s so a single
-		// re-probe wait fits within the fixed (60s) hold budget. The burst-retry
-		// tuning constants are now fixed in source, so only the cooldown-length
-		// knobs need pinning here.
-		process.env.CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS = "1000";
+		// Deterministic timing. The first 429 sets its no-reset cooldown from
+		// CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS; pin it to ~1s so a single
+		// re-probe wait fits within the hold budget (otherwise the default 60s
+		// cooldown makes the real hold-sleep exceed the per-test timeout). The
+		// burst-retry tuning constants are now fixed in source, so only this
+		// cooldown-length knob needs pinning here.
 		process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS = "1000";
 	});
 
@@ -346,7 +346,6 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
-		delete process.env.CCFLARE_RATE_LIMIT_BACKOFF_BASE_MS;
 		delete process.env.CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS;
 	});
 
