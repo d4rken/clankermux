@@ -21,10 +21,39 @@ import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./
 const log = new Logger("AnalyticsRunner");
 
 const DEFAULT_CACHE_TTL_MS = 10_000;
+// Per-request "soft" deadline. When it fires we reject only that request and
+// leave the shared worker running (see runDashboardWorker), so one slow query
+// can't take sibling dashboard panels down with it.
 const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
+// The all-time analytics view sweeps the full requests table across ~15 serial
+// query phases (percentiles, window functions, per-model/per-account rollups),
+// which legitimately needs far longer than the light panels on a large DB.
+// It gets its own generous soft deadline; every other kind keeps the tight one
+// so a slow stats/history read still surfaces quickly.
+const ANALYTICS_WORKER_TIMEOUT_MS = 60_000;
+// Last-resort "hard" deadline. Only a genuinely wedged worker (no response to a
+// request long after even its soft deadline) trips this, and only this path
+// terminates the shared worker. Kept well above the largest soft deadline so a
+// merely-slow query that finishes late is never mistaken for a wedge.
+const HARD_WORKER_TIMEOUT_MS = 120_000;
 const SQLITE_BUSY_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 128;
 const DEFAULT_MAX_IN_FLIGHT_ENTRIES = 64;
+
+const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
+	analytics: ANALYTICS_WORKER_TIMEOUT_MS,
+	stats: DEFAULT_WORKER_TIMEOUT_MS,
+	"usage-history": DEFAULT_WORKER_TIMEOUT_MS,
+	"memory-history": DEFAULT_WORKER_TIMEOUT_MS,
+	"cache-keepalive-history": DEFAULT_WORKER_TIMEOUT_MS,
+	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
+	"payments-summary": DEFAULT_WORKER_TIMEOUT_MS,
+};
+
+/** Per-request soft timeout (ms) for a dashboard worker kind. */
+export function getWorkerTimeoutMs(kind: DashboardWorkerKind): number {
+	return WORKER_SOFT_TIMEOUT_MS_BY_KIND[kind] ?? DEFAULT_WORKER_TIMEOUT_MS;
+}
 
 type CachedResponse = {
 	expiresAt: number;
@@ -65,11 +94,46 @@ export function invalidateDashboardCache(kind: DashboardWorkerKind): void {
 type PendingWorkerRequest = {
 	resolve: (response: Response) => void;
 	reject: (error: Error) => void;
-	timeoutHandle: ReturnType<typeof setTimeout>;
+	// Fires first: rejects this one request without touching the worker.
+	softTimeoutHandle: ReturnType<typeof setTimeout>;
+	// Fires much later if this request is still unanswered; terminates the
+	// worker only when it has gone fully silent (a genuine wedge).
+	hardTimeoutHandle: ReturnType<typeof setTimeout>;
+	// Set once the caller has been given an answer (result OR soft-timeout
+	// error). A late worker result for an already-settled request is dropped,
+	// and resetDashboardWorker won't reject it a second time.
+	settled: boolean;
 };
 
-let dashboardWorker: Worker | undefined;
+/**
+ * Structural view of the dashboard Worker the runner depends on. A test seam
+ * (__setDashboardWorkerFactoryForTests) can swap in a controllable stub, so
+ * this is kept to exactly the surface the runner uses.
+ */
+export type DashboardWorkerLike = {
+	postMessage(message: AnalyticsWorkerRequest): void;
+	terminate(): void;
+	onmessage: ((event: MessageEvent<AnalyticsWorkerResponse>) => void) | null;
+	onerror: ((event: ErrorEvent) => void) | null;
+	onmessageerror: (() => void) | null;
+	unref?: () => void;
+};
+
+let dashboardWorker: DashboardWorkerLike | undefined;
 const pendingWorkerRequests = new Map<string, PendingWorkerRequest>();
+
+// Wall-clock of the worker's most recent sign of life: its creation, or any
+// message it posts back (for any request, including ones already timed out).
+// The hard watchdog only tears the worker down if it has stayed silent this
+// entire time — a worker still answering other reads is demonstrably alive, so
+// a merely-slow query aging out never triggers a collateral teardown of
+// healthy sibling requests.
+let lastWorkerActivityAt = 0;
+
+// Test seams (see analytics-worker-timeout.test.ts). Both default to null so
+// production behaviour is unchanged.
+let workerFactoryOverride: (() => DashboardWorkerLike) | null = null;
+let workerTimeoutOverrideMs: { soft?: number; hard?: number } | null = null;
 
 type DirectHandler = (params: URLSearchParams) => Promise<Response>;
 
@@ -262,16 +326,49 @@ function runDashboardWorker(
 	params: URLSearchParams,
 ): Promise<Response> {
 	const id = crypto.randomUUID();
+	const softMs = workerTimeoutOverrideMs?.soft ?? getWorkerTimeoutMs(kind);
+	const hardMs = workerTimeoutOverrideMs?.hard ?? HARD_WORKER_TIMEOUT_MS;
 
 	return new Promise<Response>((resolve, reject) => {
-		const timeoutHandle = setTimeout(() => {
-			resetDashboardWorker(new DashboardWorkerTimeoutError());
-		}, DEFAULT_WORKER_TIMEOUT_MS);
+		const softTimeoutHandle = setTimeout(() => {
+			const pending = pendingWorkerRequests.get(id);
+			if (!pending || pending.settled) return;
+			// Reject ONLY this request; leave the shared worker running so
+			// sibling dashboard panels keep their in-flight results. The entry
+			// stays registered (settled=true) so a late worker result is dropped
+			// cleanly and the hard watchdog can still recover a wedged worker.
+			pending.settled = true;
+			pending.reject(new DashboardWorkerTimeoutError(softMs));
+		}, softMs);
+
+		const hardTimeoutHandle = setTimeout(() => {
+			const pending = pendingWorkerRequests.get(id);
+			if (!pending) return;
+			// This request has gone unanswered well past even its soft deadline.
+			// Only tear the worker down if it has been completely silent the whole
+			// time — that's a genuine wedge. If it has posted anything recently
+			// (other reads still completing), it's alive and merely slow on this
+			// query, so don't punish healthy siblings: quietly retire this
+			// abandoned entry and let the late result (if any) be dropped.
+			if (Date.now() - lastWorkerActivityAt >= hardMs) {
+				resetDashboardWorker(new DashboardWorkerTimeoutError(hardMs));
+				return;
+			}
+			clearTimeout(pending.softTimeoutHandle);
+			clearTimeout(pending.hardTimeoutHandle);
+			pendingWorkerRequests.delete(id);
+			if (!pending.settled) {
+				pending.settled = true;
+				pending.reject(new DashboardWorkerTimeoutError(hardMs));
+			}
+		}, hardMs);
 
 		pendingWorkerRequests.set(id, {
 			resolve,
 			reject,
-			timeoutHandle,
+			softTimeoutHandle,
+			hardTimeoutHandle,
+			settled: false,
 		});
 
 		try {
@@ -285,7 +382,8 @@ function runDashboardWorker(
 		} catch (error) {
 			const pending = pendingWorkerRequests.get(id);
 			if (pending) {
-				clearTimeout(pending.timeoutHandle);
+				clearTimeout(pending.softTimeoutHandle);
+				clearTimeout(pending.hardTimeoutHandle);
 				pendingWorkerRequests.delete(id);
 			}
 			const err =
@@ -298,46 +396,55 @@ function runDashboardWorker(
 	});
 }
 
-function getDashboardWorker(): Worker {
+function createRealDashboardWorker(): DashboardWorkerLike {
+	return new Worker(new URL("./analytics-worker.ts", import.meta.url).href, {
+		smol: true,
+	}) as unknown as DashboardWorkerLike;
+}
+
+function getDashboardWorker(): DashboardWorkerLike {
 	if (dashboardWorker) return dashboardWorker;
 
-	dashboardWorker = new Worker(
-		new URL("./analytics-worker.ts", import.meta.url).href,
-		{
-			smol: true,
-		},
-	);
+	const worker = (workerFactoryOverride ?? createRealDashboardWorker)();
+	dashboardWorker = worker;
+	lastWorkerActivityAt = Date.now();
 
-	if (
-		"unref" in dashboardWorker &&
-		typeof (dashboardWorker as { unref?: () => void }).unref === "function"
-	) {
-		(dashboardWorker as { unref: () => void }).unref();
+	if ("unref" in worker && typeof worker.unref === "function") {
+		worker.unref();
 	}
 
-	dashboardWorker.onmessage = (
-		event: MessageEvent<AnalyticsWorkerResponse>,
-	) => {
+	worker.onmessage = (event: MessageEvent<AnalyticsWorkerResponse>) => {
 		handleDashboardWorkerMessage(event.data);
 	};
-	dashboardWorker.onerror = (event: ErrorEvent) => {
+	worker.onerror = (event: ErrorEvent) => {
 		resetDashboardWorker(new Error(event.message || "dashboard worker error"));
 	};
-	dashboardWorker.onmessageerror = () => {
+	worker.onmessageerror = () => {
 		resetDashboardWorker(
 			new Error("dashboard worker message deserialization failed"),
 		);
 	};
 
-	return dashboardWorker;
+	return worker;
 }
 
 function handleDashboardWorkerMessage(data: AnalyticsWorkerResponse): void {
+	// Any message — even one for an already-dropped request — is proof the
+	// worker is alive; record it before anything else so the hard watchdog can
+	// tell "slow" apart from "wedged".
+	lastWorkerActivityAt = Date.now();
+
 	const pending = pendingWorkerRequests.get(data.id);
 	if (!pending) return;
 
-	clearTimeout(pending.timeoutHandle);
+	clearTimeout(pending.softTimeoutHandle);
+	clearTimeout(pending.hardTimeoutHandle);
 	pendingWorkerRequests.delete(data.id);
+
+	// The caller already got a soft-timeout error; the worker answered late but
+	// is healthy. Drop the stale result and keep the worker for the next read.
+	if (pending.settled) return;
+	pending.settled = true;
 
 	if (data.timings && data.timings.totalMs > 500) {
 		log.warn(
@@ -372,8 +479,12 @@ function resetDashboardWorker(error: Error): void {
 	}
 
 	for (const [id, pending] of pendingWorkerRequests) {
-		clearTimeout(pending.timeoutHandle);
+		clearTimeout(pending.softTimeoutHandle);
+		clearTimeout(pending.hardTimeoutHandle);
 		pendingWorkerRequests.delete(id);
+		// A soft-timed-out request has already been answered; don't reject twice.
+		if (pending.settled) continue;
+		pending.settled = true;
 		pending.reject(error);
 	}
 }
@@ -430,8 +541,8 @@ function responseFromCached(cached: CachedResponse): Response {
 }
 
 class DashboardWorkerTimeoutError extends Error {
-	constructor() {
-		super(`dashboard worker timed out after ${DEFAULT_WORKER_TIMEOUT_MS}ms`);
+	constructor(timeoutMs: number) {
+		super(`dashboard worker timed out after ${timeoutMs}ms`);
 		this.name = "DashboardWorkerTimeoutError";
 	}
 }
@@ -439,6 +550,28 @@ class DashboardWorkerTimeoutError extends Error {
 export function clearAnalyticsCachesForTests(): void {
 	responseCache.clear();
 	inFlight.clear();
+}
+
+/**
+ * Test seam: swap the dashboard Worker for a controllable stub. Pass null to
+ * restore the real worker factory. Only affects workers created after the call,
+ * so pair it with terminateAnalyticsWorker() to drop any cached instance.
+ */
+export function __setDashboardWorkerFactoryForTests(
+	factory: (() => DashboardWorkerLike) | null,
+): void {
+	workerFactoryOverride = factory;
+}
+
+/**
+ * Test seam: shrink the soft/hard worker deadlines so timeout behaviour is
+ * exercised in milliseconds instead of the production minute-scale values. Pass
+ * null to restore production timeouts.
+ */
+export function __setDashboardWorkerTimeoutsForTests(
+	override: { soft?: number; hard?: number } | null,
+): void {
+	workerTimeoutOverrideMs = override;
 }
 
 export function getAnalyticsCacheStatsForTests(): {
