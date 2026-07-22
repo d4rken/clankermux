@@ -204,6 +204,38 @@ describe("getScopedWeeklyLimits", () => {
 		]);
 	});
 
+	it("returns the Codex Spark scoped weekly entry (provider-agnostic path)", () => {
+		// Codex-shaped payload: a dead 5-hour placeholder plus a live weekly and a
+		// per-model scoped weekly. The extractor keys on data shape, not provider,
+		// so the Spark window surfaces exactly like Anthropic's scoped windows.
+		expect(
+			getScopedWeeklyLimits({
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: { utilization: 21, resets_at: ISO },
+				limits: [
+					scopedEntry({
+						group: "codex",
+						percent: 0,
+						scope: {
+							model: {
+								id: "GPT-5.3-Codex-Spark",
+								display_name: "GPT-5.3-Codex-Spark",
+							},
+							surface: null,
+						},
+					}),
+				],
+			} as unknown as FullUsageData),
+		).toEqual([
+			{
+				key: "GPT-5.3-Codex-Spark",
+				label: "GPT-5.3-Codex-Spark",
+				utilization: 0,
+				resetsAt: ISO,
+			},
+		]);
+	});
+
 	it("returns [] for a non-Anthropic shape even if a scoped-looking entry sneaks in", () => {
 		// No flat keys and no `limits[]` → not Anthropic-shaped → [].
 		expect(

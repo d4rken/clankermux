@@ -186,6 +186,25 @@ function formatRemaining(ms: number): string {
 	return `${minutes}m`;
 }
 
+// A usage window is an empty placeholder when it carries no signal at all:
+// zero-or-null utilization, no reset timestamp, and no active rate-limit or
+// throttle on that window. Codex's 5-hour window is now always such a
+// placeholder — OpenAI removed the 5h quota, so the parser emits
+// `{ utilization: 0, resets_at: null }` — and rendering it produces a
+// permanently-empty, misleading card. Suppressing it is SAFE for Anthropic: a
+// fresh Anthropic 5-hour window at 0% still carries a real `resets_at`, so the
+// reset-timestamp condition keeps it visible. Only a window with no utilization
+// AND no reset AND no active rate-limit disappears.
+function isEmptyPlaceholderWindow(
+	utilization: number | null | undefined,
+	resetTime: string | null | undefined,
+	isRateLimitedOrThrottled: boolean,
+): boolean {
+	const hasUtilization = utilization != null && utilization !== 0;
+	const hasReset = resetTime != null;
+	return !hasUtilization && !hasReset && !isRateLimitedOrThrottled;
+}
+
 // The model-family weekly windows (e.g. "Fable"/Opus/Sonnet) are secondary to
 // the primary 5-hour and unscoped weekly windows and get the subtler card tint.
 function isSecondaryWindow(window: string | null, label?: string): boolean {
@@ -556,11 +575,26 @@ export function RateLimitProgress({
 			};
 		};
 		if (anthropicData?.five_hour) {
-			usages.push({
-				utilization: anthropicData.five_hour.utilization,
-				window: "five_hour",
-				resetTime: anthropicData.five_hour.resets_at,
-			});
+			// Suppress a dead 5-hour placeholder (Codex has no 5h window anymore).
+			// Keep it whenever there's an active rate-limit/throttle to surface —
+			// window-scoped throttle, or the account-wide usage rate-limit/throttle.
+			const fiveHourRateLimited =
+				usageThrottledWindows.includes("five_hour") ||
+				usageRateLimitedUntil != null ||
+				usageThrottledUntil != null;
+			if (
+				!isEmptyPlaceholderWindow(
+					anthropicData.five_hour.utilization,
+					anthropicData.five_hour.resets_at,
+					fiveHourRateLimited,
+				)
+			) {
+				usages.push({
+					utilization: anthropicData.five_hour.utilization,
+					window: "five_hour",
+					resetTime: anthropicData.five_hour.resets_at,
+				});
+			}
 		} else {
 			// Fallback: use the most restrictive window data for 5-hour display
 			usages.push({
