@@ -28,6 +28,143 @@ import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
 
+/**
+ * Max age of a cached usage entry before it is considered stale.
+ *
+ * Read contracts differ by method:
+ *  - get() / getAge(): evicting. A stale entry is treated as absent — the read
+ *    returns null AND deletes the entry.
+ *  - peek(): non-evicting DATA read. A stale entry returns null but is left in
+ *    place (so later eviction and window-reset comparisons see it).
+ *  - peekAge(): non-evicting AGE read, and the sole exception to the "stale →
+ *    null" rule — it returns the entry's TRUE age even when stale, and only
+ *    returns null when NO entry exists. This lets pure observers (e.g. the usage
+ *    snapshot sampler) apply their own freshness threshold, independent of this
+ *    TTL. Pair it with peek() when staleness should gate the data itself.
+ */
+const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Demand-aware polling cadence (Anthropic only — see {@link PollingPolicy}).
+ *
+ * IDLE_POLL_INTERVAL_MS: the base cadence a *cold* account (no recent traffic)
+ * polls at. 10 minutes — deliberately NOT 9 (the cache TTL). Routing already
+ * treats usage data older than ~2*pollInterval as unknown (independent of the
+ * TTL), stale reads fail open, and the account-selector fires a free
+ * `refreshNow` on demand when it actually needs a fresh reading — so letting an
+ * idle entry lapse past the TTL between polls is safe and saves the shared,
+ * aggressively-rate-limited /oauth/usage + /oauth/profile bucket.
+ *
+ * ACTIVITY_RECENCY_MS: how recently an account must have served a request to be
+ * treated as "active" (poll at the configured active cadence). 15 minutes.
+ *
+ * MAX_BACKOFF_MS: ceiling for the exponential failure backoff (unchanged).
+ */
+const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
+const ACTIVITY_RECENCY_MS = 15 * 60_000;
+const MAX_BACKOFF_MS = 30 * 60 * 1000;
+
+/**
+ * Optional per-account polling policy passed as the final argument to
+ * {@link UsageCache.startPolling}. Only the Anthropic setup opts in
+ * (`demandAware: true`); Zai/Kilo/Alibaba pass nothing and keep the fixed
+ * cadence they always had.
+ *
+ * Activity source (why an in-memory map + optional resolver, not a captured
+ * `Account`): a startup-captured `account.last_used` goes stale immediately, so
+ * it must never drive cadence. Instead the request/proxy path calls
+ * {@link UsageCache.noteActivity} to record real-time activity in an in-memory
+ * map on the cache — this doubles as the idle→active re-arm signal (see
+ * `noteActivity`). `getLastActivityMs` is an OPTIONAL live resolver consulted
+ * ONLY on cold start (before the account has served any request this process,
+ * e.g. just after a restart): it reads the *current* DB `last_used` so an
+ * account that was busy right before a restart still polls at the active cadence
+ * without waiting for its next request. Once any activity is observed in-memory,
+ * the map wins and the resolver is not consulted.
+ */
+export interface PollingPolicy {
+	/** Opt in to recency-based active/idle cadence. Anthropic-only. */
+	demandAware?: boolean;
+	/**
+	 * Cold-start fallback activity source: the account's CURRENT `last_used`
+	 * (ms since epoch) read live, or null/undefined when unknown. May be async.
+	 * Consulted only when no in-memory activity has been observed yet.
+	 */
+	getLastActivityMs?: (
+		accountId: string,
+	) => number | null | Promise<number | null>;
+	/** Override the idle base cadence (defaults to IDLE_POLL_INTERVAL_MS). */
+	idleIntervalMs?: number;
+	/** Override the activity-recency threshold (defaults to ACTIVITY_RECENCY_MS). */
+	activityRecencyMs?: number;
+}
+
+/**
+ * Pure recency decision: given the account's last-activity timestamp, pick the
+ * base cadence and whether it is the idle cadence. Non-demand-aware accounts
+ * always get the fixed active interval (their existing behavior). The idle
+ * cadence is `max(activeInterval, idleInterval)` so a config where the active
+ * interval already exceeds the idle floor never *speeds up* an idle account.
+ */
+export function computeDemandAwareInterval(
+	opts: Pick<
+		PollingPolicy,
+		"demandAware" | "idleIntervalMs" | "activityRecencyMs"
+	>,
+	lastActivityMs: number | null,
+	activeIntervalMs: number,
+	now: number,
+): { intervalMs: number; isIdle: boolean } {
+	if (!opts.demandAware) return { intervalMs: activeIntervalMs, isIdle: false };
+	const idleIntervalMs = Math.max(
+		activeIntervalMs,
+		opts.idleIntervalMs ?? IDLE_POLL_INTERVAL_MS,
+	);
+	const recencyMs = opts.activityRecencyMs ?? ACTIVITY_RECENCY_MS;
+	if (lastActivityMs != null && now - lastActivityMs < recencyMs) {
+		return { intervalMs: activeIntervalMs, isIdle: false };
+	}
+	return { intervalMs: idleIntervalMs, isIdle: true };
+}
+
+/**
+ * Pure poll-delay decision combining, in priority order: (1) a server
+ * retry-after (wins outright), (2) exponential failure backoff (wins over the
+ * base cadence — a failing account keeps backing off regardless of active/idle),
+ * then (3) the demand-aware active/idle base cadence with ±jitter. `jitterFraction`
+ * is the caller's random value in [-0.2, 0.2] (0 in tests for determinism).
+ */
+export function computePollDelay(params: {
+	demandAware?: boolean;
+	idleIntervalMs?: number;
+	activityRecencyMs?: number;
+	activeIntervalMs: number;
+	lastActivityMs: number | null;
+	failures: number;
+	retryAfterMs: number | null;
+	now: number;
+	jitterFraction: number;
+}): { delayMs: number; isIdle: boolean } {
+	if (params.retryAfterMs != null)
+		return { delayMs: params.retryAfterMs, isIdle: false };
+	if (params.failures > 0) {
+		return {
+			delayMs: Math.min(
+				params.activeIntervalMs * 2 ** params.failures,
+				MAX_BACKOFF_MS,
+			),
+			isIdle: false,
+		};
+	}
+	const { intervalMs, isIdle } = computeDemandAwareInterval(
+		params,
+		params.lastActivityMs,
+		params.activeIntervalMs,
+		params.now,
+	);
+	return { delayMs: intervalMs + intervalMs * params.jitterFraction, isIdle };
+}
+
 export interface UsageWindow {
 	utilization: number;
 	resets_at: string | null;
@@ -589,6 +726,13 @@ export type AccessTokenProvider = () => Promise<string>;
 class UsageCache {
 	private cache = new Map<string, { data: AnyUsageData; timestamp: number }>();
 	private pollTimeouts = new Map<string, NodeJS.Timeout>();
+	// Monotonic per-account poll generation. Bumped on every startPolling and read
+	// on every (re)arm: a timer or async cold-start resolver left over from a
+	// superseded generation can never arm a new timer. This is the AUTHORITATIVE
+	// replacement guard — unlike the tokenProviders identity guard it still holds
+	// when a caller reuses the same tokenProvider function reference across a
+	// replacement. Deleted on stopPolling (same lifecycle as tokenProviders).
+	private pollGenerations = new Map<string, number>();
 	private failureCounts = new Map<string, number>();
 	private tokenProviders = new Map<string, AccessTokenProvider>();
 	private providerTypes = new Map<string, string>(); // Track provider type for each account
@@ -627,6 +771,19 @@ class UsageCache {
 		string,
 		Promise<{ success: boolean; retryAfterMs: number | null }>
 	>();
+	// Demand-aware polling state (Anthropic only — set when startPolling receives
+	// a PollingPolicy with demandAware:true). See PollingPolicy / noteActivity.
+	private pollingPolicies = new Map<string, PollingPolicy>();
+	// Real-time activity signal: the last time (ms since epoch) an account served
+	// a request, recorded by noteActivity from the proxy path. Primary cadence
+	// source and the idle→active re-arm trigger. Never a captured Account value.
+	private lastActivityAt = new Map<string, number>();
+	// Bookkeeping for the currently-armed poll timer so noteActivity can decide
+	// whether an idle-sleeping account should be re-armed to the active cadence.
+	private pollSchedule = new Map<
+		string,
+		{ wakeAt: number; isIdle: boolean; activeBaseMs: number }
+	>();
 
 	/**
 	 * Schedule the next poll with exponential backoff on failures.
@@ -636,36 +793,164 @@ class UsageCache {
 	private scheduleNextPoll(
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
+		generation: number,
 		baseIntervalMs: number,
 		provider?: string,
 		customEndpoint?: string | null,
 		retryAfterMs?: number | null,
 	) {
+		// Generation guard: a superseded poll loop must never (re)schedule.
+		if (this.pollGenerations.get(accountId) !== generation) return;
 		const failures = this.failureCounts.get(accountId) ?? 0;
-		// Add ±20% random jitter to the base interval so accounts spread out
-		// and don't lock into sync with each other over time.
-		const jitter = (Math.random() - 0.5) * 0.4 * baseIntervalMs;
-		// Use server-provided retry-after if available, otherwise exponential backoff capped at 30 minutes
-		const delay =
-			retryAfterMs != null
-				? retryAfterMs
-				: failures === 0
-					? baseIntervalMs + jitter
-					: Math.min(baseIntervalMs * 2 ** failures, 30 * 60 * 1000);
+		const policy = this.pollingPolicies.get(accountId);
+		// The demand-aware active/idle decision only matters for a HEALTHY tick:
+		// on a server retry-after or during failure backoff the backoff delay wins
+		// regardless, and activity is irrelevant. Non-demand-aware providers always
+		// take the fixed active cadence (their prior behavior, byte-identical).
+		const healthyDemandAware =
+			!!policy?.demandAware && failures === 0 && retryAfterMs == null;
+		if (!healthyDemandAware) {
+			this.armNextPoll(
+				accountId,
+				tokenProvider,
+				generation,
+				baseIntervalMs,
+				provider,
+				customEndpoint,
+				retryAfterMs ?? null,
+				null,
+			);
+			return;
+		}
+
+		// Prefer the in-memory real-time activity map. Only when NOTHING has been
+		// observed yet (cold start, e.g. just after a restart) do we consult the
+		// injected live resolver — async, so guarded before arming.
+		const mapActivity = this.lastActivityAt.get(accountId);
+		if (mapActivity !== undefined || !policy?.getLastActivityMs) {
+			this.armNextPoll(
+				accountId,
+				tokenProvider,
+				generation,
+				baseIntervalMs,
+				provider,
+				customEndpoint,
+				null,
+				mapActivity ?? null,
+			);
+			return;
+		}
+		Promise.resolve(policy.getLastActivityMs(accountId))
+			.then((resolved) =>
+				this.armAfterResolve(
+					accountId,
+					tokenProvider,
+					generation,
+					baseIntervalMs,
+					provider,
+					customEndpoint,
+					resolved ?? null,
+				),
+			)
+			.catch(() =>
+				// Resolver failure → treat as unknown activity → idle cadence (safe:
+				// reduces pressure on the shared bucket).
+				this.armAfterResolve(
+					accountId,
+					tokenProvider,
+					generation,
+					baseIntervalMs,
+					provider,
+					customEndpoint,
+					null,
+				),
+			);
+	}
+
+	/**
+	 * Arm the next poll after the (possibly async) cold-start activity resolver
+	 * settled. Generation-guarded: a stopPolling()/restart during the await bumps
+	 * (or clears) the generation, so a superseded resolver bails even if the caller
+	 * reused the same tokenProvider reference (which would defeat the identity
+	 * guard). The tokenProvider identity guard and the pollTimeouts presence check
+	 * remain as belt-and-suspenders (the latter avoids double-arming if a timer was
+	 * armed during the await).
+	 */
+	private armAfterResolve(
+		accountId: string,
+		tokenProvider: AccessTokenProvider,
+		generation: number,
+		baseIntervalMs: number,
+		provider: string | undefined,
+		customEndpoint: string | null | undefined,
+		resolved: number | null,
+	) {
+		if (this.pollGenerations.get(accountId) !== generation) return;
+		if (this.tokenProviders.get(accountId) !== tokenProvider) return;
+		if (this.pollTimeouts.has(accountId)) return;
+		// Any real-time activity observed during the await wins over the DB value.
+		const observed = this.lastActivityAt.get(accountId);
+		this.armNextPoll(
+			accountId,
+			tokenProvider,
+			generation,
+			baseIntervalMs,
+			provider,
+			customEndpoint,
+			null,
+			observed ?? resolved,
+		);
+	}
+
+	/**
+	 * Compute the poll delay (retry-after / backoff / demand-aware base + jitter)
+	 * and arm the timer. `activeBaseMs` is the configured active cadence, threaded
+	 * unchanged across ticks; `lastActivityMs` only influences the healthy base
+	 * cadence decision.
+	 */
+	private armNextPoll(
+		accountId: string,
+		tokenProvider: AccessTokenProvider,
+		generation: number,
+		activeBaseMs: number,
+		provider: string | undefined,
+		customEndpoint: string | null | undefined,
+		retryAfterMs: number | null,
+		lastActivityMs: number | null,
+	) {
+		// Generation guard: never arm a timer for a superseded poll loop.
+		if (this.pollGenerations.get(accountId) !== generation) return;
+		const failures = this.failureCounts.get(accountId) ?? 0;
+		const policy = this.pollingPolicies.get(accountId);
+		// ±20% random jitter so accounts spread out and don't lock into sync.
+		const jitterFraction = (Math.random() - 0.5) * 0.4;
+		const { delayMs, isIdle } = computePollDelay({
+			demandAware: policy?.demandAware,
+			idleIntervalMs: policy?.idleIntervalMs,
+			activityRecencyMs: policy?.activityRecencyMs,
+			activeIntervalMs: activeBaseMs,
+			lastActivityMs,
+			failures,
+			retryAfterMs,
+			now: Date.now(),
+			jitterFraction,
+		});
 
 		if (failures > 0) {
 			log.info(
-				`Usage poll backoff for account ${accountId}: retry in ${Math.round(delay / 1000)}s (${failures} consecutive failure(s))${retryAfterMs != null ? " [server retry-after]" : ""}`,
+				`Usage poll backoff for account ${accountId}: retry in ${Math.round(delayMs / 1000)}s (${failures} consecutive failure(s))${retryAfterMs != null ? " [server retry-after]" : ""}`,
 			);
 		}
 
 		const timeoutId = setTimeout(async () => {
 			this.pollTimeouts.delete(accountId);
-			// Bail if polling was stopped OR restarted with a new provider since this
-			// tick was scheduled. Identity (not mere presence) guards against a
-			// zombie loop: stopPolling()+startPolling() (e.g. reauth) installs a new
-			// provider, and the old in-flight loop must not keep polling with its
-			// stale closure alongside the new one.
+			this.pollSchedule.delete(accountId);
+			// Bail if polling was stopped OR restarted (replaced) since this tick was
+			// scheduled. The generation guard is authoritative — it catches a
+			// stopPolling()+startPolling() (e.g. reauth) even when the same
+			// tokenProvider reference is reused; the identity guard remains as a
+			// secondary check so a stale closure never polls alongside the new one.
+			if (this.pollGenerations.get(accountId) !== generation) return;
 			if (this.tokenProviders.get(accountId) !== tokenProvider) return;
 
 			const { success, retryAfterMs: nextRetryAfterMs } =
@@ -681,21 +966,80 @@ class UsageCache {
 				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
 				this.failureCounts.set(accountId, count);
 			}
-			// Schedule the next poll only if this provider is still the active one
-			// (identity guard — see the bail check above).
-			if (this.tokenProviders.get(accountId) === tokenProvider) {
+			// Schedule the next poll only if this generation is still current
+			// (generation + identity guards — see the bail check above).
+			if (
+				this.pollGenerations.get(accountId) === generation &&
+				this.tokenProviders.get(accountId) === tokenProvider
+			) {
 				this.scheduleNextPoll(
 					accountId,
 					tokenProvider,
-					baseIntervalMs,
+					generation,
+					activeBaseMs,
 					provider,
 					customEndpoint,
 					nextRetryAfterMs,
 				);
 			}
-		}, delay);
+		}, delayMs);
 
 		this.pollTimeouts.set(accountId, timeoutId);
+		this.pollSchedule.set(accountId, {
+			wakeAt: Date.now() + delayMs,
+			isIdle,
+			activeBaseMs,
+		});
+	}
+
+	/**
+	 * Record that an account just served a request (the demand-aware activity
+	 * signal) and, if it is currently sleeping on an idle-cadence timer, re-arm it
+	 * to the active cadence promptly. Without this an account that goes from idle
+	 * to busy could wait out most of a ~10-minute idle sleep before the scheduler
+	 * notices. Cheap and guarded: a NO-OP for providers without demand-aware
+	 * polling and for stopped pollers (never resurrects one).
+	 *
+	 * The membership guards run BEFORE recording activity so the `lastActivityAt`
+	 * map stays bounded to accounts with an ACTIVE demand-aware poller: a late
+	 * response after polling stopped, or traffic on a non-demand-aware account,
+	 * records nothing (and stopPolling prunes the entry), so the map can't grow
+	 * without bound.
+	 */
+	noteActivity(accountId: string, now: number = Date.now()): void {
+		const policy = this.pollingPolicies.get(accountId);
+		if (!policy?.demandAware) return;
+		// Don't resurrect a stopped poller (and don't record activity for one —
+		// stopPolling has removed the token provider and pruned lastActivityAt).
+		const tokenProvider = this.tokenProviders.get(accountId);
+		if (!tokenProvider) return;
+		// Only record activity once we know a demand-aware poller is active for this
+		// account — bounds the map to live pollers (pruned on stopPolling).
+		this.lastActivityAt.set(accountId, now);
+		const sched = this.pollSchedule.get(accountId);
+		// Only re-arm when currently sleeping on an IDLE timer. An active or
+		// backoff timer is left untouched (backoff must keep winning).
+		if (!sched?.isIdle) return;
+		// Skip if the pending idle wake is already within ~one active interval
+		// (incl. max +20% jitter) — re-arming could only push it further out.
+		if (sched.wakeAt - now <= sched.activeBaseMs * 1.2) return;
+		// Re-arm within the CURRENT generation (defensive: only if one is live).
+		const generation = this.pollGenerations.get(accountId);
+		if (generation === undefined) return;
+		const existing = this.pollTimeouts.get(accountId);
+		if (existing) clearTimeout(existing);
+		this.pollTimeouts.delete(accountId);
+		this.pollSchedule.delete(accountId);
+		// scheduleNextPoll re-reads lastActivityAt (now fresh) → active cadence.
+		this.scheduleNextPoll(
+			accountId,
+			tokenProvider,
+			generation,
+			sched.activeBaseMs,
+			this.providerTypes.get(accountId),
+			this.customEndpoints.get(accountId),
+			null,
+		);
 	}
 
 	/**
@@ -715,6 +1059,7 @@ class UsageCache {
 			accountId: string,
 			error: unknown,
 		) => boolean | Promise<boolean>,
+		policy?: PollingPolicy,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -724,14 +1069,27 @@ class UsageCache {
 			return;
 		}
 
-		// Stop existing polling if any to prevent leaks
+		// Stop existing polling if any to prevent leaks. DELETE the map entry (not
+		// just clearTimeout): a lingering entry would make armAfterResolve's
+		// `pollTimeouts.has` guard refuse to arm this fresh generation's timer,
+		// leaving a demand-aware poller replaced via startPolling (without a prior
+		// stopPolling) permanently unscheduled.
 		const existing = this.pollTimeouts.get(accountId);
 		if (existing) {
 			clearTimeout(existing);
+			this.pollTimeouts.delete(accountId);
 			log.warn(
 				`Clearing existing polling timeout for account ${accountId} before starting new one`,
 			);
 		}
+
+		// Bump the per-account poll generation: any timer or async cold-start
+		// resolver still pending from a prior startPolling is now superseded and
+		// must never (re)arm — even if the caller reuses the same tokenProvider
+		// reference (which defeats the identity guard). Every (re)arm is gated on
+		// this exact generation value.
+		const generation = (this.pollGenerations.get(accountId) ?? 0) + 1;
+		this.pollGenerations.set(accountId, generation);
 
 		// Reset failure count for fresh start
 		this.failureCounts.delete(accountId);
@@ -775,6 +1133,16 @@ class UsageCache {
 		} else {
 			this.tokenRefreshFailureHandlers.delete(accountId);
 		}
+		// Demand-aware polling policy (Anthropic only). Absent → fixed cadence.
+		if (policy) {
+			this.pollingPolicies.set(accountId, policy);
+		} else {
+			this.pollingPolicies.delete(accountId);
+		}
+		// Fresh start: drop any stale activity/schedule bookkeeping from a prior
+		// generation so cadence decisions start from a clean slate.
+		this.lastActivityAt.delete(accountId);
+		this.pollSchedule.delete(accountId);
 
 		// Default to 90s if not provided
 		const baseIntervalMs = intervalMs ?? 90000;
@@ -785,12 +1153,17 @@ class UsageCache {
 				if (!success) {
 					this.failureCounts.set(accountId, 1);
 				}
-				// Identity guard: only start the loop if this provider is still the
-				// active one (a concurrent restart may have swapped it).
-				if (this.tokenProviders.get(accountId) === tokenProvider) {
+				// Generation + identity guards: only start the loop if this generation
+				// is still current (a concurrent restart/replacement may have
+				// superseded it). scheduleNextPoll re-checks the generation too.
+				if (
+					this.pollGenerations.get(accountId) === generation &&
+					this.tokenProviders.get(accountId) === tokenProvider
+				) {
 					this.scheduleNextPoll(
 						accountId,
 						tokenProvider,
+						generation,
 						baseIntervalMs,
 						provider,
 						customEndpoint,
@@ -850,6 +1223,13 @@ class UsageCache {
 			this.usageRateLimitedUntil.delete(accountId);
 			// Clear any in-flight fetch so it doesn't linger after polling stops.
 			this.inFlightFetches.delete(accountId);
+			// Demand-aware polling bookkeeping.
+			this.pollingPolicies.delete(accountId);
+			this.lastActivityAt.delete(accountId);
+			this.pollSchedule.delete(accountId);
+			// Drop the generation so any pending async resolver from this poller
+			// bails on the generation guard (and doesn't leak an entry).
+			this.pollGenerations.delete(accountId);
 			log.info(
 				`Stopped usage polling and cleared cache for account ${accountId}`,
 			);
@@ -1116,7 +1496,7 @@ class UsageCache {
 	/**
 	 * Clean up stale cache entries older than maxAgeMs
 	 */
-	cleanupStaleEntries(maxAgeMs: number = 10 * 60 * 1000): void {
+	cleanupStaleEntries(maxAgeMs: number = USAGE_CACHE_TTL_MS): void {
 		const now = Date.now();
 		let cleanedCount = 0;
 
@@ -1141,7 +1521,7 @@ class UsageCache {
 
 		// Clean up stale entries while accessing
 		const age = Date.now() - cached.timestamp;
-		if (age > 10 * 60 * 1000) {
+		if (age > USAGE_CACHE_TTL_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			log.debug(
@@ -1149,6 +1529,24 @@ class UsageCache {
 			);
 			return null;
 		}
+
+		return cached.data;
+	}
+
+	/**
+	 * Non-evicting read of cached usage data. Returns the cached data, or null if
+	 * the entry is missing OR stale (age > USAGE_CACHE_TTL_MS). Unlike get(), this
+	 * NEVER deletes the entry — a stale entry stays in the map so that later
+	 * eviction (via get()/getAge()/cleanupStaleEntries) and window-reset
+	 * comparisons (notifyWindowReset reads the raw map) behave as if no read
+	 * happened. Use for pure observers/inspection that must not mutate cache state.
+	 */
+	peek(accountId: string): AnyUsageData | null {
+		const cached = this.cache.get(accountId);
+		if (!cached) return null;
+
+		const age = Date.now() - cached.timestamp;
+		if (age > USAGE_CACHE_TTL_MS) return null; // stale — but do NOT evict
 
 		return cached.data;
 	}
@@ -1229,13 +1627,28 @@ class UsageCache {
 
 		const age = Date.now() - cached.timestamp;
 		// Clean up if too old
-		if (age > 10 * 60 * 1000) {
+		if (age > USAGE_CACHE_TTL_MS) {
 			// 10 minutes max age
 			this.cache.delete(accountId);
 			return null;
 		}
 
 		return age;
+	}
+
+	/**
+	 * Non-evicting read of cached data age in milliseconds. Returns the age of the
+	 * entry if one exists (EVEN IF stale, i.e. age > USAGE_CACHE_TTL_MS), or null
+	 * only when there is no entry at all. This deliberately differs from getAge(),
+	 * which treats a stale entry as absent (returns null) and evicts it. peekAge()
+	 * NEVER deletes, so callers can inspect true age — including staleness — for
+	 * pure observation without mutating cache state. Pair with peek() (which
+	 * returns null once stale) when staleness should gate the data itself.
+	 */
+	peekAge(accountId: string): number | null {
+		const cached = this.cache.get(accountId);
+		if (!cached) return null;
+		return Date.now() - cached.timestamp;
 	}
 
 	/**

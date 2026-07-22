@@ -426,6 +426,28 @@ function startUsagePollingWithRefresh(
 						.catch(() => null);
 					return shouldStopPollingPausedAccount(current, error);
 				},
+				// Demand-aware cadence: poll recently-active Anthropic accounts at the
+				// configured active interval, back cold accounts off to the ~10-min
+				// idle cadence — to relieve the shared, aggressively-rate-limited
+				// /oauth/usage + /oauth/profile bucket. The proxy path calls
+				// usageCache.noteActivity() on real traffic (the primary, real-time
+				// activity signal + idle→active re-arm); getLastActivityMs is only a
+				// cold-start fallback that reads the CURRENT DB last_used (never the
+				// captured, soon-stale `account` snapshot) so an account busy right
+				// before a restart still polls actively before its next request.
+				//
+				// Tradeoff: for idle/paused accounts, subscription-expired recovery
+				// and seat-reassignment detection may now lag by up to the idle
+				// interval (~10 min). Acceptable — those are not latency-critical, and
+				// on-demand refresh (account-selector's refreshNow) covers real traffic.
+				{
+					demandAware: account.provider === "anthropic",
+					getLastActivityMs: (accountId) =>
+						proxyContext.dbOps
+							.getAccount(accountId)
+							.then((a) => a?.last_used ?? null)
+							.catch(() => null),
+				},
 			);
 
 			// Reset retry count on success
@@ -1042,13 +1064,13 @@ export default async function startServer(options?: {
 
 	// Register this server's codex on-demand usage refresher. Delegates to the
 	// shared CodexSpendCoordinator: the manual "Refresh usage" click routes through
-	// observe(accountId, "manual-refresh") → applyCodexObservation, so it issues the
-	// native `/responses` ping, carries prior codexCredits FORWARD (fixing the old
-	// window-only `usageCache.set` overwrite that silently erased learned credits),
-	// persists the rate-limit reset, and applies a 429 cooldown — all through the
-	// single Codex spend authority. The manual-refresh cause ignores
-	// `auto_refresh_enabled` (explicit operator consent). Cost is bounded by
-	// `max_output_tokens: 1` plus the abort-after-headers cancel in the native ping.
+	// refreshManual → readUsageStatus, a ZERO-COST `GET /wham/usage` read (it does
+	// NOT ping `/responses` and does NOT spend quota). The read is applied via the
+	// shared applyCodexUsageStatus bookkeeping, so it carries prior codexCredits
+	// FORWARD and persists the rate-limit reset — but a 200 for an exhausted account
+	// never clears `rate_limited_until`, and it never applies a cooldown. On a read
+	// failure the prior usage cache is kept and the failure is reported (no ping
+	// fallback).
 	registerCodexUsageRefresher(serverId, (accountId: string) =>
 		codexSpendCoordinator.refreshManual(accountId),
 	);

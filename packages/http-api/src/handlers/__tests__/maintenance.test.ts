@@ -16,11 +16,15 @@ function makeConfig(
 	payloadDays = 3,
 	requestDays = 90,
 	storePayloads?: boolean,
+	usageSnapshotDays = 90,
+	memorySnapshotDays = 90,
 ) {
 	return {
 		getDataRetentionDays: () => payloadDays,
 		getRequestRetentionDays: () => requestDays,
 		getStorePayloads: () => storePayloads ?? true,
+		getUsageSnapshotRetentionDays: () => usageSnapshotDays,
+		getMemorySnapshotRetentionDays: () => memorySnapshotDays,
 	} as unknown as import("@clankermux/config").Config;
 }
 
@@ -140,15 +144,23 @@ describe("createCleanupHandler", () => {
 
 		it("calls cleanupOldRequests with millisecond values derived from config", async () => {
 			const dbOps = makeDbOps();
-			const handler = createCleanupHandler(dbOps, makeConfig(3, 90));
+			// payloadDays=3, requestDays=90, storePayloads default, usageSnapshotDays=45,
+			// memorySnapshotDays=30 — prove the manual path threads the CONFIGURED
+			// snapshot windows instead of letting cleanupOldRequests fall back to 90d.
+			const handler = createCleanupHandler(
+				dbOps,
+				makeConfig(3, 90, undefined, 45, 30),
+			);
 			await handler();
 
 			expect(dbOps.cleanupOldRequests).toHaveBeenCalledTimes(1);
-			const [payloadMs, requestMs] = (
+			const [payloadMs, requestMs, usageSnapshotMs, memorySnapshotMs] = (
 				dbOps.cleanupOldRequests as ReturnType<typeof mock>
 			).mock.calls[0];
 			expect(payloadMs).toBe(3 * 24 * 60 * 60 * 1000);
 			expect(requestMs).toBe(90 * 24 * 60 * 60 * 1000);
+			expect(usageSnapshotMs).toBe(45 * 24 * 60 * 60 * 1000);
+			expect(memorySnapshotMs).toBe(30 * 24 * 60 * 60 * 1000);
 		});
 
 		it("does NOT call compact (cleanup and compact are separate handlers)", async () => {

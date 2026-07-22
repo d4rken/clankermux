@@ -4,7 +4,9 @@ import {
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
+	fetchCodexUsageStatus,
 	getProvider,
+	readChatgptAccountId,
 	sendCodexNativePing,
 	usageCache,
 } from "@clankermux/providers";
@@ -16,6 +18,7 @@ import type {
 } from "@clankermux/types";
 import {
 	applyCodexObservation,
+	applyCodexUsageStatus,
 	type CodexObservationResult,
 	type CodexObservationSource,
 	type CodexRateLimitAction,
@@ -33,15 +36,19 @@ const log = new Logger("CodexSpendCoordinator");
 /**
  * Why a Codex spend (a single quota-consuming native `/responses` ping) is being
  * requested. Deliberately a CLOSED union — there is no "telemetry" or generic
- * string cause. Every autonomous or manual Codex usage probe flows through the
- * coordinator under exactly one of these two intents:
+ * string cause.
  *
  *   - `"scheduled-prime"`: the auto-refresh scheduler priming a dormant/aging
- *     window. Gated on the account's `auto_refresh_enabled` flag and counted
- *     against the account's request tally (`count-only`).
- *   - `"manual-refresh"`: an operator-initiated "refresh usage" click. Always
- *     allowed (ignores `auto_refresh_enabled`) and NOT counted against the
- *     request tally (`none`) — the operator's action is not app traffic.
+ *     window. This is the ONE production spend cause: the native POST is the
+ *     operation that actually STARTS a new 5h window (a free read cannot). Gated
+ *     on the account's `auto_refresh_enabled` flag and counted against the
+ *     account's request tally (`count-only`).
+ *   - `"manual-refresh"`: an always-allowed (ignores `auto_refresh_enabled`),
+ *     uncounted (`none`) spend primitive. NOTE: the dashboard's "Refresh usage"
+ *     button no longer routes here — it now uses the FREE `GET /wham/usage` read
+ *     ({@link CodexSpendCoordinator.readUsageStatus}) so a manual refresh costs
+ *     zero quota. This cause is retained for {@link CodexSpendCoordinator.observe}
+ *     as a general spend option (and exercises observe's always-allowed branch).
  */
 export type CodexSpendCause = "scheduled-prime" | "manual-refresh";
 
@@ -97,30 +104,44 @@ interface InflightSpend {
 export interface CodexSpendCoordinatorDeps {
 	getValidAccessToken?: typeof getValidAccessToken;
 	applyCodexObservation?: typeof applyCodexObservation;
+	applyCodexUsageStatus?: typeof applyCodexUsageStatus;
 	sendCodexNativePing?: typeof sendCodexNativePing;
+	fetchCodexUsageStatus?: typeof fetchCodexUsageStatus;
+	readChatgptAccountId?: typeof readChatgptAccountId;
 	fetchCodexRateLimitResetCredits?: typeof fetchCodexRateLimitResetCredits;
 	consumeCodexRateLimitResetCredit?: typeof consumeCodexRateLimitResetCredit;
 	getProvider?: typeof getProvider;
 }
 
 /**
- * The single authority for autonomous (scheduled-prime) and manual
- * (manual-refresh) Codex spend. Owns the policy around issuing a native
- * `/responses` ping: the per-cause gate, concurrent de-duplication, the
- * last-moment scheduled re-check, one rate-limit parse, and one
- * {@link applyCodexObservation} call. It NEVER falls back to a translated
- * `/v1/messages` request — the native ping is the only transport.
+ * The single authority for Codex usage acquisition. Two distinct transports:
  *
- * Wiring: constructed in later refactor steps. Step 3 reroutes the scheduler to
- * {@link observe}; Step 4 reroutes the manual-refresh endpoint to
- * {@link refreshManual}. This module only adds the capability + unit tests.
+ *   - SPEND ({@link observe} → native `/responses` ping): autonomous
+ *     scheduled-prime window-priming. Owns the per-cause gate, concurrent
+ *     de-duplication, the last-moment scheduled re-check, one rate-limit parse,
+ *     and one {@link applyCodexObservation} call. NEVER falls back to a
+ *     translated `/v1/messages` request — the native ping is the only spend
+ *     transport.
+ *   - FREE READ ({@link readUsageStatus} → `GET /wham/usage`): the manual
+ *     "Refresh usage" click ({@link refreshManual}). Zero quota; deduped by a
+ *     SEPARATE in-flight map so it can never join or authorize a spend; on
+ *     failure it keeps the prior cache and reports the failure (no ping
+ *     fallback).
+ *
+ * Both transports funnel their observation through the SHARED bookkeeping in
+ * `codex-observation.ts` ({@link applyCodexObservation} for headers,
+ * {@link applyCodexUsageStatus} for JSON) so cache/credits-carry-forward/window-
+ * roll/reset-persist behave identically.
  */
 export class CodexSpendCoordinator {
 	private readonly ctx: ProxyContext;
 	private readonly inflight = new Map<string, InflightSpend>();
 	private readonly getValidAccessToken: typeof getValidAccessToken;
 	private readonly applyCodexObservation: typeof applyCodexObservation;
+	private readonly applyCodexUsageStatus: typeof applyCodexUsageStatus;
 	private readonly sendCodexNativePing: typeof sendCodexNativePing;
+	private readonly fetchCodexUsageStatus: typeof fetchCodexUsageStatus;
+	private readonly readChatgptAccountId: typeof readChatgptAccountId;
 	private readonly fetchCodexRateLimitResetCredits: typeof fetchCodexRateLimitResetCredits;
 	private readonly consumeCodexRateLimitResetCredit: typeof consumeCodexRateLimitResetCredit;
 	private readonly getProvider: typeof getProvider;
@@ -128,18 +149,95 @@ export class CodexSpendCoordinator {
 		string,
 		Promise<CodexUsageRefreshOutcome>
 	>();
+	/**
+	 * Per-account in-flight FREE usage READ (`GET /wham/usage`). Deliberately a
+	 * SEPARATE map from {@link inflight} (which dedups quota-spending native
+	 * pings): a concurrent manual read must never join, suppress, or authorize a
+	 * scheduled-prime SPEND. Reads dedup only against other reads.
+	 */
+	private readonly readInflight = new Map<
+		string,
+		Promise<CodexUsageRefreshOutcome>
+	>();
+	/**
+	 * Per-account monotonic ISSUE counter for the cross-transport application
+	 * ordering guard (SF1). Each COORDINATOR-driven observation — a free-GET usage
+	 * read ({@link runUsageStatusRead}) or a native-ping spend
+	 * ({@link runSharedSpend}) — reserves the next value the instant its network
+	 * call is issued ({@link reserveApplicationSeq}). Values only ever increase.
+	 */
+	private readonly applicationSeqCounter = new Map<string, number>();
+	/**
+	 * Per-account highest ISSUE sequence whose observation has already been
+	 * APPLIED to the usage cache / DB. An observation may apply only when its
+	 * reserved sequence is strictly greater ({@link claimApplication}); an older
+	 * read that returns AFTER a newer spend already applied is skipped rather than
+	 * overwriting the fresher window/reset state (or clearing a cooldown the newer
+	 * spend just set). Real-traffic {@link applyCodexObservation} calls made by the
+	 * response pipeline do NOT flow through the coordinator and deliberately do NOT
+	 * participate in this guard — they stay the authoritative freshest signal.
+	 */
+	private readonly lastAppliedSeq = new Map<string, number>();
 
 	constructor(ctx: ProxyContext, deps: CodexSpendCoordinatorDeps = {}) {
 		this.ctx = ctx;
 		this.getValidAccessToken = deps.getValidAccessToken ?? getValidAccessToken;
 		this.applyCodexObservation =
 			deps.applyCodexObservation ?? applyCodexObservation;
+		this.applyCodexUsageStatus =
+			deps.applyCodexUsageStatus ?? applyCodexUsageStatus;
 		this.sendCodexNativePing = deps.sendCodexNativePing ?? sendCodexNativePing;
+		this.fetchCodexUsageStatus =
+			deps.fetchCodexUsageStatus ?? fetchCodexUsageStatus;
+		this.readChatgptAccountId =
+			deps.readChatgptAccountId ?? readChatgptAccountId;
 		this.fetchCodexRateLimitResetCredits =
 			deps.fetchCodexRateLimitResetCredits ?? fetchCodexRateLimitResetCredits;
 		this.consumeCodexRateLimitResetCredit =
 			deps.consumeCodexRateLimitResetCredit ?? consumeCodexRateLimitResetCredit;
 		this.getProvider = deps.getProvider ?? getProvider;
+	}
+
+	/**
+	 * Attach an in-flight-map cleanup that runs on BOTH settle branches WITHOUT
+	 * leaking an unhandled rejection (SF3). `promise.finally(cleanup)` returns a
+	 * NEW promise that rejects whenever `promise` rejects; because that returned
+	 * promise is never awaited or caught, a rejecting in-flight body (whose awaited
+	 * copy the HTTP caller already handles) still surfaces as an
+	 * `unhandledRejection`. `then(cleanup, cleanup)` runs the cleanup on the
+	 * fulfilled AND the rejected branch and resolves the cleanup copy to
+	 * `undefined`, so nothing escapes. Callers keep awaiting the ORIGINAL
+	 * `promise` — its semantics are unchanged.
+	 */
+	private settleInflight<T>(promise: Promise<T>, cleanup: () => void): void {
+		void promise.then(cleanup, cleanup);
+	}
+
+	/**
+	 * Reserve the next application sequence for `accountId`, called at the instant
+	 * a coordinator-driven network call (free-GET read or native-ping spend) is
+	 * ISSUED. Monotonic per account; two observations issued before either applies
+	 * receive distinct, increasing values so their relative issue order is
+	 * preserved.
+	 */
+	private reserveApplicationSeq(accountId: string): number {
+		const next = (this.applicationSeqCounter.get(accountId) ?? 0) + 1;
+		this.applicationSeqCounter.set(accountId, next);
+		return next;
+	}
+
+	/**
+	 * Decide whether the observation reserved at `seq` may APPLY, and if so record
+	 * it as the newest applied for `accountId`. Returns `false` when a
+	 * later-issued observation already applied — this one is stale and must not
+	 * overwrite the newer cache / rate_limit_reset (nor clear a cooldown a newer
+	 * spend set).
+	 */
+	private claimApplication(accountId: string, seq: number): boolean {
+		const lastApplied = this.lastAppliedSeq.get(accountId) ?? 0;
+		if (seq <= lastApplied) return false;
+		this.lastAppliedSeq.set(accountId, seq);
+		return true;
 	}
 
 	/**
@@ -363,7 +461,7 @@ export class CodexSpendCoordinator {
 
 		const promise = this.runResetCreditsRefresh(accountId);
 		this.resetCreditsInflight.set(accountId, promise);
-		void promise.finally(() => {
+		this.settleInflight(promise, () => {
 			if (this.resetCreditsInflight.get(accountId) === promise) {
 				this.resetCreditsInflight.delete(accountId);
 			}
@@ -472,7 +570,7 @@ export class CodexSpendCoordinator {
 		this.inflight.set(accountId, entry);
 		// Clear the entry once settled, guarded by identity so a superseding entry
 		// (should one ever exist) is never deleted out from under itself.
-		void promise.finally(() => {
+		this.settleInflight(promise, () => {
 			if (this.inflight.get(accountId) === entry) {
 				this.inflight.delete(accountId);
 			}
@@ -481,39 +579,129 @@ export class CodexSpendCoordinator {
 	}
 
 	/**
-	 * Manual "refresh usage" adapter. Maps {@link observe}(…, "manual-refresh")
-	 * onto the existing {@link CodexUsageRefreshOutcome} dashboard contract,
-	 * matching the wording the server's refresher callback produces today. NOT
-	 * wired to the HTTP endpoint yet (Step 4 does that).
+	 * Manual "refresh usage" click. ZERO-COST: it reads the FREE
+	 * `GET /wham/usage` status ({@link readUsageStatus}) and the separate free
+	 * reset-credit summary — it NEVER issues a quota-spending native ping, and it
+	 * NEVER falls back to one on failure. On a read failure the prior usage cache
+	 * is left untouched and the failure is reported to the caller.
+	 *
+	 * The two free reads run concurrently; the usage read drives the returned
+	 * {@link CodexUsageRefreshOutcome} (matching the dashboard contract), while the
+	 * reset-credit read keeps its own detailed metadata cache warm (its per-credit
+	 * expiries are needed for auto-apply and are NOT derivable from the usage
+	 * summary count).
 	 */
 	async refreshManual(accountId: string): Promise<CodexUsageRefreshOutcome> {
 		const [result] = await Promise.all([
-			this.observe(accountId, "manual-refresh"),
+			this.readUsageStatus(accountId),
 			this.refreshResetCredits(accountId, true),
 		]);
-		switch (result.status) {
-			case "skipped":
-				return { success: false, message: result.reason };
-			case "failed":
-				return { success: false, message: result.message };
-			case "completed": {
-				const { accountName, responseStatus, observation } = result;
-				if (!observation.usage) {
-					return {
-						success: false,
-						message: `Codex returned no usage headers (status ${responseStatus}) for '${accountName}'`,
-					};
-				}
-				const fiveHour = observation.usage.five_hour?.utilization ?? 0;
-				const sevenDay = observation.usage.seven_day?.utilization ?? 0;
-				// A 429 still yields a usable usage refresh (the payload is what we
-				// wanted), but the message must not celebrate an exhausted account.
-				const message = observation.isRateLimited
-					? `Usage refreshed for '${accountName}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
-					: `Usage refreshed for '${accountName}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
-				return { success: true, message };
+		return result;
+	}
+
+	/**
+	 * Read the FREE `GET /wham/usage` status for `accountId` and apply it to the
+	 * usage cache. Concurrent callers for the same account share ONE physical GET
+	 * via {@link readInflight} (a SEPARATE map from the spend dedup — a read can
+	 * never join or authorize a native-ping spend). Never spends quota.
+	 */
+	async readUsageStatus(accountId: string): Promise<CodexUsageRefreshOutcome> {
+		const existing = this.readInflight.get(accountId);
+		if (existing) return existing;
+
+		const promise = this.runUsageStatusRead(accountId);
+		this.readInflight.set(accountId, promise);
+		this.settleInflight(promise, () => {
+			if (this.readInflight.get(accountId) === promise) {
+				this.readInflight.delete(accountId);
 			}
+		});
+		return promise;
+	}
+
+	private async runUsageStatusRead(
+		accountId: string,
+	): Promise<CodexUsageRefreshOutcome> {
+		const account = await this.ctx.dbOps.getAccount(accountId);
+		if (!account) {
+			return { success: false, message: `Account ${accountId} not found` };
 		}
+		if (account.provider !== "codex") {
+			return {
+				success: false,
+				message: `Account '${account.name}' is not a Codex account`,
+			};
+		}
+		if (!account.access_token && !account.refresh_token) {
+			return {
+				success: false,
+				message: `Account '${account.name}' has no tokens — please re-authenticate`,
+			};
+		}
+
+		let accessToken: string;
+		try {
+			accessToken = await this.getValidAccessToken(account, this.ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				success: false,
+				message: `Could not refresh access token for '${account.name}': ${message}`,
+			};
+		}
+
+		const chatgptAccountId = this.readChatgptAccountId(accessToken);
+		// Reserve this read's application sequence at the moment its network call is
+		// ISSUED — pairs with the native-ping spend's reservation so a read that
+		// BEGAN before a later spend APPLIED cannot overwrite the newer state.
+		const applicationSeq = this.reserveApplicationSeq(accountId);
+		const status = await this.fetchCodexUsageStatus({
+			accessToken,
+			chatgptAccountId,
+		});
+
+		// Fail-clean: any non-200 / parse error / network throw keeps the prior
+		// cache untouched and reports failure. NO native-ping fallback (that would
+		// spend quota and defeat the point of the free read).
+		if (!status.ok) {
+			return {
+				success: false,
+				message: `Codex usage read failed for '${account.name}' (status ${
+					status.status ?? "network error"
+				}).`,
+			};
+		}
+		if (!status.usage) {
+			return {
+				success: false,
+				message: `Codex returned no usage windows for '${account.name}' (status ${status.status}).`,
+			};
+		}
+
+		// Cross-transport ordering guard (SF1): if a newer observation for this
+		// account already applied while this GET was in flight (e.g. a scheduled
+		// prime opened a NEW 5h window), applying this now-stale old-window snapshot
+		// would clobber the fresher cache + persisted rate_limit_reset and could
+		// clear a cooldown the newer spend just set. Skip the application but still
+		// report a successful read (the GET itself succeeded).
+		if (!this.claimApplication(accountId, applicationSeq)) {
+			return {
+				success: true,
+				message: `Usage read for '${account.name}' superseded by a newer observation; kept the fresher state.`,
+			};
+		}
+
+		const observation = this.applyCodexUsageStatus(account, status, this.ctx, {
+			requestAccounting: "none",
+		});
+		const fiveHour = observation.usage?.five_hour?.utilization ?? 0;
+		const sevenDay = observation.usage?.seven_day?.utilization ?? 0;
+		// The read succeeded even when the account is exhausted (the payload is what
+		// we wanted); the message just must not celebrate an exhausted account.
+		const message = observation.isRateLimited
+			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
+			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
+		return { success: true, message };
 	}
 
 	/**
@@ -557,6 +745,10 @@ export class CodexSpendCoordinator {
 		// 7. Issue the single native ping (the ONLY transport — no translated
 		//    fallback on failure).
 		const endpoint = account.custom_endpoint ?? CODEX_DEFAULT_ENDPOINT;
+		// Reserve this spend's application sequence at the instant its native ping
+		// is ISSUED — pairs with the free-GET read's reservation so whichever
+		// observation was issued LATER wins the cache/DB (see claimApplication).
+		const applicationSeq = this.reserveApplicationSeq(accountId);
 		let response: Response;
 		try {
 			response = await this.sendCodexNativePing(accessToken, endpoint);
@@ -595,6 +787,33 @@ export class CodexSpendCoordinator {
 			: "none";
 		const rateLimitAction: CodexRateLimitAction =
 			response.status === 429 ? { kind: "apply" } : { kind: "skip" };
+
+		// Cross-transport ordering guard (SF1): if a newer observation for this
+		// account already applied while this ping was in flight, skip the ENTIRE
+		// application (cache/reset persistence, 429 cooldown, and success recovery)
+		// so a stale snapshot cannot overwrite the fresher state. The transport
+		// status is still reported to the caller. Skipping also drops this spend's
+		// request-count increment — an accepted one-request undercount in this rare
+		// reverse-completion race, in exchange for never clobbering newer state.
+		if (!this.claimApplication(accountId, applicationSeq)) {
+			log.debug(
+				`Codex spend for '${account.name}' [${[...causes].join("+")}] superseded by a newer observation (status=${response.status}); skipped application.`,
+			);
+			return {
+				status: "completed",
+				responseOk: response.ok,
+				responseStatus: response.status,
+				accountName: account.name,
+				observation: {
+					usage: null,
+					effectiveCredits: null,
+					earliestResetMs: null,
+					windowRolledOver: false,
+					isRateLimited: rateLimitInfo.isRateLimited,
+					responseStatus: response.status,
+				},
+			};
+		}
 
 		const observation = this.applyCodexObservation(
 			account,

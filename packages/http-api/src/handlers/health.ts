@@ -41,7 +41,7 @@ export type AccountUsageResolver = (
  */
 export const usageCacheResolver: AccountUsageResolver = (account) =>
 	account.provider === "anthropic" || account.provider === "codex"
-		? (usageCache.get(account.id) as AnthropicUsageData | null)
+		? (usageCache.peek(account.id) as AnthropicUsageData | null)
 		: null;
 
 /** An account-level weekly window reduced to utilization + parsed reset ms. */

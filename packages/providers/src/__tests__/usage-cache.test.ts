@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { type AnyUsageData, usageCache } from "../usage-fetcher";
 
 // Mock the import that's causing issues to isolate our test
 const mockUsageCache = {
@@ -496,5 +497,112 @@ describe("UsageCache - Memory Management", () => {
 			const age = mockUsageCache.getAge(nonExistentAccount);
 			expect(age).toBeNull();
 		});
+	});
+});
+
+// Exercises the REAL exported `usageCache` singleton (not the mock above) so the
+// non-evicting reads are proven against the shipping implementation. Time is
+// driven by a Date.now spy so a "stale" entry can be produced deterministically.
+describe("UsageCache - non-evicting peek()/peekAge()", () => {
+	const ACCOUNT = "peek-nonevict-account";
+	const TTL_MS = 10 * 60 * 1000;
+	const BASE = 1_000_000_000_000; // fixed epoch base for deterministic ages
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	const sample: AnyUsageData = {
+		five_hour: { utilization: 12, resets_at: null },
+		seven_day: { utilization: 34, resets_at: null },
+	};
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(ACCOUNT);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ACCOUNT);
+		nowSpy.mockRestore();
+	});
+
+	it("peek() returns fresh data and peekAge() reports its age within TTL", () => {
+		usageCache.set(ACCOUNT, sample); // stamped at BASE
+		nowSpy.mockReturnValue(BASE + 30_000); // 30s later, still fresh
+
+		expect(usageCache.peek(ACCOUNT)).toEqual(sample);
+		expect(usageCache.peekAge(ACCOUNT)).toBe(30_000);
+	});
+
+	it("peek() on a stale entry returns null but does NOT evict it", () => {
+		usageCache.set(ACCOUNT, sample);
+		nowSpy.mockReturnValue(BASE + TTL_MS + 1); // just past the 10-min TTL
+
+		// Stale → peek yields null...
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+
+		// ...but the entry survives: peekAge still reports the (stale) age, and a
+		// second peek() is still null without ever having deleted the entry.
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 1);
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 1);
+
+		// A real evicting read (get) is what finally removes the stale entry.
+		expect(usageCache.get(ACCOUNT)).toBeNull();
+		// Now the entry is gone: the non-evicting reads report absence.
+		expect(usageCache.peekAge(ACCOUNT)).toBeNull();
+		expect(usageCache.peek(ACCOUNT)).toBeNull();
+	});
+
+	it("peekAge() returns the true age even when stale and never deletes", () => {
+		usageCache.set(ACCOUNT, sample);
+		nowSpy.mockReturnValue(BASE + TTL_MS + 5_000); // stale
+
+		// Age is returned (not null) even though it exceeds the TTL...
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 5_000);
+		// ...and repeated calls keep seeing it (no eviction side effect).
+		expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 5_000);
+
+		// By contrast getAge() treats the stale entry as absent AND evicts it.
+		expect(usageCache.getAge(ACCOUNT)).toBeNull();
+		expect(usageCache.peekAge(ACCOUNT)).toBeNull(); // now truly gone
+	});
+
+	it("peek()/peekAge() return null for a missing account", () => {
+		expect(usageCache.peek("no-such-account")).toBeNull();
+		expect(usageCache.peekAge("no-such-account")).toBeNull();
+	});
+
+	// The usage-snapshot sampler gates on its OWN freshness threshold
+	// (`age === null || age > freshnessMs`) using peekAge, independent of the
+	// cache TTL, and reads data via peek(). This proves the chosen peekAge
+	// contract (true age, even when stale) keeps that gating correct: because the
+	// sampler's freshnessMs is always well under the 10-min TTL, every entry it
+	// would accept is also non-stale for peek(), so peekAge returning the true age
+	// (rather than null) never changes the accept/reject decision.
+	it("sampler-style freshness gating with peekAge stays correct", () => {
+		const FRESHNESS_MS = 180_000; // matches max(2*pollInterval, 150s) in practice
+
+		// Emulate the sampler's per-account gate over peekAge + peek.
+		const samplerAccepts = (id: string): boolean => {
+			const age = usageCache.peekAge(id);
+			if (age === null || age > FRESHNESS_MS) return false; // honest gap
+			return usageCache.peek(id) !== null;
+		};
+
+		usageCache.set(ACCOUNT, sample); // stamped at BASE
+
+		// Within freshnessMs → accepted, and peek() has real data.
+		nowSpy.mockReturnValue(BASE + 60_000);
+		expect(samplerAccepts(ACCOUNT)).toBe(true);
+
+		// Past freshnessMs but still under the TTL → the sampler skips on its OWN
+		// age gate (peekAge reports the true age > freshnessMs). peek() would still
+		// return data here, so it's peekAge's true-age return that drives the skip.
+		nowSpy.mockReturnValue(BASE + FRESHNESS_MS + 1);
+		expect(usageCache.peek(ACCOUNT)).not.toBeNull(); // not yet TTL-stale
+		expect(samplerAccepts(ACCOUNT)).toBe(false);
+
+		// Past the TTL → skipped as well (age gate fires first; peek() is null too).
+		nowSpy.mockReturnValue(BASE + TTL_MS + 1);
+		expect(samplerAccepts(ACCOUNT)).toBe(false);
 	});
 });

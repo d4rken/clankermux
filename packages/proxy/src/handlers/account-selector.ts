@@ -27,9 +27,12 @@ export function __resetColdRefreshState(): void {
  * comparator has real data on the first request(s) after a cold start —
  * WITHOUT ever stalling a request.
  *
- * Anthropic only: it exposes a free usage endpoint. Codex usage refresh would
- * burn real quota (no free usage endpoint), and Zai/others have no windowed
- * capacity model used by the comparator here.
+ * Anthropic only: this warmer drives the Anthropic `/oauth/usage` poller via
+ * `usageCache.refreshNow`. Codex is excluded here because it is NOT wired into
+ * that poller — its free `GET /wham/usage` read (`fetchCodexUsageStatus`) is
+ * driven by the manual refresh / spend coordinator, not this selection-time
+ * warmer — and Zai/others have no windowed capacity model used by the comparator
+ * here.
  *
  * Only blocks briefly (≤300ms) at a true cold start — when every account in the
  * top available priority tier is unknown. Otherwise the refresh runs in the
@@ -42,8 +45,9 @@ export async function ensureUsageFreshForSelection(
 ): Promise<void> {
 	try {
 		const maxAge = ctx.config.getUsagePollIntervalMs() * 2;
-		// Anthropic only: it has a free usage endpoint. Codex usage refresh costs
-		// real quota; Zai/others have no capacity model here.
+		// Anthropic only: this warmer uses the Anthropic `/oauth/usage` poller
+		// (`refreshNow`). Codex is not wired into that poller here (it has its own
+		// free read elsewhere); Zai/others have no capacity model here.
 		const anthropic = accounts.filter(
 			(a) => a.provider === "anthropic" && isAccountAvailable(a, now),
 		);

@@ -101,6 +101,14 @@ export function updateAccountMetadata(
 			successRecovery: "standard",
 		});
 	} else {
+		// Real Anthropic traffic just used this account: feed the demand-aware
+		// usage poller's activity signal so an idle-cadence poller re-arms to the
+		// active cadence promptly. Gated on real traffic (bypassSession is the
+		// background auto-refresh path, NOT user demand) and on the provider that
+		// actually runs demand-aware polling (no-op otherwise, but kept explicit).
+		if (!bypassSession && account.provider === "anthropic") {
+			usageCache.noteActivity(account.id);
+		}
 		// Update basic usage (with optional bypass)
 		if (bypassSession) {
 			// Increment request count without updating session tracking

@@ -19,10 +19,35 @@ function makeConfig(): { config: Config; cleanup: () => void } {
 }
 
 describe("usage snapshot retention days", () => {
-	it("defaults to 3650 days", () => {
+	it("defaults to 3650 days when the key is absent", () => {
+		// Default deliberately kept at 3650 to avoid a one-time live prune; the
+		// retention MECHANISM (batched worker prune + manual cleanup honoring the
+		// configured value) is still hardened so an explicit lower value is safe.
 		const { config, cleanup } = makeConfig();
 		try {
 			expect(config.getUsageSnapshotRetentionDays()).toBe(3650);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("honors an explicitly saved lower value (e.g. 90) so operators can opt in", () => {
+		// Lowering retention explicitly is supported and safe (batched prune); it
+		// just isn't the default.
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setUsageSnapshotRetentionDays(90);
+			expect(config.getUsageSnapshotRetentionDays()).toBe(90);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("honors an explicitly saved value below the new default (e.g. 30)", () => {
+		const { config, cleanup } = makeConfig();
+		try {
+			config.setUsageSnapshotRetentionDays(30);
+			expect(config.getUsageSnapshotRetentionDays()).toBe(30);
 		} finally {
 			cleanup();
 		}

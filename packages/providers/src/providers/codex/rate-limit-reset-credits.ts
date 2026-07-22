@@ -84,7 +84,7 @@ function nullableString(value: unknown): string | null {
 	return typeof value === "string" ? value : null;
 }
 
-function readChatgptAccountId(accessToken: string): string | null {
+export function readChatgptAccountId(accessToken: string): string | null {
 	const claims = decodeJwtPayloadSafe(accessToken);
 	const auth = asRecord(claims?.["https://api.openai.com/auth"]);
 	return nullableString(auth?.chatgpt_account_id);

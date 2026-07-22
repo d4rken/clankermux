@@ -7,8 +7,11 @@ export interface ParseCodexUsageHeadersOptions {
 }
 
 const DEFAULT_UTILIZATION = 0;
-const FIVE_HOUR_WINDOW_MINUTES = 5 * 60;
-const SEVEN_DAY_WINDOW_MINUTES = 7 * 24 * 60;
+// Codex's backend reports window durations in SECONDS (RateLimitWindowSnapshot
+// `limit_window_seconds`). The legacy header path reports them in minutes and
+// converts to seconds before slotting, so both sources share one boundary set.
+const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60;
+const SEVEN_DAY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 
 export interface NormalizedCodexInputUsage {
 	/** Total context occupied upstream, including cached tokens. */
@@ -94,13 +97,40 @@ function toUsageWindow(
 	};
 }
 
-function pickWindowSlot(
-	windowMinutes: number | null,
+/**
+ * Slot a Codex rate-limit window by its duration in SECONDS. Shared by the
+ * legacy `x-codex-*` header path (which multiplies its minute values up first)
+ * and the JSON `/wham/usage` parser so both agree on the 5h/7d boundaries.
+ */
+export function pickWindowSlot(
+	windowSeconds: number | null,
 ): "five_hour" | "seven_day" | null {
-	if (windowMinutes === null) return null;
-	if (windowMinutes <= FIVE_HOUR_WINDOW_MINUTES) return "five_hour";
-	if (windowMinutes >= SEVEN_DAY_WINDOW_MINUTES) return "seven_day";
+	if (windowSeconds === null) return null;
+	if (windowSeconds <= FIVE_HOUR_WINDOW_SECONDS) return "five_hour";
+	if (windowSeconds >= SEVEN_DAY_WINDOW_SECONDS) return "seven_day";
 	return null;
+}
+
+/**
+ * Normalize a single Codex usage window into a `{ slot, data }` pair. Empty
+ * placeholder windows (0%, 0-duration, no reset) collapse to `data: null`,
+ * mirroring codex-rs. Reused by both the header parser and the JSON
+ * `/wham/usage` parser so window semantics stay identical across sources.
+ */
+export function normalizeCodexWindow(
+	utilization: number | null,
+	windowSeconds: number | null,
+	resetsAt: string | null,
+	defaultUtilization: number = DEFAULT_UTILIZATION,
+): { slot: "five_hour" | "seven_day" | null; data: UsageWindow | null } {
+	const hasMeaningfulWindowData =
+		utilization !== 0 || windowSeconds !== 0 || resetsAt !== null;
+	return {
+		slot: pickWindowSlot(windowSeconds),
+		data: hasMeaningfulWindowData
+			? toUsageWindow(utilization ?? defaultUtilization, resetsAt)
+			: null,
+	};
 }
 
 function readWindow(
@@ -127,17 +157,14 @@ function readWindow(
 			allowRelativeResetAfter,
 		);
 
-	// Treat a window as present only when it has meaningful data.
-	// Mirrors codex-rs behavior for empty (0%, 0min, no reset) placeholders.
-	const hasMeaningfulWindowData =
-		utilization !== 0 || windowMinutes !== 0 || resetsAt !== null;
-
-	return {
-		window: pickWindowSlot(windowMinutes),
-		data: hasMeaningfulWindowData
-			? toUsageWindow(utilization ?? defaultUtilization, resetsAt)
-			: null,
-	};
+	const windowSeconds = windowMinutes === null ? null : windowMinutes * 60;
+	const { slot, data } = normalizeCodexWindow(
+		utilization,
+		windowSeconds,
+		resetsAt,
+		defaultUtilization,
+	);
+	return { window: slot, data };
 }
 
 export interface CodexCreditsInfo {

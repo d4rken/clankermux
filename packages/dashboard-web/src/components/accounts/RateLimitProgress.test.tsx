@@ -444,8 +444,7 @@ describe("RateLimitProgress", () => {
 			const asOf = new Date(Date.now() - 2 * 60 * 60 * 1000);
 			return {
 				info: {
-					sevenDayUtilization: 85,
-					sevenDayResetIso: reset.toISOString(),
+					sevenDay: { utilization: 85, resetIso: reset.toISOString() },
 					asOfIso: asOf.toISOString(),
 				},
 				reset,
@@ -478,6 +477,74 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain(
 				"Live usage unavailable — showing last known data",
 			);
+		});
+
+		it("renders a last-known 5-hour window alongside the weekly window", () => {
+			const fiveReset = new Date(Date.now() + 90 * 60 * 1000);
+			const sevenReset = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+			const asOf = new Date(Date.now() - 60 * 1000);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageData={null}
+					staleUsage={{
+						fiveHour: { utilization: 42, resetIso: fiveReset.toISOString() },
+						sevenDay: { utilization: 85, resetIso: sevenReset.toISOString() },
+						asOfIso: asOf.toISOString(),
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("5h: last known as of");
+			expect(html).toContain("42%");
+			expect(html).toContain("Weekly: last known as of");
+			expect(html).toContain("85%");
+		});
+
+		it("renders a 5h-only stale reading when the weekly window is absent", () => {
+			const fiveReset = new Date(Date.now() + 90 * 60 * 1000);
+			const asOf = new Date(Date.now() - 60 * 1000);
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageData={null}
+					staleUsage={{
+						fiveHour: { utilization: 42, resetIso: fiveReset.toISOString() },
+						asOfIso: asOf.toISOString(),
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("5h: last known as of");
+			expect(html).toContain("42%");
+			expect(html).not.toContain("Weekly: last known as of");
+		});
+
+		it("shows the persisted stale fallback even when the usage API is rate limited", () => {
+			const { info } = staleUsage();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageData={null}
+					staleUsage={info}
+					usageRateLimitedUntil={Date.now() + 60 * 1000}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			// The stale block wins over the bare "Rate limited" branch, and carries
+			// its own rate-limited note.
+			expect(html).toContain("Weekly: last known as of");
+			expect(html).toContain("85%");
+			expect(html).toContain(
+				"Usage API rate limited — showing last known data",
+			);
+			expect(html).not.toContain("usage data unavailable");
 		});
 
 		it("renders even when there is no rate-limit reset at all", () => {

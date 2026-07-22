@@ -339,10 +339,14 @@ export function RateLimitProgress({
 		return null;
 
 	// Show explicit rate-limited state when the Anthropic usage API returned 429
-	// and we have no cached data to show.
+	// and we have NOTHING else to show. A persisted stale snapshot takes
+	// precedence over this bare note (it yields to the stale block below, which
+	// carries its own "usage API rate limited" line), so the last-known reading
+	// is never hidden by the rate-limited branch.
 	if (
 		usageRateLimitedUntil != null &&
 		!usageData &&
+		!staleUsage &&
 		(provider === "anthropic" || provider === "codex")
 	) {
 		const retryAfterDate = new Date(usageRateLimitedUntil);
@@ -365,29 +369,67 @@ export function RateLimitProgress({
 		);
 	}
 
-	// Live usage data is gone (e.g. usage polling fails because the
-	// subscription lapsed, so the cache evicted) but a persisted snapshot still
-	// knows the weekly state. Show only the weekly window: a stale 5-hour
-	// reading is meaningless minutes after polling stops, while the weekly
-	// utilization and its reset date stay relevant for days.
+	// Live usage data is gone (e.g. right after a restart before the poller warms
+	// the cache, or usage polling fails because the subscription lapsed) but a
+	// persisted snapshot still knows the last-sampled state. Show whichever
+	// windows the server carried: the 5-hour window only when the snapshot was
+	// fresh (server-gated), the weekly window whenever its reset is still future.
+	// Wording never implies the value is live — "last known as of HH:MM".
 	if (!usageData && staleUsage) {
 		return (
 			<div className={cn(PRIMARY_CARD_CLASS, className)}>
 				<div className="space-y-1.5">
-					<Progress value={staleUsage.sevenDayUtilization} className="h-2" />
-					<div className="flex items-center justify-between gap-2 text-xs">
-						<span className="min-w-0 flex-1 truncate text-muted-foreground">
-							Weekly: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
-						</span>
-						<span className="shrink-0 text-muted-foreground">
-							{formatResetText(staleUsage.sevenDayResetIso, "seven_day", now)}
-						</span>
-						<span className="shrink-0 font-medium text-muted-foreground">
-							{staleUsage.sevenDayUtilization.toFixed(0)}%
-						</span>
-					</div>
+					{staleUsage.fiveHour && (
+						<>
+							<Progress
+								value={staleUsage.fiveHour.utilization}
+								className="h-2"
+							/>
+							<div className="flex items-center justify-between gap-2 text-xs">
+								<span className="min-w-0 flex-1 truncate text-muted-foreground">
+									5h: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
+								</span>
+								<span className="shrink-0 text-muted-foreground">
+									{formatResetText(
+										staleUsage.fiveHour.resetIso,
+										"five_hour",
+										now,
+									)}
+								</span>
+								<span className="shrink-0 font-medium text-muted-foreground">
+									{staleUsage.fiveHour.utilization.toFixed(0)}%
+								</span>
+							</div>
+						</>
+					)}
+					{staleUsage.sevenDay && (
+						<>
+							<Progress
+								value={staleUsage.sevenDay.utilization}
+								className="h-2"
+							/>
+							<div className="flex items-center justify-between gap-2 text-xs">
+								<span className="min-w-0 flex-1 truncate text-muted-foreground">
+									Weekly: last known as of{" "}
+									{formatAsOfText(staleUsage.asOfIso, now)}
+								</span>
+								<span className="shrink-0 text-muted-foreground">
+									{formatResetText(
+										staleUsage.sevenDay.resetIso,
+										"seven_day",
+										now,
+									)}
+								</span>
+								<span className="shrink-0 font-medium text-muted-foreground">
+									{staleUsage.sevenDay.utilization.toFixed(0)}%
+								</span>
+							</div>
+						</>
+					)}
 					<p className="text-xs text-amber-600 dark:text-amber-400">
-						Live usage unavailable — showing last known data
+						{usageRateLimitedUntil != null
+							? "Usage API rate limited — showing last known data"
+							: "Live usage unavailable — showing last known data"}
 					</p>
 				</div>
 			</div>

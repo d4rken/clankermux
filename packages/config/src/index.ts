@@ -296,7 +296,14 @@ export class Config extends EventEmitter {
 	getUsageSnapshotRetentionDays(): number {
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
-		return 3650; // default usage snapshot retention (10 years for the Limits graph)
+		// Default kept at 3650 (10 years) DELIBERATELY: lowering it would trigger a
+		// one-time prune of >N-day usage_snapshots on the live DB at next restart,
+		// which we chose to avoid. The retention MECHANISM is still hardened — the
+		// worker prune is batched (see incremental-vacuum-worker.ts) and manual
+		// "Clean up now" now honors this configured value (see maintenance.ts) — so
+		// an operator can lower usage_snapshot_retention_days explicitly and the
+		// prune will be safe. It just no longer happens by default.
+		return 3650;
 	}
 
 	setUsageSnapshotRetentionDays(days: number): void {

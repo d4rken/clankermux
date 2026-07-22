@@ -1,11 +1,13 @@
 /**
- * Unit tests for CodexSpendCoordinator — the single authority for autonomous
- * (scheduled-prime) and manual (manual-refresh) Codex spend.
+ * Unit tests for CodexSpendCoordinator — the authority for autonomous
+ * (scheduled-prime) Codex SPEND and the manual free-GET usage READ.
  *
- * Strategy: inject the two policy dependencies via the coordinator's optional
- * `deps` constructor param — `getValidAccessToken` and `applyCodexObservation` —
- * so we can observe the exact opts the applicator is called with and count
- * applicator calls. Injection (not `mock.module`) is deliberate: bun's
+ * Strategy: inject the policy dependencies via the coordinator's optional `deps`
+ * constructor param — `getValidAccessToken`, `applyCodexObservation` (header
+ * path), and `fetchCodexUsageStatus` + `applyCodexUsageStatus` + a
+ * `readChatgptAccountId` stub (the free-GET read path) — so we can observe the
+ * exact opts each applicator is called with and count calls. Injection (not
+ * `mock.module`) is deliberate: bun's
  * `mock.module` registrations are GLOBAL for the whole test process and are NOT
  * undone by `mock.restore()`/`afterEach`, so they leak into every later file in
  * the suite. Plain `mock()`/closure doubles passed as deps stay local to this
@@ -18,7 +20,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
 	type CodexCreditsInfo,
+	type CodexUsageStatus,
 	codexRateLimitResetCreditsCache,
+	type FetchCodexUsageStatusArgs,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -28,9 +32,11 @@ import type {
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
 import { CodexSpendCoordinator } from "../codex-spend-coordinator";
-import type {
-	ApplyCodexObservationOptions,
-	CodexObservationResult,
+import {
+	type ApplyCodexObservationOptions,
+	type ApplyCodexUsageStatusOptions,
+	applyCodexUsageStatus,
+	type CodexObservationResult,
 } from "../handlers/codex-observation";
 import type { ProxyContext } from "../handlers/proxy-types";
 
@@ -81,6 +87,38 @@ const mockApplyCodexObservation = mock(
 	},
 );
 
+// fetchCodexUsageStatus (the FREE GET): records the args it was called with and
+// returns a pluggable CodexUsageStatus. Injected so a test can force ok/failure
+// without any network and assert the fresh token + chatgpt account id flow.
+let usageStatusResult: CodexUsageStatus = makeUsageStatus();
+const fetchStatusCalls: FetchCodexUsageStatusArgs[] = [];
+const mockFetchCodexUsageStatus = mock(
+	async (args: FetchCodexUsageStatusArgs) => {
+		fetchStatusCalls.push(args);
+		return usageStatusResult;
+	},
+);
+
+// applyCodexUsageStatus (the JSON applicator): records the opts it was called with
+// and returns a pluggable observation (reuses observationResult so isRateLimited
+// drives the message wording).
+const applyStatusCalls: Array<{
+	account: Account;
+	status: CodexUsageStatus;
+	opts: ApplyCodexUsageStatusOptions;
+}> = [];
+const mockApplyCodexUsageStatus = mock(
+	(
+		account: Account,
+		status: CodexUsageStatus,
+		_ctx: unknown,
+		opts: ApplyCodexUsageStatusOptions,
+	) => {
+		applyStatusCalls.push({ account, status, opts });
+		return { ...observationResult, responseStatus: status.status ?? 200 };
+	},
+);
+
 // ---------------------------------------------------------------------------
 // fetch mock (drives the real sendCodexNativePing)
 // ---------------------------------------------------------------------------
@@ -100,6 +138,24 @@ const originalFetch = globalThis.fetch;
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+function makeUsageStatus(
+	overrides: Partial<CodexUsageStatus> = {},
+): CodexUsageStatus {
+	return {
+		usage: {
+			five_hour: { utilization: 12, resets_at: null },
+			seven_day: { utilization: 34, resets_at: null },
+		},
+		allowed: true,
+		limitReached: false,
+		rateLimitReachedType: null,
+		resetCreditsAvailableCount: null,
+		ok: true,
+		status: 200,
+		...overrides,
+	};
+}
 
 function makeObservation(
 	overrides: Partial<CodexObservationResult> = {},
@@ -232,6 +288,9 @@ function makeCoordinator() {
 	const coordinator = new CodexSpendCoordinator(harness.ctx, {
 		getValidAccessToken: mockGetValidAccessToken,
 		applyCodexObservation: mockApplyCodexObservation,
+		applyCodexUsageStatus: mockApplyCodexUsageStatus,
+		fetchCodexUsageStatus: mockFetchCodexUsageStatus,
+		readChatgptAccountId: () => "acct-123",
 		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
 		consumeCodexRateLimitResetCredit: mockConsumeCodexRateLimitResetCredit,
 	});
@@ -302,27 +361,46 @@ function seedId(id: string): string {
 	return id;
 }
 
-// Build a native-ping fetch response carrying real Codex usage window headers
-// (primary → five_hour, secondary → seven_day), plus optional extra headers.
-function usageHeaderResponse(
+// Build a `GET /wham/usage` JSON fetch response (primary → five_hour, secondary
+// → seven_day) for the REAL fetchCodexUsageStatus in the end-to-end read tests.
+function whamUsageResponse(
 	fiveHourPct: number,
 	sevenDayPct: number,
-	extraHeaders: Record<string, string> = {},
-	status = 200,
+	opts: {
+		allowed?: boolean;
+		limitReached?: boolean;
+		credits?: {
+			has_credits: boolean;
+			balance?: number | string;
+			unlimited?: boolean;
+		};
+		planType?: string | null;
+		status?: number;
+	} = {},
 ): Response {
 	const fiveHourResetSec = Math.floor((Date.now() + 4 * 3600_000) / 1000);
 	const sevenDayResetSec = Math.floor((Date.now() + 6 * 24 * 3600_000) / 1000);
-	return new Response("event: ignored\n\n", {
-		status,
-		headers: {
-			"x-codex-primary-window-minutes": "300",
-			"x-codex-primary-used-percent": String(fiveHourPct),
-			"x-codex-primary-reset-at": String(fiveHourResetSec),
-			"x-codex-secondary-window-minutes": String(7 * 24 * 60),
-			"x-codex-secondary-used-percent": String(sevenDayPct),
-			"x-codex-secondary-reset-at": String(sevenDayResetSec),
-			...extraHeaders,
+	const body: Record<string, unknown> = {
+		plan_type: opts.planType ?? null,
+		rate_limit: {
+			allowed: opts.allowed ?? true,
+			limit_reached: opts.limitReached ?? false,
+			primary_window: {
+				used_percent: fiveHourPct,
+				limit_window_seconds: 5 * 60 * 60,
+				reset_at: fiveHourResetSec,
+			},
+			secondary_window: {
+				used_percent: sevenDayPct,
+				limit_window_seconds: 7 * 24 * 60 * 60,
+				reset_at: sevenDayResetSec,
+			},
 		},
+	};
+	if (opts.credits) body.credits = opts.credits;
+	return new Response(JSON.stringify(body), {
+		status: opts.status ?? 200,
+		headers: { "content-type": "application/json" },
 	});
 }
 
@@ -333,7 +411,11 @@ const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 beforeEach(() => {
 	fetchCalls.length = 0;
 	applyCalls.length = 0;
+	fetchStatusCalls.length = 0;
+	applyStatusCalls.length = 0;
 	mockApplyCodexObservation.mockClear();
+	mockApplyCodexUsageStatus.mockClear();
+	mockFetchCodexUsageStatus.mockClear();
 	mockGetValidAccessToken.mockClear();
 	mockFetchCodexRateLimitResetCredits.mockClear();
 	mockConsumeCodexRateLimitResetCredit.mockClear();
@@ -341,6 +423,7 @@ beforeEach(() => {
 	tokenImpl = async () => "token";
 	consumeImpl = async () => ({ outcome: "reset", windowsReset: 2 });
 	observationResult = makeObservation();
+	usageStatusResult = makeUsageStatus();
 	fetchImpl = async () =>
 		new Response("event: ignored\n\n", {
 			status: 200,
@@ -1007,11 +1090,11 @@ describe("CodexSpendCoordinator.refreshResetCredits", () => {
 // refreshManual — CodexUsageRefreshOutcome mapping
 // ---------------------------------------------------------------------------
 
-describe("CodexSpendCoordinator.refreshManual", () => {
-	it("maps a successful non-rate-limited refresh to a success outcome", async () => {
+describe("CodexSpendCoordinator.refreshManual — GET-only (zero-cost)", () => {
+	it("reads the FREE GET and never issues a native ping", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(makeCodexAccount({ id: "a", name: "codex-x" }));
-		observationResult = makeObservation({ isRateLimited: false });
+		usageStatusResult = makeUsageStatus();
 
 		const outcome = await coordinator.refreshManual("a");
 
@@ -1019,18 +1102,25 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 			success: true,
 			message: "Usage refreshed for 'codex-x' (5h: 12%, 7d: 34%).",
 		});
+		// The free GET ran; the JSON applicator ran with `none` accounting.
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(applyStatusCalls[0]?.opts.requestAccounting).toBe("none");
+		// The fresh token + chatgpt account id were passed to the GET.
+		expect(fetchStatusCalls[0]?.accessToken).toBe("token");
+		expect(fetchStatusCalls[0]?.chatgptAccountId).toBe("acct-123");
+		// Absolutely NO native ping (no global fetch) and no header applicator.
+		expect(fetchCalls.length).toBe(0);
+		expect(mockApplyCodexObservation).not.toHaveBeenCalled();
+		// The separate reset-credit GET still ran (kept separate).
 		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledTimes(1);
 	});
 
-	it("maps a rate-limited refresh to a success outcome that does not celebrate", async () => {
+	it("does not celebrate an exhausted (rate-limited) account", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(makeCodexAccount({ id: "a", name: "codex-x" }));
 		observationResult = makeObservation({ isRateLimited: true });
-		fetchImpl = async () =>
-			new Response("rate limited", {
-				status: 429,
-				headers: { "x-codex-primary-reset-at": "1775000000" },
-			});
+		usageStatusResult = makeUsageStatus({ allowed: false, limitReached: true });
 
 		const outcome = await coordinator.refreshManual("a");
 
@@ -1038,12 +1128,10 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 		expect(outcome.message).toBe(
 			"Usage refreshed for 'codex-x' — account is rate limited (5h: 12%, 7d: 34%).",
 		);
-		// A manual 429 still applies a cooldown (the applicator owns it): the
-		// coordinator must pass rateLimitAction=apply so the account is cooled.
-		expect(applyCalls[0]?.opts.rateLimitAction.kind).toBe("apply");
+		expect(fetchCalls.length).toBe(0);
 	});
 
-	it("allows a manual refresh even when auto_refresh_enabled is 0 (explicit operator consent)", async () => {
+	it("proceeds even when auto_refresh_enabled is 0 (a free read is always allowed)", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(
 			makeCodexAccount({
@@ -1052,35 +1140,60 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 				auto_refresh_enabled: false,
 			}),
 		);
-		observationResult = makeObservation({ isRateLimited: false });
 
 		const outcome = await coordinator.refreshManual("a");
 
-		// manual-refresh cause ignores auto_refresh_enabled → the spend proceeds.
 		expect(outcome).toEqual({
 			success: true,
 			message: "Usage refreshed for 'codex-x' (5h: 12%, 7d: 34%).",
 		});
-		expect(fetchCalls.length).toBe(1);
-		expect(mockApplyCodexObservation).toHaveBeenCalledTimes(1);
-		expect(applyCalls[0]?.opts.source).toBe("manual-refresh");
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(fetchCalls.length).toBe(0);
 	});
 
-	it("maps a response with no usage headers to a failure outcome carrying the status", async () => {
+	it("on a GET failure keeps the prior cache, applies nothing, and sends NO ping", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("get-fail");
+		setAccount(makeCodexAccount({ id, name: "codex-x" }));
+		const prior: UsageData = {
+			five_hour: { utilization: 55, resets_at: null },
+			seven_day: { utilization: 66, resets_at: null },
+		};
+		usageCache.set(id, prior);
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 500,
+			usage: null,
+		});
+
+		const outcome = await coordinator.refreshManual(id);
+
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("Codex usage read failed for 'codex-x'");
+		// No applicator call, no native ping, and the prior cache is untouched.
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+		expect(fetchCalls.length).toBe(0);
+		expect(usageCache.get(id)).toEqual(prior);
+	});
+
+	it("on a network throw (status null) keeps the cache and sends NO ping", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(makeCodexAccount({ id: "a", name: "codex-x" }));
-		observationResult = makeObservation({ usage: null });
-		fetchImpl = async () => new Response("", { status: 502 });
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: null,
+			usage: null,
+		});
 
 		const outcome = await coordinator.refreshManual("a");
 
-		expect(outcome).toEqual({
-			success: false,
-			message: "Codex returned no usage headers (status 502) for 'codex-x'",
-		});
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("(status network error)");
+		expect(fetchCalls.length).toBe(0);
+		expect(mockApplyCodexObservation).not.toHaveBeenCalled();
 	});
 
-	it("maps a non-codex account to a failure outcome", async () => {
+	it("maps a non-codex account to a failure outcome without a read", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(
 			makeCodexAccount({ id: "a", name: "codex-x", provider: "anthropic" }),
@@ -1092,9 +1205,10 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 			success: false,
 			message: "Account 'codex-x' is not a Codex account",
 		});
+		expect(mockFetchCodexUsageStatus).not.toHaveBeenCalled();
 	});
 
-	it("maps a token refresh failure to a failure outcome", async () => {
+	it("maps a token refresh failure to a failure outcome without a read or ping", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		setAccount(makeCodexAccount({ id: "a", name: "codex-x" }));
 		tokenImpl = async () => {
@@ -1107,6 +1221,88 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 		expect(outcome.message).toContain(
 			"Could not refresh access token for 'codex-x'",
 		);
+		expect(mockFetchCodexUsageStatus).not.toHaveBeenCalled();
+		expect(fetchCalls.length).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// readUsageStatus in-flight dedup + isolation from the spend dedup
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.readUsageStatus — in-flight isolation", () => {
+	it("a concurrent read and scheduled prime do NOT join (separate in-flight maps)", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+
+		const [read, spend] = await Promise.all([
+			coordinator.readUsageStatus("a"),
+			coordinator.observe("a", "scheduled-prime"),
+		]);
+
+		expect(read.success).toBe(true);
+		expect(spend.status).toBe("completed");
+		// The read used the FREE GET; the spend issued its OWN native ping. Neither
+		// suppressed nor joined the other.
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(fetchCalls.length).toBe(1); // exactly one native ping (the spend)
+		expect(mockApplyCodexObservation).toHaveBeenCalledTimes(1);
+	});
+
+	it("concurrent reads for the same account share ONE free GET", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", name: "codex-x" }));
+
+		// Gate the token so the second read joins before the GET fires.
+		let release: () => void = () => {};
+		tokenImpl = () =>
+			new Promise<string>((resolve) => {
+				release = () => resolve("token");
+			});
+
+		const p1 = coordinator.readUsageStatus("a");
+		const p2 = coordinator.readUsageStatus("a");
+		await flush();
+		release();
+		const [r1, r2] = await Promise.all([p1, p2]);
+
+		// Both joiners observe the SAME shared result and only ONE GET was issued.
+		expect(r1).toBe(r2);
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(mockGetValidAccessToken).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears the read in-flight entry after settling so a later read re-issues", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a" }));
+
+		await coordinator.readUsageStatus("a");
+		await coordinator.readUsageStatus("a");
+
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(2);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Scheduled priming still SPENDS via the native ping (unchanged by 1b)
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.observe — scheduled prime still spends", () => {
+	it("scheduled-prime issues the native ping and never uses the free GET", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+
+		const result = await coordinator.observe("a", "scheduled-prime");
+
+		expect(result.status).toBe("completed");
+		// The native ping fired (real sendCodexNativePing → one global fetch) and
+		// the header applicator ran — priming is unchanged.
+		expect(fetchCalls.length).toBe(1);
+		expect(mockApplyCodexObservation).toHaveBeenCalledTimes(1);
+		// The free GET was NOT substituted for priming.
+		expect(mockFetchCodexUsageStatus).not.toHaveBeenCalled();
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
 	});
 });
 
@@ -1117,8 +1313,8 @@ describe("CodexSpendCoordinator.refreshManual", () => {
 // window-only data), and that fresh credits/window-rolls are still applied.
 // ---------------------------------------------------------------------------
 
-describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-end)", () => {
-	it("PRESERVES prior codexCredits when the manual native ping has NO credits headers", async () => {
+describe("CodexSpendCoordinator.refreshManual — free-GET application (end-to-end)", () => {
+	it("PRESERVES prior codexCredits when the free GET carries NO credits object", async () => {
 		const { coordinator, setAccount } = makeRealCoordinator();
 		const id = seedId("cf-carry");
 		setAccount(makeCodexAccount({ id, name: "codex-cf" }));
@@ -1137,8 +1333,8 @@ describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-
 			codexCredits: seeded,
 		});
 
-		// Native ping returns fresh usage windows but NO x-codex-credits-* headers.
-		fetchImpl = async () => usageHeaderResponse(20, 40);
+		// Free GET returns fresh usage windows but NO `credits` object.
+		fetchImpl = async () => whamUsageResponse(20, 40);
 
 		const outcome = await coordinator.refreshManual(id);
 
@@ -1147,14 +1343,14 @@ describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-
 			message: "Usage refreshed for 'codex-cf' (5h: 20%, 7d: 40%).",
 		});
 		const cached = usageCache.get(id) as UsageData | null;
-		// Bug fixed: prior credits survive the manual refresh…
+		// Prior credits survive the free refresh…
 		expect(cached?.codexCredits).toEqual(seeded);
 		// …while the window utilizations were genuinely refreshed (not the seed).
 		expect(cached?.five_hour.utilization).toBe(20);
 		expect(cached?.seven_day.utilization).toBe(40);
 	});
 
-	it("REPLACES codexCredits when the manual native ping DOES carry credits headers", async () => {
+	it("REPLACES codexCredits when the free GET DOES carry a credits object", async () => {
 		const { coordinator, setAccount } = makeRealCoordinator();
 		const id = seedId("cf-fresh");
 		setAccount(makeCodexAccount({ id, name: "codex-cf" }));
@@ -1172,12 +1368,9 @@ describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-
 		});
 
 		fetchImpl = async () =>
-			usageHeaderResponse(20, 88, {
-				"x-codex-credits-has-credits": "true",
-				"x-codex-credits-balance": "7.25",
-				"x-codex-credits-unlimited": "false",
-				"x-codex-plan-type": "pro",
-				"x-codex-secondary-used-percent": "88",
+			whamUsageResponse(20, 88, {
+				credits: { has_credits: true, balance: 7.25, unlimited: false },
+				planType: "pro",
 			});
 
 		const outcome = await coordinator.refreshManual(id);
@@ -1193,7 +1386,7 @@ describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-
 		});
 	});
 
-	it("resets the session on a genuine 5h window roll during a manual refresh", async () => {
+	it("resets the session on a genuine 5h window roll during a free refresh", async () => {
 		const { coordinator, setAccount, resetSessionCalls } =
 			makeRealCoordinator();
 		const id = seedId("cf-roll");
@@ -1210,12 +1403,343 @@ describe("CodexSpendCoordinator.refreshManual — credits carry-forward (end-to-
 			seven_day: { utilization: 50, resets_at: null },
 		});
 
-		fetchImpl = async () => usageHeaderResponse(3, 40);
+		fetchImpl = async () => whamUsageResponse(3, 40);
 
 		const outcome = await coordinator.refreshManual(id);
 
 		expect(outcome.success).toBe(true);
 		expect(resetSessionCalls).toHaveLength(1);
 		expect(resetSessionCalls[0]?.accountId).toBe(id);
+	});
+
+	it("CRITICAL GUARD: a 200 for an EXHAUSTED account updates windows but does NOT clear rate_limited_until", async () => {
+		const { coordinator, setAccount, runSql } = makeRealCoordinator();
+		const id = seedId("exhausted-200");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-x",
+				rate_limited_until: Date.now() + 3600_000,
+				rate_limited_at: Date.now(),
+			}),
+		);
+
+		fetchImpl = async () =>
+			whamUsageResponse(100, 90, { allowed: false, limitReached: true });
+
+		const outcome = await coordinator.refreshManual(id);
+
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("rate limited");
+		// Windows WERE observed/cached…
+		const cached = usageCache.get(id) as UsageData | null;
+		expect(cached?.five_hour.utilization).toBe(100);
+		// …but the lock was NOT cleared: no rate_limited_until = NULL write ran.
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(false);
+	});
+
+	it("clears rate_limited_until on a genuinely-recovered (allowed) 200", async () => {
+		const { coordinator, setAccount, runSql } = makeRealCoordinator();
+		const id = seedId("recovered-200");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-x",
+				rate_limited_until: Date.now() + 3600_000,
+				rate_limited_at: null,
+			}),
+		);
+
+		fetchImpl = async () =>
+			whamUsageResponse(20, 40, { allowed: true, limitReached: false });
+
+		const outcome = await coordinator.refreshManual(id);
+
+		expect(outcome.success).toBe(true);
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// applyCodexUsageStatus — exhausted-200 recovery guard (both signals null).
+// A 200 that reports NEITHER `allowed` NOR `limit_reached` cannot confirm
+// recovery, so the account's rate_limited_until lock must be left intact.
+// Tested directly against the applicator (not through the coordinator) so the
+// null-signal case is exercised without a JSON-parse round trip.
+// ---------------------------------------------------------------------------
+
+describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
+	function makeRecoveryCtx() {
+		const runSql: Array<{ sql: string; params: unknown[] }> = [];
+		const ctx = {
+			dbOps: {
+				updateAccountUsage: () => {},
+				resetConsecutiveRateLimits: async () => {},
+				getAdapter: () => ({
+					run: async (sql: string, params: unknown[]) => {
+						runSql.push({ sql, params });
+					},
+				}),
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+		return { ctx, runSql };
+	}
+
+	it("both signals null does NOT clear rate_limited_until (fail-safe)", () => {
+		const { ctx, runSql } = makeRecoveryCtx();
+		const id = seedId("null-signals-200");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-null",
+			rate_limited_until: Date.now() + 3600_000,
+			rate_limited_at: Date.now(),
+		});
+		const status: CodexUsageStatus = {
+			usage: {
+				five_hour: { utilization: 50, resets_at: null },
+				seven_day: { utilization: 50, resets_at: null },
+			},
+			allowed: null,
+			limitReached: null,
+			rateLimitReachedType: null,
+			resetCreditsAvailableCount: null,
+			ok: true,
+			status: 200,
+		};
+
+		const result = applyCodexUsageStatus(account, status, ctx, {
+			requestAccounting: "none",
+		});
+
+		// A missing signal is "cannot confirm", not "recovered": no cooldown clear.
+		expect(result.isRateLimited).toBe(false);
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(false);
+	});
+
+	it("a positive allowed=true signal DOES clear rate_limited_until", () => {
+		const { ctx, runSql } = makeRecoveryCtx();
+		const id = seedId("allowed-signal-200");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-ok",
+			rate_limited_until: Date.now() + 3600_000,
+			rate_limited_at: null,
+		});
+		const status: CodexUsageStatus = {
+			usage: {
+				five_hour: { utilization: 20, resets_at: null },
+				seven_day: { utilization: 20, resets_at: null },
+			},
+			allowed: true,
+			limitReached: false,
+			rateLimitReachedType: null,
+			resetCreditsAvailableCount: null,
+			ok: true,
+			status: 200,
+		};
+
+		applyCodexUsageStatus(account, status, ctx, { requestAccounting: "none" });
+
+		expect(
+			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cross-transport application ordering (SF1). A free-GET read and a native-ping
+// spend for the SAME account can complete out of order; an observation that
+// BEGAN before another observation was APPLIED must not overwrite the newer
+// state. Completion order is controlled deterministically with a deferred GET.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — cross-transport application ordering (SF1)", () => {
+	it("a stale read completing AFTER a newer spend applied does NOT apply (no overwrite)", async () => {
+		const accounts = new Map<string, Account>();
+		const id = "ordering-stale-read";
+		accounts.set(
+			id,
+			makeCodexAccount({ id, name: "codex-order", auto_refresh_enabled: true }),
+		);
+		const ctx = {
+			dbOps: {
+				getAccount: async (i: string) => {
+					const a = accounts.get(i);
+					return a ? { ...a } : null;
+				},
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+
+		// Deferred GET: the read blocks here until we release it, so we can force
+		// the spend to apply FIRST and the read to return SECOND.
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		const readGate = new Promise<CodexUsageStatus>((res) => {
+			releaseRead = res;
+		});
+
+		const obsApplyCount = { n: 0 };
+		const statusApplyCount = { n: 0 };
+
+		const coordinator = new CodexSpendCoordinator(ctx, {
+			getValidAccessToken: async () => "token",
+			readChatgptAccountId: () => "acct-123",
+			fetchCodexUsageStatus: async () => readGate,
+			applyCodexObservation: (_a, response) => {
+				obsApplyCount.n += 1;
+				return makeObservation({ responseStatus: response.status });
+			},
+			applyCodexUsageStatus: (_a, status) => {
+				statusApplyCount.n += 1;
+				return makeObservation({ responseStatus: status.status ?? 200 });
+			},
+			fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		});
+
+		// 1. Start the READ first so it reserves the LOWER (older) sequence, then
+		//    parks on the deferred GET.
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		// 2. Run the SPEND to completion; it reserves the HIGHER sequence and applies
+		//    (its native ping resolves against the mocked global fetch immediately).
+		const spend = await coordinator.observe(id, "scheduled-prime");
+		expect(spend.status).toBe("completed");
+		expect(obsApplyCount.n).toBe(1); // the newer spend applied
+
+		// 3. Release the now-stale read; it completes and tries to apply.
+		releaseRead(makeUsageStatus());
+		const read = await readP;
+
+		// The read still reports success (the GET succeeded) but its applicator was
+		// SKIPPED — the sole cache/reset/cooldown writer never ran, so nothing the
+		// newer spend wrote was overwritten.
+		expect(read.success).toBe(true);
+		expect(read.message).toContain("superseded by a newer observation");
+		expect(statusApplyCount.n).toBe(0);
+	});
+
+	it("normal order (read issued, then spend) applies BOTH observations", async () => {
+		const accounts = new Map<string, Account>();
+		const id = "ordering-normal";
+		accounts.set(
+			id,
+			makeCodexAccount({ id, name: "codex-order", auto_refresh_enabled: true }),
+		);
+		const ctx = {
+			dbOps: {
+				getAccount: async (i: string) => {
+					const a = accounts.get(i);
+					return a ? { ...a } : null;
+				},
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+
+		const obsApplyCount = { n: 0 };
+		const statusApplyCount = { n: 0 };
+		const coordinator = new CodexSpendCoordinator(ctx, {
+			getValidAccessToken: async () => "token",
+			readChatgptAccountId: () => "acct-123",
+			fetchCodexUsageStatus: async () => makeUsageStatus(),
+			applyCodexObservation: (_a, response) => {
+				obsApplyCount.n += 1;
+				return makeObservation({ responseStatus: response.status });
+			},
+			applyCodexUsageStatus: (_a, status) => {
+				statusApplyCount.n += 1;
+				return makeObservation({ responseStatus: status.status ?? 200 });
+			},
+			fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		});
+
+		// Read fully completes and applies (seq 1) BEFORE the spend is issued (seq 2).
+		const read = await coordinator.readUsageStatus(id);
+		const spend = await coordinator.observe(id, "scheduled-prime");
+
+		expect(read.success).toBe(true);
+		expect(spend.status).toBe("completed");
+		expect(statusApplyCount.n).toBe(1);
+		expect(obsApplyCount.n).toBe(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Unhandled-rejection safety (SF3). An in-flight body whose applicator throws
+// must reject to the caller that awaits it, WITHOUT the in-flight-map cleanup
+// copy surfacing an unhandledRejection.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — in-flight cleanup rejection safety", () => {
+	it("a read whose applicator throws rejects to the caller with NO unhandled rejection", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const { coordinator, setAccount } = makeCoordinator();
+			setAccount(makeCodexAccount({ id: "throw-read", name: "codex-x" }));
+			mockApplyCodexUsageStatus.mockImplementationOnce(() => {
+				throw new Error("applicator boom");
+			});
+
+			await expect(coordinator.readUsageStatus("throw-read")).rejects.toThrow(
+				"applicator boom",
+			);
+
+			// Give any stray finally-chained rejection a chance to surface.
+			await flush();
+			await flush();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
+	});
+
+	it("a spend whose applicator throws rejects to the caller with NO unhandled rejection", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const { coordinator, setAccount } = makeCoordinator();
+			setAccount(
+				makeCodexAccount({
+					id: "throw-spend",
+					name: "codex-x",
+					auto_refresh_enabled: true,
+				}),
+			);
+			mockApplyCodexObservation.mockImplementationOnce(() => {
+				throw new Error("applicator boom");
+			});
+
+			await expect(
+				coordinator.observe("throw-spend", "manual-refresh"),
+			).rejects.toThrow("applicator boom");
+
+			await flush();
+			await flush();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
 	});
 });
