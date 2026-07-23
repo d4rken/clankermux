@@ -25,7 +25,7 @@ function scopedLimit(
 describe("normalizeCodexUsageData limits handling", () => {
 	it("drops limits entries with a past reset and keeps future ones", () => {
 		const usage: UsageData = {
-			five_hour: { utilization: 0, resets_at: null },
+			five_hour: null,
 			seven_day: { utilization: 21, resets_at: future() },
 			limits: [
 				scopedLimit("Live-Model", future(), 5),
@@ -45,7 +45,7 @@ describe("normalizeCodexUsageData limits handling", () => {
 	it("passes a fully-future limits array through unchanged", () => {
 		const reset = future();
 		const usage: UsageData = {
-			five_hour: { utilization: 0, resets_at: null },
+			five_hour: null,
 			seven_day: { utilization: 21, resets_at: future() },
 			limits: [scopedLimit("GPT-5.3-Codex-Spark", reset, 3)],
 		};
@@ -63,7 +63,7 @@ describe("normalizeCodexUsageData limits handling", () => {
 		// future reset must keep the payload alive rather than collapsing to null.
 		const reset = future();
 		const usage: UsageData = {
-			five_hour: { utilization: 0, resets_at: null },
+			five_hour: null,
 			seven_day: { utilization: 0, resets_at: null },
 			limits: [scopedLimit("GPT-5.3-Codex-Spark", reset, 4)],
 		};
@@ -78,7 +78,7 @@ describe("normalizeCodexUsageData limits handling", () => {
 
 	it("still returns null when both flat windows are stale and no live limit remains", () => {
 		const usage: UsageData = {
-			five_hour: { utilization: 0, resets_at: null },
+			five_hour: null,
 			seven_day: { utilization: 0, resets_at: null },
 			limits: [scopedLimit("Spent-Model", past(), 100)],
 		};
@@ -88,7 +88,7 @@ describe("normalizeCodexUsageData limits handling", () => {
 
 	it("leaves limits absent when the source has none", () => {
 		const usage: UsageData = {
-			five_hour: { utilization: 0, resets_at: null },
+			five_hour: null,
 			seven_day: { utilization: 21, resets_at: future() },
 		};
 
@@ -96,5 +96,30 @@ describe("normalizeCodexUsageData limits handling", () => {
 
 		expect(normalized).not.toBeNull();
 		expect(normalized?.limits).toBeUndefined();
+	});
+
+	it("keeps five_hour null (retired window) and stays alive via a live weekly", () => {
+		const usage: UsageData = {
+			five_hour: null,
+			seven_day: { utilization: 21, resets_at: future() },
+		};
+
+		const normalized = normalizeCodexUsageData(usage);
+
+		expect(normalized).not.toBeNull();
+		// null must NOT be fabricated into a `{0, null}` placeholder.
+		expect(normalized?.five_hour).toBeNull();
+	});
+
+	it("collapses a stale-reset five_hour to null rather than a 0% card", () => {
+		const usage: UsageData = {
+			five_hour: { utilization: 10, resets_at: past() },
+			seven_day: { utilization: 21, resets_at: future() },
+		};
+
+		const normalized = normalizeCodexUsageData(usage);
+
+		expect(normalized).not.toBeNull();
+		expect(normalized?.five_hour).toBeNull();
 	});
 });

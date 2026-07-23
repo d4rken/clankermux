@@ -235,17 +235,17 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
-	describe("empty placeholder window suppression", () => {
+	describe("5-hour card 0-vs-null contract", () => {
 		const future = () =>
 			new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
 
-		it("suppresses the Codex 5-hour placeholder (0% / no reset / not rate-limited) but keeps the weekly card", () => {
+		it("hides the 5-hour card when Codex reports five_hour: null (retired window) but keeps the weekly card", () => {
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={null}
 					usageWindow="seven_day"
 					usageData={{
-						five_hour: { utilization: 0, resets_at: null },
+						five_hour: null,
 						seven_day: { utilization: 21, resets_at: future() },
 					}}
 					provider="codex"
@@ -277,14 +277,35 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("5-hour");
 		});
 
-		it("renders a Codex scoped weekly (Spark) secondary card even when the 5-hour placeholder is suppressed", () => {
+		it("renders a real Anthropic 5-hour window at 0% with a null reset (idle-but-live window must show)", () => {
+			// Regression: an idle Anthropic account (0% 5h, null reset) carries a REAL
+			// window that is byte-identical to Codex's retired placeholder — the old
+			// shape-based suppression wrongly hid it. The 0-vs-null contract keeps it.
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={null}
+					usageUtilization={0}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 0, resets_at: null },
+						seven_day: { utilization: 20, resets_at: future() },
+					}}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("5-hour");
+		});
+
+		it("renders a Codex scoped weekly (Spark) secondary card even when the 5-hour window is null", () => {
 			const reset = future();
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={null}
 					usageWindow="seven_day"
 					usageData={{
-						five_hour: { utilization: 0, resets_at: null },
+						five_hour: null,
 						seven_day: { utilization: 21, resets_at: reset },
 						limits: [
 							{
