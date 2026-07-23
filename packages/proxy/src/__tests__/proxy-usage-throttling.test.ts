@@ -111,6 +111,48 @@ describe("handleProxy usage throttling", () => {
 			Date.now = realDateNow;
 		}
 	});
+
+	it("SPOOF GUARD: an external request with a spoofed auto-refresh header is still throttled (529)", async () => {
+		// handleProxy is called WITHOUT isInternal (defaults false), so requestMeta
+		// .internal is false. The trust gate on the probe exemption must reject the
+		// client-supplied header — otherwise any caller could set it to bypass
+		// operator-configured usage throttling.
+		const account = makeAccount();
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const resetAt = new Date(now + 2 * 60 * 60 * 1000).toISOString();
+		usageCache.set(account.id, {
+			five_hour: { utilization: 80, resets_at: resetAt },
+			seven_day: { utilization: 10, resets_at: null },
+		});
+
+		const realDateNow = Date.now;
+		Date.now = () => now;
+		try {
+			const request = new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					// Spoofed by an external client — must NOT grant the exemption.
+					"x-clankermux-auto-refresh": "true",
+				},
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 16,
+				}),
+			});
+
+			const response = await handleProxy(
+				request,
+				new URL(request.url),
+				makeContext(account),
+			);
+
+			expect(response.status).toBe(529);
+		} finally {
+			Date.now = realDateNow;
+		}
+	});
 });
 
 // Spy context builder for processProxyResponse-level tests. Runs async-writer

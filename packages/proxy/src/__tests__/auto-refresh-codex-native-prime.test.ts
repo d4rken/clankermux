@@ -252,6 +252,33 @@ describe("AutoRefreshScheduler — codex native prime via coordinator", () => {
 		expect(cooldownWrite).toBeUndefined();
 	});
 
+	it("completed + responseOk=false (529) is NEUTRAL — no failure recorded, no pause", async () => {
+		// A 529 (overloaded) is a transient capacity signal, not a broken endpoint.
+		// It must not count toward the re-auth threshold (which would false-pause the
+		// account). Same provider-independent rule as the translated auto-refresh path.
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, 529));
+		const scheduler = await makeScheduler(db, coordinator);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-529" }));
+
+		expect(scheduler.consecutiveFailures.get("codex-529")).toBeUndefined();
+		// No recordRefreshFailure → no pause UPDATE.
+		expect(db.runWithChanges).not.toHaveBeenCalled();
+	});
+
+	it("completed + 529 does NOT reset a prior genuine failure streak (skip-without-reset)", async () => {
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, 529));
+		const scheduler = await makeScheduler(db, coordinator);
+		// A real failure streak already exists; an interleaved 529 must leave it intact.
+		scheduler.consecutiveFailures.set("codex-529-mix", 3);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-529-mix" }));
+
+		expect(scheduler.consecutiveFailures.get("codex-529-mix")).toBe(3);
+	});
+
 	it("completed + responseOk=true + earliestResetMs updates lastRefreshResetTime and clears the failure counter", async () => {
 		const db = makeDb();
 		const resetMs = Date.now() + 3 * 60 * 60 * 1000;

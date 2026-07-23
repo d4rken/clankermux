@@ -45,6 +45,7 @@ import {
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
+	isTrustedSyntheticProbe,
 	type ProxyAttemptOutcome,
 	type ProxyContext,
 	prepareRequestBody,
@@ -877,7 +878,22 @@ export async function handleProxy(
 		overloaded: providerOverloadedAccounts,
 	} = applyProviderOverloadGate(selectedAccounts);
 
+	// Synthetic auto-refresh / keepalive probes must reach their force-routed
+	// account even when it is usage-throttled: throttling them yields a synthetic
+	// 529 that the scheduler would miscount as a broken-endpoint failure and
+	// eventually false-auto-pause the account. Gate on requestMeta.internal (the
+	// trusted in-process dispatch flag, set from isInternal at the entry point) AND
+	// the probe header — the header alone is client-spoofable, so an external
+	// request cannot use it to dodge operator-configured usage throttling.
+	const isSyntheticProbeRequest = isTrustedSyntheticProbe(
+		req.headers,
+		requestMeta.internal,
+	);
+
 	const applyUsageThrottling = (accounts: Account[]) => {
+		if (isSyntheticProbeRequest) {
+			return { available: accounts, throttled: [] as Account[] };
+		}
 		const settings = {
 			fiveHourEnabled: ctx.config.getUsageThrottlingFiveHourEnabled(),
 			weeklyEnabled: ctx.config.getUsageThrottlingWeeklyEnabled(),

@@ -482,6 +482,16 @@ export class AutoRefreshScheduler {
 				return;
 			case "completed": {
 				if (!result.responseOk) {
+					// A 529 (overloaded) is a transient capacity signal, not a broken
+					// endpoint — same provider-independent rule as the translated
+					// auto-refresh path. Treat it as neutral: neither count it toward
+					// the re-auth threshold nor reset a prior genuine failure streak.
+					if (result.responseStatus === 529) {
+						log.warn(
+							`Codex scheduled prime for ${accountRow.name} received 529 (overloaded); treating as neutral, not a failure`,
+						);
+						return;
+					}
 					// 429/5xx: the coordinator/applicator already persisted any reset and
 					// applied the 429 cooldown — do NOT re-apply it here. Just count the
 					// failure toward the re-auth threshold, matching the old failure path.
@@ -942,6 +952,20 @@ export class AutoRefreshScheduler {
 				}
 
 				return true;
+			}
+
+			// A 529 (overloaded) is a transient capacity/throttle signal, not a
+			// broken endpoint. A probe can legitimately receive one from the
+			// provider-overload gate, an overflowed overload-hold, or raw upstream
+			// Anthropic overload (probes are deliberately excluded from being HELD,
+			// so they get an immediate 529). Treat it as neutral: do NOT count it
+			// toward FAILURE_THRESHOLD (which would false-auto-pause the account) and
+			// do NOT reset a prior genuine failure streak — just skip.
+			if (response.status === 529) {
+				log.warn(
+					`Auto-refresh for ${accountRow.name} received 529 (overloaded); treating as neutral, not a failure`,
+				);
+				return false;
 			}
 
 			log.error(
