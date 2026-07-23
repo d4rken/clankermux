@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { OAuthRefreshTokenError } from "@clankermux/core";
 import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
@@ -3237,5 +3238,125 @@ describe("CodexProvider Tranche 3 — source-order preservation", () => {
 		);
 		expect(callIdx).toBeGreaterThanOrEqual(0);
 		expect(textIdx).toBeGreaterThan(callIdx);
+	});
+});
+
+describe("CodexProvider refreshToken auth-error classification", () => {
+	afterEach(() => {
+		spyOn(globalThis, "fetch").mockRestore();
+	});
+
+	// Test files are excluded from typecheck, so a minimal account shape is fine.
+	const account = (overrides: Record<string, unknown> = {}) =>
+		({
+			id: "codex-1",
+			name: "codex-test",
+			provider: "codex",
+			refresh_token: "rt-old",
+			...overrides,
+		}) as unknown as Parameters<CodexProvider["refreshToken"]>[0];
+
+	const mockTokenResponse = (body: unknown, status: number) =>
+		spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(typeof body === "string" ? body : JSON.stringify(body), {
+				status,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+
+	it("throws OAuthRefreshTokenError on invalid_grant (revoked/expired token)", async () => {
+		mockTokenResponse(
+			{
+				error: "invalid_grant",
+				error_description: "Token has been expired or revoked.",
+			},
+			400,
+		);
+		const provider = new CodexProvider();
+		await expect(
+			provider.refreshToken(account(), "cid"),
+		).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("treats client-level errors (unauthorized_client) as transient/generic, not per-account reauth", async () => {
+		// invalid_client / unauthorized_client describe the OAuth CLIENT config,
+		// not an individual account's refresh token — reauth (through the same
+		// shared client) can't fix them, so they must NOT pause the account.
+		mockTokenResponse({ error: "unauthorized_client" }, 400);
+		const provider = new CodexProvider();
+		const err = await provider
+			.refreshToken(account(), "cid")
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("throws OAuthRefreshTokenError on refresh_token_reused (existing behavior)", async () => {
+		mockTokenResponse({ error: "refresh_token_reused" }, 400);
+		const provider = new CodexProvider();
+		await expect(
+			provider.refreshToken(account(), "cid"),
+		).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("throws a generic (non-OAuthRefreshTokenError) error on a transient server_error", async () => {
+		mockTokenResponse({ error: "server_error" }, 500);
+		const provider = new CodexProvider();
+		const err = await provider
+			.refreshToken(account(), "cid")
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("throws a generic (non-OAuthRefreshTokenError) error on a 503 with no JSON body", async () => {
+		mockTokenResponse("Service Unavailable", 503);
+		const provider = new CodexProvider();
+		const err = await provider
+			.refreshToken(account(), "cid")
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("throws OAuthRefreshTokenError on a non-JSON text/plain body containing invalid_grant", async () => {
+		// Regression guard (Finding 7): a terminal marker in a non-JSON body must
+		// still be classified as terminal rather than a generic retryable error.
+		spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("error: invalid_grant — token revoked", { status: 400 }),
+		);
+		const provider = new CodexProvider();
+		await expect(
+			provider.refreshToken(account(), "cid"),
+		).rejects.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("throws a generic error on a non-JSON text/plain body with no terminal marker", async () => {
+		spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("bad request", { status: 400 }),
+		);
+		const provider = new CodexProvider();
+		const err = await provider
+			.refreshToken(account(), "cid")
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
+	it("returns the rotated tokens on a successful refresh", async () => {
+		mockTokenResponse(
+			{
+				access_token: "at-new",
+				refresh_token: "rt-new",
+				expires_in: 3600,
+			},
+			200,
+		);
+		const provider = new CodexProvider();
+		const before = Date.now();
+		const result = await provider.refreshToken(account(), "cid");
+		expect(result.accessToken).toBe("at-new");
+		expect(result.refreshToken).toBe("rt-new");
+		expect(result.expiresAt).toBeGreaterThanOrEqual(before + 3600 * 1000);
 	});
 });

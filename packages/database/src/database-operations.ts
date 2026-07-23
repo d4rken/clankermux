@@ -882,8 +882,9 @@ OAuth tokens will need to be re-authenticated.
 		expiresAt: number,
 		refreshToken?: string,
 		identity?: AccountIdentity | null,
-	): Promise<void> {
-		await withDatabaseRetry(
+		expectedRefreshToken?: string | null,
+	): Promise<boolean> {
+		return withDatabaseRetry(
 			() =>
 				this.accounts.updateTokens(
 					accountId,
@@ -891,6 +892,7 @@ OAuth tokens will need to be re-authenticated.
 					expiresAt,
 					refreshToken,
 					identity,
+					expectedRefreshToken,
 				),
 			this.retryConfig,
 			"updateAccountTokens",

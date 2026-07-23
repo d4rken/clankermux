@@ -114,13 +114,26 @@ export class AccountRepository extends BaseRepository<Account> {
 		return row ? toAccount(row) : null;
 	}
 
+	/**
+	 * Persist refreshed OAuth tokens.
+	 *
+	 * When `expectedRefreshToken` is provided this becomes a compare-and-swap:
+	 * the write applies ONLY while the account's stored `refresh_token` still
+	 * equals the token the caller's refresh exchanged. If a concurrent reauth or
+	 * rotation replaced it in the meantime, the guarded WHERE misses and the
+	 * stale-generation write is rejected (0 rows changed → returns false), so a
+	 * delayed refresh success can never clobber freshly-installed credentials.
+	 * When `expectedRefreshToken` is omitted, the write is unconditional on
+	 * `id = ?` as before. Returns true iff a row was actually written.
+	 */
 	async updateTokens(
 		accountId: string,
 		accessToken: string,
 		expiresAt: number,
 		refreshToken?: string,
 		identity?: AccountIdentity | null,
-	): Promise<void> {
+		expectedRefreshToken?: string | null,
+	): Promise<boolean> {
 		const now = Date.now();
 		// When identity is provided, COALESCE-merge each field so a null arriving
 		// piecemeal (e.g. a Codex refresh that lacks an id_token → no email that
@@ -136,9 +149,15 @@ export class AccountRepository extends BaseRepository<Account> {
 		const identityParams: Array<string | number | null> = identity
 			? [...identityBindParams(identity), now]
 			: [];
+		// Compare-and-swap guard (see method doc): only pin on the exchanged
+		// refresh token when the caller supplied one.
+		const casClause =
+			expectedRefreshToken != null ? " AND refresh_token = ?" : "";
+		const casParams: Array<string | null> =
+			expectedRefreshToken != null ? [expectedRefreshToken] : [];
 		if (refreshToken) {
-			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?${identitySet} WHERE id = ?`,
+			const changes = await this.runWithChanges(
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?${identitySet} WHERE id = ?${casClause}`,
 				[
 					accessToken,
 					expiresAt,
@@ -146,14 +165,16 @@ export class AccountRepository extends BaseRepository<Account> {
 					now,
 					...identityParams,
 					accountId,
+					...casParams,
 				],
 			);
-		} else {
-			await this.run(
-				`UPDATE accounts SET access_token = ?, expires_at = ?${identitySet} WHERE id = ?`,
-				[accessToken, expiresAt, ...identityParams, accountId],
-			);
+			return changes > 0;
 		}
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET access_token = ?, expires_at = ?${identitySet} WHERE id = ?${casClause}`,
+			[accessToken, expiresAt, ...identityParams, accountId, ...casParams],
+		);
+		return changes > 0;
 	}
 
 	/**

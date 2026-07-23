@@ -93,7 +93,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			getActiveComboForFamily: mock(async () => null),
 			updateAccountUsage: mock(async () => undefined),
 			updateAccountRateLimitMeta: mock(async () => undefined),
-			updateAccountTokens: mock(async () => undefined),
+			updateAccountTokens: mock(async () => true),
 			updateRequestUsage: mock(async () => undefined),
 			resetAccountSession: mock(async () => undefined),
 			markAccountRateLimited: mock(async () => 1),
