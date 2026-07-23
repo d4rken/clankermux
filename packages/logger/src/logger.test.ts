@@ -86,6 +86,118 @@ describe("Logger error serialization", () => {
 	});
 });
 
+describe("Logger unserializable-data guard", () => {
+	let savedLogLevel: string | undefined;
+	let savedLogFormat: string | undefined;
+
+	beforeEach(() => {
+		savedLogLevel = process.env.LOG_LEVEL;
+		savedLogFormat = process.env.LOG_FORMAT;
+		delete process.env.LOG_LEVEL;
+	});
+
+	afterEach(() => {
+		if (savedLogLevel === undefined) delete process.env.LOG_LEVEL;
+		else process.env.LOG_LEVEL = savedLogLevel;
+		if (savedLogFormat === undefined) delete process.env.LOG_FORMAT;
+		else process.env.LOG_FORMAT = savedLogFormat;
+	});
+
+	// Exercise the private formatter directly via a typed structural cast.
+	const formatOf = (logger: Logger) =>
+		(
+			logger as unknown as {
+				formatMessage(level: string, message: string, data?: unknown): string;
+			}
+		).formatMessage.bind(logger);
+
+	const circular = () => {
+		// biome-ignore lint/suspicious/noExplicitAny: intentionally cyclic test payload
+		const o: any = { a: 1 };
+		o.self = o;
+		return o;
+	};
+
+	it("does not throw into the caller when data is circular (pretty)", () => {
+		const logger = new Logger("Test", LogLevel.ERROR);
+		expect(() => logger.error("boom", circular())).not.toThrow();
+	});
+
+	it("does not throw into the caller when data is circular (json)", () => {
+		process.env.LOG_FORMAT = "json";
+		const logger = new Logger("Test", LogLevel.ERROR);
+		expect(() => logger.error("boom", circular())).not.toThrow();
+	});
+
+	it("does not throw on a BigInt payload", () => {
+		const logger = new Logger("Test", LogLevel.ERROR);
+		expect(() => logger.error("big", { n: 10n })).not.toThrow();
+	});
+
+	it("does not throw when a nested toJSON throws", () => {
+		const logger = new Logger("Test", LogLevel.ERROR);
+		const hostile = {
+			toJSON() {
+				throw new Error("no serialize for you");
+			},
+		};
+		expect(() => logger.error("hostile", hostile)).not.toThrow();
+	});
+
+	it("json format: substitutes an [unserializable:] marker and preserves envelope", () => {
+		process.env.LOG_FORMAT = "json";
+		const logger = new Logger("Test", LogLevel.ERROR);
+		const out = formatOf(logger)("ERROR", "boom", circular());
+		const parsed = JSON.parse(out) as Record<string, unknown>;
+		expect(parsed.level).toBe("ERROR");
+		expect(parsed.msg).toBe("boom");
+		expect(parsed.prefix).toBe("Test");
+		expect(typeof parsed.ts).toBe("string");
+		expect(String(parsed.data)).toContain("[unserializable:");
+	});
+
+	it("pretty format: substitutes an [unserializable:] marker inline", () => {
+		const logger = new Logger("Test", LogLevel.ERROR);
+		const out = formatOf(logger)("ERROR", "boom", circular());
+		expect(out).toContain("[unserializable:");
+		expect(out).toContain("boom");
+	});
+
+	it("happy path json output is byte-identical to a raw stringify", () => {
+		process.env.LOG_FORMAT = "json";
+		const logger = new Logger("Test", LogLevel.INFO);
+		const out = formatOf(logger)("INFO", "hello", { foo: "bar" });
+		// Envelope built exactly as formatMessage does on the success path.
+		const parsed = JSON.parse(out) as Record<string, unknown>;
+		expect(parsed.data).toEqual({ foo: "bar" });
+		expect(parsed.msg).toBe("hello");
+		expect(out).not.toContain("[unserializable:");
+	});
+
+	it("does not overflow on a self-referential Error.cause", () => {
+		const logger = new Logger("Test", LogLevel.ERROR);
+		// biome-ignore lint/suspicious/noExplicitAny: cyclic cause chain
+		const err: any = new Error("loop");
+		err.cause = err;
+		let captured: LogEvent | undefined;
+		const handler = (e: LogEvent) => {
+			captured = e;
+		};
+		logBus.on("log", handler);
+		try {
+			expect(() => logger.error("cyclic", err)).not.toThrow();
+		} finally {
+			logBus.off("log", handler);
+		}
+		// First cause level is the normalized Error; the cycle is detected one
+		// level deeper (err.cause === err), where the marker replaces the loop.
+		const data = captured?.data as { cause?: { cause?: unknown } };
+		expect(data.cause?.cause).toBe("[circular error cause]");
+		// And the normalized event still round-trips through stringify.
+		expect(() => JSON.stringify(captured)).not.toThrow();
+	});
+});
+
 describe("Logger env LOG_LEVEL handling", () => {
 	const original = process.env.LOG_LEVEL;
 
