@@ -91,6 +91,41 @@ describe("createLogsStreamHandler", () => {
 		expect(text).toContain(`data: ${JSON.stringify(sampleEvent)}\n\n`);
 	});
 
+	it("does not tear down the stream on an unserializable log event", async () => {
+		closeAllSseStreams(); // flush closers leaked by other suites
+		const baseline = logBus.listenerCount("log");
+		const handler = createLogsStreamHandler(20);
+		const reader = openStream(handler);
+
+		await readUntil(reader, (t) => t.includes("connected"));
+		expect(logBus.listenerCount("log")).toBe(baseline + 1);
+
+		// A circular payload: JSON.stringify would throw. Previously the handler's
+		// catch conflated that with a closed socket and cleaned up the listener,
+		// disconnecting the whole dashboard feed. Now it must survive.
+		// biome-ignore lint/suspicious/noExplicitAny: cyclic test payload
+		const circular: any = { a: 1 };
+		circular.self = circular;
+		logBus.emit("log", {
+			ts: Date.now(),
+			level: "ERROR",
+			msg: "bad-event",
+			data: circular,
+		} as LogEvent);
+
+		// The event is still forwarded — with the data replaced by a marker — and
+		// the listener remains subscribed (stream not torn down).
+		const text = await readUntil(reader, (t) => t.includes("bad-event"));
+		expect(text).toContain("bad-event");
+		expect(text).toContain("[unserializable:");
+		expect(logBus.listenerCount("log")).toBe(baseline + 1);
+
+		// And a subsequent normal event still flows through the same live stream.
+		logBus.emit("log", { ...sampleEvent, msg: "still-alive" });
+		const more = await readUntil(reader, (t) => t.includes("still-alive"));
+		expect(more).toContain("still-alive");
+	});
+
 	it("emits periodic heartbeat comments to keep the connection alive", async () => {
 		const handler = createLogsStreamHandler(20);
 		const reader = openStream(handler);

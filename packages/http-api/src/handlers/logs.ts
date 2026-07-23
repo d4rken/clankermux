@@ -1,5 +1,5 @@
 import { sseResponse } from "@clankermux/http-common";
-import { Logger, logBus } from "@clankermux/logger";
+import { Logger, logBus, safeStringifyLogEvent } from "@clankermux/logger";
 import type { LogEvent } from "@clankermux/types";
 import { registerSseCloser } from "../sse-registry";
 
@@ -57,7 +57,11 @@ export function createLogsStreamHandler(
 			if (closed) return;
 
 			try {
-				const data = `data: ${JSON.stringify(event)}\n\n`;
+				// safeStringifyLogEvent never throws on an unserializable event, so a
+				// serialization failure can't masquerade as a closed socket here and
+				// tear down a healthy stream — this catch now only fires on a genuine
+				// write failure.
+				const data = `data: ${safeStringifyLogEvent(event)}\n\n`;
 				await writer.write(encoder.encode(data));
 			} catch (_error) {
 				// Stream closed
