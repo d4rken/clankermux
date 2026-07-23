@@ -171,14 +171,23 @@ export class AutoRefreshScheduler {
 	// constructs the real coordinator over the same proxyContext.
 	private readonly coordinator: CodexSpendCoordinator;
 
+	// Injectable dispatch seam for the translated Anthropic prime (defaults to the
+	// real dispatchProxyRequest). Injectable — like `coordinator` — so tests can
+	// force a dispatch rejection to exercise the no-response failure path WITHOUT
+	// mock.module (which bun keeps global for the whole run and leaks into sibling
+	// test files).
+	private readonly dispatch: typeof dispatchProxyRequest;
+
 	constructor(
 		db: BunSqlAdapter,
 		proxyContext: ProxyContext,
 		coordinator?: CodexSpendCoordinator,
+		dispatch: typeof dispatchProxyRequest = dispatchProxyRequest,
 	) {
 		this.db = db;
 		this.proxyContext = proxyContext;
 		this.coordinator = coordinator ?? new CodexSpendCoordinator(proxyContext);
+		this.dispatch = dispatch;
 	}
 
 	/**
@@ -760,7 +769,7 @@ export class AutoRefreshScheduler {
 						headers,
 						body: JSON.stringify(requestBody),
 					});
-					response = await dispatchProxyRequest(
+					response = await this.dispatch(
 						req,
 						url,
 						this.proxyContext,
@@ -793,11 +802,22 @@ export class AutoRefreshScheduler {
 				}
 			}
 
-			// If we couldn't get any successful response
+			// If we couldn't get any successful response, every per-model dispatch
+			// threw (dispatchProxyRequest is contracted to map errors to a Response,
+			// so this is the defensive backstop for that contract being violated).
+			// This is a genuine failure and MUST be counted toward the re-auth
+			// threshold — the same as the error-status and exception paths below.
+			// Previously it returned without recording, so a persistently
+			// un-dispatchable account never tripped FAILURE_THRESHOLD via this path.
 			if (!response) {
 				const errorMsg = lastError?.message || "All models failed";
 				log.error(
 					`Failed to send auto-refresh message to ${accountRow.name} with any model: ${errorMsg}`,
+				);
+				await this.recordRefreshFailure(
+					accountRow.id,
+					accountRow.name,
+					"(no response from any model)",
 				);
 				return false;
 			}
