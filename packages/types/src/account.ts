@@ -44,7 +44,11 @@ export interface AnthropicLimitEntry {
 }
 
 export interface AnthropicUsageData {
-	five_hour?: UsageWindowData;
+	// `null` means the window does not exist (Codex retired its rolling 5h
+	// window); a real object (even at 0% with a null reset) means a live window
+	// at that utilization — Anthropic still emits `{utilization:0, resets_at:null}`
+	// for an idle-but-real 5h window and must keep its card.
+	five_hour?: UsageWindowData | null;
 	seven_day?: UsageWindowData;
 	seven_day_oauth_apps?: UsageWindowData;
 	seven_day_opus?: UsageWindowData;

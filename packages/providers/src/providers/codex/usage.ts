@@ -368,7 +368,15 @@ export function parseCodexUsageHeaders(
 	});
 
 	const usage: UsageData = {
-		five_hour: fiveHour ?? { utilization: defaultUtilization, resets_at: null },
+		// Codex retired its rolling 5-hour window. Carry `fiveHour` straight through
+		// (already `UsageWindow | null` from pickWindowBySlot / legacy fallback):
+		// `null` = no 5h window at all (hidden downstream), a real object (even 0%)
+		// = a window at that utilization. Do NOT fabricate a `{0, null}` placeholder
+		// here — that shape is indistinguishable from Anthropic's genuine idle 5h
+		// window and would resurrect the dead-card bug. The `if (!fiveHour &&
+		// !sevenDay) return null` guard above already ensures at least one window
+		// exists, so seven_day keeps its zeroed fallback.
+		five_hour: fiveHour,
 		seven_day: sevenDay ?? { utilization: defaultUtilization, resets_at: null },
 	};
 	// Only attach `limits` when a per-model family surfaced — an empty array would

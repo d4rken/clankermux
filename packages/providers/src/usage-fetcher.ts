@@ -178,8 +178,11 @@ export interface ExtraUsage {
 }
 
 export interface UsageData {
-	// Core windows (always present in older API versions)
-	five_hour: UsageWindow;
+	// Core windows (always present in older API versions). `five_hour` is
+	// nullable: Codex retired its rolling 5h window, so a Codex producer emits
+	// `null` to mean "no window" — distinct from a real `{utilization:0,...}`
+	// window that Anthropic still reports when its 5h window is idle at 0%.
+	five_hour: UsageWindow | null;
 	seven_day: UsageWindow;
 	seven_day_oauth_apps?: UsageWindow;
 	seven_day_opus?: UsageWindow | null;

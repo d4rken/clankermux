@@ -205,14 +205,14 @@ function applyCodexUsageBookkeeping(
 
 	usageCache.set(account.id, codexUsage);
 	log.debug(
-		`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour.utilization}%, 7d=${codexUsage.seven_day.utilization}%`,
+		`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour?.utilization ?? "n/a"}%, 7d=${codexUsage.seven_day.utilization}%`,
 	);
 
 	// Persist rate_limit_reset from usage windows (earliest of 5h/7d) so
 	// auto-refresh can track windows.
 	const earliestResetOf = (
 		u: {
-			five_hour?: { resets_at: string | null };
+			five_hour?: { resets_at: string | null } | null;
 			seven_day?: { resets_at: string | null };
 		} | null,
 	): number | null => {

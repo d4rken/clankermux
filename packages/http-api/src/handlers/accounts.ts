@@ -250,14 +250,18 @@ export function presentRateLimitStatus(
 export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 	const now = Date.now();
 	const normalized: UsageData = {
-		five_hour: { ...usage.five_hour },
+		five_hour: usage.five_hour ? { ...usage.five_hour } : null,
 		seven_day: { ...usage.seven_day },
 	};
+	// Codex retired its 5h window. A rolled/expired Codex 5h window is absent, not
+	// a 0% card, so collapse a stale reset to `null` (hidden) rather than a
+	// fabricated `{0, null}` placeholder. `normalizeCodexUsageData` only ever runs
+	// for codex accounts, so `null` here is always correct.
 	if (
-		normalized.five_hour.resets_at &&
+		normalized.five_hour?.resets_at &&
 		new Date(normalized.five_hour.resets_at).getTime() <= now
 	) {
-		normalized.five_hour = { utilization: 0, resets_at: null };
+		normalized.five_hour = null;
 	}
 	if (
 		normalized.seven_day.resets_at &&
@@ -281,7 +285,7 @@ export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 	// solely on the flat windows would discard a still-live Spark scoped card the
 	// moment the account-wide weekly reset lapses in a stale cache snapshot.
 	const hasLiveLimits = (normalized.limits?.length ?? 0) > 0;
-	return normalized.five_hour.resets_at !== null ||
+	return (normalized.five_hour?.resets_at ?? null) !== null ||
 		normalized.seven_day.resets_at !== null ||
 		hasLiveLimits
 		? normalized
