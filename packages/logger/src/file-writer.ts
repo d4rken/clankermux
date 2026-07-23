@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readEnv } from "@clankermux/core/env";
 import type { LogEvent } from "@clankermux/types";
-import { safeReason } from "./serialize";
+import { safeStringifyLogEvent } from "./serialize";
 
 // Local constants to avoid circular dependency with core
 const BUFFER_SIZES = {
@@ -123,31 +123,10 @@ export class LogFileWriter implements Disposable {
 
 		// Serialize defensively: `event.data` is caller-supplied and may be
 		// unserializable (circular/BigInt/throwing toJSON). An uncaught throw here
-		// would propagate into the caller's business logic. On failure, rebuild a
-		// minimal event preserving ts/level/msg with a marker in place of data; if
-		// even that throws (e.g. a hostile `msg` getter), fall back to a fixed,
-		// always-valid JSON line so a write can never throw or be silently lost.
-		let line: string;
-		try {
-			line = `${JSON.stringify(event)}\n`;
-		} catch (e: unknown) {
-			const reason = safeReason(e);
-			try {
-				const fallback: LogEvent = {
-					ts: event.ts,
-					level: event.level,
-					msg: event.msg,
-					data: `[unserializable: ${reason}]`,
-				};
-				line = `${JSON.stringify(fallback)}\n`;
-			} catch {
-				line = `${JSON.stringify({
-					ts: Date.now(),
-					level: "ERROR",
-					msg: "[unserializable log event]",
-				})}\n`;
-			}
-		}
+		// would propagate into the caller's business logic. safeStringifyLogEvent
+		// substitutes a marker (preserving ts/level/msg) so a write can never throw
+		// or be silently lost.
+		const line = `${safeStringifyLogEvent(event)}\n`;
 		if (this.stream) {
 			this.stream.write(line);
 		}

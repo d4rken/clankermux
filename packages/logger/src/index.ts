@@ -216,3 +216,4 @@ export class Logger {
 // Default logger instance
 export const log = new Logger();
 export { logFileWriter } from "./file-writer";
+export { safeReason, safeStringifyLogEvent } from "./serialize";

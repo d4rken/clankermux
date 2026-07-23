@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { LogEvent } from "@clankermux/types";
 import { Logger, LogLevel, logBus } from "./index";
+import { safeStringifyLogEvent } from "./serialize";
 
 describe("Logger error serialization", () => {
 	let captured: LogEvent[] = [];
@@ -195,6 +196,46 @@ describe("Logger unserializable-data guard", () => {
 		expect(data.cause?.cause).toBe("[circular error cause]");
 		// And the normalized event still round-trips through stringify.
 		expect(() => JSON.stringify(captured)).not.toThrow();
+	});
+});
+
+describe("safeStringifyLogEvent", () => {
+	it("is byte-identical to JSON.stringify on a serializable event", () => {
+		const event: LogEvent = {
+			ts: 123,
+			level: "INFO",
+			msg: "ok",
+			data: { foo: "bar" },
+		};
+		expect(safeStringifyLogEvent(event)).toBe(JSON.stringify(event));
+	});
+
+	it("preserves the envelope and marks unserializable data", () => {
+		// biome-ignore lint/suspicious/noExplicitAny: cyclic test payload
+		const circular: any = { a: 1 };
+		circular.self = circular;
+		const event: LogEvent = {
+			ts: 456,
+			level: "ERROR",
+			msg: "boom",
+			data: circular,
+		};
+		const parsed = JSON.parse(safeStringifyLogEvent(event)) as LogEvent;
+		expect(parsed.ts).toBe(456);
+		expect(parsed.level).toBe("ERROR");
+		expect(parsed.msg).toBe("boom");
+		expect(String(parsed.data)).toContain("[unserializable:");
+	});
+
+	it("handles a BigInt payload without throwing", () => {
+		const event: LogEvent = {
+			ts: 789,
+			level: "WARN",
+			msg: "big",
+			data: { n: 10n },
+		};
+		expect(() => safeStringifyLogEvent(event)).not.toThrow();
+		expect(safeStringifyLogEvent(event)).toContain("[unserializable:");
 	});
 });
 
