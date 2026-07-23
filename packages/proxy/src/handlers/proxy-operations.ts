@@ -177,6 +177,23 @@ export function isSyntheticInternalRequest(headers: Headers): boolean {
 }
 
 /**
+ * True only for a TRUSTED synthetic probe: an in-process scheduler dispatch
+ * (`internal` — the flag handleProxy sets from its own `isInternal` parameter,
+ * never from a request header) that also carries an auto-refresh/keepalive
+ * marker. The `internal` gate is mandatory: the marker headers are
+ * client-spoofable, so header presence alone must NOT let an external caller
+ * bypass operator-side gates such as usage throttling. Use this (not the
+ * header-only {@link isSyntheticInternalRequest}) wherever a probe exemption
+ * would otherwise be a spoofable security hole.
+ */
+export function isTrustedSyntheticProbe(
+	headers: Headers,
+	internal: boolean,
+): boolean {
+	return internal && isSyntheticInternalRequest(headers);
+}
+
+/**
  * Determines the absolute epoch timestamp (ms since epoch) until which an account
  * should be marked rate-limited after model exhaustion. Priority:
  *   1. retry-after / x-ratelimit-reset response header (actual upstream backoff)

@@ -60,7 +60,7 @@ describe("parseCodexUsageStatus", () => {
 		expect(status.resetCreditsAvailableCount).toBe(2);
 
 		expect(status.usage).not.toBeNull();
-		expect(status.usage?.five_hour.utilization).toBe(42);
+		expect(status.usage?.five_hour?.utilization).toBe(42);
 		expect(status.usage?.seven_day.utilization).toBe(73);
 		expect(status.usage?.codexCredits).toEqual({
 			hasCredits: true,
@@ -75,14 +75,14 @@ describe("parseCodexUsageStatus", () => {
 		// 18000s is 5h; a naive minutes reading (300) would also be 5h, but 604800s
 		// must be 7d — a minutes reading (10080) would mis-slot. Prove seconds win.
 		const status = parseCodexUsageStatus(fullBody(), 200, NOW_MS);
-		expect(status.usage?.five_hour.utilization).toBe(42);
+		expect(status.usage?.five_hour?.utilization).toBe(42);
 		expect(status.usage?.seven_day.utilization).toBe(73);
 	});
 
 	it("prefers reset_at over reset_after_seconds", () => {
 		const status = parseCodexUsageStatus(fullBody(), 200, NOW_MS);
 		// reset_at 1_700_000_500 (epoch s) → ISO, NOT now + reset_after_seconds.
-		expect(status.usage?.five_hour.resets_at).toBe(
+		expect(status.usage?.five_hour?.resets_at).toBe(
 			new Date(1_700_000_500 * 1_000).toISOString(),
 		);
 	});
@@ -91,7 +91,7 @@ describe("parseCodexUsageStatus", () => {
 		const body = fullBody();
 		body.rate_limit.primary_window.reset_at = 0;
 		const status = parseCodexUsageStatus(body, 200, NOW_MS);
-		expect(status.usage?.five_hour.resets_at).toBe(
+		expect(status.usage?.five_hour?.resets_at).toBe(
 			new Date(NOW_MS + 3600 * 1_000).toISOString(),
 		);
 	});
@@ -112,7 +112,7 @@ describe("parseCodexUsageStatus", () => {
 		// Root rate_limit still drives allowed/limitReached, not the extra entry.
 		expect(status.allowed).toBe(true);
 		expect(status.limitReached).toBe(false);
-		expect(status.usage?.five_hour.utilization).toBe(42);
+		expect(status.usage?.five_hour?.utilization).toBe(42);
 	});
 
 	it("surfaces limit_reached / allowed / reached-type for an exhausted account", () => {
@@ -128,6 +128,29 @@ describe("parseCodexUsageStatus", () => {
 		expect(status.allowed).toBe(false);
 		expect(status.limitReached).toBe(true);
 		expect(status.rateLimitReachedType).toBe("rate_limit_reached");
+	});
+
+	it("emits five_hour: null (not a 0% placeholder) when only a weekly window is present", () => {
+		// Codex retired its rolling 5h window; a weekly-only /wham/usage read must
+		// leave five_hour null rather than fabricating a `{0, null}` card that is
+		// indistinguishable from Anthropic's genuine idle 5h window.
+		const body = {
+			plan_type: "pro",
+			rate_limit: {
+				allowed: true,
+				limit_reached: false,
+				primary_window: {
+					used_percent: 73,
+					limit_window_seconds: 7 * 24 * 60 * 60, // 604800 → seven_day
+					reset_after_seconds: 100_000,
+					reset_at: 1_700_100_000,
+				},
+			},
+		};
+		const status = parseCodexUsageStatus(body, 200, NOW_MS);
+		expect(status.usage).not.toBeNull();
+		expect(status.usage?.five_hour).toBeNull();
+		expect(status.usage?.seven_day.utilization).toBe(73);
 	});
 
 	it("returns usage null but ok:true for empty/placeholder windows", () => {

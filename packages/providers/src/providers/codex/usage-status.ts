@@ -208,7 +208,12 @@ export function parseCodexUsageStatus(
 		const weeklyUsedPct = sevenDay ? sevenDay.utilization : null;
 		const codexCredits = parseCredits(root, weeklyUsedPct);
 		usage = {
-			five_hour: fiveHour ?? { utilization: 0, resets_at: null },
+			// Codex retired its rolling 5-hour window. Emit `fiveHour` verbatim
+			// (`null` when absent) rather than a fabricated `{0, null}` placeholder,
+			// which is byte-identical to Anthropic's genuine idle 5h window and would
+			// resurrect the dead-card bug. The `if (fiveHour || sevenDay)` guard above
+			// already ensures at least one window exists.
+			five_hour: fiveHour,
 			seven_day: sevenDay ?? { utilization: 0, resets_at: null },
 			...(codexCredits ? { codexCredits } : {}),
 		};

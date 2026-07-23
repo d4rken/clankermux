@@ -26,6 +26,7 @@ export {
 	createContextWindowExceededResponse,
 	createPinnedTargetUnavailableResponse,
 	createPoolExhaustedResponse,
+	isTrustedSyntheticProbe,
 	type ProxyAttemptOptions,
 	type ProxyAttemptOutcome,
 	proxyForcedAccount,

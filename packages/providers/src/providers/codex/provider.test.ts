@@ -2685,6 +2685,26 @@ describe("parseCodexUsageHeaders", () => {
 		expect(parseCodexUsageHeaders(new Headers())).toBeNull();
 	});
 
+	it("emits five_hour: null (not a fabricated 0% placeholder) when only a weekly window is present", () => {
+		// Codex retired its rolling 5h window. With only a weekly (seven_day) window
+		// present, `five_hour` must be null — a real `{0, null}` object would be
+		// indistinguishable from an idle Anthropic 5h window downstream.
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage).not.toBeNull();
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
 	it("drops invalid reset timestamps instead of throwing", () => {
 		const headers = new Headers({
 			"x-codex-primary-used-percent": "12",
