@@ -117,6 +117,61 @@ const FAILURE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_FAILURE_RECORDS = 1000; // Prevent unbounded growth
 const MAX_BACKOFF_RETRIES = 10; // After 10 backoff hits, check DB
 
+// Single-flight coalesce cache: a very-recent SUCCESSFUL refresh, keyed by
+// account id. OAuth providers rotate refresh tokens (a successful refresh
+// returns a new one and invalidates the old), so two near-simultaneous refresh
+// triggers each holding a stale `account` snapshot would race: the first wins
+// and rotates, the second runs with the now-invalidated old token and fails
+// with invalid_grant / refresh_token_reused. When a caller arrives within the
+// coalesce window of a fresh refresh, we hand back the cached token instead of
+// firing that doomed second rotation.
+interface RecentRefresh {
+	accessToken: string;
+	expiresAt: number;
+	at: number;
+}
+const recentRefreshes = new Map<string, RecentRefresh>();
+const REFRESH_COALESCE_WINDOW_MS = 10_000; // reuse a very-recent successful refresh instead of racing a second rotation
+const RECENT_REFRESH_MIN_HEADROOM_MS = 60_000; // only reuse while the cached token is still comfortably valid
+
+/**
+ * Record a very-recent SUCCESSFUL refresh for single-flight coalescing so a
+ * near-simultaneous caller (including the proactive scheduler paths, which call
+ * `provider.refreshToken` directly and share this module-level cache) reuses this
+ * token instead of racing a second (doomed) rotation.
+ */
+export function recordRecentRefresh(
+	accountId: string,
+	accessToken: string,
+	expiresAt: number,
+): void {
+	recentRefreshes.set(accountId, { accessToken, expiresAt, at: Date.now() });
+}
+
+/**
+ * Return a very-recent successful refresh worth reusing instead of firing a
+ * second (doomed) rotation, or null. Reusable only when: within the coalesce
+ * window, the cached token still has comfortable expiry headroom, AND it differs
+ * from the token the caller already holds (so a caller whose CURRENT token was
+ * just rejected upstream still forces a real refresh — never served back its own
+ * failing token).
+ */
+export function getCoalescibleRecentRefresh(
+	accountId: string,
+	currentAccessToken: string | null,
+): { accessToken: string; expiresAt: number } | null {
+	const recent = recentRefreshes.get(accountId);
+	if (
+		recent &&
+		Date.now() - recent.at < REFRESH_COALESCE_WINDOW_MS &&
+		recent.expiresAt - Date.now() > RECENT_REFRESH_MIN_HEADROOM_MS &&
+		recent.accessToken !== currentAccessToken
+	) {
+		return { accessToken: recent.accessToken, expiresAt: recent.expiresAt };
+	}
+	return null;
+}
+
 // Cleanup old failures periodically
 let cleanupInterval: Timer | null = null;
 
@@ -137,6 +192,13 @@ export const startTokenCleanupInterval = () => {
 				refreshFailures.delete(accountId);
 				backoffCounters.delete(accountId);
 			});
+
+			// Expire stale coalesce-cache entries (short-lived by design).
+			for (const [accountId, entry] of recentRefreshes.entries()) {
+				if (now - entry.at > REFRESH_COALESCE_WINDOW_MS) {
+					recentRefreshes.delete(accountId);
+				}
+			}
 
 			// Enforce size limit during periodic cleanup to prevent memory bloat
 			enforceMaxSize();
@@ -164,6 +226,7 @@ registerDisposable({
 		stopTokenCleanupInterval();
 		refreshFailures.clear();
 		backoffCounters.clear();
+		recentRefreshes.clear();
 	},
 });
 
@@ -184,6 +247,13 @@ function cleanupExpiredFailures(): void {
 		refreshFailures.delete(accountId);
 		backoffCounters.delete(accountId); // Also clean up backoff counters
 	});
+
+	// Expire stale coalesce-cache entries (short-lived by design).
+	for (const [accountId, entry] of recentRefreshes.entries()) {
+		if (now - entry.at > REFRESH_COALESCE_WINDOW_MS) {
+			recentRefreshes.delete(accountId);
+		}
+	}
 
 	if (toDelete.length > 0) {
 		log.debug(
@@ -232,6 +302,40 @@ export async function refreshAccessTokenSafe(
 	account: Account,
 	ctx: ProxyContext,
 ): Promise<string> {
+	// Join an in-progress refresh BEFORE consulting the coalesce cache: an active
+	// refresh yields the freshest result, so a caller holding an older token joins
+	// it rather than being served a possibly-stale (or already-rejected) cached
+	// token while a replacement refresh is mid-flight.
+	const inFlight = ctx.refreshInFlight.get(account.id);
+	if (inFlight) {
+		const joinedToken = await inFlight;
+		// Sync this caller's account to the winner's fresh token so the 401-retry
+		// path (which re-derives from account.access_token) uses it.
+		const recent = recentRefreshes.get(account.id);
+		if (recent && recent.accessToken === joinedToken) {
+			account.access_token = recent.accessToken;
+			account.expires_at = recent.expiresAt;
+		}
+		return joinedToken;
+	}
+
+	// Coalesce short-circuit next (before the backoff gate): a just-completed
+	// refresh already produced a fresh token; reuse it rather than racing a second
+	// rotation (which would fail as invalid_grant/refresh_token_reused against the
+	// just-invalidated old token) — and skip the backoff gate, since serving a
+	// cached token makes no network call. The helper only returns a token that
+	// DIFFERS from this caller's current one, so a caller whose own token was just
+	// rejected upstream still forces a real refresh.
+	const coalesced = getCoalescibleRecentRefresh(
+		account.id,
+		account.access_token,
+	);
+	if (coalesced) {
+		account.access_token = coalesced.accessToken;
+		account.expires_at = coalesced.expiresAt;
+		return coalesced.accessToken;
+	}
+
 	// Proactively clean expired entries before checking
 	cleanupExpiredFailures();
 
@@ -323,20 +427,34 @@ export async function refreshAccessTokenSafe(
 		// Get the provider for this account
 		const provider = getProvider(account.provider) || ctx.provider;
 
+		// Snapshot the refresh token this attempt is about to EXCHANGE, before the
+		// network round-trip. The persist below is compare-and-swapped on it (the
+		// backstop): if a concurrent reauth/rotation installs a new refresh token
+		// while this refresh is in flight, the CAS clause no-ops the delayed write
+		// so it can't overwrite the fresh credentials with this attempt's
+		// stale-generation tokens.
+		const exchangedRefreshToken = account.refresh_token;
+
 		// Create a new refresh promise and store it
 		const refreshPromise = provider
 			.refreshToken(account, ctx.runtime.clientId)
 			.then((result: TokenRefreshResult) => {
-				// 1. Persist to database asynchronously
-				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.updateAccountTokens(
+				// 1. Enqueue the durable write NON-BLOCKING (fire-and-forget). We do
+				// NOT await it: an unknown/timed-out write must not gate the refresh
+				// result. The exchanged-token CAS clause (WHERE refresh_token =
+				// exchangedRefreshToken) is the backstop that no-ops the write if a
+				// concurrent reauth/rotation installed new credentials while this
+				// refresh was in flight — so a delayed write can't clobber them.
+				ctx.asyncWriter.enqueue(async () => {
+					await ctx.dbOps.updateAccountTokens(
 						account.id,
 						result.accessToken,
 						result.expiresAt,
 						result.refreshToken,
 						result.identity,
-					),
-				);
+						exchangedRefreshToken ?? undefined,
+					);
+				});
 
 				// 2. Update the live in-memory account object immediately
 				// This prevents subsequent requests from seeing stale token data
@@ -349,6 +467,10 @@ export async function refreshAccessTokenSafe(
 
 				// Clear any previous failure record on successful refresh
 				refreshFailures.delete(account.id);
+
+				// Record for single-flight coalescing so a near-simultaneous caller
+				// reuses this token instead of racing a second (doomed) rotation.
+				recordRecentRefresh(account.id, result.accessToken, result.expiresAt);
 
 				const expiresInSec = Math.round((result.expiresAt - Date.now()) / 1000);
 				log.info(`Successfully refreshed token for account: ${account.name}`);
@@ -369,22 +491,52 @@ export async function refreshAccessTokenSafe(
 					error instanceof Error ? error.message : String(error);
 				const enhancedMessage = getOAuthErrorMessage(account, originalError);
 
-				log.error(
-					`Token refresh failed for account ${account.name}: ${enhancedMessage}`,
-					error,
-				);
-				// Terminal auth failure (revoked/invalid refresh token): pause the
-				// account for re-auth immediately so the LB fails over instead of
-				// leaving it in rotation to fail every request. Awaited so the pause
-				// lands before any caller (e.g. the auto-refresh scheduler) records a
-				// generic failure that could otherwise mask the specific reason.
-				await pauseAccountForReauthIfInvalidGrant(error, account, ctx.dbOps);
 				// Carry the invalid_grant classification (from the RAW error, before
 				// getOAuthErrorMessage may strip the marker) on the wrapped error so
 				// downstream consumers can reliably tell "needs reauth" from transient.
 				const isInvalidGrant =
 					error instanceof OAuthRefreshTokenError ||
 					isInvalidGrantMessage(originalError);
+				// Terminal auth failure (revoked/invalid refresh token): pause the
+				// account for re-auth immediately so the LB fails over instead of
+				// leaving it in rotation to fail every request. Awaited so the pause
+				// lands before any caller (e.g. the auto-refresh scheduler) records a
+				// generic failure that could otherwise mask the specific reason. The
+				// pause is guarded on the stored refresh token still matching the one
+				// that failed, so a rotation-race loser (token already rotated) returns
+				// false and is NOT paused — that false is our benign-race signal.
+				const paused = await pauseAccountForReauthIfInvalidGrant(
+					error,
+					account,
+					ctx.dbOps,
+				);
+				if (paused) {
+					// Genuine terminal auth failure: pauseAccountForReauthIfInvalidGrant
+					// already logged an ERROR ("Account ... PAUSED — needs
+					// re-authentication"). Don't double-log. Drop any coalesce entry so a
+					// later caller doesn't reuse a token from a now-paused account.
+					recentRefreshes.delete(account.id);
+				} else if (isInvalidGrant) {
+					// Terminal-looking auth error but the account was NOT newly flagged:
+					// the stored refresh token no longer matches the one this attempt
+					// used — a concurrent refresh already rotated it (benign race loser),
+					// or the account is already paused/reauthed. Not actionable; log
+					// quietly instead of alarming. Also drop the failure record recorded
+					// at the top of this catch: a superseded/benign loser must not leave a
+					// backoff entry that would reject the next legitimate refresh with
+					// ServiceUnavailable.
+					refreshFailures.delete(account.id);
+					log.info(
+						`Token refresh for account ${account.name} was not newly flagged for reauth (a concurrent refresh already rotated the token, or the account is already paused); leaving its state unchanged.`,
+					);
+				} else {
+					// Non-auth transient failure (network / 5xx / unexpected). Keep prior
+					// visibility.
+					log.error(
+						`Token refresh failed for account ${account.name}: ${enhancedMessage}`,
+						error,
+					);
+				}
 				throw new TokenRefreshError(
 					account.id,
 					new Error(enhancedMessage),
@@ -775,6 +927,9 @@ export function clearAccountRefreshCache(accountId: string): void {
 	// instead of waiting out the backoff window.
 	refreshFailures.delete(accountId);
 	backoffCounters.delete(accountId);
+	// Drop any coalesce-cached token so a stale token from before reauth is never
+	// served after new credentials are installed.
+	recentRefreshes.delete(accountId);
 	for (const [serverId, clearer] of refreshClearers) {
 		try {
 			clearer(accountId);

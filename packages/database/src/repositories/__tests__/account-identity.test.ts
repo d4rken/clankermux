@@ -348,3 +348,69 @@ describe("AccountRepository — setAccountIdentity (token decode, no profile fet
 		expect(after?.identity_profile_fetched_at).toBeNull();
 	});
 });
+
+describe("AccountRepository — updateTokens compare-and-swap (expectedRefreshToken)", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+		db.run(
+			`INSERT INTO accounts (id, name, created_at, refresh_token, access_token, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			["cas-1", "cas-1", Date.now(), "rt-current", "tok-old", 1_000],
+		);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("returns false and does NOT change the row when the expected refresh token no longer matches", async () => {
+		const applied = await repo.updateTokens(
+			"cas-1",
+			"tok-stale",
+			5_000,
+			"rt-stale-new",
+			null,
+			"rt-EXCHANGED-but-superseded",
+		);
+		expect(applied).toBe(false);
+
+		const row = await repo.findById("cas-1");
+		// Untouched: the concurrent-reauth generation is preserved.
+		expect(row?.access_token).toBe("tok-old");
+		expect(row?.expires_at).toBe(1_000);
+		expect(row?.refresh_token).toBe("rt-current");
+	});
+
+	it("returns true and updates the row when the expected refresh token matches", async () => {
+		const applied = await repo.updateTokens(
+			"cas-1",
+			"tok-new",
+			9_000,
+			"rt-rotated",
+			null,
+			"rt-current",
+		);
+		expect(applied).toBe(true);
+
+		const row = await repo.findById("cas-1");
+		expect(row?.access_token).toBe("tok-new");
+		expect(row?.expires_at).toBe(9_000);
+		expect(row?.refresh_token).toBe("rt-rotated");
+	});
+
+	it("applies unconditionally (returns true) when no expected refresh token is supplied", async () => {
+		const applied = await repo.updateTokens(
+			"cas-1",
+			"tok-uncond",
+			7_000,
+			"rt-uncond",
+		);
+		expect(applied).toBe(true);
+
+		const row = await repo.findById("cas-1");
+		expect(row?.access_token).toBe("tok-uncond");
+		expect(row?.refresh_token).toBe("rt-uncond");
+	});
+});

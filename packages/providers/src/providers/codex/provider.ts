@@ -3,6 +3,7 @@ import {
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	getModelFamily,
 	isDebugEnabled,
+	isInvalidGrantMessage,
 	mapModelName,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
@@ -39,6 +40,23 @@ function sanitizeResponseHeaders(headers: Headers): Headers {
 	}
 	return sanitized;
 }
+
+// OAuth error codes that mean the refresh token itself is terminally rejected
+// (revoked / expired / rotated-away / deauthorized) and can only be fixed by
+// re-authenticating. Detection is by error CODE, not human error_description
+// wording, so a genuinely dead token reliably surfaces the reauth prompt.
+// Only refresh-token-specific codes belong here. `invalid_client` and
+// `unauthorized_client` describe the OAuth CLIENT/application (Codex uses a
+// fixed shared CLIENT_ID), NOT an individual account's refresh token — treating
+// them as OAuthRefreshTokenError would pause EVERY account with a reauth prompt
+// that reauth (through the same client) can't fix, and they'd stay paused after
+// the client config is corrected. They deliberately fall through to the generic
+// retryable error instead.
+const TERMINAL_OAUTH_ERROR_CODES = new Set([
+	"refresh_token_reused",
+	"invalid_grant",
+	"invalid_refresh_token",
+]);
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -381,24 +399,42 @@ export class CodexProvider extends BaseProvider {
 		});
 
 		if (!response.ok) {
+			// Read the raw body once, then attempt JSON parse. Reading text first
+			// (rather than response.json() in a try/catch) means a non-JSON body —
+			// e.g. a 400 text/plain payload literally containing "invalid_grant" —
+			// is still classifiable via the marker fallback below, instead of being
+			// silently treated as a generic retryable error.
+			const raw = await response.text();
 			let errorData: { error?: string; error_description?: string } | null =
 				null;
 			try {
-				errorData = await response.json();
+				errorData = raw ? JSON.parse(raw) : null;
 			} catch {
-				// ignore
+				// ignore — body was not JSON; fall back to raw-text marker matching
 			}
 
+			const errorCode = errorData?.error ?? null;
 			const errorMessage =
-				errorData?.error_description || errorData?.error || response.statusText;
+				errorData?.error_description ||
+				errorData?.error ||
+				raw ||
+				response.statusText;
 
-			// Rotating refresh tokens: reuse → terminal, must re-auth. Throw the
-			// typed error so the refresh chokepoint pauses the account for reauth
-			// (detection is by type, not by message wording).
-			if (errorData?.error === "refresh_token_reused") {
+			// Terminal auth rejections (revoked / expired / reused / deauthorized)
+			// must re-auth. Throw the typed error so the refresh chokepoint pauses
+			// the account for reauth — detection is by error CODE when JSON parses,
+			// or by a raw-body marker when it doesn't, so a genuinely dead token
+			// reliably surfaces the reauth prompt instead of being mistaken for a
+			// transient failure.
+			if (
+				(errorCode && TERMINAL_OAUTH_ERROR_CODES.has(errorCode)) ||
+				(errorData == null && isInvalidGrantMessage(raw))
+			) {
 				throw new OAuthRefreshTokenError(
 					account.id,
-					`Codex refresh token was reused for account ${account.name}. Re-authenticate account "${account.name}" from the dashboard (Accounts tab).`,
+					`Codex refresh token rejected${
+						errorCode ? ` (${errorCode})` : ""
+					} for account ${account.name}. Re-authenticate account "${account.name}" from the dashboard (Accounts tab).`,
 				);
 			}
 

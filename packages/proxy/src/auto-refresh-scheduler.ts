@@ -1,7 +1,9 @@
 import {
 	CLAUDE_MODEL_IDS,
 	getClientVersion,
+	isInvalidGrantMessage,
 	normalizeAnthropicUsage,
+	OAuthRefreshTokenError,
 	registerHeartbeat,
 } from "@clankermux/core";
 import type { BunSqlAdapter } from "@clankermux/database";
@@ -26,8 +28,10 @@ import {
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
 import {
+	getCoalescibleRecentRefresh,
 	getValidAccessToken,
 	pauseAccountForReauthIfInvalidGrant,
+	recordRecentRefresh,
 } from "./handlers";
 import type { ProxyContext } from "./proxy";
 
@@ -1233,21 +1237,44 @@ export class AutoRefreshScheduler {
 					consecutive_rate_limits: 0,
 				};
 
+				// Coalesce skip: a near-simultaneous refresh (this proactive path shares
+				// token-manager's module-level cache) already produced a fresh token.
+				// Reuse it rather than racing a second rotation that would fail as
+				// invalid_grant against the just-invalidated old token.
+				if (getCoalescibleRecentRefresh(row.id, account.access_token)) {
+					log.debug(
+						`Proactive refresh for ${row.name} skipped — a concurrent refresh already produced a fresh token`,
+					);
+					continue;
+				}
+
+				// Snapshot the refresh token this attempt will EXCHANGE so the persist
+				// below can compare-and-swap on it (the backstop; see
+				// updateAccountTokens).
+				const exchangedRefreshToken = row.refresh_token;
+
 				// Use refreshAccessTokenSafe to get deduplication and backoff handling
 				const refreshPromise = provider
 					.refreshToken(account, this.proxyContext.runtime.clientId)
 					.then(async (result) => {
 						const newRefreshToken = result.refreshToken ?? row.refresh_token;
-						await this.db.run(
-							`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
-							[
-								result.accessToken,
-								result.expiresAt,
-								newRefreshToken,
-								Date.now(),
-								row.id,
-							],
+						// AWAIT the durable write via the canonical token-write path
+						// (preserves refresh_token_issued_at) so a proactive rotation is
+						// persisted before we report success — a full/dropped writer queue
+						// must never silently lose the rotated refresh token. The
+						// exchanged-token CAS clause is the backstop that no-ops the write if
+						// a concurrent reauth/rotation installed new credentials meanwhile.
+						await this.proxyContext.dbOps.updateAccountTokens(
+							row.id,
+							result.accessToken,
+							result.expiresAt,
+							newRefreshToken,
+							result.identity ?? null,
+							exchangedRefreshToken ?? undefined,
 						);
+						// Feed the shared coalesce cache so a near-simultaneous
+						// request-triggered refresh reuses this token instead of racing.
+						recordRecentRefresh(row.id, result.accessToken, result.expiresAt);
 						log.info(
 							`Qwen token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
 						);
@@ -1260,17 +1287,31 @@ export class AutoRefreshScheduler {
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
 				await refreshPromise;
 			} catch (error) {
-				log.error(
-					`Failed to proactively refresh Qwen token for ${row.name}:`,
-					error,
-				);
 				// This proactive path calls provider.refreshToken directly (bypassing
-				// refreshAccessTokenSafe), so pause-for-reauth on a revoked token here too.
-				await pauseAccountForReauthIfInvalidGrant(
+				// refreshAccessTokenSafe), so classify + pause-for-reauth here too, and
+				// gate the log so a benign race loser doesn't alarm.
+				const isInvalidGrant =
+					error instanceof OAuthRefreshTokenError ||
+					isInvalidGrantMessage(
+						error instanceof Error ? error.message : String(error),
+					);
+				const paused = await pauseAccountForReauthIfInvalidGrant(
 					error,
 					{ id: row.id, name: row.name, refresh_token: row.refresh_token },
 					this.proxyContext.dbOps,
 				);
+				if (paused) {
+					// pauseAccountForReauthIfInvalidGrant already logged the reauth error.
+				} else if (isInvalidGrant) {
+					log.info(
+						`Proactive Qwen refresh for ${row.name} was superseded by a concurrent refresh or the account is already flagged; leaving it active.`,
+					);
+				} else {
+					log.error(
+						`Failed to proactively refresh Qwen token for ${row.name}:`,
+						error,
+					);
+				}
 			}
 		}
 	}
@@ -1382,24 +1423,49 @@ export class AutoRefreshScheduler {
 					consecutive_rate_limits: 0,
 				};
 
+				// Coalesce skip: a near-simultaneous refresh (this proactive path shares
+				// token-manager's module-level cache) already produced a fresh token.
+				// Reuse it rather than racing a second rotation that would fail as
+				// invalid_grant against the just-invalidated old token.
+				if (getCoalescibleRecentRefresh(row.id, account.access_token)) {
+					log.debug(
+						`Proactive refresh for ${row.name} skipped — a concurrent refresh already produced a fresh token`,
+					);
+					continue;
+				}
+
+				// Snapshot the refresh token this attempt will EXCHANGE so the persist
+				// below can compare-and-swap on it (the backstop; see
+				// updateAccountTokens).
+				const exchangedRefreshToken = row.refresh_token;
+
 				// Register in refreshInFlight so concurrent request-triggered refreshes join this one
 				const refreshPromise = provider
 					.refreshToken(account, this.proxyContext.runtime.clientId)
 					.then(async (result) => {
 						const newRefreshToken = result.refreshToken ?? row.refresh_token;
-						// Persist via the canonical token-write path, which COALESCE-merges
-						// identity (a null from a refresh lacking an id_token never erases a
-						// previously-captured value; identity_captured_at advances only when
-						// identity is present) and stamps refresh_token_issued_at. Codex
-						// exposes no org name / profile endpoint, so identity_organization_name
-						// COALESCEs to itself and identity_profile_fetched_at is never touched.
+						// AWAIT the durable write via the canonical token-write path, which
+						// COALESCE-merges identity (a null from a refresh lacking an id_token
+						// never erases a previously-captured value; identity_captured_at
+						// advances only when identity is present) and stamps
+						// refresh_token_issued_at. Codex exposes no org name / profile
+						// endpoint, so identity_organization_name COALESCEs to itself and
+						// identity_profile_fetched_at is never touched. Awaited so a proactive
+						// rotation is persisted before success — a full/dropped writer queue
+						// must never silently lose the rotated refresh token. The
+						// exchanged-token CAS clause is the backstop that no-ops the write if
+						// a concurrent reauth/rotation installed new credentials meanwhile.
 						await this.proxyContext.dbOps.updateAccountTokens(
 							row.id,
 							result.accessToken,
 							result.expiresAt,
 							newRefreshToken,
 							result.identity ?? null,
+							exchangedRefreshToken ?? undefined,
 						);
+						// Feed the shared coalesce cache so a near-simultaneous
+						// request-triggered refresh reuses this token instead of racing.
+						recordRecentRefresh(row.id, result.accessToken, result.expiresAt);
 						log.info(
 							`Codex token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
 						);
@@ -1412,17 +1478,31 @@ export class AutoRefreshScheduler {
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
 				await refreshPromise;
 			} catch (error) {
-				log.error(
-					`Failed to proactively refresh Codex token for ${row.name}:`,
-					error,
-				);
 				// This proactive path calls provider.refreshToken directly (bypassing
-				// refreshAccessTokenSafe), so pause-for-reauth on a revoked token here too.
-				await pauseAccountForReauthIfInvalidGrant(
+				// refreshAccessTokenSafe), so classify + pause-for-reauth here too, and
+				// gate the log so a benign race loser doesn't alarm.
+				const isInvalidGrant =
+					error instanceof OAuthRefreshTokenError ||
+					isInvalidGrantMessage(
+						error instanceof Error ? error.message : String(error),
+					);
+				const paused = await pauseAccountForReauthIfInvalidGrant(
 					error,
 					{ id: row.id, name: row.name, refresh_token: row.refresh_token },
 					this.proxyContext.dbOps,
 				);
+				if (paused) {
+					// pauseAccountForReauthIfInvalidGrant already logged the reauth error.
+				} else if (isInvalidGrant) {
+					log.info(
+						`Proactive Codex refresh for ${row.name} was superseded by a concurrent refresh or the account is already flagged; leaving it active.`,
+					);
+				} else {
+					log.error(
+						`Failed to proactively refresh Codex token for ${row.name}:`,
+						error,
+					);
+				}
 			}
 		}
 	}
