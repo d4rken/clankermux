@@ -146,12 +146,14 @@ type SchedulerInternals = AutoRefreshScheduler & {
 async function makeScheduler(
 	db: ReturnType<typeof makeDb>,
 	coordinator: ReturnType<typeof makeCoordinator>,
+	dispatch?: (...args: unknown[]) => Promise<Response>,
 ): Promise<SchedulerInternals> {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
 		makeProxyContext() as never,
 		coordinator as never,
+		dispatch as never,
 	) as never as SchedulerInternals;
 }
 
@@ -252,6 +254,33 @@ describe("AutoRefreshScheduler — codex native prime via coordinator", () => {
 		expect(cooldownWrite).toBeUndefined();
 	});
 
+	it("completed + responseOk=false (529) is NEUTRAL — no failure recorded, no pause", async () => {
+		// A 529 (overloaded) is a transient capacity signal, not a broken endpoint.
+		// It must not count toward the re-auth threshold (which would false-pause the
+		// account). Same provider-independent rule as the translated auto-refresh path.
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, 529));
+		const scheduler = await makeScheduler(db, coordinator);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-529" }));
+
+		expect(scheduler.consecutiveFailures.get("codex-529")).toBeUndefined();
+		// No recordRefreshFailure → no pause UPDATE.
+		expect(db.runWithChanges).not.toHaveBeenCalled();
+	});
+
+	it("completed + 529 does NOT reset a prior genuine failure streak (skip-without-reset)", async () => {
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, 529));
+		const scheduler = await makeScheduler(db, coordinator);
+		// A real failure streak already exists; an interleaved 529 must leave it intact.
+		scheduler.consecutiveFailures.set("codex-529-mix", 3);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-529-mix" }));
+
+		expect(scheduler.consecutiveFailures.get("codex-529-mix")).toBe(3);
+	});
+
 	it("completed + responseOk=true + earliestResetMs updates lastRefreshResetTime and clears the failure counter", async () => {
 		const db = makeDb();
 		const resetMs = Date.now() + 3 * 60 * 60 * 1000;
@@ -333,6 +362,30 @@ describe("AutoRefreshScheduler — codex native prime via coordinator", () => {
 
 		const resumeWrite = db.runCalls.find((c) => c.sql.includes("paused = 0"));
 		expect(resumeWrite).toBeUndefined();
+	});
+
+	it("translated prime: records a failure when every model dispatch rejects (no-response backstop)", async () => {
+		// dispatchProxyRequest is contracted to map errors to a Response, so the
+		// scheduler's no-response branch only fires if that contract is violated
+		// (dispatch rejects). Regression guard: this path previously returned
+		// without recording, so a persistently un-dispatchable account never tripped
+		// FAILURE_THRESHOLD. Inject a rejecting dispatch to drive the branch.
+		const db = makeDb([{ auto_refresh_enabled: 1 }]); // race-guard passes
+		const coordinator = makeCoordinator(completed(true, 200)); // unused for anthropic
+		const rejectingDispatch = async () => {
+			throw new Error("dispatch exploded");
+		};
+		const scheduler = await makeScheduler(db, coordinator, rejectingDispatch);
+
+		const ok = await scheduler.sendTranslatedClaudePrime(
+			makeRow({ id: "anthropic-noresp", provider: "anthropic" }),
+		);
+
+		expect(ok).toBe(false);
+		// The no-response backstop must now count exactly one failure.
+		expect(scheduler.consecutiveFailures.get("anthropic-noresp")).toBe(1);
+		// It is NOT a 529, so it is a genuine failure (not the neutral-529 path).
+		expect(coordinator.observe).not.toHaveBeenCalled();
 	});
 
 	it("an ANTHROPIC account still uses the translated sendTranslatedClaudePrime path and never calls the coordinator", async () => {

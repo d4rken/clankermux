@@ -171,14 +171,23 @@ export class AutoRefreshScheduler {
 	// constructs the real coordinator over the same proxyContext.
 	private readonly coordinator: CodexSpendCoordinator;
 
+	// Injectable dispatch seam for the translated Anthropic prime (defaults to the
+	// real dispatchProxyRequest). Injectable — like `coordinator` — so tests can
+	// force a dispatch rejection to exercise the no-response failure path WITHOUT
+	// mock.module (which bun keeps global for the whole run and leaks into sibling
+	// test files).
+	private readonly dispatch: typeof dispatchProxyRequest;
+
 	constructor(
 		db: BunSqlAdapter,
 		proxyContext: ProxyContext,
 		coordinator?: CodexSpendCoordinator,
+		dispatch: typeof dispatchProxyRequest = dispatchProxyRequest,
 	) {
 		this.db = db;
 		this.proxyContext = proxyContext;
 		this.coordinator = coordinator ?? new CodexSpendCoordinator(proxyContext);
+		this.dispatch = dispatch;
 	}
 
 	/**
@@ -482,6 +491,16 @@ export class AutoRefreshScheduler {
 				return;
 			case "completed": {
 				if (!result.responseOk) {
+					// A 529 (overloaded) is a transient capacity signal, not a broken
+					// endpoint — same provider-independent rule as the translated
+					// auto-refresh path. Treat it as neutral: neither count it toward
+					// the re-auth threshold nor reset a prior genuine failure streak.
+					if (result.responseStatus === 529) {
+						log.warn(
+							`Codex scheduled prime for ${accountRow.name} received 529 (overloaded); treating as neutral, not a failure`,
+						);
+						return;
+					}
 					// 429/5xx: the coordinator/applicator already persisted any reset and
 					// applied the 429 cooldown — do NOT re-apply it here. Just count the
 					// failure toward the re-auth threshold, matching the old failure path.
@@ -750,7 +769,7 @@ export class AutoRefreshScheduler {
 						headers,
 						body: JSON.stringify(requestBody),
 					});
-					response = await dispatchProxyRequest(
+					response = await this.dispatch(
 						req,
 						url,
 						this.proxyContext,
@@ -783,11 +802,22 @@ export class AutoRefreshScheduler {
 				}
 			}
 
-			// If we couldn't get any successful response
+			// If we couldn't get any successful response, every per-model dispatch
+			// threw (dispatchProxyRequest is contracted to map errors to a Response,
+			// so this is the defensive backstop for that contract being violated).
+			// This is a genuine failure and MUST be counted toward the re-auth
+			// threshold — the same as the error-status and exception paths below.
+			// Previously it returned without recording, so a persistently
+			// un-dispatchable account never tripped FAILURE_THRESHOLD via this path.
 			if (!response) {
 				const errorMsg = lastError?.message || "All models failed";
 				log.error(
 					`Failed to send auto-refresh message to ${accountRow.name} with any model: ${errorMsg}`,
+				);
+				await this.recordRefreshFailure(
+					accountRow.id,
+					accountRow.name,
+					"(no response from any model)",
 				);
 				return false;
 			}
@@ -942,6 +972,20 @@ export class AutoRefreshScheduler {
 				}
 
 				return true;
+			}
+
+			// A 529 (overloaded) is a transient capacity/throttle signal, not a
+			// broken endpoint. A probe can legitimately receive one from the
+			// provider-overload gate, an overflowed overload-hold, or raw upstream
+			// Anthropic overload (probes are deliberately excluded from being HELD,
+			// so they get an immediate 529). Treat it as neutral: do NOT count it
+			// toward FAILURE_THRESHOLD (which would false-auto-pause the account) and
+			// do NOT reset a prior genuine failure streak — just skip.
+			if (response.status === 529) {
+				log.warn(
+					`Auto-refresh for ${accountRow.name} received 529 (overloaded); treating as neutral, not a failure`,
+				);
+				return false;
 			}
 
 			log.error(

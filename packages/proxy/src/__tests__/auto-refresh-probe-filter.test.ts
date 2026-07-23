@@ -9,7 +9,10 @@
  */
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
-import { isSyntheticInternalRequest } from "../handlers/proxy-operations";
+import {
+	isSyntheticInternalRequest,
+	isTrustedSyntheticProbe,
+} from "../handlers/proxy-operations";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -93,6 +96,57 @@ describe("proxy-operations — isSyntheticInternal header detection", () => {
 			method: "POST",
 		});
 		expect(isSyntheticInternalRequest(req.headers)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isTrustedSyntheticProbe — the trust-gated variant used to exempt probes from
+// usage throttling. Header presence alone is client-spoofable, so the exemption
+// MUST also require the trusted in-process `internal` flag.
+// ---------------------------------------------------------------------------
+
+describe("proxy-operations — isTrustedSyntheticProbe (trust-gated exemption)", () => {
+	const withHeaders = (h: Record<string, string>) =>
+		new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: h,
+		}).headers;
+
+	it("internal dispatch + auto-refresh header → trusted probe", () => {
+		expect(
+			isTrustedSyntheticProbe(
+				withHeaders({ "x-clankermux-auto-refresh": "true" }),
+				true,
+			),
+		).toBe(true);
+	});
+
+	it("internal dispatch + keepalive header → trusted probe", () => {
+		expect(
+			isTrustedSyntheticProbe(
+				withHeaders({ "x-clankermux-keepalive": "true" }),
+				true,
+			),
+		).toBe(true);
+	});
+
+	it("SPOOF GUARD: external request with a spoofed auto-refresh header → NOT trusted", () => {
+		// isInternal=false: an external client set the header itself. The exemption
+		// must reject it so it cannot dodge operator-configured usage throttling.
+		expect(
+			isTrustedSyntheticProbe(
+				withHeaders({ "x-clankermux-auto-refresh": "true" }),
+				false,
+			),
+		).toBe(false);
+	});
+
+	it("internal dispatch WITHOUT a probe header → NOT trusted", () => {
+		expect(isTrustedSyntheticProbe(withHeaders({}), true)).toBe(false);
+	});
+
+	it("external request without a probe header → NOT trusted", () => {
+		expect(isTrustedSyntheticProbe(withHeaders({}), false)).toBe(false);
 	});
 });
 

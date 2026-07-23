@@ -6,6 +6,7 @@ import { EventEmitter } from "node:events";
 import { isDebugEnabled } from "@clankermux/core/env";
 import type { LogEvent } from "@clankermux/types";
 import { logFileWriter } from "./file-writer";
+import { safeReason } from "./serialize";
 
 export enum LogLevel {
 	DEBUG = 0,
@@ -22,10 +23,25 @@ export const logBus = new EventEmitter();
 // Error's name/message/stack are non-enumerable, so JSON.stringify(err) returns "{}".
 // Convert Errors to plain objects before they flow into formatMessage / LogEvent /
 // the file writer, which all use JSON.stringify downstream.
+//
+// The Error.cause chain is walked recursively but cycle-guarded: a
+// self-referential cause (`err.cause = err`) would otherwise overflow the stack
+// here — before the payload ever reaches the JSON.stringify serialization guard
+// downstream. `seen` tracks Errors already visited on this chain.
 // biome-ignore lint/suspicious/noExplicitAny: payload is intentionally untyped
-function normalizeLogData(data: any): any {
+function normalizeLogData(data: any, seen?: WeakSet<object>): any {
 	if (data === undefined || data === null) return data;
 	if (data instanceof Error) {
+		const visited = seen ?? new WeakSet<object>();
+		if (visited.has(data)) {
+			return {
+				name: data.name,
+				message: data.message,
+				stack: data.stack,
+				cause: "[circular error cause]",
+			};
+		}
+		visited.add(data);
 		const out: Record<string, unknown> = {
 			name: data.name,
 			message: data.message,
@@ -33,7 +49,9 @@ function normalizeLogData(data: any): any {
 		};
 		if (data.cause !== undefined) {
 			out.cause =
-				data.cause instanceof Error ? normalizeLogData(data.cause) : data.cause;
+				data.cause instanceof Error
+					? normalizeLogData(data.cause, visited)
+					: data.cause;
 		}
 		return out;
 	}
@@ -86,10 +104,32 @@ export class Logger {
 				msg: message,
 				...(data && { data }),
 			};
-			return JSON.stringify(logEntry);
+			// Guard against unserializable `data` (circular/BigInt/throwing toJSON)
+			// crashing the caller. Happy path is byte-identical; on failure the
+			// envelope is rebuilt preserving ts/level/prefix/msg — only `data` is
+			// replaced with a marker. The envelope fields are always plain strings,
+			// so the fallback stringify cannot itself throw.
+			try {
+				return JSON.stringify(logEntry);
+			} catch (e: unknown) {
+				return JSON.stringify({
+					ts: timestamp,
+					level,
+					prefix: this.prefix || undefined,
+					msg: message,
+					data: `[unserializable: ${safeReason(e)}]`,
+				});
+			}
 		} else {
 			const prefix = this.prefix ? `[${this.prefix}] ` : "";
-			const dataStr = data ? ` ${JSON.stringify(data)}` : "";
+			let dataStr = "";
+			if (data) {
+				try {
+					dataStr = ` ${JSON.stringify(data)}`;
+				} catch (e: unknown) {
+					dataStr = ` [unserializable: ${safeReason(e)}]`;
+				}
+			}
 			return `[${timestamp}] ${level}: ${prefix}${message}${dataStr}`;
 		}
 	}
