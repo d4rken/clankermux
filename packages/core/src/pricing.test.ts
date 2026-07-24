@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	__pricingTestHooks,
 	estimateCostUSD,
 	getModelCacheRates,
 	type TokenBreakdown,
@@ -108,6 +109,119 @@ describe("bundled Opus pricing (offline fallback)", () => {
 		expect(await estimateCostUSD("claude-opus-4-7", ioTokens)).toBeCloseTo(
 			30,
 			6,
+		);
+	});
+});
+
+describe("bundled cost fields backfill a partial remote entry", () => {
+	// models.dev can list a freshly-released model before it carries cache
+	// pricing. Merging "remote wins wholesale" would then leave the merged entry
+	// without cache_read/cache_write, getCostRate would throw, and the WHOLE
+	// request cost would collapse to 0 (persisted as NULL) — the same outage the
+	// bundled entry exists to prevent. Bundled must fill the per-field gaps while
+	// every value the remote does define still wins.
+	const allTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	async function withRemoteCatalogue(
+		remote: unknown,
+		run: () => Promise<void>,
+	): Promise<void> {
+		const offlineFetch = globalThis.fetch;
+		// Point the disk cache somewhere disposable so the stub catalogue can't
+		// leak into any later test through the on-disk pricing cache.
+		const remoteTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
+		process.env.TMPDIR = remoteTmpdir;
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify(remote), {
+				headers: { "content-type": "application/json" },
+			})) as typeof globalThis.fetch;
+		try {
+			__pricingTestHooks.reset();
+			await __pricingTestHooks.loadPricing();
+			await run();
+		} finally {
+			globalThis.fetch = offlineFetch;
+			process.env.TMPDIR = pricingTmpdir;
+			rmSync(remoteTmpdir, { recursive: true, force: true });
+			__pricingTestHooks.reset();
+		}
+	}
+
+	it("fills missing cache costs while the remote input cost still wins", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// Deliberately no cache_read/cache_write, and an input
+							// cost that differs from the bundled $5 so we can tell
+							// which side won.
+							cost: { input: 7, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				// 7 (remote input) + 25 (remote output) + 0.5 + 6.25 (bundled cache)
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					38.75,
+					6,
+				);
+			},
+		);
+	});
+
+	it("still adds models the remote catalogue omits entirely", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							cost: { input: 7, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				// claude-opus-4-8 is bundled-only in this catalogue: 5 + 25 + 0.5 + 6.25
+				expect(await estimateCostUSD("claude-opus-4-8", allTokens)).toBeCloseTo(
+					36.75,
+					6,
+				);
+			},
+		);
+	});
+
+	it("does not overwrite a remote cost of zero", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// A free/zero-rated field is a defined remote value and
+							// must survive the backfill.
+							cost: { input: 5, output: 25, cache_read: 0, cache_write: 0 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					30,
+					6,
+				);
+			},
 		);
 	});
 });

@@ -369,14 +369,30 @@ class PriceCatalogue {
 					merged[providerName].models = {};
 				}
 
-				// Add any missing models from bundled data
+				// Fill gaps in the remote table from bundled data: models the remote
+				// omits entirely, plus individual cost fields a present remote entry
+				// leaves undefined. Remote values always win where they are defined
+				// (including 0) — bundled only backfills holes. Without the per-field
+				// backfill, a remote entry that lists a model but omits e.g.
+				// cache_read makes getCostRate throw and collapses the ENTIRE request
+				// cost to 0 (persisted as NULL), which is exactly what the bundled
+				// table exists to prevent.
 				let addedModels = 0;
+				let backfilledModels = 0;
 				for (const [modelId, modelData] of Object.entries(
 					providerData.models,
 				)) {
-					if (!merged[providerName].models?.[modelId]) {
+					const existing = merged[providerName].models?.[modelId];
+					if (!existing) {
 						merged[providerName].models[modelId] = modelData;
 						addedModels++;
+						continue;
+					}
+					if (
+						modelData.cost &&
+						this.backfillModelCost(existing, modelData.cost)
+					) {
+						backfilledModels++;
 					}
 				}
 
@@ -385,10 +401,60 @@ class PriceCatalogue {
 						`Added ${addedModels} missing models for provider "${providerName}" from bundled pricing`,
 					);
 				}
+
+				if (backfilledModels > 0) {
+					this.logger?.debug(
+						`Backfilled missing cost fields for ${backfilledModels} models of provider "${providerName}" from bundled pricing`,
+					);
+				}
 			}
 		}
 
 		return merged;
+	}
+
+	/**
+	 * Copy any cost field the remote entry leaves undefined from the bundled
+	 * entry. Remote values win wherever they are defined, so a rate the remote
+	 * reports as 0 is preserved rather than treated as missing. Returns true when
+	 * at least one field was filled in.
+	 *
+	 * Both sides are treated as Partial<ModelCost>: the remote table is parsed
+	 * JSON, so any field can be absent at runtime regardless of the declared type.
+	 */
+	private backfillModelCost(
+		remoteModel: ModelDef,
+		bundledCost: Partial<ModelCost>,
+	): boolean {
+		if (!remoteModel.cost) {
+			remoteModel.cost = { ...bundledCost } as ModelCost;
+			return true;
+		}
+
+		const cost = remoteModel.cost as Partial<ModelCost>;
+		let filled = false;
+
+		if (cost.input === undefined && bundledCost.input !== undefined) {
+			cost.input = bundledCost.input;
+			filled = true;
+		}
+		if (cost.output === undefined && bundledCost.output !== undefined) {
+			cost.output = bundledCost.output;
+			filled = true;
+		}
+		if (cost.cache_read === undefined && bundledCost.cache_read !== undefined) {
+			cost.cache_read = bundledCost.cache_read;
+			filled = true;
+		}
+		if (
+			cost.cache_write === undefined &&
+			bundledCost.cache_write !== undefined
+		) {
+			cost.cache_write = bundledCost.cache_write;
+			filled = true;
+		}
+
+		return filled;
 	}
 
 	/**
