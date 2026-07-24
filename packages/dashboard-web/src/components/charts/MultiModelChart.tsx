@@ -1,4 +1,3 @@
-import { getModelShortName } from "@clankermux/core";
 import {
 	formatCost,
 	formatNumber,
@@ -16,17 +15,12 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import {
-	CHART_COLORS,
-	CHART_HEIGHTS,
-	CHART_PROPS,
-	COLORS,
-	type TimeRange,
-} from "../../constants";
+import { CHART_HEIGHTS, CHART_PROPS, type TimeRange } from "../../constants";
 import {
 	formatCompactCurrency,
 	formatCompactNumber,
 } from "../../lib/chart-utils";
+import { getModelColor } from "../../lib/model-colors";
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
@@ -50,38 +44,6 @@ interface MultiModelChartProps {
 	loading?: boolean;
 	height?: number;
 	timeRange?: TimeRange;
-}
-
-// Model-based color palette
-const MODEL_COLORS: Record<string, string> = {
-	"claude-3.5-sonnet": COLORS.purple,
-	"claude-3.5-haiku": COLORS.success,
-	"claude-3-opus": COLORS.blue,
-	"claude-opus-4": COLORS.pink,
-	"claude-opus-4.1": COLORS.indigo,
-	"claude-sonnet-4": COLORS.cyan,
-	"claude-sonnet-4.5": COLORS.purple,
-	"claude-fable-5": COLORS.warning,
-	"claude-mythos-5": COLORS.primary,
-};
-
-function getModelColor(model: string, index: number): string {
-	// Try to find color by short name first
-	const shortName = getModelShortName(model);
-	if (MODEL_COLORS[shortName]) return MODEL_COLORS[shortName];
-
-	// Check for exact match
-	if (MODEL_COLORS[model]) return MODEL_COLORS[model];
-
-	// Check for partial matches
-	for (const [key, color] of Object.entries(MODEL_COLORS)) {
-		if (model.includes(key) || key.includes(model)) {
-			return color;
-		}
-	}
-
-	// Use chart colors array as fallback
-	return CHART_COLORS[index % CHART_COLORS.length];
 }
 
 function getMetricLabel(metric: string): string {
