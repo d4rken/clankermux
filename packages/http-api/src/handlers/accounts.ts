@@ -80,6 +80,7 @@ import {
 	buildAccountUsagePredictions,
 } from "../services/build-account-predictions";
 import type { AccountResponse } from "../types";
+import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
 import { weeklyExhaustion } from "./health";
 
@@ -1235,6 +1236,14 @@ export function createAccountAddHandler(
 						customEndpoint || null,
 					],
 				);
+
+				// Start usage polling immediately so the account's 5h/weekly bars
+				// populate right away instead of a blank placeholder until restart.
+				await primeUsagePollingForNewAccount({
+					id: accountId,
+					provider,
+					name,
+				});
 
 				return jsonResponse({
 					success: true,
