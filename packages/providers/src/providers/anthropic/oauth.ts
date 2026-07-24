@@ -155,7 +155,7 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 			organization?: unknown;
 		};
 
-		console.log("[AnthropicOAuth] exchange response:", {
+		oauthLog.debug("exchange response:", {
 			expiresIn: json.expires_in,
 			hasRefreshToken: !!json.refresh_token,
 			responseKeys: Object.keys(json),
