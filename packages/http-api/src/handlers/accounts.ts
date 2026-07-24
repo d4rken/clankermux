@@ -31,6 +31,7 @@ import {
 	getRepresentativeWindow,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
+	USAGE_CACHE_TTL_MS,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -293,12 +294,24 @@ export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 		: null;
 }
 
+/**
+ * Resolve a Codex account's usage, reporting WHERE it came from.
+ *
+ * The source matters to the caller: only a `"cache"` result actually describes
+ * the live cache entry, so only then may the response label it with that entry's
+ * sample time. A `"persisted"` result was reconstructed from stored response
+ * headers (the cached entry could not be normalized, or there was none), and a
+ * `null` data result means neither source produced anything.
+ */
 async function getCachedOrPersistedCodexUsage(
 	db: ReturnType<DatabaseOperations["getAdapter"]>,
 	accountId: string,
 	accountName: string,
 	cacheData: FullUsageData | null,
-): Promise<FullUsageData | null> {
+): Promise<{
+	data: FullUsageData | null;
+	source: "cache" | "persisted" | null;
+}> {
 	if (cacheData) {
 		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
 		if (normalizedCache) {
@@ -306,7 +319,7 @@ async function getCachedOrPersistedCodexUsage(
 			// carries the 5h/7d windows).
 			const cacheCredits = (cacheData as UsageData).codexCredits;
 			if (cacheCredits) normalizedCache.codexCredits = cacheCredits;
-			return normalizedCache as FullUsageData;
+			return { data: normalizedCache as FullUsageData, source: "cache" };
 		}
 	}
 	const rows = await db.query<{ json: string; timestamp: number | null }>(
@@ -349,7 +362,10 @@ async function getCachedOrPersistedCodexUsage(
 
 			usageCache.set(accountId, normalizedUsage);
 			log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
-			return normalizedUsage as FullUsageData;
+			return {
+				data: normalizedUsage as FullUsageData,
+				source: "persisted",
+			};
 		} catch (error) {
 			log.warn(
 				`Failed to recover Codex usage from stored payload for ${accountName}:`,
@@ -358,7 +374,7 @@ async function getCachedOrPersistedCodexUsage(
 		}
 	}
 
-	return null;
+	return { data: null, source: null };
 }
 
 /**
@@ -548,12 +564,47 @@ export function createAccountsListHandler(
 			)
 			.catch(() => new Map<string, number>());
 
-		// Read the live usage cache exactly once per account: get() evicts
-		// entries past their TTL as a side effect, so a second read later in the
-		// request could see an entry the stale-candidate filter still saw —
-		// leaving that account with neither live data nor a snapshot fallback.
+		// Live usage read ONCE per account via peekWithAge(): non-evicting, and it
+		// keeps serving a reading that is past the ROUTING TTL, reporting its true
+		// age (up to UI_STALE_HORIZON_MS). The old get() was evicting AND
+		// TTL-gated, which had two costs: (a) an idle account whose next poll had
+		// not landed yet showed the amber "Live usage unavailable" banner despite
+		// healthy polling, and (b) every read mutated cache state, so the read had
+		// to be hoisted here and threaded to avoid a second read evicting an entry
+		// the stale-candidate filter still needed. (a) is what this endpoint now
+		// fixes by carrying the age to the UI; the hoisting is kept anyway so the
+		// whole response is built from ONE consistent snapshot per account.
+		//
+		// TWO VIEWS, deliberately different — classify every new consumer:
+		//  - `liveUsageByAccount` (UI horizon, up to 30 min): DISPLAY only. What the
+		//    dashboard renders, annotated with `usageAsOfIso`. Used by the
+		//    stale-snapshot fallback filter, the rendered `usageData`/utilization/
+		//    window, the weekly-exhaustion label, the throttle annotation and the
+		//    Codex credits chip — all of which describe a reading AS OF a stated
+		//    time and stay honest when that time is minutes ago.
+		//  - `routingFreshUsageByAccount` (ROUTING TTL, 10 min): anything that
+		//    DERIVES a value modelling "now". Today that is the exhaustion
+		//    prediction, which appends the live reading as a data point stamped
+		//    `t: now` (see build-account-predictions.ts) — an aged reading injected
+		//    there would read as a fresh sample and skew the regression.
+		// (The `isPrimary` routing simulation reads the cache itself via
+		// usageCache.peek(), which is TTL-gated independently of both maps.)
+		const liveUsageEntryByAccount = new Map(
+			accounts.map((a) => [a.id, usageCache.peekWithAge(a.id)] as const),
+		);
 		const liveUsageByAccount = new Map(
-			accounts.map((a) => [a.id, usageCache.get(a.id)]),
+			accounts.map(
+				(a) => [a.id, liveUsageEntryByAccount.get(a.id)?.data ?? null] as const,
+			),
+		);
+		const routingFreshUsageByAccount = new Map(
+			accounts.map((a) => {
+				const entry = liveUsageEntryByAccount.get(a.id);
+				return [
+					a.id,
+					entry && entry.ageMs <= USAGE_CACHE_TTL_MS ? entry.data : null,
+				] as const;
+			}),
 		);
 
 		// Earned Codex resets come from a separate read-only account endpoint, not
@@ -593,11 +644,16 @@ export function createAccountsListHandler(
 		);
 
 		// Best-effort per-account exhaustion prediction: least-squares regression
-		// over recent stored snapshots + the live reading. Built from the same
-		// live usage cache the staleUsage fallback reads (the only live source
-		// available before the per-account map), then attached below. A DB or
+		// over recent stored snapshots + the live reading, attached below. A DB or
 		// compute failure must NEVER break the accounts response — on error every
 		// account simply gets `prediction: null`.
+		//
+		// Sourced from `routingFreshUsageByAccount`, NOT the display view:
+		// buildAccountUsagePredictions appends this reading with `t: now`, so a
+		// reading that is minutes old would enter the regression claiming to be
+		// current and flatten or skew the forecast. An account whose reading has
+		// aged past the routing TTL simply predicts from its stored snapshots
+		// (or gets `prediction: null`) until the next poll lands.
 		const isoToMs = (s: string | null | undefined): number | null => {
 			if (s == null) return null;
 			const ms = Date.parse(s);
@@ -609,7 +665,7 @@ export function createAccountsListHandler(
 			// Only Anthropic-style providers expose the 5h/7d windows the
 			// prediction model consumes.
 			if (provider !== "anthropic" && provider !== "codex") continue;
-			const live = liveUsageByAccount.get(a.id);
+			const live = routingFreshUsageByAccount.get(a.id);
 			if (!live || typeof live !== "object") continue;
 			const fiveHour = (live as AnthropicUsageData).five_hour;
 			const sevenDay = (live as AnthropicUsageData).seven_day;
@@ -673,16 +729,23 @@ export function createAccountsListHandler(
 						: null;
 
 				// Get usage data from cache for providers that expose account-page quota or credit data
+				const liveUsageEntry = liveUsageEntryByAccount.get(account.id) ?? null;
 				const cachedUsageData = liveUsageByAccount.get(account.id) ?? null;
 				let usageData: FullUsageData | null =
 					cachedUsageData as FullUsageData | null;
+				// Whether the usage we are about to serve really IS the live cache
+				// entry — the only case where labelling it with that entry's sample
+				// time is truthful. Codex may substitute DB-restored data below.
+				let usageIsLiveCacheEntry = liveUsageEntry != null;
 				if (account.provider === "codex") {
-					usageData = await getCachedOrPersistedCodexUsage(
+					const resolved = await getCachedOrPersistedCodexUsage(
 						db,
 						account.id,
 						account.name,
 						usageData,
 					);
+					usageData = resolved.data;
+					usageIsLiveCacheEntry = resolved.source === "cache";
 				}
 
 				// Account-wide weekly exhaustion (anthropic/codex only): the weeklyAll
@@ -718,9 +781,8 @@ export function createAccountsListHandler(
 				// after a window roll), which would otherwise drop the credits chip
 				// even though the cache knows the account is on credits. Reuse the
 				// already-read `cachedUsageData` (the single per-account cache read
-				// from `liveUsageByAccount`, line 510) rather than reading the cache
-				// a second time — a second get() could evict a TTL-expired entry the
-				// stale-candidate filter still needs.
+				// from `liveUsageByAccount`) rather than reading the cache again, so
+				// the whole response describes one consistent snapshot per account.
 				const codexCredits =
 					account.provider === "codex"
 						? ((usageData as UsageData | null)?.codexCredits ??
@@ -887,10 +949,21 @@ export function createAccountsListHandler(
 					fiveHourEnabled: config.getUsageThrottlingFiveHourEnabled(),
 					weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
 				};
+				// Unlike the bars, "requests are being delayed" is a claim about what
+				// the PROXY is doing right now, and the proxy gates throttling on a
+				// routing-fresh reading (`usageCache.peek()`, TTL-gated). Mirror that
+				// gate so an aged display reading can't announce a delay that isn't
+				// happening. Age of the reading behind `fullUsageData`: the live cache
+				// entry's, or 0 for a Codex payload just re-derived from stored headers
+				// (that path re-warms the cache, so the proxy sees it as fresh too).
+				const usageDataAgeMs = usageIsLiveCacheEntry
+					? (liveUsageEntry?.ageMs ?? 0)
+					: 0;
 				if (
 					(usageThrottleSettings.fiveHourEnabled ||
 						usageThrottleSettings.weeklyEnabled) &&
-					fullUsageData
+					fullUsageData &&
+					usageDataAgeMs <= USAGE_CACHE_TTL_MS
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
 						fullUsageData as AnyUsageData,
@@ -990,6 +1063,19 @@ export function createAccountsListHandler(
 					codexCredits, // Codex-only credits state (null otherwise)
 					codexRateLimitResetCredits,
 					staleUsage,
+					// When the reading in `usageData` was sampled. Emitted ONLY when that
+					// data really is the live cache entry — a Codex payload restored
+					// from the DB (or an absent reading) gets null rather than a
+					// borrowed timestamp. Uses the entry's ABSOLUTE write time, never
+					// `now - ageMs`: `now` predates this response's DB round-trips, so
+					// the subtraction would report the reading as older than it is.
+					// The dashboard annotates the bars with this once the reading is
+					// older than the routing TTL — an honest age beats claiming the
+					// data is unavailable.
+					usageAsOfIso:
+						usageIsLiveCacheEntry && liveUsageEntry
+							? new Date(liveUsageEntry.sampledAtMs).toISOString()
+							: null,
 					prediction: predictionByAccount.get(account.id) ?? null,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,

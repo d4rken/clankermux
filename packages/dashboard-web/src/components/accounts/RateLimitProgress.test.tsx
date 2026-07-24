@@ -661,6 +661,144 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("Weekly: last known as of");
 		});
 
+		// Data that is 11 minutes old is not "unavailable" — it is live data with an
+		// honest age. The amber warning is reserved for genuinely absent data.
+		describe("aging live usage", () => {
+			const liveWindows = () => {
+				const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+				return {
+					five_hour: { utilization: 10, resets_at: future },
+					seven_day: { utilization: 42, resets_at: future },
+				};
+			};
+
+			it("annotates the live bars with an 'as of' time once past the routing TTL", () => {
+				const asOf = new Date(Date.now() - 11 * 60 * 1000);
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={liveWindows()}
+						usageAsOfIso={asOf.toISOString()}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).toContain("Live usage as of");
+				// The real bars are still rendered, not the amber fallback.
+				expect(html).toContain("42%");
+				expect(html).not.toContain(
+					"Live usage unavailable — showing last known data",
+				);
+			});
+
+			it("does not annotate a reading that is still within the routing TTL", () => {
+				const asOf = new Date(Date.now() - 2 * 60 * 1000);
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={liveWindows()}
+						usageAsOfIso={asOf.toISOString()}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).not.toContain("Live usage as of");
+				expect(html).toContain("42%");
+			});
+
+			it("does not annotate when the server sent no as-of timestamp", () => {
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={liveWindows()}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).not.toContain("Live usage as of");
+			});
+
+			// The Kilo credits card returns before the window grid is built, so it
+			// needs the disclosure applied on its own path — a balance served from a
+			// 20-minute-old cache entry must not read as a current balance.
+			it("discloses the age on an aged Kilo credit balance", () => {
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={{
+							remainingUsd: 12.5,
+							totalMicrodollarsAcquired: 50_000_000,
+						}}
+						usageAsOfIso={new Date(Date.now() - 20 * 60 * 1000).toISOString()}
+						provider="kilo"
+					/>,
+				);
+
+				expect(html).toContain("$12.50 remaining");
+				expect(html).toContain("Live usage as of");
+			});
+
+			it("does not annotate a fresh Kilo credit balance", () => {
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={{
+							remainingUsd: 12.5,
+							totalMicrodollarsAcquired: 50_000_000,
+						}}
+						usageAsOfIso={new Date(Date.now() - 60 * 1000).toISOString()}
+						provider="kilo"
+					/>,
+				);
+
+				expect(html).toContain("$12.50 remaining");
+				expect(html).not.toContain("Live usage as of");
+			});
+
+			it("still shows the amber fallback when there is genuinely no live data", () => {
+				const { info } = staleUsage();
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={null}
+						staleUsage={info}
+						usageAsOfIso={new Date(Date.now() - 11 * 60 * 1000).toISOString()}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).toContain(
+					"Live usage unavailable — showing last known data",
+				);
+				expect(html).not.toContain("Live usage as of");
+			});
+
+			it("keeps the rate-limited wording when the usage API is 429ing", () => {
+				const { info } = staleUsage();
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={null}
+						staleUsage={info}
+						usageRateLimitedUntil={Date.now() + 60 * 1000}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).toContain(
+					"Usage API rate limited — showing last known data",
+				);
+				expect(html).not.toContain(
+					"Live usage unavailable — showing last known data",
+				);
+			});
+		});
+
 		it("prefers live usage data over the stale snapshot", () => {
 			const { info } = staleUsage();
 			const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();

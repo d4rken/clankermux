@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { usageCache } from "@clankermux/providers";
@@ -193,5 +193,79 @@ describe("accounts list usage prediction wiring", () => {
 
 		expect(rising?.prediction?.fiveHour?.state).toBe("rising");
 		expect(none?.prediction).toBeNull();
+	});
+});
+
+/**
+ * The accounts endpoint serves live usage for DISPLAY well past the routing TTL
+ * (up to the UI horizon), annotated with its age. The exhaustion prediction is a
+ * DERIVED COMPUTATION, not display: buildAccountUsagePredictions appends the
+ * live reading as a data point stamped `t: now`, so feeding it an aged reading
+ * would inject a stale utilization as if it had just been sampled, flattening or
+ * skewing the regression. Predictions must stay gated on the ROUTING TTL.
+ */
+describe("accounts list prediction freshness gating", () => {
+	const AGED_ID = "acc-aged";
+	const FRESH_ID = "acc-fresh";
+	const BASE = 1_700_000_000_000;
+	const MINUTE_MS = 60 * 1000;
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(AGED_ID);
+		usageCache.delete(FRESH_ID);
+	});
+	afterEach(() => {
+		usageCache.delete(AGED_ID);
+		usageCache.delete(FRESH_ID);
+		nowSpy.mockRestore();
+	});
+
+	const usage = (at: number) => ({
+		five_hour: {
+			utilization: 60,
+			resets_at: new Date(at + 3 * HOUR_MS).toISOString(),
+		},
+		seven_day: {
+			utilization: 20,
+			resets_at: new Date(at + 3 * HOUR_MS).toISOString(),
+		},
+	});
+
+	it("keeps a past-TTL reading out of the prediction while still displaying it", async () => {
+		usageCache.set(AGED_ID, usage(BASE)); // stamped at BASE
+		// 15 minutes later: past the 10-min routing TTL, inside the 30-min UI horizon.
+		nowSpy.mockReturnValue(BASE + 15 * MINUTE_MS);
+		usageCache.set(FRESH_ID, usage(BASE + 15 * MINUTE_MS)); // sampled "now"
+
+		const handler = createAccountsListHandler(
+			makeDbOps(
+				[
+					makeAccountRow({ id: AGED_ID, name: "Aged", provider: "anthropic" }),
+					makeAccountRow({
+						id: FRESH_ID,
+						name: "Fresh",
+						provider: "anthropic",
+					}),
+				],
+				[],
+			),
+			config,
+		);
+		const body = (await (await handler()).json()) as AccountResponse[];
+		const aged = body.find((a) => a.id === AGED_ID);
+		const fresh = body.find((a) => a.id === FRESH_ID);
+
+		// Display side: the aged reading is still served, with its honest age.
+		expect(aged?.usageData).not.toBeNull();
+		expect(aged?.usageUtilization).toBe(60);
+		expect(aged?.usageAsOfIso).toBe(new Date(BASE).toISOString());
+		// Derived side: it must NOT have entered the regression as a live point.
+		expect(aged?.prediction).toBeNull();
+
+		// Control — the routing-fresh account still feeds its prediction, so the
+		// gate is a freshness gate, not a blanket disable.
+		expect(fresh?.prediction).not.toBeNull();
 	});
 });

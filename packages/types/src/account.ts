@@ -319,6 +319,19 @@ export interface AccountResponse {
 		fetchedAt: string;
 	} | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
+	/**
+	 * When the LIVE reading in `usageData` was sampled (ISO). Null when
+	 * `usageData` did not come from the live usage cache — either there is no
+	 * cached reading (then `staleUsage` may carry a persisted snapshot instead) or
+	 * it was restored from the DB (Codex).
+	 *
+	 * The live cache is served to this endpoint non-evictively and stays served
+	 * past the routing freshness TTL, so a reading may legitimately be several
+	 * minutes old while polling is perfectly healthy. The dashboard annotates the
+	 * live bars with this "as of" time once the reading exceeds the routing TTL,
+	 * instead of pretending live data is unavailable. DISPLAY-ONLY.
+	 */
+	usageAsOfIso?: string | null;
 	prediction?: AccountUsagePrediction | null; // Server-computed regression-backed exhaustion prediction per window
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled

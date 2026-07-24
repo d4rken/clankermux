@@ -28,6 +28,7 @@ interface RateLimitProgressProps {
 	usageWindow?: string | null; // Window name (e.g., "five_hour")
 	usageData?: FullUsageData | null; // Full usage data from API
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
+	usageAsOfIso?: string | null; // When the live reading in usageData was sampled
 	usageRateLimitedUntil?: number | null; // Timestamp (ms) until usage API 429 clears
 	usageThrottledUntil?: number | null; // Timestamp (ms) until proactive usage throttling clears
 	usageThrottledWindows?: string[]; // Exact usage windows currently being throttled
@@ -53,6 +54,15 @@ function predictionForWindow(
 }
 
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
+
+// How old a LIVE reading may get before its age is worth surfacing. Mirrors the
+// server's routing freshness TTL (USAGE_CACHE_TTL_MS in @clankermux/providers,
+// which the browser bundle deliberately does not depend on): under it the value
+// is "current" and an age annotation would be noise; over it the reading is
+// still shown — it is real data, just older — but labelled with its "as of"
+// time so nobody reads a stale number as current. Genuinely absent live data is
+// a different state entirely and keeps the amber last-known-snapshot fallback.
+const LIVE_USAGE_FRESH_MS = 10 * 60 * 1000;
 
 // Each usage window renders as its own card. Primary windows (the 5-hour and
 // unscoped weekly quota) get a filled muted card; the secondary,
@@ -293,6 +303,23 @@ function formatAsOfText(asOfIso: string, now: number): string {
 	});
 }
 
+/**
+ * Caption for a LIVE reading that has aged past {@link LIVE_USAGE_FRESH_MS},
+ * else null (still current, absent, or an unparseable timestamp). Reuses
+ * `formatAsOfText` so the aged-live and last-known-snapshot captions read
+ * identically.
+ */
+function agedLiveUsageAsOf(
+	usageAsOfIso: string | null | undefined,
+	now: number,
+): string | null {
+	if (!usageAsOfIso) return null;
+	const asOfMs = new Date(usageAsOfIso).getTime();
+	if (!Number.isFinite(asOfMs) || now - asOfMs <= LIVE_USAGE_FRESH_MS)
+		return null;
+	return formatAsOfText(usageAsOfIso, now);
+}
+
 interface UsageDisplay {
 	utilization: number | null;
 	window: string | null;
@@ -306,6 +333,7 @@ export function RateLimitProgress({
 	usageWindow,
 	usageData,
 	staleUsage,
+	usageAsOfIso,
 	usageRateLimitedUntil,
 	usageThrottledUntil,
 	usageThrottledWindows = [],
@@ -337,6 +365,15 @@ export function RateLimitProgress({
 	// but still render null if there's no resetIso and no usage data to show
 	if (!resetIso && !usageData && !staleUsage && !usageRateLimitedUntil)
 		return null;
+
+	// The live reading is real but no longer current (polling is healthy — the
+	// next refresh simply hasn't landed). Show the value as usual and state its
+	// age; the amber "unavailable" wording stays reserved for missing data.
+	// Computed BEFORE the provider-specific branches so every card that renders a
+	// live reading — including Kilo's credit balance, which returns early —
+	// discloses the same age. The server serves any provider's cached entry up to
+	// the UI horizon, so any of them can be aged.
+	const agedAsOfText = agedLiveUsageAsOf(usageAsOfIso, now);
 
 	// Show explicit rate-limited state when the Anthropic usage API returned 429
 	// and we have NOTHING else to show. A persisted stale snapshot takes
@@ -463,6 +500,11 @@ export function RateLimitProgress({
 								: "No credits"}
 						</span>
 					</div>
+					{agedAsOfText && (
+						<p className="text-xs text-muted-foreground">
+							Live usage as of {agedAsOfText}
+						</p>
+					)}
 				</div>
 			);
 		}
@@ -637,8 +679,13 @@ export function RateLimitProgress({
 
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
-	return (
-		<div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", className)}>
+	const windowGrid = (
+		<div
+			className={cn(
+				"grid grid-cols-1 gap-3 sm:grid-cols-2",
+				!agedAsOfText && className,
+			)}
+		>
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
@@ -853,6 +900,17 @@ export function RateLimitProgress({
 					</div>
 				);
 			})}
+		</div>
+	);
+
+	if (!agedAsOfText) return windowGrid;
+
+	return (
+		<div className={cn("space-y-1.5", className)}>
+			{windowGrid}
+			<p className="text-xs text-muted-foreground">
+				Live usage as of {agedAsOfText}
+			</p>
 		</div>
 	);
 }
