@@ -237,6 +237,13 @@ describe("Model Validation Utilities", () => {
 		expect(getModelFamily("CLAUDE-OPUS-5-0")).toBe("opus"); // case insensitive
 	});
 
+	test("getModelFamily detects the bare claude-opus-5 id", () => {
+		// Anthropic returns the bare id (no dated suffix) for Opus 5, so the
+		// substring family match must cover the exact string routing sees.
+		expect(getModelFamily("claude-opus-5")).toBe("opus");
+		expect(isValidClaudeModel("claude-opus-5")).toBe(true);
+	});
+
 	test("getModelFamily detects sonnet models", () => {
 		expect(getModelFamily("claude-sonnet-4-5-20250929")).toBe("sonnet");
 		expect(getModelFamily("claude-sonnet-5-0")).toBe("sonnet");
@@ -768,5 +775,70 @@ describe("resolveCodexTargetModel", () => {
 		expect(
 			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary + 1),
 		).toBe(false);
+	});
+});
+
+describe("claude-opus-5 routing", () => {
+	test("an opus-family account mapping applies to claude-opus-5", () => {
+		const account = makeCodexAccount({
+			provider: "openai-compatible",
+			model_mappings: JSON.stringify({ opus: "z-ai/glm-4.5-air:free" }),
+		});
+		expect(mapModelName("claude-opus-5", account)).toBe(
+			"z-ai/glm-4.5-air:free",
+		);
+	});
+
+	test("resolves to the opus family default Codex target", () => {
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(resolveCodexTargetModel("claude-opus-5", account)).toBe(
+			"gpt-5.6-sol",
+		);
+	});
+
+	test("stays capped at the Codex backend window despite a 1M source model", () => {
+		// Opus 5 advertises a 1M context window, but once the request is rewritten
+		// to gpt-5.6-sol the gate is bound by the CODEX backend window (353K), not
+		// by the source model. Counterintuitive but correct: the request is served
+		// by Codex, so Codex's window is the constraint.
+		const account = makeCodexAccount({ model_mappings: null });
+		const boundary = Math.floor(353_000 * SAFETY_MARGIN);
+		expect(codexAccountFitsRequest(account, "claude-opus-5", boundary)).toBe(
+			true,
+		);
+		expect(
+			codexAccountFitsRequest(account, "claude-opus-5", boundary + 1),
+		).toBe(false);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 353_000),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 353_001),
+		).toBe(false);
+	});
+
+	test("an operator mapping pinned to claude-opus-4-8 deliberately wins", () => {
+		// Family mappings are not auto-migrated: an operator who pinned
+		// {"opus": "claude-opus-4-8"} keeps that explicit downgrade for Opus 5.
+		const account = makeCodexAccount({
+			provider: "anthropic",
+			model_mappings: JSON.stringify({ opus: "claude-opus-4-8" }),
+		});
+		expect(mapModelName("claude-opus-5", account)).toBe("claude-opus-4-8");
+	});
+
+	test("a version-specific claude-opus-4-8 mapping does not apply to Opus 5", () => {
+		// Exact-id mappings are checked before family mappings, so a mapping keyed
+		// on the 4.8 id leaves Opus 5 untouched.
+		const account = makeCodexAccount({
+			provider: "anthropic",
+			model_mappings: JSON.stringify({
+				"claude-opus-4-8": "z-ai/glm-4.5-air:free",
+			}),
+		});
+		expect(mapModelName("claude-opus-4-8", account)).toBe(
+			"z-ai/glm-4.5-air:free",
+		);
+		expect(mapModelName("claude-opus-5", account)).toBe("claude-opus-5");
 	});
 });

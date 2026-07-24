@@ -146,6 +146,19 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 6.25,
 				},
 			},
+			// Opus 5 keeps the Opus 4.5–4.8 tier ($5/$25). The $10/$50 quoted at
+			// launch is the "fast mode" premium — a Claude-API-only research
+			// preview with no representation in this proxy.
+			[CLAUDE_MODEL_IDS.OPUS_5]: {
+				id: CLAUDE_MODEL_IDS.OPUS_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_5],
+				cost: {
+					input: 5,
+					output: 25,
+					cache_read: 0.5,
+					cache_write: 6.25,
+				},
+			},
 			// Mythos-class models: $10/M input, $50/M output,
 			// $1.00/M cache read (0.1x), $12.50/M cache write (1.25x).
 			[CLAUDE_MODEL_IDS.FABLE_5]: {
@@ -356,14 +369,30 @@ class PriceCatalogue {
 					merged[providerName].models = {};
 				}
 
-				// Add any missing models from bundled data
+				// Fill gaps in the remote table from bundled data: models the remote
+				// omits entirely, plus individual cost fields a present remote entry
+				// leaves undefined. Remote values always win where they are defined
+				// (including 0) — bundled only backfills holes. Without the per-field
+				// backfill, a remote entry that lists a model but omits e.g.
+				// cache_read makes getCostRate throw and collapses the ENTIRE request
+				// cost to 0 (persisted as NULL), which is exactly what the bundled
+				// table exists to prevent.
 				let addedModels = 0;
+				let backfilledModels = 0;
 				for (const [modelId, modelData] of Object.entries(
 					providerData.models,
 				)) {
-					if (!merged[providerName].models?.[modelId]) {
+					const existing = merged[providerName].models?.[modelId];
+					if (!existing) {
 						merged[providerName].models[modelId] = modelData;
 						addedModels++;
+						continue;
+					}
+					if (
+						modelData.cost &&
+						this.backfillModelCost(existing, modelData.cost)
+					) {
+						backfilledModels++;
 					}
 				}
 
@@ -372,10 +401,88 @@ class PriceCatalogue {
 						`Added ${addedModels} missing models for provider "${providerName}" from bundled pricing`,
 					);
 				}
+
+				if (backfilledModels > 0) {
+					this.logger?.debug(
+						`Backfilled missing cost fields for ${backfilledModels} models of provider "${providerName}" from bundled pricing`,
+					);
+				}
 			}
 		}
 
 		return merged;
+	}
+
+	/**
+	 * Copy any cost field the remote entry leaves undefined from the bundled
+	 * entry. Remote values win wherever they are defined, so a rate the remote
+	 * reports as 0 is preserved rather than treated as missing. Returns true when
+	 * at least one field was filled in.
+	 *
+	 * Cache fields are not copied verbatim: they are scaled by the ratio between
+	 * the remote input rate and the bundled input rate. If models.dev has moved a
+	 * model to another price tier (say input $5 -> $10) the bundled cache rates
+	 * belong to the old tier, and mixing them with the authoritative remote input
+	 * price would mis-cost every cached request for that model. Scaling preserves
+	 * whatever cache-to-input ratio the BUNDLED entry itself encodes, which keeps
+	 * this provider-agnostic — mergePricingData also runs for zai/minimax/
+	 * openrouter, where Anthropic's 0.1x/1.25x cache ratios do not hold, so
+	 * hardcoding those multipliers would corrupt non-Anthropic entries. The
+	 * strictly-positive guard means a provider that temporarily zero-rates input
+	 * falls back to the bundled absolutes instead of zeroing the cache rates.
+	 * input/output are never scaled — a missing one is copied verbatim.
+	 *
+	 * Both sides are treated as Partial<ModelCost>: the remote table is parsed
+	 * JSON, so any field can be absent at runtime regardless of the declared type.
+	 */
+	private backfillModelCost(
+		remoteModel: ModelDef,
+		bundledCost: Partial<ModelCost>,
+	): boolean {
+		if (!remoteModel.cost) {
+			remoteModel.cost = { ...bundledCost } as ModelCost;
+			return true;
+		}
+
+		const cost = remoteModel.cost as Partial<ModelCost>;
+		let filled = false;
+
+		// Read the remote input rate BEFORE the backfill below can populate it:
+		// only a remote-DEFINED input identifies the tier models.dev put the model
+		// on. A backfilled one is the bundled value, whose ratio is 1 anyway.
+		const remoteInput = cost.input;
+		const bundledInput = bundledCost.input;
+		const cacheScale =
+			typeof remoteInput === "number" &&
+			Number.isFinite(remoteInput) &&
+			remoteInput > 0 &&
+			typeof bundledInput === "number" &&
+			Number.isFinite(bundledInput) &&
+			bundledInput > 0
+				? remoteInput / bundledInput
+				: 1;
+
+		if (cost.input === undefined && bundledCost.input !== undefined) {
+			cost.input = bundledCost.input;
+			filled = true;
+		}
+		if (cost.output === undefined && bundledCost.output !== undefined) {
+			cost.output = bundledCost.output;
+			filled = true;
+		}
+		if (cost.cache_read === undefined && bundledCost.cache_read !== undefined) {
+			cost.cache_read = bundledCost.cache_read * cacheScale;
+			filled = true;
+		}
+		if (
+			cost.cache_write === undefined &&
+			bundledCost.cache_write !== undefined
+		) {
+			cost.cache_write = bundledCost.cache_write * cacheScale;
+			filled = true;
+		}
+
+		return filled;
 	}
 
 	/**

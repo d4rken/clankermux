@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	__pricingTestHooks,
 	estimateCostUSD,
 	getModelCacheRates,
 	type TokenBreakdown,
@@ -66,8 +67,10 @@ describe("estimateCostUSD", () => {
 });
 
 describe("bundled Opus pricing (offline fallback)", () => {
-	// Opus 4.7 and 4.8 both price at $5/M input, $25/M output,
+	// Opus 4.7, 4.8 and 5 all price at $5/M input, $25/M output,
 	// $0.50/M cache read, $6.25/M cache write — same tier as Opus 4.5/4.6.
+	// (Opus 5's $10/$50 "fast mode" is a Claude-API-only research preview with
+	// no representation in this proxy.)
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -76,6 +79,17 @@ describe("bundled Opus pricing (offline fallback)", () => {
 		cacheReadInputTokens: 1_000_000,
 		cacheCreationInputTokens: 1_000_000,
 	};
+
+	it("prices claude-opus-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5", ioTokens)).toBeCloseTo(30, 6);
+	});
+
+	it("prices claude-opus-5 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5", cacheTokens)).toBeCloseTo(
+			6.75,
+			6,
+		);
+	});
 
 	it("prices claude-opus-4-8 input/output from bundled data", async () => {
 		expect(await estimateCostUSD("claude-opus-4-8", ioTokens)).toBeCloseTo(
@@ -95,6 +109,179 @@ describe("bundled Opus pricing (offline fallback)", () => {
 		expect(await estimateCostUSD("claude-opus-4-7", ioTokens)).toBeCloseTo(
 			30,
 			6,
+		);
+	});
+});
+
+describe("bundled cost fields backfill a partial remote entry", () => {
+	// models.dev can list a freshly-released model before it carries cache
+	// pricing. Merging "remote wins wholesale" would then leave the merged entry
+	// without cache_read/cache_write, getCostRate would throw, and the WHOLE
+	// request cost would collapse to 0 (persisted as NULL) — the same outage the
+	// bundled entry exists to prevent. Bundled must fill the per-field gaps while
+	// every value the remote does define still wins.
+	const allTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+	const cacheOnlyTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	async function withRemoteCatalogue(
+		remote: unknown,
+		run: () => Promise<void>,
+	): Promise<void> {
+		const offlineFetch = globalThis.fetch;
+		// Point the disk cache somewhere disposable so the stub catalogue can't
+		// leak into any later test through the on-disk pricing cache.
+		const remoteTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
+		process.env.TMPDIR = remoteTmpdir;
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify(remote), {
+				headers: { "content-type": "application/json" },
+			})) as typeof globalThis.fetch;
+		try {
+			__pricingTestHooks.reset();
+			await __pricingTestHooks.loadPricing();
+			await run();
+		} finally {
+			globalThis.fetch = offlineFetch;
+			process.env.TMPDIR = pricingTmpdir;
+			rmSync(remoteTmpdir, { recursive: true, force: true });
+			__pricingTestHooks.reset();
+		}
+	}
+
+	it("fills missing cache costs while the remote input cost still wins", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// Deliberately no cache_read/cache_write, and an input
+							// cost that differs from the bundled $5 so we can tell
+							// which side won.
+							cost: { input: 7, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				// 7 (remote input) + 25 (remote output), plus the bundled cache rates
+				// scaled to the remote tier (7/5 = 1.4x): 0.5*1.4 + 6.25*1.4.
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					41.45,
+					6,
+				);
+			},
+		);
+	});
+
+	it("scales backfilled cache costs to the remote price tier", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// models.dev moved the model to the doubled tier
+							// (bundled is 5 / 25 / 0.5 / 6.25) and still lists no
+							// cache rates. Copying the bundled cache absolutes would
+							// price cached tokens at the old tier forever.
+							cost: { input: 10, output: 50 },
+						},
+					},
+				},
+			},
+			async () => {
+				// Merged cache rates are 0.5*2 = 1.0 and 6.25*2 = 12.5 per 1M.
+				expect(
+					await estimateCostUSD("claude-opus-5", cacheOnlyTokens),
+				).toBeCloseTo(13.5, 6);
+				// ...and the input/output rates the remote defined still win.
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					73.5,
+					6,
+				);
+			},
+		);
+	});
+
+	it("copies bundled cache costs verbatim when the remote input is zero", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// A zero-rated input carries no tier information; scaling
+							// by it would wipe out the cache rates entirely, so the
+							// bundled absolutes are copied instead.
+							cost: { input: 0, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD("claude-opus-5", cacheOnlyTokens),
+				).toBeCloseTo(6.75, 6);
+			},
+		);
+	});
+
+	it("still adds models the remote catalogue omits entirely", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							cost: { input: 7, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				// claude-opus-4-8 is bundled-only in this catalogue: 5 + 25 + 0.5 + 6.25
+				expect(await estimateCostUSD("claude-opus-4-8", allTokens)).toBeCloseTo(
+					36.75,
+					6,
+				);
+			},
+		);
+	});
+
+	it("does not overwrite a remote cost of zero", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// A free/zero-rated field is a defined remote value and
+							// must survive the backfill.
+							cost: { input: 5, output: 25, cache_read: 0, cache_write: 0 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					30,
+					6,
+				);
+			},
 		);
 	});
 });
@@ -162,6 +349,14 @@ describe("bundled Mythos-class pricing (offline fallback)", () => {
 });
 
 describe("getModelCacheRates", () => {
+	it("returns Opus 5 rates from bundled data", () => {
+		expect(getModelCacheRates("claude-opus-5")).toEqual({
+			inputPer1M: 5,
+			cacheReadPer1M: 0.5,
+			cacheWritePer1M: 6.25,
+		});
+	});
+
 	it("returns Opus 4.8 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-opus-4-8")).toEqual({
 			inputPer1M: 5,

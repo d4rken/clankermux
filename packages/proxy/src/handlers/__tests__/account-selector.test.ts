@@ -511,6 +511,34 @@ describe("selectAccountsForRequest — combo routing", () => {
 		expect(slotInfo?.slots[0]?.modelOverride).toBe("claude-opus-4-5");
 	});
 
+	it("selects the opus combo for claude-opus-5 and keeps a slot pinned to 4.8", async () => {
+		// Opus 5 resolves to the "opus" family, so an active opus combo applies.
+		// A slot explicitly pinned to claude-opus-4-8 is an operator choice and is
+		// deliberately NOT rewritten to the newer model.
+		const acc = makeAccount({ id: "acc-1" });
+		const combo = makeCombo([
+			{
+				id: "slot-1",
+				combo_id: "combo-1",
+				account_id: "acc-1",
+				model: "claude-opus-4-8",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+
+		const ctx = makeCtx({ accounts: [acc], activeCombo: combo });
+		const meta = makeRequestMeta();
+
+		const result = await selectAccountsForRequest(meta, ctx, "claude-opus-5");
+
+		expect(ctx.dbOps.getActiveComboForFamily).toHaveBeenCalledWith("opus");
+		expect(result.map((a) => a.id)).toEqual(["acc-1"]);
+		expect(getComboSlotInfo(meta)?.slots[0]?.modelOverride).toBe(
+			"claude-opus-4-8",
+		);
+	});
+
 	it("sets meta.comboName when combo routing is active", async () => {
 		const acc = makeAccount({ id: "acc-1" });
 		const combo = makeCombo([
