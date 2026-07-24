@@ -11,6 +11,44 @@ export const COLORS = {
 	cyan: "#06b6d4",
 } as const;
 
+/**
+ * Qualitative palette for per-model data series.
+ *
+ * Deliberately separate from `COLORS`: those are SEMANTIC names (success,
+ * warning, error, ...) that other components rely on, and there are only nine
+ * of them — far too few to give every model a unique hue, which is why models
+ * used to collide. Charts plot every model in the time range side by side, so
+ * a data-series palette needs many mutually distinguishable hues and nothing
+ * else.
+ *
+ * Every entry is taken verbatim from an established colorblind-safe
+ * qualitative set (Okabe-Ito, and Paul Tol's bright/light/muted/vibrant
+ * schemes). The 17 hues were picked to maximise the smallest pairwise CIE76
+ * distance while keeping every pair at least ~9 dE apart under simulated
+ * protanopia and deuteranopia, and every entry above L* 45 so it stays legible
+ * on the dashboard's near-black chart background (hsl(220 13% 8%)).
+ * model-colors.test.ts enforces the separation.
+ */
+export const MODEL_PALETTE = {
+	blue: "#0077BB", // Tol vibrant blue
+	orange: "#E69F00", // Okabe-Ito orange
+	green: "#228833", // Tol bright green
+	magenta: "#EE3377", // Tol vibrant magenta
+	skyBlue: "#99DDFF", // Tol light cyan
+	yellow: "#EEDD88", // Tol light yellow
+	red: "#CC3311", // Tol vibrant red
+	mint: "#44BB99", // Tol light mint
+	purple: "#AA4499", // Tol muted purple
+	pear: "#BBCC33", // Tol light pear
+	peach: "#EE8866", // Tol light orange
+	lightBlue: "#77AADD", // Tol light blue
+	olive: "#999933", // Tol muted olive
+	mauve: "#CC79A7", // Okabe-Ito reddish purple
+	grey: "#DDDDDD", // Tol pale grey
+	rose: "#EE6677", // Tol bright red
+	pink: "#FFAABB", // Tol light pink
+} as const;
+
 // Chart color sequence for multi-series charts
 export const CHART_COLORS = [
 	COLORS.primary,

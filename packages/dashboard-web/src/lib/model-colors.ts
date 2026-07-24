@@ -1,36 +1,43 @@
 import { getModelShortName } from "@clankermux/core";
-import { CHART_COLORS, COLORS } from "../constants";
+import { CHART_COLORS, MODEL_PALETTE } from "../constants";
 
 /**
  * Model-based chart color palette, keyed by the UI short name
  * (`getModelShortName`) with a few legacy ids that predate the registry.
  *
- * Invariant: no two models in the same family (opus / sonnet / haiku / fable)
- * may share a color — a chart typically plots several versions of one family
- * side by side, and identical colors make the lines indistinguishable. Repeats
- * ACROSS families are fine. Every registry model needs an explicit entry: the
- * substring fallback below is deliberately loose (`claude-opus-4-8` contains
- * `claude-opus-4`), so a model without an entry silently inherits an older
- * model's color. Enforced by model-colors.test.ts.
+ * Invariant: every id here has a GLOBALLY unique color — no two models share
+ * one, regardless of family. Charts are not grouped per family: AnalyticsCharts
+ * builds its series list from every distinct model in the time range, so Opus,
+ * Sonnet and Mythos are plotted side by side and a cross-family repeat is just
+ * as unreadable as a within-family one. The "all" range can also surface the
+ * pre-registry legacy ids alongside current ones, so they need stable
+ * assignments too. Colors come from MODEL_PALETTE (curated colorblind-safe
+ * hues) rather than the semantic COLORS object, which has too few entries to go
+ * around.
+ *
+ * Every registry model needs an explicit entry: the substring fallback below is
+ * deliberately loose (`claude-opus-4-8` contains `claude-opus-4`), so a model
+ * without an entry silently inherits an older model's color. Uniqueness and
+ * perceptual separation are enforced by model-colors.test.ts.
  */
 export const MODEL_COLORS: Record<string, string> = {
-	"claude-3.5-sonnet": COLORS.purple,
-	"claude-3.5-haiku": COLORS.success,
-	"claude-3-opus": COLORS.blue,
-	"claude-opus-4": COLORS.pink,
-	"claude-opus-4.1": COLORS.indigo,
-	"claude-opus-4.5": COLORS.purple,
-	"claude-opus-4.6": COLORS.cyan,
-	"claude-opus-4.7": COLORS.success,
-	"claude-opus-4.8": COLORS.warning,
-	"claude-opus-5": COLORS.primary,
-	"claude-sonnet-4": COLORS.cyan,
-	"claude-sonnet-4.5": COLORS.blue,
-	"claude-sonnet-4.6": COLORS.indigo,
-	"claude-sonnet-5": COLORS.primary,
-	"claude-haiku-4.5": COLORS.cyan,
-	"claude-fable-5": COLORS.warning,
-	"claude-mythos-5": COLORS.primary,
+	"claude-3.5-sonnet": MODEL_PALETTE.rose,
+	"claude-3.5-haiku": MODEL_PALETTE.pink,
+	"claude-3-opus": MODEL_PALETTE.grey,
+	"claude-opus-4": MODEL_PALETTE.blue,
+	"claude-opus-4.1": MODEL_PALETTE.orange,
+	"claude-opus-4.5": MODEL_PALETTE.green,
+	"claude-opus-4.6": MODEL_PALETTE.magenta,
+	"claude-opus-4.7": MODEL_PALETTE.skyBlue,
+	"claude-opus-4.8": MODEL_PALETTE.yellow,
+	"claude-opus-5": MODEL_PALETTE.red,
+	"claude-sonnet-4": MODEL_PALETTE.mint,
+	"claude-sonnet-4.5": MODEL_PALETTE.purple,
+	"claude-sonnet-4.6": MODEL_PALETTE.pear,
+	"claude-sonnet-5": MODEL_PALETTE.peach,
+	"claude-haiku-4.5": MODEL_PALETTE.lightBlue,
+	"claude-fable-5": MODEL_PALETTE.olive,
+	"claude-mythos-5": MODEL_PALETTE.mauve,
 };
 
 /**
