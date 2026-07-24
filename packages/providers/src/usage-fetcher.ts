@@ -29,31 +29,76 @@ import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
 const log = new Logger("UsageFetcher");
 
 /**
- * Max age of a cached usage entry before it is considered stale.
+ * Max age of a cached usage entry before it is considered stale for ROUTING.
  *
  * Read contracts differ by method:
  *  - get() / getAge(): evicting. A stale entry is treated as absent — the read
  *    returns null AND deletes the entry.
  *  - peek(): non-evicting DATA read. A stale entry returns null but is left in
  *    place (so later eviction and window-reset comparisons see it).
- *  - peekAge(): non-evicting AGE read, and the sole exception to the "stale →
- *    null" rule — it returns the entry's TRUE age even when stale, and only
- *    returns null when NO entry exists. This lets pure observers (e.g. the usage
- *    snapshot sampler) apply their own freshness threshold, independent of this
- *    TTL. Pair it with peek() when staleness should gate the data itself.
+ *  - peekAge(): non-evicting AGE read, and one of two exceptions to the
+ *    "stale → null" rule — it returns the entry's TRUE age even when stale, and
+ *    only returns null when NO entry exists. This lets pure observers (e.g. the
+ *    usage snapshot sampler) apply their own freshness threshold, independent of
+ *    this TTL. Pair it with peek() when staleness should gate the data itself.
+ *  - peekWithAge(): non-evicting DATA+AGE read for the DASHBOARD. Also returns a
+ *    stale entry (data plus its true age) so the UI can render an honest "as of"
+ *    age instead of claiming the data is unavailable; it returns null only when
+ *    no entry exists or the entry is past the much longer
+ *    {@link UI_STALE_HORIZON_MS}. Never used by routing.
  */
-const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+export const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * How long a cached reading stays worth SHOWING (as an aged value) after it has
+ * stopped being worth ROUTING on. Past this horizon peekWithAge() reports
+ * absence and the dashboard falls back to the persisted snapshot. Deliberately
+ * generous (3x the routing TTL): the failure it guards against is a poller that
+ * died, and a half-hour-old number labelled with its age is still more useful
+ * than a blank card.
+ */
+export const UI_STALE_HORIZON_MS = 30 * 60_000;
 
 /**
  * Demand-aware polling cadence (Anthropic only — see {@link PollingPolicy}).
  *
  * IDLE_POLL_INTERVAL_MS: the base cadence a *cold* account (no recent traffic)
- * polls at. 10 minutes — deliberately NOT 9 (the cache TTL). Routing already
- * treats usage data older than ~2*pollInterval as unknown (independent of the
- * TTL), stale reads fail open, and the account-selector fires a free
- * `refreshNow` on demand when it actually needs a fresh reading — so letting an
- * idle entry lapse past the TTL between polls is safe and saves the shared,
- * aggressively-rate-limited /oauth/usage + /oauth/profile bucket.
+ * polls at.
+ *
+ * IDLE_REFRESH_LEAD_MS: headroom subtracted from {@link USAGE_CACHE_TTL_MS} when
+ * scheduling, to absorb the refresh round-trip.
+ *
+ * WHAT IS ACTUALLY GUARANTEED: {@link computePollDelay} clamps the scheduled
+ * DELAY of every demand-aware HEALTHY poll — active and idle alike — to
+ * `USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS`. That bounds the timer, not the
+ * age of the entry when its replacement is written: the true end-to-end gap is
+ * `resolver latency + delay + timer lateness + token latency + fetch latency`,
+ * and only `delay` is under our control. IDLE_REFRESH_LEAD_MS is HEADROOM for
+ * that tail (a local DB read, a possible token refresh and a 5s-timeout HTTP
+ * call — comfortably inside 60s in practice), NOT a proof. The negative-only
+ * idle jitter (see {@link idleJitterFraction}) is belt-and-braces on top: idle
+ * jitter can only pull a poll earlier, never later.
+ *
+ * The guarantee that a user NEVER sees a false "Live usage unavailable" comes
+ * from the display side, not from this schedule: the dashboard reads through
+ * {@link UsageCache.peekWithAge}, which keeps serving an expired entry (labelled
+ * with its true age) up to {@link UI_STALE_HORIZON_MS}. The cadence work here
+ * makes the common case fresh; the non-evicting read makes the tail honest.
+ *
+ * This replaces the original reasoning, which held that "letting an idle entry
+ * lapse past the TTL between polls is safe" because routing fails open and the
+ * account-selector can `refreshNow` on demand. That was true of ROUTING but
+ * ignored the DASHBOARD: the accounts endpoint read the same cache, so every gap
+ * between expiry and the replacement fetch painted a healthy account with the
+ * amber "Live usage unavailable" banner. With a 10-minute cadence, ±20% jitter
+ * and a 10-minute TTL, roughly half of all idle cycles produced such a gap.
+ *
+ * The clamp applies ONLY to the demand-aware healthy cadence. Non-demand-aware
+ * providers (Zai/Kilo/Alibaba) pass no policy and keep their configured cadence
+ * verbatim. Retry-after and the exponential failure backoff are likewise
+ * unclamped — a failing account should keep backing off, and there is no fresh
+ * reading to protect. (A successful on-demand {@link UsageCache.refreshNow}
+ * ends such a backoff early; see that method.)
  *
  * ACTIVITY_RECENCY_MS: how recently an account must have served a request to be
  * treated as "active" (poll at the configured active cadence). 15 minutes.
@@ -61,6 +106,7 @@ const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
  * MAX_BACKOFF_MS: ceiling for the exponential failure backoff (unchanged).
  */
 const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
+export const IDLE_REFRESH_LEAD_MS = 60_000;
 const ACTIVITY_RECENCY_MS = 15 * 60_000;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 
@@ -102,9 +148,19 @@ export interface PollingPolicy {
 /**
  * Pure recency decision: given the account's last-activity timestamp, pick the
  * base cadence and whether it is the idle cadence. Non-demand-aware accounts
- * always get the fixed active interval (their existing behavior). The idle
- * cadence is `max(activeInterval, idleInterval)` so a config where the active
- * interval already exceeds the idle floor never *speeds up* an idle account.
+ * always get the fixed active interval (their existing behavior).
+ *
+ * The idle cadence is `max(activeInterval, min(idleInterval, idleCap))` where
+ * `idleCap = USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS`:
+ *  - the `min` pulls the idle BASE under the refresh cap,
+ *  - the outer `max` keeps the long-standing rule that an idle account is never
+ *    polled FASTER than the configured active cadence.
+ *
+ * A configured active cadence above the cap therefore leaves this function
+ * returning an over-cap idle interval — that is deliberate and harmless, because
+ * {@link computePollDelay} clamps the final DELAY of both branches to the same
+ * ceiling. At that ceiling idle simply equals active, so the "idle is never
+ * faster than active" rule still holds while the schedule stays inside the TTL.
  */
 export function computeDemandAwareInterval(
 	opts: Pick<
@@ -118,7 +174,10 @@ export function computeDemandAwareInterval(
 	if (!opts.demandAware) return { intervalMs: activeIntervalMs, isIdle: false };
 	const idleIntervalMs = Math.max(
 		activeIntervalMs,
-		opts.idleIntervalMs ?? IDLE_POLL_INTERVAL_MS,
+		Math.min(
+			opts.idleIntervalMs ?? IDLE_POLL_INTERVAL_MS,
+			USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
+		),
 	);
 	const recencyMs = opts.activityRecencyMs ?? ACTIVITY_RECENCY_MS;
 	if (lastActivityMs != null && now - lastActivityMs < recencyMs) {
@@ -128,11 +187,32 @@ export function computeDemandAwareInterval(
 }
 
 /**
+ * Fold the caller's symmetric jitter value into the NEGATIVE-only range the idle
+ * cadence requires: `[-0.2, 0.2]` → `[-0.1, 0]`, i.e. a delay in
+ * `[0.9, 1.0] x interval`. Idle polls may only be pulled EARLIER, never pushed
+ * past the cap that guarantees the refresh lands before the cache entry expires;
+ * accounts still de-synchronize, just within a one-sided 10% band. Uniform in,
+ * uniform out; and 0 in (the tests' deterministic value) is still 0 out.
+ */
+export function idleJitterFraction(symmetricJitterFraction: number): number {
+	return -Math.abs(symmetricJitterFraction) / 2;
+}
+
+/**
  * Pure poll-delay decision combining, in priority order: (1) a server
  * retry-after (wins outright), (2) exponential failure backoff (wins over the
  * base cadence — a failing account keeps backing off regardless of active/idle),
- * then (3) the demand-aware active/idle base cadence with ±jitter. `jitterFraction`
- * is the caller's random value in [-0.2, 0.2] (0 in tests for determinism).
+ * then (3) the demand-aware active/idle base cadence with jitter. `jitterFraction`
+ * is the caller's random value in [-0.2, 0.2] (0 in tests for determinism); the
+ * ACTIVE cadence applies it symmetrically, the IDLE cadence folds it to
+ * negative-only via {@link idleJitterFraction}.
+ *
+ * The healthy demand-aware delay (BOTH branches, post-jitter) is then clamped to
+ * `USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS` so the schedule stays inside the
+ * cache TTL for ANY configured cadence — including a caller-supplied
+ * `activeIntervalMs` above the ceiling, and the ACTIVE re-arm that
+ * `noteActivity()` performs when a sleeping idle account wakes. Paths (1) and (2)
+ * and non-demand-aware providers are deliberately left unclamped.
  */
 export function computePollDelay(params: {
 	demandAware?: boolean;
@@ -162,7 +242,16 @@ export function computePollDelay(params: {
 		params.activeIntervalMs,
 		params.now,
 	);
-	return { delayMs: intervalMs + intervalMs * params.jitterFraction, isIdle };
+	const fraction = isIdle
+		? idleJitterFraction(params.jitterFraction)
+		: params.jitterFraction;
+	const jittered = intervalMs + intervalMs * fraction;
+	// Only the demand-aware healthy cadence is clamped; a provider without a
+	// policy keeps its configured cadence verbatim (byte-identical behavior).
+	const delayMs = params.demandAware
+		? Math.min(jittered, USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS)
+		: jittered;
+	return { delayMs, isIdle };
 }
 
 export interface UsageWindow {
@@ -926,6 +1015,9 @@ class UsageCache {
 		const failures = this.failureCounts.get(accountId) ?? 0;
 		const policy = this.pollingPolicies.get(accountId);
 		// ±20% random jitter so accounts spread out and don't lock into sync.
+		// computePollDelay applies it symmetrically to the ACTIVE cadence and folds
+		// it to negative-only for the IDLE cadence (which must never overshoot its
+		// refresh-before-expiry cap).
 		const jitterFraction = (Math.random() - 0.5) * 0.4;
 		const { delayMs, isIdle } = computePollDelay({
 			demandAware: policy?.demandAware,
@@ -1184,6 +1276,9 @@ class UsageCache {
 	/**
 	 * Trigger an immediate usage fetch for an account that already has polling configured.
 	 * Returns false when no polling/token provider is configured or when the fetch fails.
+	 *
+	 * On success the failure streak is cleared and a backed-off poll loop is
+	 * re-armed to the healthy cadence — see {@link rearmAfterOnDemandSuccess}.
 	 */
 	async refreshNow(accountId: string): Promise<boolean> {
 		const tokenProvider = this.tokenProviders.get(accountId);
@@ -1199,7 +1294,61 @@ class UsageCache {
 			provider,
 			customEndpoint,
 		);
+		if (success) this.rearmAfterOnDemandSuccess(accountId, tokenProvider);
 		return success;
+	}
+
+	/**
+	 * An on-demand fetch just proved the account healthy. Two consequences:
+	 *
+	 *  1. The consecutive-failure streak is disproven → cleared unconditionally.
+	 *  2. If the loop was sitting in exponential backoff, its pending wake can be
+	 *     far beyond {@link USAGE_CACHE_TTL_MS} (the ceiling is 30 minutes), so
+	 *     the reading we just wrote would expire long before the next poll
+	 *     replaced it. Re-arm the timer onto the healthy cadence instead.
+	 *
+	 * Deliberately a NO-OP when the account was already healthy: `refreshNow` is
+	 * called from the dashboard's refresh button and account priming, and pushing
+	 * the pending wake out on every call would let a polling dashboard postpone
+	 * scheduled polling indefinitely.
+	 *
+	 * Guards mirror `noteActivity()`: the token-provider identity check refuses to
+	 * resurrect a stopped or replaced poller (stopPolling removes it), and the
+	 * generation must still be live. A missing schedule entry means a poll tick is
+	 * currently executing — it will reschedule itself off the (now cleared) failure
+	 * count, so there is nothing to do.
+	 */
+	private rearmAfterOnDemandSuccess(
+		accountId: string,
+		tokenProvider: AccessTokenProvider,
+	): void {
+		if (this.tokenProviders.get(accountId) !== tokenProvider) return;
+		const hadFailures = (this.failureCounts.get(accountId) ?? 0) > 0;
+		this.failureCounts.delete(accountId);
+		if (!hadFailures) return;
+
+		const generation = this.pollGenerations.get(accountId);
+		if (generation === undefined) return;
+		const sched = this.pollSchedule.get(accountId);
+		if (!sched) return; // a tick is in flight; it reschedules itself
+
+		const existing = this.pollTimeouts.get(accountId);
+		if (existing) clearTimeout(existing);
+		this.pollTimeouts.delete(accountId);
+		this.pollSchedule.delete(accountId);
+		log.debug(
+			`On-demand usage refresh succeeded for account ${accountId} — clearing backoff and re-arming the poll schedule`,
+		);
+		// failureCounts is now empty → scheduleNextPoll takes the healthy cadence.
+		this.scheduleNextPoll(
+			accountId,
+			tokenProvider,
+			generation,
+			sched.activeBaseMs,
+			this.providerTypes.get(accountId),
+			this.customEndpoints.get(accountId),
+			null,
+		);
 	}
 
 	/**
@@ -1552,6 +1701,44 @@ class UsageCache {
 		if (age > USAGE_CACHE_TTL_MS) return null; // stale — but do NOT evict
 
 		return cached.data;
+	}
+
+	/**
+	 * Non-evicting DATA + AGE read for the DASHBOARD's freshness display.
+	 *
+	 * Returns the cached data together with its TRUE age even when the entry is
+	 * past {@link USAGE_CACHE_TTL_MS} — a reading that is a few minutes past the
+	 * ROUTING freshness bar is not "unavailable", it is live data with an age, and
+	 * the UI renders it as such ("as of HH:MM") rather than falling back to the
+	 * persisted snapshot and its amber "Live usage unavailable" banner. Returns
+	 * null only when there is NO entry, or the entry is older than
+	 * {@link UI_STALE_HORIZON_MS} (at which point showing it would be misleading
+	 * and the snapshot fallback is the honest answer).
+	 *
+	 * NEVER evicts — like peek()/peekAge(), a stale entry is left in the map so
+	 * eviction and window-reset comparisons behave as if no read happened. Do NOT
+	 * use for routing/throttling/capacity decisions; those must keep using
+	 * get()/getAge()/getFreshCapacity, which enforce the routing TTL.
+	 *
+	 * Returns BOTH forms of the timestamp on purpose:
+	 *  - `sampledAtMs` is the entry's ABSOLUTE write time. Serialize this. Callers
+	 *    must never reconstruct it as `theirNow - ageMs`: a request handler's
+	 *    `now` is captured before its DB round-trips, so that subtraction reports
+	 *    the reading as older than it is by the handler's own elapsed time.
+	 *  - `ageMs` is the age against the clock AT READ TIME, for freshness gating
+	 *    (e.g. "is this still within the routing TTL?") without a second clock
+	 *    read that could disagree with the one that admitted the entry.
+	 */
+	peekWithAge(
+		accountId: string,
+	): { data: AnyUsageData; ageMs: number; sampledAtMs: number } | null {
+		const cached = this.cache.get(accountId);
+		if (!cached) return null;
+
+		const ageMs = Date.now() - cached.timestamp;
+		if (ageMs > UI_STALE_HORIZON_MS) return null; // too old to show — do NOT evict
+
+		return { data: cached.data, ageMs, sampledAtMs: cached.timestamp };
 	}
 
 	/**

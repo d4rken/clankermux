@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { usageCache } from "@clankermux/providers";
@@ -85,6 +85,10 @@ function makeAccountRow(overrides: Partial<AccountRow>): AccountRow {
 function makeDbOps(
 	accounts: AccountRow[],
 	latestSnapshots: RankedSnapshot[],
+	// Invoked while the handler awaits its first repository call — lets a test
+	// advance a mocked clock so wall-time really elapses between the handler's
+	// `now` capture and the later usage-cache read.
+	onFirstQuery?: () => void,
 ): DatabaseOperations {
 	return {
 		getAdapter: () => ({
@@ -95,7 +99,10 @@ function makeDbOps(
 			get: async () => null,
 		}),
 		getStatsRepository: () => ({
-			getSessionStats: async () => new Map(),
+			getSessionStats: async () => {
+				onFirstQuery?.();
+				return new Map();
+			},
 			getActiveSessionCountsByAccount: async () => new Map(),
 		}),
 		getLatestUsageSnapshots: async (ids: string[]) =>
@@ -107,6 +114,11 @@ function makeDbOps(
 const config = {
 	getUsageThrottlingFiveHourEnabled: () => false,
 	getUsageThrottlingWeeklyEnabled: () => false,
+} as unknown as Config;
+
+const throttlingConfig = {
+	getUsageThrottlingFiveHourEnabled: () => true,
+	getUsageThrottlingWeeklyEnabled: () => true,
 } as unknown as Config;
 
 const ACCOUNT_ID = "acc-stale";
@@ -229,5 +241,218 @@ describe("accounts list staleUsage builder", () => {
 		expect(acc?.staleUsage?.asOfIso).toBe(
 			new Date(now - 1 * MINUTE_MS).toISOString(),
 		);
+	});
+});
+
+/**
+ * The accounts list reads live usage NON-evictively and reports the reading's
+ * "as of" time, so a reading past the routing TTL still renders as live data
+ * (annotated with its age) instead of collapsing into the amber snapshot
+ * fallback. Regression for the TTL/poll-cadence collision.
+ */
+describe("accounts list live usage freshness (usageAsOfIso)", () => {
+	const BASE = 1_700_000_000_000;
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(ACCOUNT_ID);
+	});
+	afterEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		nowSpy.mockRestore();
+	});
+
+	const liveUsage = () => ({
+		five_hour: {
+			utilization: 12,
+			resets_at: new Date(BASE + 2 * HOUR_MS).toISOString(),
+		},
+		seven_day: {
+			utilization: 34,
+			resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+		},
+	});
+
+	it("serves live usage past the routing TTL with an honest as-of timestamp", async () => {
+		usageCache.set(ACCOUNT_ID, liveUsage()); // stamped at BASE
+		nowSpy.mockReturnValue(BASE + 11 * MINUTE_MS); // past the 10-min routing TTL
+
+		const acc = await runHandler([
+			snapshot({
+				ts: BASE,
+				sevenDayPct: 99,
+				sevenDayReset: BASE + 3 * DAY_MS,
+			}),
+		]);
+
+		expect(acc?.usageData).not.toBeNull();
+		expect(acc?.usageUtilization).toBe(34);
+		expect(acc?.usageAsOfIso).toBe(new Date(BASE).toISOString());
+		// Live data present → no snapshot fallback (which would paint the amber
+		// "Live usage unavailable" banner in the dashboard).
+		expect(acc?.staleUsage).toBeNull();
+	});
+
+	it("reports the as-of timestamp for a fresh reading too", async () => {
+		usageCache.set(ACCOUNT_ID, liveUsage());
+		nowSpy.mockReturnValue(BASE + 2 * MINUTE_MS);
+
+		const acc = await runHandler([]);
+		expect(acc?.usageAsOfIso).toBe(new Date(BASE).toISOString());
+	});
+
+	it("does not evict the cache entry it read", async () => {
+		usageCache.set(ACCOUNT_ID, liveUsage());
+		nowSpy.mockReturnValue(BASE + 11 * MINUTE_MS);
+
+		await runHandler([]);
+		// A second request must still see the same reading (the old evicting get()
+		// dropped it on the first read).
+		const acc = await runHandler([]);
+		expect(acc?.usageData).not.toBeNull();
+		expect(acc?.usageAsOfIso).toBe(new Date(BASE).toISOString());
+	});
+
+	it("falls back to the persisted snapshot past the UI horizon", async () => {
+		usageCache.set(ACCOUNT_ID, liveUsage());
+		nowSpy.mockReturnValue(BASE + 31 * MINUTE_MS); // past UI_STALE_HORIZON_MS
+
+		const acc = await runHandler([
+			snapshot({
+				ts: BASE + 30 * MINUTE_MS,
+				sevenDayPct: 85,
+				sevenDayReset: BASE + 31 * MINUTE_MS + 3 * DAY_MS,
+			}),
+		]);
+
+		expect(acc?.usageData).toBeNull();
+		expect(acc?.usageAsOfIso).toBeNull();
+		expect(acc?.staleUsage?.sevenDay?.utilization).toBe(85);
+	});
+
+	it("reports a null as-of timestamp when there is no live reading at all", async () => {
+		const acc = await runHandler([
+			snapshot({
+				ts: BASE - 1 * MINUTE_MS,
+				sevenDayPct: 85,
+				sevenDayReset: BASE + 3 * DAY_MS,
+			}),
+		]);
+		expect(acc?.usageAsOfIso).toBeNull();
+		expect(acc?.staleUsage?.sevenDay?.utilization).toBe(85);
+	});
+
+	// The handler captures `now` up front and then awaits several repository
+	// calls, so deriving the as-of time as `now - ageMs` reports the reading as
+	// older than it is by the handler's own elapsed time. A running clock exposes
+	// that; the fixed-clock tests above cannot.
+	it("reports the exact sample time even when the handler takes time to run", async () => {
+		let clock = BASE;
+		nowSpy.mockImplementation(() => clock);
+		usageCache.set(ACCOUNT_ID, liveUsage()); // stamped at BASE
+
+		const handler = createAccountsListHandler(
+			makeDbOps(
+				[makeAccountRow({ id: ACCOUNT_ID, provider: "anthropic" })],
+				[],
+				// 4s of "DB time" between the handler's `now` and its cache read.
+				() => {
+					clock += 4_000;
+				},
+			),
+			config,
+		);
+		const body = (await (await handler()).json()) as AccountResponse[];
+		const acc = body.find((a) => a.id === ACCOUNT_ID);
+
+		expect(acc?.usageAsOfIso).toBe(new Date(BASE).toISOString());
+	});
+
+	// getCachedOrPersistedCodexUsage() substitutes DB-restored usage when the
+	// cached entry cannot be normalized (or drops it entirely). Labelling that
+	// result with the live cache entry's sample time would describe data that was
+	// never returned.
+	it("omits the as-of timestamp when Codex normalization rejects the cached entry", async () => {
+		// Both windows lack a reset time and there are no scoped limits, so
+		// normalizeCodexUsageData returns null → the persisted path takes over.
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: { utilization: 50, resets_at: null },
+		});
+		nowSpy.mockReturnValue(BASE + 2 * MINUTE_MS);
+
+		const handler = createAccountsListHandler(
+			makeDbOps([makeAccountRow({ id: ACCOUNT_ID, provider: "codex" })], []),
+			config,
+		);
+		const body = (await (await handler()).json()) as AccountResponse[];
+		const acc = body.find((a) => a.id === ACCOUNT_ID);
+
+		expect(acc?.usageData).toBeNull();
+		expect(acc?.usageAsOfIso).toBeNull();
+	});
+
+	// The throttle annotation states that the PROXY is delaying requests. The
+	// proxy decides that from a routing-fresh reading (usageCache.peek()), so an
+	// aged display reading must not announce a delay that is not happening.
+	it("suppresses the throttle annotation for a reading past the routing TTL", async () => {
+		// Utilization far ahead of the window's elapsed pace → throttled when fresh.
+		const burning = () => ({
+			five_hour: {
+				utilization: 95,
+				resets_at: new Date(BASE + 4 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 95,
+				resets_at: new Date(BASE + 6 * DAY_MS).toISOString(),
+			},
+		});
+		const run = async (ageMs: number) => {
+			usageCache.delete(ACCOUNT_ID);
+			nowSpy.mockReturnValue(BASE);
+			usageCache.set(ACCOUNT_ID, burning());
+			nowSpy.mockReturnValue(BASE + ageMs);
+			const handler = createAccountsListHandler(
+				makeDbOps(
+					[makeAccountRow({ id: ACCOUNT_ID, provider: "anthropic" })],
+					[],
+				),
+				throttlingConfig,
+			);
+			const body = (await (await handler()).json()) as AccountResponse[];
+			return body.find((a) => a.id === ACCOUNT_ID);
+		};
+
+		const fresh = await run(2 * MINUTE_MS);
+		expect(fresh?.usageThrottledWindows.length).toBeGreaterThan(0);
+
+		const aged = await run(12 * MINUTE_MS);
+		// Bars still render (with their age)...
+		expect(aged?.usageData).not.toBeNull();
+		// ...but the "requests are being delayed" claim is withdrawn.
+		expect(aged?.usageThrottledWindows).toEqual([]);
+		expect(aged?.usageThrottledUntil).toBeNull();
+	});
+
+	it("keeps the as-of timestamp for a Codex entry that normalizes from the live cache", async () => {
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: 50,
+				resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+			},
+		});
+		nowSpy.mockReturnValue(BASE + 2 * MINUTE_MS);
+
+		const handler = createAccountsListHandler(
+			makeDbOps([makeAccountRow({ id: ACCOUNT_ID, provider: "codex" })], []),
+			config,
+		);
+		const body = (await (await handler()).json()) as AccountResponse[];
+		const acc = body.find((a) => a.id === ACCOUNT_ID);
+
+		expect(acc?.usageData).not.toBeNull();
+		expect(acc?.usageAsOfIso).toBe(new Date(BASE).toISOString());
 	});
 });

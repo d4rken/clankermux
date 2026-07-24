@@ -506,6 +506,7 @@ describe("UsageCache - Memory Management", () => {
 describe("UsageCache - non-evicting peek()/peekAge()", () => {
 	const ACCOUNT = "peek-nonevict-account";
 	const TTL_MS = 10 * 60 * 1000;
+	const UI_HORIZON_MS = 30 * 60 * 1000; // UI_STALE_HORIZON_MS
 	const BASE = 1_000_000_000_000; // fixed epoch base for deterministic ages
 	let nowSpy: ReturnType<typeof spyOn>;
 
@@ -578,6 +579,83 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 	// sampler's freshnessMs is always well under the 10-min TTL, every entry it
 	// would accept is also non-stale for peek(), so peekAge returning the true age
 	// (rather than null) never changes the accept/reject decision.
+	// peekWithAge is the DASHBOARD freshness read: data + its TRUE age, even past
+	// the routing TTL, bounded only by the (much longer) UI horizon. It exists so
+	// an 11-minute-old reading renders as live-with-an-"as of" age instead of the
+	// amber "Live usage unavailable" the evicting get() used to trigger.
+	describe("peekWithAge() — non-evicting UI freshness read", () => {
+		it("returns data with its true age while fresh", () => {
+			usageCache.set(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + 45_000);
+
+			expect(usageCache.peekWithAge(ACCOUNT)).toEqual({
+				data: sample,
+				ageMs: 45_000,
+				sampledAtMs: BASE,
+			});
+		});
+
+		// The absolute write time is what callers serialize; deriving it as
+		// `theirNow - ageMs` mislabels the reading whenever the caller's `now`
+		// predates the read (a request handler captures `now` before its awaits).
+		it("reports the entry's absolute sample timestamp, not a relative age only", () => {
+			usageCache.set(ACCOUNT, sample); // written at BASE
+			nowSpy.mockReturnValue(BASE + 7 * 60_000);
+
+			const entry = usageCache.peekWithAge(ACCOUNT);
+			expect(entry?.sampledAtMs).toBe(BASE);
+			// Stays anchored to the write time as the clock advances (only the age
+			// moves), so a caller never has to do clock arithmetic.
+			nowSpy.mockReturnValue(BASE + 12 * 60_000);
+			const later = usageCache.peekWithAge(ACCOUNT);
+			expect(later?.sampledAtMs).toBe(BASE);
+			expect(later?.ageMs).toBe(12 * 60_000);
+		});
+
+		it("returns data with its TRUE age past the routing TTL and never evicts", () => {
+			usageCache.set(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + TTL_MS + 90_000); // 11m30s — the observed gap
+
+			const first = usageCache.peekWithAge(ACCOUNT);
+			expect(first).toEqual({
+				data: sample,
+				ageMs: TTL_MS + 90_000,
+				sampledAtMs: BASE,
+			});
+			// Repeat reads keep seeing it — no eviction side effect...
+			expect(usageCache.peekWithAge(ACCOUNT)).toEqual(first);
+			// ...and the entry is genuinely still in the map.
+			expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 90_000);
+			// By contrast the routing read still treats it as absent (and evicts).
+			expect(usageCache.get(ACCOUNT)).toBeNull();
+			expect(usageCache.peekWithAge(ACCOUNT)).toBeNull();
+		});
+
+		it("returns null past the UI horizon without evicting", () => {
+			usageCache.set(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + UI_HORIZON_MS + 1);
+
+			expect(usageCache.peekWithAge(ACCOUNT)).toBeNull();
+			// Still non-evicting: the raw entry survives for other observers.
+			expect(usageCache.peekAge(ACCOUNT)).toBe(UI_HORIZON_MS + 1);
+		});
+
+		it("returns data exactly at the UI horizon boundary", () => {
+			usageCache.set(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + UI_HORIZON_MS);
+
+			expect(usageCache.peekWithAge(ACCOUNT)).toEqual({
+				data: sample,
+				ageMs: UI_HORIZON_MS,
+				sampledAtMs: BASE,
+			});
+		});
+
+		it("returns null for a missing account", () => {
+			expect(usageCache.peekWithAge("no-such-account")).toBeNull();
+		});
+	});
+
 	it("sampler-style freshness gating with peekAge stays correct", () => {
 		const FRESHNESS_MS = 180_000; // matches max(2*pollInterval, 150s) in practice
 

@@ -13,13 +13,17 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import {
 	computeDemandAwareInterval,
 	computePollDelay,
+	IDLE_REFRESH_LEAD_MS,
+	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "../usage-fetcher";
 
 const ACTIVE = 90_000; // configured active cadence (getUsagePollIntervalMs default)
-const IDLE = 10 * 60_000; // IDLE_POLL_INTERVAL_MS
 const RECENCY = 15 * 60_000; // ACTIVITY_RECENCY_MS
 const NOW = 1_000_000_000_000;
+// The idle cadence is capped so a refresh always lands before the cache entry
+// expires: TTL (10 min) minus the fetch-latency lead (1 min) => 9 min.
+const IDLE_CAP = USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS;
 
 describe("demand-aware cadence — computeDemandAwareInterval", () => {
 	it("recently-active account → active interval", () => {
@@ -39,7 +43,9 @@ describe("demand-aware cadence — computeDemandAwareInterval", () => {
 			ACTIVE,
 			NOW,
 		);
-		expect(r).toEqual({ intervalMs: IDLE, isIdle: true });
+		// The 10-min idle base is capped to 9 min so the refresh lands before the
+		// cache entry expires.
+		expect(r).toEqual({ intervalMs: IDLE_CAP, isIdle: true });
 	});
 
 	it("unknown/never-seen activity (null) → idle interval", () => {
@@ -49,7 +55,7 @@ describe("demand-aware cadence — computeDemandAwareInterval", () => {
 			ACTIVE,
 			NOW,
 		);
-		expect(r).toEqual({ intervalMs: IDLE, isIdle: true });
+		expect(r).toEqual({ intervalMs: IDLE_CAP, isIdle: true });
 	});
 
 	it("exactly at the recency boundary → idle (strict <)", () => {
@@ -152,7 +158,7 @@ describe("demand-aware cadence — computePollDelay priority", () => {
 		expect(r).toEqual({ delayMs: ACTIVE * 1.2, isIdle: false });
 	});
 
-	it("healthy + cold picks the idle interval", () => {
+	it("healthy + cold picks the (capped) idle interval", () => {
 		const r = computePollDelay({
 			demandAware: true,
 			activeIntervalMs: ACTIVE,
@@ -162,7 +168,226 @@ describe("demand-aware cadence — computePollDelay priority", () => {
 			now: NOW,
 			jitterFraction: 0,
 		});
-		expect(r).toEqual({ delayMs: IDLE, isIdle: true });
+		expect(r).toEqual({ delayMs: IDLE_CAP, isIdle: true });
+	});
+});
+
+/**
+ * Regression: an idle account's next poll must ALWAYS land before its cache
+ * entry expires. Previously the idle cadence (10 min) equalled the cache TTL
+ * (10 min) and carried symmetric ±20% jitter, so ~half of all idle cycles left
+ * the entry expired for 30s–2min — long enough for the dashboard's evicting
+ * read to return null and paint "Live usage unavailable" on a healthy account.
+ */
+describe("demand-aware cadence — idle refresh lands before the cache TTL", () => {
+	// Sweep the full symmetric jitter range the scheduler can produce.
+	const JITTER_SAMPLES = Array.from(
+		{ length: 41 },
+		(_, i) => -0.2 + i * 0.01, // -0.20 … +0.20
+	);
+
+	const idleDelay = (jitterFraction: number, activeIntervalMs = ACTIVE) =>
+		computePollDelay({
+			demandAware: true,
+			activeIntervalMs,
+			lastActivityMs: null, // cold → idle cadence
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction,
+		});
+
+	it("idle delay is strictly under the cache TTL across the full jitter range", () => {
+		for (const jitterFraction of JITTER_SAMPLES) {
+			const { delayMs, isIdle } = idleDelay(jitterFraction);
+			expect(isIdle).toBe(true);
+			expect(delayMs).toBeLessThan(USAGE_CACHE_TTL_MS);
+			// And by at least the fetch-latency lead, so the replacement lands first.
+			expect(delayMs).toBeLessThanOrEqual(
+				USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
+			);
+		}
+	});
+
+	it("idle jitter is negative-only: delay stays in [0.9, 1.0] x the capped interval", () => {
+		for (const jitterFraction of JITTER_SAMPLES) {
+			const { delayMs } = idleDelay(jitterFraction);
+			expect(delayMs).toBeGreaterThanOrEqual(IDLE_CAP * 0.9);
+			expect(delayMs).toBeLessThanOrEqual(IDLE_CAP);
+		}
+		// The extremes still de-synchronize accounts (not a constant delay).
+		expect(idleDelay(0.2).delayMs).toBe(IDLE_CAP * 0.9);
+		expect(idleDelay(-0.2).delayMs).toBe(IDLE_CAP * 0.9);
+		expect(idleDelay(0).delayMs).toBe(IDLE_CAP);
+	});
+
+	it("caps an idleIntervalMs override that exceeds the TTL lead", () => {
+		const r = computeDemandAwareInterval(
+			{ demandAware: true, idleIntervalMs: 20 * 60_000 },
+			null,
+			ACTIVE,
+			NOW,
+		);
+		expect(r).toEqual({ intervalMs: IDLE_CAP, isIdle: true });
+	});
+
+	it("leaves an idleIntervalMs override below the cap untouched", () => {
+		const r = computeDemandAwareInterval(
+			{ demandAware: true, idleIntervalMs: 5 * 60_000 },
+			null,
+			ACTIVE,
+			NOW,
+		);
+		expect(r).toEqual({ intervalMs: 5 * 60_000, isIdle: true });
+	});
+
+	it("never polls an idle account faster than the configured active cadence", () => {
+		// A configured active cadence above the cap wins: speeding an idle account
+		// up to 9 min would spend MORE of the shared usage-endpoint quota than the
+		// active cadence does, inverting the whole point of the idle cadence.
+		const bigActive = 15 * 60_000;
+		const r = computeDemandAwareInterval(
+			{ demandAware: true },
+			null,
+			bigActive,
+			NOW,
+		);
+		expect(r).toEqual({ intervalMs: bigActive, isIdle: true });
+	});
+
+	it("active cadence keeps its symmetric ±20% jitter (uncapped)", () => {
+		const active = (jitterFraction: number) =>
+			computePollDelay({
+				demandAware: true,
+				activeIntervalMs: ACTIVE,
+				lastActivityMs: NOW, // recent → active cadence
+				failures: 0,
+				retryAfterMs: null,
+				now: NOW,
+				jitterFraction,
+			});
+		expect(active(0.2)).toEqual({ delayMs: ACTIVE * 1.2, isIdle: false });
+		expect(active(-0.2)).toEqual({ delayMs: ACTIVE * 0.8, isIdle: false });
+		expect(active(0)).toEqual({ delayMs: ACTIVE, isIdle: false });
+	});
+
+	it("does NOT cap a non-demand-aware provider's fixed cadence", () => {
+		// Zai/Kilo/Alibaba pass no policy → isIdle is always false and their
+		// configured cadence is used verbatim, even beyond the cache TTL.
+		const fixed = 20 * 60_000;
+		expect(computeDemandAwareInterval({}, null, fixed, NOW)).toEqual({
+			intervalMs: fixed,
+			isIdle: false,
+		});
+		const r = computePollDelay({
+			activeIntervalMs: fixed,
+			lastActivityMs: null,
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0.2,
+		});
+		expect(r).toEqual({ delayMs: fixed * 1.2, isIdle: false });
+		expect(r.delayMs).toBeGreaterThan(USAGE_CACHE_TTL_MS);
+	});
+
+	it("leaves retry-after and failure backoff free to exceed the cache TTL", () => {
+		// A failing account must keep backing off; letting its entry lapse is
+		// correct (there is no fresh reading to protect).
+		const retry = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: ACTIVE,
+			lastActivityMs: null,
+			failures: 0,
+			retryAfterMs: 25 * 60_000,
+			now: NOW,
+			jitterFraction: 0,
+		});
+		expect(retry).toEqual({ delayMs: 25 * 60_000, isIdle: false });
+
+		const backoff = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: ACTIVE,
+			lastActivityMs: null,
+			failures: 10,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0,
+		});
+		expect(backoff.delayMs).toBeGreaterThan(USAGE_CACHE_TTL_MS);
+		expect(backoff.isIdle).toBe(false);
+	});
+
+	// The cap must hold for EVERY demand-aware healthy delay, not just the idle
+	// branch: `activeIntervalMs` is a caller-supplied parameter that may exceed
+	// the cap, and noteActivity() re-arms a woken account to the ACTIVE cadence
+	// with symmetric jitter. Clamping the post-jitter delay for both branches is
+	// what makes the invariant configuration-independent — and at the ceiling the
+	// idle delay simply equals the active one, so idle still never polls faster.
+	it("clamps the post-jitter ACTIVE delay of a demand-aware account", () => {
+		const nearCap = 9.5 * 60_000; // already above the 9-min cap
+		const r = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: nearCap,
+			lastActivityMs: NOW, // recent → active cadence
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0.2, // would push it to 11.4 min
+		});
+		expect(r).toEqual({ delayMs: IDLE_CAP, isIdle: false });
+	});
+
+	it("holds the invariant for every configured cadence x jitter combination", () => {
+		const configuredCadences = [
+			90_000, // production default (apps/server/src/server.ts)
+			5 * 60_000,
+			9 * 60_000,
+			15 * 60_000, // above the cap
+			45 * 60_000, // far above the cap
+		];
+		for (const activeIntervalMs of configuredCadences) {
+			for (const jitterFraction of JITTER_SAMPLES) {
+				for (const lastActivityMs of [NOW, null]) {
+					// active and idle
+					const { delayMs } = computePollDelay({
+						demandAware: true,
+						activeIntervalMs,
+						lastActivityMs,
+						failures: 0,
+						retryAfterMs: null,
+						now: NOW,
+						jitterFraction,
+					});
+					expect(delayMs).toBeLessThanOrEqual(IDLE_CAP);
+				}
+			}
+		}
+	});
+
+	it("never schedules an idle poll sooner than the active one at the ceiling", () => {
+		const bigActive = 15 * 60_000;
+		const active = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: bigActive,
+			lastActivityMs: NOW,
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0,
+		});
+		const idle = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: bigActive,
+			lastActivityMs: null,
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0,
+		});
+		expect(idle.delayMs).toBeGreaterThanOrEqual(active.delayMs);
+		expect(idle.delayMs).toBe(IDLE_CAP);
+		expect(active.delayMs).toBe(IDLE_CAP);
 	});
 });
 
@@ -178,11 +403,16 @@ describe("demand-aware cadence — noteActivity re-arm (integration)", () => {
 	}
 	let fetchSpy: ReturnType<typeof spyOn>;
 	let fetchCalls = 0;
+	// Flipped by the refreshNow tests to drive the poll loop into failure backoff
+	// and then let an on-demand refresh succeed.
+	let fetchFails = false;
 
 	beforeEach(() => {
 		fetchCalls = 0;
+		fetchFails = false;
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
 			fetchCalls++;
+			if (fetchFails) return new Response("nope", { status: 500 });
 			return new Response(
 				JSON.stringify({
 					five_hour: { utilization: 10, resets_at: null },
@@ -397,5 +627,105 @@ describe("demand-aware cadence — noteActivity re-arm (integration)", () => {
 		expect(activityMap.has(id)).toBe(false); // pruned on stop
 		usageCache.noteActivity(id); // stopped poller → no-op, stays absent
 		expect(activityMap.has(id)).toBe(false);
+	});
+
+	// refreshNow() writes a fresh entry but used to leave the poll loop sitting in
+	// whatever backoff earlier failures had earned. A 30-minute backoff outlives
+	// the 10-minute cache TTL, so the proven-healthy reading expired long before
+	// the next scheduled poll — exactly the gap this branch is closing.
+	describe("refreshNow re-arms the poll schedule", () => {
+		const failureCounts = () =>
+			(usageCache as unknown as { failureCounts: Map<string, number> })
+				.failureCounts;
+		const pollSchedule = () =>
+			(
+				usageCache as unknown as {
+					pollSchedule: Map<string, { wakeAt: number; isIdle: boolean }>;
+				}
+			).pollSchedule;
+
+		const startDemandAware = (
+			id: string,
+			activeMs: number,
+			idleIntervalMs = 100_000,
+		) =>
+			usageCache.startPolling(
+				id,
+				async () => "fake-token",
+				"anthropic",
+				activeMs,
+				null,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ demandAware: true, idleIntervalMs },
+			);
+
+		// Wait until the loop is asleep on a backoff timer of at least `minFailures`
+		// consecutive failures (rather than racing a fixed sleep against a tick).
+		async function waitForBackoff(id: string, minFailures: number) {
+			for (let i = 0; i < 200; i++) {
+				if (
+					(failureCounts().get(id) ?? 0) >= minFailures &&
+					pollSchedule().has(id)
+				)
+					return;
+				await wait(20);
+			}
+			throw new Error(`account ${id} never reached ${minFailures} failures`);
+		}
+
+		it("clears the failure streak and pulls the next poll in", async () => {
+			const id = freshId();
+			const ACTIVE_MS = 100;
+			const IDLE_MS = 250; // the healthy cadence for this cold account
+			fetchFails = true;
+			startDemandAware(id, ACTIVE_MS, IDLE_MS);
+
+			// Let the streak grow until the backoff (ACTIVE_MS * 2^failures) is
+			// genuinely longer than the healthy cadence — the shape of the real bug,
+			// where a 30-minute backoff outlives a 10-minute cache entry.
+			await waitForBackoff(id, 3);
+			const backoffRemaining =
+				(pollSchedule().get(id)?.wakeAt ?? 0) - Date.now();
+			expect(backoffRemaining).toBeGreaterThan(IDLE_MS);
+
+			fetchFails = false;
+			expect(await usageCache.refreshNow(id)).toBe(true);
+
+			// The streak is disproven and the schedule is back on the healthy cadence.
+			expect(failureCounts().has(id)).toBe(false);
+			const rearmedRemaining =
+				(pollSchedule().get(id)?.wakeAt ?? 0) - Date.now();
+			expect(rearmedRemaining).toBeGreaterThan(0);
+			expect(rearmedRemaining).toBeLessThanOrEqual(IDLE_MS);
+			expect(rearmedRemaining).toBeLessThan(backoffRemaining);
+		});
+
+		it("does not push out the next poll when the account was already healthy", async () => {
+			// Guard against the opposite failure: a dashboard that refreshes on a
+			// timer must not be able to postpone scheduled polling indefinitely.
+			const id = freshId();
+			startDemandAware(id, 100_000);
+			await wait(40);
+			const before = pollSchedule().get(id)?.wakeAt;
+			expect(before).toBeDefined();
+
+			expect(await usageCache.refreshNow(id)).toBe(true);
+			expect(pollSchedule().get(id)?.wakeAt).toBe(before as number);
+		});
+
+		it("never resurrects a stopped poller", async () => {
+			const id = freshId();
+			startDemandAware(id, 100_000);
+			await wait(40);
+			usageCache.stopPolling(id);
+
+			expect(await usageCache.refreshNow(id)).toBe(false);
+			expect(pollSchedule().has(id)).toBe(false);
+			expect(failureCounts().has(id)).toBe(false);
+		});
 	});
 });
