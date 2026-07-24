@@ -146,6 +146,19 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 6.25,
 				},
 			},
+			// Opus 5 keeps the Opus 4.5–4.8 tier ($5/$25). The $10/$50 quoted at
+			// launch is the "fast mode" premium — a Claude-API-only research
+			// preview with no representation in this proxy.
+			[CLAUDE_MODEL_IDS.OPUS_5]: {
+				id: CLAUDE_MODEL_IDS.OPUS_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_5],
+				cost: {
+					input: 5,
+					output: 25,
+					cache_read: 0.5,
+					cache_write: 6.25,
+				},
+			},
 			// Mythos-class models: $10/M input, $50/M output,
 			// $1.00/M cache read (0.1x), $12.50/M cache write (1.25x).
 			[CLAUDE_MODEL_IDS.FABLE_5]: {

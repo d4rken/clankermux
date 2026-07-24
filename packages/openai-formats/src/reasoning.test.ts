@@ -20,6 +20,13 @@ describe("reasoning effort support", () => {
 			"xhigh",
 			"max",
 		]);
+		expect(getSupportedReasoningEfforts("claude-opus-5")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 		expect(getSupportedReasoningEfforts("claude-haiku-4-5")).toEqual([
 			"low",
 			"medium",

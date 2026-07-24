@@ -66,8 +66,10 @@ describe("estimateCostUSD", () => {
 });
 
 describe("bundled Opus pricing (offline fallback)", () => {
-	// Opus 4.7 and 4.8 both price at $5/M input, $25/M output,
+	// Opus 4.7, 4.8 and 5 all price at $5/M input, $25/M output,
 	// $0.50/M cache read, $6.25/M cache write — same tier as Opus 4.5/4.6.
+	// (Opus 5's $10/$50 "fast mode" is a Claude-API-only research preview with
+	// no representation in this proxy.)
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -76,6 +78,17 @@ describe("bundled Opus pricing (offline fallback)", () => {
 		cacheReadInputTokens: 1_000_000,
 		cacheCreationInputTokens: 1_000_000,
 	};
+
+	it("prices claude-opus-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5", ioTokens)).toBeCloseTo(30, 6);
+	});
+
+	it("prices claude-opus-5 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5", cacheTokens)).toBeCloseTo(
+			6.75,
+			6,
+		);
+	});
 
 	it("prices claude-opus-4-8 input/output from bundled data", async () => {
 		expect(await estimateCostUSD("claude-opus-4-8", ioTokens)).toBeCloseTo(
@@ -162,6 +175,14 @@ describe("bundled Mythos-class pricing (offline fallback)", () => {
 });
 
 describe("getModelCacheRates", () => {
+	it("returns Opus 5 rates from bundled data", () => {
+		expect(getModelCacheRates("claude-opus-5")).toEqual({
+			inputPer1M: 5,
+			cacheReadPer1M: 0.5,
+			cacheWritePer1M: 6.25,
+		});
+	});
+
 	it("returns Opus 4.8 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-opus-4-8")).toEqual({
 			inputPer1M: 5,
