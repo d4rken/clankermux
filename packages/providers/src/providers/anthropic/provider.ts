@@ -178,7 +178,10 @@ export class AnthropicProvider extends BaseProvider {
 			client_id: clientId,
 		};
 
-		log.debug("Request body:", requestBody);
+		// NOTE: do NOT log `requestBody` — it contains the full plaintext
+		// refresh_token, which would leak a live credential into the logs
+		// (journald is persistent and group-readable). The truncated
+		// `refreshTokenPreview` logged above is the only debug detail we keep.
 
 		const response = await fetch("https://platform.claude.com/v1/oauth/token", {
 			method: "POST",

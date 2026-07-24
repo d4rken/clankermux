@@ -1,5 +1,8 @@
+import { Logger } from "@clankermux/logger";
 import { generatePKCE } from "../../oauth/pkce";
 import type { PKCEChallenge } from "../../types";
+
+const log = new Logger("QwenDeviceOAuth");
 
 // Qwen OAuth constants (verified against qwen-code repo)
 const DEVICE_CODE_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/device/code";
@@ -113,7 +116,7 @@ export async function pollForToken(
 
 		if (response.ok) {
 			const tokenData = (await response.json()) as QwenTokenResponse;
-			console.log("[QwenDeviceOAuth] device code token response:", {
+			log.debug("device code token response:", {
 				expiresIn: tokenData.expires_in,
 				hasRefreshToken: !!tokenData.refresh_token,
 				hasResourceUrl: !!tokenData.resource_url,
@@ -185,7 +188,7 @@ export async function refreshQwenTokens(
 		resource_url?: string;
 	};
 
-	console.log("[QwenDeviceOAuth] token response:", {
+	log.debug("token response:", {
 		expiresIn: data.expires_in,
 		hasRefreshToken: !!data.refresh_token,
 		hasResourceUrl: !!data.resource_url,

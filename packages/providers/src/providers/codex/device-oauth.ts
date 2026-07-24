@@ -1,5 +1,9 @@
 // Codex device code auth flow (RFC 8628 variant)
 // Matches codex-rs/login/src/device_code_auth.rs
+import { Logger } from "@clankermux/logger";
+
+const log = new Logger("CodexDeviceOAuth");
+
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_BASE = "https://auth.openai.com";
 const USERCODE_ENDPOINT = `${AUTH_BASE}/api/accounts/deviceauth/usercode`;
@@ -150,7 +154,7 @@ async function exchangeCodexDeviceCode(
 		id_token?: string;
 	};
 
-	console.log("[CodexDeviceOAuth] token exchange response:", {
+	log.debug("token exchange response:", {
 		expiresIn: data.expires_in,
 		hasRefreshToken: !!data.refresh_token,
 		responseKeys: Object.keys(data),
