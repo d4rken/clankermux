@@ -26,6 +26,7 @@ import {
 	pollForToken as pollQwenForToken,
 } from "@clankermux/providers/qwen";
 import { clearAccountRefreshCache } from "@clankermux/proxy";
+import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 
 const log = new Logger("OAuthHandler");
 
@@ -997,7 +998,7 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 					`Completing OAuth flow for account '${name}' in ${savedMode} mode`,
 				);
 
-				await oauthFlow.complete(
+				const created = await oauthFlow.complete(
 					{
 						sessionId,
 						code,
@@ -1012,6 +1013,15 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 				dbOps.deleteOAuthSession(sessionId);
 
 				log.info(`Successfully added account '${name}' via OAuth`);
+
+				// Start usage polling immediately so the account's 5h/weekly bars
+				// populate right away instead of a blank placeholder until restart.
+				// (No-op for console API-key accounts — they have no usage windows.)
+				await primeUsagePollingForNewAccount({
+					id: created.id,
+					provider: created.provider,
+					name: created.name,
+				});
 
 				return jsonResponse({
 					success: true,
