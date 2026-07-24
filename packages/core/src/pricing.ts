@@ -419,6 +419,19 @@ class PriceCatalogue {
 	 * reports as 0 is preserved rather than treated as missing. Returns true when
 	 * at least one field was filled in.
 	 *
+	 * Cache fields are not copied verbatim: they are scaled by the ratio between
+	 * the remote input rate and the bundled input rate. If models.dev has moved a
+	 * model to another price tier (say input $5 -> $10) the bundled cache rates
+	 * belong to the old tier, and mixing them with the authoritative remote input
+	 * price would mis-cost every cached request for that model. Scaling preserves
+	 * whatever cache-to-input ratio the BUNDLED entry itself encodes, which keeps
+	 * this provider-agnostic — mergePricingData also runs for zai/minimax/
+	 * openrouter, where Anthropic's 0.1x/1.25x cache ratios do not hold, so
+	 * hardcoding those multipliers would corrupt non-Anthropic entries. The
+	 * strictly-positive guard means a provider that temporarily zero-rates input
+	 * falls back to the bundled absolutes instead of zeroing the cache rates.
+	 * input/output are never scaled — a missing one is copied verbatim.
+	 *
 	 * Both sides are treated as Partial<ModelCost>: the remote table is parsed
 	 * JSON, so any field can be absent at runtime regardless of the declared type.
 	 */
@@ -434,6 +447,21 @@ class PriceCatalogue {
 		const cost = remoteModel.cost as Partial<ModelCost>;
 		let filled = false;
 
+		// Read the remote input rate BEFORE the backfill below can populate it:
+		// only a remote-DEFINED input identifies the tier models.dev put the model
+		// on. A backfilled one is the bundled value, whose ratio is 1 anyway.
+		const remoteInput = cost.input;
+		const bundledInput = bundledCost.input;
+		const cacheScale =
+			typeof remoteInput === "number" &&
+			Number.isFinite(remoteInput) &&
+			remoteInput > 0 &&
+			typeof bundledInput === "number" &&
+			Number.isFinite(bundledInput) &&
+			bundledInput > 0
+				? remoteInput / bundledInput
+				: 1;
+
 		if (cost.input === undefined && bundledCost.input !== undefined) {
 			cost.input = bundledCost.input;
 			filled = true;
@@ -443,14 +471,14 @@ class PriceCatalogue {
 			filled = true;
 		}
 		if (cost.cache_read === undefined && bundledCost.cache_read !== undefined) {
-			cost.cache_read = bundledCost.cache_read;
+			cost.cache_read = bundledCost.cache_read * cacheScale;
 			filled = true;
 		}
 		if (
 			cost.cache_write === undefined &&
 			bundledCost.cache_write !== undefined
 		) {
-			cost.cache_write = bundledCost.cache_write;
+			cost.cache_write = bundledCost.cache_write * cacheScale;
 			filled = true;
 		}
 

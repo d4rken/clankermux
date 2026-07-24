@@ -126,6 +126,10 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		cacheReadInputTokens: 1_000_000,
 		cacheCreationInputTokens: 1_000_000,
 	};
+	const cacheOnlyTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
 
 	async function withRemoteCatalogue(
 		remote: unknown,
@@ -169,11 +173,67 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 				},
 			},
 			async () => {
-				// 7 (remote input) + 25 (remote output) + 0.5 + 6.25 (bundled cache)
+				// 7 (remote input) + 25 (remote output), plus the bundled cache rates
+				// scaled to the remote tier (7/5 = 1.4x): 0.5*1.4 + 6.25*1.4.
 				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
-					38.75,
+					41.45,
 					6,
 				);
+			},
+		);
+	});
+
+	it("scales backfilled cache costs to the remote price tier", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// models.dev moved the model to the doubled tier
+							// (bundled is 5 / 25 / 0.5 / 6.25) and still lists no
+							// cache rates. Copying the bundled cache absolutes would
+							// price cached tokens at the old tier forever.
+							cost: { input: 10, output: 50 },
+						},
+					},
+				},
+			},
+			async () => {
+				// Merged cache rates are 0.5*2 = 1.0 and 6.25*2 = 12.5 per 1M.
+				expect(
+					await estimateCostUSD("claude-opus-5", cacheOnlyTokens),
+				).toBeCloseTo(13.5, 6);
+				// ...and the input/output rates the remote defined still win.
+				expect(await estimateCostUSD("claude-opus-5", allTokens)).toBeCloseTo(
+					73.5,
+					6,
+				);
+			},
+		);
+	});
+
+	it("copies bundled cache costs verbatim when the remote input is zero", async () => {
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"claude-opus-5": {
+							id: "claude-opus-5",
+							name: "Claude Opus 5",
+							// A zero-rated input carries no tier information; scaling
+							// by it would wipe out the cache rates entirely, so the
+							// bundled absolutes are copied instead.
+							cost: { input: 0, output: 25 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD("claude-opus-5", cacheOnlyTokens),
+				).toBeCloseTo(6.75, 6);
 			},
 		);
 	});
