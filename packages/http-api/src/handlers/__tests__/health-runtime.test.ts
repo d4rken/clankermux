@@ -633,6 +633,122 @@ describe("?detail=1 parameter", () => {
 		}
 	});
 
+	it("reports usage_exhausted for a LOCKED weekly-exhausted account (cause over mechanism)", async () => {
+		// The lock is the MECHANISM (a cooldown row exists); the spent weekly window
+		// is the CAUSE. Previously the detail view skipped the weekly evaluation
+		// entirely for locked accounts and reported "rate_limited".
+		const id = "health-exh-locked-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "exhausted-and-locked",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: Date.now() + 600_000,
+						rate_limited_reason: "weekly_exhausted_429",
+						rate_limited_at: Date.now(),
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
+			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
+				"number",
+			);
+			// The lock is still reported as detail — only the headline changes.
+			expect(typeof body.accounts_detail?.[0]?.rate_limited_until).toBe(
+				"number",
+			);
+			expect(body.accounts_detail?.[0]?.rate_limited_reason).toBe(
+				"weekly_exhausted_429",
+			);
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("keeps rate_limited for a locked account whose weekly window has headroom", async () => {
+		const id = "health-locked-healthy-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(42, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "locked-only",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: Date.now() + 600_000,
+						rate_limited_reason: "model_fallback_429",
+						rate_limited_at: Date.now(),
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("keeps paused ahead of usage_exhausted (a paused account is not routable for another reason)", async () => {
+		const id = "health-paused-exhausted-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "paused-and-exhausted",
+						provider: "anthropic",
+						paused: true,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("paused");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
 	it("marks an account with a spent seven_day_oauth_apps as usage_exhausted in accounts_detail", async () => {
 		const id = "health-oauth-acct-1";
 		const futureIso = new Date(Date.now() + 3_600_000).toISOString();

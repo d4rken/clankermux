@@ -224,12 +224,15 @@ export function createHealthHandler(
 					a.rate_limited_until >= now
 				);
 				const usage = getUsage(a);
-				// Account-wide weekly exhaustion sidelines the whole account (status
-				// `usage_exhausted`), but only when it isn't already paused/locked.
-				const { exhausted, resetMs } =
-					a.paused || locked
-						? { exhausted: false, resetMs: null }
-						: weeklyExhaustion(usage, now);
+				// Account-wide weekly exhaustion sidelines the whole account. A live
+				// cooldown lock does NOT hide it: the lock is the mechanism, the spent
+				// weekly window is the cause, and reporting the mechanism made
+				// identically-exhausted accounts read differently depending on whether
+				// a cooldown happened to still be ticking. Paused stays excluded — a
+				// paused account is not routable for an unrelated reason.
+				const { exhausted, resetMs } = a.paused
+					? { exhausted: false, resetMs: null }
+					: weeklyExhaustion(usage, now);
 				// Family-scoped exhaustion is DETAIL only — it never changes the
 				// account's routability, so it's surfaced without touching `status`.
 				const scopedFamilies = getExhaustedFamilies(usage, now).map(
@@ -238,12 +241,14 @@ export function createHealthHandler(
 
 				const detail: AccountDetail = {
 					name: a.name,
+					// Cause before mechanism: `usage_exhausted` outranks the cooldown
+					// lock. The lock itself is still reported in the fields below.
 					status: a.paused
 						? "paused"
-						: locked
-							? "rate_limited"
-							: exhausted
-								? "usage_exhausted"
+						: exhausted
+							? "usage_exhausted"
+							: locked
+								? "rate_limited"
 								: "available",
 					rate_limited_until: locked ? (a.rate_limited_until ?? null) : null,
 					rate_limited_reason: locked ? (a.rate_limited_reason ?? null) : null,
