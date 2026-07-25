@@ -91,6 +91,8 @@ export {
 	type HoldResult,
 	holdAndRetryCacheAccount,
 	isOAuthAnthropicAccount,
+	type ReprobeFn,
+	type ReprobeOutcome,
 } from "./transparent-retry";
 export {
 	createUsageThrottledResponse,

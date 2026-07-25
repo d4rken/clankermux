@@ -12,7 +12,11 @@ import {
 	resetHoldSlots,
 	tryAcquireHoldSlot,
 } from "../burst-cooldown";
-import { HOLD_OVERFLOW, holdAndRetryCacheAccount } from "../transparent-retry";
+import {
+	HOLD_OVERFLOW,
+	holdAndRetryCacheAccount,
+	type ReprobeOutcome,
+} from "../transparent-retry";
 
 // Deterministic timing overrides passed into holdAndRetryCacheAccount in place
 // of the (now fixed) module constants: a short hold budget and zero jitter keep
@@ -90,7 +94,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -108,7 +112,10 @@ describe("holdAndRetryCacheAccount", () => {
 			account,
 			confidence: "fresh_headroom",
 			signal: new AbortController().signal,
-			reprobe: async () => okResponse(),
+			reprobe: async () => ({
+				kind: "response" as const,
+				response: okResponse(),
+			}),
 			...TEST_HOLD_OVERRIDES,
 		});
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
@@ -125,7 +132,7 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				// Refresh the cooldown a tiny bit so each loop re-waits ~0.
 				account.rate_limited_until = Date.now() - 1;
-				return null; // still throttled
+				return { kind: "throttled" as const }; // still throttled
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -145,7 +152,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 			maxHoldMs: 1000,
@@ -166,7 +173,7 @@ describe("holdAndRetryCacheAccount", () => {
 			reprobe: async () => {
 				probes += 1;
 				account.rate_limited_until = Date.now() - 1;
-				return null;
+				return { kind: "throttled" as const };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -189,7 +196,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -210,7 +217,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: controller.signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 			maxHoldMs: 5000,
@@ -246,12 +253,12 @@ describe("holdAndRetryCacheAccount", () => {
 				probes += 1;
 				// Never resolve on our own — only when the budget deadline aborts us,
 				// mirroring proxyWithAccount's AbortError → null failover.
-				return new Promise<Response | null>((resolve) => {
+				return new Promise<ReprobeOutcome>((resolve) => {
 					signal.addEventListener(
 						"abort",
 						() => {
 							probeSignalAborted = true;
-							resolve(null);
+							resolve({ kind: "throttled" });
 						},
 						{ once: true },
 					);
@@ -283,7 +290,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: controller.signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -312,7 +319,7 @@ describe("holdAndRetryCacheAccount", () => {
 			reprobe: async () => {
 				probes += 1;
 				account.rate_limited_until = Date.now() - 1;
-				return null;
+				return { kind: "throttled" as const };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -332,7 +339,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -356,7 +363,7 @@ describe("holdAndRetryCacheAccount", () => {
 			signal: new AbortController().signal,
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			// No maxHoldMs override — exercise the real 120s BURST_RETRY_MAX_HOLD_MS.
 			maxAttempts: 3,
@@ -379,7 +386,7 @@ describe("holdAndRetryCacheAccount", () => {
 			model: "claude-haiku-4-5",
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
@@ -400,11 +407,112 @@ describe("holdAndRetryCacheAccount", () => {
 			model: "claude-sonnet-4-5",
 			reprobe: async () => {
 				probes += 1;
-				return okResponse();
+				return { kind: "response" as const, response: okResponse() };
 			},
 			...TEST_HOLD_OVERRIDES,
 		});
 		expect(result).toBeInstanceOf(Response);
 		expect(probes).toBe(1);
+	});
+
+	// --- suppressed re-probes (single-flight recovery gate) -------------------
+	//
+	// "suppressed" means the re-probe NEVER HAPPENED: another request holds the
+	// account's recovery-probe lease. Nothing was sent upstream and nothing was
+	// learned, so it must not consume one of the (three) attempts.
+
+	it("a SUPPRESSED re-probe does not consume an attempt", async () => {
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let calls = 0;
+		let realProbes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				calls += 1;
+				// The lease holder is slow: the first four re-probes are suppressed —
+				// more than MAX_ATTEMPTS — and only then does the account answer.
+				if (calls <= 4) return { kind: "suppressed" as const };
+				realProbes += 1;
+				return { kind: "response" as const, response: okResponse() };
+			},
+			...TEST_HOLD_OVERRIDES,
+			suppressedPollMs: 1,
+		});
+		expect(result).toBeInstanceOf(Response);
+		expect(calls).toBe(5);
+		expect(realProbes).toBe(1);
+	});
+
+	it("a stale_should_retry hold survives suppression and still gets its ONE probe", async () => {
+		// Its budget is a single probe, so collapsing suppression into "throttled"
+		// ended the hold on the very first suppression — failing the request over
+		// while the real probe was still in flight.
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let calls = 0;
+		let realProbes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "stale_should_retry",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				calls += 1;
+				if (calls === 1) return { kind: "suppressed" as const };
+				realProbes += 1;
+				return { kind: "response" as const, response: okResponse() };
+			},
+			...TEST_HOLD_OVERRIDES,
+			suppressedPollMs: 1,
+		});
+		expect(result).toBeInstanceOf(Response);
+		expect(realProbes).toBe(1);
+	});
+
+	it("a permanently-suppressed re-probe gives up only when the budget runs out", async () => {
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		let calls = 0;
+		const start = Date.now();
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				calls += 1;
+				return { kind: "suppressed" as const };
+			},
+			...TEST_HOLD_OVERRIDES,
+			maxHoldMs: 200,
+			suppressedPollMs: 20,
+		});
+		const elapsed = Date.now() - start;
+		expect(result).toBeNull();
+		// It polled repeatedly (rather than giving up after MAX_ATTEMPTS) and used
+		// most of the budget doing so.
+		expect(calls).toBeGreaterThan(3);
+		expect(elapsed).toBeGreaterThanOrEqual(150);
+		expect(elapsed).toBeLessThan(2000);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("a client disconnect during a suppression poll aborts the hold", async () => {
+		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
+		const controller = new AbortController();
+		let calls = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: controller.signal,
+			reprobe: async () => {
+				calls += 1;
+				controller.abort();
+				return { kind: "suppressed" as const };
+			},
+			...TEST_HOLD_OVERRIDES,
+			suppressedPollMs: 50,
+		});
+		expect(result).toBeNull();
+		expect(calls).toBe(1);
+		expect(getActiveHoldCount()).toBe(0);
 	});
 });
