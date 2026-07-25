@@ -72,9 +72,17 @@ const KNOWN_ERROR_META: Record<
 	weekly_exhausted_429: {
 		title: "Weekly usage limit reached",
 		description:
-			"Anthropic returned 429 while this account's account-wide weekly window was already at 100% (confirmed by fresh usage data). The account is cooled down until the provider's reset time and traffic shifts to other accounts; the transparent burst-retry hold is skipped because a spent weekly window cannot recover early.",
+			"Anthropic returned 429 while this account's account-wide weekly window was already at 100% (confirmed by fresh usage data). The account is cooled down until the provider's reset time and traffic shifts to other accounts; the transparent burst-retry hold is skipped because re-probing the same spent window would only burn latency.",
 		suggestion:
-			"No action needed — the account recovers automatically when its weekly window resets. Add or prioritize another account if the whole pool is exhausted.",
+			"No action needed — the account recovers automatically when its weekly window resets, or earlier if usage polling sees the window recover before then. Add or prioritize another account if the whole pool is exhausted.",
+		severity: "warning",
+	},
+	session_exhausted_429: {
+		title: "5-hour usage limit reached",
+		description:
+			"Anthropic returned 429 while this account's 5-hour session window was already at 100% (confirmed by fresh usage data). The account is cooled down and traffic shifts to other accounts; the transparent burst-retry hold is skipped because re-probing the same spent window would only burn latency.",
+		suggestion:
+			"No action needed — the account recovers automatically when its 5-hour window resets, or earlier if usage polling sees the window recover before then.",
 		severity: "warning",
 	},
 	family_weekly_exhausted_429: {
