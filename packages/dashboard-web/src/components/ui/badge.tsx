@@ -15,8 +15,11 @@ const badgeVariants = cva(
 				destructive:
 					"border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/80",
 				outline: "text-foreground",
+				// White on green-500 is ~2.22:1 — nowhere near the 4.5:1 minimum.
+				// `--success-foreground` is the near-black/near-white pairing that
+				// ships with the token (~5.47:1 light, ~9.90:1 dark).
 				success:
-					"border-transparent bg-green-500 text-white shadow hover:bg-green-500/80",
+					"border-transparent bg-success text-success-foreground shadow hover:bg-success/80",
 				// White on yellow-500 is ~1.91:1 — nowhere near the 4.5:1 minimum.
 				// `--warning-foreground` is the near-black/near-white pairing that
 				// ships with the token (~6.06:1 light, ~11.3:1 dark).

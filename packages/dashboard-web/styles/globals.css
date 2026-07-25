@@ -26,6 +26,11 @@
 	--warning: oklch(68.1% 0.162 75.834);
 	/* Near-black warm: white on either amber shade is well under 3:1. */
 	--warning-foreground: oklch(21% 0.03 75.834);
+	/* Green success tone. Same value Tailwind's green-600 resolves to, so the
+	   text-success sites that used to @apply it are unchanged. */
+	--success: oklch(62.7% 0.194 149.214);
+	/* Near-black green: white on either green shade is well under 3:1. */
+	--success-foreground: oklch(21% 0.03 149.214);
 	--border: hsl(240 5.9% 90%);
 	--input: hsl(240 5.9% 90%);
 	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
@@ -54,6 +59,10 @@
 	   existed. */
 	--warning: oklch(85.2% 0.199 91.936);
 	--warning-foreground: oklch(21% 0.03 91.936);
+	/* green-400 — what text-success resolved to in dark mode before the token
+	   existed. */
+	--success: oklch(79.2% 0.209 151.711);
+	--success-foreground: oklch(21% 0.03 151.711);
 	--border: hsl(220 13% 20%);
 	--input: hsl(220 13% 18%);
 	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
@@ -83,6 +92,10 @@
 	   exist in the theme. */
 	--color-warning: var(--warning);
 	--color-warning-foreground: var(--warning-foreground);
+	/* Same reason as warning: `bg-success/10` only exists once `success` is a
+	   real theme color. */
+	--color-success: var(--success);
+	--color-success-foreground: var(--success-foreground);
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
@@ -169,17 +182,5 @@
 	/* Card hover effects */
 	.card-hover {
 		@apply transition-all duration-200 hover:shadow-lg hover:scale-[1.02];
-	}
-
-	/* Success colors.
-	   NOTE: `success` has the same latent problem `warning` had — it is not a
-	   registered theme color, so `bg-success/10` generates no CSS. Left alone
-	   deliberately; fixing it is a separate change. */
-	.text-success {
-		@apply text-green-600 dark:text-green-400;
-	}
-
-	.bg-success {
-		@apply bg-green-100 dark:bg-green-900/20;
 	}
 }

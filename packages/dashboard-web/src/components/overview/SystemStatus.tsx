@@ -75,9 +75,13 @@ export function SystemStatus() {
 
 		const badge =
 			status === "ok" ? (
-				<Badge variant="default" className="bg-success">
-					Healthy
-				</Badge>
+				// The badge's own success variant, not `variant="default"` with a
+				// `bg-success` override: that override left the default variant's
+				// white text on top of it, which was unreadable on the pale green the
+				// hand-written rule produced and no better on the registered green.
+				// The variant itself pairs the green with `--success-foreground`, so
+				// this reads at ~5.5:1 light / ~9.9:1 dark rather than white's ~2.2:1.
+				<Badge variant="success">Healthy</Badge>
 			) : status === "degraded" ? (
 				// The badge's own warning variant, not `variant="default"` with a
 				// `bg-warning` override: that override left the default variant's
