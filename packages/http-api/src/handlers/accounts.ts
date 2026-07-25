@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
-	INDEPENDENT_BLOCK_STATUSES,
 	isAnthropicUsageShape,
+	isIndependentBlock,
 	patterns,
 	providerStatusToCause,
 	type RateLimitCause,
@@ -230,18 +230,17 @@ export function resolveRateLimitPresentation(
 		: null;
 
 	// 1. Administrative / billing blocks are not explained by a spent quota.
-	const isIndependentBlock =
-		(providerStatus !== null &&
-			[...INDEPENDENT_BLOCK_STATUSES].some((s) =>
-				providerStatus.toLowerCase().startsWith(s),
-			)) ||
-		fields.rate_limited_reason === "out_of_credits";
+	//    Shared with `/health?detail=1` so the two surfaces cannot drift.
+	const independentBlock = isIndependentBlock(
+		providerStatus,
+		fields.rate_limited_reason,
+	);
 
 	// 2. Weekly exhaustion outranks every generic throttle mechanism.
 	const weeklyResetMs = weeklyExhausted?.resetMs ?? null;
 	if (
 		weeklyExhausted &&
-		!isIndependentBlock &&
+		!independentBlock &&
 		weeklyResetMs !== null &&
 		weeklyResetMs > now
 	) {

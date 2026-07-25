@@ -2,6 +2,7 @@ import type { Config } from "@clankermux/config";
 import {
 	getExhaustedFamilies,
 	isAccountAvailable,
+	isIndependentBlock,
 	TtlCache,
 	weeklyExhaustion,
 } from "@clankermux/core";
@@ -233,6 +234,22 @@ export function createHealthHandler(
 				const { exhausted, resetMs } = a.paused
 					? { exhausted: false, resetMs: null }
 					: weeklyExhaustion(usage, now);
+				// …with ONE carve-out, shared with `/api/accounts` via
+				// `isIndependentBlock`: an administrative/billing block (a stored
+				// `payment_required` / `blocked`, or an `out_of_credits` cooldown) is
+				// not explained by a spent quota, and reporting `usage_exhausted`
+				// there would tell the operator to wait for a weekly reset when the
+				// real action is to pay. Gated to LOCKED accounts on purpose: an
+				// unlocked account with a stored `payment_required` is still routable
+				// (`isAccountAvailable` is true), so its spent weekly window is the
+				// more accurate health headline. A locked account with a GENERIC lock
+				// still yields to `usage_exhausted`.
+				const weeklyTakesHeadline =
+					exhausted &&
+					!(
+						locked &&
+						isIndependentBlock(a.rate_limit_status, a.rate_limited_reason)
+					);
 				// Family-scoped exhaustion is DETAIL only — it never changes the
 				// account's routability, so it's surfaced without touching `status`.
 				const scopedFamilies = getExhaustedFamilies(usage, now).map(
@@ -245,7 +262,7 @@ export function createHealthHandler(
 					// lock. The lock itself is still reported in the fields below.
 					status: a.paused
 						? "paused"
-						: exhausted
+						: weeklyTakesHeadline
 							? "usage_exhausted"
 							: locked
 								? "rate_limited"

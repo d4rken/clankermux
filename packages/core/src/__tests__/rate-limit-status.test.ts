@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
 	INDEPENDENT_BLOCK_STATUSES,
+	isIndependentBlock,
 	providerStatusToCause,
 	REJECTING_STATUSES,
 	SOFT_WARNING_STATUSES,
@@ -53,6 +54,61 @@ describe("unified rate-limit status vocabulary", () => {
 			expect(ACCOUNT_WIDE_HARD_STATUSES.has(status)).toBe(false);
 			expect(REJECTING_STATUSES.has(status)).toBe(false);
 		}
+	});
+});
+
+describe("isIndependentBlock", () => {
+	it("is true for an out_of_credits cooldown reason", () => {
+		expect(isIndependentBlock(null, "out_of_credits")).toBe(true);
+		// The reason wins regardless of the provider status.
+		expect(isIndependentBlock("allowed_warning", "out_of_credits")).toBe(true);
+	});
+
+	it("is true for the administrative/billing provider statuses", () => {
+		expect(isIndependentBlock("payment_required", null)).toBe(true);
+		expect(isIndependentBlock("blocked", null)).toBe(true);
+	});
+
+	it("is FALSE for generic throttle mechanisms (a spent quota explains those)", () => {
+		for (const status of [
+			"rate_limited",
+			"queueing_hard",
+			"queueing_soft",
+			"rejected",
+			"allowed_warning",
+			"allowed",
+			"some_new_status",
+		]) {
+			expect(isIndependentBlock(status, null)).toBe(false);
+		}
+	});
+
+	it("is false for other cooldown reasons", () => {
+		for (const reason of [
+			"model_fallback_429",
+			"weekly_exhausted_429",
+			"family_weekly_exhausted_429",
+		]) {
+			expect(isIndependentBlock(null, reason)).toBe(false);
+		}
+	});
+
+	it("is false for null / undefined / empty inputs", () => {
+		expect(isIndependentBlock(null, null)).toBe(false);
+		expect(isIndependentBlock(undefined, undefined)).toBe(false);
+		expect(isIndependentBlock("", "")).toBe(false);
+	});
+
+	it("matches case-insensitively", () => {
+		expect(isIndependentBlock("Payment_Required", null)).toBe(true);
+		expect(isIndependentBlock("BLOCKED", null)).toBe(true);
+	});
+
+	it("matches as a PREFIX (the stored column can carry a suffix)", () => {
+		expect(isIndependentBlock("payment_required (30m)", null)).toBe(true);
+		expect(isIndependentBlock("blocked_by_provider", null)).toBe(true);
+		// …but never as a substring.
+		expect(isIndependentBlock("soft_payment_required", null)).toBe(false);
 	});
 });
 

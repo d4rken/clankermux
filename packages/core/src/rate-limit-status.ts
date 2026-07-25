@@ -44,6 +44,34 @@ export const INDEPENDENT_BLOCK_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The reason value the proxy persists when an Anthropic 429 reports
+ * `overage-disabled-reason: out_of_credits` — a billing state, not a quota one.
+ */
+const OUT_OF_CREDITS_REASON = "out_of_credits";
+
+/**
+ * Administrative / billing blocks that a spent quota does not explain, so they
+ * outrank weekly exhaustion wherever a cause is presented. Shared by
+ * `/api/accounts` and `/health?detail=1` so the two surfaces cannot disagree
+ * about whether an operator should wait for a reset or go and pay.
+ *
+ * The provider status is prefix-matched (case-insensitively) because the stored
+ * column can carry a trailing suffix.
+ */
+export function isIndependentBlock(
+	providerStatus: string | null | undefined,
+	rateLimitedReason: string | null | undefined,
+): boolean {
+	if (rateLimitedReason === OUT_OF_CREDITS_REASON) return true;
+	if (!providerStatus) return false;
+	const normalized = providerStatus.toLowerCase();
+	for (const status of INDEPENDENT_BLOCK_STATUSES) {
+		if (normalized.startsWith(status)) return true;
+	}
+	return false;
+}
+
+/**
  * Soft / warning statuses that must NOT block account usage and must NOT be
  * treated as hard limits. The normal non-limited value `"allowed"` is not listed
  * here.
