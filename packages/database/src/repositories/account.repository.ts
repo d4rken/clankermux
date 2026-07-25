@@ -343,28 +343,41 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * Compare-and-clear the rate-limit lock for the usage-poller's
 	 * capacity-restored path. Clears the SAME columns as `clearRateLimitState`,
 	 * but ONLY when the account's cooldown is STILL the exact one the caller
-	 * observed — both `rate_limited_until` AND `rate_limited_at` unchanged — AND
-	 * the reason is not the intentional `out_of_credits` floor.
+	 * observed — `rate_limited_until`, `rate_limited_at` AND `rate_limited_reason`
+	 * all unchanged — and only when that cooldown is strictly OLDER than the
+	 * evidence that justifies clearing it.
 	 *
 	 * Pinning on `rate_limited_at` (not just the deadline) matters because repeated
-	 * 429s can reuse the SAME upstream reset time: a concurrent NON-credit cooldown
-	 * that happens to carry the same `rate_limited_until` would otherwise be cleared
+	 * 429s can reuse the SAME upstream reset time: a concurrent cooldown that
+	 * happens to carry the same `rate_limited_until` would otherwise be cleared
 	 * out from under a request that just set it. `rate_limited_at` is the write
 	 * instant, so it changes on every fresh cooldown.
 	 *
-	 * This makes the poller's read-check-clear ATOMIC at the DB layer: if a
-	 * concurrent request writes a new cooldown/floor (changing `rate_limited_until`
-	 * or `rate_limited_at`, and/or setting `rate_limited_reason='out_of_credits'`)
-	 * between the caller's read and this write, the WHERE misses and the new state
-	 * is preserved. The seat-reassignment / normal case is unaffected (the values
-	 * are unchanged → the WHERE matches → the lock clears). `rate_limited_at IS ?`
-	 * is SQLite's null-safe equality, so a null-`rate_limited_at` cooldown matches a
-	 * null observation. Returns true iff a row actually changed.
+	 * Pinning on the REASON is what keeps the release quota-derived: the caller
+	 * passes the exact eligible reason it observed (see
+	 * `QUOTA_DERIVED_RATE_LIMIT_REASONS`), so a concurrent rewrite to ANY other
+	 * reason — an `out_of_credits` floor, or a per-IP burst cooldown, which must
+	 * never be released on account-quota evidence — misses the WHERE. This
+	 * supersedes the older "everything except `out_of_credits`" guard.
+	 *
+	 * `rate_limited_at < ?` is the CAUSAL guard: the cooldown must predate the
+	 * start of the usage request that produced the evidence. A cooldown written
+	 * while that request was in flight is temporally ambiguous — the reading may
+	 * predate it — so it is refused and re-evaluated on the next poll. Both
+	 * cooldown writers stamp `rate_limited_at = Date.now()`, so a same-millisecond
+	 * write equals the boundary and fails the strict `<`. A NULL `rate_limited_at`
+	 * also fails it (NULL comparisons are never true), i.e. fails CLOSED.
+	 *
+	 * Together this makes the poller's read-check-clear ATOMIC at the DB layer: any
+	 * concurrent cooldown write between the caller's read and this write leaves the
+	 * new state intact. Returns true iff a row actually changed.
 	 */
 	async clearRateLimitOnCapacityRestore(
 		accountId: string,
 		expectedRateLimitedUntil: number,
 		expectedRateLimitedAt: number | null,
+		expectedRateLimitedReason: string,
+		evidenceFetchStartedAt: number,
 	): Promise<boolean> {
 		const changes = await this.runWithChanges(
 			`UPDATE accounts
@@ -378,8 +391,15 @@ export class AccountRepository extends BaseRepository<Account> {
 			WHERE id = ?
 				AND rate_limited_until = ?
 				AND rate_limited_at IS ?
-				AND (rate_limited_reason IS NULL OR rate_limited_reason != 'out_of_credits')`,
-			[accountId, expectedRateLimitedUntil, expectedRateLimitedAt],
+				AND rate_limited_reason = ?
+				AND rate_limited_at < ?`,
+			[
+				accountId,
+				expectedRateLimitedUntil,
+				expectedRateLimitedAt,
+				expectedRateLimitedReason,
+				evidenceFetchStartedAt,
+			],
 		);
 		return changes > 0;
 	}

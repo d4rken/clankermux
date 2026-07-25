@@ -1014,14 +1014,19 @@ OAuth tokens will need to be re-authenticated.
 
 	/**
 	 * Atomically clear the rate-limit lock for the capacity-restored path — but
-	 * only when `rate_limited_until` still equals `expectedRateLimitedUntil` and
-	 * the reason isn't the intentional `out_of_credits` floor. Returns true iff a
-	 * row changed. See {@link AccountRepository.clearRateLimitOnCapacityRestore}.
+	 * only when the observed cooldown is still in place UNCHANGED (deadline, write
+	 * instant AND reason) and predates the evidence that justifies clearing it.
+	 * Pinning the exact eligible reason is what keeps the release quota-derived:
+	 * an `out_of_credits` floor or a per-IP burst cooldown written concurrently
+	 * simply misses the WHERE. Returns true iff a row changed. See
+	 * {@link AccountRepository.clearRateLimitOnCapacityRestore}.
 	 */
 	async clearRateLimitOnCapacityRestore(
 		accountId: string,
 		expectedRateLimitedUntil: number,
 		expectedRateLimitedAt: number | null,
+		expectedRateLimitedReason: string,
+		evidenceFetchStartedAt: number,
 	): Promise<boolean> {
 		return withDatabaseRetry(
 			async () =>
@@ -1029,6 +1034,8 @@ OAuth tokens will need to be re-authenticated.
 					accountId,
 					expectedRateLimitedUntil,
 					expectedRateLimitedAt,
+					expectedRateLimitedReason,
+					evidenceFetchStartedAt,
 				),
 			this.retryConfig,
 			"clearRateLimitOnCapacityRestore",

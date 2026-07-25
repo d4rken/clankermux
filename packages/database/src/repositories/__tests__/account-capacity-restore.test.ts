@@ -64,6 +64,10 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 	let repo: AccountRepository;
 	const UNTIL = Date.now() + 5 * 60 * 60 * 1000;
 	const AT = Date.now();
+	/** Every eligible cooldown in this suite is a quota-derived weekly one… */
+	const REASON = "weekly_exhausted_429";
+	/** …written 1s BEFORE the poll that produced the clearing evidence. */
+	const FETCH_STARTED_AT = AT + 1_000;
 
 	beforeEach(() => {
 		({ db, repo } = makeDb());
@@ -72,17 +76,15 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 		db.close();
 	});
 
-	it("clears an ordinary cooldown when the observed until AND at are unchanged", async () => {
-		seedLock(db, "acc-1", {
-			until: UNTIL,
-			at: AT,
-			reason: "upstream_429_with_reset",
-		});
+	it("clears an eligible cooldown when until, at AND reason are all unchanged", async () => {
+		seedLock(db, "acc-1", { until: UNTIL, at: AT, reason: REASON });
 
 		const changed = await repo.clearRateLimitOnCapacityRestore(
 			"acc-1",
 			UNTIL,
 			AT,
+			REASON,
+			FETCH_STARTED_AT,
 		);
 
 		expect(changed).toBe(true);
@@ -92,16 +94,14 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 	it("does NOT clear when rate_limited_until changed between read and clear (TOCTOU)", async () => {
 		const NEW_UNTIL = UNTIL + 60_000;
 		// Current state carries the NEW deadline; caller clears with the STALE one.
-		seedLock(db, "acc-1", {
-			until: NEW_UNTIL,
-			at: AT,
-			reason: "upstream_429_with_reset",
-		});
+		seedLock(db, "acc-1", { until: NEW_UNTIL, at: AT, reason: REASON });
 
 		const changed = await repo.clearRateLimitOnCapacityRestore(
 			"acc-1",
 			UNTIL,
 			AT,
+			REASON,
+			FETCH_STARTED_AT,
 		);
 
 		expect(changed).toBe(false);
@@ -109,66 +109,91 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 	});
 
 	it("does NOT clear when rate_limited_at changed but the deadline is the SAME (reused upstream reset)", async () => {
-		const NEW_AT = AT + 1000;
-		// A concurrent NON-credit cooldown reused the same rate_limited_until but was
-		// written at a later instant → different rate_limited_at. Must NOT clear.
-		seedLock(db, "acc-1", {
-			until: UNTIL,
-			at: NEW_AT,
-			reason: "upstream_429_with_reset",
-		});
+		const NEW_AT = AT + 100;
+		// A concurrent cooldown reused the same rate_limited_until but was written
+		// at a later instant → different rate_limited_at. Must NOT clear.
+		seedLock(db, "acc-1", { until: UNTIL, at: NEW_AT, reason: REASON });
 
 		const changed = await repo.clearRateLimitOnCapacityRestore(
 			"acc-1",
 			UNTIL,
 			AT, // stale observed rate_limited_at
+			REASON,
+			FETCH_STARTED_AT,
 		);
 
 		expect(changed).toBe(false);
 		expect(readUntil(db, "acc-1")).toBe(UNTIL);
 	});
 
-	it("does NOT clear when a concurrent out_of_credits floor was written at the same until+at", async () => {
-		seedLock(db, "acc-1", { until: UNTIL, at: AT, reason: "out_of_credits" });
+	it("does NOT clear when a concurrent write swapped the reason, at the SAME until+at", async () => {
+		// The reason guard is what keeps the release quota-derived: an
+		// out_of_credits floor (billing) and an upstream_429_with_reset cooldown
+		// (which a per-IP burst inherits) must both survive, even when they collide
+		// exactly with the observed deadline and write instant.
+		for (const reason of ["out_of_credits", "upstream_429_with_reset"]) {
+			const id = `acc-${reason}`;
+			seedLock(db, id, { until: UNTIL, at: AT, reason });
 
-		const changed = await repo.clearRateLimitOnCapacityRestore(
-			"acc-1",
-			UNTIL,
-			AT,
-		);
+			const changed = await repo.clearRateLimitOnCapacityRestore(
+				id,
+				UNTIL,
+				AT,
+				REASON,
+				FETCH_STARTED_AT,
+			);
 
-		expect(changed).toBe(false);
-		expect(readUntil(db, "acc-1")).toBe(UNTIL);
+			expect(changed).toBe(false);
+			expect(readUntil(db, id)).toBe(UNTIL);
+		}
 	});
 
-	it("null-safe matches a null rate_limited_at (IS ?) when the observation was also null", async () => {
-		seedLock(db, "acc-1", {
-			until: UNTIL,
-			at: null,
-			reason: "upstream_429_with_reset",
-		});
+	it("does NOT clear when the cooldown is NEWER than the evidence, or exactly at the boundary", async () => {
+		// Both cooldown writers stamp rate_limited_at = Date.now(), so a
+		// same-millisecond write equals the boundary and must fail the strict <.
+		for (const at of [FETCH_STARTED_AT, FETCH_STARTED_AT + 1]) {
+			const id = `acc-at-${at}`;
+			seedLock(db, id, { until: UNTIL, at, reason: REASON });
+
+			const changed = await repo.clearRateLimitOnCapacityRestore(
+				id,
+				UNTIL,
+				at,
+				REASON,
+				FETCH_STARTED_AT,
+			);
+
+			expect(changed).toBe(false);
+			expect(readUntil(db, id)).toBe(UNTIL);
+		}
+	});
+
+	it("fails CLOSED for an otherwise-eligible row whose rate_limited_at is NULL", async () => {
+		// NULL can't be ordered against the evidence — `rate_limited_at < ?` is
+		// never true — so the DB refuses even if the caller passed the null through.
+		seedLock(db, "acc-1", { until: UNTIL, at: null, reason: REASON });
 
 		const changed = await repo.clearRateLimitOnCapacityRestore(
 			"acc-1",
 			UNTIL,
 			null,
+			REASON,
+			FETCH_STARTED_AT,
 		);
 
-		expect(changed).toBe(true);
-		expect(readUntil(db, "acc-1")).toBeNull();
+		expect(changed).toBe(false);
+		expect(readUntil(db, "acc-1")).toBe(UNTIL);
 	});
 
 	it("does NOT clear a null rate_limited_at row when the observation was a number", async () => {
-		seedLock(db, "acc-1", {
-			until: UNTIL,
-			at: null,
-			reason: "upstream_429_with_reset",
-		});
+		seedLock(db, "acc-1", { until: UNTIL, at: null, reason: REASON });
 
 		const changed = await repo.clearRateLimitOnCapacityRestore(
 			"acc-1",
 			UNTIL,
 			AT,
+			REASON,
+			FETCH_STARTED_AT,
 		);
 
 		expect(changed).toBe(false);
@@ -180,6 +205,8 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 			"nope",
 			UNTIL,
 			AT,
+			REASON,
+			FETCH_STARTED_AT,
 		);
 		expect(changed).toBe(false);
 	});
