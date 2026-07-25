@@ -72,7 +72,10 @@ export function weeklyExhaustion(
  * and the flat `seven_day_oauth_apps` (Claude Code weekly). Family-scoped
  * (`weekly_scoped`) windows and `extra_usage` are deliberately NOT in this set.
  */
-export type AccountWideWindow = "session" | "weekly_all" | "seven_day_oauth_apps";
+export type AccountWideWindow =
+	| "session"
+	| "weekly_all"
+	| "seven_day_oauth_apps";
 
 /** Which class of account-wide window is responsible for the exhaustion. */
 export type AccountWideExhaustionBinding = "weekly" | "session";

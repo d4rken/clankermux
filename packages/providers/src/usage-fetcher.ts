@@ -1282,26 +1282,26 @@ class UsageCache {
 			provider,
 			customEndpoint,
 		).then(({ success, retryAfterMs }) => {
-				if (!success) {
-					this.failureCounts.set(accountId, 1);
-				}
-				// Generation + identity guards: only start the loop if this generation
-				// is still current (a concurrent restart/replacement may have
-				// superseded it). scheduleNextPoll re-checks the generation too.
-				if (
-					this.pollGenerations.get(accountId) === generation &&
-					this.tokenProviders.get(accountId) === tokenProvider
-				) {
-					this.scheduleNextPoll(
-						accountId,
-						tokenProvider,
-						generation,
-						baseIntervalMs,
-						provider,
-						customEndpoint,
-						retryAfterMs,
-					);
-				}
+			if (!success) {
+				this.failureCounts.set(accountId, 1);
+			}
+			// Generation + identity guards: only start the loop if this generation
+			// is still current (a concurrent restart/replacement may have
+			// superseded it). scheduleNextPoll re-checks the generation too.
+			if (
+				this.pollGenerations.get(accountId) === generation &&
+				this.tokenProviders.get(accountId) === tokenProvider
+			) {
+				this.scheduleNextPoll(
+					accountId,
+					tokenProvider,
+					generation,
+					baseIntervalMs,
+					provider,
+					customEndpoint,
+					retryAfterMs,
+				);
+			}
 		});
 
 		log.debug(

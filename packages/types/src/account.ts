@@ -147,7 +147,9 @@ export function isQuotaDerivedRateLimitReason(
 	value: string | null | undefined,
 ): value is QuotaDerivedRateLimitReason {
 	if (value == null) return false;
-	return (QUOTA_DERIVED_RATE_LIMIT_REASONS as readonly string[]).includes(value);
+	return (QUOTA_DERIVED_RATE_LIMIT_REASONS as readonly string[]).includes(
+		value,
+	);
 }
 
 // Usage data types for Anthropic accounts

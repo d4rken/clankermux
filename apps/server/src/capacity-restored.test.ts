@@ -137,7 +137,13 @@ const skipToken = (msgs: string[]) =>
 describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("clears a quota-derived weekly lock, pinning the full observation", async () => {
 		const h = makeHarness(makeAccount({}));
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 
 		expect(h.clearCalls).toEqual([
 			{
@@ -163,7 +169,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 		const h = makeHarness(
 			makeAccount({ rate_limited_reason: "session_exhausted_429" }),
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.clearCalls[0].expectedReason).toBe("session_exhausted_429");
 	});
@@ -181,7 +193,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 			const h = makeHarness(
 				makeAccount({ rate_limited_reason: reason as never }),
 			);
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
 		}
@@ -190,7 +208,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("fails CLOSED when rate_limited_at is missing", async () => {
 		for (const at of [null, undefined]) {
 			const h = makeHarness(makeAccount({ rate_limited_at: at as never }));
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["missing_rate_limited_at"]);
 		}
@@ -199,7 +223,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("refuses a cooldown written AFTER the poll started, and at the exact boundary", async () => {
 		for (const at of [FETCH_STARTED_AT, FETCH_STARTED_AT + 1]) {
 			const h = makeHarness(makeAccount({ rate_limited_at: at }));
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["cooldown_newer_than_evidence"]);
 		}
@@ -207,7 +237,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 
 	it("logs cas_mismatch when the atomic update changed no row", async () => {
 		const h = makeHarness(makeAccount({}), false);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toHaveLength(1); // attempted…
 		expect(h.infoMsgs).toEqual([]); // …but not reported as cleared
 		expect(skipToken(h.debugMsgs)).toEqual(["cas_mismatch"]);
@@ -258,7 +294,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 			const h = makeHarness(
 				makeAccount({ rate_limited_until: until as never }),
 			);
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
 			expect(h.clearCalls).toEqual([]);
 			// The normal state of a healthy account — never logged per poll.
 			expect(h.debugMsgs).toEqual([]);
@@ -268,7 +310,13 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 
 	it("does nothing when the account is missing", async () => {
 		const h = makeHarness(null);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toEqual([]);
 		expect(h.debugMsgs).toEqual([]);
 	});
@@ -285,12 +333,24 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		});
 		const h = makeHarness(() => account);
 
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toEqual([]);
 
 		// The lock lands (asynchronously, after the first callback already ran).
 		account = makeAccount({});
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.infoMsgs).toHaveLength(1);
 	});
@@ -303,19 +363,37 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		});
 
 		await expect(
-			clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW),
+			clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			),
 		).rejects.toThrow("database is locked");
 		expect(h.infoMsgs).toEqual([]);
 
 		fail = false;
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.infoMsgs).toHaveLength(1);
 	});
 
 	it("a cooldown written mid-poll is skipped by THAT sample and cleared by the NEXT one", async () => {
 		const h = makeHarness(makeAccount({ rate_limited_at: NOW - 500 }));
 		// Evidence from a poll that started before the cooldown was written.
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
 		expect(h.clearCalls).toEqual([]);
 		expect(skipToken(h.debugMsgs)).toEqual(["cooldown_newer_than_evidence"]);
 

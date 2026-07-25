@@ -64,7 +64,9 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 		fetchSpy = null;
 	});
 
-	function startPolling(onCapacityRestored: (e: CapacityRestoredEvidence) => void) {
+	function startPolling(
+		onCapacityRestored: (e: CapacityRestoredEvidence) => void,
+	) {
 		usageCache.startPolling(
 			ACCOUNT,
 			"token",

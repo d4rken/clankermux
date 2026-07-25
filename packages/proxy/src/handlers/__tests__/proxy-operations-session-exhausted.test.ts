@@ -310,7 +310,9 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		await run(ctx, makeOAuthAnthropicAccount());
 
 		expect(reasonsFrom(saveRequestCalls)).toContain("weekly_exhausted_429");
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("session_exhausted_429");
+		expect(reasonsFrom(saveRequestCalls)).not.toContain(
+			"session_exhausted_429",
+		);
 	});
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
@@ -320,7 +322,9 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		const { ctx, saveRequestCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("session_exhausted_429");
+		expect(reasonsFrom(saveRequestCalls)).not.toContain(
+			"session_exhausted_429",
+		);
 		expect(reasonsFrom(saveRequestCalls)).toContain("model_fallback_429");
 	});
 
@@ -333,7 +337,9 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 			reprobe: true,
 		});
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("session_exhausted_429");
+		expect(reasonsFrom(saveRequestCalls)).not.toContain(
+			"session_exhausted_429",
+		);
 	});
 
 	it("is skipped for a TRUSTED in-process probe but NOT for a spoofed header", async () => {
@@ -373,7 +379,9 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		const { ctx, saveRequestCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount({ provider: "codex" }), "gpt-5.5");
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("session_exhausted_429");
+		expect(reasonsFrom(saveRequestCalls)).not.toContain(
+			"session_exhausted_429",
+		);
 	});
 
 	it("leaves the family-weekly rung reachable when only a FAMILY is spent", async () => {

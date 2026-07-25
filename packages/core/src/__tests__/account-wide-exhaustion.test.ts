@@ -195,8 +195,8 @@ describe("accountWideExhaustion", () => {
 			resetMs: null,
 		});
 		expect(accountWideExhaustion(undefined, NOW).exhausted).toBe(false);
-		expect(
-			accountWideExhaustion({} as AnthropicUsageData, NOW).exhausted,
-		).toBe(false);
+		expect(accountWideExhaustion({} as AnthropicUsageData, NOW).exhausted).toBe(
+			false,
+		);
 	});
 });
