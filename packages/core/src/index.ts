@@ -99,6 +99,9 @@ export {
 	MODEL_SHORT_NAMES,
 } from "./models";
 export {
+	// Test-only handle (reset cached pricing + the pricing-miss registry). NOT a
+	// runtime API: there is deliberately no public way to clear recorded gaps.
+	__pricingTestHooks,
 	estimateCostUSD,
 	getModelCacheRates,
 	getPricingGapOverflowCount,

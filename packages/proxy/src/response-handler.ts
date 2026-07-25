@@ -93,6 +93,7 @@ function trackFinalize(
 	opts: {
 		responseTimeMs: number;
 		providerName: string;
+		accountProvider?: string;
 		isStream: boolean;
 		endedCleanly: boolean;
 	},
@@ -334,6 +335,15 @@ async function forwardToClientInner(
 		getHeader: (name) => requestHeaders.get(name),
 	});
 
+	// Provider the request was actually served by, for signals that must follow
+	// the ACCOUNT rather than the registered handler: accounts stored as
+	// `claude-console-api` have no provider registered under that name and fall
+	// back to the default `anthropic` provider, so `ctx.provider.name` would
+	// mislabel them. Used by the mid-stream rate-limit sniffer and by
+	// pricing-gap attribution; falls back to the handler for anonymous/forced
+	// requests that have no account.
+	const accountProvider = account?.provider ?? ctx.provider.name;
+
 	const routingRecord = routing
 		? {
 				strategy: routing.strategy,
@@ -437,7 +447,7 @@ async function forwardToClientInner(
 		// requests must be recorded as failures when a nominal HTTP 200 stream ends
 		// in an SSE error frame. `disableCooldown` only suppresses account state.
 		const rateLimitSniffer = createSseRateLimitSniffer({
-			provider: account?.provider ?? ctx.provider.name,
+			provider: accountProvider,
 		});
 
 		// Configurable via env vars to support long agentic workloads where
@@ -574,6 +584,7 @@ async function forwardToClientInner(
 						{
 							responseTimeMs,
 							providerName: ctx.provider.name,
+							accountProvider,
 							isStream: true,
 							// onEnd fires when the upstream stream reaches its natural end
 							// (the reader saw `done`), so the body was NOT truncated →
@@ -611,6 +622,7 @@ async function forwardToClientInner(
 						{
 							responseTimeMs,
 							providerName: ctx.provider.name,
+							accountProvider,
 							isStream: true,
 							endedCleanly: false,
 						},
@@ -657,6 +669,7 @@ async function forwardToClientInner(
 				{
 					responseTimeMs,
 					providerName: ctx.provider.name,
+					accountProvider,
 					isStream: false,
 					endedCleanly: true,
 				},
@@ -731,6 +744,7 @@ async function forwardToClientInner(
 					{
 						responseTimeMs,
 						providerName: ctx.provider.name,
+						accountProvider,
 						isStream: false,
 						// Body was fully read (capped) → complete transport, clean end.
 						endedCleanly: true,
@@ -751,6 +765,7 @@ async function forwardToClientInner(
 					{
 						responseTimeMs,
 						providerName: ctx.provider.name,
+						accountProvider,
 						isStream: false,
 						endedCleanly: false,
 					},

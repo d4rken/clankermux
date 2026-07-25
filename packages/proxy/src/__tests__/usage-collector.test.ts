@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { PricingEstimateContext } from "@clankermux/core";
 import {
 	createUsageState,
 	feedChunk,
@@ -6,6 +7,7 @@ import {
 	finalizeUsage,
 	getLineBufferLength,
 	MAX_SSE_LINE_BYTES,
+	type UsageState,
 } from "../usage-collector";
 
 // ---------------------------------------------------------------------------
@@ -22,17 +24,26 @@ function sse(event: string, data: unknown): Uint8Array {
 
 /** A fake cost function: $1 per input token, $2 per output token, recorded. */
 function fakeCost(): {
-	fn: (model: string, t: Record<string, number | undefined>) => Promise<number>;
-	calls: Array<{ model: string; tokens: Record<string, number | undefined> }>;
+	fn: (
+		model: string,
+		t: Record<string, number | undefined>,
+		context?: PricingEstimateContext,
+	) => Promise<number>;
+	calls: Array<{
+		model: string;
+		tokens: Record<string, number | undefined>;
+		context?: PricingEstimateContext;
+	}>;
 } {
 	const calls: Array<{
 		model: string;
 		tokens: Record<string, number | undefined>;
+		context?: PricingEstimateContext;
 	}> = [];
 	return {
 		calls,
-		fn: async (model, tokens) => {
-			calls.push({ model, tokens });
+		fn: async (model, tokens, context) => {
+			calls.push({ model, tokens, context });
 			return (tokens.inputTokens ?? 0) * 1 + (tokens.outputTokens ?? 0) * 2;
 		},
 	};
@@ -582,6 +593,70 @@ describe("usage-collector", () => {
 			expect(cost.calls[0].tokens.inputTokens).toBe(100);
 			expect(cost.calls[0].tokens.outputTokens).toBe(10);
 			expect(summary.usage.totalTokens).toBe(110);
+		});
+	});
+
+	// The collector is the ONE call site that opts into pricing-gap reporting: it
+	// owns the persisted cost_usd, and a failure here is exactly what stores NULL.
+	// It must also attribute the gap to the ACCOUNT's provider, not the registered
+	// handler — a claude-console-api account is served by the anthropic provider.
+	describe("pricing-gap reporting context", () => {
+		function streamedState(): UsageState {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 100, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 10 },
+				}),
+				1100,
+			);
+			return state;
+		}
+
+		it("opts into gap reporting exactly once, attributed to the account provider", async () => {
+			const cost = fakeCost();
+			await finalizeUsage(
+				streamedState(),
+				{
+					responseTimeMs: 1000,
+					providerName: "anthropic",
+					accountProvider: "claude-console-api",
+					isStream: true,
+				},
+				{ estimateCostUSD: cost.fn },
+			);
+
+			expect(cost.calls).toHaveLength(1);
+			expect(cost.calls[0].context).toEqual({
+				provider: "claude-console-api",
+				reportGaps: true,
+			});
+		});
+
+		it("falls back to the handler provider when the request had no account", async () => {
+			const cost = fakeCost();
+			await finalizeUsage(
+				streamedState(),
+				{ responseTimeMs: 1000, providerName: "ollama", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+
+			expect(cost.calls[0].context).toEqual({
+				provider: "ollama",
+				reportGaps: true,
+			});
 		});
 	});
 

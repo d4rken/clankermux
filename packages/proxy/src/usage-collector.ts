@@ -496,6 +496,16 @@ export interface FinalizeOpts {
 	 * isn't undercounted. Defaults to `true` (back-compat: trust the provider).
 	 */
 	endedCleanly?: boolean;
+	/**
+	 * Provider used to attribute (and suppress) a pricing-catalogue gap.
+	 *
+	 * This is the ACCOUNT's provider, which is not always `providerName`: a
+	 * `claude-console-api` account has no provider registered under that name and
+	 * is served by the default `anthropic` provider, so attributing its gaps to
+	 * `providerName` would mislabel them. Falls back to `providerName` when the
+	 * request had no account (anonymous/forced paths).
+	 */
+	accountProvider?: string;
 }
 
 export interface FinalizeDeps {
@@ -557,14 +567,26 @@ export async function finalizeUsage(
 		finalOutput;
 
 	const model = state.model;
+	// This is the ONE call site that opts into pricing-gap reporting. It owns the
+	// `cost_usd` that is actually persisted (a failure here is what stores NULL),
+	// and it runs exactly once per recorded request — unlike the provider-level
+	// estimator calls, which price the same response a second time and carry no
+	// account attribution.
 	const costUsd =
 		model !== undefined
-			? await estimateCostUSD(model, {
-					inputTokens: state.inputTokens,
-					outputTokens: finalOutput,
-					cacheReadInputTokens: state.cacheReadInputTokens,
-					cacheCreationInputTokens: state.cacheCreationInputTokens,
-				})
+			? await estimateCostUSD(
+					model,
+					{
+						inputTokens: state.inputTokens,
+						outputTokens: finalOutput,
+						cacheReadInputTokens: state.cacheReadInputTokens,
+						cacheCreationInputTokens: state.cacheCreationInputTokens,
+					},
+					{
+						provider: opts.accountProvider ?? opts.providerName,
+						reportGaps: true,
+					},
+				)
 			: undefined;
 
 	const speed = computeTokensPerSecond(state, finalOutput, opts);
