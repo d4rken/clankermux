@@ -360,18 +360,20 @@ function startUsagePollingWithRefresh(
 							),
 						);
 				},
-				(accountId) => {
-					// Usage API shows available capacity (<100%). Clear a stale future
-					// rate_limited_until lock now (seat-reassignment / early reset) rather
-					// than waiting for the natural expiry — but never wipe an intentional
+				(evidence) => {
+					// Polling observed account-wide headroom (<100%) on this account.
+					// Level-triggered: reported on EVERY healthy poll, so a refused or
+					// missed clear heals on the next one. The handler decides whether the
+					// lock may actually be released (reason-gated, causally guarded, and
+					// atomic at the DB layer) — never wiping an intentional
 					// `out_of_credits` floor. See clearRateLimitOnCapacityRestored.
 					clearRateLimitOnCapacityRestored(
 						proxyContext.dbOps,
 						logger,
-						accountId,
+						evidence,
 					).catch((err) =>
 						logger.warn(
-							`Failed to check/clear rate_limited_until for account ${accountId} on capacity restore: ${err}`,
+							`Failed to check/clear rate_limited_until for account ${evidence.accountId} on capacity restore: ${err}`,
 						),
 					);
 				},

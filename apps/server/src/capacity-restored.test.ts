@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Account, DatabaseOperations } from "@clankermux/database";
+import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
 	type CapacityRestoredLogger,
 	clearRateLimitOnCapacityRestored,
@@ -8,6 +9,20 @@ import {
 const NOW = 1_750_000_000_000;
 const FUTURE = NOW + 60 * 60 * 1000;
 const AT = NOW - 5_000;
+/** The poll that produced the evidence started AFTER the cooldown was written. */
+const FETCH_STARTED_AT = NOW - 1_000;
+
+function evidence(
+	overrides: Partial<CapacityRestoredEvidence> = {},
+): CapacityRestoredEvidence {
+	return {
+		accountId: "acc-1",
+		utilization: 40,
+		extraUsageUtilization: null,
+		fetchStartedAt: FETCH_STARTED_AT,
+		...overrides,
+	};
+}
 
 function makeAccount(overrides: Partial<Account>): Account {
 	return {
@@ -79,7 +94,7 @@ describe("clearRateLimitOnCapacityRestored", () => {
 			}),
 			true,
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, "acc-1", NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
 		// Passes the EXACT observed rate_limited_until AND rate_limited_at as the
 		// compare-and-clear guard.
 		expect(h.clearCalls).toEqual([
@@ -99,7 +114,7 @@ describe("clearRateLimitOnCapacityRestored", () => {
 			}),
 			false,
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, "acc-1", NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
 		expect(h.clearCalls).toHaveLength(1); // attempted…
 		expect(h.infoMsgs).toEqual([]); // …but not reported as cleared
 	});
@@ -112,7 +127,7 @@ describe("clearRateLimitOnCapacityRestored", () => {
 				rate_limited_reason: "out_of_credits",
 			}),
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, "acc-1", NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
 		expect(h.clearCalls).toEqual([]);
 		expect(h.debugMsgs).toHaveLength(1);
 	});
@@ -121,13 +136,13 @@ describe("clearRateLimitOnCapacityRestored", () => {
 		const h = makeHarness(
 			makeAccount({ id: "acc-1", rate_limited_until: NOW - 1000 }),
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, "acc-1", NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
 		expect(h.clearCalls).toEqual([]);
 	});
 
 	it("does nothing when the account is missing", async () => {
 		const h = makeHarness(null);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, "acc-1", NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
 		expect(h.clearCalls).toEqual([]);
 	});
 });

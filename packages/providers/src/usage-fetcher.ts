@@ -525,28 +525,49 @@ export function getRepresentativeUtilization(
 }
 
 /**
- * Whether a successful usage poll should fire the capacity-restored callback
- * (which clears a stale `rate_limited_until`). True only when ALL hold:
- *  - the account was previously usage-rate-limited (`wasRateLimited`),
- *  - the account-wide representative utilization is a number below 100 (genuine
- *    headroom — `null`/no-evidence never clears), AND
- *  - the overage `extra_usage` window is below 100.
- *
- * The account-wide representative deliberately EXCLUDES `extra_usage`, so an
- * account whose overage credits are spent can read <100% here; vetoing on a
- * spent `extra_usage` prevents polling from wiping an overage / `out_of_credits`
- * floor. Belt-and-suspenders with the reason-aware guard at the callback site.
+ * What a successful usage poll reports to the capacity-restored listener. The
+ * poller REPORTS evidence; it does not decide whether a cooldown may be cleared
+ * (that is the listener's job, which knows the cooldown's reason and age).
  */
-export function shouldClearRateLimitOnCapacity(
+export interface CapacityRestoredEvidence {
+	accountId: string;
+	/** Account-wide representative utilization observed by this poll (< 100). */
+	utilization: number;
+	/**
+	 * The overage window's utilization, or null when absent. REPORTED, never
+	 * enforced here: the account-wide representative excludes `extra_usage`, and
+	 * a spent overage bucket is the `out_of_credits` floor's business — vetoing on
+	 * it would block a legitimate recovery of a genuinely-restored account.
+	 */
+	extraUsageUtilization: number | null;
+	/**
+	 * Wall clock captured immediately BEFORE the usage request went out. This is
+	 * the causal boundary the listener compares a cooldown's `rate_limited_at`
+	 * against: a cooldown written while this request was in flight is temporally
+	 * ambiguous, so it must wait for the next poll rather than be cleared by a
+	 * reading that may predate it.
+	 */
+	fetchStartedAt: number;
+}
+
+/**
+ * Whether a successful usage poll carries capacity-restored evidence worth
+ * reporting: the account-wide representative utilization is a NUMBER below 100,
+ * i.e. no account-wide window (5h session, weekly, OAuth-apps weekly) is spent.
+ *
+ * LEVEL-triggered, not edge-triggered: it is evaluated on every successful poll
+ * and does not depend on any prior observation. Edge detection (a `100 → <100`
+ * crossing) is lossy — an account locked while its weekly sits at 40% never
+ * produces such a transition — and loses events across restarts.
+ *
+ * `null` NEVER reports: a `limits[]`-only payload once collapsed to 0, read as
+ * "plenty of headroom", and falsely cleared a cooldown. No evidence is not
+ * evidence of headroom.
+ */
+export function shouldReportCapacityRestored(
 	representativeUtilization: number | null,
-	extraUsageUtilization: number | null | undefined,
-	wasRateLimited: boolean,
-): boolean {
-	if (!wasRateLimited) return false;
-	if (representativeUtilization === null || representativeUtilization >= 100)
-		return false;
-	if ((extraUsageUtilization ?? 0) >= 100) return false;
-	return true;
+): representativeUtilization is number {
+	return representativeUtilization !== null && representativeUtilization < 100;
 }
 
 /**
@@ -833,7 +854,7 @@ class UsageCache {
 	private usageRateLimitedUntil = new Map<string, number>(); // Tracks when usage API 429 clears
 	private capacityRestoredCallbacks = new Map<
 		string,
-		(accountId: string) => void
+		(evidence: CapacityRestoredEvidence) => void
 	>();
 	// Accounts whose last usage fetch failed with the expired-subscription
 	// signature. Drives the once-per-transition subscriptionExpired /
@@ -859,9 +880,19 @@ class UsageCache {
 	// first success also fires usageRecovered so a subscription_expired pause
 	// persisted before a restart can still be lifted once the seat is back.
 	private hasSucceededOnce = new Set<string>();
+	// In-flight fetch dedup, tagged with the poll generation that issued it. The
+	// generation tag matters: a startPolling REPLACEMENT bumps the generation while
+	// an old fetch may still be running, and a plain account-keyed map would hand
+	// the new generation the old promise — whose result the new generation then
+	// (correctly) rejects as stale, leaving it having performed NO fetch at all and
+	// silently waiting for its next scheduled poll. Deduplicate only WITHIN a
+	// generation.
 	private inFlightFetches = new Map<
 		string,
-		Promise<{ success: boolean; retryAfterMs: number | null }>
+		{
+			generation: number;
+			promise: Promise<{ success: boolean; retryAfterMs: number | null }>;
+		}
 	>();
 	// Demand-aware polling state (Anthropic only — set when startPolling receives
 	// a PollingPolicy with demandAware:true). See PollingPolicy / noteActivity.
@@ -1052,6 +1083,7 @@ class UsageCache {
 				await this.fetchAndCache(
 					accountId,
 					tokenProvider,
+					generation,
 					provider,
 					customEndpoint,
 				);
@@ -1147,7 +1179,7 @@ class UsageCache {
 		intervalMs?: number,
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
-		onCapacityRestored?: (accountId: string) => void,
+		onCapacityRestored?: (evidence: CapacityRestoredEvidence) => void,
 		onSubscriptionExpired?: (accountId: string) => void,
 		onUsageRecovered?: (accountId: string) => void,
 		onTokenRefreshFailure?: (
@@ -1243,8 +1275,13 @@ class UsageCache {
 		const baseIntervalMs = intervalMs ?? 90000;
 
 		// Immediate fetch
-		this.fetchAndCache(accountId, tokenProvider, provider, customEndpoint).then(
-			({ success, retryAfterMs }) => {
+		this.fetchAndCache(
+			accountId,
+			tokenProvider,
+			generation,
+			provider,
+			customEndpoint,
+		).then(({ success, retryAfterMs }) => {
 				if (!success) {
 					this.failureCounts.set(accountId, 1);
 				}
@@ -1265,8 +1302,7 @@ class UsageCache {
 						retryAfterMs,
 					);
 				}
-			},
-		);
+		});
 
 		log.debug(
 			`Started usage polling for account ${accountId} (provider: ${provider}) with base interval ${Math.round(baseIntervalMs / 1000)}s`,
@@ -1285,12 +1321,21 @@ class UsageCache {
 		if (!tokenProvider) {
 			return false;
 		}
+		// On-demand fetches join the CURRENT generation (same lifecycle as the
+		// token provider: both are installed by startPolling and dropped by
+		// stopPolling), so they dedup with a concurrent scheduled poll and their
+		// result is applied under the same guards.
+		const generation = this.pollGenerations.get(accountId);
+		if (generation === undefined) {
+			return false;
+		}
 
 		const provider = this.providerTypes.get(accountId);
 		const customEndpoint = this.customEndpoints.get(accountId);
 		const { success } = await this.fetchAndCache(
 			accountId,
 			tokenProvider,
+			generation,
 			provider,
 			customEndpoint,
 		);
@@ -1396,49 +1441,81 @@ class UsageCache {
 	private async fetchAndCache(
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
+		generation: number,
 		provider?: string,
 		customEndpoint?: string | null,
 	): Promise<{ success: boolean; retryAfterMs: number | null }> {
-		// Deduplicate concurrent fetches for the same account — return the
-		// existing in-flight promise rather than starting a second HTTP request.
+		// Deduplicate concurrent fetches for the same account — return the existing
+		// in-flight promise rather than starting a second HTTP request — but ONLY
+		// within the same poll generation. A newer generation must issue (and apply)
+		// its own fetch; reusing a superseded generation's promise would give it a
+		// result its own guards reject, i.e. no fetch at all.
 		const inflight = this.inFlightFetches.get(accountId);
-		if (inflight) {
+		if (inflight && inflight.generation === generation) {
 			log.debug(
 				`Reusing in-flight fetch for account ${accountId} — skipping duplicate request`,
 			);
-			return inflight;
+			return inflight.promise;
 		}
 
 		const promise = this._doFetchAndCache(
 			accountId,
 			tokenProvider,
+			generation,
 			provider,
 			customEndpoint,
 		);
-		this.inFlightFetches.set(accountId, promise);
+		this.inFlightFetches.set(accountId, { generation, promise });
 		promise.finally(() => {
 			// Identity-guarded: a restart (stopPolling + startPolling) during this
 			// fetch may have installed a newer in-flight entry for the same account;
 			// only clear our own so we don't wipe the current generation's dedup.
-			if (this.inFlightFetches.get(accountId) === promise) {
+			if (this.inFlightFetches.get(accountId)?.promise === promise) {
 				this.inFlightFetches.delete(accountId);
 			}
 		});
 		return promise;
 	}
 
+	/**
+	 * True while `generation` is still this account's live poll generation AND the
+	 * token provider is still the one that issued the fetch. Re-checked at every
+	 * await boundary inside a fetch: a superseded in-flight fetch must neither
+	 * write the cache nor invoke any callback (its reading belongs to a poller that
+	 * no longer exists — e.g. a reauth swapped the credentials underneath it).
+	 */
+	private isLiveFetchGeneration(
+		accountId: string,
+		generation: number,
+		tokenProvider: AccessTokenProvider,
+	): boolean {
+		return (
+			this.pollGenerations.get(accountId) === generation &&
+			this.tokenProviders.get(accountId) === tokenProvider
+		);
+	}
+
 	private async _doFetchAndCache(
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
+		generation: number,
 		provider?: string,
 		_customEndpoint?: string | null,
 	): Promise<{ success: boolean; retryAfterMs: number | null }> {
+		/** A superseded fetch reports failure without touching any shared state. */
+		const superseded = { success: false, retryAfterMs: null } as const;
 		try {
 			// Get a fresh access token or API key on each fetch
 			let token: string;
 			try {
 				token = await tokenProvider();
 			} catch (tokenError) {
+				// Generation guard BEFORE the failure handler: a rejection belonging to
+				// a superseded generation must not invoke the current poller's
+				// onTokenRefreshFailure (which can halt polling for the live account).
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider)) {
+					return superseded;
+				}
 				// Handle token provider errors that might result in empty objects
 				const tokenErrorMessage =
 					tokenError instanceof Error
@@ -1480,6 +1557,11 @@ class UsageCache {
 				return { success: false, retryAfterMs: null };
 			}
 
+			// Generation guard after the (awaited) token resolution.
+			if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider)) {
+				return superseded;
+			}
+
 			// Validate token before proceeding
 			if (!token || (typeof token === "string" && token.trim() === "")) {
 				log.warn(
@@ -1494,6 +1576,8 @@ class UsageCache {
 			if (provider === "zai") {
 				// Fetch Zai usage data
 				data = await fetchZaiUsageData(token);
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
 				if (data) {
 					// Import Zai helper functions
 					const {
@@ -1517,6 +1601,8 @@ class UsageCache {
 			} else if (provider === "kilo") {
 				// Fetch Kilo usage data
 				data = await fetchKiloUsageData(token);
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
 				if (data) {
 					this.cache.set(accountId, { data, timestamp: Date.now() });
 					const utilization = getRepresentativeKiloUtilization(
@@ -1531,6 +1617,8 @@ class UsageCache {
 			} else if (provider === "alibaba-coding-plan") {
 				// Fetch Alibaba Coding Plan usage data
 				data = await fetchAlibabaCodingPlanUsageData(token);
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
 				if (data) {
 					this.cache.set(accountId, { data, timestamp: Date.now() });
 					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
@@ -1545,8 +1633,14 @@ class UsageCache {
 					return { success: true, retryAfterMs: null };
 				}
 			} else {
-				// Default to Anthropic usage data
+				// Default to Anthropic usage data. `fetchStartedAt` is the causal
+				// boundary reported with capacity-restored evidence: FETCH START, not
+				// response completion — a cooldown written while this request was in
+				// flight is temporally ambiguous and must wait for the next poll.
+				const fetchStartedAt = Date.now();
 				const result = await fetchUsageData(token);
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
 				if (result.data) {
 					// Subscription-expired recovery: fire usageRecovered on the
 					// failure→success transition, and also on the FIRST success of this
@@ -1561,8 +1655,9 @@ class UsageCache {
 							this.usageRecoveredCallbacks.get(accountId);
 						if (recoveredCallback) recoveredCallback(accountId);
 					}
-					// Snapshot before clearing — needed for the capacity-restored guard below.
-					const wasRateLimited = this.usageRateLimitedUntil.has(accountId);
+					// The usage endpoint answered, so its own 429 throttle (a per-IP limit
+					// on /oauth/usage, unrelated to the account's quota) is over. Four
+					// live consumers read this map; it is NOT the capacity-restored gate.
 					this.usageRateLimitedUntil.delete(accountId);
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
@@ -1579,21 +1674,27 @@ class UsageCache {
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,
 					);
-					// Notify capacity-restored listener only when the account was previously
-					// rate-limited (usageRateLimitedUntil set) and usage now shows genuine
-					// account-wide headroom. This handles seat-reassignment: org admin
-					// reassigns a seat mid-window, Anthropic resets usage, polling detects
-					// available capacity and lets the caller clear stale rate_limited_until.
-					if (
-						shouldClearRateLimitOnCapacity(
-							utilization,
-							(result.data as UsageData).extra_usage?.utilization,
-							wasRateLimited,
-						)
-					) {
+					// Report capacity-restored evidence on EVERY successful poll that
+					// sees account-wide headroom (level-triggered — no crossing to miss,
+					// nothing to lose across a restart, and a refused clear simply retries
+					// on the next poll). The representative is MAX(session, weeklyAll) plus
+					// the OAuth-apps weekly, so "< 100" means NO account-wide window is
+					// spent — strictly stronger than "the binding window recovered".
+					//
+					// The poller does not decide whether the cooldown may be cleared: it
+					// does not know the cooldown's reason or age. It reports; the listener
+					// (apps/server/src/capacity-restored.ts) decides.
+					if (shouldReportCapacityRestored(utilization)) {
 						const capacityCallback =
 							this.capacityRestoredCallbacks.get(accountId);
-						if (capacityCallback) capacityCallback(accountId);
+						if (capacityCallback)
+							capacityCallback({
+								accountId,
+								utilization,
+								extraUsageUtilization:
+									(result.data as UsageData).extra_usage?.utilization ?? null,
+								fetchStartedAt,
+							});
 					}
 					const window = getRepresentativeWindow(result.data as UsageData);
 					log.debug(
