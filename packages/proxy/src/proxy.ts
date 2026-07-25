@@ -1260,15 +1260,26 @@ export async function handleProxy(
 		sawOverloadSuppression: boolean;
 		sawRetrip: boolean;
 		/**
-		 * A candidate was skipped by the single-flight recovery-probe gate: NOTHING
-		 * was attempted against it because another request is probing it right now.
+		 * Candidates skipped by the single-flight recovery-probe gate: NOTHING was
+		 * attempted against them because another request is probing them right now.
 		 * Like `sawOverloadSuppression`, this is an AVAILABILITY condition with a
 		 * verdict already in flight — never a failure of the candidate — so the
-		 * hold loops must keep waiting for it within their budget instead of
-		 * treating the round as "everything failed for ordinary reasons".
+		 * hold loops keep waiting for it within their budget instead of treating
+		 * the round as "everything failed for ordinary reasons".
+		 *
+		 * Account IDs rather than a flag: a round can MIX a suppressed candidate
+		 * with one that failed ordinarily, and the loops must be able to re-attempt
+		 * exactly the former while leaving the latter alone.
 		 */
-		sawRateLimitProbeSuppression: boolean;
-		ordinaryFailures: number;
+		probeSuppressedAccountIds: Set<string>;
+		/**
+		 * Candidates that WERE attempted and failed for an ordinary reason (auth /
+		 * network / 429 / model). Nothing is in flight for them, so a short poll
+		 * that re-attempts them is pure hammering — worse than wasted work for a
+		 * 429, which it can deepen. Replaces the old write-only `ordinaryFailures`
+		 * counter, whose information the hold loops could not act on.
+		 */
+		ordinaryFailedAccountIds: Set<string>;
 		budgetAborted: boolean;
 	};
 
@@ -1289,8 +1300,8 @@ export async function handleProxy(
 			response: null,
 			sawOverloadSuppression: false,
 			sawRetrip: false,
-			sawRateLimitProbeSuppression: false,
-			ordinaryFailures: 0,
+			probeSuppressedAccountIds: new Set<string>(),
+			ordinaryFailedAccountIds: new Set<string>(),
 			budgetAborted: false,
 		};
 		for (let i = 0; i < candidates.length; i++) {
@@ -1322,19 +1333,20 @@ export async function handleProxy(
 							} else if (o.kind === "overload_529") {
 								round.sawRetrip = true;
 							} else {
-								round.ordinaryFailures++;
+								// Attributed to the candidate, so a later poll can skip
+								// exactly this account rather than the whole round.
+								round.ordinaryFailedAccountIds.add(candidate.id);
 							}
 						},
 					},
 				),
 			);
 			// Suppressed: another request is probing this candidate and NOTHING was
-			// attempted. Record it as its own condition — it is neither a failure
-			// (so it must not count toward `ordinaryFailures`) nor a served round;
-			// the hold loops wait for the in-flight probe's verdict on the strength
-			// of this flag.
+			// attempted. Record the ACCOUNT — it is neither a failure nor a served
+			// round; the hold loops wait for this candidate's in-flight verdict and
+			// re-attempt exactly it.
 			if (gated.suppressed) {
-				round.sawRateLimitProbeSuppression = true;
+				round.probeSuppressedAccountIds.add(candidate.id);
 				continue;
 			}
 			const r = gated.response;
@@ -1428,6 +1440,13 @@ export async function handleProxy(
 			NETWORK.IDLE_REARM_INTERVAL_MS,
 		);
 		const holdStart = Date.now();
+		// Accounts that were ATTEMPTED in an earlier round of this hold and failed
+		// for an ordinary reason (auth / network / 429 / model). Nothing is in
+		// flight for them, so re-attempting them on every ~1.5s poll is exactly the
+		// hammering this loop's classification exists to prevent — and for a 429 it
+		// can deepen a real rate limit. They stay excluded for the rest of the hold;
+		// the hold itself still ends (below) when a round has no verdict to wait on.
+		const ordinaryFailedIds = new Set<string>();
 		try {
 			while (true) {
 				const nowMs = Date.now();
@@ -1483,6 +1502,19 @@ export async function handleProxy(
 					),
 					wakeComboInfo,
 				);
+				// Drop candidates a previous round already proved broken for THIS
+				// request (see `ordinaryFailedIds`). `candidates` itself is kept intact
+				// below: the "pool is empty" branch asks whether the GATES left
+				// anything, which is a different question from "is anything left worth
+				// attempting".
+				const attemptableCandidates = candidates.filter(
+					(a) => !ordinaryFailedIds.has(a.id),
+				);
+				if (attemptableCandidates.length < candidates.length) {
+					log.debug(
+						`Overload hold: skipping ${candidates.length - attemptableCandidates.length} candidate(s) that already failed for an ordinary reason this hold`,
+					);
+				}
 				// Bound the wake attempt by the REMAINING hold budget (mirrors the
 				// burst-retry probe in transparent-retry.ts): makeProxyRequest's
 				// internal timeout is 30 minutes, so a wake near the budget's edge
@@ -1504,11 +1536,16 @@ export async function handleProxy(
 					: AbortSignal.any([req.signal, budgetController.signal]);
 				let round: AttemptRound;
 				try {
-					round = await attemptCandidates(candidates, { signal: wakeSignal });
+					round = await attemptCandidates(attemptableCandidates, {
+						signal: wakeSignal,
+					});
 				} finally {
 					// Disarm the budget timer on every path; the composed signal's
 					// listeners are released with the per-wake controller itself.
 					clearTimeout(budgetTimer);
+				}
+				for (const id of round.ordinaryFailedAccountIds) {
+					ordinaryFailedIds.add(id);
 				}
 				if (round.response) return round.response;
 				if (req.signal.aborted) return createClientAbortResponse();
@@ -1524,17 +1561,20 @@ export async function handleProxy(
 				} else if (
 					!round.sawOverloadSuppression &&
 					!round.sawRetrip &&
-					!round.sawRateLimitProbeSuppression
+					round.probeSuppressedAccountIds.size === 0
 				) {
-					// Every failure this round was ORDINARY (auth / network / 429 /
-					// model-not-found): there is no verdict to wait for, and
+					// Nothing this round has a verdict in flight: every candidate either
+					// failed ORDINARILY (auth / network / 429 / model-not-found) or was
+					// already excluded as broken. There is nothing to wait for, and
 					// re-attempting on the short probe poll would hammer a broken
 					// candidate dozens of times over the budget. Break out to the
 					// normal terminal / synthetic path.
 					//
 					// A recovery-probe suppression is explicitly NOT that: a probe IS
 					// in flight for a candidate that may serve us, so we keep polling
-					// within budget rather than returning a synthetic 529 immediately.
+					// within budget rather than returning a synthetic 529 immediately —
+					// while the ordinary-failure exclusion above keeps that polling off
+					// the siblings that already failed.
 					break;
 				}
 				// Suppressed behind the in-flight overload probe or the single-flight
@@ -2033,15 +2073,21 @@ export async function handleProxy(
 			const isEligible = (a: Account): boolean =>
 				opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
 			const holdStart = Date.now();
-			// Set when the PREVIOUS round was skipped by the single-flight
+			// The candidates the PREVIOUS round skipped via the single-flight
 			// recovery-probe gate. Such a candidate has no cooldown deadline to wait
 			// on (that is exactly why it was selectable), so without this the loop
 			// would see "nothing to wait for" and exit while the probe was still in
 			// flight — handing the caller its terminal (a size 400, a family 429 or a
-			// pin 503) although a candidate was about to become usable. Deliberately
-			// NOT sticky: it is refreshed from each round, so an ordinary failure
-			// restores the original exit behaviour on the next pass.
-			let probeSuppressed = false;
+			// pin 503) although a candidate was about to become usable.
+			//
+			// Account IDs, not a flag: a round can mix a suppressed candidate with a
+			// sibling that failed for an ordinary reason, and a probe-verdict poll
+			// must re-attempt ONLY the former. Retrying the failed sibling every
+			// ~1.5s for the rest of the budget (up to 330s here) is the hammering
+			// this loop's classification exists to prevent. Deliberately NOT sticky:
+			// refreshed from each round, so an ordinary failure restores the original
+			// exit behaviour on the next pass.
+			let probeSuppressedIds = new Set<string>();
 			while (true) {
 				const nowMs = Date.now();
 				const elapsed = nowMs - holdStart;
@@ -2070,12 +2116,16 @@ export async function handleProxy(
 					.filter((x) => x.availableAt > nowMs);
 
 				let waitMs: number;
-				if (unavailable.length === 0) {
+				// True when this pass exists ONLY to wait for an in-flight recovery
+				// probe (no cooldown deadline drove it). Such a pass must re-attempt
+				// exactly the suppressed candidates — see `probeSuppressedIds`.
+				const pollingForProbeVerdict = unavailable.length === 0;
+				if (pollingForProbeVerdict) {
 					// Nothing is cooling down. Normally that means there is nothing to
 					// wait for — unless the last round was recovery-probe suppressed, in
 					// which case an upstream probe IS in flight for a candidate that may
 					// serve this request; short-poll for its verdict instead.
-					if (!probeSuppressed) break;
+					if (probeSuppressedIds.size === 0) break;
 					waitMs =
 						OVERLOAD_HOLD_PROBE_POLL_MS +
 						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
@@ -2125,25 +2175,40 @@ export async function handleProxy(
 					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 				);
 
-				if (candidates.length === 0) {
-					probeSuppressed = false; // nothing was attempted this pass
-					continue; // still unavailable
+				// A probe-verdict poll re-attempts ONLY the candidates that were
+				// suppressed — the whole reason this pass exists. A sibling that
+				// already failed for an ordinary reason has no verdict pending, so
+				// re-attempting it every poll would just hammer it (and deepen a real
+				// 429). A cooldown-driven pass is unchanged: it re-attempts every
+				// candidate, because waiting out a refreshed cooldown and re-probing
+				// is exactly this hold's job.
+				const attemptList = pollingForProbeVerdict
+					? candidates.filter((a) => probeSuppressedIds.has(a.id))
+					: candidates;
+
+				if (attemptList.length === 0) {
+					// Nothing was attempted this pass: either the gates left no
+					// candidate, or the suppressed one is no longer selectable (it
+					// picked up a cooldown, which the next pass will wait out).
+					probeSuppressedIds = new Set();
+					continue;
 				}
 
 				log.info(
-					`${label}: ${candidates.length} account(s) now available, retrying`,
+					`${label}: ${attemptList.length} account(s) now available, retrying`,
 				);
 
 				// This hold deliberately ignores the round's overload/ordinary
 				// classification — its loop-back semantics predate the overload hold
 				// and are unchanged (it waits on account cooldowns, not probe
 				// verdicts). The ONE exception is recovery-probe suppression, which
-				// means a candidate was not attempted at all: carry it to the next
-				// pass so the "nothing to wait for" exit above waits for that probe's
-				// verdict instead of giving up on a candidate that may serve us.
-				const round = await attemptCandidates(candidates);
+				// means a candidate was not attempted at all: carry those accounts to
+				// the next pass so the "nothing to wait for" exit above waits for the
+				// probe's verdict instead of giving up on a candidate that may serve
+				// us — and so that pass targets exactly them.
+				const round = await attemptCandidates(attemptList);
 				if (round.response) return round.response;
-				probeSuppressed = round.sawRateLimitProbeSuppression;
+				probeSuppressedIds = round.probeSuppressedAccountIds;
 				// All candidates returned null — loop back to recheck.
 			}
 			return null;

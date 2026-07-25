@@ -150,6 +150,28 @@ async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 }
 
 /**
+ * True for a real upstream proxy endpoint. Unrelated background fetches (e.g.
+ * the pricing-table refresh in @clankermux/core) must never be counted as
+ * upstream attempts — they would make the single-flight assertions lie.
+ */
+function isProxyCall(input: RequestInfo | URL): boolean {
+	const url = input instanceof Request ? input.url : String(input);
+	return (
+		url.includes("api.anthropic.com") ||
+		url.includes("chatgpt.com") ||
+		url.includes("/v1/messages")
+	);
+}
+
+/** Benign stub for those background fetches — never touches the network. */
+function backgroundStub(): Response {
+	return new Response("{}", {
+		status: 200,
+		headers: { "content-type": "application/json" },
+	});
+}
+
+/**
  * A request whose estimate is `targetEstimate` tokens (chars/3.0 + max_tokens).
  * Mirrors context-window-gate.test.ts.
  */
@@ -218,7 +240,8 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		holdProbeLease();
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			if (!isProxyCall(input)) return backgroundStub();
 			throw new Error("no upstream call expected — the attempt is suppressed");
 		});
 
@@ -260,7 +283,8 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		// The lease holder finishes after the hold's first (suppressed) wake.
 		setTimeout(() => resetRateLimitProbeGatesForTests(), 700);
 
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			if (!isProxyCall(input)) return backgroundStub();
 			anthropic.rate_limited_until = null;
 			return new Response(
 				JSON.stringify({
@@ -286,6 +310,78 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 
 		expect(response.status).toBe(200);
 	}, 20_000);
+
+	it("a MIXED CW-hold round polls only the suppressed account, never re-hammering the failed sibling", async () => {
+		// Same shape as the overload hold's mixed round, on the other hold loop:
+		// keeping the pass alive for A's in-flight probe must not drag B — which
+		// has no verdict pending — into every ~1.5s poll for a budget that runs to
+		// 330s here.
+		const codex = makeAccount({
+			id: "codex-too-small",
+			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
+		});
+		const suppressed = makeAccount({
+			id: ACCOUNT_ID,
+			name: "anthropic-suppressed",
+			provider: "anthropic",
+			api_key: "key-suppressed",
+			access_token: "key-suppressed",
+			rate_limited_until: Date.now() + 200,
+		});
+		const broken = makeAccount({
+			id: "acc-broken",
+			name: "anthropic-broken",
+			provider: "anthropic",
+			api_key: "key-broken",
+			access_token: "key-broken",
+			priority: 1,
+			rate_limited_until: Date.now() + 200,
+		});
+		const ctx = makeContext([codex, suppressed, broken]);
+		(ctx.provider as unknown as { name: string }).name = "anthropic";
+		holdProbeLease();
+		// Long enough for several probe-verdict polls to elapse.
+		setTimeout(() => resetRateLimitProbeGatesForTests(), 3_500);
+
+		let brokenCalls = 0;
+		let suppressedCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const credential = `${headers.get("x-api-key") ?? ""} ${headers.get("authorization") ?? ""}`;
+				if (credential.includes("key-broken")) {
+					brokenCalls += 1;
+					throw new Error("connection refused");
+				}
+				suppressedCalls += 1;
+				suppressed.rate_limited_until = null;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-opus-4-7",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			},
+		);
+
+		const response = await callHandleProxy(
+			makeSizedRequest(500_000),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(brokenCalls).toBe(1);
+		expect(response.status).toBe(200);
+		expect(suppressedCalls).toBe(1);
+	}, 30_000);
 
 	it("still returns the size 400 when NO candidate fits even the full window", async () => {
 		// Same suppressed lease, but 500_000 tokens exceeds gpt-5.5's full window,
@@ -318,7 +414,7 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 		originalFetch = globalThis.fetch;
 		clearProviderOverloadCooldown();
 		resetRateLimitProbeGatesForTests();
-		setOverloadHoldBudgetOverrideForTests(8_000);
+		setOverloadHoldBudgetOverrideForTests(12_000);
 	});
 
 	afterEach(() => {
@@ -346,7 +442,8 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 		applyProviderOverloadCooldown("anthropic", Date.now() + 200, null);
 
 		let upstreamCalls = 0;
-		globalThis.fetch = mock(async () => {
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			if (!isProxyCall(input)) return backgroundStub();
 			upstreamCalls += 1;
 			return new Response(
 				JSON.stringify({
@@ -384,10 +481,95 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 
 		// Served after waiting for the in-flight probe — NOT bounced with a 529.
 		expect(response.status).toBe(200);
-		// It reached upstream only AFTER the lease holder finished — the point is
-		// that it waited rather than bouncing a 529 while the probe was in flight.
-		expect(upstreamCalls).toBeGreaterThanOrEqual(1);
+		// Exactly one upstream attempt, made only AFTER the lease holder finished:
+		// it waited rather than bouncing a 529 while the probe was in flight.
+		expect(upstreamCalls).toBe(1);
 		// It actually waited (breaker deadline + at least one suppression poll).
 		expect(elapsed).toBeGreaterThan(700);
 	}, 20_000);
+
+	it("a MIXED round polls only the suppressed account, never re-hammering the failed sibling", async () => {
+		// A is suppressed (a probe is in flight for it); B fails fast for an
+		// ordinary reason. Keeping the round alive on A's account must not drag B
+		// along: nothing is in flight for B, so every ~1.5s poll would re-attempt a
+		// known-broken account for the whole 120s budget — and if B were failing
+		// with a 429, that hammering can deepen a real rate limit.
+		const suppressed = makeAccount({
+			id: ACCOUNT_ID,
+			name: "anthropic-suppressed",
+			provider: "anthropic",
+			api_key: "key-suppressed",
+			access_token: "key-suppressed",
+		});
+		const broken = makeAccount({
+			id: "acc-broken",
+			name: "anthropic-broken",
+			provider: "anthropic",
+			api_key: "key-broken",
+			access_token: "key-broken",
+			priority: 1,
+		});
+		const ctx = makeContext([suppressed, broken]);
+		(ctx.provider as unknown as { name: string }).name = "anthropic";
+		holdProbeLease(); // only ACCOUNT_ID is gated by the probe lease
+		applyProviderOverloadCooldown("anthropic", Date.now() + 200, null);
+
+		let brokenCalls = 0;
+		let suppressedCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				// Anthropic accounts authenticate with x-api-key when they carry an
+				// api_key, and with a bearer token otherwise — check both so the
+				// routing can never silently collapse the two accounts into one.
+				const credential = `${headers.get("x-api-key") ?? ""} ${headers.get("authorization") ?? ""}`;
+				if (credential.includes("key-broken")) {
+					brokenCalls += 1;
+					// An ORDINARY failure (network rejection): the attempt fails over
+					// with no verdict pending afterwards.
+					throw new Error("connection refused");
+				}
+				suppressedCalls += 1;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-sonnet-4-5",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			},
+		);
+
+		// Hold the lease long enough for SEVERAL probe-verdict polls to elapse, so
+		// re-hammering would be unmistakable in `brokenCalls`.
+		setTimeout(() => resetRateLimitProbeGatesForTests(), 3_500);
+
+		const response = await callHandleProxy(
+			new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 16,
+				}),
+			}),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The broken sibling was attempted exactly once across the whole hold…
+		expect(brokenCalls).toBe(1);
+		// …and the suppressed account still served the request once its probe
+		// finished (the F6 property is intact — the hold kept waiting).
+		expect(response.status).toBe(200);
+		expect(suppressedCalls).toBe(1);
+	}, 30_000);
 });
