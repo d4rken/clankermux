@@ -1,3 +1,4 @@
+import { REJECTING_STATUSES } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { isAnthropicHardLimitStatus } from "@clankermux/providers";
 import {
@@ -123,7 +124,9 @@ export function isOAuthAnthropicAccount(account: Account): boolean {
  *  2. Hard-limit unified-status      → not retryable (`hard_limit_status`),
  *     even when `x-should-retry: true` is present.
  *  3. Fresh capacity, minHeadroom>0  → retryable, `fresh_headroom`.
- *  4. Stale/absent capacity:
+ *  4. Stale/absent capacity (or zero headroom):
+ *       - REJECTING unified-status   → not retryable
+ *         (hard set plus `rejected`)   (`rejecting_status_no_headroom`).
  *       - `x-should-retry: true`     → retryable, `stale_should_retry`
  *                                       (single short probe only).
  *       - otherwise                  → not retryable
@@ -161,8 +164,23 @@ export function classify429Transient(args: {
 		return { retryable: true, confidence: "fresh_headroom" };
 	}
 
-	// 4. Usage stale/absent (or headroom 0): trust a `x-should-retry: true` hint
-	//    for a single short probe only; otherwise do not hold.
+	// 4a. Usage stale/absent (or headroom 0) AND the provider says it is REFUSING
+	//     the request (`REJECTING_STATUSES`, i.e. the hard set plus `rejected`):
+	//     never rescue this on the `x-should-retry` hint. Anthropic sends
+	//     `rejected` together with `x-should-retry: true` on an account whose
+	//     window is spent, so without this we hold and re-probe an account that
+	//     cannot recover before its window resets. Deliberately narrow: it does
+	//     NOT touch step 3, so a `rejected` 429 with fresh positive headroom is
+	//     still treated as the per-IP burst throttle that burst-retry exists for.
+	const statusHeader = response.headers.get(
+		"anthropic-ratelimit-unified-status",
+	);
+	if (statusHeader !== null && REJECTING_STATUSES.has(statusHeader)) {
+		return { retryable: false, reason: "rejecting_status_no_headroom" };
+	}
+
+	// 4b. Otherwise trust a `x-should-retry: true` hint for a single short probe
+	//     only; failing that, do not hold.
 	if (response.headers.get("x-should-retry") === "true") {
 		return { retryable: true, confidence: "stale_should_retry" };
 	}
