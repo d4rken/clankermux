@@ -518,7 +518,12 @@ export function AccountStatusChips({
 				</StatusChip>
 			)}
 			{status.showRateLimitChip && (
-				<RateLimitStatusChip status={status.rateLimitStatus} />
+				<RateLimitStatusChip
+					status={status.rateLimitStatus}
+					cause={status.rateLimitCause}
+					resetMs={status.rateLimitCauseResetMs}
+					providerStatus={status.rateLimitProviderStatus}
+				/>
 			)}
 			{status.staleLockDetected && (
 				<span

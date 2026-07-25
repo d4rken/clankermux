@@ -1124,6 +1124,9 @@ export function createAccountsListHandler(
 						? new Date(Number(account.expires_at)).toISOString()
 						: null,
 					rateLimitStatus,
+					rateLimitCause: rateLimitPresentation.cause,
+					rateLimitCauseResetMs: rateLimitPresentation.resetMs,
+					rateLimitProviderStatus: rateLimitPresentation.providerStatus,
 					rateLimitReset: account.rate_limit_reset
 						? new Date(Number(account.rate_limit_reset)).toISOString()
 						: null,

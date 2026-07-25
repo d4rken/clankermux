@@ -54,4 +54,80 @@ describe("RateLimitStatusChip", () => {
 		const html = render("some_new_status (5m)");
 		expect(html).toContain("Some New Status");
 	});
+
+	it("maps a usage_exhausted status string to an amber 'Usage exhausted' chip", () => {
+		const html = render("usage_exhausted (2760m)");
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("46h");
+	});
+
+	it("maps the provider's `rejected` status to a red 'Rate limited' chip", () => {
+		const html = render("rejected (30m)");
+		expect(html).toContain("Rate limited");
+		expect(html).toContain("bg-red-100");
+	});
+});
+
+const NOW = 1_750_000_000_000;
+const MIN = 60_000;
+
+describe("RateLimitStatusChip — structured cause", () => {
+	it("renders 'Usage exhausted' (amber) from the cause, with the cause's countdown", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip
+				status="usage_exhausted (1380m)"
+				cause="usage_exhausted"
+				resetMs={NOW + 90 * MIN}
+				providerStatus="rejected"
+				now={NOW}
+			/>,
+		);
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("bg-amber-100");
+		// 90 minutes -> 1h 30m, taken from resetMs rather than the string.
+		expect(html).toContain("1h 30m");
+	});
+
+	it("renders a red 'Rate limited' chip for a `rejected` provider status", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip
+				status="rate_limited (30m)"
+				cause="rate_limited"
+				resetMs={NOW + 30 * MIN}
+				providerStatus="rejected"
+				now={NOW}
+			/>,
+		);
+		expect(html).toContain("Rate limited");
+		expect(html).toContain("bg-red-100");
+		expect(html).toContain("30m");
+	});
+
+	it("keeps an unrecognized provider status humanized instead of using the cause", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip
+				status="some_new_status (5m)"
+				cause="allowed_warning"
+				resetMs={null}
+				providerStatus="some_new_status"
+				now={NOW}
+			/>,
+		);
+		expect(html).toContain("Some New Status");
+		expect(html).not.toContain("Near limit");
+	});
+
+	it("omits the countdown when the cause has no known reset", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip
+				status="usage_exhausted"
+				cause="usage_exhausted"
+				resetMs={null}
+				now={NOW}
+			/>,
+		);
+		expect(html).toContain("Usage exhausted");
+		expect(html).not.toContain("·");
+	});
 });

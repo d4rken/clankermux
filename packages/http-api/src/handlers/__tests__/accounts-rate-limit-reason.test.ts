@@ -132,6 +132,24 @@ describe("/api/accounts — rate_limited_reason round-trip", () => {
 		}
 	});
 
+	it("emits the structured rate-limit cause fields alongside the string", async () => {
+		const until = Date.now() + 30 * 60_000;
+		const body = await listAccounts([
+			makeAccountRow({
+				id: "acc-cause",
+				rate_limit_status: "rejected",
+				rate_limited: 1,
+				rate_limited_until: until,
+			}),
+		]);
+		const account = body.find((a) => a.id === "acc-cause");
+		// `rejected` normalizes to the rate_limited cause; the raw value survives.
+		expect(account?.rateLimitCause).toBe("rate_limited");
+		expect(account?.rateLimitProviderStatus).toBe("rejected");
+		expect(account?.rateLimitCauseResetMs).toBe(until);
+		expect(account?.rateLimitStatus).toBe("rate_limited (30m)");
+	});
+
 	it("still nulls a reason the current build does not know", async () => {
 		const body = await listAccounts([
 			makeAccountRow({

@@ -158,6 +158,50 @@ describe("deriveAccountStatus — rate-limit status", () => {
 		).toBe(true);
 	});
 
+	it("prefers the structured cause over the display string", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				// Legacy string says soft; the resolved cause says blocked.
+				rateLimitStatus: "allowed_warning (10m)",
+				rateLimitCause: "blocked",
+			}),
+			NOW,
+		);
+		expect(status.isHardLimited).toBe(true);
+		expect(status.isRateLimited).toBe(true);
+	});
+
+	it("treats a usage_exhausted cause as limited but SUPPRESSES Force Reset", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				rateLimitStatus: "usage_exhausted (2760m)",
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseResetMs: NOW + 2760 * MINUTE,
+				// Even with a live lock, the lock is legitimate: force-resetting it
+				// only lets the router burn fresh 429s against a spent window.
+				rateLimitedUntil: NOW + 30 * MINUTE,
+			}),
+			NOW,
+		);
+		expect(status.isUsageExhausted).toBe(true);
+		expect(status.showRateLimitChip).toBe(true);
+		expect(status.isRateLimited).toBe(true);
+		expect(status.isHardLimited).toBe(true);
+		expect(status.isBlockedByLegacyLock).toBe(true);
+		expect(status.showForceReset).toBe(false);
+		expect(status.staleLockDetected).toBe(false);
+		expect(status.rateLimitCauseResetMs).toBe(NOW + 2760 * MINUTE);
+	});
+
+	it("hides the chip for an `ok` cause even when the legacy string disagrees", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ rateLimitStatus: "OK", rateLimitCause: "ok" }),
+			NOW,
+		);
+		expect(status.showRateLimitChip).toBe(false);
+		expect(status.isRateLimited).toBe(false);
+	});
+
 	it("treats queueing_soft as a soft limit, not a hard one", () => {
 		const status = deriveAccountStatus(
 			makeAccount({ rateLimitStatus: "queueing_soft (5m)" }),

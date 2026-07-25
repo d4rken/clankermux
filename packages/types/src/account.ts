@@ -332,7 +332,21 @@ export interface AccountResponse {
 	pauseReason?: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
+	/**
+	 * Back-compat display string (`<base>` or `<base> (Nm)`), derived from the
+	 * same decision as {@link AccountResponse.rateLimitCause} so the two can never
+	 * disagree. Prefer the structured fields in new code.
+	 */
 	rateLimitStatus: string;
+	/** Normalized, machine-readable reason the account is (not) limited. */
+	rateLimitCause: RateLimitCause;
+	/** Epoch ms when `rateLimitCause` is expected to clear; null when unknown. */
+	rateLimitCauseResetMs: number | null;
+	/**
+	 * Raw stored provider status (`anthropic-ratelimit-unified-status`), for
+	 * diagnostics — may be a value the vocabulary does not recognize.
+	 */
+	rateLimitProviderStatus: string | null;
 	rateLimitReset: string | null;
 	rateLimitRemaining: number | null;
 	rateLimitedUntil: number | null;
@@ -722,6 +736,14 @@ export function toAccountResponse(account: Account): AccountResponse {
 			? new Date(account.expires_at).toISOString()
 			: null,
 		rateLimitStatus,
+		// Minimal honest projection: this mapper has no usage data, so it can only
+		// see the proxy's own lock. `/api/accounts` resolves the full cause (weekly
+		// exhaustion, provider status) via `resolveRateLimitPresentation`.
+		rateLimitCause: isRateLimited ? "rate_limited" : "ok",
+		rateLimitCauseResetMs: isRateLimited
+			? (account.rate_limited_until ?? null)
+			: null,
+		rateLimitProviderStatus: account.rate_limit_status ?? null,
 		rateLimitReset: account.rate_limit_reset
 			? new Date(account.rate_limit_reset).toISOString()
 			: null,
