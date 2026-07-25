@@ -21,6 +21,11 @@
 	--accent-foreground: hsl(0 0% 100%);
 	--destructive: hsl(0 84.2% 60.2%);
 	--destructive-foreground: hsl(0 0% 98%);
+	/* Amber warn tone. Same value Tailwind's yellow-600 resolves to, so the
+	   text-warning sites that used to @apply it are unchanged. */
+	--warning: oklch(68.1% 0.162 75.834);
+	/* Near-black warm: white on either amber shade is well under 3:1. */
+	--warning-foreground: oklch(21% 0.03 75.834);
 	--border: hsl(240 5.9% 90%);
 	--input: hsl(240 5.9% 90%);
 	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
@@ -45,6 +50,10 @@
 	--accent-foreground: hsl(0 0% 100%);
 	--destructive: hsl(0 84.2% 60.2%);
 	--destructive-foreground: hsl(0 0% 98%);
+	/* yellow-400 — what text-warning resolved to in dark mode before the token
+	   existed. */
+	--warning: oklch(85.2% 0.199 91.936);
+	--warning-foreground: oklch(21% 0.03 91.936);
 	--border: hsl(220 13% 20%);
 	--input: hsl(220 13% 18%);
 	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
@@ -68,6 +77,12 @@
 	--color-accent-foreground: var(--accent-foreground);
 	--color-destructive: var(--destructive);
 	--color-destructive-foreground: var(--destructive-foreground);
+	/* Registered like destructive so Tailwind generates the opacity modifiers
+	   (bg-warning/10, border-warning/30, …). A hand-written .bg-warning rule
+	   cannot: Tailwind v4 only emits `<utility>-<color>/<alpha>` for colors that
+	   exist in the theme. */
+	--color-warning: var(--warning);
+	--color-warning-foreground: var(--warning-foreground);
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
@@ -156,20 +171,15 @@
 		@apply transition-all duration-200 hover:shadow-lg hover:scale-[1.02];
 	}
 
-	/* Success/Error/Warning colors */
+	/* Success colors.
+	   NOTE: `success` has the same latent problem `warning` had — it is not a
+	   registered theme color, so `bg-success/10` generates no CSS. Left alone
+	   deliberately; fixing it is a separate change. */
 	.text-success {
 		@apply text-green-600 dark:text-green-400;
 	}
 
-	.text-warning {
-		@apply text-yellow-600 dark:text-yellow-400;
-	}
-
 	.bg-success {
 		@apply bg-green-100 dark:bg-green-900/20;
-	}
-
-	.bg-warning {
-		@apply bg-yellow-100 dark:bg-yellow-900/20;
 	}
 }

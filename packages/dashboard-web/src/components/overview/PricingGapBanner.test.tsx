@@ -32,7 +32,10 @@ describe("PricingGapBannerView", () => {
 		expect(html).toContain("854");
 		expect(html).toContain("requests");
 		// Amber warn tone, not the destructive red of the corruption banner:
-		// requests are still served, only costing is degraded.
+		// requests are still served, only costing is degraded. This asserts the
+		// className the markup asks for — NOT that it resolves to any CSS. What
+		// makes it resolve is `warning` being a registered theme color in
+		// globals.css's `@theme inline` block.
 		expect(html).toContain("bg-warning/15");
 		expect(html).not.toContain("bg-destructive");
 	});
