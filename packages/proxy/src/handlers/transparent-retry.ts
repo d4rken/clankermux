@@ -38,6 +38,13 @@ const BURST_RETRY_MAX_HOLD_MS = 120_000;
 const BURST_RETRY_MAX_ATTEMPTS = 3;
 /** Jitter bound (ms) added to each re-probe wait (used with Math.random). */
 const BURST_RETRY_JITTER_MS = 500;
+/**
+ * Poll interval (ms) while a re-probe is SUPPRESSED — another request holds the
+ * account's single-flight recovery-probe lease. Short, because what we are
+ * waiting for is that request's upstream call to finish (typically seconds);
+ * the hold budget still bounds the total wait.
+ */
+const BURST_RETRY_SUPPRESSED_POLL_MS = 1_000;
 
 /**
  * Max usage-cache age (ms) trusted when reading fresh headroom for the
@@ -169,7 +176,9 @@ export function classify429Transient(args: {
 	//     never rescue this on the `x-should-retry` hint. Anthropic sends
 	//     `rejected` together with `x-should-retry: true` on an account whose
 	//     window is spent, so without this we hold and re-probe an account that
-	//     cannot recover before its window resets. Deliberately narrow: it does
+	//     is spent right now — a bounded in-request hold cannot outlast that.
+	//     (An EARLY provider reset is possible, but it is observed by the usage
+	//     poller's capacity-restored path, not by holding.) Deliberately narrow: it does
 	//     NOT touch step 3, so a `rejected` 429 with fresh positive headroom is
 	//     still treated as the per-IP burst throttle that burst-retry exists for.
 	const statusHeader = response.headers.get(
@@ -211,14 +220,29 @@ export const HOLD_OVERFLOW = Symbol("burst-retry-hold-overflow");
 export type HoldResult = Response | null | typeof HOLD_OVERFLOW;
 
 /**
+ * Outcome of one re-probe of the held account.
+ *
+ * `suppressed` is deliberately NOT collapsed into `throttled`: it means the
+ * re-probe never happened, because another request holds the account's
+ * single-flight recovery-probe lease. Treating it as a failed probe would
+ * consume one of the (three) attempts — and for `stale_should_retry`, whose
+ * budget is a SINGLE probe, the very first suppression would end the hold — so
+ * the request would fail over while the real probe was still in flight.
+ */
+export type ReprobeOutcome =
+	| { kind: "response"; response: Response }
+	| { kind: "throttled" }
+	| { kind: "suppressed" };
+
+/**
  * A closure that re-probes the held account once via the reprobe path
- * (`proxyWithAccount` in reprobe mode). Returns a real Response on success, or
- * `null` when the account is still throttled (429) or the attempt failed over.
+ * (`proxyWithAccount` in reprobe mode). See {@link ReprobeOutcome}: a real
+ * Response, "still throttled" (429 / failed over), or "not attempted at all".
  */
 export type ReprobeFn = (
 	account: Account,
 	signal: AbortSignal,
-) => Promise<Response | null>;
+) => Promise<ReprobeOutcome>;
 
 /**
  * Sleep for `ms`, resolving early (with `false`) if the signal aborts. Resolves
@@ -300,6 +324,7 @@ export async function holdAndRetryCacheAccount(args: {
 	maxHoldMs?: number;
 	maxAttempts?: number;
 	jitterMs?: number;
+	suppressedPollMs?: number;
 }): Promise<HoldResult> {
 	const { account, confidence, signal, reprobe } = args;
 	const clock = args.now ?? Date.now;
@@ -309,6 +334,8 @@ export async function holdAndRetryCacheAccount(args: {
 	const maxHoldMs = args.maxHoldMs ?? BURST_RETRY_MAX_HOLD_MS;
 	const configuredMaxAttempts = args.maxAttempts ?? BURST_RETRY_MAX_ATTEMPTS;
 	const jitterMs = args.jitterMs ?? BURST_RETRY_JITTER_MS;
+	const suppressedPollMs =
+		args.suppressedPollMs ?? BURST_RETRY_SUPPRESSED_POLL_MS;
 
 	if (!tryAcquireHoldSlot()) {
 		log.warn(
@@ -392,9 +419,11 @@ export async function holdAndRetryCacheAccount(args: {
 				}
 			}
 
-			attempt += 1;
+			// Counted only once the probe actually HAPPENS — a suppressed re-probe
+			// below leaves the counter untouched (see ReprobeOutcome).
+			const attemptNumber = attempt + 1;
 			log.info(
-				`Burst-retry: re-probing ${account.name}, attempt ${attempt}/${maxAttempts} (held ${heldMs}ms, confidence=${confidence})`,
+				`Burst-retry: re-probing ${account.name}, attempt ${attemptNumber}/${maxAttempts} (held ${heldMs}ms, confidence=${confidence})`,
 			);
 
 			// Bound the probe by the remaining hold budget. makeProxyRequest now
@@ -414,22 +443,53 @@ export async function holdAndRetryCacheAccount(args: {
 			const probeSignal = signal.aborted
 				? signal
 				: AbortSignal.any([signal, budgetController.signal]);
-			let response: Response | null;
+			let outcome: ReprobeOutcome;
 			try {
-				response = await reprobe(account, probeSignal);
+				outcome = await reprobe(account, probeSignal);
 			} finally {
 				clearTimeout(budgetTimer);
 			}
 			heldMs = clock() - start;
-			if (response) {
+
+			if (outcome.kind === "suppressed") {
+				// NOT an attempt: another request holds the account's single-flight
+				// recovery-probe lease, so nothing was sent upstream and we learned
+				// nothing about the account. Do not consume an attempt (a
+				// stale_should_retry hold has exactly one, and would otherwise end
+				// here) — short-poll instead so this hold wakes promptly once that
+				// probe's verdict lands, still bounded by the hold budget.
+				const pollRemaining = budgetMs - (clock() - start);
+				const pollWait = suppressedPollMs + Math.random() * jitterMs;
+				if (pollWait > pollRemaining) {
+					log.info(
+						`Burst-retry giving up on ${account.name}: recovery probe still suppressed and the remaining budget (${Math.round(pollRemaining)}ms) is under one poll interval`,
+					);
+					return null;
+				}
+				log.debug(
+					`Burst-retry: re-probe of ${account.name} suppressed (another request holds the recovery-probe lease) — polling in ${Math.round(pollWait)}ms, attempt not consumed`,
+				);
+				const completed = await abortableSleep(pollWait, signal);
+				heldMs = clock() - start;
+				if (!completed || signal.aborted) {
+					log.info(
+						`Burst-retry hold aborted while suppressed for ${account.name} after ${heldMs}ms`,
+					);
+					return null;
+				}
+				continue;
+			}
+
+			attempt = attemptNumber;
+			if (outcome.kind === "response") {
 				log.info(
 					`Burst-retry succeeded on ${account.name} after ${heldMs}ms held, ${attempt} attempt(s)`,
 				);
-				return response;
+				return outcome.response;
 			}
 
-			// Still throttled (null) — loop to wait out the refreshed cooldown
-			// within the full budget (subject to the never-wake-early guard and the
+			// Still throttled — loop to wait out the refreshed cooldown within the
+			// full budget (subject to the never-wake-early guard and the
 			// stale_should_retry single-probe cap). On give-up the caller falls
 			// through to its normal failover loop (healthy Anthropic siblings first).
 		}

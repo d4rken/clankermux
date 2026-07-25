@@ -51,6 +51,7 @@ import {
 	prepareRequestBody,
 	proxyForcedAccount,
 	proxyWithAccount,
+	type ReprobeOutcome,
 	RequestBodyContext,
 	resolveFamilyWeeklyExclusion,
 	resolveTransientlyCooledFamilySibling,
@@ -249,6 +250,60 @@ function isBurstHoldEligible(
 	heldInGatedAccounts: boolean,
 ): boolean {
 	return heldInGatedAccounts || decision === "affinity_hold";
+}
+
+/** Outcome of {@link attemptThroughProbeGate}. */
+type GatedAttempt = {
+	/** The upstream response, or null when the attempt produced none. */
+	response: Response | null;
+	/**
+	 * True when another request already holds this account's single-flight probe
+	 * lease. NOTHING was attempted — the caller must skip this candidate (and NOT
+	 * count it as a failure) and move on to the next one.
+	 */
+	suppressed: boolean;
+};
+
+/**
+ * THE single chokepoint for every non-forced upstream attempt in this file.
+ *
+ * It owns the recovery-probe gate end to end: admission before the attempt, and
+ * the lease for the WHOLE attempt (including `proxyWithAccount`'s internal
+ * stale-token 401 retry recursion), released on EVERY terminal outcome —
+ * success, a reapplied cooldown, an exception, or any early return — via the
+ * try/finally below. `completeRateLimitProbe` is idempotent, so the release is
+ * safe even when an inner path (a fresh 429 → `cooldown_reapplied`, or the
+ * response processor's `recovered`/`abandoned`) already released it.
+ *
+ * Why a single chokepoint: `proxyWithAccount` has several call sites (the two
+ * candidate loops, the affinity-first attempt, the two hold re-attempt paths and
+ * the context-window last resort). When only the loops consulted the gate, every
+ * other path stampeded a freshly-recovered account — and, because no lease was
+ * ever taken, a success on those paths hit `completeRateLimitProbe`'s no-lease
+ * no-op and could not clear the capacity-restored marker either.
+ *
+ * Deliberately NOT routed through here:
+ *  - the global force-account override (`proxyForcedAccount`), an operator
+ *    escape hatch that bypasses account selection entirely — so the "exactly one
+ *    upstream probe" guarantee explicitly excludes it;
+ *  - the local count_tokens synthesis attempt, which is a synthetic request that
+ *    must not consume an account's single recovery probe.
+ */
+async function attemptThroughProbeGate(
+	account: Account,
+	attempt: () => Promise<Response | null>,
+): Promise<GatedAttempt> {
+	const admission = getRateLimitProbeAdmission(account);
+	if (admission === "suppressed") {
+		return { response: null, suppressed: true };
+	}
+	try {
+		return { response: await attempt(), suppressed: false };
+	} finally {
+		if (admission === "admitted") {
+			completeRateLimitProbe(account, "abandoned");
+		}
+	}
 }
 
 // ===== MAIN HANDLER =====
@@ -1204,7 +1259,27 @@ export async function handleProxy(
 		response: Response | null;
 		sawOverloadSuppression: boolean;
 		sawRetrip: boolean;
-		ordinaryFailures: number;
+		/**
+		 * Candidates skipped by the single-flight recovery-probe gate: NOTHING was
+		 * attempted against them because another request is probing them right now.
+		 * Like `sawOverloadSuppression`, this is an AVAILABILITY condition with a
+		 * verdict already in flight — never a failure of the candidate — so the
+		 * hold loops keep waiting for it within their budget instead of treating
+		 * the round as "everything failed for ordinary reasons".
+		 *
+		 * Account IDs rather than a flag: a round can MIX a suppressed candidate
+		 * with one that failed ordinarily, and the loops must be able to re-attempt
+		 * exactly the former while leaving the latter alone.
+		 */
+		probeSuppressedAccountIds: Set<string>;
+		/**
+		 * Candidates that WERE attempted and failed for an ordinary reason (auth /
+		 * network / 429 / model). Nothing is in flight for them, so a short poll
+		 * that re-attempts them is pure hammering — worse than wasted work for a
+		 * 429, which it can deepen. Replaces the old write-only `ordinaryFailures`
+		 * counter, whose information the hold loops could not act on.
+		 */
+		ordinaryFailedAccountIds: Set<string>;
 		budgetAborted: boolean;
 	};
 
@@ -1225,40 +1300,56 @@ export async function handleProxy(
 			response: null,
 			sawOverloadSuppression: false,
 			sawRetrip: false,
-			ordinaryFailures: 0,
+			probeSuppressedAccountIds: new Set<string>(),
+			ordinaryFailedAccountIds: new Set<string>(),
 			budgetAborted: false,
 		};
 		for (let i = 0; i < candidates.length; i++) {
 			const candidate = candidates[i];
-			const r = await proxyWithAccount(
-				req,
-				url,
-				candidate,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				i,
-				ctx,
-				// HIGH: a recovered combo slot must be served with ITS model, not
-				// the request's — resolve the current slot override by account id.
-				currentComboOverrideForAccount(candidate),
-				apiKeyId,
-				apiKeyName,
-				requestBodyContext,
-				false,
-				{
-					...(options?.signal ? { signal: options.signal } : {}),
-					onOutcome: (o) => {
-						if (o.kind === "overload_suppressed") {
-							round.sawOverloadSuppression = true;
-						} else if (o.kind === "overload_529") {
-							round.sawRetrip = true;
-						} else {
-							round.ordinaryFailures++;
-						}
+			// Same single-flight probe gate as every other upstream attempt: a hold
+			// wake must not stampede a freshly-recovered account either.
+			const gated = await attemptThroughProbeGate(candidate, () =>
+				proxyWithAccount(
+					req,
+					url,
+					candidate,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					i,
+					ctx,
+					// HIGH: a recovered combo slot must be served with ITS model, not
+					// the request's — resolve the current slot override by account id.
+					currentComboOverrideForAccount(candidate),
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					false,
+					{
+						...(options?.signal ? { signal: options.signal } : {}),
+						onOutcome: (o) => {
+							if (o.kind === "overload_suppressed") {
+								round.sawOverloadSuppression = true;
+							} else if (o.kind === "overload_529") {
+								round.sawRetrip = true;
+							} else {
+								// Attributed to the candidate, so a later poll can skip
+								// exactly this account rather than the whole round.
+								round.ordinaryFailedAccountIds.add(candidate.id);
+							}
+						},
 					},
-				},
+				),
 			);
+			// Suppressed: another request is probing this candidate and NOTHING was
+			// attempted. Record the ACCOUNT — it is neither a failure nor a served
+			// round; the hold loops wait for this candidate's in-flight verdict and
+			// re-attempt exactly it.
+			if (gated.suppressed) {
+				round.probeSuppressedAccountIds.add(candidate.id);
+				continue;
+			}
+			const r = gated.response;
 			if (r) {
 				round.response = r;
 				return round;
@@ -1349,6 +1440,13 @@ export async function handleProxy(
 			NETWORK.IDLE_REARM_INTERVAL_MS,
 		);
 		const holdStart = Date.now();
+		// Accounts that were ATTEMPTED in an earlier round of this hold and failed
+		// for an ordinary reason (auth / network / 429 / model). Nothing is in
+		// flight for them, so re-attempting them on every ~1.5s poll is exactly the
+		// hammering this loop's classification exists to prevent — and for a 429 it
+		// can deepen a real rate limit. They stay excluded for the rest of the hold;
+		// the hold itself still ends (below) when a round has no verdict to wait on.
+		const ordinaryFailedIds = new Set<string>();
 		try {
 			while (true) {
 				const nowMs = Date.now();
@@ -1404,6 +1502,19 @@ export async function handleProxy(
 					),
 					wakeComboInfo,
 				);
+				// Drop candidates a previous round already proved broken for THIS
+				// request (see `ordinaryFailedIds`). `candidates` itself is kept intact
+				// below: the "pool is empty" branch asks whether the GATES left
+				// anything, which is a different question from "is anything left worth
+				// attempting".
+				const attemptableCandidates = candidates.filter(
+					(a) => !ordinaryFailedIds.has(a.id),
+				);
+				if (attemptableCandidates.length < candidates.length) {
+					log.debug(
+						`Overload hold: skipping ${candidates.length - attemptableCandidates.length} candidate(s) that already failed for an ordinary reason this hold`,
+					);
+				}
 				// Bound the wake attempt by the REMAINING hold budget (mirrors the
 				// burst-retry probe in transparent-retry.ts): makeProxyRequest's
 				// internal timeout is 30 minutes, so a wake near the budget's edge
@@ -1425,11 +1536,16 @@ export async function handleProxy(
 					: AbortSignal.any([req.signal, budgetController.signal]);
 				let round: AttemptRound;
 				try {
-					round = await attemptCandidates(candidates, { signal: wakeSignal });
+					round = await attemptCandidates(attemptableCandidates, {
+						signal: wakeSignal,
+					});
 				} finally {
 					// Disarm the budget timer on every path; the composed signal's
 					// listeners are released with the per-wake controller itself.
 					clearTimeout(budgetTimer);
+				}
+				for (const id of round.ordinaryFailedAccountIds) {
+					ordinaryFailedIds.add(id);
 				}
 				if (round.response) return round.response;
 				if (req.signal.aborted) return createClientAbortResponse();
@@ -1442,15 +1558,27 @@ export async function handleProxy(
 					}
 					// No candidates while a bucket is still open/half-open (the gate
 					// re-excluded them) — keep polling for the probe verdict.
-				} else if (!round.sawOverloadSuppression && !round.sawRetrip) {
-					// Every failure this round was ORDINARY (auth / network / 429 /
-					// model-not-found): there is no overload verdict to wait for, and
+				} else if (
+					!round.sawOverloadSuppression &&
+					!round.sawRetrip &&
+					round.probeSuppressedAccountIds.size === 0
+				) {
+					// Nothing this round has a verdict in flight: every candidate either
+					// failed ORDINARILY (auth / network / 429 / model-not-found) or was
+					// already excluded as broken. There is nothing to wait for, and
 					// re-attempting on the short probe poll would hammer a broken
 					// candidate dozens of times over the budget. Break out to the
 					// normal terminal / synthetic path.
+					//
+					// A recovery-probe suppression is explicitly NOT that: a probe IS
+					// in flight for a candidate that may serve us, so we keep polling
+					// within budget rather than returning a synthetic 529 immediately —
+					// while the ordinary-failure exclusion above keeps that polling off
+					// the siblings that already failed.
 					break;
 				}
-				// Suppressed behind the in-flight probe, or re-tripped mid-attempt:
+				// Suppressed behind the in-flight overload probe or the single-flight
+				// recovery probe, or re-tripped mid-attempt:
 				// short-poll so a probe verdict wakes us promptly (holders must not
 				// sleep past a probe completion). Recompute the remaining budget —
 				// the wake attempt above may have consumed a meaningful slice of it.
@@ -1526,26 +1654,39 @@ export async function handleProxy(
 	// closure is generic over the account it is handed. Shared by the normal
 	// decide-before-loop and the zero-accounts storm-degrade hold (Finding 1) so
 	// both re-probe identically.
+	//
+	// Routed through the single-flight probe gate like every other upstream
+	// attempt: a re-probe IS an upstream request, so concurrent holds must not all
+	// probe a freshly-recovered account. Suppression is reported AS SUCH (never
+	// collapsed into "still throttled"): nothing was sent upstream, so the hold
+	// must not spend one of its attempts on it — it short-polls instead.
 	const reprobe = async (
 		probeAccount: Account,
 		signal: AbortSignal,
-	): Promise<Response | null> =>
-		proxyWithAccount(
-			req,
-			url,
-			probeAccount,
-			requestMeta,
-			finalBodyBuffer,
-			finalCreateBodyStream,
-			0,
-			ctx,
-			null,
-			apiKeyId,
-			apiKeyName,
-			requestBodyContext,
-			false,
-			{ reprobe: true, signal },
+	): Promise<ReprobeOutcome> => {
+		const gated = await attemptThroughProbeGate(probeAccount, () =>
+			proxyWithAccount(
+				req,
+				url,
+				probeAccount,
+				requestMeta,
+				finalBodyBuffer,
+				finalCreateBodyStream,
+				0,
+				ctx,
+				null,
+				apiKeyId,
+				apiKeyName,
+				requestBodyContext,
+				false,
+				{ reprobe: true, signal },
+			),
 		);
+		if (gated.suppressed) return { kind: "suppressed" };
+		return gated.response
+			? { kind: "response", response: gated.response }
+			: { kind: "throttled" };
+	};
 
 	// Outcome of a burst hold once it has run. `served` carries the real upstream
 	// Response; `aborted` means the client disconnected mid-hold (Finding 2) and
@@ -1774,6 +1915,10 @@ export async function handleProxy(
 				log.info(
 					`count_tokens: all accounts gated out — synthesizing a local estimate from Codex account ${codexForSynthesis.name} instead of a capacity terminal`,
 				);
+				// Deliberately NOT routed through attemptThroughProbeGate: this is a
+				// synthetic, locally-answered request (no upstream call), so it must
+				// neither consume an account's single recovery probe nor be suppressed
+				// by another request holding it.
 				const syntheticResponse = await proxyWithAccount(
 					req,
 					url,
@@ -1928,6 +2073,21 @@ export async function handleProxy(
 			const isEligible = (a: Account): boolean =>
 				opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
 			const holdStart = Date.now();
+			// The candidates the PREVIOUS round skipped via the single-flight
+			// recovery-probe gate. Such a candidate has no cooldown deadline to wait
+			// on (that is exactly why it was selectable), so without this the loop
+			// would see "nothing to wait for" and exit while the probe was still in
+			// flight — handing the caller its terminal (a size 400, a family 429 or a
+			// pin 503) although a candidate was about to become usable.
+			//
+			// Account IDs, not a flag: a round can mix a suppressed candidate with a
+			// sibling that failed for an ordinary reason, and a probe-verdict poll
+			// must re-attempt ONLY the former. Retrying the failed sibling every
+			// ~1.5s for the rest of the budget (up to 330s here) is the hammering
+			// this loop's classification exists to prevent. Deliberately NOT sticky:
+			// refreshed from each round, so an ordinary failure restores the original
+			// exit behaviour on the next pass.
+			let probeSuppressedIds = new Set<string>();
 			while (true) {
 				const nowMs = Date.now();
 				const elapsed = nowMs - holdStart;
@@ -1955,18 +2115,34 @@ export async function handleProxy(
 					})
 					.filter((x) => x.availableAt > nowMs);
 
-				if (unavailable.length === 0) break; // nothing to wait for
-
-				const soonest = Math.min(...unavailable.map((x) => x.availableAt));
-				const waitMs =
-					Math.max(0, soonest - nowMs) +
-					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+				let waitMs: number;
+				// True when this pass exists ONLY to wait for an in-flight recovery
+				// probe (no cooldown deadline drove it). Such a pass must re-attempt
+				// exactly the suppressed candidates — see `probeSuppressedIds`.
+				const pollingForProbeVerdict = unavailable.length === 0;
+				if (pollingForProbeVerdict) {
+					// Nothing is cooling down. Normally that means there is nothing to
+					// wait for — unless the last round was recovery-probe suppressed, in
+					// which case an upstream probe IS in flight for a candidate that may
+					// serve this request; short-poll for its verdict instead.
+					if (probeSuppressedIds.size === 0) break;
+					waitMs =
+						OVERLOAD_HOLD_PROBE_POLL_MS +
+						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+					log.info(
+						`${label}: waiting ${waitMs}ms for an in-flight recovery probe`,
+					);
+				} else {
+					const soonest = Math.min(...unavailable.map((x) => x.availableAt));
+					waitMs =
+						Math.max(0, soonest - nowMs) +
+						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+					log.info(
+						`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
+					);
+				}
 
 				if (waitMs > remaining) break; // soonest expiry is beyond budget
-
-				log.info(
-					`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
-				);
 
 				const completed = await abortableSleep(waitMs, req.signal);
 				if (!completed) {
@@ -1999,18 +2175,40 @@ export async function handleProxy(
 					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 				);
 
-				if (candidates.length === 0) continue; // still unavailable
+				// A probe-verdict poll re-attempts ONLY the candidates that were
+				// suppressed — the whole reason this pass exists. A sibling that
+				// already failed for an ordinary reason has no verdict pending, so
+				// re-attempting it every poll would just hammer it (and deepen a real
+				// 429). A cooldown-driven pass is unchanged: it re-attempts every
+				// candidate, because waiting out a refreshed cooldown and re-probing
+				// is exactly this hold's job.
+				const attemptList = pollingForProbeVerdict
+					? candidates.filter((a) => probeSuppressedIds.has(a.id))
+					: candidates;
+
+				if (attemptList.length === 0) {
+					// Nothing was attempted this pass: either the gates left no
+					// candidate, or the suppressed one is no longer selectable (it
+					// picked up a cooldown, which the next pass will wait out).
+					probeSuppressedIds = new Set();
+					continue;
+				}
 
 				log.info(
-					`${label}: ${candidates.length} account(s) now available, retrying`,
+					`${label}: ${attemptList.length} account(s) now available, retrying`,
 				);
 
 				// This hold deliberately ignores the round's overload/ordinary
 				// classification — its loop-back semantics predate the overload hold
 				// and are unchanged (it waits on account cooldowns, not probe
-				// verdicts).
-				const round = await attemptCandidates(candidates);
+				// verdicts). The ONE exception is recovery-probe suppression, which
+				// means a candidate was not attempted at all: carry those accounts to
+				// the next pass so the "nothing to wait for" exit above waits for the
+				// probe's verdict instead of giving up on a candidate that may serve
+				// us — and so that pass targets exactly them.
+				const round = await attemptCandidates(attemptList);
 				if (round.response) return round.response;
+				probeSuppressedIds = round.probeSuppressedAccountIds;
 				// All candidates returned null — loop back to recheck.
 			}
 			return null;
@@ -2068,6 +2266,7 @@ export async function handleProxy(
 					return createClientAbortResponse();
 				}
 				let relaxAttempted = false;
+				let relaxSuppressed = 0;
 				for (let i = 0; i < relaxCandidates.length; i++) {
 					const { account } = relaxCandidates[i];
 					// Re-derive the combo slot's model override exactly as the gate
@@ -2080,28 +2279,40 @@ export async function handleProxy(
 						`Context-window last-resort: attempting excluded Codex account ` +
 							`"${account.name}" against full window (estimate=${gateTokenEstimate})`,
 					);
-					relaxAttempted = true;
-					const r = await proxyWithAccount(
-						req,
-						url,
-						account,
-						requestMeta,
-						finalBodyBuffer,
-						finalCreateBodyStream,
-						i,
-						ctx,
-						slot?.modelOverride,
-						apiKeyId,
-						apiKeyName,
-						requestBodyContext,
-						// On the last candidate, forward a real upstream
-						// rate-limit/overload as the honest terminal rather than
-						// collapsing it to null.
-						i === relaxCandidates.length - 1,
-						// Thread the client signal so a disconnect aborts the in-flight
-						// attempt instead of waiting for the upstream timeout.
-						{ signal: req.signal },
-					);
+					// Through the same single-flight probe gate: this is a real upstream
+					// attempt on a real account, so a freshly-recovered one still gets
+					// exactly one probe. Suppressed → skip to the next candidate;
+					// nothing was attempted, so it counts as neither a relaxation
+					// attempt nor (crucially) as evidence about the request's SIZE.
+					const gated = await attemptThroughProbeGate(account, () => {
+						relaxAttempted = true;
+						return proxyWithAccount(
+							req,
+							url,
+							account,
+							requestMeta,
+							finalBodyBuffer,
+							finalCreateBodyStream,
+							i,
+							ctx,
+							slot?.modelOverride,
+							apiKeyId,
+							apiKeyName,
+							requestBodyContext,
+							// On the last candidate, forward a real upstream
+							// rate-limit/overload as the honest terminal rather than
+							// collapsing it to null.
+							i === relaxCandidates.length - 1,
+							// Thread the client signal so a disconnect aborts the in-flight
+							// attempt instead of waiting for the upstream timeout.
+							{ signal: req.signal },
+						);
+					});
+					if (gated.suppressed) {
+						relaxSuppressed += 1;
+						continue;
+					}
+					const r = gated.response;
 					if (r) return r;
 					// A null here can mean the client disconnected mid-attempt (the
 					// threaded signal aborts the fetch, which proxyWithAccount reports
@@ -2118,17 +2329,28 @@ export async function handleProxy(
 				// returned above).
 				cacheBodyStore.discardStaged(requestMeta.id);
 
-				if (!relaxAttempted) {
-					// No excluded Codex account fit even the full window → the request
-					// is genuinely too big for every backend. The size 400 is correct.
+				// The size verdict is a property of the CANDIDATE SET, not of whether
+				// an upstream attempt happened to run: only "no excluded account fits
+				// even the full window" proves the request is too big for every
+				// backend. Keying the 400 on "nothing was attempted" told a client its
+				// request was too large whenever every fitting candidate was merely
+				// probe-suppressed — a non-retryable answer to a purely temporary,
+				// retryable condition.
+				if (relaxCandidates.length === 0) {
 					return createContextWindowExceededResponse(
 						gateTokenEstimate,
 						contextExcludedAccounts,
 						effectiveRequestModel ?? "unknown",
 					);
 				}
-				// The request fit the true window but every last-resort Codex attempt
-				// failed for availability (429/5xx/network → null). That is NOT a size
+				if (!relaxAttempted && relaxSuppressed > 0) {
+					log.info(
+						`Context-window last-resort: all ${relaxSuppressed} fitting account(s) were recovery-probe suppressed — deferring to an availability terminal, NOT a context_window_exceeded 400`,
+					);
+				}
+				// The request fit the true window but every last-resort Codex candidate
+				// either failed for availability (429/5xx/network → null) or was
+				// suppressed behind an in-flight recovery probe. Neither is a size
 				// problem, so fall through to the generic terminals below —
 				// pool_exhausted / provider-overloaded, or pinned_target_unavailable
 				// when a pin / Codex-CLI floor is active (all honest, retryable 503s)
@@ -2434,48 +2656,59 @@ export async function handleProxy(
 						heldCapacity === null ? "stale_should_retry" : "fresh_headroom";
 				}
 			} else if (accounts.some((a) => a.id === heldAccount.id)) {
-				// The held account is available (affinity_hit) — attempt it first.
-				// Record it so the normal loop below skips a duplicate attempt if we
-				// fall through (non-retryable outcome).
-				burstAttemptedAccountId = heldAccount.id;
+				// The held account is available (affinity_hit) — attempt it first,
+				// through the SAME single-flight probe gate as every other upstream
+				// attempt. Without the gate, concurrent affinity requests all reached
+				// a freshly-recovered account at once; and because no lease was held,
+				// a success here could not clear its capacity-restored marker either.
 				let firstOutcome: ProxyAttemptOutcome | null = null;
-				const firstResponse = await proxyWithAccount(
-					req,
-					url,
-					heldAccount,
-					requestMeta,
-					finalBodyBuffer,
-					finalCreateBodyStream,
-					0,
-					ctx,
-					null,
-					apiKeyId,
-					apiKeyName,
-					requestBodyContext,
-					false,
-					{
-						signal: req.signal,
-						onOutcome: (o) => {
-							firstOutcome = o;
-							// The normal loop below skips the held account (attempted-id
-							// guard), so its suppression must be recorded here.
-							noteOverloadSuppression(heldAccount, o);
+				const gatedFirst = await attemptThroughProbeGate(heldAccount, () => {
+					// Record the attempt (only when it actually happens) so the normal
+					// loop below skips a duplicate if we fall through.
+					burstAttemptedAccountId = heldAccount.id;
+					return proxyWithAccount(
+						req,
+						url,
+						heldAccount,
+						requestMeta,
+						finalBodyBuffer,
+						finalCreateBodyStream,
+						0,
+						ctx,
+						null,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						false,
+						{
+							signal: req.signal,
+							onOutcome: (o) => {
+								firstOutcome = o;
+								// The normal loop below skips the held account (attempted-id
+								// guard), so its suppression must be recorded here.
+								noteOverloadSuppression(heldAccount, o);
+							},
 						},
-					},
-				);
-				if (firstResponse) {
-					return firstResponse;
+					);
+				});
+				if (gatedFirst.response) {
+					return gatedFirst.response;
 				}
-				// `firstOutcome` is assigned synchronously inside proxyWithAccount via
-				// the onOutcome sink before it returns; the cast narrows the inferred
-				// `never` from the closure-only assignment.
-				const outcome = firstOutcome as ProxyAttemptOutcome | null;
-				if (outcome?.kind === "retryable_429") {
-					enterHold = true;
-					holdConfidence = outcome.confidence;
+				// Suppressed: another request is already probing this account. Nothing
+				// was attempted, so do NOT enter the hold — fall through to the normal
+				// failover loop (which suppresses it again and moves to a sibling).
+				if (!gatedFirst.suppressed) {
+					// `firstOutcome` is assigned synchronously inside proxyWithAccount via
+					// the onOutcome sink before it returns; the cast narrows the inferred
+					// `never` from the closure-only assignment.
+					const outcome = firstOutcome as ProxyAttemptOutcome | null;
+					if (outcome?.kind === "retryable_429") {
+						enterHold = true;
+						holdConfidence = outcome.confidence;
+					}
+					// Any other outcome → fall through to the normal failover loop below
+					// (the held account already failed; the loop will skip it as cooled).
 				}
-				// Any other outcome → fall through to the normal failover loop below
-				// (the held account already failed; the loop will skip it as cooled).
 			}
 			// If the marker is active but the held account is currently in `accounts`
 			// AND not the trigger path above, holdConfidence stays fresh_headroom
@@ -2586,17 +2819,12 @@ export async function handleProxy(
 			);
 		}
 
-		// Single-flight recovery probe gate: if this account's cooldown just
-		// expired on a mature 429 streak, admit only one probe. Concurrent
-		// requests that would re-select the just-recovered account are suppressed
-		// and skip to the next candidate instead of stampeding it.
-		const probeAdmission = getRateLimitProbeAdmission(accounts[i]);
-		if (probeAdmission === "suppressed") {
-			continue;
-		}
-
-		try {
-			response = await proxyWithAccount(
+		// Single-flight recovery probe gate (see attemptThroughProbeGate): a
+		// freshly-recovered account admits exactly ONE probe. Concurrent requests
+		// that would re-select it are suppressed and skip to the next candidate
+		// instead of stampeding it.
+		const gated = await attemptThroughProbeGate(accounts[i], () =>
+			proxyWithAccount(
 				req,
 				url,
 				accounts[i],
@@ -2618,18 +2846,12 @@ export async function handleProxy(
 				{
 					onOutcome: (o) => noteOverloadSuppression(accounts[i], o),
 				},
-			);
-		} finally {
-			// Belt-and-suspenders lease release. The terminal outcome usually
-			// releases the lease already (success/non-429 → response-processor
-			// "recovered"/"abandoned"; a fresh 429 → applyRateLimitCooldown
-			// "cooldown_reapplied"); completeRateLimitProbe is idempotent, so this
-			// only fires when none of those ran (thrown error, or the attempt
-			// fell through without a terminal classification).
-			if (probeAdmission === "admitted") {
-				completeRateLimitProbe(accounts[i], "abandoned");
-			}
+			),
+		);
+		if (gated.suppressed) {
+			continue;
 		}
+		response = gated.response;
 
 		if (response) {
 			return response;
@@ -2716,22 +2938,18 @@ export async function handleProxy(
 					continue;
 				}
 
-				// Single-flight recovery probe gate (same rationale as the primary
-				// failover loop above): admit only one probe for a freshly-recovered
-				// mature-streak account; suppress concurrent stampeders.
-				const probeAdmission = getRateLimitProbeAdmission(fallbackAccounts[i]);
-				if (probeAdmission === "suppressed") {
-					continue;
-				}
-
-				// Const capture for the onOutcome closure: narrowing of the mutable
+				// Const captures for the closures below: narrowing of the mutable
 				// `fallbackAccounts` binding does not survive into a callback.
-				const fallbackAccount = fallbackAccounts[i];
-				try {
-					response = await proxyWithAccount(
+				const fallbackList = fallbackAccounts;
+				const fallbackAccount = fallbackList[i];
+				// Single-flight recovery probe gate (same chokepoint as the primary
+				// failover loop above): admit only one probe for a freshly-recovered
+				// account; suppress concurrent stampeders.
+				const gated = await attemptThroughProbeGate(fallbackAccount, () =>
+					proxyWithAccount(
 						req,
 						url,
-						fallbackAccounts[i],
+						fallbackAccount,
 						requestMeta,
 						finalBodyBuffer,
 						finalCreateBodyStream,
@@ -2741,20 +2959,20 @@ export async function handleProxy(
 						apiKeyId,
 						apiKeyName,
 						requestBodyContext,
-						i === fallbackAccounts.length - 1 ||
+						i === fallbackList.length - 1 ||
 							shouldForwardProviderOverloadIfNoCrossProviderFallback(
-								fallbackAccounts,
+								fallbackList,
 								i,
 							),
 						{
 							onOutcome: (o) => noteOverloadSuppression(fallbackAccount, o),
 						},
-					);
-				} finally {
-					if (probeAdmission === "admitted") {
-						completeRateLimitProbe(fallbackAccounts[i], "abandoned");
-					}
+					),
+				);
+				if (gated.suppressed) {
+					continue;
 				}
+				response = gated.response;
 
 				if (response) {
 					return response;

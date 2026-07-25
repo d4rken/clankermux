@@ -88,8 +88,15 @@ export const RATE_LIMIT_REASONS = [
 	/** Anthropic 429 on an account whose ACCOUNT-WIDE weekly window is spent
 	 *  (fresh usage evidence). The cooldown is the usual `extractCooldownUntil`
 	 *  deadline; what changes is that the reason names the real cause and the
-	 *  transparent burst-retry hold is skipped — the window cannot recover early. */
+	 *  transparent burst-retry hold is skipped — re-probing the same spent window
+	 *  only burns latency. (The account can still come back before the deadline if
+	 *  polling observes the window recovered — see the capacity-restored path.) */
 	"weekly_exhausted_429",
+	/** Anthropic 429 while the account's 5-hour session window is spent (>= 100%
+	 *  with a future reset, confirmed from FRESH usage data). Sibling of
+	 *  `weekly_exhausted_429`; both are quota-derived BY CONSTRUCTION because the
+	 *  proxy read the window itself rather than inferring the cause from headers. */
+	"session_exhausted_429",
 ] as const;
 
 /** Why an account was last marked rate-limited. Derived from {@link RATE_LIMIT_REASONS}. */
@@ -98,6 +105,51 @@ export type RateLimitReason = (typeof RATE_LIMIT_REASONS)[number];
 /** Runtime validator for a stored rate-limit reason string. */
 export function isRateLimitReason(value: string): value is RateLimitReason {
 	return (RATE_LIMIT_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * The cooldown reasons that are QUOTA-DERIVED BY CONSTRUCTION: the proxy read
+ * the account-wide window at >= 100% from fresh usage data itself, so the cause
+ * is observed rather than inferred. Only these reasons may be released early by
+ * the usage poller's capacity-restored path — the evidence that would clear them
+ * (the same windows, now below 100%) is the exact evidence that created them.
+ *
+ * Everything else is excluded, each for its own reason:
+ *  - `upstream_429_with_reset` — NOT quota provenance: `parseRateLimit`
+ *    synthesizes `now + 60s` for a bare 429, so a per-IP burst inherits it.
+ *    Releasing a burst cooldown on account-quota evidence re-storms it.
+ *  - `model_fallback_429`, `all_models_exhausted_429` — ambiguous cause.
+ *  - `upstream_429_no_reset_probe_cooldown`, `upstream_429_no_reset_default_5h`
+ *    — no reset header at all; cause unknown.
+ *  - `upstream_529_overloaded_with_reset` / `_no_reset` — provider overload, not
+ *    an account quota.
+ *  - `out_of_credits` — a billing floor that must expire on its own or clear on
+ *    a real successful request; account-wide usage excludes `extra_usage`, so it
+ *    can legitimately read < 100% while credits are still depleted.
+ *  - `family_weekly_exhausted_429` — never applies an account-wide cooldown.
+ *  - `null` — a legacy row is not evidence.
+ */
+export const QUOTA_DERIVED_RATE_LIMIT_REASONS = [
+	"weekly_exhausted_429",
+	"session_exhausted_429",
+] as const satisfies readonly RateLimitReason[];
+
+/** A cooldown reason that is quota-derived by construction. */
+export type QuotaDerivedRateLimitReason =
+	(typeof QUOTA_DERIVED_RATE_LIMIT_REASONS)[number];
+
+/**
+ * Runtime membership test for {@link QUOTA_DERIVED_RATE_LIMIT_REASONS}. Accepts
+ * `null`/`undefined` (a missing reason is never eligible) so callers can pass a
+ * stored column value straight through.
+ */
+export function isQuotaDerivedRateLimitReason(
+	value: string | null | undefined,
+): value is QuotaDerivedRateLimitReason {
+	if (value == null) return false;
+	return (QUOTA_DERIVED_RATE_LIMIT_REASONS as readonly string[]).includes(
+		value,
+	);
 }
 
 // Usage data types for Anthropic accounts

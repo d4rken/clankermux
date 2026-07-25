@@ -1,4 +1,5 @@
 import {
+	accountWideExhaustion,
 	getModelFamily,
 	getModelList,
 	isDebugEnabled,
@@ -9,7 +10,6 @@ import {
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
-	weeklyExhaustion,
 } from "@clankermux/core";
 import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
@@ -1228,22 +1228,29 @@ export async function proxyWithAccount(
 				);
 			}
 
-			// ── Account-wide weekly exhaustion: name the cause, skip the hold ──
-			// A 429 on an Anthropic account whose ACCOUNT-WIDE weekly window is
-			// already spent (per FRESH usage data) is not a transient burst: the
-			// window cannot recover before its reset, so holding and re-probing the
-			// account only burns latency. Record the truthful
-			// `weekly_exhausted_429` reason and fail over immediately.
+			// ── Account-wide exhaustion: name the cause, skip the hold ─────────
+			// A 429 on an Anthropic account whose ACCOUNT-WIDE window is already
+			// spent (per FRESH usage data) is not a transient burst: the window is
+			// spent right now, so holding and re-probing the account only burns
+			// latency. Record the truthful reason — `weekly_exhausted_429` when the
+			// weekly class binds, `session_exhausted_429` when only the 5h session
+			// window is spent — and fail over immediately. Both reasons are
+			// quota-derived BY CONSTRUCTION (we read the window ourselves rather
+			// than inferring the cause from headers), which is what makes them
+			// eligible for the poller's early capacity-restored release.
+			//
+			// Weekly outranks session (see `accountWideExhaustion`), so whenever the
+			// weekly window is spent this behaves exactly as it did when the block
+			// was weekly-only; the session-only case is the new behaviour.
 			//
 			// The cooldown DEADLINE is deliberately unchanged — the same
 			// `extractCooldownUntil` value every other path computes. Substituting
-			// the weekly `resets_at` would let a stale-cache false positive, or a
-			// malformed far-future reset, create a multi-day lock that the
-			// capacity-restored path cannot reliably clear. A false positive here
-			// costs a mislabelled reason and a skipped hold, nothing more.
+			// the window's `resets_at` would let a stale-cache false positive, or a
+			// malformed far-future reset, create a multi-day lock. A false positive
+			// here costs a mislabelled reason and a skipped hold, nothing more.
 			//
 			// Fails open: with stale/absent usage every existing path behaves
-			// exactly as before. Anthropic only — Codex weekly windows belong to
+			// exactly as before. Anthropic only — Codex windows belong to
 			// the CodexSpendCoordinator. Trusted-probe gated (not the header-only
 			// `isSyntheticInternalRequest` its neighbours use) because the marker
 			// headers are client-spoofable.
@@ -1255,7 +1262,7 @@ export async function proxyWithAccount(
 			) {
 				const now = Date.now();
 				// getFreshCapacity is only the 180s FRESHNESS gate here; the
-				// exhaustion verdict itself comes from weeklyExhaustion.
+				// exhaustion verdict itself comes from accountWideExhaustion.
 				const usageIsFresh =
 					getFreshCapacity(
 						usageCache,
@@ -1264,18 +1271,21 @@ export async function proxyWithAccount(
 						now,
 						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 					) !== null;
-				const weekly = usageIsFresh
-					? weeklyExhaustion(
+				const exhaustion = usageIsFresh
+					? accountWideExhaustion(
 							usageCache.get(account.id) as AnthropicUsageData | null,
 							now,
 						)
-					: { exhausted: false, resetMs: null };
+					: { exhausted: false, binding: null, resetMs: null };
 				if (
-					weekly.exhausted &&
-					weekly.resetMs !== null &&
-					weekly.resetMs > now
+					exhaustion.exhausted &&
+					exhaustion.resetMs !== null &&
+					exhaustion.resetMs > now
 				) {
-					const reason: RateLimitReason = "weekly_exhausted_429";
+					const reason: RateLimitReason =
+						exhaustion.binding === "weekly"
+							? "weekly_exhausted_429"
+							: "session_exhausted_429";
 					const cooldownUntil = extractCooldownUntil(
 						rawResponse,
 						account.id,
@@ -1313,7 +1323,7 @@ export async function proxyWithAccount(
 						),
 					);
 					log.warn(
-						`Account ${account.name} weekly-exhausted (429, weekly window spent until ${new Date(weekly.resetMs).toISOString()}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
+						`Account ${account.name} ${exhaustion.binding}-exhausted (429, ${exhaustion.binding} window spent until ${new Date(exhaustion.resetMs).toISOString()}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
 					);
 					return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
 				}

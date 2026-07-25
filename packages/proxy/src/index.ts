@@ -35,12 +35,14 @@ export {
 } from "./codex-spend-coordinator";
 export { dispatchProxyRequest } from "./dispatch";
 export {
+	type CapacityProbeReservation,
 	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
 	clearAccountAffinity,
 	clearAccountRefreshCache,
+	clearCapacityRestoredProbePending,
 	consumeCodexResetCreditForAccount,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
@@ -49,7 +51,9 @@ export {
 	getUsageThrottleStatus,
 	getUsageThrottleUntil,
 	getValidAccessToken,
+	hasCapacityRestoredProbePending,
 	isRefreshTokenLikelyExpired,
+	markCapacityRestoredProbePending,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
@@ -59,6 +63,7 @@ export {
 	registerPollingRestarter,
 	registerRefreshClearer,
 	restartUsagePollingForAccount,
+	rollbackCapacityRestoredProbePending,
 	setForcedAccount,
 	startGlobalTokenHealthChecks,
 	stopGlobalTokenHealthChecks,

@@ -64,3 +64,66 @@ export function weeklyExhaustion(
 	}
 	return { exhausted, resetMs };
 }
+
+/**
+ * The windows {@link accountWideExhaustion} considers. Each of them sidelines
+ * the WHOLE account when spent: the rolling 5-hour `session`, the normalized
+ * account-wide weekly (`weekly_all` — flat `seven_day` or the `limits[]` entry),
+ * and the flat `seven_day_oauth_apps` (Claude Code weekly). Family-scoped
+ * (`weekly_scoped`) windows and `extra_usage` are deliberately NOT in this set.
+ */
+export type AccountWideWindow =
+	| "session"
+	| "weekly_all"
+	| "seven_day_oauth_apps";
+
+/** Which class of account-wide window is responsible for the exhaustion. */
+export type AccountWideExhaustionBinding = "weekly" | "session";
+
+/**
+ * Account-wide exhaustion across EVERY window that sidelines the whole account:
+ * the 5h `session`, the normalized `weeklyAll`, and the flat
+ * `seven_day_oauth_apps` (see {@link AccountWideWindow}). Family-scoped windows
+ * are deliberately excluded (a single spent family is not the account) and so is
+ * `extra_usage` (overage is the `out_of_credits` floor's business).
+ *
+ * A window counts as spent at `utilization >= 100` with a KNOWN FUTURE reset — a
+ * past/absent reset is stale/unknown, and we never sideline an account on
+ * ambiguous evidence. This mirrors {@link weeklyExhaustion} exactly.
+ *
+ * `binding` reports which class is responsible, weekly OUTRANKING session, so a
+ * weekly-spent account keeps reporting weekly even when 5h is also spent. The
+ * precedence delegates to {@link weeklyExhaustion} WHOLESALE rather than taking
+ * a max reset across classes: "latest reset among all spent windows" would
+ * return a session reset `T2` when weekly resets at `T1 < T2`, contradicting
+ * `weeklyExhaustion` and making `binding: "weekly"` carry a session-derived
+ * reset. A weekly window at 100% with a missing/past reset does NOT suppress a
+ * validly-spent session window — in that case the session binds.
+ *
+ * `weeklyExhaustion` is left untouched and keeps its own callers (`/health` and
+ * `/api/accounts` display); this helper is the wider verdict used to classify a
+ * 429 against the account-wide windows the usage endpoint reports.
+ */
+export function accountWideExhaustion(
+	usage: AnthropicUsageData | null | undefined,
+	now: number,
+): {
+	exhausted: boolean;
+	binding: AccountWideExhaustionBinding | null;
+	resetMs: number | null;
+} {
+	const weekly = weeklyExhaustion(usage, now);
+	if (weekly.exhausted) {
+		return { exhausted: true, binding: "weekly", resetMs: weekly.resetMs };
+	}
+	const session = normalizeAnthropicUsage(usage, now).session;
+	if (
+		session &&
+		session.utilization >= 100 &&
+		session.resetMs !== null &&
+		session.resetMs > now
+	) {
+		return { exhausted: true, binding: "session", resetMs: session.resetMs };
+	}
+	return { exhausted: false, binding: null, resetMs: null };
+}

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { sessionCacheStore } from "@clankermux/proxy";
+import {
+	clearCapacityRestoredProbePending,
+	hasCapacityRestoredProbePending,
+	markCapacityRestoredProbePending,
+	sessionCacheStore,
+} from "@clankermux/proxy";
 import { createAccountRemoveHandler } from "../accounts";
 
 /**
@@ -97,5 +102,29 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 		const remaining = sessionCacheStore.getAllSlots();
 		expect(remaining).toHaveLength(1);
 		expect(remaining[0]?.accountId).toBe(OTHER_ID);
+	});
+
+	it("drops an owed capacity-restored probe marker for the removed account", async () => {
+		// The marker is deliberately never time-expired, so removal is the only way
+		// it can be dropped without a successful probe (or a restart).
+		markCapacityRestoredProbePending(ACCOUNT_ID);
+		markCapacityRestoredProbePending(OTHER_ID);
+		try {
+			const { dbOps } = makeDbOps();
+			const handler = createAccountRemoveHandler(
+				dbOps as Parameters<typeof createAccountRemoveHandler>[0],
+			);
+			const req = new Request("http://internal/api/accounts", {
+				method: "DELETE",
+				body: JSON.stringify({ confirm: ACCOUNT_NAME }),
+			});
+			expect((await handler(req, ACCOUNT_NAME)).status).toBe(200);
+
+			expect(hasCapacityRestoredProbePending(ACCOUNT_ID)).toBe(false);
+			expect(hasCapacityRestoredProbePending(OTHER_ID)).toBe(true);
+		} finally {
+			clearCapacityRestoredProbePending(ACCOUNT_ID);
+			clearCapacityRestoredProbePending(OTHER_ID);
+		}
 	});
 });

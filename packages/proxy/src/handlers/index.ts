@@ -35,6 +35,13 @@ export {
 } from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 export {
+	type CapacityProbeReservation,
+	clearCapacityRestoredProbePending,
+	hasCapacityRestoredProbePending,
+	markCapacityRestoredProbePending,
+	rollbackCapacityRestoredProbePending,
+} from "./rate-limit-cooldown";
+export {
 	createRequestMetadata,
 	prepareRequestBody,
 	validateProviderPath,
@@ -84,6 +91,8 @@ export {
 	type HoldResult,
 	holdAndRetryCacheAccount,
 	isOAuthAnthropicAccount,
+	type ReprobeFn,
+	type ReprobeOutcome,
 } from "./transparent-retry";
 export {
 	createUsageThrottledResponse,
