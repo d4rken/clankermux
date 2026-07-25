@@ -33,7 +33,15 @@ const HOLD_TIMING_OVERRIDE = {
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 	const { handleProxy } = await import("../proxy");
-	return handleProxy(req, url, ctx, undefined, undefined, false, HOLD_TIMING_OVERRIDE);
+	return handleProxy(
+		req,
+		url,
+		ctx,
+		undefined,
+		undefined,
+		false,
+		HOLD_TIMING_OVERRIDE,
+	);
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
