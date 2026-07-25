@@ -565,6 +565,31 @@ describe("pricing-miss registry", () => {
 		expect(truncated?.provider).toBe("provider");
 	});
 
+	it("keeps model ids distinct when their truncated labels collide", async () => {
+		// Truncation is a DISPLAY concern. Keying on the clipped label would fold
+		// every id sharing a 256-character prefix into one entry and sum their
+		// occurrence counts, so two different models would read as one busy one.
+		const prefix = "z".repeat(__pricingTestHooks.maxModelIdLength);
+		await estimateCostUSD(`${prefix}-alpha`, io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD(`${prefix}-beta`, io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		// The visible labels are identical (both clipped to the shared prefix)…
+		expect(new Set(gaps.map((gap) => gap.modelId)).size).toBe(1);
+		// …but the entries are not merged, so neither count is inflated.
+		expect(gaps.map((gap) => gap.occurrences)).toEqual([1, 1]);
+
+		// The warn cache is keyed the same way, so both models are warned about.
+		expect(__pricingTestHooks.warnCount()).toBe(2);
+	});
+
 	it("evicts least-recently-seen entries over the cap and counts the overflow", async () => {
 		const cap = __pricingTestHooks.maxMissEntries;
 		// A gap that keeps recurring — the live one we must not lose.

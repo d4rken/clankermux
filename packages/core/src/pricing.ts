@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -301,8 +302,33 @@ const MAX_PRICING_MISS_PROVIDER_LENGTH = 64;
 /** Placeholder for a model id / provider that sanitizes down to nothing. */
 const UNKNOWN_PRICING_LABEL = "unknown";
 
-/** Separator that cannot appear in a sanitized key part (a stripped control char). */
-const PRICING_MISS_KEY_SEPARATOR = "\u0000";
+/**
+ * Hex characters kept from the sha256 key digest. 12 hex chars is 48 bits of
+ * key space against structures capped at 128 entries, so a collision needs a
+ * deliberate preimage search rather than being reachable by accident.
+ */
+const PRICING_MISS_KEY_DIGEST_LENGTH = 12;
+
+/**
+ * Bounded key over the ORIGINAL, untruncated parts.
+ *
+ * The stored label is sanitized and clipped to 256 characters, so keying on it
+ * would merge every model id sharing a 256-character prefix into a single entry
+ * — combining the occurrence counts of models that are not the same model. The
+ * digest keeps distinct inputs distinct however identical their visible labels
+ * end up looking.
+ *
+ * Each part is length-prefixed so no concatenation of parts can be reproduced
+ * by a different split: a client-controlled model id may contain any character,
+ * separators included.
+ */
+function digestKey(...parts: string[]): string {
+	const hash = createHash("sha256");
+	for (const part of parts) {
+		hash.update(`${part.length}:${part}`);
+	}
+	return hash.digest("hex").slice(0, PRICING_MISS_KEY_DIGEST_LENGTH);
+}
 
 /**
  * Strip control characters and bound the length of an untrusted label before it
@@ -827,11 +853,13 @@ class PriceCatalogue {
 			MAX_PRICING_MISS_PROVIDER_LENGTH,
 		);
 
-		this.warnOnce(modelId, provider, opts.error);
+		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.error);
 
 		if (!opts.report) return;
 
-		const key = `${provider}${PRICING_MISS_KEY_SEPARATOR}${modelId}`;
+		// Keyed on the ORIGINAL pair, not the display labels: two model ids that
+		// share their first 256 characters must stay two entries.
+		const key = digestKey(opts.provider ?? "", opts.modelId);
 		const now = opts.now ?? Date.now();
 
 		const existing = this.pricingMisses.get(key);
@@ -863,19 +891,23 @@ class PriceCatalogue {
 	 * bounded by dropping the least-recently-warned entry. Model-keyed (not
 	 * provider-keyed) so the provider extractor and the usage collector, which
 	 * price the same response with different attribution, do not each log a line.
+	 *
+	 * `key` is the digest of the ORIGINAL model id; `modelId`/`provider` are the
+	 * sanitized labels used for display only.
 	 */
 	private warnOnce(
+		key: string,
 		modelId: string,
 		provider: string,
 		error?: Error | string,
 	): void {
-		if (this.warnedModels.has(modelId)) {
+		if (this.warnedModels.has(key)) {
 			// Re-insert to move the entry to the most-recently-warned end.
-			this.warnedModels.delete(modelId);
-			this.warnedModels.add(modelId);
+			this.warnedModels.delete(key);
+			this.warnedModels.add(key);
 			return;
 		}
-		this.warnedModels.add(modelId);
+		this.warnedModels.add(key);
 		while (this.warnedModels.size > MAX_PRICING_WARN_ENTRIES) {
 			const oldest = this.warnedModels.values().next();
 			if (oldest.done) break;
