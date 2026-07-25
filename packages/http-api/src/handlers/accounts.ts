@@ -219,11 +219,14 @@ export function resolveRateLimitPresentation(
 		HARD_LIMIT_PREFIXES.some((prefix) =>
 			providerStatus.toLowerCase().startsWith(prefix),
 		);
-	// An unrecognized provider status is treated as a soft warning: that mirrors
-	// today's behavior (not hard ⇒ no Force Reset) and the raw value is carried in
-	// `providerStatus` so the chip can still humanize it verbatim.
+	// A provider status the vocabulary has not been taught becomes `unknown`,
+	// which is in NEITHER cause set: the account reads as limited (we cannot tell
+	// that it is fine — that is exactly how `rejected` went unnoticed) but not as
+	// an account-wide hard block (so Force Reset stays governed by the lock alone).
+	// The raw value is carried in `providerStatus`, and the back-compat `status`
+	// string still passes it through verbatim, so the chip humanizes it as before.
 	const storedCause: RateLimitCause | null = providerStatus
-		? (providerStatusToCause(providerStatus) ?? "allowed_warning")
+		? (providerStatusToCause(providerStatus) ?? "unknown")
 		: null;
 
 	// 1. Administrative / billing blocks are not explained by a spent quota.

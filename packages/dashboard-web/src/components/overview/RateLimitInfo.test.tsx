@@ -84,6 +84,21 @@ describe("RateLimitInfo", () => {
 		expect(soft).toContain("bg-warning/10");
 	});
 
+	it("still lists an `unknown` cause, coloured amber rather than red", () => {
+		const html = render([
+			makeAccount({
+				name: "mystery",
+				rateLimitStatus: "some_new_status (10m)",
+				rateLimitCause: "unknown",
+				rateLimitProviderStatus: "some_new_status",
+				rateLimitCauseResetMs: NOW + 10 * MIN,
+			}),
+		]);
+		expect(html).toContain("mystery");
+		expect(html).toContain("bg-warning/10");
+		expect(html).not.toContain("bg-destructive/10");
+	});
+
 	it("falls back to the display string for legacy payloads without a cause", () => {
 		const html = render([
 			makeAccount({

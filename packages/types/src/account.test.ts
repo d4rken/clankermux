@@ -3,9 +3,29 @@ import {
 	type AccountResponse,
 	type AccountRow,
 	computeDuplicateAccountFlags,
+	HARD_RATE_LIMIT_CAUSES,
+	NON_LIMITED_RATE_LIMIT_CAUSES,
+	type RateLimitCause,
 	toAccount,
 	toAccountResponse,
 } from "./account";
+
+describe("rate-limit cause sets", () => {
+	it("classifies `unknown` as NEITHER non-limited NOR hard", () => {
+		// An unrecognized provider status must not read as "fine" (that is exactly
+		// how `rejected` went unnoticed) and must not be asserted as an
+		// account-wide block either — so it belongs to neither set.
+		const unknown: RateLimitCause = "unknown";
+		expect(NON_LIMITED_RATE_LIMIT_CAUSES.has(unknown)).toBe(false);
+		expect(HARD_RATE_LIMIT_CAUSES.has(unknown)).toBe(false);
+	});
+
+	it("keeps the two sets disjoint", () => {
+		for (const cause of NON_LIMITED_RATE_LIMIT_CAUSES) {
+			expect(HARD_RATE_LIMIT_CAUSES.has(cause)).toBe(false);
+		}
+	});
+});
 
 /** A minimal AccountRow with only the required fields populated. */
 function makeRow(overrides: Partial<AccountRow> = {}): AccountRow {

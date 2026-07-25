@@ -21,11 +21,21 @@ export type RateLimitCause =
 	| "rate_limited"
 	| "blocked"
 	| "payment_required"
-	| "usage_exhausted";
+	| "usage_exhausted"
+	/**
+	 * The provider reported a status the vocabulary has not been taught (a new or
+	 * renamed `anthropic-ratelimit-unified-status` value). Deliberately a member
+	 * of NEITHER {@link NON_LIMITED_RATE_LIMIT_CAUSES} nor
+	 * {@link HARD_RATE_LIMIT_CAUSES}: we do not understand this account's state,
+	 * so it must not read as "fine" (that is exactly how `rejected` went
+	 * unnoticed) and must not be asserted as an account-wide block either.
+	 */
+	| "unknown";
 
 /**
- * Causes that mean the account is NOT limited right now. Everything else means
- * requests are being delayed, queued or refused.
+ * Causes that mean the account is NOT limited right now. Everything else —
+ * including `unknown` — means requests are being delayed, queued or refused, or
+ * that we cannot tell.
  */
 export const NON_LIMITED_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 	new Set<RateLimitCause>(["ok", "allowed", "allowed_warning"]);
@@ -33,7 +43,9 @@ export const NON_LIMITED_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 /**
  * Causes that block the account account-wide (as opposed to soft warnings /
  * queueing). `usage_exhausted` is included: a spent weekly window blocks the
- * account just as effectively as a provider-side `rate_limited`.
+ * account just as effectively as a provider-side `rate_limited`. `unknown` is
+ * NOT included — an unrecognized status is not evidence of a hard block, so it
+ * must not enable destructive affordances such as Force Reset.
  */
 export const HARD_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 	new Set<RateLimitCause>([

@@ -104,6 +104,16 @@ const CAUSE_MAP: Record<Exclude<RateLimitCause, "ok">, StatusDescriptor> = {
 	blocked: STATUS_MAP.blocked,
 	payment_required: STATUS_MAP.payment_required,
 	usage_exhausted: USAGE_EXHAUSTED_DESCRIPTOR,
+	// Only reached when no raw provider status came with the cause — otherwise the
+	// unrecognized value is rendered verbatim (humanized) by the string path
+	// below, which is strictly more informative. Neutral, never red: an
+	// unrecognized status is not evidence of a block.
+	unknown: {
+		label: "Unknown status",
+		variant: "secondary",
+		description:
+			"The provider reported a rate-limit status this build does not recognize.",
+	},
 };
 
 // Format a minute count as a compact human duration, e.g. 602 -> "10h 2m".

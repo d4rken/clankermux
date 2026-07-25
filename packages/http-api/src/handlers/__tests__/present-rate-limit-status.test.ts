@@ -607,16 +607,32 @@ describe("resolveRateLimitPresentation — structured fields", () => {
 		).toBe("queueing_soft");
 	});
 
-	it("treats an unrecognized provider status as a soft warning and passes it through", () => {
+	it("reports an unrecognized provider status as `unknown` and passes it through", () => {
 		const presentation = resolveRateLimitPresentation(
 			{ ...OK_FIELDS, rate_limit_status: "some_new_status" },
 			NOW,
 		);
-		// Unknown ⇒ non-blocking (today's behavior: no Force Reset, chip shown) and
-		// the raw value is what the chip humanizes.
-		expect(presentation.cause).toBe("allowed_warning");
+		// A status the vocabulary has not been taught must NOT read as fine — that
+		// is exactly how `rejected` went unnoticed — but it is not evidence of a
+		// hard block either, hence its own cause in neither set.
+		expect(presentation.cause).toBe("unknown");
 		expect(presentation.providerStatus).toBe("some_new_status");
+		// COMPATIBILITY CONTRACT: the back-compat string still carries the raw
+		// value verbatim, so the chip keeps humanizing it exactly as before.
 		expect(presentation.status).toBe("some_new_status");
+	});
+
+	it("keeps the raw countdown formatting for an unrecognized status", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				...OK_FIELDS,
+				rate_limit_status: "some_new_status",
+				rate_limit_reset: NOW + 5 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("unknown");
+		expect(presentation.status).toBe("some_new_status (5m)");
 	});
 
 	it("reports the legacy lock as a rate_limited cause", () => {

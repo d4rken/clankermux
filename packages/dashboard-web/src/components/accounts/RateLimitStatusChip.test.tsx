@@ -108,14 +108,29 @@ describe("RateLimitStatusChip — structured cause", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitStatusChip
 				status="some_new_status (5m)"
-				cause="allowed_warning"
+				cause="unknown"
 				resetMs={null}
 				providerStatus="some_new_status"
 				now={NOW}
 			/>,
 		);
 		expect(html).toContain("Some New Status");
-		expect(html).not.toContain("Near limit");
+		expect(html).not.toContain("Unknown status");
+		// Never red: an unrecognized status is not evidence of a block.
+		expect(html).not.toContain("bg-red-100");
+	});
+
+	it("falls back to a neutral 'Unknown status' chip when no raw value is available", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip
+				status=""
+				cause="unknown"
+				resetMs={null}
+				now={NOW}
+			/>,
+		);
+		expect(html).toContain("Unknown status");
+		expect(html).not.toContain("bg-red-100");
 	});
 
 	it("omits the countdown when the cause has no known reset", () => {

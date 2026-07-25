@@ -193,6 +193,37 @@ describe("deriveAccountStatus — rate-limit status", () => {
 		expect(status.rateLimitCauseResetMs).toBe(NOW + 2760 * MINUTE);
 	});
 
+	it("treats an `unknown` cause as limited but not hard (no Force Reset without a lock)", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				rateLimitStatus: "some_new_status (5m)",
+				rateLimitCause: "unknown",
+				rateLimitProviderStatus: "some_new_status",
+			}),
+			NOW,
+		);
+		// We do not understand this account's state, so it must not read as fine…
+		expect(status.isRateLimited).toBe(true);
+		expect(status.showRateLimitChip).toBe(true);
+		// …but an unrecognized status is not evidence of an account-wide block.
+		expect(status.isHardLimited).toBe(false);
+		expect(status.showForceReset).toBe(false);
+	});
+
+	it("offers Force Reset for an `unknown` cause only because of the lock", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				rateLimitStatus: "some_new_status (5m)",
+				rateLimitCause: "unknown",
+				rateLimitedUntil: NOW + 5 * MINUTE,
+			}),
+			NOW,
+		);
+		expect(status.isHardLimited).toBe(false);
+		expect(status.isBlockedByLegacyLock).toBe(true);
+		expect(status.showForceReset).toBe(true);
+	});
+
 	it("hides the chip for an `ok` cause even when the legacy string disagrees", () => {
 		const status = deriveAccountStatus(
 			makeAccount({ rateLimitStatus: "OK", rateLimitCause: "ok" }),
