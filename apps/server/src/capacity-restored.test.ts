@@ -95,7 +95,7 @@ function makeHarness(
 				generation += 1;
 				markerCalls.push(`mark:${generation}`);
 				pending.add(generation);
-				return { accountId, generation, previousGeneration: null };
+				return { accountId, generation, previous: null, rolledBack: false };
 			},
 			rollbackPending: (reservation) => {
 				markerCalls.push(`rollback:${reservation.generation}`);

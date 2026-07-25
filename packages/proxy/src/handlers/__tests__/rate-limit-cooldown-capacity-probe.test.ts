@@ -202,17 +202,12 @@ describe("capacity-restored single-flight marker", () => {
 		const account = makeAccount();
 
 		const first = markCapacityRestoredProbePending(account.id);
-		const second = markCapacityRestoredProbePending(account.id);
-		// A late rollback of the FIRST reservation must not drop the second.
+		const _second = markCapacityRestoredProbePending(account.id);
+		// A late rollback of the FIRST reservation must not drop the second's
+		// marker — the second owns the slot and its clear may still commit.
 		rollbackCapacityRestoredProbePending(first);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
-
-		rollbackCapacityRestoredProbePending(second);
-		// Rolling back the second RESTORES the first, which is still owed.
-		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
-		rollbackCapacityRestoredProbePending(first);
-		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(admittedOutOf(account, 3)).toBe(1);
 	});
 
 	it("a rollback RESTORES the marker it displaced instead of erasing it", () => {
@@ -236,6 +231,39 @@ describe("capacity-restored single-flight marker", () => {
 		const only = markCapacityRestoredProbePending(account.id);
 		rollbackCapacityRestoredProbePending(only);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
+	});
+
+	it("two overlapping FAILED clears leave NO marker, whichever unwinds first", () => {
+		// Both CASes fail. The older reservation unwinds first, which is a slot
+		// no-op (the newer one owns it) — so without per-reservation state the
+		// newer rollback would "restore" a predecessor that had itself failed,
+		// leaving a marker owed for a restore that never happened. Markers never
+		// expire, so a healthy account would be single-flighted forever.
+		Date.now = () => NOW;
+		const account = makeAccount();
+
+		const first = markCapacityRestoredProbePending(account.id);
+		const second = markCapacityRestoredProbePending(account.id);
+		rollbackCapacityRestoredProbePending(first); // older finishes first
+		rollbackCapacityRestoredProbePending(second);
+
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
+		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+	});
+
+	it("unwinds past a whole run of failed predecessors to a live one", () => {
+		Date.now = () => NOW;
+		const account = makeAccount();
+
+		markCapacityRestoredProbePending(account.id); // 1: COMMITS (never rolled back)
+		const second = markCapacityRestoredProbePending(account.id); // 2: fails
+		const third = markCapacityRestoredProbePending(account.id); // 3: fails
+		rollbackCapacityRestoredProbePending(second);
+		rollbackCapacityRestoredProbePending(third);
+
+		// Reservation 1's restore is still owed.
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
+		expect(admittedOutOf(account, 4)).toBe(1);
 	});
 
 	it("account removal drops the marker", () => {

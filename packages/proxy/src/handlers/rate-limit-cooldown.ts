@@ -40,10 +40,10 @@ const probeLeases = new Map<
 // concurrent request would stampede an account whose recovery is, by
 // construction, a guess about the provider's state.
 //
-// accountId → capacity generation. The generation exists so an OLD probe can
-// never clear a NEWER restore's marker (release → re-lock → release again while
-// the first probe is still in flight).
-const capacityRestoredPending = new Map<string, number>();
+// accountId → the reservation currently owning the slot. The generation exists
+// so an OLD probe can never clear a NEWER restore's marker (release → re-lock →
+// release again while the first probe is still in flight).
+const capacityRestoredPending = new Map<string, CapacityProbeReservation>();
 let capacityGenerationCounter = 0;
 
 export type RateLimitProbeAdmission =
@@ -52,16 +52,40 @@ export type RateLimitProbeAdmission =
 	| "suppressed";
 
 /**
- * A provisional capacity-restored reservation. Carries the generation it armed
- * AND the generation it displaced, so a rollback RESTORES the previous state
- * rather than erasing it.
+ * A capacity-restored reservation — a node in the per-account reservation chain.
+ * It links to the reservation it displaced, so unwinding restores real state
+ * rather than erasing it, and carries its own outcome so a predecessor that
+ * ALSO failed is never resurrected.
+ *
+ * Opaque to callers: hand it back to
+ * {@link rollbackCapacityRestoredProbePending} and nothing else.
  */
 export interface CapacityProbeReservation {
 	accountId: string;
 	/** The generation this reservation armed. */
 	generation: number;
-	/** The generation that was pending before it, or null if none was. */
-	previousGeneration: number | null;
+	/** The reservation this one displaced, or null if the slot was empty. */
+	previous: CapacityProbeReservation | null;
+	/**
+	 * Set once this reservation's clear is known to have failed. A rolled-back
+	 * reservation is never restored as anyone else's predecessor — otherwise two
+	 * overlapping failed clears would leave a marker pending for a restore that
+	 * never happened, and markers deliberately never expire, so a healthy
+	 * account would be single-flighted forever.
+	 */
+	rolledBack: boolean;
+}
+
+/**
+ * Walk back to the first reservation that has NOT been rolled back — the state
+ * the slot should hold once `from` unwinds. Null when every ancestor failed.
+ */
+function firstLiveReservation(
+	from: CapacityProbeReservation | null,
+): CapacityProbeReservation | null {
+	let node = from;
+	while (node?.rolledBack) node = node.previous;
+	return node;
 }
 
 /**
@@ -81,37 +105,50 @@ export function markCapacityRestoredProbePending(
 	accountId: string,
 ): CapacityProbeReservation {
 	capacityGenerationCounter += 1;
-	const previousGeneration = capacityRestoredPending.get(accountId) ?? null;
-	capacityRestoredPending.set(accountId, capacityGenerationCounter);
-	return {
+	const reservation: CapacityProbeReservation = {
 		accountId,
 		generation: capacityGenerationCounter,
-		previousGeneration,
+		previous: capacityRestoredPending.get(accountId) ?? null,
+		rolledBack: false,
 	};
+	capacityRestoredPending.set(accountId, reservation);
+	return reservation;
 }
 
 /**
- * Undo a reservation whose clear never committed, RESTORING whatever was
- * pending before it. Deleting outright would be wrong: the capacity callback is
- * fire-and-forget, so two can overlap (reserve 1 → reserve 2 → CAS 1 SUCCEEDS →
- * CAS 2 fails). Deleting on that rollback would leave an account that IS
- * unlocked with no marker at all — and with the streak still 0, nothing else
- * gates the fan-in. The same applies to a marker retained after
- * `cooldown_reapplied` that a later failed reservation would otherwise erase.
+ * Undo a reservation whose clear never committed, restoring the most recent
+ * predecessor that is still LIVE (not itself rolled back).
  *
- * Generation-guarded on the way in as well: if a NEWER reservation has since
- * replaced this one, the rollback is a no-op (that newer reservation owns the
- * slot and will restore its own predecessor if it too fails).
+ * Two failure modes this has to thread between, both real:
+ *  - Erasing is wrong. The capacity callback is fire-and-forget, so two can
+ *    overlap: reserve 1 → reserve 2 → CAS 1 SUCCEEDS → CAS 2 fails. Deleting on
+ *    that rollback would leave an account that IS unlocked with no marker at all
+ *    — and with the streak still 0, nothing else gates the fan-in. The same
+ *    applies to a marker retained across `cooldown_reapplied`.
+ *  - Blindly restoring is also wrong. If BOTH CASes fail and the older one
+ *    unwinds first, its rollback is a slot no-op (2 owns the slot) — so without
+ *    per-reservation state, 2's rollback would restore 1 and leave a marker
+ *    pending for a restore that never happened. Markers never expire, so a
+ *    healthy account would be single-flighted forever.
+ *
+ * Marking the node resolves both: the rollback always records THIS reservation's
+ * outcome (even when it no longer owns the slot), and the owner unwinds to the
+ * first ancestor that has not been rolled back — or clears the slot when every
+ * ancestor failed.
  */
 export function rollbackCapacityRestoredProbePending(
 	reservation: CapacityProbeReservation,
 ): void {
-	const { accountId, generation, previousGeneration } = reservation;
-	if (capacityRestoredPending.get(accountId) !== generation) return;
-	if (previousGeneration === null) {
+	// Record the outcome unconditionally: a newer reservation currently owning
+	// the slot must be able to see, later, that this predecessor failed.
+	reservation.rolledBack = true;
+	const { accountId } = reservation;
+	if (capacityRestoredPending.get(accountId) !== reservation) return;
+	const restored = firstLiveReservation(reservation.previous);
+	if (restored === null) {
 		capacityRestoredPending.delete(accountId);
 	} else {
-		capacityRestoredPending.set(accountId, previousGeneration);
+		capacityRestoredPending.set(accountId, restored);
 	}
 }
 
@@ -179,7 +216,9 @@ export function getRateLimitProbeAdmission(
 		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
 		account.rate_limited_until != null &&
 		account.rate_limited_until <= now;
-	const capacityGeneration = capacityRestoredPending.get(account.id);
+	const capacityGeneration = capacityRestoredPending.get(
+		account.id,
+	)?.generation;
 	if (!expiredMatureCooldown && capacityGeneration === undefined)
 		return "not_required";
 
@@ -239,7 +278,8 @@ export function completeRateLimitProbe(
 	if (outcome === "recovered") {
 		if (
 			lease.capacityGeneration !== undefined &&
-			capacityRestoredPending.get(account.id) === lease.capacityGeneration
+			capacityRestoredPending.get(account.id)?.generation ===
+				lease.capacityGeneration
 		) {
 			capacityRestoredPending.delete(account.id);
 		}
