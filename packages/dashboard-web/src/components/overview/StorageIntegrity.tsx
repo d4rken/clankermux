@@ -101,11 +101,10 @@ export function StorageIntegritySection() {
 				: data?.last_quick_check_at != null
 					? `Last quick check ${formatRelative(data.last_quick_check_at)} — full check still pending`
 					: "—";
-		badgeNode = (
-			<Badge variant="default" className="bg-success">
-				Healthy
-			</Badge>
-		);
+		// The badge's own success variant rather than `variant="default"` with a
+		// `bg-success` override, which kept the default variant's white text and
+		// only swapped the background — white on green fails contrast either way.
+		badgeNode = <Badge variant="success">Healthy</Badge>;
 	} else {
 		tone = "warn";
 		icon = <AlertTriangle className="h-5 w-5 text-warning" />;
