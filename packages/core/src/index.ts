@@ -144,3 +144,8 @@ export {
 	getVersionSync,
 	trackClientVersion,
 } from "./version";
+export {
+	flatOauthAppsWindow,
+	type WeeklyWindow,
+	weeklyExhaustion,
+} from "./weekly-exhaustion";

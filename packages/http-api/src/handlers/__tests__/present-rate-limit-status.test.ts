@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { weeklyExhaustion } from "@clankermux/core";
 import type { AnthropicUsageData } from "@clankermux/types";
 import { presentRateLimitStatus } from "../accounts";
-import { weeklyExhaustion } from "../health";
 
 const NOW = 1_750_000_000_000;
 const MIN = 60_000;

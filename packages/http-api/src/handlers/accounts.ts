@@ -10,6 +10,7 @@ import {
 	validateNumber,
 	validatePriority,
 	validateString,
+	weeklyExhaustion,
 } from "@clankermux/core";
 import type {
 	CodexResetCreditEventRow,
@@ -85,7 +86,6 @@ import {
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
-import { weeklyExhaustion } from "./health";
 
 const log = new Logger("AccountsHandler");
 
