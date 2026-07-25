@@ -52,10 +52,24 @@ export type RateLimitProbeAdmission =
 	| "suppressed";
 
 /**
+ * A provisional capacity-restored reservation. Carries the generation it armed
+ * AND the generation it displaced, so a rollback RESTORES the previous state
+ * rather than erasing it.
+ */
+export interface CapacityProbeReservation {
+	accountId: string;
+	/** The generation this reservation armed. */
+	generation: number;
+	/** The generation that was pending before it, or null if none was. */
+	previousGeneration: number | null;
+}
+
+/**
  * Reserve a capacity-restored probe generation for an account. Called by the
  * capacity-restored handler BEFORE its compare-and-clear commits, and rolled
  * back via {@link rollbackCapacityRestoredProbePending} if that CAS fails or
- * throws.
+ * throws. A committed (successful) CAS simply keeps the reservation — that is
+ * what commits the new generation.
  *
  * Reserve-then-roll-back, not arm-after-commit: DB state and process memory
  * cannot change atomically, and arming only after the async CAS resolves leaves
@@ -63,22 +77,41 @@ export type RateLimitProbeAdmission =
  * marker — fan-in through the very hole the marker exists to close. A
  * momentarily-armed marker on a failed CAS costs at most one suppressed request.
  */
-export function markCapacityRestoredProbePending(accountId: string): number {
+export function markCapacityRestoredProbePending(
+	accountId: string,
+): CapacityProbeReservation {
 	capacityGenerationCounter += 1;
+	const previousGeneration = capacityRestoredPending.get(accountId) ?? null;
 	capacityRestoredPending.set(accountId, capacityGenerationCounter);
-	return capacityGenerationCounter;
+	return {
+		accountId,
+		generation: capacityGenerationCounter,
+		previousGeneration,
+	};
 }
 
 /**
- * Undo a reservation whose clear never committed. Generation-guarded: a NEWER
- * reservation for the same account must survive an older rollback.
+ * Undo a reservation whose clear never committed, RESTORING whatever was
+ * pending before it. Deleting outright would be wrong: the capacity callback is
+ * fire-and-forget, so two can overlap (reserve 1 → reserve 2 → CAS 1 SUCCEEDS →
+ * CAS 2 fails). Deleting on that rollback would leave an account that IS
+ * unlocked with no marker at all — and with the streak still 0, nothing else
+ * gates the fan-in. The same applies to a marker retained after
+ * `cooldown_reapplied` that a later failed reservation would otherwise erase.
+ *
+ * Generation-guarded on the way in as well: if a NEWER reservation has since
+ * replaced this one, the rollback is a no-op (that newer reservation owns the
+ * slot and will restore its own predecessor if it too fails).
  */
 export function rollbackCapacityRestoredProbePending(
-	accountId: string,
-	generation: number,
+	reservation: CapacityProbeReservation,
 ): void {
-	if (capacityRestoredPending.get(accountId) === generation) {
+	const { accountId, generation, previousGeneration } = reservation;
+	if (capacityRestoredPending.get(accountId) !== generation) return;
+	if (previousGeneration === null) {
 		capacityRestoredPending.delete(accountId);
+	} else {
+		capacityRestoredPending.set(accountId, previousGeneration);
 	}
 }
 

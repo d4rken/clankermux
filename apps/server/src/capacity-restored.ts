@@ -1,5 +1,6 @@
 import type { DatabaseOperations } from "@clankermux/database";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
+import type { CapacityProbeReservation } from "@clankermux/proxy";
 import { isQuotaDerivedRateLimitReason } from "@clankermux/types";
 
 /** Minimal logger surface the capacity-restored handler needs. */
@@ -13,12 +14,16 @@ export interface CapacityRestoredLogger {
  * proxy-internal file and tests can observe the calls). Backed by
  * `markCapacityRestoredProbePending` / `rollbackCapacityRestoredProbePending`
  * in `@clankermux/proxy`.
+ *
+ * `markPending` returns a RESERVATION rather than a bare generation: rolling one
+ * back must restore whatever it displaced, because this handler is invoked
+ * fire-and-forget and two calls for the same account can overlap.
  */
 export interface CapacityRestoredProbeMarker {
-	/** Reserve a probe generation for the account; returns that generation. */
-	markPending: (accountId: string) => number;
+	/** Reserve a probe generation for the account. */
+	markPending: (accountId: string) => CapacityProbeReservation;
 	/** Release a reservation whose clear never committed. */
-	rollbackPending: (accountId: string, generation: number) => void;
+	rollbackPending: (reservation: CapacityProbeReservation) => void;
 }
 
 /**
@@ -118,7 +123,7 @@ export async function clearRateLimitOnCapacityRestored(
 	// with `consecutive_rate_limits` still 0 and no deadline left behind, so
 	// nothing else would gate the fan-in; arming only after the await resolves
 	// would leave a window in which the account is unlocked and unmarked.
-	const probeGeneration = marker.markPending(accountId);
+	const reservation = marker.markPending(accountId);
 	let cleared: boolean;
 	try {
 		cleared = await dbOps.clearRateLimitOnCapacityRestore(
@@ -129,7 +134,7 @@ export async function clearRateLimitOnCapacityRestored(
 			evidence.fetchStartedAt,
 		);
 	} catch (err) {
-		marker.rollbackPending(accountId, probeGeneration);
+		marker.rollbackPending(reservation);
 		throw err;
 	}
 	if (cleared) {
@@ -141,7 +146,7 @@ export async function clearRateLimitOnCapacityRestored(
 			)}m fetch_started_at=${new Date(evidence.fetchStartedAt).toISOString()}`,
 		);
 	} else {
-		marker.rollbackPending(accountId, probeGeneration);
+		marker.rollbackPending(reservation);
 		logger.debug(
 			`[clankermux] account=${acc.name} capacity_restored_skip cas_mismatch (a concurrent write replaced the observed cooldown)`,
 		);

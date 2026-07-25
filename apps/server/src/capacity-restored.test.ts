@@ -91,15 +91,15 @@ function makeHarness(
 		markerCalls,
 		pending,
 		marker: {
-			markPending: () => {
+			markPending: (accountId) => {
 				generation += 1;
 				markerCalls.push(`mark:${generation}`);
 				pending.add(generation);
-				return generation;
+				return { accountId, generation, previousGeneration: null };
 			},
-			rollbackPending: (_accountId, gen) => {
-				markerCalls.push(`rollback:${gen}`);
-				pending.delete(gen);
+			rollbackPending: (reservation) => {
+				markerCalls.push(`rollback:${reservation.generation}`);
+				pending.delete(reservation.generation);
 			},
 		},
 		logger: {
@@ -453,6 +453,86 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 			expect(hasCapacityRestoredProbePending("acc-race-2")).toBe(false);
 		} finally {
 			clearCapacityRestoredProbePending("acc-race-2");
+		}
+	});
+
+	it("an OVERLAPPING failed clear cannot erase the marker a successful one just committed", async () => {
+		// The capacity callback is fire-and-forget, so two can overlap. Reserve 1 →
+		// reserve 2 → CAS 1 SUCCEEDS → CAS 2 fails. If rollback DELETED instead of
+		// restoring, the account would be unlocked with no marker at all — and with
+		// the streak still 0, nothing else gates the fan-in.
+		const realMarker = {
+			markPending: markCapacityRestoredProbePending,
+			rollbackPending: rollbackCapacityRestoredProbePending,
+		};
+		const ID = "acc-overlap";
+		// Gate both CAS calls so their completion order is controlled.
+		let releaseFirst: (() => void) | null = null;
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		let call = 0;
+		const dbOps = {
+			getAccount: async () => makeAccount({ id: ID }),
+			clearRateLimitOnCapacityRestore: async () => {
+				call += 1;
+				if (call === 1) {
+					await firstGate;
+					return true; // the older clear COMMITS
+				}
+				return false; // the newer clear is refused
+			},
+		} as unknown as Parameters<typeof clearRateLimitOnCapacityRestored>[0];
+		const logger: CapacityRestoredLogger = { debug: () => {}, info: () => {} };
+
+		try {
+			const first = clearRateLimitOnCapacityRestored(
+				dbOps,
+				logger,
+				evidence({ accountId: ID }),
+				realMarker,
+				NOW,
+			);
+			// Second callback reserves on top of the first while it is still in
+			// flight, then fails and rolls back.
+			const second = clearRateLimitOnCapacityRestored(
+				dbOps,
+				logger,
+				evidence({ accountId: ID }),
+				realMarker,
+				NOW,
+			);
+			await second;
+			releaseFirst?.();
+			await first;
+
+			expect(hasCapacityRestoredProbePending(ID)).toBe(true);
+		} finally {
+			clearCapacityRestoredProbePending(ID);
+		}
+	});
+
+	it("a failed clear cannot erase a marker RETAINED from an earlier restore", async () => {
+		// e.g. a marker kept across `cooldown_reapplied`: a later reservation whose
+		// CAS refuses must restore it, not delete it.
+		const realMarker = {
+			markPending: markCapacityRestoredProbePending,
+			rollbackPending: rollbackCapacityRestoredProbePending,
+		};
+		const ID = "acc-retained";
+		markCapacityRestoredProbePending(ID); // the retained marker
+		try {
+			const h = makeHarness(makeAccount({ id: ID }), false);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence({ accountId: ID }),
+				realMarker,
+				NOW,
+			);
+			expect(hasCapacityRestoredProbePending(ID)).toBe(true);
+		} finally {
+			clearCapacityRestoredProbePending(ID);
 		}
 	});
 

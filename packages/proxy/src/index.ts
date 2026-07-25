@@ -35,6 +35,7 @@ export {
 } from "./codex-spend-coordinator";
 export { dispatchProxyRequest } from "./dispatch";
 export {
+	type CapacityProbeReservation,
 	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,

@@ -35,6 +35,7 @@ export {
 } from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 export {
+	type CapacityProbeReservation,
 	clearCapacityRestoredProbePending,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
