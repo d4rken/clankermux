@@ -525,6 +525,22 @@ export function getRepresentativeUtilization(
 }
 
 /**
+ * Result of one usage fetch.
+ *
+ * `superseded` is a THIRD state, distinct from success and failure: the fetch
+ * belonged to a poll generation (or token provider) that was replaced while it
+ * was in flight, so it says nothing at all about the live poller. Callers must
+ * drop it rather than fold it into `success === false` — counting it as a
+ * failure pushes a healthy replacement poller into exponential backoff and lets
+ * its usage data go stale.
+ */
+interface UsageFetchOutcome {
+	success: boolean;
+	retryAfterMs: number | null;
+	superseded?: boolean;
+}
+
+/**
  * What a successful usage poll reports to the capacity-restored listener. The
  * poller REPORTS evidence; it does not decide whether a cooldown may be cleared
  * (that is the listener's job, which knows the cooldown's reason and age).
@@ -891,7 +907,7 @@ class UsageCache {
 		string,
 		{
 			generation: number;
-			promise: Promise<{ success: boolean; retryAfterMs: number | null }>;
+			promise: Promise<UsageFetchOutcome>;
 		}
 	>();
 	// Demand-aware polling state (Anthropic only — set when startPolling receives
@@ -1079,14 +1095,23 @@ class UsageCache {
 			if (this.pollGenerations.get(accountId) !== generation) return;
 			if (this.tokenProviders.get(accountId) !== tokenProvider) return;
 
-			const { success, retryAfterMs: nextRetryAfterMs } =
-				await this.fetchAndCache(
-					accountId,
-					tokenProvider,
-					generation,
-					provider,
-					customEndpoint,
-				);
+			const {
+				success,
+				retryAfterMs: nextRetryAfterMs,
+				superseded,
+			} = await this.fetchAndCache(
+				accountId,
+				tokenProvider,
+				generation,
+				provider,
+				customEndpoint,
+			);
+			// A superseded result belongs to a poll generation that no longer
+			// exists. It is NOT a failure of the live one — counting it would push
+			// a perfectly healthy replacement poller into exponential backoff and
+			// let its usage data go stale. Drop it entirely (the reschedule guards
+			// below would bail anyway).
+			if (superseded) return;
 			if (success) {
 				this.failureCounts.delete(accountId); // reset streak on success
 			} else {
@@ -1281,7 +1306,10 @@ class UsageCache {
 			generation,
 			provider,
 			customEndpoint,
-		).then(({ success, retryAfterMs }) => {
+		).then(({ success, retryAfterMs, superseded }) => {
+			// Stale result from a generation that has since been replaced: it says
+			// nothing about THIS poller, so it must not seed a failure streak.
+			if (superseded) return;
 			if (!success) {
 				this.failureCounts.set(accountId, 1);
 			}
@@ -1444,7 +1472,7 @@ class UsageCache {
 		generation: number,
 		provider?: string,
 		customEndpoint?: string | null,
-	): Promise<{ success: boolean; retryAfterMs: number | null }> {
+	): Promise<UsageFetchOutcome> {
 		// Deduplicate concurrent fetches for the same account — return the existing
 		// in-flight promise rather than starting a second HTTP request — but ONLY
 		// within the same poll generation. A newer generation must issue (and apply)
@@ -1501,9 +1529,13 @@ class UsageCache {
 		generation: number,
 		provider?: string,
 		_customEndpoint?: string | null,
-	): Promise<{ success: boolean; retryAfterMs: number | null }> {
+	): Promise<UsageFetchOutcome> {
 		/** A superseded fetch reports failure without touching any shared state. */
-		const superseded = { success: false, retryAfterMs: null } as const;
+		const superseded = {
+			success: false,
+			retryAfterMs: null,
+			superseded: true,
+		} as const;
 		try {
 			// Get a fresh access token or API key on each fetch
 			let token: string;
@@ -1541,6 +1573,17 @@ class UsageCache {
 									: String(handlerError)
 							}`,
 						);
+					}
+					// The handler AWAITS (it reads the account from the DB), so the
+					// generation must be re-checked after it settles — resolved OR
+					// thrown. A reauth can start a new poller during that lookup, and
+					// acting on the stale verdict here would call stopPolling() on the
+					// LIVE generation, tearing down its token provider, callbacks and
+					// cache and leaving the account unpolled until an explicit restart.
+					if (
+						!this.isLiveFetchGeneration(accountId, generation, tokenProvider)
+					) {
+						return superseded;
 					}
 					if (shouldStop) {
 						log.info(
@@ -1584,6 +1627,10 @@ class UsageCache {
 						getRepresentativeZaiUtilization,
 						getRepresentativeZaiWindow,
 					} = await import("./zai-usage-fetcher");
+					// The dynamic import is another await boundary — re-check before any
+					// cache write or callback.
+					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+						return superseded;
 
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
