@@ -55,6 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	__pricingTestHooks.reset();
+	__pricingTestHooks.setLogger(null);
 });
 
 const UNPRICED_MODEL = "claude-not-yet-priced-9";
@@ -74,6 +75,18 @@ function unpricedResponseBody(): string {
 describe("one request through the main path yields exactly one gap record", () => {
 	it("records once even though the provider prices the same response first", async () => {
 		const body = unpricedResponseBody();
+		// The same response is priced twice, by call sites with different provider
+		// attribution. The warn cache is model-keyed, so the operator sees exactly
+		// one log line rather than one per pricing path.
+		// (The catalogue also warns about the deliberately-disabled network fetch,
+		// so keep only the "no price" lines.)
+		const warnings: string[] = [];
+		__pricingTestHooks.setLogger({
+			warn: (message: string) => {
+				if (message.startsWith("Price for model ")) warnings.push(message);
+			},
+			debug: () => {},
+		});
 
 		// 1. Provider-level extraction (response-processor drives this first).
 		const provider = new AnthropicCompatibleProvider();
@@ -104,5 +117,8 @@ describe("one request through the main path yields exactly one gap record", () =
 			reason: "model_missing",
 			occurrences: 1,
 		});
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(UNPRICED_MODEL);
 	});
 });

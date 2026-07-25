@@ -265,16 +265,32 @@ const DEFAULT_PRICING_FETCH_TIMEOUT_MS = 4_000;
 const PRICING_REFRESH_HOURS = 24;
 
 /**
- * Hard cap on distinct (provider, model) pricing misses held in memory.
+ * Hard cap on distinct (provider, model) REPORTABLE pricing misses held in
+ * memory.
  *
  * A request's `model` is client-controlled and never validated, so any caller
  * can mint unlimited distinct model strings that reach the cost estimator. The
- * registry (which also does the once-per-model warn de-duplication that an
- * unbounded Set used to do) therefore evicts least-recently-seen entries once
- * the cap is reached. A real gap recurs on every affected request, so recency
- * eviction keeps live gaps and drops one-shot junk.
+ * registry therefore evicts least-recently-seen entries once the cap is
+ * reached. A real gap recurs on every affected request, so recency eviction
+ * keeps live gaps and drops one-shot junk.
+ *
+ * Only misses that are actually surfaced by {@link getPricingGaps} occupy this
+ * capacity: suppressed providers (Ollama) and calls that never opted into
+ * reporting are deliberately kept out, so they cannot evict a genuine finding.
+ * Warn de-duplication lives in its own separately-bounded cache.
  */
 const MAX_PRICING_MISS_ENTRIES = 128;
+
+/**
+ * Hard cap on the warn-de-duplication cache — the bounded replacement for the
+ * unbounded `warnedModels` Set. Keyed by MODEL ONLY (no provider) so an unpriced
+ * model logs exactly once no matter which of the two pricing paths observed it
+ * (a provider's usage extractor prices the response without account
+ * attribution, then the proxy's usage collector prices it again with the real
+ * provider). Kept separate from the gap registry so warn traffic can never
+ * evict a reported gap, and vice versa.
+ */
+const MAX_PRICING_WARN_ENTRIES = 128;
 
 /** Longest model id retained in the registry; longer ids are truncated. */
 const MAX_PRICING_MISS_MODEL_ID_LENGTH = 256;
@@ -301,16 +317,6 @@ function sanitizeLabel(value: string | undefined, maxLength: number): string {
 }
 
 /**
- * Registry entry. Extends the public {@link PricingGap} shape with the internal
- * `reported` flag: entries are created for EVERY miss (they carry the warn-once
- * de-duplication), but only misses whose caller opted in are surfaced by
- * {@link getPricingGaps}.
- */
-interface PricingMissEntry extends PricingGap {
-	reported: boolean;
-}
-
-/**
  * A pricing-catalogue lookup failure, carrying the reason so the caller does not
  * have to parse an error message to tell "no such model" from "model present but
  * missing a rate".
@@ -330,16 +336,28 @@ class PriceCatalogue {
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
 	/**
-	 * Bounded pricing-miss registry, keyed by `provider\0modelId`. Replaces the
-	 * old unbounded `warnedModels` Set: it still de-duplicates the "price not
-	 * found" warning, but it is capped, holds untrusted ids only after
-	 * sanitization, and aggregates occurrences so the misses can be surfaced.
+	 * Bounded registry of REPORTABLE pricing misses, keyed by
+	 * `provider\0modelId`. Capped, holds untrusted ids only after sanitization,
+	 * and aggregates occurrences so the misses can be surfaced by
+	 * {@link getGaps}.
+	 *
+	 * Only reportable misses are inserted — a suppressed provider or a call that
+	 * did not opt in never touches this map, so it cannot spend the capacity a
+	 * genuine gap needs.
 	 *
 	 * Insertion order is maintained as least-recently-seen first (an existing
 	 * entry is deleted and re-inserted when touched), so eviction is O(1) on the
 	 * first key.
 	 */
-	private pricingMisses = new Map<string, PricingMissEntry>();
+	private pricingMisses = new Map<string, PricingGap>();
+	/**
+	 * Bounded warn-de-duplication cache, keyed by MODEL ONLY, so an unpriced
+	 * model produces exactly one log line however many pricing paths observe it.
+	 * Same least-recently-seen ordering and eviction as the registry above, and
+	 * deliberately a separate structure: warn traffic must never evict a reported
+	 * gap.
+	 */
+	private warnedModels = new Set<string>();
 	/** How many entries have been evicted by the cap since process start. */
 	private pricingMissOverflow = 0;
 	/** Whether the cap-exceeded warning has been emitted (log once, not per request). */
@@ -355,6 +373,14 @@ class PriceCatalogue {
 	private constructor() {}
 
 	setLogger(logger: Logger): void {
+		this.logger = logger;
+	}
+
+	/**
+	 * Test-only: swap in (or clear) the warn logger so a test can capture the
+	 * de-duplicated warning without the app's real logger.
+	 */
+	setLoggerForTests(logger: Logger | null): void {
 		this.logger = logger;
 	}
 
@@ -746,13 +772,19 @@ class PriceCatalogue {
 		this.lastFetch = 0;
 		this.inFlightLoad = null;
 		this.pricingMisses.clear();
+		this.warnedModels.clear();
 		this.pricingMissOverflow = 0;
 		this.warnedPricingMissOverflow = false;
 	}
 
-	/** Test-only: total registry size (reported + suppressed entries). */
+	/** Test-only: size of the reported-gap registry. */
 	getMissCountForTests(): number {
 		return this.pricingMisses.size;
+	}
+
+	/** Test-only: size of the warn-de-duplication cache. */
+	getWarnCountForTests(): number {
+		return this.warnedModels.size;
 	}
 
 	/** Test-only: is a background remote load currently in flight? */
@@ -768,10 +800,15 @@ class PriceCatalogue {
 	/**
 	 * Record a pricing-catalogue miss for `(provider, modelId)`.
 	 *
-	 * Every miss lands here (that is what de-duplicates the log line, exactly as
-	 * `warnOnce` used to), but the entry is only exposed by
-	 * {@link PriceCatalogue.getGaps} when the caller asked for it — see
-	 * `estimateCostUSD`'s opt-in `reportGaps` context flag.
+	 * Two independent, independently-bounded effects:
+	 *
+	 *  - the model is warned about at most once (model-keyed cache), however many
+	 *    pricing paths priced the same response; and
+	 *  - the miss enters the reported-gap registry ONLY when `report` is true —
+	 *    i.e. the caller opted in via `estimateCostUSD`'s `reportGaps` flag AND
+	 *    the provider is not one whose free models make a gap expected. A
+	 *    suppressed or unattributed miss must not consume registry capacity,
+	 *    because that capacity is what keeps a genuine gap alive.
 	 */
 	recordMiss(opts: {
 		modelId: string;
@@ -789,6 +826,11 @@ class PriceCatalogue {
 			opts.provider,
 			MAX_PRICING_MISS_PROVIDER_LENGTH,
 		);
+
+		this.warnOnce(modelId, provider, opts.error);
+
+		if (!opts.report) return;
+
 		const key = `${provider}${PRICING_MISS_KEY_SEPARATOR}${modelId}`;
 		const now = opts.now ?? Date.now();
 
@@ -799,7 +841,6 @@ class PriceCatalogue {
 			// The latest observation wins: a model that was absent and is now
 			// present-but-incomplete should report the failure it fails with today.
 			existing.reason = opts.reason;
-			existing.reported ||= opts.report;
 			// Re-insert to move the entry to the most-recently-seen end.
 			this.pricingMisses.delete(key);
 			this.pricingMisses.set(key, existing);
@@ -813,12 +854,35 @@ class PriceCatalogue {
 			occurrences: 1,
 			firstSeenAt: now,
 			lastSeenAt: now,
-			reported: opts.report,
 		});
 		this.evictOverflowingMisses();
+	}
 
-		const detail = opts.error
-			? ` (reason: ${opts.error instanceof Error ? opts.error.message : opts.error})`
+	/**
+	 * Log the "no price" warning at most once per model, then keep the cache
+	 * bounded by dropping the least-recently-warned entry. Model-keyed (not
+	 * provider-keyed) so the provider extractor and the usage collector, which
+	 * price the same response with different attribution, do not each log a line.
+	 */
+	private warnOnce(
+		modelId: string,
+		provider: string,
+		error?: Error | string,
+	): void {
+		if (this.warnedModels.has(modelId)) {
+			// Re-insert to move the entry to the most-recently-warned end.
+			this.warnedModels.delete(modelId);
+			this.warnedModels.add(modelId);
+			return;
+		}
+		this.warnedModels.add(modelId);
+		while (this.warnedModels.size > MAX_PRICING_WARN_ENTRIES) {
+			const oldest = this.warnedModels.values().next();
+			if (oldest.done) break;
+			this.warnedModels.delete(oldest.value);
+		}
+		const detail = error
+			? ` (reason: ${error instanceof Error ? error.message : error})`
 			: "";
 		this.logger?.warn(
 			`Price for model "${modelId}" (provider "${provider}") not found - cost set to 0${detail}`,
@@ -845,11 +909,12 @@ class PriceCatalogue {
 	/**
 	 * Cloned snapshots of the reported misses, in a deterministic order (oldest
 	 * first, then provider, then model id). Never hands out registry internals.
+	 * Every entry in the registry is reportable by construction — suppressed and
+	 * opted-out misses were never inserted.
 	 */
 	getGaps(): PricingGap[] {
 		const gaps: PricingGap[] = [];
 		for (const entry of this.pricingMisses.values()) {
-			if (!entry.reported) continue;
 			gaps.push({
 				modelId: entry.modelId,
 				provider: entry.provider,
@@ -882,18 +947,33 @@ export function setPricingLogger(logger: Logger): void {
 
 /**
  * Test-only handle onto the pricing singleton. Lets tests reset cached state
- * (including the pricing-miss registry) and inspect the in-flight load. NOT for
- * runtime use — there is deliberately no public way to clear recorded gaps.
+ * (the reported-gap registry and the warn-de-duplication cache), swap the warn
+ * logger, and inspect the in-flight load.
+ *
+ * It is exported from the package barrel because cross-package tests (proxy,
+ * providers) price responses through the real singleton and need to reset it
+ * between cases — so `reset()` is reachable at runtime. The underscore prefix
+ * marks it as private API: nothing on the request path may call it, and there is
+ * no other way to clear recorded gaps.
  */
 export const __pricingTestHooks = {
 	reset(): void {
 		PriceCatalogue.get().resetForTests();
 	},
-	/** Size of the bounded pricing-miss registry, reported and suppressed alike. */
+	/** Number of reported gaps currently held by the bounded registry. */
 	missCount(): number {
 		return PriceCatalogue.get().getMissCountForTests();
 	},
+	/** Number of models currently held by the bounded warn-dedup cache. */
+	warnCount(): number {
+		return PriceCatalogue.get().getWarnCountForTests();
+	},
+	/** Swap in a capturing logger (or `null` to silence pricing warnings). */
+	setLogger(logger: Logger | null): void {
+		PriceCatalogue.get().setLoggerForTests(logger);
+	},
 	maxMissEntries: MAX_PRICING_MISS_ENTRIES,
+	maxWarnEntries: MAX_PRICING_WARN_ENTRIES,
 	maxModelIdLength: MAX_PRICING_MISS_MODEL_ID_LENGTH,
 	hasInFlightLoad(): boolean {
 		return PriceCatalogue.get().hasInFlightLoadForTests();

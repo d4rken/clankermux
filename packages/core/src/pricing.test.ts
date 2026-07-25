@@ -427,12 +427,29 @@ describe("pricing-miss registry", () => {
 	const io: TokenBreakdown = { inputTokens: 1000, outputTokens: 1000 };
 	const report = { reportGaps: true };
 
+	/**
+	 * Install a capturing logger and hand back the array of "no price" warnings
+	 * only — the catalogue also warns about the network fetch this suite
+	 * deliberately disables, which is not what these cases are about.
+	 */
+	function captureMissWarnings(): string[] {
+		const warnings: string[] = [];
+		__pricingTestHooks.setLogger({
+			warn: (message: string) => {
+				if (message.startsWith("Price for model ")) warnings.push(message);
+			},
+			debug: () => {},
+		});
+		return warnings;
+	}
+
 	beforeEach(() => {
 		__pricingTestHooks.reset();
 	});
 
 	afterEach(() => {
 		__pricingTestHooks.reset();
+		__pricingTestHooks.setLogger(null);
 	});
 
 	it("records a gap only when the caller opts in", async () => {
@@ -578,6 +595,83 @@ describe("pricing-miss registry", () => {
 		).toBe(true);
 	});
 
+	it("keeps suppressed and opted-out misses out of the registry entirely", async () => {
+		// A miss the operator can do nothing about (Ollama is free by definition)
+		// or that nobody asked to be reported must not occupy a single slot: the
+		// registry's capacity is what keeps a REAL gap alive.
+		await estimateCostUSD("llama-local", io, { provider: "ollama", ...report });
+		await estimateCostUSD("unattributed-model", io);
+
+		expect(__pricingTestHooks.missCount()).toBe(0);
+		expect(getPricingGaps()).toEqual([]);
+	});
+
+	it("does not let suppressed misses evict a reported gap", async () => {
+		const cap = __pricingTestHooks.maxMissEntries;
+		await estimateCostUSD("real-gap-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		// An Ollama install exposes far more distinct model ids than the cap.
+		for (let i = 0; i < cap * 2; i++) {
+			await estimateCostUSD(`ollama-model-${i}`, io, {
+				provider: "ollama",
+				...report,
+			});
+			// …and provider-level extraction prices every response without
+			// attribution or opt-in, too.
+			await estimateCostUSD(`unattributed-model-${i}`, io);
+		}
+
+		expect(__pricingTestHooks.missCount()).toBe(1);
+		expect(getPricingGapOverflowCount()).toBe(0);
+		expect(getPricingGaps().map((gap) => gap.modelId)).toEqual([
+			"real-gap-model",
+		]);
+	});
+
+	it("warns once per model across both pricing paths", async () => {
+		// Only the miss warnings matter here; the catalogue also warns about the
+		// deliberately-disabled network fetch.
+		const warnings = captureMissWarnings();
+
+		// The provider's usage extractor prices the response first, with no
+		// account attribution, then the proxy's usage collector prices the SAME
+		// response with the real provider and opts into reporting. That is one
+		// unpriced model, so it is one log line.
+		await estimateCostUSD("double-priced-model", io);
+		await estimateCostUSD("double-priced-model", io, {
+			provider: "claude-console-api",
+			...report,
+		});
+		await estimateCostUSD("double-priced-model", io, {
+			provider: "claude-console-api",
+			...report,
+		});
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("double-priced-model");
+		// A suppressed provider still gets its one line — the operator should see
+		// the miss in the log even though it is not worth a dashboard banner.
+		await estimateCostUSD("llama-local", io, { provider: "ollama", ...report });
+		expect(warnings).toHaveLength(2);
+	});
+
+	it("bounds the warn-dedup cache independently of the registry", async () => {
+		const warnCap = __pricingTestHooks.maxWarnEntries;
+		for (let i = 0; i < warnCap * 2; i++) {
+			// Suppressed, so none of these reach the registry at all.
+			await estimateCostUSD(`ollama-model-${i}`, io, {
+				provider: "ollama",
+				...report,
+			});
+		}
+
+		expect(__pricingTestHooks.warnCount()).toBeLessThanOrEqual(warnCap);
+		expect(__pricingTestHooks.missCount()).toBe(0);
+	});
+
 	it("returns cloned snapshots in a deterministic order", async () => {
 		// Ordering is (firstSeenAt, provider, modelId) — the provider/model
 		// tiebreak matters because misses recorded in the same millisecond must
@@ -616,10 +710,13 @@ describe("pricing-miss registry", () => {
 			...report,
 		});
 		expect(getPricingGaps()).toHaveLength(1);
+		expect(__pricingTestHooks.warnCount()).toBe(1);
 
 		__pricingTestHooks.reset();
 
 		expect(getPricingGaps()).toEqual([]);
 		expect(getPricingGapOverflowCount()).toBe(0);
+		// Both bounded structures are cleared, so a warn-once model warns again.
+		expect(__pricingTestHooks.warnCount()).toBe(0);
 	});
 });
