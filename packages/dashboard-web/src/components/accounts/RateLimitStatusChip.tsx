@@ -1,3 +1,5 @@
+import { providerStatusToCause } from "@clankermux/core";
+import type { RateLimitCause } from "@clankermux/types";
 import type { ComponentProps } from "react";
 import type { Badge } from "../ui/badge";
 import { StatusChip } from "./StatusChip";
@@ -22,6 +24,17 @@ interface StatusDescriptor {
 	variant: NonNullable<BadgeVariant>;
 	description: string;
 }
+
+/**
+ * A spent weekly quota is a routine, self-healing state rather than a provider
+ * fault, so it gets the amber warning treatment rather than the red one.
+ */
+const USAGE_EXHAUSTED_DESCRIPTOR: StatusDescriptor = {
+	label: "Usage exhausted",
+	variant: "warning",
+	description:
+		"Weekly usage quota is spent — requests resume when the window resets.",
+};
 
 // Maps the provider's unified rate-limit status (e.g. the value of the
 // `anthropic-ratelimit-unified-status` header) to a human-readable chip.
@@ -66,6 +79,41 @@ const STATUS_MAP: Record<string, StatusDescriptor> = {
 		variant: "destructive",
 		description: "The provider requires payment before serving more requests.",
 	},
+	// Anthropic emits `rejected` on a spent account; it means the provider is
+	// refusing the request, so it reads as a rate limit rather than a grey unknown.
+	rejected: {
+		label: "Rate limited",
+		variant: "destructive",
+		description:
+			"Blocked by the provider — requests are rejected until the limit resets.",
+	},
+	usage_exhausted: USAGE_EXHAUSTED_DESCRIPTOR,
+};
+
+/**
+ * The chip for each normalized {@link RateLimitCause}. Preferred over parsing the
+ * display string: the API resolves the cause and the string from ONE decision, so
+ * keying on the cause cannot drift. `ok` has no chip (callers hide it).
+ */
+const CAUSE_MAP: Record<Exclude<RateLimitCause, "ok">, StatusDescriptor> = {
+	allowed: STATUS_MAP.allowed,
+	allowed_warning: STATUS_MAP.allowed_warning,
+	queueing_soft: STATUS_MAP.queueing_soft,
+	queueing_hard: STATUS_MAP.queueing_hard,
+	rate_limited: STATUS_MAP.rate_limited,
+	blocked: STATUS_MAP.blocked,
+	payment_required: STATUS_MAP.payment_required,
+	usage_exhausted: USAGE_EXHAUSTED_DESCRIPTOR,
+	// Only reached when no raw provider status came with the cause — otherwise the
+	// unrecognized value is rendered verbatim (humanized) by the string path
+	// below, which is strictly more informative. Neutral, never red: an
+	// unrecognized status is not evidence of a block.
+	unknown: {
+		label: "Unknown status",
+		variant: "secondary",
+		description:
+			"The provider reported a rate-limit status this build does not recognize.",
+	},
 };
 
 // Format a minute count as a compact human duration, e.g. 602 -> "10h 2m".
@@ -107,12 +155,51 @@ function parseStatus(raw: string): ParsedStatus {
 }
 
 interface RateLimitStatusChipProps {
-	/** Raw status string from the API, e.g. `allowed (242m)`. */
+	/**
+	 * Raw status string from the API, e.g. `allowed (242m)`. Used as the fallback
+	 * for callers that have no structured cause (older payloads, legacy shapes).
+	 */
 	status: string;
+	/** Normalized cause from the API — preferred over parsing `status`. */
+	cause?: RateLimitCause | null;
+	/** Epoch ms when the cause clears; drives the countdown when `cause` is set. */
+	resetMs?: number | null;
+	/**
+	 * Raw stored provider status. When it is a value the shared vocabulary does
+	 * not recognize, its humanized label is more informative than the generic
+	 * cause the resolver normalized it to, so the string path wins.
+	 */
+	providerStatus?: string | null;
+	/** Injectable clock (tests). */
+	now?: number;
 }
 
-export function RateLimitStatusChip({ status }: RateLimitStatusChipProps) {
-	const { descriptor, resetMinutes } = parseStatus(status);
+export function RateLimitStatusChip({
+	status,
+	cause = null,
+	resetMs = null,
+	providerStatus = null,
+	now = Date.now(),
+}: RateLimitStatusChipProps) {
+	const parsed = parseStatus(status);
+	const isUnknownProviderStatus =
+		!!providerStatus && providerStatusToCause(providerStatus) === null;
+	// Prefer the structured cause, except when it is a normalization of a provider
+	// status we don't know (keep that one verbatim) — `usage_exhausted` is derived
+	// from usage data, not from the provider status, so it always wins.
+	const causeDescriptor =
+		cause !== null &&
+		cause !== "ok" &&
+		(cause === "usage_exhausted" || !isUnknownProviderStatus)
+			? CAUSE_MAP[cause]
+			: null;
+	const useCause = causeDescriptor !== null;
+	const descriptor = causeDescriptor ?? parsed.descriptor;
+	const resetMinutes = useCause
+		? resetMs !== null && resetMs > now
+			? Math.ceil((resetMs - now) / 60000)
+			: null
+		: parsed.resetMinutes;
 	const resetLabel =
 		resetMinutes !== null && resetMinutes > 0
 			? formatMinutes(resetMinutes)

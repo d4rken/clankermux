@@ -9,6 +9,7 @@ import {
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
+	weeklyExhaustion,
 } from "@clankermux/core";
 import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
@@ -22,6 +23,7 @@ import {
 } from "@clankermux/providers";
 import {
 	type Account,
+	type AnthropicUsageData,
 	getNativeResponsesMetaContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	PROVIDER_NAMES,
@@ -1224,6 +1226,97 @@ export async function proxyWithAccount(
 					{ kind: "hard_429", cooldownUntil: floorUntil },
 					rawResponse,
 				);
+			}
+
+			// ── Account-wide weekly exhaustion: name the cause, skip the hold ──
+			// A 429 on an Anthropic account whose ACCOUNT-WIDE weekly window is
+			// already spent (per FRESH usage data) is not a transient burst: the
+			// window cannot recover before its reset, so holding and re-probing the
+			// account only burns latency. Record the truthful
+			// `weekly_exhausted_429` reason and fail over immediately.
+			//
+			// The cooldown DEADLINE is deliberately unchanged — the same
+			// `extractCooldownUntil` value every other path computes. Substituting
+			// the weekly `resets_at` would let a stale-cache false positive, or a
+			// malformed far-future reset, create a multi-day lock that the
+			// capacity-restored path cannot reliably clear. A false positive here
+			// costs a mislabelled reason and a skipped hold, nothing more.
+			//
+			// Fails open: with stale/absent usage every existing path behaves
+			// exactly as before. Anthropic only — Codex weekly windows belong to
+			// the CodexSpendCoordinator. Trusted-probe gated (not the header-only
+			// `isSyntheticInternalRequest` its neighbours use) because the marker
+			// headers are client-spoofable.
+			if (
+				rawResponse.status === 429 &&
+				account.provider === "anthropic" &&
+				!options?.reprobe &&
+				!isTrustedSyntheticProbe(req.headers, requestMeta.internal === true)
+			) {
+				const now = Date.now();
+				// getFreshCapacity is only the 180s FRESHNESS gate here; the
+				// exhaustion verdict itself comes from weeklyExhaustion.
+				const usageIsFresh =
+					getFreshCapacity(
+						usageCache,
+						account.id,
+						account.provider,
+						now,
+						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+					) !== null;
+				const weekly = usageIsFresh
+					? weeklyExhaustion(
+							usageCache.get(account.id) as AnthropicUsageData | null,
+							now,
+						)
+					: { exhausted: false, resetMs: null };
+				if (
+					weekly.exhausted &&
+					weekly.resetMs !== null &&
+					weekly.resetMs > now
+				) {
+					const reason: RateLimitReason = "weekly_exhausted_429";
+					const cooldownUntil = extractCooldownUntil(
+						rawResponse,
+						account.id,
+						usageCache.getRateLimitedUntil.bind(usageCache),
+					);
+					applyRateLimitCooldown(
+						account,
+						{ resetTime: cooldownUntil, reason },
+						ctx,
+					);
+					// Persist the 429's unified-status header so the dashboard chip
+					// reflects the live value rather than the last success.
+					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+					const responseTime = Date.now() - requestMeta.timestamp;
+					// Deliberate direct audit row (synthetic UUID id), NOT
+					// recorder-owned — mirrors the out_of_credits path.
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest(
+							crypto.randomUUID(),
+							req.method,
+							url.pathname,
+							account.id,
+							429,
+							false,
+							reason,
+							responseTime,
+							failoverAttempts,
+							requestedModel ? { model: requestedModel } : undefined,
+							apiKeyId ?? undefined,
+							apiKeyName ?? undefined,
+							requestMeta.project ?? null,
+							undefined,
+							requestMeta.comboName ?? null,
+							requestMeta.reasoningEffort ?? null,
+						),
+					);
+					log.warn(
+						`Account ${account.name} weekly-exhausted (429, weekly window spent until ${new Date(weekly.resetMs).toISOString()}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
+					);
+					return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
+				}
 			}
 
 			// ── Reactive family-weekly safety net ───────────────────────────

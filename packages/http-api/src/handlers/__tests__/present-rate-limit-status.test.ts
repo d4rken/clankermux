@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { weeklyExhaustion } from "@clankermux/core";
 import type { AnthropicUsageData } from "@clankermux/types";
-import { presentRateLimitStatus } from "../accounts";
-import { weeklyExhaustion } from "../health";
+import {
+	presentRateLimitStatus,
+	resolveRateLimitPresentation,
+} from "../accounts";
 
 const NOW = 1_750_000_000_000;
 const MIN = 60_000;
@@ -275,7 +278,11 @@ describe("presentRateLimitStatus", () => {
 		expect(status).toBe("usage_exhausted");
 	});
 
-	it("prefers an active rate-limit lock over weekly exhaustion", () => {
+	it("prefers weekly exhaustion over an active rate-limit lock (cause wins)", () => {
+		// PRECEDENCE INTENTIONALLY REVERSED (was: "prefers an active rate-limit lock
+		// over weekly exhaustion", expecting "Rate limited (4m)"). The cooldown lock
+		// is the MECHANISM; a spent weekly window is the CAUSE, and the cause is what
+		// the operator needs to see. The countdown is the later of the two deadlines.
 		const status = presentRateLimitStatus(
 			{
 				rate_limit_status: null,
@@ -286,7 +293,7 @@ describe("presentRateLimitStatus", () => {
 			NOW,
 			{ resetMs: NOW + 15 * MIN },
 		);
-		expect(status).toBe("Rate limited (4m)");
+		expect(status).toBe("usage_exhausted (15m)");
 	});
 
 	it("does not override an OK-returning path when weeklyExhausted is null", () => {
@@ -350,7 +357,13 @@ describe("presentRateLimitStatus", () => {
 		expect(status).toBe("usage_exhausted (12m)");
 	});
 
-	it("does NOT override a HARD stored status with usage_exhausted (hard keeps precedence)", () => {
+	it("overrides a HARD `rate_limited` stored status with usage_exhausted (cause wins)", () => {
+		// PRECEDENCE INTENTIONALLY REVERSED (was: "does NOT override a HARD stored
+		// status with usage_exhausted", expecting "rate_limited"). `rate_limited`
+		// (like `queueing_hard` / `rejected`) is a throttle MECHANISM; the spent
+		// weekly window is the CAUSE that explains it. Administrative/billing blocks
+		// — `payment_required` / `blocked` — are NOT explained by a spent quota and
+		// keep their own label (see the sibling test below).
 		const status = presentRateLimitStatus(
 			{
 				rate_limit_status: "rate_limited",
@@ -361,10 +374,44 @@ describe("presentRateLimitStatus", () => {
 			NOW,
 			{ resetMs: NOW + 12 * MIN },
 		);
-		expect(status).toBe("rate_limited");
+		expect(status).toBe("usage_exhausted (12m)");
 	});
 
-	it("does NOT override a soft status when there is an active lock (lock precedence)", () => {
+	it("keeps `payment_required` / `blocked` over usage_exhausted (independent blocks)", () => {
+		for (const stored of ["payment_required", "blocked"]) {
+			const status = presentRateLimitStatus(
+				{
+					rate_limit_status: stored,
+					rate_limit_reset: null,
+					rate_limited: 0,
+					rate_limited_until: NOW - MIN,
+				},
+				NOW,
+				{ resetMs: NOW + 12 * MIN },
+			);
+			expect(status).toBe(stored);
+		}
+	});
+
+	it("keeps an out_of_credits reason over usage_exhausted (billing, not quota)", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 5 * MIN,
+				rate_limited_reason: "out_of_credits",
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN },
+		);
+		expect(status).toBe("rate_limited (5m)");
+	});
+
+	it("overrides a soft status + active lock with usage_exhausted (cause wins)", () => {
+		// PRECEDENCE INTENTIONALLY REVERSED (was: "does NOT override a soft status
+		// when there is an active lock", expecting "rate_limited (5m)"). Same
+		// mechanism-vs-cause reversal as above.
 		const status = presentRateLimitStatus(
 			{
 				rate_limit_status: "allowed_warning",
@@ -375,6 +422,240 @@ describe("presentRateLimitStatus", () => {
 			NOW,
 			{ resetMs: NOW + 12 * MIN },
 		);
-		expect(status).toBe("rate_limited (5m)");
+		expect(status).toBe("usage_exhausted (12m)");
+	});
+
+	it("uses the LATER of the lock and the weekly reset for the countdown", () => {
+		// A lock that outlives the quota window keeps the countdown honest: the
+		// account is still not routable when the weekly window rolls.
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "rate_limited",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 40 * MIN,
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN },
+		);
+		expect(status).toBe("usage_exhausted (40m)");
+	});
+
+	it("keeps today's behavior when the weekly reset is unknown but a lock is active", () => {
+		// `resetMs: null` is ambiguous evidence — it must NOT outrank a live lock.
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 4 * MIN,
+			},
+			NOW,
+			{ resetMs: null },
+		);
+		expect(status).toBe("Rate limited (4m)");
+	});
+
+	it("labels a short 529-era cooldown on a 100%-weekly account as usage_exhausted", () => {
+		const status = presentRateLimitStatus(
+			{
+				rate_limit_status: "allowed",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 60_000, // 1-minute overload cooldown
+			},
+			NOW,
+			{ resetMs: NOW + 2760 * MIN },
+		);
+		expect(status).toBe("usage_exhausted (2760m)");
+	});
+});
+
+/**
+ * The three live Anthropic accounts that motivated this change. All three are in
+ * the IDENTICAL real state (weekly at 100%, future reset); only the presence of
+ * a still-ticking proxy cooldown differed, and that made two of them read
+ * "rate_limited" while the third read "usage_exhausted". Field values are the
+ * ones captured from the live DB / `/api/accounts`.
+ */
+describe("resolveRateLimitPresentation — captured live accounts", () => {
+	const WEEKLY_RESET = NOW + 1380 * MIN;
+
+	it("Claude-Main: `rejected` + lock 30 ms before the weekly reset ⇒ usage_exhausted", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "rejected",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: WEEKLY_RESET - 30,
+			},
+			NOW,
+			{ resetMs: WEEKLY_RESET },
+		);
+		expect(presentation.cause).toBe("usage_exhausted");
+		expect(presentation.resetMs).toBe(WEEKLY_RESET);
+		// The raw provider value is preserved for diagnostics.
+		expect(presentation.providerStatus).toBe("rejected");
+		expect(presentation.status).toBe("usage_exhausted (1380m)");
+	});
+
+	it("Claude-Backup-1: `rejected` + lock 872 ms before the weekly reset ⇒ usage_exhausted", () => {
+		const weeklyReset = NOW + 4020 * MIN;
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "rejected",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: weeklyReset - 872,
+			},
+			NOW,
+			{ resetMs: weeklyReset },
+		);
+		expect(presentation.cause).toBe("usage_exhausted");
+		expect(presentation.status).toBe("usage_exhausted (4020m)");
+	});
+
+	it("Claude-Backup-2: `allowed_warning`, expired lock ⇒ usage_exhausted (unchanged)", () => {
+		const weeklyReset = NOW + 2760 * MIN;
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 0,
+				rate_limited_until: NOW - 5 * MIN,
+			},
+			NOW,
+			{ resetMs: weeklyReset },
+		);
+		expect(presentation.cause).toBe("usage_exhausted");
+		expect(presentation.resetMs).toBe(weeklyReset);
+		expect(presentation.status).toBe("usage_exhausted (2760m)");
+	});
+});
+
+describe("resolveRateLimitPresentation — structured fields", () => {
+	it("reports cause `ok` with no reset for a healthy account", () => {
+		expect(resolveRateLimitPresentation(OK_FIELDS, NOW)).toEqual({
+			cause: "ok",
+			resetMs: null,
+			providerStatus: null,
+			status: "OK",
+		});
+	});
+
+	it("normalizes `rejected` to the rate_limited cause, preserving the raw value", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "rejected",
+				rate_limit_reset: NOW + 9 * MIN,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.providerStatus).toBe("rejected");
+		expect(presentation.resetMs).toBe(NOW + 9 * MIN);
+		expect(presentation.status).toBe("rejected (9m)");
+	});
+
+	it("keeps the lock countdown for `rejected` under an active lock (not in the hard set)", () => {
+		// `rejected` is deliberately NOT promoted to ACCOUNT_WIDE_HARD_STATUSES, so
+		// the stale-status-under-lock branch still rewrites it — unchanged behavior.
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "rejected",
+				rate_limit_reset: NOW + 9 * MIN,
+				rate_limited: 1,
+				rate_limited_until: NOW + 3 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.resetMs).toBe(NOW + 3 * MIN);
+		expect(presentation.status).toBe("rate_limited (3m)");
+	});
+
+	it("reports the lock deadline as the reset when a stale soft status is overridden", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 7 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.resetMs).toBe(NOW + 7 * MIN);
+		expect(presentation.providerStatus).toBe("allowed_warning");
+		expect(presentation.status).toBe("rate_limited (7m)");
+	});
+
+	it("maps soft statuses to their own causes", () => {
+		expect(
+			resolveRateLimitPresentation(
+				{ ...OK_FIELDS, rate_limit_status: "allowed" },
+				NOW,
+			).cause,
+		).toBe("allowed");
+		expect(
+			resolveRateLimitPresentation(
+				{ ...OK_FIELDS, rate_limit_status: "queueing_soft" },
+				NOW,
+			).cause,
+		).toBe("queueing_soft");
+	});
+
+	it("reports an unrecognized provider status as `unknown` and passes it through", () => {
+		const presentation = resolveRateLimitPresentation(
+			{ ...OK_FIELDS, rate_limit_status: "some_new_status" },
+			NOW,
+		);
+		// A status the vocabulary has not been taught must NOT read as fine — that
+		// is exactly how `rejected` went unnoticed — but it is not evidence of a
+		// hard block either, hence its own cause in neither set.
+		expect(presentation.cause).toBe("unknown");
+		expect(presentation.providerStatus).toBe("some_new_status");
+		// COMPATIBILITY CONTRACT: the back-compat string still carries the raw
+		// value verbatim, so the chip keeps humanizing it exactly as before.
+		expect(presentation.status).toBe("some_new_status");
+	});
+
+	it("keeps the raw countdown formatting for an unrecognized status", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				...OK_FIELDS,
+				rate_limit_status: "some_new_status",
+				rate_limit_reset: NOW + 5 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("unknown");
+		expect(presentation.status).toBe("some_new_status (5m)");
+	});
+
+	it("reports the legacy lock as a rate_limited cause", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: null,
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 4 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.resetMs).toBe(NOW + 4 * MIN);
+		expect(presentation.status).toBe("Rate limited (4m)");
+	});
+
+	it("reports usage_exhausted with a null reset when the weekly reset is unknown", () => {
+		const presentation = resolveRateLimitPresentation(OK_FIELDS, NOW, {
+			resetMs: null,
+		});
+		expect(presentation.cause).toBe("usage_exhausted");
+		expect(presentation.resetMs).toBeNull();
+		expect(presentation.status).toBe("usage_exhausted");
 	});
 });

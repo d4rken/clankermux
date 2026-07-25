@@ -2,8 +2,9 @@ import type { Config } from "@clankermux/config";
 import {
 	getExhaustedFamilies,
 	isAccountAvailable,
-	normalizeAnthropicUsage,
+	isIndependentBlock,
 	TtlCache,
+	weeklyExhaustion,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
@@ -43,67 +44,6 @@ export const usageCacheResolver: AccountUsageResolver = (account) =>
 	account.provider === "anthropic" || account.provider === "codex"
 		? (usageCache.peek(account.id) as AnthropicUsageData | null)
 		: null;
-
-/** An account-level weekly window reduced to utilization + parsed reset ms. */
-interface WeeklyWindow {
-	utilization: number;
-	resetMs: number | null;
-}
-
-/**
- * The flat `seven_day_oauth_apps` window (Claude Code weekly quota) reduced to
- * {utilization, resetMs}, or null when absent / non-numeric. The normalizer's
- * account-wide `weeklyAll` deliberately does NOT capture this window, so it is
- * read directly here — mirroring the account-wide representative in
- * `getRepresentativeUtilization`.
- */
-function flatOauthAppsWindow(
-	usage: AnthropicUsageData | null | undefined,
-): WeeklyWindow | null {
-	const w = usage?.seven_day_oauth_apps;
-	if (
-		!w ||
-		typeof w.utilization !== "number" ||
-		!Number.isFinite(w.utilization)
-	)
-		return null;
-	const ms = w.resets_at ? Date.parse(w.resets_at) : null;
-	return {
-		utilization: w.utilization,
-		resetMs: ms !== null && Number.isFinite(ms) ? ms : null,
-	};
-}
-
-/**
- * Account-wide weekly exhaustion: EITHER the normalized `weeklyAll` window
- * (flat `seven_day` / limits `weekly_all`) OR the flat `seven_day_oauth_apps`
- * window (Claude Code weekly quota) is at/above 100% with a KNOWN FUTURE reset.
- * A past/absent reset is treated as stale/unknown (not exhausted) so we never
- * sideline an account on ambiguous evidence. When more than one window is spent,
- * `resetMs` is the LATEST future reset — the account stays exhausted until all
- * binding windows clear. Family-scoped windows are deliberately NOT considered
- * here (they are per-model, surfaced as detail only).
- */
-export function weeklyExhaustion(
-	usage: AnthropicUsageData | null | undefined,
-	now: number,
-): { exhausted: boolean; resetMs: number | null } {
-	const windows: WeeklyWindow[] = [];
-	const weeklyAll = normalizeAnthropicUsage(usage, now).weeklyAll;
-	if (weeklyAll) windows.push(weeklyAll);
-	const oauth = flatOauthAppsWindow(usage);
-	if (oauth) windows.push(oauth);
-
-	let exhausted = false;
-	let resetMs: number | null = null;
-	for (const w of windows) {
-		if (w.utilization >= 100 && w.resetMs !== null && w.resetMs > now) {
-			exhausted = true;
-			resetMs = resetMs === null ? w.resetMs : Math.max(resetMs, w.resetMs);
-		}
-	}
-	return { exhausted, resetMs };
-}
 
 export function computePoolStatus(
 	accounts: Account[],
@@ -285,12 +225,31 @@ export function createHealthHandler(
 					a.rate_limited_until >= now
 				);
 				const usage = getUsage(a);
-				// Account-wide weekly exhaustion sidelines the whole account (status
-				// `usage_exhausted`), but only when it isn't already paused/locked.
-				const { exhausted, resetMs } =
-					a.paused || locked
-						? { exhausted: false, resetMs: null }
-						: weeklyExhaustion(usage, now);
+				// Account-wide weekly exhaustion sidelines the whole account. A live
+				// cooldown lock does NOT hide it: the lock is the mechanism, the spent
+				// weekly window is the cause, and reporting the mechanism made
+				// identically-exhausted accounts read differently depending on whether
+				// a cooldown happened to still be ticking. Paused stays excluded — a
+				// paused account is not routable for an unrelated reason.
+				const { exhausted, resetMs } = a.paused
+					? { exhausted: false, resetMs: null }
+					: weeklyExhaustion(usage, now);
+				// …with ONE carve-out, shared with `/api/accounts` via
+				// `isIndependentBlock`: an administrative/billing block (a stored
+				// `payment_required` / `blocked`, or an `out_of_credits` cooldown) is
+				// not explained by a spent quota, and reporting `usage_exhausted`
+				// there would tell the operator to wait for a weekly reset when the
+				// real action is to pay. Gated to LOCKED accounts on purpose: an
+				// unlocked account with a stored `payment_required` is still routable
+				// (`isAccountAvailable` is true), so its spent weekly window is the
+				// more accurate health headline. A locked account with a GENERIC lock
+				// still yields to `usage_exhausted`.
+				const weeklyTakesHeadline =
+					exhausted &&
+					!(
+						locked &&
+						isIndependentBlock(a.rate_limit_status, a.rate_limited_reason)
+					);
 				// Family-scoped exhaustion is DETAIL only — it never changes the
 				// account's routability, so it's surfaced without touching `status`.
 				const scopedFamilies = getExhaustedFamilies(usage, now).map(
@@ -299,12 +258,14 @@ export function createHealthHandler(
 
 				const detail: AccountDetail = {
 					name: a.name,
+					// Cause before mechanism: `usage_exhausted` outranks the cooldown
+					// lock. The lock itself is still reported in the fields below.
 					status: a.paused
 						? "paused"
-						: locked
-							? "rate_limited"
-							: exhausted
-								? "usage_exhausted"
+						: weeklyTakesHeadline
+							? "usage_exhausted"
+							: locked
+								? "rate_limited"
 								: "available",
 					rate_limited_until: locked ? (a.rate_limited_until ?? null) : null,
 					rate_limited_reason: locked ? (a.rate_limited_reason ?? null) : null,

@@ -633,6 +633,234 @@ describe("?detail=1 parameter", () => {
 		}
 	});
 
+	it("reports usage_exhausted for a LOCKED weekly-exhausted account (cause over mechanism)", async () => {
+		// The lock is the MECHANISM (a cooldown row exists); the spent weekly window
+		// is the CAUSE. Previously the detail view skipped the weekly evaluation
+		// entirely for locked accounts and reported "rate_limited".
+		const id = "health-exh-locked-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "exhausted-and-locked",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: Date.now() + 600_000,
+						rate_limited_reason: "weekly_exhausted_429",
+						rate_limited_at: Date.now(),
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
+			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
+				"number",
+			);
+			// The lock is still reported as detail — only the headline changes.
+			expect(typeof body.accounts_detail?.[0]?.rate_limited_until).toBe(
+				"number",
+			);
+			expect(body.accounts_detail?.[0]?.rate_limited_reason).toBe(
+				"weekly_exhausted_429",
+			);
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	/**
+	 * …with ONE carve-out, shared with /api/accounts via `isIndependentBlock`:
+	 * an administrative/billing block is not explained by a spent quota, so a
+	 * LOCKED account in that state keeps `rate_limited`. Otherwise the two API
+	 * surfaces would disagree and the operator would be told to wait for a weekly
+	 * reset when the real action is to pay.
+	 */
+	describe("independent-block carve-out", () => {
+		async function detailStatusFor(row: {
+			id: string;
+			rate_limit_status?: string | null;
+			rate_limited_reason?: string | null;
+			rate_limited_until?: number | null;
+		}): Promise<string | undefined> {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id: row.id,
+						name: row.id,
+						provider: "anthropic",
+						paused: false,
+						rate_limit_status: row.rate_limit_status ?? null,
+						rate_limited_until: row.rate_limited_until ?? null,
+						rate_limited_reason: row.rate_limited_reason ?? null,
+						rate_limited_at: row.rate_limited_until ? Date.now() : null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+			return body.accounts_detail?.[0]?.status as string | undefined;
+		}
+
+		/** Run `fn` with a 100%-weekly usage payload seeded for `id`. */
+		async function withExhaustedUsage(
+			id: string,
+			fn: () => Promise<void>,
+		): Promise<void> {
+			usageCache.set(
+				id,
+				weeklyAllUsage(100, new Date(Date.now() + 3_600_000).toISOString()),
+			);
+			try {
+				await fn();
+			} finally {
+				usageCache.delete(id);
+			}
+		}
+
+		it("locked + out_of_credits + weekly 100% ⇒ rate_limited (pay, don't wait)", async () => {
+			const id = "health-exh-credits";
+			await withExhaustedUsage(id, async () => {
+				expect(
+					await detailStatusFor({
+						id,
+						rate_limited_reason: "out_of_credits",
+						rate_limited_until: Date.now() + 600_000,
+					}),
+				).toBe("rate_limited");
+			});
+		});
+
+		it("locked + stored payment_required + weekly 100% ⇒ rate_limited", async () => {
+			const id = "health-exh-payment";
+			await withExhaustedUsage(id, async () => {
+				expect(
+					await detailStatusFor({
+						id,
+						rate_limit_status: "payment_required",
+						rate_limited_reason: "model_fallback_429",
+						rate_limited_until: Date.now() + 600_000,
+					}),
+				).toBe("rate_limited");
+			});
+		});
+
+		it("locked + GENERIC reason + weekly 100% ⇒ usage_exhausted (cause still wins)", async () => {
+			const id = "health-exh-generic";
+			await withExhaustedUsage(id, async () => {
+				expect(
+					await detailStatusFor({
+						id,
+						rate_limit_status: "rejected",
+						rate_limited_reason: "model_fallback_429",
+						rate_limited_until: Date.now() + 600_000,
+					}),
+				).toBe("usage_exhausted");
+			});
+		});
+
+		it("UNLOCKED + stored payment_required + weekly 100% ⇒ usage_exhausted", async () => {
+			// An unlocked account is still routable (isAccountAvailable is true), so
+			// its spent weekly window is the more accurate health headline.
+			const id = "health-exh-unlocked";
+			await withExhaustedUsage(id, async () => {
+				expect(
+					await detailStatusFor({
+						id,
+						rate_limit_status: "payment_required",
+						rate_limited_until: null,
+					}),
+				).toBe("usage_exhausted");
+			});
+		});
+	});
+
+	it("keeps rate_limited for a locked account whose weekly window has headroom", async () => {
+		const id = "health-locked-healthy-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(42, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "locked-only",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: Date.now() + 600_000,
+						rate_limited_reason: "model_fallback_429",
+						rate_limited_at: Date.now(),
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("keeps paused ahead of usage_exhausted (a paused account is not routable for another reason)", async () => {
+		const id = "health-paused-exhausted-1";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "paused-and-exhausted",
+						provider: "anthropic",
+						paused: true,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("paused");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
 	it("marks an account with a spent seven_day_oauth_apps as usage_exhausted in accounts_detail", async () => {
 		const id = "health-oauth-acct-1";
 		const futureIso = new Date(Date.now() + 3_600_000).toISOString();

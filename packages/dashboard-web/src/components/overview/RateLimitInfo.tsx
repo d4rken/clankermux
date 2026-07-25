@@ -1,4 +1,8 @@
 import type { AccountResponse } from "@clankermux/types";
+import {
+	HARD_RATE_LIMIT_CAUSES,
+	NON_LIMITED_RATE_LIMIT_CAUSES,
+} from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
 import {
 	Card,
@@ -10,15 +14,42 @@ import {
 
 interface RateLimitInfoProps {
 	accounts: AccountResponse[];
+	/** Injectable clock (tests). */
+	now?: number;
 }
 
-export function RateLimitInfo({ accounts }: RateLimitInfoProps) {
-	const rateLimitedAccounts = accounts.filter((acc) => {
-		const status = acc.rateLimitStatus.toLowerCase();
-		return (
-			status !== "ok" && status !== "paused" && !status.startsWith("allowed")
-		);
-	});
+/** Is this account limited right now? Prefers the API's structured cause. */
+function isLimited(account: AccountResponse): boolean {
+	if (account.rateLimitCause) {
+		return !NON_LIMITED_RATE_LIMIT_CAUSES.has(account.rateLimitCause);
+	}
+	const status = account.rateLimitStatus.toLowerCase();
+	return (
+		status !== "ok" && status !== "paused" && !status.startsWith("allowed")
+	);
+}
+
+/** Blocked account-wide (red) vs merely warning/queueing (amber). */
+function isHardLimited(account: AccountResponse): boolean {
+	if (account.rateLimitCause) {
+		return HARD_RATE_LIMIT_CAUSES.has(account.rateLimitCause);
+	}
+	const status = account.rateLimitStatus.toLowerCase();
+	return (
+		status.includes("hard") ||
+		(status.includes("limit") && !status.includes("warning"))
+	);
+}
+
+export function RateLimitInfo({
+	accounts,
+	now = Date.now(),
+}: RateLimitInfoProps) {
+	// Paused accounts are excluded: they are out of rotation for an unrelated
+	// reason and their stored rate-limit state is frozen, not live.
+	const rateLimitedAccounts = accounts.filter(
+		(acc) => !acc.paused && isLimited(acc),
+	);
 
 	if (rateLimitedAccounts.length === 0) {
 		return null;
@@ -33,24 +64,24 @@ export function RateLimitInfo({ accounts }: RateLimitInfoProps) {
 			<CardContent>
 				<div className="space-y-3">
 					{rateLimitedAccounts.map((account) => {
-						const resetTime = account.rateLimitReset
-							? new Date(account.rateLimitReset)
-							: null;
-						const now = new Date();
-						const timeUntilReset = resetTime
-							? Math.max(0, resetTime.getTime() - now.getTime())
-							: null;
-						const minutesLeft = timeUntilReset
-							? Math.ceil(timeUntilReset / 60000)
-							: null;
+						// The cause's own reset is authoritative — `rateLimitReset` is the
+						// raw provider header and can disagree with the countdown baked
+						// into the status string (e.g. when weekly exhaustion outranks a
+						// shorter cooldown lock).
+						const resetMs =
+							account.rateLimitCauseResetMs ??
+							(account.rateLimitReset
+								? new Date(account.rateLimitReset).getTime()
+								: null);
+						const resetTime = resetMs !== null ? new Date(resetMs) : null;
+						const minutesLeft =
+							resetMs !== null && resetMs > now
+								? Math.ceil((resetMs - now) / 60000)
+								: null;
 
-						const statusLower = account.rateLimitStatus.toLowerCase();
-						const isHardLimit =
-							statusLower.includes("hard") ||
-							(statusLower.includes("limit") &&
-								!statusLower.includes("warning"));
-						const bgClass = isHardLimit ? "bg-destructive/10" : "bg-warning/10";
-						const iconColor = isHardLimit ? "text-destructive" : "text-warning";
+						const hardLimited = isHardLimited(account);
+						const bgClass = hardLimited ? "bg-destructive/10" : "bg-warning/10";
+						const iconColor = hardLimited ? "text-destructive" : "text-warning";
 
 						return (
 							<div
@@ -72,7 +103,7 @@ export function RateLimitInfo({ accounts }: RateLimitInfoProps) {
 									{resetTime && (
 										<>
 											<p className="text-sm font-medium">
-												Resets in {minutesLeft}m
+												Resets in {minutesLeft ?? 0}m
 											</p>
 											<p className="text-xs text-muted-foreground">
 												{resetTime.toLocaleTimeString(undefined, {

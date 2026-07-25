@@ -110,6 +110,7 @@ export {
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
+export * from "./rate-limit-status";
 export * from "./request-events";
 export {
 	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
@@ -149,3 +150,8 @@ export {
 	getVersionSync,
 	trackClientVersion,
 } from "./version";
+export {
+	flatOauthAppsWindow,
+	type WeeklyWindow,
+	weeklyExhaustion,
+} from "./weekly-exhaustion";

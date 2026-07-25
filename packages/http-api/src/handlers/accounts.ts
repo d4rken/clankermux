@@ -1,14 +1,19 @@
 import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
+	ACCOUNT_WIDE_HARD_STATUSES,
 	isAnthropicUsageShape,
+	isIndependentBlock,
 	patterns,
+	providerStatusToCause,
+	type RateLimitCause,
 	sanitizers,
 	TIME_CONSTANTS,
 	validateAndSanitizeModelMappings,
 	validateNumber,
 	validatePriority,
 	validateString,
+	weeklyExhaustion,
 } from "@clankermux/core";
 import type {
 	CodexResetCreditEventRow,
@@ -67,6 +72,7 @@ import type {
 } from "@clankermux/types";
 import {
 	computeDuplicateAccountFlags,
+	isRateLimitReason,
 	microsToUsd,
 	requiresSessionDurationTracking,
 	usdToMicros,
@@ -83,28 +89,19 @@ import {
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
-import { weeklyExhaustion } from "./health";
 
 const log = new Logger("AccountsHandler");
 
-const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
-	"upstream_429_with_reset",
-	// Kept for backwards-compat with DB rows written by ccflare ≤ v3.5.x;
-	// new code emits `upstream_429_no_reset_probe_cooldown` instead.
-	"upstream_429_no_reset_default_5h",
-	"upstream_429_no_reset_probe_cooldown",
-	"model_fallback_429",
-	"all_models_exhausted_429",
-	"upstream_529_overloaded_with_reset",
-	"upstream_529_overloaded_no_reset",
-	"out_of_credits",
-]);
-
+/**
+ * Validate a stored `rate_limited_reason` for the API response. Backed by
+ * `RATE_LIMIT_REASONS` in `@clankermux/types`, the same runtime tuple the
+ * `RateLimitReason` union is derived from — a hand-maintained allowlist used to
+ * live here and silently nulled `family_weekly_exhausted_429`, hiding its
+ * dashboard error card. Unknown (e.g. far-future) values still degrade to null.
+ */
 function toRateLimitReason(v: string | null): RateLimitReason | null {
 	if (v === null) return null;
-	return RATE_LIMIT_REASONS.has(v as RateLimitReason)
-		? (v as RateLimitReason)
-		: null;
+	return isRateLimitReason(v) ? v : null;
 }
 
 /**
@@ -143,110 +140,207 @@ const STALE_USAGE_MAX_AGE_MS = 2 * SNAPSHOT_SAMPLE_INTERVAL_MS;
 /**
  * Status prefixes that mean the account is actually blocked (vs soft warnings
  * like "allowed_warning" / "queueing_soft" which mean it is still usable).
- * Must mirror HARD_LIMIT_PREFIXES in
- * packages/dashboard-web/src/lib/account-status.ts (http-api cannot depend on
- * dashboard-web, so the list is duplicated here).
+ * The shared vocabulary lives in `@clankermux/core`; the stored column can carry
+ * a trailing suffix, so membership is tested as a prefix match.
  */
-const HARD_LIMIT_PREFIXES = [
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-];
+const HARD_LIMIT_PREFIXES = [...ACCOUNT_WIDE_HARD_STATUSES];
+
+/** The stored account fields the rate-limit presentation is derived from. */
+interface RateLimitFields {
+	rate_limit_status: string | null;
+	rate_limit_reset: number | string | null;
+	rate_limited: boolean | 0 | 1 | null;
+	rate_limited_until: number | string | null;
+	/** Why the proxy last cooled the account down; drives the billing carve-out. */
+	rate_limited_reason?: string | null;
+}
+
+/** The resolved, display-ready rate-limit state of an account. */
+export interface RateLimitPresentation {
+	/** Normalized, machine-readable cause. */
+	cause: RateLimitCause;
+	/** Epoch ms when the cause is expected to clear; null when unknown. */
+	resetMs: number | null;
+	/** Raw stored provider status, for diagnostics (may be an unrecognized value). */
+	providerStatus: string | null;
+	/** Back-compat `<base> (Nm)` projection — derived here so it cannot drift. */
+	status: string;
+}
+
+/** `<base>` or `<base> (Nm)` when the reset is a known future time. */
+function withCountdown(base: string, resetMs: number | null, now: number) {
+	if (resetMs === null || resetMs <= now) return base;
+	return `${base} (${Math.ceil((resetMs - now) / 60000)}m)`;
+}
 
 /**
- * Compute the display-ready rateLimitStatus string for an account.
+ * Resolve an account's rate-limit state into ONE decision that drives both the
+ * structured API fields and the back-compat `rateLimitStatus` string.
  *
- * The stored `rate_limit_status` comes from upstream response headers and can
- * go stale: once the proxy locks an account (`rate_limited_until` in the
- * future, e.g. via the model_fallback_429 cooldown), no responses arrive to
- * refresh it, so a soft "allowed_warning" can linger while the account is in
- * fact blocked. When an active lock exists and the stored status is not
- * already hard, present `rate_limited (Nm)` instead — the dashboard's
- * RateLimitStatusChip keys on the normalized `rate_limited` base and renders
- * the red "Rate limited" chip.
+ * The stored `rate_limit_status` comes from upstream response headers and can go
+ * stale: once the proxy locks an account (`rate_limited_until` in the future,
+ * e.g. via the model_fallback_429 cooldown), no responses arrive to refresh it,
+ * so a soft "allowed_warning" can linger while the account is in fact blocked.
+ *
+ * Precedence is CAUSE-WINS:
+ *
+ *  1. Independent blocks keep their own label — a stored `payment_required` /
+ *     `blocked`, or an `out_of_credits` cooldown reason. These are
+ *     administrative/billing states that a spent quota does not explain.
+ *  2. Account-wide weekly exhaustion with a known future reset wins over every
+ *     generic throttle signal. A cooldown lock, `rate_limited`, `queueing_hard`
+ *     and `rejected` are all throttle MECHANISMS; the spent weekly window is the
+ *     CAUSE, and reporting the mechanism is what made three identically-exhausted
+ *     accounts read differently depending on whether a lock happened to still be
+ *     ticking. The countdown is the LATER of the weekly reset and the lock, so it
+ *     stays honest if a lock outlives the quota window.
+ *  3. Otherwise: an active lock over a non-hard stored status surfaces the lock;
+ *     a hard stored status passes through; then the legacy `rate_limited` flag;
+ *     then weekly exhaustion with an unknown reset; else OK.
  *
  * Pure (caller injects `now`) so it can be unit tested directly.
  */
-export function presentRateLimitStatus(
-	fields: {
-		rate_limit_status: string | null;
-		rate_limit_reset: number | string | null;
-		rate_limited: boolean | 0 | 1 | null;
-		rate_limited_until: number | string | null;
-	},
+export function resolveRateLimitPresentation(
+	fields: RateLimitFields,
 	now: number,
 	/**
 	 * Account-wide weekly exhaustion (weeklyAll >= 100 with a future reset), when
-	 * known. When the account has no live rate-limit lock/status (would read
-	 * "OK"), surface `usage_exhausted (Nm)` instead so a 100%-weekly-not-yet-cooled
-	 * account stops reading "OK". Display-only — does not affect routing.
+	 * known. Display-only — does not affect routing.
 	 */
 	weeklyExhausted?: { resetMs: number | null } | null,
-): string {
+): RateLimitPresentation {
+	const providerStatus = fields.rate_limit_status || null;
 	const lockMs = fields.rate_limited_until
 		? Number(fields.rate_limited_until)
 		: 0;
 	const hasActiveLock = lockMs > now;
-
-	// The label for account-wide weekly exhaustion (with a countdown when the reset
-	// is a known future time). Only meaningful when `weeklyExhausted` is set.
-	const usageExhaustedLabel = (): string => {
-		const resetMs = weeklyExhausted?.resetMs ?? null;
-		if (resetMs !== null && resetMs > now) {
-			const minutesLeft = Math.ceil((resetMs - now) / 60000);
-			return `usage_exhausted (${minutesLeft}m)`;
-		}
-		return "usage_exhausted";
-	};
-
-	if (fields.rate_limit_status) {
-		const storedIsHard = HARD_LIMIT_PREFIXES.some((prefix) =>
-			fields.rate_limit_status?.toLowerCase().startsWith(prefix),
+	const storedIsHard =
+		providerStatus !== null &&
+		HARD_LIMIT_PREFIXES.some((prefix) =>
+			providerStatus.toLowerCase().startsWith(prefix),
 		);
+	// A provider status the vocabulary has not been taught becomes `unknown`,
+	// which is in NEITHER cause set: the account reads as limited (we cannot tell
+	// that it is fine — that is exactly how `rejected` went unnoticed) but not as
+	// an account-wide hard block (so Force Reset stays governed by the lock alone).
+	// The raw value is carried in `providerStatus`, and the back-compat `status`
+	// string still passes it through verbatim, so the chip humanizes it as before.
+	const storedCause: RateLimitCause | null = providerStatus
+		? (providerStatusToCause(providerStatus) ?? "unknown")
+		: null;
+
+	// 1. Administrative / billing blocks are not explained by a spent quota.
+	//    Shared with `/health?detail=1` so the two surfaces cannot drift.
+	const independentBlock = isIndependentBlock(
+		providerStatus,
+		fields.rate_limited_reason,
+	);
+
+	// 2. Weekly exhaustion outranks every generic throttle mechanism.
+	const weeklyResetMs = weeklyExhausted?.resetMs ?? null;
+	if (
+		weeklyExhausted &&
+		!independentBlock &&
+		weeklyResetMs !== null &&
+		weeklyResetMs > now
+	) {
+		const resetMs = Math.max(weeklyResetMs, lockMs);
+		return {
+			cause: "usage_exhausted",
+			resetMs,
+			providerStatus,
+			status: withCountdown("usage_exhausted", resetMs, now),
+		};
+	}
+
+	// 3. Today's logic, unchanged.
+	if (providerStatus !== null && storedCause !== null) {
 		if (hasActiveLock && !storedIsHard) {
 			// Stale soft status while the proxy lock is active — surface the lock.
-			const minutesLeft = Math.ceil((lockMs - now) / 60000);
-			return `rate_limited (${minutesLeft}m)`;
+			return {
+				cause: "rate_limited",
+				resetMs: lockMs,
+				providerStatus,
+				status: withCountdown("rate_limited", lockMs, now),
+			};
 		}
 		// A SOFT stored status (allowed/allowed_warning/…) does NOT block the
 		// account, but account-wide weekly exhaustion does. With no active lock and
-		// a spent weekly window, surface `usage_exhausted` instead of the reassuring
-		// soft status. An active lock or a genuinely HARD stored status keeps
-		// precedence (handled above / below).
+		// a spent weekly window (reset unknown), surface `usage_exhausted` instead
+		// of the reassuring soft status.
 		if (!hasActiveLock && !storedIsHard && weeklyExhausted) {
-			return usageExhaustedLabel();
+			return {
+				cause: "usage_exhausted",
+				resetMs: null,
+				providerStatus,
+				status: "usage_exhausted",
+			};
 		}
-		const resetMs = Number(fields.rate_limit_reset);
-		if (resetMs && resetMs > now) {
-			const minutesLeft = Math.ceil((resetMs - now) / 60000);
-			return `${fields.rate_limit_status} (${minutesLeft}m)`;
+		const providerResetMs = Number(fields.rate_limit_reset);
+		if (providerResetMs && providerResetMs > now) {
+			return {
+				cause: storedCause,
+				resetMs: providerResetMs,
+				providerStatus,
+				status: withCountdown(providerStatus, providerResetMs, now),
+			};
 		}
 		if (hasActiveLock) {
 			// Hard stored status with an active proxy lock but no usable provider
-			// reset (null or already past) — fall back to the lock-based countdown
-			// so the chip still shows when the block lifts. A provider
-			// rate_limit_reset that is set and in the future wins (above).
-			const minutesLeft = Math.ceil((lockMs - now) / 60000);
-			return `${fields.rate_limit_status} (${minutesLeft}m)`;
+			// reset (null or already past) — fall back to the lock-based countdown so
+			// the chip still shows when the block lifts. A provider rate_limit_reset
+			// that is set and in the future wins (above).
+			return {
+				cause: storedCause,
+				resetMs: lockMs,
+				providerStatus,
+				status: withCountdown(providerStatus, lockMs, now),
+			};
 		}
-		return fields.rate_limit_status;
+		return {
+			cause: storedCause,
+			resetMs: null,
+			providerStatus,
+			status: providerStatus,
+		};
 	}
 
 	if (fields.rate_limited && hasActiveLock) {
 		// Fall back to legacy rate limit check
-		const minutesLeft = Math.ceil((lockMs - now) / 60000);
-		return `Rate limited (${minutesLeft}m)`;
+		return {
+			cause: "rate_limited",
+			resetMs: lockMs,
+			providerStatus,
+			status: withCountdown("Rate limited", lockMs, now),
+		};
 	}
 
 	// No live lock/status: a 100%-weekly account is genuinely blocked for
 	// account-wide requests even though nothing has cooled it yet — surface it
 	// rather than a misleading "OK".
 	if (weeklyExhausted) {
-		return usageExhaustedLabel();
+		return {
+			cause: "usage_exhausted",
+			resetMs: null,
+			providerStatus,
+			status: "usage_exhausted",
+		};
 	}
 
-	return "OK";
+	return { cause: "ok", resetMs: null, providerStatus, status: "OK" };
+}
+
+/**
+ * The display-ready `rateLimitStatus` string for an account — a thin projection
+ * of {@link resolveRateLimitPresentation} so the string and the structured
+ * fields can never disagree.
+ */
+export function presentRateLimitStatus(
+	fields: RateLimitFields,
+	now: number,
+	weeklyExhausted?: { resetMs: number | null } | null,
+): string {
+	return resolveRateLimitPresentation(fields, now, weeklyExhausted).status;
 }
 
 export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
@@ -764,16 +858,18 @@ export function createAccountsListHandler(
 					if (exhausted) weeklyExhausted = { resetMs };
 				}
 
-				const rateLimitStatus = presentRateLimitStatus(
+				const rateLimitPresentation = resolveRateLimitPresentation(
 					{
 						rate_limit_status: account.rate_limit_status,
 						rate_limit_reset: account.rate_limit_reset,
 						rate_limited: account.rate_limited,
 						rate_limited_until: account.rate_limited_until,
+						rate_limited_reason: account.rate_limited_reason,
 					},
 					now,
 					weeklyExhausted,
 				);
+				const rateLimitStatus = rateLimitPresentation.status;
 				// Codex-only credits state for the response chip; null for other
 				// providers or when unknown. Prefer the resolved usage object, but
 				// fall back to the RAW cached usage: normalizeCodexUsageData returns
@@ -1030,6 +1126,9 @@ export function createAccountsListHandler(
 						? new Date(Number(account.expires_at)).toISOString()
 						: null,
 					rateLimitStatus,
+					rateLimitCause: rateLimitPresentation.cause,
+					rateLimitCauseResetMs: rateLimitPresentation.resetMs,
+					rateLimitProviderStatus: rateLimitPresentation.providerStatus,
 					rateLimitReset: account.rate_limit_reset
 						? new Date(Number(account.rate_limit_reset)).toISOString()
 						: null,
