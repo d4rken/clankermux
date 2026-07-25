@@ -565,6 +565,45 @@ describe("pricing-miss registry", () => {
 		expect(truncated?.provider).toBe("provider");
 	});
 
+	it("strips C1 controls and formatting overrides, not just C0", async () => {
+		// U+009B is a single-character CSI and U+0085 a line break: a C0-only
+		// strip leaves both intact, so an id like this still injects terminal
+		// escapes into the console and forges lines in the log. U+202E flips the
+		// visual order of everything after it in the dashboard row.
+		const c1Noisy = "evil\u0085model\u009B[31mname\u202Edaeh";
+
+		await estimateCostUSD(c1Noisy, io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gap = getPricingGaps()[0];
+		expect(gap.modelId).toBe("evilmodel[31mnamedaeh");
+		expect(gap.provider).toBe("anthropic");
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.modelId)).toBe(false);
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.provider)).toBe(false);
+	});
+
+	it("logs only the typed reason, never the raw lookup error", async () => {
+		const warnings = captureMissWarnings();
+		// The lookup error message embeds the model id verbatim, so logging it
+		// would put the untruncated, uncleaned client string on the console —
+		// straight past both the length cap and the control-character strip.
+		const hostile = `${"x".repeat(5_000)}\u009B[2J\u0085forged log line`;
+
+		await estimateCostUSD(hostile, io, { provider: "anthropic", ...report });
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("(reason: model_missing)");
+		expect(warnings[0]).not.toContain("not found in pricing catalogue");
+		expect(warnings[0]).not.toContain("forged log line");
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(warnings[0])).toBe(false);
+		// One bounded model label + one bounded provider label + fixed wording.
+		expect(warnings[0].length).toBeLessThanOrEqual(
+			__pricingTestHooks.maxModelIdLength + 200,
+		);
+	});
+
 	it("keeps model ids distinct when their truncated labels collide", async () => {
 		// Truncation is a DISPLAY concern. Keying on the clipped label would fold
 		// every id sharing a 256-character prefix into one entry and sum their

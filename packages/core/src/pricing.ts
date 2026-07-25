@@ -331,13 +331,28 @@ function digestKey(...parts: string[]): string {
 }
 
 /**
- * Strip control characters and bound the length of an untrusted label before it
+ * Characters removed from an untrusted label before it is stored, logged, or
+ * served over the `/api/*` surface:
+ *
+ *  - `Cc` — ALL Unicode controls, both the C0 block plus DEL and the C1 block
+ *    (U+0080–U+009F). C1 matters as much as C0: U+009B is a single-character
+ *    CSI, so a C0-only strip still lets a model id smuggle terminal escape
+ *    sequences into console output.
+ *  - `Cf` — formatting controls, which include the bidirectional overrides
+ *    (U+202E and friends) that can visually reorder a log line or a dashboard
+ *    row so it reads as something it is not.
+ *  - `Zl`/`Zp` — the line and paragraph separators, which forge a line break in
+ *    a log file the same way a raw newline would.
+ */
+const UNSAFE_LABEL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * Strip unsafe characters and bound the length of an untrusted label before it
  * is stored (and later served over the unauthenticated `/api/*` surface).
  */
 function sanitizeLabel(value: string | undefined, maxLength: number): string {
 	if (!value) return UNKNOWN_PRICING_LABEL;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
-	const stripped = value.replace(/[\u0000-\u001F\u007F]/g, "").trim();
+	const stripped = value.replace(UNSAFE_LABEL_CHARS, "").trim();
 	if (stripped.length === 0) return UNKNOWN_PRICING_LABEL;
 	return stripped.slice(0, maxLength);
 }
@@ -840,7 +855,6 @@ class PriceCatalogue {
 		modelId: string;
 		provider?: string;
 		reason: PricingGapReason;
-		error?: Error | string;
 		report: boolean;
 		now?: number;
 	}): void {
@@ -853,7 +867,7 @@ class PriceCatalogue {
 			MAX_PRICING_MISS_PROVIDER_LENGTH,
 		);
 
-		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.error);
+		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.reason);
 
 		if (!opts.report) return;
 
@@ -894,12 +908,18 @@ class PriceCatalogue {
 	 *
 	 * `key` is the digest of the ORIGINAL model id; `modelId`/`provider` are the
 	 * sanitized labels used for display only.
+	 *
+	 * Everything interpolated into the line is bounded: the two sanitized labels
+	 * and the typed reason. The lookup error's message is deliberately NOT
+	 * logged — it embeds the raw model id, which would smuggle the untruncated,
+	 * unsanitized client string straight past both the length cap and the
+	 * control-character strip.
 	 */
 	private warnOnce(
 		key: string,
 		modelId: string,
 		provider: string,
-		error?: Error | string,
+		reason: PricingGapReason,
 	): void {
 		if (this.warnedModels.has(key)) {
 			// Re-insert to move the entry to the most-recently-warned end.
@@ -913,11 +933,8 @@ class PriceCatalogue {
 			if (oldest.done) break;
 			this.warnedModels.delete(oldest.value);
 		}
-		const detail = error
-			? ` (reason: ${error instanceof Error ? error.message : error})`
-			: "";
 		this.logger?.warn(
-			`Price for model "${modelId}" (provider "${provider}") not found - cost set to 0${detail}`,
+			`Price for model "${modelId}" (provider "${provider}") not found - cost set to 0 (reason: ${reason})`,
 		);
 	}
 
@@ -1211,7 +1228,6 @@ export async function estimateCostUSD(
 			// model: the remediation wording covers both ("add or complete").
 			reason:
 				error instanceof PricingLookupError ? error.reason : "model_missing",
-			error: error instanceof Error ? error : String(error),
 			report:
 				context?.reportGaps === true &&
 				!(
