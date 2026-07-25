@@ -5,6 +5,7 @@ import type {
 	Request,
 	RequestResponse,
 } from "@clankermux/types";
+import { NON_LIMITED_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import {
 	formatCost,
 	formatDuration,
@@ -86,6 +87,11 @@ export class AccountPresenter {
 	}
 
 	get isRateLimited(): boolean {
+		// The API's structured cause is authoritative when present: it already
+		// accounts for weekly exhaustion, which no lock/string check can see.
+		if ("rateLimitCause" in this.account && this.account.rateLimitCause) {
+			return !NON_LIMITED_RATE_LIMIT_CAUSES.has(this.account.rateLimitCause);
+		}
 		if ("rate_limited_until" in this.account) {
 			return Boolean(
 				this.account.rate_limited_until &&

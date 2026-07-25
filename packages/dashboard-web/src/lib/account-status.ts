@@ -1,4 +1,6 @@
-import type { AccountResponse } from "@clankermux/types";
+import { ACCOUNT_WIDE_HARD_STATUSES } from "@clankermux/core";
+import type { AccountResponse, RateLimitCause } from "@clankermux/types";
+import { HARD_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
 import { computeRenewal, type RenewalUrgency } from "./renewal";
@@ -6,13 +8,10 @@ import { computeRenewal, type RenewalUrgency } from "./renewal";
 /**
  * Only these hard-limit statuses mean the account is actually blocked; soft
  * warnings like "allowed_warning" / "queueing_soft" mean it is still usable.
+ * Shared vocabulary from `@clankermux/core`; matched as a prefix because the
+ * API appends a `(Nm)` countdown to the status string.
  */
-const HARD_LIMIT_PREFIXES = [
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-];
+const HARD_LIMIT_PREFIXES = [...ACCOUNT_WIDE_HARD_STATUSES];
 
 /** Urgency of the soonest-expiring available Codex usage-reset credit. */
 export type ResetCreditUrgency = "none" | "soon" | "imminent";
@@ -50,6 +49,14 @@ export interface AccountStatus {
 	isNeedsReauth: boolean;
 	/** Unified rate-limit status string, e.g. "rate_limited (30m)" or "OK". */
 	rateLimitStatus: string;
+	/** Normalized rate-limit cause from the API; null on legacy payloads. */
+	rateLimitCause: RateLimitCause | null;
+	/** Epoch ms when the cause clears; null when unknown. */
+	rateLimitCauseResetMs: number | null;
+	/** Raw provider status behind the cause (may be an unrecognized value). */
+	rateLimitProviderStatus: string | null;
+	/** The account-wide weekly quota is spent (blocked, but self-healing). */
+	isUsageExhausted: boolean;
 	/** Whether to render the colored RateLimitStatusChip (non-paused, non-OK). */
 	showRateLimitChip: boolean;
 	/** DB rate-limit lock is set but usage data shows capacity (< 100%). */
@@ -136,15 +143,25 @@ export function deriveAccountStatus(
 		isPaused && account.pauseReason === "oauth_invalid_grant";
 	const rateLimitStatus = presenter.rateLimitStatus;
 
-	const isHardLimited = HARD_LIMIT_PREFIXES.some((prefix) =>
-		rateLimitStatus.toLowerCase().startsWith(prefix),
-	);
+	// Prefer the API's structured cause; fall back to prefix-matching the display
+	// string for legacy payloads that predate the structured fields.
+	const rateLimitCause = account.rateLimitCause ?? null;
+	const isUsageExhausted = rateLimitCause === "usage_exhausted";
+	const isHardLimited = rateLimitCause
+		? HARD_RATE_LIMIT_CAUSES.has(rateLimitCause)
+		: HARD_LIMIT_PREFIXES.some((prefix) =>
+				rateLimitStatus.toLowerCase().startsWith(prefix),
+			);
 	// Also show Force Reset when rateLimitedUntil is in the future even if the
 	// status is soft/OK — the selector still skips the account.
 	const isBlockedByLegacyLock =
 		typeof account.rateLimitedUntil === "number" &&
 		account.rateLimitedUntil > now;
-	const showForceReset = (isHardLimited || isBlockedByLegacyLock) && !isPaused;
+	// A weekly-exhausted account's lock is legitimate: force-resetting it only
+	// lets the router burn fresh 429s against a window that cannot recover before
+	// its reset, so the action is suppressed.
+	const showForceReset =
+		(isHardLimited || isBlockedByLegacyLock) && !isPaused && !isUsageExhausted;
 	// staleLockDetected only fires when numeric usage data exists (Anthropic
 	// accounts); Zai accounts have usageUtilization === null and are excluded.
 	const staleLockDetected =
@@ -275,7 +292,13 @@ export function deriveAccountStatus(
 		isSubscriptionExpired,
 		isNeedsReauth,
 		rateLimitStatus,
-		showRateLimitChip: !isPaused && rateLimitStatus !== "OK",
+		rateLimitCause,
+		rateLimitCauseResetMs: account.rateLimitCauseResetMs ?? null,
+		rateLimitProviderStatus: account.rateLimitProviderStatus ?? null,
+		isUsageExhausted,
+		showRateLimitChip:
+			!isPaused &&
+			(rateLimitCause ? rateLimitCause !== "ok" : rateLimitStatus !== "OK"),
 		staleLockDetected,
 		isUsageThrottled,
 		providerOverloadedUntil,

@@ -1,29 +1,104 @@
 import { microsToUsd } from "./payment";
 import type { AccountUsagePrediction } from "./usage-prediction";
 
-export type RateLimitReason =
-	| "upstream_429_with_reset"
+/**
+ * Normalized, machine-readable reason an account is (or is not) limited right
+ * now — the single vocabulary shared by the API, the dashboard chips and the
+ * `/health` detail view. Derived from the provider's unified rate-limit status,
+ * the proxy's own cooldown lock and the account's usage windows.
+ *
+ * Lives in `@clankermux/types` (not `@clankermux/core`) because `AccountResponse`
+ * and `@clankermux/ui-common` both need it and neither may depend on core.
+ * `@clankermux/core` re-exports it alongside the provider-status sets so the
+ * server-side vocabulary still has one import site.
+ */
+export type RateLimitCause =
+	| "ok"
+	| "allowed"
+	| "allowed_warning"
+	| "queueing_soft"
+	| "queueing_hard"
+	| "rate_limited"
+	| "blocked"
+	| "payment_required"
+	| "usage_exhausted"
+	/**
+	 * The provider reported a status the vocabulary has not been taught (a new or
+	 * renamed `anthropic-ratelimit-unified-status` value). Deliberately a member
+	 * of NEITHER {@link NON_LIMITED_RATE_LIMIT_CAUSES} nor
+	 * {@link HARD_RATE_LIMIT_CAUSES}: we do not understand this account's state,
+	 * so it must not read as "fine" (that is exactly how `rejected` went
+	 * unnoticed) and must not be asserted as an account-wide block either.
+	 */
+	| "unknown";
+
+/**
+ * Causes that mean the account is NOT limited right now. Everything else —
+ * including `unknown` — means requests are being delayed, queued or refused, or
+ * that we cannot tell.
+ */
+export const NON_LIMITED_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
+	new Set<RateLimitCause>(["ok", "allowed", "allowed_warning"]);
+
+/**
+ * Causes that block the account account-wide (as opposed to soft warnings /
+ * queueing). `usage_exhausted` is included: a spent weekly window blocks the
+ * account just as effectively as a provider-side `rate_limited`. `unknown` is
+ * NOT included — an unrecognized status is not evidence of a hard block, so it
+ * must not enable destructive affordances such as Force Reset.
+ */
+export const HARD_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
+	new Set<RateLimitCause>([
+		"queueing_hard",
+		"rate_limited",
+		"blocked",
+		"payment_required",
+		"usage_exhausted",
+	]);
+
+/**
+ * The full set of rate-limit reasons the proxy may persist, as a runtime tuple.
+ * {@link RateLimitReason} is DERIVED from it so the union and the API validator
+ * ({@link isRateLimitReason}) can never drift — previously the validator was a
+ * hand-maintained `Set` that silently nulled reasons it had not been taught.
+ */
+export const RATE_LIMIT_REASONS = [
+	"upstream_429_with_reset",
 	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
 	 *  v3.5.2+ emits `upstream_429_no_reset_probe_cooldown` for the same path
 	 *  with a configurable shorter default. Existing DB rows keep the old
 	 *  value for history. */
-	| "upstream_429_no_reset_default_5h"
-	| "upstream_429_no_reset_probe_cooldown"
-	| "model_fallback_429"
-	| "all_models_exhausted_429"
+	"upstream_429_no_reset_default_5h",
+	"upstream_429_no_reset_probe_cooldown",
+	"model_fallback_429",
+	"all_models_exhausted_429",
 	/** Anthropic 529 overloaded_error with a Retry-After reset time. */
-	| "upstream_529_overloaded_with_reset"
+	"upstream_529_overloaded_with_reset",
 	/** Anthropic 529 overloaded_error with no Retry-After header; probe cooldown applied. */
-	| "upstream_529_overloaded_no_reset"
+	"upstream_529_overloaded_no_reset",
 	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
 	 *  depleted; a long cooldown (≥1h, or until window reset) is applied instead of
 	 *  the short no-reset probe loop. */
-	| "out_of_credits"
+	"out_of_credits",
 	/** Anthropic 429 for a model family whose weekly quota is exhausted while the
 	 *  account still has unified 5h/7d headroom. Recorded when the reactive
 	 *  safety net fails the request over WITHOUT an account-wide cooldown, so the
 	 *  account stays available for other families (family-scoped rate limiting). */
-	| "family_weekly_exhausted_429";
+	"family_weekly_exhausted_429",
+	/** Anthropic 429 on an account whose ACCOUNT-WIDE weekly window is spent
+	 *  (fresh usage evidence). The cooldown is the usual `extractCooldownUntil`
+	 *  deadline; what changes is that the reason names the real cause and the
+	 *  transparent burst-retry hold is skipped — the window cannot recover early. */
+	"weekly_exhausted_429",
+] as const;
+
+/** Why an account was last marked rate-limited. Derived from {@link RATE_LIMIT_REASONS}. */
+export type RateLimitReason = (typeof RATE_LIMIT_REASONS)[number];
+
+/** Runtime validator for a stored rate-limit reason string. */
+export function isRateLimitReason(value: string): value is RateLimitReason {
+	return (RATE_LIMIT_REASONS as readonly string[]).includes(value);
+}
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
@@ -269,7 +344,21 @@ export interface AccountResponse {
 	pauseReason?: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
+	/**
+	 * Back-compat display string (`<base>` or `<base> (Nm)`), derived from the
+	 * same decision as {@link AccountResponse.rateLimitCause} so the two can never
+	 * disagree. Prefer the structured fields in new code.
+	 */
 	rateLimitStatus: string;
+	/** Normalized, machine-readable reason the account is (not) limited. */
+	rateLimitCause: RateLimitCause;
+	/** Epoch ms when `rateLimitCause` is expected to clear; null when unknown. */
+	rateLimitCauseResetMs: number | null;
+	/**
+	 * Raw stored provider status (`anthropic-ratelimit-unified-status`), for
+	 * diagnostics — may be a value the vocabulary does not recognize.
+	 */
+	rateLimitProviderStatus: string | null;
 	rateLimitReset: string | null;
 	rateLimitRemaining: number | null;
 	rateLimitedUntil: number | null;
@@ -659,6 +748,14 @@ export function toAccountResponse(account: Account): AccountResponse {
 			? new Date(account.expires_at).toISOString()
 			: null,
 		rateLimitStatus,
+		// Minimal honest projection: this mapper has no usage data, so it can only
+		// see the proxy's own lock. `/api/accounts` resolves the full cause (weekly
+		// exhaustion, provider status) via `resolveRateLimitPresentation`.
+		rateLimitCause: isRateLimited ? "rate_limited" : "ok",
+		rateLimitCauseResetMs: isRateLimited
+			? (account.rate_limited_until ?? null)
+			: null,
+		rateLimitProviderStatus: account.rate_limit_status ?? null,
 		rateLimitReset: account.rate_limit_reset
 			? new Date(account.rate_limit_reset).toISOString()
 			: null,

@@ -145,6 +145,64 @@ describe("classify429Transient", () => {
 		});
 	});
 
+	// ── `rejected` — a REJECTING status that is NOT in the account-wide hard set ──
+	// Anthropic sends it with `x-should-retry: true`, so before this the proxy
+	// would hold and re-probe an account that cannot recover until its window
+	// resets. The block is surgical: only the x-should-retry rescue is refused.
+
+	it("`rejected` + FRESH positive headroom ⇒ still retryable (burst path untouched)", () => {
+		const result = classify({
+			response: makeResponse({
+				"anthropic-ratelimit-unified-status": "rejected",
+				"x-should-retry": "true",
+			}),
+			getCapacity: freshHeadroom(40),
+		});
+		expect(result).toEqual({ retryable: true, confidence: "fresh_headroom" });
+	});
+
+	it("`rejected` + zero headroom + x-should-retry:true ⇒ NOT retryable", () => {
+		const result = classify({
+			response: makeResponse({
+				"anthropic-ratelimit-unified-status": "rejected",
+				"x-should-retry": "true",
+			}),
+			getCapacity: freshHeadroom(0),
+		});
+		expect(result).toEqual({
+			retryable: false,
+			reason: "rejecting_status_no_headroom",
+		});
+	});
+
+	it("`rejected` + absent capacity + x-should-retry:true ⇒ NOT retryable", () => {
+		const result = classify({
+			response: makeResponse({
+				"anthropic-ratelimit-unified-status": "rejected",
+				"x-should-retry": "true",
+			}),
+			getCapacity: noCapacity,
+		});
+		expect(result).toEqual({
+			retryable: false,
+			reason: "rejecting_status_no_headroom",
+		});
+	});
+
+	it("a soft status + absent capacity + x-should-retry:true is unaffected", () => {
+		const result = classify({
+			response: makeResponse({
+				"anthropic-ratelimit-unified-status": "allowed_warning",
+				"x-should-retry": "true",
+			}),
+			getCapacity: noCapacity,
+		});
+		expect(result).toEqual({
+			retryable: true,
+			confidence: "stale_should_retry",
+		});
+	});
+
 	it("non-OAuth Anthropic (console/API-key, no refresh token) ⇒ not retryable", () => {
 		const result = classify({
 			account: makeAccount({
