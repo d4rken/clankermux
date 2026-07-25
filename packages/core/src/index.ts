@@ -101,6 +101,9 @@ export {
 export {
 	estimateCostUSD,
 	getModelCacheRates,
+	getPricingGapOverflowCount,
+	getPricingGaps,
+	type PricingEstimateContext,
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";

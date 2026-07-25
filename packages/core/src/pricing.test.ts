@@ -1,4 +1,11 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +13,8 @@ import {
 	__pricingTestHooks,
 	estimateCostUSD,
 	getModelCacheRates,
+	getPricingGapOverflowCount,
+	getPricingGaps,
 	type TokenBreakdown,
 } from "./pricing";
 
@@ -38,7 +47,8 @@ afterAll(() => {
 });
 
 describe("estimateCostUSD", () => {
-	it("returns 0 for an unknown model", async () => {
+	it("returns 0 for an unknown model and records nothing without opt-in", async () => {
+		__pricingTestHooks.reset();
 		const tokenBreakdown: TokenBreakdown = {
 			inputTokens: 1000,
 			outputTokens: 1000,
@@ -50,6 +60,9 @@ describe("estimateCostUSD", () => {
 		);
 
 		expect(cost).toBe(0);
+		// Reporting is opt-in: a bare call still de-duplicates the log warning
+		// internally, but surfaces no gap.
+		expect(getPricingGaps()).toEqual([]);
 	});
 
 	it("computes cost for a known bundled Anthropic model", async () => {
@@ -400,5 +413,213 @@ describe("getModelCacheRates", () => {
 			cacheReadPer1M: 0,
 			cacheWritePer1M: 0,
 		});
+	});
+});
+
+/**
+ * The pricing-miss registry holds UNTRUSTED input: a request's `model` is
+ * client-controlled, unvalidated and unbounded in length, and it is served back
+ * out over the unauthenticated `/api/*` surface. Bounding and sanitizing it is a
+ * correctness requirement, not polish — the Set it replaces had exactly this
+ * unbounded-growth bug.
+ */
+describe("pricing-miss registry", () => {
+	const io: TokenBreakdown = { inputTokens: 1000, outputTokens: 1000 };
+	const report = { reportGaps: true };
+
+	beforeEach(() => {
+		__pricingTestHooks.reset();
+	});
+
+	afterEach(() => {
+		__pricingTestHooks.reset();
+	});
+
+	it("records a gap only when the caller opts in", async () => {
+		await estimateCostUSD("silent-unknown-model", io, {
+			provider: "anthropic",
+		});
+		expect(getPricingGaps()).toEqual([]);
+
+		await estimateCostUSD("reported-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].modelId).toBe("reported-unknown-model");
+		expect(gaps[0].provider).toBe("anthropic");
+		expect(gaps[0].occurrences).toBe(1);
+	});
+
+	it("suppresses ollama and ollama-cloud but not openai-compatible", async () => {
+		await estimateCostUSD("llama-local", io, {
+			provider: "ollama",
+			...report,
+		});
+		await estimateCostUSD("llama-hosted", io, {
+			provider: "ollama-cloud",
+			...report,
+		});
+		expect(getPricingGaps()).toEqual([]);
+
+		// openai-compatible fronts paid endpoints too, so a gap there is real
+		// information and must NOT be suppressed.
+		await estimateCostUSD("some-paid-model", io, {
+			provider: "openai-compatible",
+			...report,
+		});
+		expect(getPricingGaps().map((gap) => gap.modelId)).toEqual([
+			"some-paid-model",
+		]);
+	});
+
+	it("keys by (provider, model) so one model can gap through two providers", async () => {
+		await estimateCostUSD("shared-unknown-model", io, {
+			provider: "openrouter",
+			...report,
+		});
+		await estimateCostUSD("shared-unknown-model", io, {
+			provider: "kilo",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		expect(gaps.map((gap) => gap.provider).sort()).toEqual([
+			"kilo",
+			"openrouter",
+		]);
+		// Two independent entries, each counted once — not one ambiguous entry.
+		expect(gaps.every((gap) => gap.occurrences === 1)).toBe(true);
+	});
+
+	it("aggregates repeated misses into one entry", async () => {
+		for (let i = 0; i < 3; i++) {
+			await estimateCostUSD("repeat-unknown-model", io, {
+				provider: "anthropic",
+				...report,
+			});
+		}
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].occurrences).toBe(3);
+		expect(gaps[0].lastSeenAt).toBeGreaterThanOrEqual(gaps[0].firstSeenAt);
+	});
+
+	it("distinguishes model_missing from cost_missing", async () => {
+		await estimateCostUSD("absent-from-catalogue", io, {
+			provider: "anthropic",
+			...report,
+		});
+		// MiniMax-M2 IS in the catalogue but carries no cache pricing, so a
+		// cache-read request fails on a PRESENT-but-incomplete entry.
+		await estimateCostUSD(
+			"MiniMax-M2",
+			{ cacheReadInputTokens: 1000 },
+			{ provider: "minimax", ...report },
+		);
+
+		const byModel = new Map(
+			getPricingGaps().map((gap) => [gap.modelId, gap.reason]),
+		);
+		expect(byModel.get("absent-from-catalogue")).toBe("model_missing");
+		expect(byModel.get("MiniMax-M2")).toBe("cost_missing");
+	});
+
+	it("sanitizes control characters and truncates oversized model ids", async () => {
+		const noisy = "evil\u0000model\u001B[31m\u007Fname";
+		const oversized = "x".repeat(__pricingTestHooks.maxModelIdLength + 500);
+
+		await estimateCostUSD(noisy, io, { provider: "anthropic", ...report });
+		await estimateCostUSD(oversized, io, {
+			provider: "prov\u0000ider",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		const sanitized = gaps.find((gap) => gap.modelId.startsWith("evil"));
+		expect(sanitized?.modelId).toBe("evilmodel[31mname");
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting they were stripped
+		expect(/[\u0000-\u001F\u007F]/.test(sanitized?.modelId ?? "")).toBe(false);
+
+		const truncated = gaps.find((gap) => gap.modelId.startsWith("x"));
+		expect(truncated?.modelId.length).toBe(__pricingTestHooks.maxModelIdLength);
+		expect(truncated?.provider).toBe("provider");
+	});
+
+	it("evicts least-recently-seen entries over the cap and counts the overflow", async () => {
+		const cap = __pricingTestHooks.maxMissEntries;
+		// A gap that keeps recurring — the live one we must not lose.
+		await estimateCostUSD("live-gap-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		// Flood with distinct client-minted ids, refreshing the live gap as real
+		// traffic would.
+		for (let i = 0; i < cap * 2; i++) {
+			await estimateCostUSD(`junk-model-${i}`, io, {
+				provider: "anthropic",
+				...report,
+			});
+			await estimateCostUSD("live-gap-model", io, {
+				provider: "anthropic",
+				...report,
+			});
+		}
+
+		expect(__pricingTestHooks.missCount()).toBeLessThanOrEqual(cap);
+		expect(getPricingGaps().length).toBeLessThanOrEqual(cap);
+		expect(getPricingGapOverflowCount()).toBeGreaterThan(0);
+		// Recency eviction keeps the entry that is still being hit.
+		expect(
+			getPricingGaps().some((gap) => gap.modelId === "live-gap-model"),
+		).toBe(true);
+	});
+
+	it("returns cloned snapshots in a deterministic order", async () => {
+		// Ordering is (firstSeenAt, provider, modelId) — the provider/model
+		// tiebreak matters because misses recorded in the same millisecond must
+		// still come back in a stable order.
+		await estimateCostUSD("first-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD("second-unknown-model", io, {
+			provider: "zai",
+			...report,
+		});
+
+		const first = getPricingGaps();
+		expect(first.map((gap) => gap.modelId)).toEqual([
+			"first-unknown-model",
+			"second-unknown-model",
+		]);
+
+		// Mutating the snapshot must not reach registry internals.
+		first[0].occurrences = 9999;
+		first[0].modelId = "tampered";
+		const second = getPricingGaps();
+		expect(second[0].modelId).toBe("first-unknown-model");
+		expect(second[0].occurrences).toBe(1);
+		expect(second[0]).not.toBe(first[0]);
+		// Same input, same order.
+		expect(second.map((gap) => gap.modelId)).toEqual(
+			getPricingGaps().map((gap) => gap.modelId),
+		);
+	});
+
+	it("is cleared by the test-hook reset", async () => {
+		await estimateCostUSD("transient-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		expect(getPricingGaps()).toHaveLength(1);
+
+		__pricingTestHooks.reset();
+
+		expect(getPricingGaps()).toEqual([]);
+		expect(getPricingGapOverflowCount()).toBe(0);
 	});
 });
