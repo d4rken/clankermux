@@ -16,6 +16,7 @@ import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MemoryUsageChart } from "./overview/MemoryUsageChart";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
+import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { SpendSummaryBand } from "./overview/SpendSummaryBand";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
@@ -155,6 +156,9 @@ export const OverviewTab = React.memo(() => {
 		<div className="space-y-6">
 			{/* Sticky corruption banner — only renders when /api/storage reports corrupt */}
 			<StorageIntegrityBanner />
+
+			{/* Only renders when /api/system/status reports unpriced models */}
+			<PricingGapBanner />
 
 			{/* Header with Time Range Selector */}
 			<div className="flex justify-between items-center">
