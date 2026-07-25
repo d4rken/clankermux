@@ -17,8 +17,11 @@ const badgeVariants = cva(
 				outline: "text-foreground",
 				success:
 					"border-transparent bg-green-500 text-white shadow hover:bg-green-500/80",
+				// White on yellow-500 is ~1.91:1 — nowhere near the 4.5:1 minimum.
+				// `--warning-foreground` is the near-black/near-white pairing that
+				// ships with the token (~6.06:1 light, ~11.3:1 dark).
 				warning:
-					"border-transparent bg-yellow-500 text-white shadow hover:bg-yellow-500/80",
+					"border-transparent bg-warning text-warning-foreground shadow hover:bg-warning/80",
 			},
 		},
 		defaultVariants: {
