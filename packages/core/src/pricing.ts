@@ -303,12 +303,15 @@ const MAX_PRICING_MISS_PROVIDER_LENGTH = 64;
 const UNKNOWN_PRICING_LABEL = "unknown";
 
 /**
- * Hex characters of the entry digest appended to a display label that is no
- * longer a faithful rendering of its input. 8 hex chars is a human-comparable
- * fingerprint — enough to tell two clipped rows apart on screen, and never the
- * thing anything is keyed on (that is the FULL digest).
+ * Hex characters of the entry digest exposed as the human-comparable
+ * fingerprint. 16 hex chars (64 bits) is short enough to read off a dashboard
+ * row and long enough that two rows an operator is comparing will not tie.
+ *
+ * It is carried in its OWN field, never appended into a label: the label is
+ * client-controlled, so a suffix inside it can simply be typed by the client.
+ * Nothing is ever keyed on the fingerprint — that is the FULL digest.
  */
-const PRICING_MISS_LABEL_DIGEST_LENGTH = 8;
+const PRICING_MISS_FINGERPRINT_LENGTH = 16;
 
 /**
  * Bounded key over the ORIGINAL, untruncated parts.
@@ -363,51 +366,21 @@ function digestKey(...parts: string[]): string {
  */
 const UNSAFE_LABEL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
-/** A label cleaned for display, plus whether cleaning changed what it says. */
-interface SanitizedLabel {
-	/** Stripped and length-bounded text, safe to store, log and serve. */
-	label: string;
-	/**
-	 * True when `label` is NOT a faithful rendering of the input — it was
-	 * truncated, had characters stripped, or the input was absent entirely. Such
-	 * a label can no longer be assumed unique: two different inputs can clean
-	 * down to the same visible text.
-	 */
-	altered: boolean;
-}
-
 /**
  * Strip unsafe characters and bound the length of an untrusted label before it
  * is stored (and later served over the unauthenticated `/api/*` surface).
- */
-function sanitizeLabel(
-	value: string | undefined,
-	maxLength: number,
-): SanitizedLabel {
-	if (!value) return { label: UNKNOWN_PRICING_LABEL, altered: true };
-	const stripped = value.replace(UNSAFE_LABEL_CHARS, "").trim();
-	if (stripped.length === 0)
-		return { label: UNKNOWN_PRICING_LABEL, altered: true };
-	const label = stripped.slice(0, maxLength);
-	return { label, altered: label !== value };
-}
-
-/**
- * Append a short digest fingerprint to a label, inside the same length budget.
  *
- * Used when sanitizing/truncating cost a label its uniqueness: two model ids
- * sharing a 256-character prefix stay two registry entries (they are keyed on
- * the digest of the originals), but without this they would render as two
- * identical rows and the operator could not tell which pricing entry to fix.
+ * The result is a DISPLAY label and nothing more. Cleaning and clipping can cost
+ * it its uniqueness — two different inputs can reduce to the same text — but
+ * that is not repaired here by decorating the label: what tells two entries
+ * apart is the separately-carried digest (`key`) and its short `fingerprint`,
+ * neither of which the client can write.
  */
-function withDigestSuffix(
-	label: string,
-	key: string,
-	maxLength: number,
-): string {
-	const suffix = ` #${key.slice(0, PRICING_MISS_LABEL_DIGEST_LENGTH)}`;
-	const room = Math.max(0, maxLength - suffix.length);
-	return `${label.slice(0, room)}${suffix}`;
+function sanitizeLabel(value: string | undefined, maxLength: number): string {
+	if (!value) return UNKNOWN_PRICING_LABEL;
+	const stripped = value.replace(UNSAFE_LABEL_CHARS, "").trim();
+	if (stripped.length === 0) return UNKNOWN_PRICING_LABEL;
+	return stripped.slice(0, maxLength);
 }
 
 /**
@@ -915,26 +888,21 @@ class PriceCatalogue {
 		// Keyed on the ORIGINAL pair, not the display labels: two model ids that
 		// share their first 256 characters must stay two entries.
 		const key = digestKey(opts.provider ?? "", opts.modelId);
+		// Prefix of the same digest — one hash, one identity, two lengths. Derived
+		// here (server side) and never from the label, so no model text can forge
+		// it.
+		const fingerprint = key.slice(0, PRICING_MISS_FINGERPRINT_LENGTH);
 
-		const model = sanitizeLabel(opts.modelId, MAX_PRICING_MISS_MODEL_ID_LENGTH);
+		const modelId = sanitizeLabel(
+			opts.modelId,
+			MAX_PRICING_MISS_MODEL_ID_LENGTH,
+		);
 		const provider = sanitizeLabel(
 			opts.provider,
 			MAX_PRICING_MISS_PROVIDER_LENGTH,
 		);
-		// Cleaning either half can cost the PAIR its uniqueness, so the fingerprint
-		// goes on whenever either was altered — on the model label, which is the
-		// one rendered in full width, so the row stays bounded and readable.
-		const modelId =
-			model.altered || provider.altered
-				? withDigestSuffix(model.label, key, MAX_PRICING_MISS_MODEL_ID_LENGTH)
-				: model.label;
 
-		this.warnOnce(
-			digestKey(opts.modelId),
-			modelId,
-			provider.label,
-			opts.reason,
-		);
+		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.reason);
 
 		if (!opts.report) return;
 
@@ -955,8 +923,9 @@ class PriceCatalogue {
 
 		this.pricingMisses.set(key, {
 			key,
+			fingerprint,
 			modelId,
-			provider: provider.label,
+			provider,
 			reason: opts.reason,
 			occurrences: 1,
 			firstSeenAt: now,
@@ -1031,6 +1000,7 @@ class PriceCatalogue {
 		for (const entry of this.pricingMisses.values()) {
 			gaps.push({
 				key: entry.key,
+				fingerprint: entry.fingerprint,
 				modelId: entry.modelId,
 				provider: entry.provider,
 				reason: entry.reason,
@@ -1093,7 +1063,7 @@ export const __pricingTestHooks = {
 	maxMissEntries: MAX_PRICING_MISS_ENTRIES,
 	maxWarnEntries: MAX_PRICING_WARN_ENTRIES,
 	maxModelIdLength: MAX_PRICING_MISS_MODEL_ID_LENGTH,
-	labelDigestLength: PRICING_MISS_LABEL_DIGEST_LENGTH,
+	fingerprintLength: PRICING_MISS_FINGERPRINT_LENGTH,
 	hasInFlightLoad(): boolean {
 		return PriceCatalogue.get().hasInFlightLoadForTests();
 	},

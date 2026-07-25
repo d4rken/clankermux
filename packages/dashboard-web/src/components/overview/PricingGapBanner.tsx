@@ -34,7 +34,16 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 						// labels, so two different entries can present the same pair and
 						// hand React a duplicate key.
 						<li key={gap.key} className="text-muted-foreground break-all">
-							<span className="font-mono text-foreground">{gap.modelId}</span>
+							<span className="font-mono text-foreground">{gap.modelId}</span>{" "}
+							{/* The server-derived identity, rendered in its OWN node on EVERY
+							    row rather than concatenated into the label. `modelId` is
+							    client-controlled text: a suffix living inside it could be
+							    typed verbatim by a client and would impersonate a genuine
+							    fingerprint. Nothing a client can write reaches this node. The
+							    tooltip carries the full digest for complete disambiguation. */}
+							<span className="font-mono text-xs" title={gap.key}>
+								{`#${gap.fingerprint}`}
+							</span>
 							{" · "}
 							{gap.provider}
 							{" · "}

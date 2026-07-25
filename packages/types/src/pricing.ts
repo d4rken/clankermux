@@ -36,9 +36,23 @@ export interface PricingGap {
 	 */
 	key: string;
 	/**
-	 * Sanitized, truncated model id as seen on the request. When cleaning cost the
-	 * label its uniqueness, it carries a ` #<8 hex>` fingerprint of {@link key} so
-	 * collided rows stay tellable apart.
+	 * Short, human-comparable form of {@link key} (its leading hex characters).
+	 *
+	 * Server-derived from the entry digest and carried in its OWN field so a UI can
+	 * render it as its own element, structurally separate from the labels. That
+	 * separation is the point: the fingerprint used to be appended into
+	 * {@link modelId}, and because that string is client-controlled, a client could
+	 * read an altered row and submit its rendered text (` #<hex>` and all) as its
+	 * own model id — producing a second row that LOOKED identically fingerprinted.
+	 * A value the client cannot write, rendered in a node the label cannot reach,
+	 * cannot be impersonated by any model text.
+	 */
+	fingerprint: string;
+	/**
+	 * Sanitized, truncated model id as seen on the request — a pure display label.
+	 *
+	 * Never doctored: whatever distinguishes two rows lives in {@link fingerprint}
+	 * and {@link key}, never inside this client-controlled text.
 	 */
 	modelId: string;
 	/** Account provider the request was served by (`unknown` if unattributed). */

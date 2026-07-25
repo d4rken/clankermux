@@ -556,9 +556,11 @@ describe("pricing-miss registry", () => {
 
 		const gaps = getPricingGaps();
 		const sanitized = gaps.find((gap) => gap.modelId.startsWith("evil"));
-		// Cleaning changed what the label says, so it carries the fingerprint that
-		// keeps it distinguishable from any other id that cleans to the same text.
-		expect(sanitized?.modelId).toMatch(/^evilmodel\[31mname #[0-9a-f]{8}$/);
+		// The label is the cleaned text and NOTHING else — what keeps it
+		// distinguishable from another id that cleans to the same text is the
+		// separately-carried fingerprint, not a suffix inside this string.
+		expect(sanitized?.modelId).toBe("evilmodel[31mname");
+		expect(sanitized?.fingerprint).toMatch(/^[0-9a-f]{16}$/);
 		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting they were stripped
 		expect(/[\u0000-\u001F\u007F]/.test(sanitized?.modelId ?? "")).toBe(false);
 
@@ -580,7 +582,7 @@ describe("pricing-miss registry", () => {
 		});
 
 		const gap = getPricingGaps()[0];
-		expect(gap.modelId).toMatch(/^evilmodel\[31mnamedaeh #[0-9a-f]{8}$/);
+		expect(gap.modelId).toBe("evilmodel[31mnamedaeh");
 		expect(gap.provider).toBe("anthropic");
 		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.modelId)).toBe(false);
 		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.provider)).toBe(false);
@@ -632,19 +634,59 @@ describe("pricing-miss registry", () => {
 		for (const gap of gaps) {
 			expect(gap.key).toMatch(/^[0-9a-f]{64}$/);
 		}
-		// …and the two rows do not READ the same either: truncation cost the label
-		// its uniqueness, so each one carries its own fingerprint.
-		expect(new Set(gaps.map((gap) => gap.modelId)).size).toBe(2);
+		// …and the two rows do not READ the same either, because each carries its
+		// own fingerprint — a prefix of that digest, in its own field. It is NOT
+		// spliced into the label: `modelId` is client-controlled, so a suffix there
+		// could simply be typed by a client and would forge a fingerprint.
+		expect(new Set(gaps.map((gap) => gap.fingerprint)).size).toBe(2);
 		for (const gap of gaps) {
-			expect(gap.modelId).toEndWith(
-				` #${gap.key.slice(0, __pricingTestHooks.labelDigestLength)}`,
+			expect(gap.fingerprint).toBe(
+				gap.key.slice(0, __pricingTestHooks.fingerprintLength),
 			);
-			// The fingerprint comes out of the length budget, never on top of it.
+			expect(gap.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+			// The label is the plain truncated text: undoctored, and still bounded by
+			// the full 256-character budget (no room is rented out to a suffix).
+			expect(gap.modelId).toBe(prefix);
 			expect(gap.modelId.length).toBe(__pricingTestHooks.maxModelIdLength);
 		}
 
 		// The warn cache is keyed the same way, so both models are warned about.
 		expect(__pricingTestHooks.warnCount()).toBe(2);
+	});
+
+	it("cannot have its fingerprint forged from the model id", async () => {
+		// The attack the separate field exists to close: observe a row's rendered
+		// identity, then send it back as your own model id. While the fingerprint
+		// lived INSIDE the label, that produced a second row whose label read
+		// exactly like the first one's.
+		await estimateCostUSD("genuine-unpriced-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		const genuine = getPricingGaps()[0];
+
+		await estimateCostUSD(
+			`genuine-unpriced-model #${genuine.fingerprint}`,
+			io,
+			{
+				provider: "anthropic",
+				...report,
+			},
+		);
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		const forger = gaps.find((gap) => gap.key !== genuine.key);
+		// The mimicry stays where the client put it — in the label — and the
+		// fingerprint is computed from the digest, so it does not follow.
+		expect(forger?.modelId).toBe(
+			`genuine-unpriced-model #${genuine.fingerprint}`,
+		);
+		expect(forger?.fingerprint).not.toBe(genuine.fingerprint);
+		expect(forger?.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+		// And the genuine row is untouched by the impersonation attempt.
+		expect(genuine.modelId).toBe("genuine-unpriced-model");
+		expect(gaps.find((gap) => gap.key === genuine.key)?.occurrences).toBe(1);
 	});
 
 	it("keeps unpaired surrogates distinct in the miss identity", async () => {

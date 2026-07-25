@@ -7,6 +7,7 @@ import { PricingGapBannerView } from "./PricingGapBanner";
 function gap(overrides: Partial<PricingGap> = {}): PricingGap {
 	return {
 		key: "9".repeat(64),
+		fingerprint: "9".repeat(16),
 		modelId: "claude-not-yet-priced-9",
 		provider: "anthropic",
 		reason: "model_missing",
@@ -35,6 +36,34 @@ function rowKeys(gaps: PricingGap[]): (string | null)[] {
 	};
 	walk(PricingGapBannerView({ gaps }));
 	return keys;
+}
+
+/**
+ * The text and tooltip of every fingerprint node.
+ *
+ * Selected STRUCTURALLY — the span the component gives a `title` — rather than
+ * by searching the markup for `#<hex>`. That is the whole point of the field: a
+ * client can put fingerprint-shaped text in a model id, but it cannot put it in
+ * this node, so a test that matched on text alone would be satisfied by a forgery.
+ */
+function rowFingerprints(
+	gaps: PricingGap[],
+): { text: string; title: string }[] {
+	const found: { text: string; title: string }[] = [];
+	const walk = (node: ReactNode): void => {
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child as ReactNode);
+			return;
+		}
+		if (!isValidElement(node)) return;
+		const props = node.props as { children?: ReactNode; title?: string };
+		if (node.type === "span" && typeof props.title === "string") {
+			found.push({ text: String(props.children), title: props.title });
+		}
+		walk(props.children);
+	};
+	walk(PricingGapBannerView({ gaps }));
+	return found;
 }
 
 describe("PricingGapBannerView", () => {
@@ -88,29 +117,71 @@ describe("PricingGapBannerView", () => {
 
 	it("keys rows on the gap identity so collided labels stay separate rows", () => {
 		// Two model ids sharing a 256-character prefix are two registry entries but
-		// present the SAME (provider, modelId) display pair. Keying on that pair
+		// present the SAME (provider, modelId) display pair — the label is now the
+		// plain truncated text, so it is identical on both rows. Keying on that pair
 		// hands React a duplicate key, which lets it reconcile the wrong row.
-		const clipped = "z".repeat(246);
+		const clipped = "z".repeat(256);
 		const first = gap({
 			key: "a".repeat(64),
-			modelId: `${clipped} #aaaaaaaa`,
+			fingerprint: "a".repeat(16),
+			modelId: clipped,
 			occurrences: 3,
 		});
 		const second = gap({
 			key: "b".repeat(64),
-			modelId: `${clipped} #bbbbbbbb`,
+			fingerprint: "b".repeat(16),
+			modelId: clipped,
 			occurrences: 7,
 		});
 
 		expect(rowKeys([first, second])).toEqual([first.key, second.key]);
 
-		// …and the operator can tell which of the two rows is which, because the
-		// server fingerprinted the labels it had to clip.
+		// …and the operator can still tell which row is which, because every row
+		// carries the server-derived fingerprint in its own node, with the full
+		// digest available as its tooltip.
+		expect(rowFingerprints([first, second])).toEqual([
+			{ text: `#${first.fingerprint}`, title: first.key },
+			{ text: `#${second.fingerprint}`, title: second.key },
+		]);
+	});
+
+	it("cannot have a row's fingerprint impersonated by model text", () => {
+		// A client that reads a fingerprinted row can submit its rendered text as
+		// its own model id. That forgery used to work, because the fingerprint lived
+		// inside the client-controlled label.
+		const genuine = gap({
+			key: "a".repeat(64),
+			fingerprint: "a".repeat(16),
+			modelId: "claude-not-yet-priced-9",
+		});
+		const forger = gap({
+			key: "b".repeat(64),
+			fingerprint: "b".repeat(16),
+			modelId: `claude-not-yet-priced-9 #${genuine.fingerprint}`,
+		});
+
+		// Both rows carry a fingerprint node, and the forger's is its OWN — the
+		// mimicry is stranded in the label, which is a different node.
+		expect(rowFingerprints([genuine, forger])).toEqual([
+			{ text: `#${genuine.fingerprint}`, title: genuine.key },
+			{ text: `#${forger.fingerprint}`, title: forger.key },
+		]);
+
+		// The forged text still renders (it is what the client sent), but the row it
+		// renders on is identified as the forger's, not the genuine one's.
 		const html = renderToStaticMarkup(
-			<PricingGapBannerView gaps={[first, second]} />,
+			<PricingGapBannerView gaps={[genuine, forger]} />,
 		);
-		expect(html).toContain("#aaaaaaaa");
-		expect(html).toContain("#bbbbbbbb");
+		expect(html).toContain(`claude-not-yet-priced-9 #${genuine.fingerprint}`);
+		expect(html).toContain(`title="${forger.key}"`);
+	});
+
+	it("renders the fingerprint on every row, not only on clipped ones", () => {
+		// Unconditional by design: a fingerprint that appears only on altered rows
+		// tells a client which rows it can impersonate by simply omitting it.
+		expect(rowFingerprints([gap()])).toEqual([
+			{ text: `#${"9".repeat(16)}`, title: "9".repeat(64) },
+		]);
 	});
 
 	it("keeps row keys distinct even when the whole display pair matches", () => {
