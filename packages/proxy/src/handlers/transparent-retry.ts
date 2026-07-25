@@ -169,7 +169,9 @@ export function classify429Transient(args: {
 	//     never rescue this on the `x-should-retry` hint. Anthropic sends
 	//     `rejected` together with `x-should-retry: true` on an account whose
 	//     window is spent, so without this we hold and re-probe an account that
-	//     cannot recover before its window resets. Deliberately narrow: it does
+	//     is spent right now — a bounded in-request hold cannot outlast that.
+	//     (An EARLY provider reset is possible, but it is observed by the usage
+	//     poller's capacity-restored path, not by holding.) Deliberately narrow: it does
 	//     NOT touch step 3, so a `rejected` 429 with fresh positive headroom is
 	//     still treated as the per-IP burst throttle that burst-retry exists for.
 	const statusHeader = response.headers.get(

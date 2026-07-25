@@ -158,8 +158,9 @@ export function deriveAccountStatus(
 		typeof account.rateLimitedUntil === "number" &&
 		account.rateLimitedUntil > now;
 	// A weekly-exhausted account's lock is legitimate: force-resetting it only
-	// lets the router burn fresh 429s against a window that cannot recover before
-	// its reset, so the action is suppressed.
+	// lets the router burn fresh 429s against a window that is spent right now,
+	// so the action is suppressed. (If the provider releases the window early,
+	// usage polling observes it and clears the lock without an operator action.)
 	const showForceReset =
 		(isHardLimited || isBlockedByLegacyLock) && !isPaused && !isUsageExhausted;
 	// staleLockDetected only fires when numeric usage data exists (Anthropic
