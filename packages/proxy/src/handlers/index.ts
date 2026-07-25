@@ -35,6 +35,12 @@ export {
 } from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 export {
+	clearCapacityRestoredProbePending,
+	hasCapacityRestoredProbePending,
+	markCapacityRestoredProbePending,
+	rollbackCapacityRestoredProbePending,
+} from "./rate-limit-cooldown";
+export {
 	createRequestMetadata,
 	prepareRequestBody,
 	validateProviderPath,

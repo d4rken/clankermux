@@ -43,6 +43,7 @@ import {
 import {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
+	clearCapacityRestoredProbePending,
 	clearProviderOverloadCooldown,
 	consumeCodexResetCreditForAccount,
 	getForcedAccount,
@@ -1499,6 +1500,10 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				// Evict any warm session-cache slots owned by the removed account so
 				// the keepalive scheduler never tries to replay against a deleted id.
 				sessionCacheStore.evictAccount(account.id);
+				// Drop any owed capacity-restored probe. The marker is deliberately
+				// never time-expired, so removal is the only way it can be dropped
+				// without a successful probe (or a restart).
+				clearCapacityRestoredProbePending(account.id);
 			}
 
 			return jsonResponse({

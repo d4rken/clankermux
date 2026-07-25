@@ -1,9 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { Account, DatabaseOperations } from "@clankermux/database";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
+import {
+	clearCapacityRestoredProbePending,
+	hasCapacityRestoredProbePending,
+	markCapacityRestoredProbePending,
+	rollbackCapacityRestoredProbePending,
+} from "@clankermux/proxy";
 import { RATE_LIMIT_REASONS } from "@clankermux/types";
 import {
 	type CapacityRestoredLogger,
+	type CapacityRestoredProbeMarker,
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 
@@ -54,6 +61,11 @@ interface Harness {
 	clearCalls: ClearCall[];
 	debugMsgs: string[];
 	infoMsgs: string[];
+	marker: CapacityRestoredProbeMarker;
+	/** Marker call trace: "mark:<gen>" / "rollback:<gen>", in order. */
+	markerCalls: string[];
+	/** Generations currently reserved (mark minus matching rollback). */
+	pending: Set<number>;
 }
 
 /**
@@ -67,12 +79,29 @@ function makeHarness(
 	const clearCalls: ClearCall[] = [];
 	const debugMsgs: string[] = [];
 	const infoMsgs: string[] = [];
+	const markerCalls: string[] = [];
+	const pending = new Set<number>();
+	let generation = 0;
 	const getAccount = typeof account === "function" ? account : () => account;
 	const clearResult = typeof clear === "function" ? clear : () => clear;
 	return {
 		clearCalls,
 		debugMsgs,
 		infoMsgs,
+		markerCalls,
+		pending,
+		marker: {
+			markPending: () => {
+				generation += 1;
+				markerCalls.push(`mark:${generation}`);
+				pending.add(generation);
+				return generation;
+			},
+			rollbackPending: (_accountId, gen) => {
+				markerCalls.push(`rollback:${gen}`);
+				pending.delete(gen);
+			},
+		},
 		logger: {
 			debug: (m) => debugMsgs.push(m),
 			info: (m) => infoMsgs.push(m),
@@ -108,7 +137,7 @@ const skipToken = (msgs: string[]) =>
 describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("clears a quota-derived weekly lock, pinning the full observation", async () => {
 		const h = makeHarness(makeAccount({}));
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 
 		expect(h.clearCalls).toEqual([
 			{
@@ -124,13 +153,17 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 		expect(h.infoMsgs[0]).toContain("reason=weekly_exhausted_429");
 		expect(h.infoMsgs[0]).toContain("utilization=40%");
 		expect(h.infoMsgs[0]).toContain("cooldown_remaining=60m");
+		// The single-flight marker is reserved BEFORE the CAS and kept on success,
+		// so no request can slip through between the commit and the arming.
+		expect(h.markerCalls).toEqual(["mark:1"]);
+		expect([...h.pending]).toEqual([1]);
 	});
 
 	it("clears a quota-derived session lock", async () => {
 		const h = makeHarness(
 			makeAccount({ rate_limited_reason: "session_exhausted_429" }),
 		);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.clearCalls[0].expectedReason).toBe("session_exhausted_429");
 	});
@@ -148,7 +181,7 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 			const h = makeHarness(
 				makeAccount({ rate_limited_reason: reason as never }),
 			);
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
 		}
@@ -157,7 +190,7 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("fails CLOSED when rate_limited_at is missing", async () => {
 		for (const at of [null, undefined]) {
 			const h = makeHarness(makeAccount({ rate_limited_at: at as never }));
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["missing_rate_limited_at"]);
 		}
@@ -166,7 +199,7 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 	it("refuses a cooldown written AFTER the poll started, and at the exact boundary", async () => {
 		for (const at of [FETCH_STARTED_AT, FETCH_STARTED_AT + 1]) {
 			const h = makeHarness(makeAccount({ rate_limited_at: at }));
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 			expect(h.clearCalls).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["cooldown_newer_than_evidence"]);
 		}
@@ -174,10 +207,50 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 
 	it("logs cas_mismatch when the atomic update changed no row", async () => {
 		const h = makeHarness(makeAccount({}), false);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toHaveLength(1); // attempted…
 		expect(h.infoMsgs).toEqual([]); // …but not reported as cleared
 		expect(skipToken(h.debugMsgs)).toEqual(["cas_mismatch"]);
+		// A failed CAS rolls the reservation back — the account never became
+		// selectable, so it must not owe a probe.
+		expect(h.markerCalls).toEqual(["mark:1", "rollback:1"]);
+		expect([...h.pending]).toEqual([]);
+	});
+
+	it("rolls the reservation back when the CAS throws", async () => {
+		const h = makeHarness(makeAccount({}), () => {
+			throw new Error("database is locked");
+		});
+		await expect(
+			clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			),
+		).rejects.toThrow("database is locked");
+		expect(h.markerCalls).toEqual(["mark:1", "rollback:1"]);
+		expect([...h.pending]).toEqual([]);
+	});
+
+	it("never reserves a marker for a rejected clear", async () => {
+		for (const account of [
+			makeAccount({ rate_limited_reason: "upstream_429_with_reset" }),
+			makeAccount({ rate_limited_at: null as never }),
+			makeAccount({ rate_limited_at: NOW - 100 }),
+			makeAccount({ rate_limited_until: NOW - 1 }),
+		]) {
+			const h = makeHarness(account);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
+			expect(h.markerCalls).toEqual([]);
+		}
 	});
 
 	it("does nothing (and logs nothing) when there is no active future lock", async () => {
@@ -185,7 +258,7 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 			const h = makeHarness(
 				makeAccount({ rate_limited_until: until as never }),
 			);
-			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+			await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 			expect(h.clearCalls).toEqual([]);
 			// The normal state of a healthy account — never logged per poll.
 			expect(h.debugMsgs).toEqual([]);
@@ -195,7 +268,7 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 
 	it("does nothing when the account is missing", async () => {
 		const h = makeHarness(null);
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toEqual([]);
 		expect(h.debugMsgs).toEqual([]);
 	});
@@ -212,12 +285,12 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		});
 		const h = makeHarness(() => account);
 
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toEqual([]);
 
 		// The lock lands (asynchronously, after the first callback already ran).
 		account = makeAccount({});
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.infoMsgs).toHaveLength(1);
 	});
@@ -230,19 +303,19 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		});
 
 		await expect(
-			clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW),
+			clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW),
 		).rejects.toThrow("database is locked");
 		expect(h.infoMsgs).toEqual([]);
 
 		fail = false;
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.infoMsgs).toHaveLength(1);
 	});
 
 	it("a cooldown written mid-poll is skipped by THAT sample and cleared by the NEXT one", async () => {
 		const h = makeHarness(makeAccount({ rate_limited_at: NOW - 500 }));
 		// Evidence from a poll that started before the cooldown was written.
-		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), NOW);
+		await clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence(), h.marker, NOW);
 		expect(h.clearCalls).toEqual([]);
 		expect(skipToken(h.debugMsgs)).toEqual(["cooldown_newer_than_evidence"]);
 
@@ -251,9 +324,58 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 			h.dbOps,
 			h.logger,
 			evidence({ fetchStartedAt: NOW - 100 }),
+			h.marker,
 			NOW,
 		);
 		expect(h.clearCalls).toHaveLength(1);
+	});
+
+	it("arms the REAL single-flight marker BEFORE the CAS commits (controlled race)", async () => {
+		// The window this ordering closes: the DB row is already updated (the
+		// account is unlocked and selectable) but no marker exists yet, so nothing
+		// gates the fan-in. Observe the real marker from INSIDE the CAS.
+		const realMarker = {
+			markPending: markCapacityRestoredProbePending,
+			rollbackPending: rollbackCapacityRestoredProbePending,
+		};
+		let armedDuringCas = false;
+		const h = makeHarness(makeAccount({ id: "acc-race" }), () => {
+			armedDuringCas = hasCapacityRestoredProbePending("acc-race");
+			return true;
+		});
+		try {
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence({ accountId: "acc-race" }),
+				realMarker,
+				NOW,
+			);
+			expect(armedDuringCas).toBe(true);
+			expect(hasCapacityRestoredProbePending("acc-race")).toBe(true);
+		} finally {
+			clearCapacityRestoredProbePending("acc-race");
+		}
+	});
+
+	it("rolls the REAL marker back when the CAS refuses", async () => {
+		const realMarker = {
+			markPending: markCapacityRestoredProbePending,
+			rollbackPending: rollbackCapacityRestoredProbePending,
+		};
+		const h = makeHarness(makeAccount({ id: "acc-race-2" }), false);
+		try {
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence({ accountId: "acc-race-2" }),
+				realMarker,
+				NOW,
+			);
+			expect(hasCapacityRestoredProbePending("acc-race-2")).toBe(false);
+		} finally {
+			clearCapacityRestoredProbePending("acc-race-2");
+		}
 	});
 
 	it("clears at utilization 99 and while extra_usage is still spent", async () => {
@@ -262,6 +384,7 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 			h.dbOps,
 			h.logger,
 			evidence({ utilization: 99, extraUsageUtilization: 100 }),
+			h.marker,
 			NOW,
 		);
 		expect(h.clearCalls).toHaveLength(1);

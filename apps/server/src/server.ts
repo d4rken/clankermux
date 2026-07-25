@@ -56,6 +56,7 @@ import {
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
 	handleProxy,
+	markCapacityRestoredProbePending,
 	type ProxyContext,
 	RequestRecorder,
 	registerAffinityClearer,
@@ -64,6 +65,7 @@ import {
 	registerCodexUsageRefresher,
 	registerPollingRestarter,
 	registerRefreshClearer,
+	rollbackCapacityRestoredProbePending,
 	setRequestRecorder,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
@@ -87,7 +89,10 @@ import {
 	liveGauges,
 	liveStats,
 } from "./cache-keepalive-snapshot-sampler";
-import { clearRateLimitOnCapacityRestored } from "./capacity-restored";
+import {
+	type CapacityRestoredProbeMarker,
+	clearRateLimitOnCapacityRestored,
+} from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -321,6 +326,18 @@ async function runStartupMaintenance(
 }
 
 /**
+ * The proxy's process-local single-flight marker, injected into the
+ * capacity-restored handler so it never deep-imports a proxy-internal file. An
+ * early release makes an account selectable again in one step with no cooldown
+ * deadline and a zero streak, so this marker is what keeps the first request
+ * after the release a SINGLE probe instead of a stampede.
+ */
+const capacityRestoredProbeMarker: CapacityRestoredProbeMarker = {
+	markPending: markCapacityRestoredProbePending,
+	rollbackPending: rollbackCapacityRestoredProbePending,
+};
+
+/**
  * Start usage polling for an account with automatic token refresh
  */
 function startUsagePollingWithRefresh(
@@ -371,6 +388,7 @@ function startUsagePollingWithRefresh(
 						proxyContext.dbOps,
 						logger,
 						evidence,
+						capacityRestoredProbeMarker,
 					).catch((err) =>
 						logger.warn(
 							`Failed to check/clear rate_limited_until for account ${evidence.accountId} on capacity restore: ${err}`,

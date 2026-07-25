@@ -9,6 +9,19 @@ export interface CapacityRestoredLogger {
 }
 
 /**
+ * The single-flight marker API (injected, so this module never deep-imports a
+ * proxy-internal file and tests can observe the calls). Backed by
+ * `markCapacityRestoredProbePending` / `rollbackCapacityRestoredProbePending`
+ * in `@clankermux/proxy`.
+ */
+export interface CapacityRestoredProbeMarker {
+	/** Reserve a probe generation for the account; returns that generation. */
+	markPending: (accountId: string) => number;
+	/** Release a reservation whose clear never committed. */
+	rollbackPending: (accountId: string, generation: number) => void;
+}
+
+/**
  * Handle the usage-poller's capacity-restored signal: polling observed that NO
  * account-wide window is spent any more (representative utilization < 100), so
  * an account still sitting on a cooldown can be released early — a seat
@@ -56,6 +69,7 @@ export async function clearRateLimitOnCapacityRestored(
 	>,
 	logger: CapacityRestoredLogger,
 	evidence: CapacityRestoredEvidence,
+	marker: CapacityRestoredProbeMarker,
 	now: number = Date.now(),
 ): Promise<void> {
 	const { accountId } = evidence;
@@ -98,13 +112,26 @@ export async function clearRateLimitOnCapacityRestored(
 	// predates the evidence, so any cooldown/floor written concurrently between
 	// the read above and this write is preserved (even one reusing the same
 	// deadline — rate_limited_at, the write instant, still differs).
-	const cleared = await dbOps.clearRateLimitOnCapacityRestore(
-		accountId,
-		acc.rate_limited_until,
-		acc.rate_limited_at,
-		reason,
-		evidence.fetchStartedAt,
-	);
+	//
+	// The single-flight marker is reserved BEFORE the CAS and rolled back if it
+	// fails or throws. An early release makes the account selectable in one step
+	// with `consecutive_rate_limits` still 0 and no deadline left behind, so
+	// nothing else would gate the fan-in; arming only after the await resolves
+	// would leave a window in which the account is unlocked and unmarked.
+	const probeGeneration = marker.markPending(accountId);
+	let cleared: boolean;
+	try {
+		cleared = await dbOps.clearRateLimitOnCapacityRestore(
+			accountId,
+			acc.rate_limited_until,
+			acc.rate_limited_at,
+			reason,
+			evidence.fetchStartedAt,
+		);
+	} catch (err) {
+		marker.rollbackPending(accountId, probeGeneration);
+		throw err;
+	}
 	if (cleared) {
 		logger.info(
 			`[clankermux] account=${acc.name} capacity_restored_clear reason=${reason} utilization=${evidence.utilization}% extra_usage=${
@@ -114,6 +141,7 @@ export async function clearRateLimitOnCapacityRestored(
 			)}m fetch_started_at=${new Date(evidence.fetchStartedAt).toISOString()}`,
 		);
 	} else {
+		marker.rollbackPending(accountId, probeGeneration);
 		logger.debug(
 			`[clankermux] account=${acc.name} capacity_restored_skip cas_mismatch (a concurrent write replaced the observed cooldown)`,
 		);

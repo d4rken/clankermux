@@ -26,16 +26,84 @@ const log = new Logger("RateLimitCooldown");
 const MATURE_COOLDOWN_STREAK = 5;
 const PROBE_LEASE_MS = 2 * 60 * 1000;
 const MAX_PROBE_GATES = 10_000;
-const probeLeases = new Map<string, number>();
+const probeLeases = new Map<
+	string,
+	{ leaseUntil: number; capacityGeneration?: number }
+>();
+
+// --- Capacity-restored single-flight marker ---------------------------------
+//
+// An account released EARLY by the usage poller (its cooldown cleared before the
+// deadline) becomes selectable again in one step, with `consecutive_rate_limits`
+// still at 0 and no cooldown deadline left behind. Neither of those facts
+// engages the mature-streak gate above, so without a dedicated marker every
+// concurrent request would stampede an account whose recovery is, by
+// construction, a guess about the provider's state.
+//
+// accountId → capacity generation. The generation exists so an OLD probe can
+// never clear a NEWER restore's marker (release → re-lock → release again while
+// the first probe is still in flight).
+const capacityRestoredPending = new Map<string, number>();
+let capacityGenerationCounter = 0;
 
 export type RateLimitProbeAdmission =
 	| "not_required"
 	| "admitted"
 	| "suppressed";
 
+/**
+ * Reserve a capacity-restored probe generation for an account. Called by the
+ * capacity-restored handler BEFORE its compare-and-clear commits, and rolled
+ * back via {@link rollbackCapacityRestoredProbePending} if that CAS fails or
+ * throws.
+ *
+ * Reserve-then-roll-back, not arm-after-commit: DB state and process memory
+ * cannot change atomically, and arming only after the async CAS resolves leaves
+ * a window in which the account is already unlocked and selectable with NO
+ * marker — fan-in through the very hole the marker exists to close. A
+ * momentarily-armed marker on a failed CAS costs at most one suppressed request.
+ */
+export function markCapacityRestoredProbePending(accountId: string): number {
+	capacityGenerationCounter += 1;
+	capacityRestoredPending.set(accountId, capacityGenerationCounter);
+	return capacityGenerationCounter;
+}
+
+/**
+ * Undo a reservation whose clear never committed. Generation-guarded: a NEWER
+ * reservation for the same account must survive an older rollback.
+ */
+export function rollbackCapacityRestoredProbePending(
+	accountId: string,
+	generation: number,
+): void {
+	if (capacityRestoredPending.get(accountId) === generation) {
+		capacityRestoredPending.delete(accountId);
+	}
+}
+
+/**
+ * Drop any capacity-restored marker for an account. For account REMOVAL only —
+ * the marker is otherwise cleared exclusively by a successful probe of the
+ * matching generation (or a process restart).
+ *
+ * It is deliberately NEVER time-expired: a family gate, an open 529 breaker or a
+ * pinned client can legitimately delay probing indefinitely, and expiring the
+ * marker would reopen fan-in at exactly the moment the account finally becomes
+ * selectable. The map is keyed by account id, so it is bounded by account count.
+ */
+export function clearCapacityRestoredProbePending(accountId: string): void {
+	capacityRestoredPending.delete(accountId);
+}
+
+/** Whether an early-release probe is still owed for this account. */
+export function hasCapacityRestoredProbePending(accountId: string): boolean {
+	return capacityRestoredPending.has(accountId);
+}
+
 function pruneProbeLeases(now: number): void {
-	for (const [accountId, leaseUntil] of probeLeases) {
-		if (leaseUntil <= now) probeLeases.delete(accountId);
+	for (const [accountId, lease] of probeLeases) {
+		if (lease.leaseUntil <= now) probeLeases.delete(accountId);
 	}
 	while (probeLeases.size >= MAX_PROBE_GATES) {
 		const oldest = probeLeases.keys().next().value;
@@ -45,19 +113,30 @@ function pruneProbeLeases(now: number): void {
 }
 
 /**
- * Admits one process-local recovery probe after a mature cooldown expires.
- * Ordinary accounts (streak below the threshold), accounts with no cooldown
- * deadline, and accounts still cooling down are not gated ("not_required").
+ * Admits one process-local recovery probe for an account that just became
+ * selectable again — either because a MATURE cooldown streak expired, or
+ * because the usage poller released the cooldown EARLY (capacity restored).
+ * Ordinary accounts are not gated ("not_required").
+ *
+ * The two triggers are separate on purpose: the mature-streak condition
+ * requires `consecutive_rate_limits >= MATURE_COOLDOWN_STREAK` and an
+ * expired-but-present deadline, and an early release satisfies NEITHER (the
+ * quota reasons run at streak 0, and the clear removes the deadline entirely) —
+ * which is why it needs its own marker rather than a relaxed deadline check.
  *
  * Returns:
- *   - "not_required": the account isn't a freshly-recovered mature-streak
- *     account; the caller proxies as normal.
+ *   - "not_required": the account isn't a freshly-recovered account; the caller
+ *     proxies as normal.
  *   - "admitted": THIS request holds the single-flight lease and should probe
  *     the account. The caller MUST release it via {@link completeRateLimitProbe}
  *     on every terminal outcome of the attempt (see the callers in proxy.ts,
  *     which wrap the proxy call in try/finally).
  *   - "suppressed": another request is already probing this account; the caller
  *     must skip it and try the next candidate.
+ *
+ * NOTE: the global force-account override in `proxy.ts` bypasses account
+ * selection entirely, so the "exactly one upstream probe" guarantee explicitly
+ * excludes that operator override.
  */
 export function getRateLimitProbeAdmission(
 	account: Account,
@@ -67,21 +146,29 @@ export function getRateLimitProbeAdmission(
 		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
 		account.rate_limited_until != null &&
 		account.rate_limited_until <= now;
-	if (!expiredMatureCooldown) return "not_required";
+	const capacityGeneration = capacityRestoredPending.get(account.id);
+	if (!expiredMatureCooldown && capacityGeneration === undefined)
+		return "not_required";
 
 	pruneProbeLeases(now);
 	const existingLease = probeLeases.get(account.id);
-	if (existingLease && existingLease > now) {
+	if (existingLease && existingLease.leaseUntil > now) {
 		log.debug(
-			`[clankermux] account=${account.name} cooldown_probe_suppressed lease_until=${new Date(existingLease).toISOString()}`,
+			`[clankermux] account=${account.name} cooldown_probe_suppressed lease_until=${new Date(existingLease.leaseUntil).toISOString()}`,
 		);
 		return "suppressed";
 	}
 
 	const leaseUntil = now + PROBE_LEASE_MS;
-	probeLeases.set(account.id, leaseUntil);
+	// Record WHICH capacity generation this probe was admitted for, so its
+	// outcome can only ever clear that generation's marker.
+	probeLeases.set(account.id, { leaseUntil, capacityGeneration });
 	log.info(
-		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits} lease_until=${new Date(leaseUntil).toISOString()}`,
+		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits}${
+			capacityGeneration !== undefined
+				? ` capacity_generation=${capacityGeneration}`
+				: ""
+		} lease_until=${new Date(leaseUntil).toISOString()}`,
 	);
 	return "admitted";
 }
@@ -92,15 +179,37 @@ export function getRateLimitProbeAdmission(
  * (recovered), a fresh cooldown being reapplied (cooldown_reapplied), or the
  * request being abandoned (exception, mid-loop skip, or any other early exit).
  *
- * Idempotent: if no lease is held this is a no-op, so it is safe to call it
- * from a try/finally chokepoint even when an earlier path already released it.
+ * The capacity-restored marker has a NARROWER lifecycle than the lease:
+ *   - `recovered` clears it — but only when the admitted generation still
+ *     matches, so an older probe can never clear a newer restore's marker.
+ *   - `cooldown_reapplied` RETAINS it. The probe got another reset-bearing 429,
+ *     which leaves `consecutive_rate_limits` at 0 and a deadline that may be the
+ *     synthesized 60s one — i.e. it can expire before the next 90s poll, and the
+ *     mature-streak gate would then return "not_required" for every concurrent
+ *     request. Clearing here would defeat the marker after the first
+ *     unsuccessful probe. While the reapplied cooldown is active the marker is
+ *     dormant (the account is unselectable); when it expires the marker again
+ *     forces exactly one probe.
+ *   - `abandoned` RETAINS it: nothing was learned about the account.
+ *
+ * Idempotent: if no lease is held this is a no-op (and capacity state is left
+ * untouched), so it is safe to call from a try/finally chokepoint even when an
+ * earlier path already released it.
  */
 export function completeRateLimitProbe(
 	account: Account,
 	outcome: "recovered" | "cooldown_reapplied" | "abandoned",
 ): void {
-	if (!probeLeases.delete(account.id)) return;
+	const lease = probeLeases.get(account.id);
+	if (!lease) return;
+	probeLeases.delete(account.id);
 	if (outcome === "recovered") {
+		if (
+			lease.capacityGeneration !== undefined &&
+			capacityRestoredPending.get(account.id) === lease.capacityGeneration
+		) {
+			capacityRestoredPending.delete(account.id);
+		}
 		log.info(
 			`[clankermux] account=${account.name} cooldown_probe_recovery_success`,
 		);
@@ -109,9 +218,10 @@ export function completeRateLimitProbe(
 	}
 }
 
-/** Test-only: clears all in-memory probe leases between test cases. */
+/** Test-only: clears all in-memory probe leases/markers between test cases. */
 export function resetRateLimitProbeGatesForTests(): void {
 	probeLeases.clear();
+	capacityRestoredPending.clear();
 }
 
 /**
