@@ -303,6 +303,14 @@ const MAX_PRICING_MISS_PROVIDER_LENGTH = 64;
 const UNKNOWN_PRICING_LABEL = "unknown";
 
 /**
+ * Hex characters of the entry digest appended to a display label that is no
+ * longer a faithful rendering of its input. 8 hex chars is a human-comparable
+ * fingerprint — enough to tell two clipped rows apart on screen, and never the
+ * thing anything is keyed on (that is the FULL digest).
+ */
+const PRICING_MISS_LABEL_DIGEST_LENGTH = 8;
+
+/**
  * Bounded key over the ORIGINAL, untruncated parts.
  *
  * The stored label is sanitized and clipped to 256 characters, so keying on it
@@ -355,15 +363,51 @@ function digestKey(...parts: string[]): string {
  */
 const UNSAFE_LABEL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
+/** A label cleaned for display, plus whether cleaning changed what it says. */
+interface SanitizedLabel {
+	/** Stripped and length-bounded text, safe to store, log and serve. */
+	label: string;
+	/**
+	 * True when `label` is NOT a faithful rendering of the input — it was
+	 * truncated, had characters stripped, or the input was absent entirely. Such
+	 * a label can no longer be assumed unique: two different inputs can clean
+	 * down to the same visible text.
+	 */
+	altered: boolean;
+}
+
 /**
  * Strip unsafe characters and bound the length of an untrusted label before it
  * is stored (and later served over the unauthenticated `/api/*` surface).
  */
-function sanitizeLabel(value: string | undefined, maxLength: number): string {
-	if (!value) return UNKNOWN_PRICING_LABEL;
+function sanitizeLabel(
+	value: string | undefined,
+	maxLength: number,
+): SanitizedLabel {
+	if (!value) return { label: UNKNOWN_PRICING_LABEL, altered: true };
 	const stripped = value.replace(UNSAFE_LABEL_CHARS, "").trim();
-	if (stripped.length === 0) return UNKNOWN_PRICING_LABEL;
-	return stripped.slice(0, maxLength);
+	if (stripped.length === 0)
+		return { label: UNKNOWN_PRICING_LABEL, altered: true };
+	const label = stripped.slice(0, maxLength);
+	return { label, altered: label !== value };
+}
+
+/**
+ * Append a short digest fingerprint to a label, inside the same length budget.
+ *
+ * Used when sanitizing/truncating cost a label its uniqueness: two model ids
+ * sharing a 256-character prefix stay two registry entries (they are keyed on
+ * the digest of the originals), but without this they would render as two
+ * identical rows and the operator could not tell which pricing entry to fix.
+ */
+function withDigestSuffix(
+	label: string,
+	key: string,
+	maxLength: number,
+): string {
+	const suffix = ` #${key.slice(0, PRICING_MISS_LABEL_DIGEST_LENGTH)}`;
+	const room = Math.max(0, maxLength - suffix.length);
+	return `${label.slice(0, room)}${suffix}`;
 }
 
 /**
@@ -868,22 +912,32 @@ class PriceCatalogue {
 		report: boolean;
 		now?: number;
 	}): void {
-		const modelId = sanitizeLabel(
-			opts.modelId,
-			MAX_PRICING_MISS_MODEL_ID_LENGTH,
-		);
+		// Keyed on the ORIGINAL pair, not the display labels: two model ids that
+		// share their first 256 characters must stay two entries.
+		const key = digestKey(opts.provider ?? "", opts.modelId);
+
+		const model = sanitizeLabel(opts.modelId, MAX_PRICING_MISS_MODEL_ID_LENGTH);
 		const provider = sanitizeLabel(
 			opts.provider,
 			MAX_PRICING_MISS_PROVIDER_LENGTH,
 		);
+		// Cleaning either half can cost the PAIR its uniqueness, so the fingerprint
+		// goes on whenever either was altered — on the model label, which is the
+		// one rendered in full width, so the row stays bounded and readable.
+		const modelId =
+			model.altered || provider.altered
+				? withDigestSuffix(model.label, key, MAX_PRICING_MISS_MODEL_ID_LENGTH)
+				: model.label;
 
-		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.reason);
+		this.warnOnce(
+			digestKey(opts.modelId),
+			modelId,
+			provider.label,
+			opts.reason,
+		);
 
 		if (!opts.report) return;
 
-		// Keyed on the ORIGINAL pair, not the display labels: two model ids that
-		// share their first 256 characters must stay two entries.
-		const key = digestKey(opts.provider ?? "", opts.modelId);
 		const now = opts.now ?? Date.now();
 
 		const existing = this.pricingMisses.get(key);
@@ -900,8 +954,9 @@ class PriceCatalogue {
 		}
 
 		this.pricingMisses.set(key, {
+			key,
 			modelId,
-			provider,
+			provider: provider.label,
 			reason: opts.reason,
 			occurrences: 1,
 			firstSeenAt: now,
@@ -975,6 +1030,7 @@ class PriceCatalogue {
 		const gaps: PricingGap[] = [];
 		for (const entry of this.pricingMisses.values()) {
 			gaps.push({
+				key: entry.key,
 				modelId: entry.modelId,
 				provider: entry.provider,
 				reason: entry.reason,
@@ -987,7 +1043,10 @@ class PriceCatalogue {
 			(a, b) =>
 				a.firstSeenAt - b.firstSeenAt ||
 				a.provider.localeCompare(b.provider) ||
-				a.modelId.localeCompare(b.modelId),
+				a.modelId.localeCompare(b.modelId) ||
+				// Last resort: two entries whose labels tie are still two entries, and
+				// the order they come back in must not depend on insertion order.
+				a.key.localeCompare(b.key),
 		);
 	}
 
@@ -1034,6 +1093,7 @@ export const __pricingTestHooks = {
 	maxMissEntries: MAX_PRICING_MISS_ENTRIES,
 	maxWarnEntries: MAX_PRICING_WARN_ENTRIES,
 	maxModelIdLength: MAX_PRICING_MISS_MODEL_ID_LENGTH,
+	labelDigestLength: PRICING_MISS_LABEL_DIGEST_LENGTH,
 	hasInFlightLoad(): boolean {
 		return PriceCatalogue.get().hasInFlightLoadForTests();
 	},

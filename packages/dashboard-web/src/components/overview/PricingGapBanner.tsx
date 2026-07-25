@@ -29,10 +29,11 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 				</p>
 				<ul className="mt-2 space-y-1">
 					{gaps.map((gap) => (
-						<li
-							key={`${gap.provider}/${gap.modelId}`}
-							className="text-muted-foreground break-all"
-						>
+						// Keyed on the server-supplied identity, NOT on
+						// `provider/modelId`: both of those are sanitized, clipped display
+						// labels, so two different entries can present the same pair and
+						// hand React a duplicate key.
+						<li key={gap.key} className="text-muted-foreground break-all">
 							<span className="font-mono text-foreground">{gap.modelId}</span>
 							{" · "}
 							{gap.provider}

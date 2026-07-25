@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { PricingGap } from "@clankermux/types";
+import { isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PricingGapBannerView } from "./PricingGapBanner";
 
 function gap(overrides: Partial<PricingGap> = {}): PricingGap {
 	return {
+		key: "9".repeat(64),
 		modelId: "claude-not-yet-priced-9",
 		provider: "anthropic",
 		reason: "model_missing",
@@ -13,6 +15,26 @@ function gap(overrides: Partial<PricingGap> = {}): PricingGap {
 		lastSeenAt: 1_700_000_060_000,
 		...overrides,
 	};
+}
+
+/**
+ * The React keys of the rendered rows. Static markup cannot show them, and a
+ * duplicate key is exactly the defect under test, so the element tree is walked
+ * directly.
+ */
+function rowKeys(gaps: PricingGap[]): (string | null)[] {
+	const keys: (string | null)[] = [];
+	const walk = (node: ReactNode): void => {
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child as ReactNode);
+			return;
+		}
+		if (!isValidElement(node)) return;
+		if (node.type === "li") keys.push(node.key);
+		walk((node.props as { children?: ReactNode }).children);
+	};
+	walk(PricingGapBannerView({ gaps }));
+	return keys;
 }
 
 describe("PricingGapBannerView", () => {
@@ -62,6 +84,45 @@ describe("PricingGapBannerView", () => {
 		expect(html).toContain("pricing entry is incomplete");
 		// Singular/plural on the occurrence count.
 		expect(html).toContain("1 request");
+	});
+
+	it("keys rows on the gap identity so collided labels stay separate rows", () => {
+		// Two model ids sharing a 256-character prefix are two registry entries but
+		// present the SAME (provider, modelId) display pair. Keying on that pair
+		// hands React a duplicate key, which lets it reconcile the wrong row.
+		const clipped = "z".repeat(246);
+		const first = gap({
+			key: "a".repeat(64),
+			modelId: `${clipped} #aaaaaaaa`,
+			occurrences: 3,
+		});
+		const second = gap({
+			key: "b".repeat(64),
+			modelId: `${clipped} #bbbbbbbb`,
+			occurrences: 7,
+		});
+
+		expect(rowKeys([first, second])).toEqual([first.key, second.key]);
+
+		// …and the operator can tell which of the two rows is which, because the
+		// server fingerprinted the labels it had to clip.
+		const html = renderToStaticMarkup(
+			<PricingGapBannerView gaps={[first, second]} />,
+		);
+		expect(html).toContain("#aaaaaaaa");
+		expect(html).toContain("#bbbbbbbb");
+	});
+
+	it("keeps row keys distinct even when the whole display pair matches", () => {
+		// The pathological case the identity exists for: identical provider AND
+		// identical label, two genuinely different models.
+		const keys = rowKeys([
+			gap({ key: "c".repeat(64) }),
+			gap({ key: "d".repeat(64) }),
+		]);
+
+		expect(keys).toHaveLength(2);
+		expect(new Set(keys).size).toBe(2);
 	});
 
 	it("renders whatever the server sends without re-applying provider suppression", () => {

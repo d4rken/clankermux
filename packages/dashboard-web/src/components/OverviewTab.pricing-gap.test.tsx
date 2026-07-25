@@ -12,6 +12,7 @@ import { OverviewTab } from "./OverviewTab";
  */
 
 const gap: PricingGap = {
+	key: "9".repeat(64),
 	modelId: "claude-not-yet-priced-9",
 	provider: "anthropic",
 	reason: "model_missing",

@@ -556,7 +556,9 @@ describe("pricing-miss registry", () => {
 
 		const gaps = getPricingGaps();
 		const sanitized = gaps.find((gap) => gap.modelId.startsWith("evil"));
-		expect(sanitized?.modelId).toBe("evilmodel[31mname");
+		// Cleaning changed what the label says, so it carries the fingerprint that
+		// keeps it distinguishable from any other id that cleans to the same text.
+		expect(sanitized?.modelId).toMatch(/^evilmodel\[31mname #[0-9a-f]{8}$/);
 		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting they were stripped
 		expect(/[\u0000-\u001F\u007F]/.test(sanitized?.modelId ?? "")).toBe(false);
 
@@ -578,7 +580,7 @@ describe("pricing-miss registry", () => {
 		});
 
 		const gap = getPricingGaps()[0];
-		expect(gap.modelId).toBe("evilmodel[31mnamedaeh");
+		expect(gap.modelId).toMatch(/^evilmodel\[31mnamedaeh #[0-9a-f]{8}$/);
 		expect(gap.provider).toBe("anthropic");
 		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.modelId)).toBe(false);
 		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.provider)).toBe(false);
@@ -620,10 +622,26 @@ describe("pricing-miss registry", () => {
 
 		const gaps = getPricingGaps();
 		expect(gaps).toHaveLength(2);
-		// The visible labels are identical (both clipped to the shared prefix)…
-		expect(new Set(gaps.map((gap) => gap.modelId)).size).toBe(1);
-		// …but the entries are not merged, so neither count is inflated.
+		// The entries are not merged, so neither count is inflated…
 		expect(gaps.map((gap) => gap.occurrences)).toEqual([1, 1]);
+		// …they carry distinct identities, so a UI keying rows on `key` never sees
+		// a duplicate…
+		expect(new Set(gaps.map((gap) => gap.key)).size).toBe(2);
+		// …each identity is the full sha256 digest, well past the 128 bits a
+		// client that picks the `model` field would have to birthday through…
+		for (const gap of gaps) {
+			expect(gap.key).toMatch(/^[0-9a-f]{64}$/);
+		}
+		// …and the two rows do not READ the same either: truncation cost the label
+		// its uniqueness, so each one carries its own fingerprint.
+		expect(new Set(gaps.map((gap) => gap.modelId)).size).toBe(2);
+		for (const gap of gaps) {
+			expect(gap.modelId).toEndWith(
+				` #${gap.key.slice(0, __pricingTestHooks.labelDigestLength)}`,
+			);
+			// The fingerprint comes out of the length budget, never on top of it.
+			expect(gap.modelId.length).toBe(__pricingTestHooks.maxModelIdLength);
+		}
 
 		// The warn cache is keyed the same way, so both models are warned about.
 		expect(__pricingTestHooks.warnCount()).toBe(2);

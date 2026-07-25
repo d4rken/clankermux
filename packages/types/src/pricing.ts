@@ -25,7 +25,21 @@ export type PricingGapReason = "model_missing" | "cost_missing";
  * sanitized (control characters stripped) and truncated before it is recorded.
  */
 export interface PricingGap {
-	/** Sanitized, truncated model id as seen on the request. */
+	/**
+	 * Stable identity of this entry: the full sha256 digest of the ORIGINAL,
+	 * untruncated `(provider, modelId)` pair.
+	 *
+	 * `modelId` and `provider` are display labels — sanitized and clipped — so two
+	 * genuinely different entries can carry an identical-looking pair. This is the
+	 * only field guaranteed unique across the list, so it is what a UI keys rows
+	 * on.
+	 */
+	key: string;
+	/**
+	 * Sanitized, truncated model id as seen on the request. When cleaning cost the
+	 * label its uniqueness, it carries a ` #<8 hex>` fingerprint of {@link key} so
+	 * collided rows stay tellable apart.
+	 */
 	modelId: string;
 	/** Account provider the request was served by (`unknown` if unattributed). */
 	provider: string;
