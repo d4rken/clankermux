@@ -151,6 +151,9 @@ export {
 	trackClientVersion,
 } from "./version";
 export {
+	type AccountWideExhaustionBinding,
+	type AccountWideWindow,
+	accountWideExhaustion,
 	flatOauthAppsWindow,
 	type WeeklyWindow,
 	weeklyExhaustion,
