@@ -303,13 +303,6 @@ const MAX_PRICING_MISS_PROVIDER_LENGTH = 64;
 const UNKNOWN_PRICING_LABEL = "unknown";
 
 /**
- * Hex characters kept from the sha256 key digest. 12 hex chars is 48 bits of
- * key space against structures capped at 128 entries, so a collision needs a
- * deliberate preimage search rather than being reachable by accident.
- */
-const PRICING_MISS_KEY_DIGEST_LENGTH = 12;
-
-/**
  * Bounded key over the ORIGINAL, untruncated parts.
  *
  * The stored label is sanitized and clipped to 256 characters, so keying on it
@@ -318,16 +311,32 @@ const PRICING_MISS_KEY_DIGEST_LENGTH = 12;
  * digest keeps distinct inputs distinct however identical their visible labels
  * end up looking.
  *
- * Each part is length-prefixed so no concatenation of parts can be reproduced
- * by a different split: a client-controlled model id may contain any character,
- * separators included.
+ * Two properties this has to hold, because the input is client-controlled and
+ * bounding it is exactly what this key exists for:
+ *
+ *  - **Lossless encoding.** `hash.update(string)` UTF-8-encodes its argument,
+ *    and UTF-8 has no encoding for an unpaired surrogate — every lone surrogate
+ *    collapses to U+FFFD, so `model-\uD800` and `model-\uD801` would digest
+ *    identically and merge into one entry with one warning. The parts are
+ *    therefore hashed as raw UTF-16LE code units, which round-trip any JS
+ *    string.
+ *  - **Full width.** The whole 256-bit digest is kept. A truncated 48-bit key
+ *    puts a birthday collision within ~2^24 hashes of anyone who can pick the
+ *    `model` field — which is the adversary this bounding exists to contain.
+ *    Memory is irrelevant at a 128-entry cap.
+ *
+ * Each part is length-prefixed (by byte count) so no concatenation of parts can
+ * be reproduced by a different split: a client-controlled model id may contain
+ * any character, separators included.
  */
 function digestKey(...parts: string[]): string {
 	const hash = createHash("sha256");
 	for (const part of parts) {
-		hash.update(`${part.length}:${part}`);
+		const bytes = Buffer.from(part, "utf16le");
+		hash.update(`${bytes.length}:`);
+		hash.update(bytes);
 	}
-	return hash.digest("hex").slice(0, PRICING_MISS_KEY_DIGEST_LENGTH);
+	return hash.digest("hex");
 }
 
 /**
@@ -377,8 +386,9 @@ class PriceCatalogue {
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
 	/**
-	 * Bounded registry of REPORTABLE pricing misses, keyed by
-	 * `provider\0modelId`. Capped, holds untrusted ids only after sanitization,
+	 * Bounded registry of REPORTABLE pricing misses, keyed by the digest of the
+	 * ORIGINAL `(provider, modelId)` pair. Capped, holds untrusted ids only after
+	 * sanitization,
 	 * and aggregates occurrences so the misses can be surfaced by
 	 * {@link getGaps}.
 	 *

@@ -629,6 +629,29 @@ describe("pricing-miss registry", () => {
 		expect(__pricingTestHooks.warnCount()).toBe(2);
 	});
 
+	it("keeps unpaired surrogates distinct in the miss identity", async () => {
+		// A JS string can hold a lone surrogate, and a request's `model` is raw
+		// client input, so it can too. UTF-8 has no encoding for one: hashing the
+		// string directly replaces BOTH of these with U+FFFD, which digests
+		// "model-\uD800" and "model-\uD801" to the same key — one entry claiming
+		// two occurrences, and a single warning, for two different models.
+		const warnings = captureMissWarnings();
+
+		await estimateCostUSD("model-\uD800", io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD("model-\uD801", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		expect(gaps.map((gap) => gap.occurrences)).toEqual([1, 1]);
+		expect(warnings).toHaveLength(2);
+	});
+
 	it("evicts least-recently-seen entries over the cap and counts the overflow", async () => {
 		const cap = __pricingTestHooks.maxMissEntries;
 		// A gap that keeps recurring — the live one we must not lose.
