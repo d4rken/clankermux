@@ -1,6 +1,12 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	PROVIDER_NAMES,
+	type PricingGap,
+	type PricingGapReason,
+} from "@clankermux/types";
 import { TIME_CONSTANTS } from "./constants";
 import { CLAUDE_MODEL_IDS, MODEL_DISPLAY_NAMES } from "./models";
 
@@ -259,11 +265,171 @@ const DEFAULT_PRICING_FETCH_TIMEOUT_MS = 4_000;
  * refresh is triggered. */
 const PRICING_REFRESH_HOURS = 24;
 
+/**
+ * Hard cap on distinct (provider, model) REPORTABLE pricing misses held in
+ * memory.
+ *
+ * A request's `model` is client-controlled and never validated, so any caller
+ * can mint unlimited distinct model strings that reach the cost estimator. The
+ * registry therefore evicts least-recently-seen entries once the cap is
+ * reached. A real gap recurs on every affected request, so recency eviction
+ * keeps live gaps and drops one-shot junk.
+ *
+ * Only misses that are actually surfaced by {@link getPricingGaps} occupy this
+ * capacity: suppressed providers (Ollama) and calls that never opted into
+ * reporting are deliberately kept out, so they cannot evict a genuine finding.
+ * Warn de-duplication lives in its own separately-bounded cache.
+ */
+const MAX_PRICING_MISS_ENTRIES = 128;
+
+/**
+ * Hard cap on the warn-de-duplication cache — the bounded replacement for the
+ * unbounded `warnedModels` Set. Keyed by MODEL ONLY (no provider) so an unpriced
+ * model logs exactly once no matter which of the two pricing paths observed it
+ * (a provider's usage extractor prices the response without account
+ * attribution, then the proxy's usage collector prices it again with the real
+ * provider). Kept separate from the gap registry so warn traffic can never
+ * evict a reported gap, and vice versa.
+ */
+const MAX_PRICING_WARN_ENTRIES = 128;
+
+/** Longest model id retained in the registry; longer ids are truncated. */
+const MAX_PRICING_MISS_MODEL_ID_LENGTH = 256;
+
+/** Longest provider name retained in the registry; longer ones are truncated. */
+const MAX_PRICING_MISS_PROVIDER_LENGTH = 64;
+
+/** Placeholder for a model id / provider that sanitizes down to nothing. */
+const UNKNOWN_PRICING_LABEL = "unknown";
+
+/**
+ * Hex characters of the entry digest exposed as the human-comparable
+ * fingerprint. 16 hex chars (64 bits) is short enough to read off a dashboard
+ * row and long enough that two rows an operator is comparing will not tie.
+ *
+ * It is carried in its OWN field, never appended into a label: the label is
+ * client-controlled, so a suffix inside it can simply be typed by the client.
+ * Nothing is ever keyed on the fingerprint — that is the FULL digest.
+ */
+const PRICING_MISS_FINGERPRINT_LENGTH = 16;
+
+/**
+ * Bounded key over the ORIGINAL, untruncated parts.
+ *
+ * The stored label is sanitized and clipped to 256 characters, so keying on it
+ * would merge every model id sharing a 256-character prefix into a single entry
+ * — combining the occurrence counts of models that are not the same model. The
+ * digest keeps distinct inputs distinct however identical their visible labels
+ * end up looking.
+ *
+ * Two properties this has to hold, because the input is client-controlled and
+ * bounding it is exactly what this key exists for:
+ *
+ *  - **Lossless encoding.** `hash.update(string)` UTF-8-encodes its argument,
+ *    and UTF-8 has no encoding for an unpaired surrogate — every lone surrogate
+ *    collapses to U+FFFD, so `model-\uD800` and `model-\uD801` would digest
+ *    identically and merge into one entry with one warning. The parts are
+ *    therefore hashed as raw UTF-16LE code units, which round-trip any JS
+ *    string.
+ *  - **Full width.** The whole 256-bit digest is kept. A truncated 48-bit key
+ *    puts a birthday collision within ~2^24 hashes of anyone who can pick the
+ *    `model` field — which is the adversary this bounding exists to contain.
+ *    Memory is irrelevant at a 128-entry cap.
+ *
+ * Each part is length-prefixed (by byte count) so no concatenation of parts can
+ * be reproduced by a different split: a client-controlled model id may contain
+ * any character, separators included.
+ */
+function digestKey(...parts: string[]): string {
+	const hash = createHash("sha256");
+	for (const part of parts) {
+		const bytes = Buffer.from(part, "utf16le");
+		hash.update(`${bytes.length}:`);
+		hash.update(bytes);
+	}
+	return hash.digest("hex");
+}
+
+/**
+ * Characters removed from an untrusted label before it is stored, logged, or
+ * served over the `/api/*` surface:
+ *
+ *  - `Cc` — ALL Unicode controls, both the C0 block plus DEL and the C1 block
+ *    (U+0080–U+009F). C1 matters as much as C0: U+009B is a single-character
+ *    CSI, so a C0-only strip still lets a model id smuggle terminal escape
+ *    sequences into console output.
+ *  - `Cf` — formatting controls, which include the bidirectional overrides
+ *    (U+202E and friends) that can visually reorder a log line or a dashboard
+ *    row so it reads as something it is not.
+ *  - `Zl`/`Zp` — the line and paragraph separators, which forge a line break in
+ *    a log file the same way a raw newline would.
+ */
+const UNSAFE_LABEL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * Strip unsafe characters and bound the length of an untrusted label before it
+ * is stored (and later served over the unauthenticated `/api/*` surface).
+ *
+ * The result is a DISPLAY label and nothing more. Cleaning and clipping can cost
+ * it its uniqueness — two different inputs can reduce to the same text — but
+ * that is not repaired here by decorating the label: what tells two entries
+ * apart is the separately-carried digest (`key`) and its short `fingerprint`,
+ * neither of which the client can write.
+ */
+function sanitizeLabel(value: string | undefined, maxLength: number): string {
+	if (!value) return UNKNOWN_PRICING_LABEL;
+	const stripped = value.replace(UNSAFE_LABEL_CHARS, "").trim();
+	if (stripped.length === 0) return UNKNOWN_PRICING_LABEL;
+	return stripped.slice(0, maxLength);
+}
+
+/**
+ * A pricing-catalogue lookup failure, carrying the reason so the caller does not
+ * have to parse an error message to tell "no such model" from "model present but
+ * missing a rate".
+ */
+class PricingLookupError extends Error {
+	constructor(
+		message: string,
+		readonly reason: PricingGapReason,
+	) {
+		super(message);
+		this.name = "PricingLookupError";
+	}
+}
+
 class PriceCatalogue {
 	private static instance: PriceCatalogue;
 	private priceData: ApiResponse | null = null;
 	private lastFetch = 0;
+	/**
+	 * Bounded registry of REPORTABLE pricing misses, keyed by the digest of the
+	 * ORIGINAL `(provider, modelId)` pair. Capped, holds untrusted ids only after
+	 * sanitization,
+	 * and aggregates occurrences so the misses can be surfaced by
+	 * {@link getGaps}.
+	 *
+	 * Only reportable misses are inserted — a suppressed provider or a call that
+	 * did not opt in never touches this map, so it cannot spend the capacity a
+	 * genuine gap needs.
+	 *
+	 * Insertion order is maintained as least-recently-seen first (an existing
+	 * entry is deleted and re-inserted when touched), so eviction is O(1) on the
+	 * first key.
+	 */
+	private pricingMisses = new Map<string, PricingGap>();
+	/**
+	 * Bounded warn-de-duplication cache, keyed by MODEL ONLY, so an unpriced
+	 * model produces exactly one log line however many pricing paths observe it.
+	 * Same least-recently-seen ordering and eviction as the registry above, and
+	 * deliberately a separate structure: warn traffic must never evict a reported
+	 * gap.
+	 */
 	private warnedModels = new Set<string>();
+	/** How many entries have been evicted by the cap since process start. */
+	private pricingMissOverflow = 0;
+	/** Whether the cap-exceeded warning has been emitted (log once, not per request). */
+	private warnedPricingMissOverflow = false;
 	private logger: Logger | null = null;
 	/**
 	 * Single in-flight remote-load promise so concurrent getPricing() callers
@@ -275,6 +441,14 @@ class PriceCatalogue {
 	private constructor() {}
 
 	setLogger(logger: Logger): void {
+		this.logger = logger;
+	}
+
+	/**
+	 * Test-only: swap in (or clear) the warn logger so a test can capture the
+	 * de-duplicated warning without the app's real logger.
+	 */
+	setLoggerForTests(logger: Logger | null): void {
 		this.logger = logger;
 	}
 
@@ -665,7 +839,20 @@ class PriceCatalogue {
 		this.priceData = null;
 		this.lastFetch = 0;
 		this.inFlightLoad = null;
+		this.pricingMisses.clear();
 		this.warnedModels.clear();
+		this.pricingMissOverflow = 0;
+		this.warnedPricingMissOverflow = false;
+	}
+
+	/** Test-only: size of the reported-gap registry. */
+	getMissCountForTests(): number {
+		return this.pricingMisses.size;
+	}
+
+	/** Test-only: size of the warn-de-duplication cache. */
+	getWarnCountForTests(): number {
+		return this.warnedModels.size;
 	}
 
 	/** Test-only: is a background remote load currently in flight? */
@@ -678,19 +865,164 @@ class PriceCatalogue {
 		return this.loadPricing();
 	}
 
-	warnOnce(modelId: string, error?: Error | string): void {
-		if (!this.warnedModels.has(modelId)) {
-			this.warnedModels.add(modelId);
-			if (error) {
-				this.logger?.warn(
-					`Price for model "${modelId}" not found - cost set to 0 (reason: ${error instanceof Error ? error.message : error})`,
-				);
-			} else {
-				this.logger?.warn(
-					`Price for model "${modelId}" not found - cost set to 0`,
-				);
-			}
+	/**
+	 * Record a pricing-catalogue miss for `(provider, modelId)`.
+	 *
+	 * Two independent, independently-bounded effects:
+	 *
+	 *  - the model is warned about at most once (model-keyed cache), however many
+	 *    pricing paths priced the same response; and
+	 *  - the miss enters the reported-gap registry ONLY when `report` is true —
+	 *    i.e. the caller opted in via `estimateCostUSD`'s `reportGaps` flag AND
+	 *    the provider is not one whose free models make a gap expected. A
+	 *    suppressed or unattributed miss must not consume registry capacity,
+	 *    because that capacity is what keeps a genuine gap alive.
+	 */
+	recordMiss(opts: {
+		modelId: string;
+		provider?: string;
+		reason: PricingGapReason;
+		report: boolean;
+		now?: number;
+	}): void {
+		// Keyed on the ORIGINAL pair, not the display labels: two model ids that
+		// share their first 256 characters must stay two entries.
+		const key = digestKey(opts.provider ?? "", opts.modelId);
+		// Prefix of the same digest — one hash, one identity, two lengths. Derived
+		// here (server side) and never from the label, so no model text can forge
+		// it.
+		const fingerprint = key.slice(0, PRICING_MISS_FINGERPRINT_LENGTH);
+
+		const modelId = sanitizeLabel(
+			opts.modelId,
+			MAX_PRICING_MISS_MODEL_ID_LENGTH,
+		);
+		const provider = sanitizeLabel(
+			opts.provider,
+			MAX_PRICING_MISS_PROVIDER_LENGTH,
+		);
+
+		this.warnOnce(digestKey(opts.modelId), modelId, provider, opts.reason);
+
+		if (!opts.report) return;
+
+		const now = opts.now ?? Date.now();
+
+		const existing = this.pricingMisses.get(key);
+		if (existing) {
+			existing.occurrences++;
+			existing.lastSeenAt = now;
+			// The latest observation wins: a model that was absent and is now
+			// present-but-incomplete should report the failure it fails with today.
+			existing.reason = opts.reason;
+			// Re-insert to move the entry to the most-recently-seen end.
+			this.pricingMisses.delete(key);
+			this.pricingMisses.set(key, existing);
+			return;
 		}
+
+		this.pricingMisses.set(key, {
+			key,
+			fingerprint,
+			modelId,
+			provider,
+			reason: opts.reason,
+			occurrences: 1,
+			firstSeenAt: now,
+			lastSeenAt: now,
+		});
+		this.evictOverflowingMisses();
+	}
+
+	/**
+	 * Log the "no price" warning at most once per model, then keep the cache
+	 * bounded by dropping the least-recently-warned entry. Model-keyed (not
+	 * provider-keyed) so the provider extractor and the usage collector, which
+	 * price the same response with different attribution, do not each log a line.
+	 *
+	 * `key` is the digest of the ORIGINAL model id; `modelId`/`provider` are the
+	 * sanitized labels used for display only.
+	 *
+	 * Everything interpolated into the line is bounded: the two sanitized labels
+	 * and the typed reason. The lookup error's message is deliberately NOT
+	 * logged — it embeds the raw model id, which would smuggle the untruncated,
+	 * unsanitized client string straight past both the length cap and the
+	 * control-character strip.
+	 */
+	private warnOnce(
+		key: string,
+		modelId: string,
+		provider: string,
+		reason: PricingGapReason,
+	): void {
+		if (this.warnedModels.has(key)) {
+			// Re-insert to move the entry to the most-recently-warned end.
+			this.warnedModels.delete(key);
+			this.warnedModels.add(key);
+			return;
+		}
+		this.warnedModels.add(key);
+		while (this.warnedModels.size > MAX_PRICING_WARN_ENTRIES) {
+			const oldest = this.warnedModels.values().next();
+			if (oldest.done) break;
+			this.warnedModels.delete(oldest.value);
+		}
+		this.logger?.warn(
+			`Price for model "${modelId}" (provider "${provider}") not found - cost set to 0 (reason: ${reason})`,
+		);
+	}
+
+	/** Drop least-recently-seen entries until the registry is back under the cap. */
+	private evictOverflowingMisses(): void {
+		while (this.pricingMisses.size > MAX_PRICING_MISS_ENTRIES) {
+			const oldest = this.pricingMisses.keys().next();
+			if (oldest.done) return;
+			this.pricingMisses.delete(oldest.value);
+			this.pricingMissOverflow++;
+		}
+		if (this.pricingMissOverflow > 0 && !this.warnedPricingMissOverflow) {
+			this.warnedPricingMissOverflow = true;
+			this.logger?.warn(
+				`Pricing-miss registry exceeded ${MAX_PRICING_MISS_ENTRIES} entries; ` +
+					`least-recently-seen entries are being evicted (unknown model ids are client-controlled)`,
+			);
+		}
+	}
+
+	/**
+	 * Cloned snapshots of the reported misses, in a deterministic order (oldest
+	 * first, then provider, then model id). Never hands out registry internals.
+	 * Every entry in the registry is reportable by construction — suppressed and
+	 * opted-out misses were never inserted.
+	 */
+	getGaps(): PricingGap[] {
+		const gaps: PricingGap[] = [];
+		for (const entry of this.pricingMisses.values()) {
+			gaps.push({
+				key: entry.key,
+				fingerprint: entry.fingerprint,
+				modelId: entry.modelId,
+				provider: entry.provider,
+				reason: entry.reason,
+				occurrences: entry.occurrences,
+				firstSeenAt: entry.firstSeenAt,
+				lastSeenAt: entry.lastSeenAt,
+			});
+		}
+		return gaps.sort(
+			(a, b) =>
+				a.firstSeenAt - b.firstSeenAt ||
+				a.provider.localeCompare(b.provider) ||
+				a.modelId.localeCompare(b.modelId) ||
+				// Last resort: two entries whose labels tie are still two entries, and
+				// the order they come back in must not depend on insertion order.
+				a.key.localeCompare(b.key),
+		);
+	}
+
+	/** How many registry entries the cap has evicted since process start. */
+	getGapOverflowCount(): number {
+		return this.pricingMissOverflow;
 	}
 }
 
@@ -702,13 +1034,36 @@ export function setPricingLogger(logger: Logger): void {
 }
 
 /**
- * Test-only handle onto the pricing singleton. Lets tests reset cached state and
- * inspect the in-flight load. NOT for runtime use.
+ * Test-only handle onto the pricing singleton. Lets tests reset cached state
+ * (the reported-gap registry and the warn-de-duplication cache), swap the warn
+ * logger, and inspect the in-flight load.
+ *
+ * It is exported from the package barrel because cross-package tests (proxy,
+ * providers) price responses through the real singleton and need to reset it
+ * between cases — so `reset()` is reachable at runtime. The underscore prefix
+ * marks it as private API: nothing on the request path may call it, and there is
+ * no other way to clear recorded gaps.
  */
 export const __pricingTestHooks = {
 	reset(): void {
 		PriceCatalogue.get().resetForTests();
 	},
+	/** Number of reported gaps currently held by the bounded registry. */
+	missCount(): number {
+		return PriceCatalogue.get().getMissCountForTests();
+	},
+	/** Number of models currently held by the bounded warn-dedup cache. */
+	warnCount(): number {
+		return PriceCatalogue.get().getWarnCountForTests();
+	},
+	/** Swap in a capturing logger (or `null` to silence pricing warnings). */
+	setLogger(logger: Logger | null): void {
+		PriceCatalogue.get().setLoggerForTests(logger);
+	},
+	maxMissEntries: MAX_PRICING_MISS_ENTRIES,
+	maxWarnEntries: MAX_PRICING_WARN_ENTRIES,
+	maxModelIdLength: MAX_PRICING_MISS_MODEL_ID_LENGTH,
+	fingerprintLength: PRICING_MISS_FINGERPRINT_LENGTH,
 	hasInFlightLoad(): boolean {
 		return PriceCatalogue.get().hasInFlightLoadForTests();
 	},
@@ -783,7 +1138,10 @@ async function getCostRate(
 		if (provider.models?.[modelId]) {
 			const model = provider.models[modelId];
 			if (!model.cost) {
-				throw new Error(`Model ${modelId} has no cost information`);
+				throw new PricingLookupError(
+					`Model ${modelId} has no cost information`,
+					"cost_missing",
+				);
 			}
 
 			const costKey =
@@ -795,7 +1153,10 @@ async function getCostRate(
 			const costPerMillion = model.cost[costKey];
 
 			if (costPerMillion === undefined) {
-				throw new Error(`Model ${modelId} has no ${kind} cost`);
+				throw new PricingLookupError(
+					`Model ${modelId} has no ${kind} cost`,
+					"cost_missing",
+				);
 			}
 
 			// Convert from per-million to per-token
@@ -803,7 +1164,64 @@ async function getCostRate(
 		}
 	}
 
-	throw new Error(`Model ${modelId} not found in pricing catalogue`);
+	throw new PricingLookupError(
+		`Model ${modelId} not found in pricing catalogue`,
+		"model_missing",
+	);
+}
+
+/**
+ * Optional call-site context for {@link estimateCostUSD}.
+ *
+ * Reporting is deliberately OPT-IN. The same response is priced more than once
+ * on the normal proxy path (a provider's usage extractor and the proxy's usage
+ * collector both call this), so a default-on reporter would double-count every
+ * miss — and would also report misses from provider-level calls that have no
+ * account attribution, defeating the per-provider suppression. Exactly one call
+ * site (the proxy usage collector, which owns the persisted `cost_usd`) passes
+ * `reportGaps: true`.
+ */
+export interface PricingEstimateContext {
+	/**
+	 * Provider the request was actually served by — the ACCOUNT's provider where
+	 * available, which is not always the registered provider handling it (e.g.
+	 * `claude-console-api` accounts are served by the `anthropic` provider).
+	 */
+	provider?: string;
+	/** Opt in to recording a pricing gap when the lookup fails. Default: false. */
+	reportGaps?: boolean;
+}
+
+/**
+ * Providers whose models are free by definition, so a missing catalogue entry is
+ * expected rather than a costing failure worth surfacing. Built from the
+ * canonical constants — never string literals, where a typo silently disables
+ * suppression.
+ *
+ * `openai-compatible` is deliberately NOT suppressed: it fronts both free local
+ * endpoints and paid ones, so a gap there is real information.
+ */
+const PRICING_GAP_SUPPRESSED_PROVIDERS: ReadonlySet<string> = new Set<string>([
+	PROVIDER_NAMES.OLLAMA,
+	PROVIDER_NAMES.OLLAMA_CLOUD,
+]);
+
+/**
+ * Cloned snapshots of the pricing-catalogue misses observed since process start
+ * (cumulative — an entry is never retracted, because a later successful
+ * input-only estimate does not prove the missing cache rate has appeared).
+ */
+export function getPricingGaps(): PricingGap[] {
+	return PriceCatalogue.get().getGaps();
+}
+
+/**
+ * How many pricing-miss entries the registry cap has evicted since process
+ * start. Non-zero means unknown model ids outnumbered the cap — the gap list is
+ * a recent sample rather than the complete set.
+ */
+export function getPricingGapOverflowCount(): number {
+	return PriceCatalogue.get().getGapOverflowCount();
 }
 
 /**
@@ -813,6 +1231,7 @@ async function getCostRate(
 export async function estimateCostUSD(
 	modelId: string,
 	tokens: TokenBreakdown,
+	context?: PricingEstimateContext,
 ): Promise<number> {
 	const catalogue = PriceCatalogue.get();
 
@@ -841,7 +1260,21 @@ export async function estimateCostUSD(
 
 		return totalCost;
 	} catch (error) {
-		catalogue.warnOnce(modelId, error instanceof Error ? error : String(error));
+		const provider = context?.provider;
+		catalogue.recordMiss({
+			modelId,
+			provider,
+			// Anything that isn't a typed lookup failure is treated as a missing
+			// model: the remediation wording covers both ("add or complete").
+			reason:
+				error instanceof PricingLookupError ? error.reason : "model_missing",
+			report:
+				context?.reportGaps === true &&
+				!(
+					provider !== undefined &&
+					PRICING_GAP_SUPPRESSED_PROVIDERS.has(provider)
+				),
+		});
 		return 0;
 	}
 }

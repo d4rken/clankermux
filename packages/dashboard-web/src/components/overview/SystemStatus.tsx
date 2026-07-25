@@ -79,9 +79,13 @@ export function SystemStatus() {
 					Healthy
 				</Badge>
 			) : status === "degraded" ? (
-				<Badge variant="default" className="bg-warning">
-					Degraded
-				</Badge>
+				// The badge's own warning variant, not `variant="default"` with a
+				// `bg-warning` override: that override left the default variant's
+				// white text on top of it, which was unreadable on the pale yellow the
+				// hand-written rule produced and no better on the registered amber.
+				// The variant itself pairs the amber with `--warning-foreground`, so
+				// this reads at ~6:1 light / ~11:1 dark rather than white's ~1.9:1.
+				<Badge variant="warning">Degraded</Badge>
 			) : (
 				<Badge variant="destructive">Unhealthy</Badge>
 			);

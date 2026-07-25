@@ -1,3 +1,4 @@
+import type { PricingGap } from "./pricing";
 import type { PoolStatus } from "./stats";
 
 /**
@@ -39,6 +40,14 @@ export interface SystemStatusResponse {
 	runtime: {
 		asyncWriterHealthy: boolean;
 		integrityStatus: "ok" | "corrupt" | "unchecked" | "running" | "skipped";
+		/**
+		 * Models whose cost could not be computed since this process started, so
+		 * their requests were recorded with a NULL cost. Deliberately does NOT
+		 * feed the `status` rollup: requests are still served correctly, only
+		 * costing is degraded, and `/health` (which 503s on a non-ok status) is
+		 * consumed by container health checks.
+		 */
+		pricingGaps: PricingGap[];
 	};
 	/** Event-loop lag from the in-process monitor (zeros when not running). */
 	eventLoop: EventLoopLagStats;

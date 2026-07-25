@@ -1,4 +1,11 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +13,8 @@ import {
 	__pricingTestHooks,
 	estimateCostUSD,
 	getModelCacheRates,
+	getPricingGapOverflowCount,
+	getPricingGaps,
 	type TokenBreakdown,
 } from "./pricing";
 
@@ -38,7 +47,8 @@ afterAll(() => {
 });
 
 describe("estimateCostUSD", () => {
-	it("returns 0 for an unknown model", async () => {
+	it("returns 0 for an unknown model and records nothing without opt-in", async () => {
+		__pricingTestHooks.reset();
 		const tokenBreakdown: TokenBreakdown = {
 			inputTokens: 1000,
 			outputTokens: 1000,
@@ -50,6 +60,9 @@ describe("estimateCostUSD", () => {
 		);
 
 		expect(cost).toBe(0);
+		// Reporting is opt-in: a bare call still de-duplicates the log warning
+		// internally, but surfaces no gap.
+		expect(getPricingGaps()).toEqual([]);
 	});
 
 	it("computes cost for a known bundled Anthropic model", async () => {
@@ -400,5 +413,457 @@ describe("getModelCacheRates", () => {
 			cacheReadPer1M: 0,
 			cacheWritePer1M: 0,
 		});
+	});
+});
+
+/**
+ * The pricing-miss registry holds UNTRUSTED input: a request's `model` is
+ * client-controlled, unvalidated and unbounded in length, and it is served back
+ * out over the unauthenticated `/api/*` surface. Bounding and sanitizing it is a
+ * correctness requirement, not polish — the Set it replaces had exactly this
+ * unbounded-growth bug.
+ */
+describe("pricing-miss registry", () => {
+	const io: TokenBreakdown = { inputTokens: 1000, outputTokens: 1000 };
+	const report = { reportGaps: true };
+
+	/**
+	 * Install a capturing logger and hand back the array of "no price" warnings
+	 * only — the catalogue also warns about the network fetch this suite
+	 * deliberately disables, which is not what these cases are about.
+	 */
+	function captureMissWarnings(): string[] {
+		const warnings: string[] = [];
+		__pricingTestHooks.setLogger({
+			warn: (message: string) => {
+				if (message.startsWith("Price for model ")) warnings.push(message);
+			},
+			debug: () => {},
+		});
+		return warnings;
+	}
+
+	beforeEach(() => {
+		__pricingTestHooks.reset();
+	});
+
+	afterEach(() => {
+		__pricingTestHooks.reset();
+		__pricingTestHooks.setLogger(null);
+	});
+
+	it("records a gap only when the caller opts in", async () => {
+		await estimateCostUSD("silent-unknown-model", io, {
+			provider: "anthropic",
+		});
+		expect(getPricingGaps()).toEqual([]);
+
+		await estimateCostUSD("reported-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].modelId).toBe("reported-unknown-model");
+		expect(gaps[0].provider).toBe("anthropic");
+		expect(gaps[0].occurrences).toBe(1);
+	});
+
+	it("suppresses ollama and ollama-cloud but not openai-compatible", async () => {
+		await estimateCostUSD("llama-local", io, {
+			provider: "ollama",
+			...report,
+		});
+		await estimateCostUSD("llama-hosted", io, {
+			provider: "ollama-cloud",
+			...report,
+		});
+		expect(getPricingGaps()).toEqual([]);
+
+		// openai-compatible fronts paid endpoints too, so a gap there is real
+		// information and must NOT be suppressed.
+		await estimateCostUSD("some-paid-model", io, {
+			provider: "openai-compatible",
+			...report,
+		});
+		expect(getPricingGaps().map((gap) => gap.modelId)).toEqual([
+			"some-paid-model",
+		]);
+	});
+
+	it("keys by (provider, model) so one model can gap through two providers", async () => {
+		await estimateCostUSD("shared-unknown-model", io, {
+			provider: "openrouter",
+			...report,
+		});
+		await estimateCostUSD("shared-unknown-model", io, {
+			provider: "kilo",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		expect(gaps.map((gap) => gap.provider).sort()).toEqual([
+			"kilo",
+			"openrouter",
+		]);
+		// Two independent entries, each counted once — not one ambiguous entry.
+		expect(gaps.every((gap) => gap.occurrences === 1)).toBe(true);
+	});
+
+	it("aggregates repeated misses into one entry", async () => {
+		for (let i = 0; i < 3; i++) {
+			await estimateCostUSD("repeat-unknown-model", io, {
+				provider: "anthropic",
+				...report,
+			});
+		}
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].occurrences).toBe(3);
+		expect(gaps[0].lastSeenAt).toBeGreaterThanOrEqual(gaps[0].firstSeenAt);
+	});
+
+	it("distinguishes model_missing from cost_missing", async () => {
+		await estimateCostUSD("absent-from-catalogue", io, {
+			provider: "anthropic",
+			...report,
+		});
+		// MiniMax-M2 IS in the catalogue but carries no cache pricing, so a
+		// cache-read request fails on a PRESENT-but-incomplete entry.
+		await estimateCostUSD(
+			"MiniMax-M2",
+			{ cacheReadInputTokens: 1000 },
+			{ provider: "minimax", ...report },
+		);
+
+		const byModel = new Map(
+			getPricingGaps().map((gap) => [gap.modelId, gap.reason]),
+		);
+		expect(byModel.get("absent-from-catalogue")).toBe("model_missing");
+		expect(byModel.get("MiniMax-M2")).toBe("cost_missing");
+	});
+
+	it("sanitizes control characters and truncates oversized model ids", async () => {
+		const noisy = "evil\u0000model\u001B[31m\u007Fname";
+		const oversized = "x".repeat(__pricingTestHooks.maxModelIdLength + 500);
+
+		await estimateCostUSD(noisy, io, { provider: "anthropic", ...report });
+		await estimateCostUSD(oversized, io, {
+			provider: "prov\u0000ider",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		const sanitized = gaps.find((gap) => gap.modelId.startsWith("evil"));
+		// The label is the cleaned text and NOTHING else — what keeps it
+		// distinguishable from another id that cleans to the same text is the
+		// separately-carried fingerprint, not a suffix inside this string.
+		expect(sanitized?.modelId).toBe("evilmodel[31mname");
+		expect(sanitized?.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting they were stripped
+		expect(/[\u0000-\u001F\u007F]/.test(sanitized?.modelId ?? "")).toBe(false);
+
+		const truncated = gaps.find((gap) => gap.modelId.startsWith("x"));
+		expect(truncated?.modelId.length).toBe(__pricingTestHooks.maxModelIdLength);
+		expect(truncated?.provider).toBe("provider");
+	});
+
+	it("strips C1 controls and formatting overrides, not just C0", async () => {
+		// U+009B is a single-character CSI and U+0085 a line break: a C0-only
+		// strip leaves both intact, so an id like this still injects terminal
+		// escapes into the console and forges lines in the log. U+202E flips the
+		// visual order of everything after it in the dashboard row.
+		const c1Noisy = "evil\u0085model\u009B[31mname\u202Edaeh";
+
+		await estimateCostUSD(c1Noisy, io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gap = getPricingGaps()[0];
+		expect(gap.modelId).toBe("evilmodel[31mnamedaeh");
+		expect(gap.provider).toBe("anthropic");
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.modelId)).toBe(false);
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(gap.provider)).toBe(false);
+	});
+
+	it("logs only the typed reason, never the raw lookup error", async () => {
+		const warnings = captureMissWarnings();
+		// The lookup error message embeds the model id verbatim, so logging it
+		// would put the untruncated, uncleaned client string on the console —
+		// straight past both the length cap and the control-character strip.
+		const hostile = `${"x".repeat(5_000)}\u009B[2J\u0085forged log line`;
+
+		await estimateCostUSD(hostile, io, { provider: "anthropic", ...report });
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("(reason: model_missing)");
+		expect(warnings[0]).not.toContain("not found in pricing catalogue");
+		expect(warnings[0]).not.toContain("forged log line");
+		expect(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(warnings[0])).toBe(false);
+		// One bounded model label + one bounded provider label + fixed wording.
+		expect(warnings[0].length).toBeLessThanOrEqual(
+			__pricingTestHooks.maxModelIdLength + 200,
+		);
+	});
+
+	it("keeps model ids distinct when their truncated labels collide", async () => {
+		// Truncation is a DISPLAY concern. Keying on the clipped label would fold
+		// every id sharing a 256-character prefix into one entry and sum their
+		// occurrence counts, so two different models would read as one busy one.
+		const prefix = "z".repeat(__pricingTestHooks.maxModelIdLength);
+		await estimateCostUSD(`${prefix}-alpha`, io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD(`${prefix}-beta`, io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		// The entries are not merged, so neither count is inflated…
+		expect(gaps.map((gap) => gap.occurrences)).toEqual([1, 1]);
+		// …they carry distinct identities, so a UI keying rows on `key` never sees
+		// a duplicate…
+		expect(new Set(gaps.map((gap) => gap.key)).size).toBe(2);
+		// …each identity is the full sha256 digest, well past the 128 bits a
+		// client that picks the `model` field would have to birthday through…
+		for (const gap of gaps) {
+			expect(gap.key).toMatch(/^[0-9a-f]{64}$/);
+		}
+		// …and the two rows do not READ the same either, because each carries its
+		// own fingerprint — a prefix of that digest, in its own field. It is NOT
+		// spliced into the label: `modelId` is client-controlled, so a suffix there
+		// could simply be typed by a client and would forge a fingerprint.
+		expect(new Set(gaps.map((gap) => gap.fingerprint)).size).toBe(2);
+		for (const gap of gaps) {
+			expect(gap.fingerprint).toBe(
+				gap.key.slice(0, __pricingTestHooks.fingerprintLength),
+			);
+			expect(gap.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+			// The label is the plain truncated text: undoctored, and still bounded by
+			// the full 256-character budget (no room is rented out to a suffix).
+			expect(gap.modelId).toBe(prefix);
+			expect(gap.modelId.length).toBe(__pricingTestHooks.maxModelIdLength);
+		}
+
+		// The warn cache is keyed the same way, so both models are warned about.
+		expect(__pricingTestHooks.warnCount()).toBe(2);
+	});
+
+	it("cannot have its fingerprint forged from the model id", async () => {
+		// The attack the separate field exists to close: observe a row's rendered
+		// identity, then send it back as your own model id. While the fingerprint
+		// lived INSIDE the label, that produced a second row whose label read
+		// exactly like the first one's.
+		await estimateCostUSD("genuine-unpriced-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		const genuine = getPricingGaps()[0];
+
+		await estimateCostUSD(
+			`genuine-unpriced-model #${genuine.fingerprint}`,
+			io,
+			{
+				provider: "anthropic",
+				...report,
+			},
+		);
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		const forger = gaps.find((gap) => gap.key !== genuine.key);
+		// The mimicry stays where the client put it — in the label — and the
+		// fingerprint is computed from the digest, so it does not follow.
+		expect(forger?.modelId).toBe(
+			`genuine-unpriced-model #${genuine.fingerprint}`,
+		);
+		expect(forger?.fingerprint).not.toBe(genuine.fingerprint);
+		expect(forger?.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+		// And the genuine row is untouched by the impersonation attempt.
+		expect(genuine.modelId).toBe("genuine-unpriced-model");
+		expect(gaps.find((gap) => gap.key === genuine.key)?.occurrences).toBe(1);
+	});
+
+	it("keeps unpaired surrogates distinct in the miss identity", async () => {
+		// A JS string can hold a lone surrogate, and a request's `model` is raw
+		// client input, so it can too. UTF-8 has no encoding for one: hashing the
+		// string directly replaces BOTH of these with U+FFFD, which digests
+		// "model-\uD800" and "model-\uD801" to the same key — one entry claiming
+		// two occurrences, and a single warning, for two different models.
+		const warnings = captureMissWarnings();
+
+		await estimateCostUSD("model-\uD800", io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD("model-\uD801", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(2);
+		expect(gaps.map((gap) => gap.occurrences)).toEqual([1, 1]);
+		expect(warnings).toHaveLength(2);
+	});
+
+	it("evicts least-recently-seen entries over the cap and counts the overflow", async () => {
+		const cap = __pricingTestHooks.maxMissEntries;
+		// A gap that keeps recurring — the live one we must not lose.
+		await estimateCostUSD("live-gap-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		// Flood with distinct client-minted ids, refreshing the live gap as real
+		// traffic would.
+		for (let i = 0; i < cap * 2; i++) {
+			await estimateCostUSD(`junk-model-${i}`, io, {
+				provider: "anthropic",
+				...report,
+			});
+			await estimateCostUSD("live-gap-model", io, {
+				provider: "anthropic",
+				...report,
+			});
+		}
+
+		expect(__pricingTestHooks.missCount()).toBeLessThanOrEqual(cap);
+		expect(getPricingGaps().length).toBeLessThanOrEqual(cap);
+		expect(getPricingGapOverflowCount()).toBeGreaterThan(0);
+		// Recency eviction keeps the entry that is still being hit.
+		expect(
+			getPricingGaps().some((gap) => gap.modelId === "live-gap-model"),
+		).toBe(true);
+	});
+
+	it("keeps suppressed and opted-out misses out of the registry entirely", async () => {
+		// A miss the operator can do nothing about (Ollama is free by definition)
+		// or that nobody asked to be reported must not occupy a single slot: the
+		// registry's capacity is what keeps a REAL gap alive.
+		await estimateCostUSD("llama-local", io, { provider: "ollama", ...report });
+		await estimateCostUSD("unattributed-model", io);
+
+		expect(__pricingTestHooks.missCount()).toBe(0);
+		expect(getPricingGaps()).toEqual([]);
+	});
+
+	it("does not let suppressed misses evict a reported gap", async () => {
+		const cap = __pricingTestHooks.maxMissEntries;
+		await estimateCostUSD("real-gap-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+
+		// An Ollama install exposes far more distinct model ids than the cap.
+		for (let i = 0; i < cap * 2; i++) {
+			await estimateCostUSD(`ollama-model-${i}`, io, {
+				provider: "ollama",
+				...report,
+			});
+			// …and provider-level extraction prices every response without
+			// attribution or opt-in, too.
+			await estimateCostUSD(`unattributed-model-${i}`, io);
+		}
+
+		expect(__pricingTestHooks.missCount()).toBe(1);
+		expect(getPricingGapOverflowCount()).toBe(0);
+		expect(getPricingGaps().map((gap) => gap.modelId)).toEqual([
+			"real-gap-model",
+		]);
+	});
+
+	it("warns once per model across both pricing paths", async () => {
+		// Only the miss warnings matter here; the catalogue also warns about the
+		// deliberately-disabled network fetch.
+		const warnings = captureMissWarnings();
+
+		// The provider's usage extractor prices the response first, with no
+		// account attribution, then the proxy's usage collector prices the SAME
+		// response with the real provider and opts into reporting. That is one
+		// unpriced model, so it is one log line.
+		await estimateCostUSD("double-priced-model", io);
+		await estimateCostUSD("double-priced-model", io, {
+			provider: "claude-console-api",
+			...report,
+		});
+		await estimateCostUSD("double-priced-model", io, {
+			provider: "claude-console-api",
+			...report,
+		});
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("double-priced-model");
+		// A suppressed provider still gets its one line — the operator should see
+		// the miss in the log even though it is not worth a dashboard banner.
+		await estimateCostUSD("llama-local", io, { provider: "ollama", ...report });
+		expect(warnings).toHaveLength(2);
+	});
+
+	it("bounds the warn-dedup cache independently of the registry", async () => {
+		const warnCap = __pricingTestHooks.maxWarnEntries;
+		for (let i = 0; i < warnCap * 2; i++) {
+			// Suppressed, so none of these reach the registry at all.
+			await estimateCostUSD(`ollama-model-${i}`, io, {
+				provider: "ollama",
+				...report,
+			});
+		}
+
+		expect(__pricingTestHooks.warnCount()).toBeLessThanOrEqual(warnCap);
+		expect(__pricingTestHooks.missCount()).toBe(0);
+	});
+
+	it("returns cloned snapshots in a deterministic order", async () => {
+		// Ordering is (firstSeenAt, provider, modelId) — the provider/model
+		// tiebreak matters because misses recorded in the same millisecond must
+		// still come back in a stable order.
+		await estimateCostUSD("first-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		await estimateCostUSD("second-unknown-model", io, {
+			provider: "zai",
+			...report,
+		});
+
+		const first = getPricingGaps();
+		expect(first.map((gap) => gap.modelId)).toEqual([
+			"first-unknown-model",
+			"second-unknown-model",
+		]);
+
+		// Mutating the snapshot must not reach registry internals.
+		first[0].occurrences = 9999;
+		first[0].modelId = "tampered";
+		const second = getPricingGaps();
+		expect(second[0].modelId).toBe("first-unknown-model");
+		expect(second[0].occurrences).toBe(1);
+		expect(second[0]).not.toBe(first[0]);
+		// Same input, same order.
+		expect(second.map((gap) => gap.modelId)).toEqual(
+			getPricingGaps().map((gap) => gap.modelId),
+		);
+	});
+
+	it("is cleared by the test-hook reset", async () => {
+		await estimateCostUSD("transient-unknown-model", io, {
+			provider: "anthropic",
+			...report,
+		});
+		expect(getPricingGaps()).toHaveLength(1);
+		expect(__pricingTestHooks.warnCount()).toBe(1);
+
+		__pricingTestHooks.reset();
+
+		expect(getPricingGaps()).toEqual([]);
+		expect(getPricingGapOverflowCount()).toBe(0);
+		// Both bounded structures are cleared, so a warn-once model warns again.
+		expect(__pricingTestHooks.warnCount()).toBe(0);
 	});
 });

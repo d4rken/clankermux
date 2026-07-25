@@ -13,6 +13,7 @@ export * from "./logging";
 export * from "./memory-snapshot";
 export * from "./native-responses";
 export * from "./payment";
+export * from "./pricing";
 export * from "./request";
 export * from "./stats";
 export * from "./strategy";

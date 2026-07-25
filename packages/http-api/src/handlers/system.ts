@@ -1,9 +1,10 @@
 import type { Config } from "@clankermux/config";
-import { getEventLoopStats } from "@clankermux/core";
+import { getEventLoopStats, getPricingGaps } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type {
 	EventLoopLagStats,
 	IntegrityStatus,
+	PricingGap,
 	SystemStatusResponse,
 } from "@clankermux/types";
 import {
@@ -20,6 +21,7 @@ import {
 type AsyncWriterHealthFn = () => { healthy: boolean };
 type IntegrityStatusFn = () => IntegrityStatus;
 type EventLoopLagFn = () => EventLoopLagStats;
+type PricingGapsFn = () => PricingGap[];
 
 /**
  * `GET /api/system/status` — live operational snapshot for the dashboard's
@@ -30,6 +32,11 @@ type EventLoopLagFn = () => EventLoopLagStats;
  *
  * Always responds 200 (it's a dashboard info endpoint, not a liveness probe);
  * the `status` field carries ok/degraded/unhealthy.
+ *
+ * `runtime.pricingGaps` rides along here rather than on `/health` on purpose:
+ * `/health` answers 503 for a non-ok status and is consumed by container health
+ * checks, and a model missing from the pricing catalogue must never take the
+ * proxy out of rotation. It is reported alongside the rollup without feeding it.
  */
 export function createSystemStatusHandler(
 	dbOps: DatabaseOperations,
@@ -37,6 +44,7 @@ export function createSystemStatusHandler(
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
 	getEventLoopLag?: EventLoopLagFn,
+	getPricingGapsFn?: PricingGapsFn,
 ) {
 	return async (): Promise<Response> => {
 		try {
@@ -54,6 +62,9 @@ export function createSystemStatusHandler(
 				: "unchecked";
 
 			const runtimeHealthy = asyncWriterHealthy;
+			// Deliberately NOT part of `runtimeHealthy`: a pricing gap degrades
+			// costing, not serving, and this rollup is shared with `/health`.
+			const pricingGaps = (getPricingGapsFn ?? getPricingGaps)();
 			const status = computeHealthStatus(runtimeHealthy, pool);
 
 			const rss = process.memoryUsage.rss();
@@ -68,6 +79,7 @@ export function createSystemStatusHandler(
 				runtime: {
 					asyncWriterHealthy,
 					integrityStatus,
+					pricingGaps,
 				},
 				// Falls back to the process-wide monitor accessor, which reports
 				// zeros when the monitor was never started (e.g. bare handler in
