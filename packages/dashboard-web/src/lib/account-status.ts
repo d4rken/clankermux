@@ -1,3 +1,4 @@
+import { ACCOUNT_WIDE_HARD_STATUSES } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
@@ -6,13 +7,10 @@ import { computeRenewal, type RenewalUrgency } from "./renewal";
 /**
  * Only these hard-limit statuses mean the account is actually blocked; soft
  * warnings like "allowed_warning" / "queueing_soft" mean it is still usable.
+ * Shared vocabulary from `@clankermux/core`; matched as a prefix because the
+ * API appends a `(Nm)` countdown to the status string.
  */
-const HARD_LIMIT_PREFIXES = [
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-];
+const HARD_LIMIT_PREFIXES = [...ACCOUNT_WIDE_HARD_STATUSES];
 
 /** Urgency of the soonest-expiring available Codex usage-reset credit. */
 export type ResetCreditUrgency = "none" | "soon" | "imminent";

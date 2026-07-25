@@ -1,4 +1,5 @@
 import {
+	ACCOUNT_WIDE_HARD_STATUSES,
 	BUFFER_SIZES,
 	estimateCostUSD,
 	mapModelName,
@@ -31,13 +32,8 @@ const DEFAULT_CONFIG: AnthropicCompatibleConfig = {
 	supportsStreaming: true,
 };
 
-// Hard rate limit statuses (similar to Anthropic)
-const HARD_LIMIT_STATUSES = new Set([
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-]);
+// Hard rate limit statuses (similar to Anthropic) — the shared vocabulary.
+const HARD_LIMIT_STATUSES = ACCOUNT_WIDE_HARD_STATUSES;
 
 const log = new Logger("BaseAnthropicCompatibleProvider");
 

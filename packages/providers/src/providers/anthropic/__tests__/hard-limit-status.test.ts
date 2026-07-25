@@ -75,6 +75,18 @@ describe("isAnthropicHardLimitStatus", () => {
 		).toBe(false);
 	});
 
+	it("`rejected` ⇒ false (deliberate: the family-weekly gate must stay unchanged)", () => {
+		// Anthropic emits `rejected` on live accounts, and the presentation layer
+		// treats it as a refusal (REJECTING_STATUSES). It is deliberately NOT
+		// promoted to the account-wide hard set, because this predicate gates the
+		// family-weekly safety net — promoting it would need header captures from a
+		// family-scoped and a transient-burst 429 first.
+		expect(isAnthropicHardLimitStatus(responseWithStatus("rejected"))).toBe(
+			false,
+		);
+		expect(HARD_LIMIT_STATUSES.has("rejected")).toBe(false);
+	});
+
 	describe("comparison is exact and case-sensitive", () => {
 		// parseRateLimit compares the raw header against HARD_LIMIT_STATUSES with
 		// Set.has(), which is case-sensitive — the predicate must match that.

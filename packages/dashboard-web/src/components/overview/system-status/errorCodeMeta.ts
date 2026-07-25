@@ -69,6 +69,14 @@ const KNOWN_ERROR_META: Record<
 			"Top up the account's credits or increase its overage allowance. Until then, traffic shifts to other configured accounts automatically.",
 		severity: "error",
 	},
+	weekly_exhausted_429: {
+		title: "Weekly usage limit reached",
+		description:
+			"Anthropic returned 429 while this account's account-wide weekly window was already at 100% (confirmed by fresh usage data). The account is cooled down until the provider's reset time and traffic shifts to other accounts; the transparent burst-retry hold is skipped because a spent weekly window cannot recover early.",
+		suggestion:
+			"No action needed — the account recovers automatically when its weekly window resets. Add or prioritize another account if the whole pool is exhausted.",
+		severity: "warning",
+	},
 	family_weekly_exhausted_429: {
 		title: "Model family weekly limit reached",
 		description:

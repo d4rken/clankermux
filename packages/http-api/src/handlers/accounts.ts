@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
+	ACCOUNT_WIDE_HARD_STATUSES,
 	isAnthropicUsageShape,
 	patterns,
 	sanitizers,
@@ -67,6 +68,7 @@ import type {
 } from "@clankermux/types";
 import {
 	computeDuplicateAccountFlags,
+	isRateLimitReason,
 	microsToUsd,
 	requiresSessionDurationTracking,
 	usdToMicros,
@@ -87,24 +89,16 @@ import { weeklyExhaustion } from "./health";
 
 const log = new Logger("AccountsHandler");
 
-const RATE_LIMIT_REASONS = new Set<RateLimitReason>([
-	"upstream_429_with_reset",
-	// Kept for backwards-compat with DB rows written by ccflare ≤ v3.5.x;
-	// new code emits `upstream_429_no_reset_probe_cooldown` instead.
-	"upstream_429_no_reset_default_5h",
-	"upstream_429_no_reset_probe_cooldown",
-	"model_fallback_429",
-	"all_models_exhausted_429",
-	"upstream_529_overloaded_with_reset",
-	"upstream_529_overloaded_no_reset",
-	"out_of_credits",
-]);
-
+/**
+ * Validate a stored `rate_limited_reason` for the API response. Backed by
+ * `RATE_LIMIT_REASONS` in `@clankermux/types`, the same runtime tuple the
+ * `RateLimitReason` union is derived from — a hand-maintained allowlist used to
+ * live here and silently nulled `family_weekly_exhausted_429`, hiding its
+ * dashboard error card. Unknown (e.g. far-future) values still degrade to null.
+ */
 function toRateLimitReason(v: string | null): RateLimitReason | null {
 	if (v === null) return null;
-	return RATE_LIMIT_REASONS.has(v as RateLimitReason)
-		? (v as RateLimitReason)
-		: null;
+	return isRateLimitReason(v) ? v : null;
 }
 
 /**
@@ -143,16 +137,10 @@ const STALE_USAGE_MAX_AGE_MS = 2 * SNAPSHOT_SAMPLE_INTERVAL_MS;
 /**
  * Status prefixes that mean the account is actually blocked (vs soft warnings
  * like "allowed_warning" / "queueing_soft" which mean it is still usable).
- * Must mirror HARD_LIMIT_PREFIXES in
- * packages/dashboard-web/src/lib/account-status.ts (http-api cannot depend on
- * dashboard-web, so the list is duplicated here).
+ * The shared vocabulary lives in `@clankermux/core`; the stored column can carry
+ * a trailing suffix, so membership is tested as a prefix match.
  */
-const HARD_LIMIT_PREFIXES = [
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-];
+const HARD_LIMIT_PREFIXES = [...ACCOUNT_WIDE_HARD_STATUSES];
 
 /**
  * Compute the display-ready rateLimitStatus string for an account.

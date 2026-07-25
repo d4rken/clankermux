@@ -1,8 +1,10 @@
 import {
+	ACCOUNT_WIDE_HARD_STATUSES,
 	BUFFER_SIZES,
 	isInvalidGrantMessage,
 	mapModelName,
 	OAuthRefreshTokenError,
+	SOFT_WARNING_STATUSES as SHARED_SOFT_WARNING_STATUSES,
 	validateEndpointUrl,
 } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
@@ -27,27 +29,22 @@ import { extractAnthropicIdentity } from "./identity";
  * distinguish a transient burst 429 from a real account limit must treat it as
  * hard. (Confirmed by `parseRateLimit` behaviour and the streaming tests.)
  *
- * This Set is the single source of truth for the Anthropic provider — both
+ * Alias of `ACCOUNT_WIDE_HARD_STATUSES` in `@clankermux/core`, which is the
+ * single source of truth for the whole repo; the name is kept here because both
  * {@link AnthropicProvider.parseRateLimit} and the exported
  * {@link isAnthropicHardLimitStatus} predicate read from it. Comparison is
  * exact and case-sensitive, matching the raw header value.
  */
-export const HARD_LIMIT_STATUSES: ReadonlySet<string> = new Set([
-	"rate_limited",
-	"blocked",
-	"queueing_hard",
-	"payment_required",
-]);
+export const HARD_LIMIT_STATUSES: ReadonlySet<string> =
+	ACCOUNT_WIDE_HARD_STATUSES;
 
 /**
  * Soft / warning statuses that must NOT block account usage and must NOT be
  * treated as hard limits. Exposed for symmetry with {@link HARD_LIMIT_STATUSES};
  * the normal non-limited value `"allowed"` is not listed here.
  */
-export const SOFT_WARNING_STATUSES: ReadonlySet<string> = new Set([
-	"allowed_warning",
-	"queueing_soft",
-]);
+export const SOFT_WARNING_STATUSES: ReadonlySet<string> =
+	SHARED_SOFT_WARNING_STATUSES;
 
 /**
  * Returns `true` iff the response's `anthropic-ratelimit-unified-status` header
