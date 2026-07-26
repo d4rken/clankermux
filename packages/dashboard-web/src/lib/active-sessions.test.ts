@@ -3,6 +3,7 @@ import type { ActiveSessionsTimePoint } from "@clankermux/types";
 import {
 	type ActiveSessionsAccountRow,
 	buildActiveSessionsTrend,
+	buildSessionTotalsByBucket,
 	SCOPE_ORDER,
 	SESSION_SCOPE_COLORS,
 	SESSION_TOTAL_KEY,
@@ -130,6 +131,62 @@ describe("buildActiveSessionsTrend", () => {
 		expect(rows[0][TOTAL_KEY]).toBe(9);
 		// Bucket 2: single scope + 0-filled siblings = 1.
 		expect(rows[1][TOTAL_KEY]).toBe(1);
+	});
+});
+
+describe("buildSessionTotalsByBucket", () => {
+	it("returns an empty map for empty input", () => {
+		expect(buildSessionTotalsByBucket([]).size).toBe(0);
+	});
+
+	it("sums every scope within one bucket", () => {
+		const timeSeries: ActiveSessionsTimePoint[] = [
+			{ ts: 1, scope: "claude_session", sessions: 2 },
+			{ ts: 1, scope: "codex_thread", sessions: 3 },
+			{ ts: 1, scope: "project", sessions: 4 },
+		];
+
+		expect(buildSessionTotalsByBucket(timeSeries).get(1)).toBe(9);
+	});
+
+	it("returns the single scope's count for a bucket with one scope", () => {
+		const timeSeries: ActiveSessionsTimePoint[] = [
+			{ ts: 10, scope: "claude_session", sessions: 5 },
+		];
+
+		expect(buildSessionTotalsByBucket(timeSeries).get(10)).toBe(5);
+	});
+
+	it("counts an unrecognised scope value toward the total", () => {
+		// The server casts the raw DB scope without runtime validation, so a scope
+		// this client doesn't know about must still count rather than vanish. This
+		// pins the scope-agnostic reduce against a regression to a SCOPE_ORDER pivot.
+		const unknownScope = {
+			ts: 1,
+			scope: "future_client",
+			sessions: 6,
+		} as unknown as ActiveSessionsTimePoint;
+		const timeSeries: ActiveSessionsTimePoint[] = [
+			{ ts: 1, scope: "claude_session", sessions: 2 },
+			unknownScope,
+		];
+
+		expect(buildSessionTotalsByBucket(timeSeries).get(1)).toBe(8);
+	});
+
+	it("keys buckets independently by ts", () => {
+		const timeSeries: ActiveSessionsTimePoint[] = [
+			{ ts: 1, scope: "claude_session", sessions: 2 },
+			{ ts: 1, scope: "codex_thread", sessions: 3 },
+			{ ts: 2, scope: "claude_session", sessions: 1 },
+			{ ts: 3, scope: "project", sessions: 7 },
+		];
+
+		const totals = buildSessionTotalsByBucket(timeSeries);
+		expect(totals.size).toBe(3);
+		expect(totals.get(1)).toBe(5);
+		expect(totals.get(2)).toBe(1);
+		expect(totals.get(3)).toBe(7);
 	});
 });
 
