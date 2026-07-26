@@ -653,9 +653,10 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 
 	it("logs the account actually attempted, not the one in first position, when the late overload check skips accounts[0]", async () => {
 		// The final-order DEBUG line is the ONLY runtime evidence that a soft
-		// demotion bound, so it must follow the real upstream attempt rather than
-		// list position. Here accounts[0] passes the EARLY provider-overload gate
-		// and is then skipped by the LATE one inside the attempt loop:
+		// demotion bound, so it must follow the account whose attempt was really
+		// admitted rather than list position. Here accounts[0] passes the EARLY
+		// provider-overload gate and is then skipped by the LATE one inside the
+		// attempt loop:
 		//   - the early gate reads each account's EFFECTIVE (mapped) model — opus
 		//     for `first`, whose bucket is closed;
 		//   - the late gate reads the REQUEST model (sonnet), whose bucket is open.
@@ -714,8 +715,8 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 					.length,
 			).toBe(1);
 			expect(line).toContain("First > Second");
-			// The logged attempt is the account that actually went upstream…
-			expect(line).toContain("attempted first upstream: second");
+			// The logged attempt is the account whose attempt was admitted…
+			expect(line).toContain("first admitted attempt: second");
 			// …while the by-position primary — the skipped account — is reported as
 			// position, never as "the first attempt".
 			expect(line).toContain("gated primary by position: first");

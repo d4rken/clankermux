@@ -1266,15 +1266,24 @@ export async function handleProxy(
 	}
 
 	// Post-gate routing evidence, emitted EXACTLY ONCE per request at the moment
-	// an upstream attempt is ADMITTED — never before. SessionStrategy.logSelection()
-	// runs BEFORE these gates, so it shows the strategy's ranking, not the order
+	// an attempt is ADMITTED — never before. SessionStrategy.logSelection() runs
+	// BEFORE these gates, so it shows the strategy's ranking, not the order
 	// clients actually follow; this line records the FINAL candidate order with
-	// each account's soft-demotion reason (if any) plus the account that was
-	// really attempted. It is the only runtime signal that a soft demotion bound.
+	// each account's soft-demotion reason (if any) plus the account whose attempt
+	// was admitted first. It is the only runtime signal that a soft demotion bound.
 	//
-	// Why the ATTEMPTED account and not `primaryAttemptAccountId`: the latter is
+	// BOUNDARY: "first admitted attempt" means the first account admitted past
+	// the routing gates and the single-flight probe gate — NOT the first account
+	// to reach the network. Admission still precedes request preparation and the
+	// authoritative overload admission inside proxy-operations.ts, either of which
+	// can fail over before any bytes leave. That is deliberate: what this line
+	// exists to verify is WHICH ACCOUNT ROUTING ATTEMPTED FIRST, and a
+	// soft-demoted account being attempted first is the defect regardless of
+	// whether that attempt reached the network.
+	//
+	// Why the ADMITTED account and not `primaryAttemptAccountId`: the latter is
 	// post-gate LIST POSITION, and at least three paths make the real first
-	// upstream attempt differ from it — the marker-active burst hold reprobes the
+	// admitted attempt differ from it — the marker-active burst hold reprobes the
 	// affinity-pinned account regardless of position, the single-flight probe gate
 	// can suppress accounts[0], and the late provider-overload check skips it
 	// before any upstream call. Reporting position would misdescribe exactly the
@@ -1295,7 +1304,7 @@ export async function handleProxy(
 			})
 			.join(" > ");
 		log.debug(
-			`Final candidate order: ${order || "none"} — attempted first upstream: ` +
+			`Final candidate order: ${order || "none"} — first admitted attempt: ` +
 				`${actualAccountId} (gated primary by position: ` +
 				`${requestMeta.routing?.primaryAttemptAccountId ?? "none"})`,
 		);
@@ -2047,7 +2056,6 @@ export async function handleProxy(
 				// synthetic, locally-answered request (no upstream call), so it must
 				// neither consume an account's single recovery probe nor be suppressed
 				// by another request holding it.
-				logFinalOrderOnce(codexForSynthesis.id);
 				const syntheticResponse = await proxyWithAccount(
 					req,
 					url,
