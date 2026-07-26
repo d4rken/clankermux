@@ -79,7 +79,8 @@ export function RequestVolumeSuccessChart({
 	const isEmpty = !data || data.length === 0;
 	// An older server omits activeSessions entirely; drawing it as a flat zero
 	// line would report an unknown as an observed value, so hide it instead.
-	const hasSessions = data.some((d) => d.activeSessions !== undefined);
+	const hasSessions =
+		!isEmpty && data.some((d) => d.activeSessions !== undefined);
 
 	return (
 		<ChartContainer
