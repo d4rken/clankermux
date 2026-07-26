@@ -12,6 +12,7 @@ import {
 	YAxis,
 } from "recharts";
 import { CHART_PROPS, COLORS } from "../../constants";
+import { SESSION_TOTAL_COLOR } from "../../lib/active-sessions";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { ChartContainer } from "./ChartContainer";
 import { ChartTooltip } from "./ChartTooltip";
@@ -22,6 +23,12 @@ interface RequestVolumeSuccessChartProps {
 		ts: number;
 		requests: number;
 		successRate: number;
+		/**
+		 * Distinct active sessions in the bucket. The key is absent (not
+		 * `undefined`) on every row when the server didn't report session
+		 * analytics at all, which is how the series' presence is detected.
+		 */
+		activeSessions?: number;
 	}>;
 	/** Selected dashboard range; controls how bucket timestamps are labelled. */
 	timeRange: string;
@@ -70,6 +77,10 @@ export function RequestVolumeSuccessChart({
 }: RequestVolumeSuccessChartProps) {
 	const chartHeight = getChartHeight(height);
 	const isEmpty = !data || data.length === 0;
+	// An older server omits activeSessions entirely; drawing it as a flat zero
+	// line would report an unknown as an observed value, so hide it instead.
+	const hasSessions =
+		!isEmpty && data.some((d) => d.activeSessions !== undefined);
 
 	return (
 		<ChartContainer
@@ -112,12 +123,30 @@ export function RequestVolumeSuccessChart({
 						domain={[0, 100]}
 						tickFormatter={(value) => `${value}%`}
 					/>
+					{/*
+					 * Sessions get their own hidden axis: counts are orders of magnitude
+					 * smaller than request volume, so sharing the requests axis would
+					 * flatten the curve onto the baseline. The shape is what's comparable
+					 * here, not the height — hence no visible ticks. width={0} is
+					 * defensive: recharts stacks same-orientation axes by id, and this
+					 * keeps the visible left axis position independent of that ordering.
+					 */}
+					{hasSessions && (
+						<YAxis
+							yAxisId="sessions"
+							hide
+							width={0}
+							domain={[0, "auto"]}
+							allowDecimals={false}
+						/>
+					)}
 					<Tooltip
 						content={
 							<ChartTooltip
 								formatters={{
 									requests: (value) => formatNumber(Number(value)),
 									successRate: (value) => `${Number(value).toFixed(1)}%`,
+									activeSessions: (value) => formatNumber(Number(value)),
 								}}
 								labelFormatter={(label, payload) => {
 									// Resolve the header from the hovered bucket's unique `ts`
@@ -131,7 +160,11 @@ export function RequestVolumeSuccessChart({
 							/>
 						}
 					/>
-					<Legend verticalAlign="top" height={36} iconType="rect" />
+					{/*
+					 * No fixed height: with a third series the legend wraps on a narrow
+					 * card, and a hard 36px reservation would let it overlap the plot.
+					 */}
+					<Legend verticalAlign="top" iconType="rect" />
 					<Area
 						yAxisId="requests"
 						type="monotone"
@@ -151,6 +184,17 @@ export function RequestVolumeSuccessChart({
 						strokeWidth={2}
 						dot={false}
 					/>
+					{hasSessions && (
+						<Line
+							yAxisId="sessions"
+							type="monotone"
+							dataKey="activeSessions"
+							name="Active Sessions"
+							stroke={SESSION_TOTAL_COLOR}
+							strokeWidth={2}
+							dot={false}
+						/>
+					)}
 				</ComposedChart>
 			</ResponsiveContainer>
 		</ChartContainer>

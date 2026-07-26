@@ -10,6 +10,7 @@ import {
 	useStats,
 } from "../hooks/queries";
 import { SESSION_SCOPE_SHORT_LABELS } from "../lib/active-sessions";
+import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
@@ -95,19 +96,10 @@ export const OverviewTab = React.memo(() => {
 		stats && analytics && accounts ? { stats, analytics, accounts } : null;
 
 	// Transform time series data
-	const timeSeriesData = useMemo(() => {
-		if (!analytics) return [];
-		return analytics.timeSeries.map((point) => ({
-			ts: point.ts,
-			requests: point.requests,
-			successRate: point.successRate,
-			responseTime: Math.round(point.avgResponseTime),
-			cost: point.costUsd.toFixed(2),
-			planCost: point.planCostUsd ?? 0,
-			apiCost: point.apiCostUsd ?? 0,
-			tokensPerSecond: point.avgTokensPerSecond || 0,
-		}));
-	}, [analytics]);
+	const timeSeriesData = useMemo(
+		() => buildOverviewTimeSeries(analytics),
+		[analytics],
+	);
 
 	// Memoize percentage changes calculation
 	const trends = useMemo(() => {
