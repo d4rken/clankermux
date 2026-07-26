@@ -227,8 +227,15 @@ Two membership tests are correct and stay as they are:
   accounts does not help; it has its own weekly-exhaustion guard.
 
 `SessionStrategy.logSelection()` runs BEFORE these gates, so it does NOT show the
-order clients follow. The DEBUG line `Final candidate order: … — first attempt: …`
-in `proxy.ts` is the one that does.
+order clients follow. The DEBUG line `Final candidate order: … — first admitted
+attempt: … (gated primary by position: …)` in `proxy.ts` is the one that does.
+It is emitted once per request from the attempt-ADMISSION points (every
+`attemptThroughProbeGate` callback), never from the `count_tokens` local
+synthesis, which makes no upstream call. "Admitted" is deliberate and is NOT
+"reached the network": request preparation and the authoritative overload
+admission in `proxy-operations.ts` both sit after admission and can still fail
+over. The question this line answers is which account ROUTING attempted first —
+a soft-demoted account being attempted first is the defect either way.
 
 ### The pool-liveness reserve
 
