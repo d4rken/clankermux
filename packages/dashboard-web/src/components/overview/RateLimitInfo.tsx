@@ -85,7 +85,7 @@ export function RateLimitInfo({
 					{rateLimitedAccounts.map((account) => {
 						// The cause's own reset is authoritative — `rateLimitReset` is the
 						// raw provider header and can disagree with the countdown baked
-						// into the status string (e.g. when weekly exhaustion outranks a
+						// into the status string (e.g. when usage exhaustion outranks a
 						// shorter cooldown lock).
 						const resetMs =
 							account.rateLimitCauseResetMs ??
