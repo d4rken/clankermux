@@ -870,7 +870,9 @@ describe("?detail=1 parameter", () => {
 				const body = (await response.json()) as HealthTestBody;
 
 				expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
-				expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
+				expect(
+					body.accounts_detail?.[0]?.usage_exhausted_until,
+				).toBeUndefined();
 				expect(
 					body.accounts_detail?.[0]?.usage_exhausted_binding,
 				).toBeUndefined();
@@ -952,7 +954,9 @@ describe("?detail=1 parameter", () => {
 			const body = (await response.json()) as HealthTestBody;
 
 			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
-			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe("session");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe(
+				"session",
+			);
 			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
 				Date.parse(sessionReset),
 			);
@@ -1027,7 +1031,9 @@ describe("?detail=1 parameter", () => {
 
 			expect(body.accounts_detail?.[0]?.status).toBe("paused");
 			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
-			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBeUndefined();
+			expect(
+				body.accounts_detail?.[0]?.usage_exhausted_binding,
+			).toBeUndefined();
 		} finally {
 			usageCache.delete(id);
 		}

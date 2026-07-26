@@ -800,10 +800,7 @@ describe("resolveRateLimitPresentation — session-class exhaustion", () => {
 
 	it("ignores a spent session whose reset is already PAST (stale evidence)", () => {
 		expect(
-			statusForUsage(
-				sessionSpent(new Date(NOW - MIN).toISOString()),
-				NOW,
-			),
+			statusForUsage(sessionSpent(new Date(NOW - MIN).toISOString()), NOW),
 		).toBe("OK");
 	});
 
