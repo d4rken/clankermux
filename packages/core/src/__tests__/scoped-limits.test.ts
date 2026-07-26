@@ -231,6 +231,8 @@ describe("isFamilyWeeklyExhaustedWithHeadroom", () => {
 		weeklyResetMs: null,
 		bindingWeeklyResetMs: null,
 		weeklyHeadroom: 100,
+		sessionResetMs: null,
+		extraUsageUtilization: null,
 	});
 
 	it("is true when the family is exhausted and unified headroom remains", () => {

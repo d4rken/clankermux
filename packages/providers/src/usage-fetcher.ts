@@ -829,6 +829,13 @@ export function getAccountCapacitySignal(
 		weeklyResetMs: weeklyReset,
 		bindingWeeklyResetMs,
 		weeklyHeadroom,
+		// The 5h session window's own reset — NOT recoverable from soonestResetMs
+		// (a min() across all hard windows loses which window it came from).
+		sessionResetMs: normalized.session?.resetMs ?? null,
+		// extra_usage is RESETLESS: it bounds bindingUtilization above but has no
+		// reset, so an account it constrains never self-recovers. Surfaced
+		// explicitly because bindingUtilization cannot say which axis produced it.
+		extraUsageUtilization: d.extra_usage?.utilization ?? null,
 	};
 }
 

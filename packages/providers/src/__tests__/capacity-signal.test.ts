@@ -337,6 +337,107 @@ describe("getAccountCapacitySignal", () => {
 		expect(signal).not.toBeNull();
 		expect(signal?.sessionHeadroom).toBe(100);
 	});
+
+	// --- sessionResetMs / extraUsageUtilization (explicit recovery inputs) ---
+
+	it("reports sessionResetMs from a flat five_hour window", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 90, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 10, resets_at: iso(600_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal?.sessionResetMs).toBe(NOW + 3_600_000);
+		// The 5h reset is the SESSION axis alone — distinct from the weekly reset.
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+	});
+
+	it("reports sessionResetMs from a limits[]-only payload", () => {
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 95,
+					resets_at: iso(1_800_000),
+					scope: null,
+					is_active: true,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 40,
+					resets_at: iso(600_000_000),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal?.sessionResetMs).toBe(NOW + 1_800_000);
+	});
+
+	it("reports sessionResetMs null when the session window is absent", () => {
+		const data: UsageData = {
+			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.sessionResetMs).toBeNull();
+	});
+
+	it("reports sessionResetMs null when the session window has no resets_at", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 90, resets_at: null },
+			seven_day: { utilization: 10, resets_at: iso(600_000_000) },
+		};
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal?.sessionResetMs).toBeNull();
+	});
+
+	it("reports extraUsageUtilization when extra_usage is present, null otherwise", () => {
+		const withExtra: UsageData = {
+			five_hour: { utilization: 20, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
+			extra_usage: {
+				is_enabled: true,
+				monthly_limit: 100,
+				used_credits: 97,
+				utilization: 97,
+			},
+		};
+		expect(
+			getAccountCapacitySignal(withExtra, "anthropic", NOW)
+				?.extraUsageUtilization,
+		).toBe(97);
+
+		const withoutExtra: UsageData = {
+			five_hour: { utilization: 20, resets_at: iso(3_600_000) },
+			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
+		};
+		expect(
+			getAccountCapacitySignal(withoutExtra, "anthropic", NOW)
+				?.extraUsageUtilization,
+		).toBeNull();
+	});
+
+	it("reports extraUsageUtilization null for a limits[]-only payload (no extra_usage)", () => {
+		const data = {
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 40,
+					resets_at: iso(600_000_000),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
+		expect(signal).not.toBeNull();
+		expect(signal?.extraUsageUtilization).toBeNull();
+		expect(signal?.sessionResetMs).toBeNull();
+	});
 });
 
 describe("getFreshCapacity", () => {

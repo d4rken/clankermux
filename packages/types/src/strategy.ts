@@ -26,6 +26,20 @@ export interface CapacitySignal {
 	bindingWeeklyResetMs: number | null;
 	/** min(100 - util) over weekly windows; 100 if none present. HARVEST tie-break. */
 	weeklyHeadroom: number;
+	/**
+	 * Reset (ms) of the 5h session window; null when absent or unknown. Explicit
+	 * for the same reason `sessionHeadroom` is: `soonestResetMs` is a min() across
+	 * all hard windows and loses WHICH window it came from, so the session's own
+	 * reset is NOT recoverable from the aggregate.
+	 */
+	sessionResetMs: number | null;
+	/**
+	 * extra_usage utilization, or null when absent. Explicit because it is a
+	 * RESETLESS constraint: it is folded into `bindingUtilization` but has no
+	 * reset, so an account it binds never self-recovers. Not recoverable from
+	 * the aggregate.
+	 */
+	extraUsageUtilization: number | null;
 }
 
 /**
