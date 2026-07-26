@@ -162,6 +162,44 @@ describe("AccountStatusChips — on-credits chip", () => {
 	});
 });
 
+/**
+ * The full API → `deriveAccountStatus` → `RateLimitStatusChip` chain. The chip's
+ * own tests inject `binding` directly, so only this level proves the field
+ * actually survives the derivation in between.
+ */
+describe("AccountStatusChips — usage-exhausted binding chain", () => {
+	function exhausted(
+		binding: AccountResponse["rateLimitCauseBinding"],
+	): AccountResponse {
+		return makeAccount({
+			provider: "anthropic",
+			rateLimitStatus: "usage_exhausted (13m)",
+			rateLimitCause: "usage_exhausted",
+			rateLimitCauseBinding: binding,
+			rateLimitCauseResetMs: NOW + 13 * 60_000,
+			rateLimitProviderStatus: "rejected",
+		});
+	}
+
+	it("renders the 5-hour tooltip for a session-bound exhaustion", () => {
+		const html = render(exhausted("session"));
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("5-hour session quota is spent");
+		expect(html).not.toContain("Weekly usage quota");
+	});
+
+	it("renders the weekly tooltip for a weekly-bound exhaustion", () => {
+		const html = render(exhausted("weekly"));
+		expect(html).toContain("Weekly usage quota is spent");
+		expect(html).not.toContain("5-hour session");
+	});
+
+	it("stays generic when the server sent no binding", () => {
+		const html = render(exhausted(undefined));
+		expect(html).toContain("A usage quota is spent");
+	});
+});
+
 describe("AccountStatusChips — family-scoped overload chips", () => {
 	it("renders a per-family chip for an open family bucket, without the generic chip", () => {
 		const html = render(

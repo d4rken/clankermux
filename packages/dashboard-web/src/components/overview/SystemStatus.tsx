@@ -152,8 +152,12 @@ export function SystemStatus() {
 					</div>
 				</div>
 
-				{/* Pool summary */}
-				<dl className="grid grid-cols-3 gap-3 text-sm">
+				{/* Pool summary. `usage_exhausted` is its own counter and NOT part of
+				    `rate_limited`: an account sitting out a spent weekly or 5-hour
+				    window has no cooldown lock, so without this cell a fully exhausted
+				    pool read "0 routable, 0 rate-limited, 0 paused" with no
+				    explanation. */}
+				<dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
 					<div>
 						<dt className="text-muted-foreground">Routable</dt>
 						<dd className="font-medium tabular-nums">
@@ -167,6 +171,16 @@ export function SystemStatus() {
 								<span className="text-warning">{pool.rate_limited}</span>
 							) : (
 								pool.rate_limited
+							)}
+						</dd>
+					</div>
+					<div>
+						<dt className="text-muted-foreground">Usage exhausted</dt>
+						<dd className="font-medium tabular-nums">
+							{(pool.usage_exhausted ?? 0) > 0 ? (
+								<span className="text-warning">{pool.usage_exhausted}</span>
+							) : (
+								(pool.usage_exhausted ?? 0)
 							)}
 						</dd>
 					</div>

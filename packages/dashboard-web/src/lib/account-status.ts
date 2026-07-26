@@ -1,5 +1,9 @@
 import { ACCOUNT_WIDE_HARD_STATUSES } from "@clankermux/core";
-import type { AccountResponse, RateLimitCause } from "@clankermux/types";
+import type {
+	AccountResponse,
+	RateLimitCause,
+	UsageExhaustionBinding,
+} from "@clankermux/types";
 import { HARD_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
@@ -53,9 +57,18 @@ export interface AccountStatus {
 	rateLimitCause: RateLimitCause | null;
 	/** Epoch ms when the cause clears; null when unknown. */
 	rateLimitCauseResetMs: number | null;
+	/**
+	 * Which account-wide window drove a `usage_exhausted` cause (a `weekly`
+	 * window or the rolling 5-hour `session`); null for every other cause and on
+	 * payloads from servers that predate the field.
+	 */
+	rateLimitCauseBinding: UsageExhaustionBinding | null;
 	/** Raw provider status behind the cause (may be an unrecognized value). */
 	rateLimitProviderStatus: string | null;
-	/** The account-wide weekly quota is spent (blocked, but self-healing). */
+	/**
+	 * An ACCOUNT-WIDE usage window is spent — a weekly one or the rolling 5-hour
+	 * session (blocked, but self-healing). `rateLimitCauseBinding` says which.
+	 */
 	isUsageExhausted: boolean;
 	/** Whether to render the colored RateLimitStatusChip (non-paused, non-OK). */
 	showRateLimitChip: boolean;
@@ -157,8 +170,9 @@ export function deriveAccountStatus(
 	const isBlockedByLegacyLock =
 		typeof account.rateLimitedUntil === "number" &&
 		account.rateLimitedUntil > now;
-	// A weekly-exhausted account's lock is legitimate: force-resetting it only
-	// lets the router burn fresh 429s against a window that is spent right now,
+	// A usage-exhausted account's lock is legitimate (whichever account-wide
+	// window bound): force-resetting it only lets the router burn fresh 429s
+	// against a window that is spent right now,
 	// so the action is suppressed. (If the provider releases the window early,
 	// usage polling observes it and clears the lock without an operator action.)
 	const showForceReset =
@@ -295,6 +309,7 @@ export function deriveAccountStatus(
 		rateLimitStatus,
 		rateLimitCause,
 		rateLimitCauseResetMs: account.rateLimitCauseResetMs ?? null,
+		rateLimitCauseBinding: account.rateLimitCauseBinding ?? null,
 		rateLimitProviderStatus: account.rateLimitProviderStatus ?? null,
 		isUsageExhausted,
 		showRateLimitChip:
