@@ -77,6 +77,8 @@ const capacity = (minHeadroom: number): CapacitySignal => ({
 	weeklyResetMs: null,
 	bindingWeeklyResetMs: null,
 	weeklyHeadroom: 100,
+	sessionResetMs: null,
+	extraUsageUtilization: null,
 });
 
 describe("resolveFamilyWeeklyExclusion", () => {

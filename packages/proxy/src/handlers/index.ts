@@ -22,6 +22,12 @@ export {
 } from "./family-weekly-gate";
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
+	isAbsorbablePeer,
+	LIVENESS_RESERVE_HEADROOM_PCT,
+	LIVENESS_RESERVE_RELEASE_HORIZON_MS,
+	resolvePoolLivenessDemotion,
+} from "./pool-liveness-gate";
+export {
 	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createPinnedTargetUnavailableResponse,

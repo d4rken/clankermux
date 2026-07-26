@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type {
 	Account,
@@ -246,5 +246,135 @@ describe("peekPrimaryAccountId", () => {
 		peekPrimaryAccountId([a], strategy, throttleDisabledConfig, now);
 
 		expect(strategy.selectCalls).toBe(0);
+	});
+
+	// --- pool-liveness reserve parity ---
+
+	const HOUR = 3_600_000;
+	const DAY = 24 * HOUR;
+
+	/** Usage with the given 5h / weekly utilization and a weekly reset 5 days out. */
+	function usage(
+		now: number,
+		fiveHour: number,
+		weekly: number,
+	): AnthropicUsageData {
+		return {
+			five_hour: {
+				utilization: fiveHour,
+				resets_at: new Date(now + 4 * HOUR).toISOString(),
+			},
+			seven_day: {
+				utilization: weekly,
+				resets_at: new Date(now + 5 * DAY).toISOString(),
+			},
+		} as AnthropicUsageData;
+	}
+
+	it("(j) skips a liveness-reserved account when a surviving peer can absorb", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		usageCache.set("anthropicA", usage(now, 0, 95)); // 5% weekly headroom
+		usageCache.set("codex", usage(now, 20, 20)); // absorbable
+
+		expect(
+			peekPrimaryAccountId(
+				[reserved, peer],
+				strategy,
+				throttleDisabledConfig,
+				now,
+			),
+		).toBe("codex");
+	});
+
+	it("(k) counts only accounts that SURVIVED the hard gates as absorbable peers", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		usageCache.set("anthropicA", usage(now, 0, 95));
+		usageCache.set("codex", usage(now, 20, 20));
+
+		// The only would-be absorber is overload-gated, so routing would keep the
+		// reserved account. Evaluating liveness BEFORE the hard gates would count
+		// the gated peer and make the badge skip an account real routing keeps.
+		applyProviderOverloadCooldown("codex", now + 60_000);
+
+		expect(
+			peekPrimaryAccountId(
+				[reserved, peer],
+				strategy,
+				throttleDisabledConfig,
+				now,
+			),
+		).toBe("anthropicA");
+	});
+
+	it("(l) fails open on usage older than the routing freshness bound", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		usageCache.set("anthropicA", usage(now, 0, 95));
+		usageCache.set("codex", usage(now, 20, 20));
+
+		// The reserved account's datum is 4 minutes old: still inside peek()'s
+		// 10-minute TTL, but OUTSIDE the 180s bound routing's liveness path uses.
+		// Routing fails open there, so the badge must too. The peer stays fresh, so
+		// this is not merely "everything is stale".
+		const ages = spyOn(usageCache, "peekAge").mockImplementation(
+			(id: string) => (id === "anthropicA" ? 240_000 : 1_000),
+		);
+		try {
+			expect(
+				peekPrimaryAccountId(
+					[reserved, peer],
+					strategy,
+					throttleDisabledConfig,
+					now,
+				),
+			).toBe("anthropicA");
+		} finally {
+			ages.mockRestore();
+		}
+	});
+
+	it("(m) still reports a reserved account as primary when nothing else survives", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const strategy = makeStrategy([reserved]);
+
+		usageCache.set("anthropicA", usage(now, 0, 95));
+
+		// Sole candidate: rule 4 (no absorbable peer) already fails the reserve
+		// open, and the demotion is soft anyway — the badge must not go blank.
+		expect(
+			peekPrimaryAccountId([reserved], strategy, throttleDisabledConfig, now),
+		).toBe("anthropicA");
+	});
+
+	it("(n) stays non-evicting: the reserved account's cache entry survives the peek", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		usageCache.set("anthropicA", usage(now, 0, 95));
+		usageCache.set("codex", usage(now, 20, 20));
+
+		peekPrimaryAccountId(
+			[reserved, peer],
+			strategy,
+			throttleDisabledConfig,
+			now,
+		);
+
+		expect(usageCache.peek("anthropicA")).not.toBeNull();
+		expect(usageCache.peek("codex")).not.toBeNull();
 	});
 });

@@ -14,7 +14,7 @@ import {
 	trackClientVersion,
 } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
-import { Logger } from "@clankermux/logger";
+import { Logger, LogLevel } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import {
 	type Account,
@@ -42,6 +42,7 @@ import {
 	getUsageThrottleUntil,
 	HOLD_OVERFLOW,
 	holdAndRetryCacheAccount,
+	isAbsorbablePeer,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
@@ -54,6 +55,7 @@ import {
 	type ReprobeOutcome,
 	RequestBodyContext,
 	resolveFamilyWeeklyExclusion,
+	resolvePoolLivenessDemotion,
 	resolveTransientlyCooledFamilySibling,
 	selectAccountsForRequest,
 	setForcedAccount,
@@ -64,6 +66,7 @@ import { resolveReservationDemotion } from "./handlers/family-reservation-gate";
 import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
+	hasCapacityRestoredProbePending,
 } from "./handlers/rate-limit-cooldown";
 import {
 	getOverloadHoldBudgetMs,
@@ -1109,17 +1112,36 @@ export async function handleProxy(
 		return passed;
 	};
 
-	// 6d. Shared-window reservation reorder — a SOFT demotion (never an
-	// exclusion). For a NON-protected request against an Anthropic account whose
-	// shared 5h/7d window is near its limit, move the account to the BACK of the
-	// candidate list so a less-constrained peer is tried first, reserving the tail
-	// of the shared window for the protected family (Fable). This only reorders —
-	// it never drops an account, so it can't empty the pool. Combo requests are
-	// skipped entirely (the attempt loop matches accounts[i] to slots[i]
-	// POSITIONALLY, so reordering would desync that mapping); for the non-combo
-	// path each account is classified by its EFFECTIVE (mapped) model via
-	// modelForAccount, matching the demand-recording site and the overload gate.
-	const applyReservationReorder = (
+	// Why each demoted account was demoted, for the pre-attempt-loop DEBUG line.
+	// Rebuilt on every applySoftDemotionReorder() call so it always describes the
+	// order the attempt loop is actually about to follow (the strategy's own
+	// logSelection runs BEFORE these gates and therefore cannot show it).
+	let softDemotionReasons = new Map<string, string>();
+
+	// 6d. Composite soft-demotion reorder — SOFT demotions (never exclusions).
+	// Two independent reasons move an account to the BACK of the candidate list:
+	//
+	//  - Shared-window reservation: a NON-protected request against an Anthropic
+	//    account whose shared 5h/7d window is near its limit, reserving the tail
+	//    of the shared window for the protected family (Fable).
+	//  - Pool liveness: an account inside the last LIVENESS_RESERVE_HEADROOM_PCT
+	//    of its weekly quota, while some peer can still absorb the traffic and
+	//    the binding weekly reset is still far off — keeping it alive as failover
+	//    capacity instead of draining it to a multi-day weekly wall.
+	//
+	// They MUST be applied as ONE partition, not two sequential ones: two stable
+	// partitions do not compose. Family produces [K, F]; a second liveness
+	// partition over that result can produce [F, K], promoting an account the
+	// family gate had just reserved. One partition over the UNION of both reasons
+	// is the only ordering that respects both.
+	//
+	// This only reorders — it never drops an account, so it can't empty the pool;
+	// if every candidate is demoted the original order is preserved. Combo
+	// requests are skipped entirely (the attempt loop matches accounts[i] to
+	// slots[i] POSITIONALLY, so reordering would desync that mapping); for the
+	// non-combo path each account is classified by its EFFECTIVE (mapped) model
+	// via modelForAccount, matching the demand-recording site and the overload gate.
+	const applySoftDemotionReorder = (
 		candidates: Account[],
 		comboInfo?: {
 			slots: Array<{ accountId: string; modelOverride: string }>;
@@ -1127,22 +1149,17 @@ export async function handleProxy(
 	): Account[] => {
 		// Combos pin each slot to a specific account POSITIONALLY (the attempt loop
 		// matches accounts[i] to slots[i]); reordering would desync that mapping and
-		// null out slot model overrides. Reservation is a fan-out routing concern, so
-		// skip combos entirely.
+		// null out slot model overrides. Both demotions are fan-out routing
+		// concerns, so skip combos entirely.
 		if (comboInfo) return candidates;
 		const now = Date.now();
-		const kept: Account[] = [];
-		const demoted: Account[] = [];
-		for (const account of candidates) {
-			// Classify by the account's EFFECTIVE (mapped) model — the family it will
-			// actually serve — via modelForAccount, matching demand recording below and
-			// the provider-overload gate. Non-combo path only, so modelForAccount's
-			// initialComboInfo dependency is inert (null).
-			const modelForGate = modelForAccount(account);
-			const demote = resolveReservationDemotion(
-				account,
-				modelForGate,
-				usageCache.get(account.id),
+
+		// Snapshot capacity ONCE up front so every peer count sees a consistent
+		// view of the pool and the whole evaluation stays O(n) rather than O(n²)
+		// cache reads.
+		const capacityById = new Map(
+			candidates.map((account) => [
+				account.id,
 				getFreshCapacity(
 					usageCache,
 					account.id,
@@ -1150,20 +1167,83 @@ export async function handleProxy(
 					now,
 					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 				),
-				getLastProtectedFamilyDemand(account.id),
+			]),
+		);
+
+		// Pass 1 — family reservation, per account (unchanged inputs/semantics).
+		const familyDemote = new Map<string, boolean>();
+		for (const account of candidates) {
+			// Classify by the account's EFFECTIVE (mapped) model — the family it will
+			// actually serve — via modelForAccount, matching demand recording below and
+			// the provider-overload gate. Non-combo path only, so modelForAccount's
+			// initialComboInfo dependency is inert (null).
+			const modelForGate = modelForAccount(account);
+			familyDemote.set(
+				account.id,
+				resolveReservationDemotion(
+					account,
+					modelForGate,
+					usageCache.get(account.id),
+					capacityById.get(account.id) ?? null,
+					getLastProtectedFamilyDemand(account.id),
+					now,
+				),
+			);
+		}
+
+		const reasons = new Map<string, string>();
+		const kept: Account[] = [];
+		const demoted: Account[] = [];
+		for (const account of candidates) {
+			// Pass 2 — how many OTHER candidates could absorb this account's traffic.
+			// A family-reserved peer is being held for Fable and a peer that owes a
+			// capacity-restored probe admits only that one probe, so neither counts.
+			let absorbablePeerCount = 0;
+			for (const peer of candidates) {
+				if (peer.id === account.id) continue;
+				if (
+					isAbsorbablePeer(
+						capacityById.get(peer.id) ?? null,
+						familyDemote.get(peer.id) === true,
+						hasCapacityRestoredProbePending(peer.id),
+					)
+				) {
+					absorbablePeerCount++;
+				}
+			}
+			// Pass 3 — the liveness decision for this account.
+			const livenessDemote = resolvePoolLivenessDemotion(
+				capacityById.get(account.id) ?? null,
+				absorbablePeerCount,
 				now,
 			);
-			if (demote) {
+			const family = familyDemote.get(account.id) === true;
+			if (family || livenessDemote) {
+				const reason =
+					family && livenessDemote
+						? "both"
+						: family
+							? "family reservation"
+							: "pool liveness";
+				reasons.set(account.id, reason);
 				demoted.push(account);
 				log.debug(
-					`Reservation gate: demoting "${account.name}" (non-protected request, ` +
-						`shared window near limit; reserving for ${PROTECTED_FAMILY})`,
+					`Soft-demotion gate: demoting "${account.name}" (${reason}) — ` +
+						(family
+							? `non-protected request, shared window near limit, reserving for ${PROTECTED_FAMILY}`
+							: "") +
+						(family && livenessDemote ? "; " : "") +
+						(livenessDemote
+							? `weekly tail held as failover capacity (${absorbablePeerCount} absorbable peer(s))`
+							: ""),
 				);
 			} else {
 				kept.push(account);
 			}
 		}
-		// Stable partition — never drops an account, only reorders.
+		softDemotionReasons = reasons;
+		// ONE stable partition over the union of both reasons — never drops an
+		// account, only reorders.
 		return [...kept, ...demoted];
 	};
 
@@ -1171,7 +1251,7 @@ export async function handleProxy(
 		postThrottleAccounts,
 		initialComboInfo,
 	);
-	const accounts = applyReservationReorder(
+	const accounts = applySoftDemotionReorder(
 		applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
 		initialComboInfo,
 	);
@@ -1179,7 +1259,56 @@ export async function handleProxy(
 		requestMeta.routing.selectedAccountId =
 			accounts[0]?.id ?? requestMeta.routing.selectedAccountId ?? null;
 		requestMeta.routing.candidatesCount = accounts.length;
+		// Post-gate FIRST attempt, set after every gate and reorder has run.
+		// Consumers that must respect a soft-demotion reorder test POSITION
+		// against this, not membership in `accounts`.
+		requestMeta.routing.primaryAttemptAccountId = accounts[0]?.id ?? null;
 	}
+
+	// Post-gate routing evidence, emitted EXACTLY ONCE per request at the moment
+	// an attempt is ADMITTED — never before. SessionStrategy.logSelection() runs
+	// BEFORE these gates, so it shows the strategy's ranking, not the order
+	// clients actually follow; this line records the FINAL candidate order with
+	// each account's soft-demotion reason (if any) plus the account whose attempt
+	// was admitted first. It is the only runtime signal that a soft demotion bound.
+	//
+	// BOUNDARY: "first admitted attempt" means the first account admitted past
+	// the routing gates and the single-flight probe gate — NOT the first account
+	// to reach the network. Admission still precedes request preparation and the
+	// authoritative overload admission inside proxy-operations.ts, either of which
+	// can fail over before any bytes leave. That is deliberate: what this line
+	// exists to verify is WHICH ACCOUNT ROUTING ATTEMPTED FIRST, and a
+	// soft-demoted account being attempted first is the defect regardless of
+	// whether that attempt reached the network.
+	//
+	// Why the ADMITTED account and not `primaryAttemptAccountId`: the latter is
+	// post-gate LIST POSITION, and at least three paths make the real first
+	// admitted attempt differ from it — the marker-active burst hold reprobes the
+	// affinity-pinned account regardless of position, the single-flight probe gate
+	// can suppress accounts[0], and the late provider-overload check skips it
+	// before any upstream call. Reporting position would misdescribe exactly the
+	// cases this line exists to diagnose, so it is called from the admission
+	// points themselves (every probe-gate callback body, plus every direct
+	// proxyWithAccount call site); the once-flag makes the extra call sites free.
+	// The gated primary is still reported alongside, labelled as position.
+	// Built only when DEBUG is on (mirrors logSelection's guard).
+	let finalOrderLogged = false;
+	const logFinalOrderOnce = (actualAccountId: string): void => {
+		if (finalOrderLogged) return;
+		if (log.getLevel() > LogLevel.DEBUG) return;
+		finalOrderLogged = true;
+		const order = accounts
+			.map((a) => {
+				const reason = softDemotionReasons.get(a.id);
+				return reason ? `${a.name}(demoted:${reason})` : a.name;
+			})
+			.join(" > ");
+		log.debug(
+			`Final candidate order: ${order || "none"} — first admitted attempt: ` +
+				`${actualAccountId} (gated primary by position: ` +
+				`${requestMeta.routing?.primaryAttemptAccountId ?? "none"})`,
+		);
+	};
 
 	// Transparent overload hold. When EVERY candidate is overload-gated (the
 	// zero-available terminal) or every attempt was suppressed behind an
@@ -1308,8 +1437,9 @@ export async function handleProxy(
 			const candidate = candidates[i];
 			// Same single-flight probe gate as every other upstream attempt: a hold
 			// wake must not stampede a freshly-recovered account either.
-			const gated = await attemptThroughProbeGate(candidate, () =>
-				proxyWithAccount(
+			const gated = await attemptThroughProbeGate(candidate, () => {
+				logFinalOrderOnce(candidate.id);
+				return proxyWithAccount(
 					req,
 					url,
 					candidate,
@@ -1339,8 +1469,8 @@ export async function handleProxy(
 							}
 						},
 					},
-				),
-			);
+				);
+			});
 			// Suppressed: another request is probing this candidate and NOTHING was
 			// attempted. Record the ACCOUNT — it is neither a failure nor a served
 			// round; the hold loops wait for this candidate's in-flight verdict and
@@ -1495,13 +1625,19 @@ export async function handleProxy(
 				const wakeComboInfo = requestMeta.comboName
 					? getComboSlotInfo(requestMeta)
 					: null;
-				const candidates = applyReservationReorder(
+				const candidates = applySoftDemotionReorder(
 					applyContextWindowGate(
 						applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
 						wakeComboInfo,
 					),
 					wakeComboInfo,
 				);
+				if (requestMeta.routing) {
+					// The wake re-selection replaces the candidate list, so the post-gate
+					// first attempt moves with it (see the initial pipeline).
+					requestMeta.routing.primaryAttemptAccountId =
+						candidates[0]?.id ?? null;
+				}
 				// Drop candidates a previous round already proved broken for THIS
 				// request (see `ordinaryFailedIds`). `candidates` itself is kept intact
 				// below: the "pool is empty" branch asks whether the GATES left
@@ -1664,8 +1800,9 @@ export async function handleProxy(
 		probeAccount: Account,
 		signal: AbortSignal,
 	): Promise<ReprobeOutcome> => {
-		const gated = await attemptThroughProbeGate(probeAccount, () =>
-			proxyWithAccount(
+		const gated = await attemptThroughProbeGate(probeAccount, () => {
+			logFinalOrderOnce(probeAccount.id);
+			return proxyWithAccount(
 				req,
 				url,
 				probeAccount,
@@ -1680,8 +1817,8 @@ export async function handleProxy(
 				requestBodyContext,
 				false,
 				{ reprobe: true, signal },
-			),
-		);
+			);
+		});
 		if (gated.suppressed) return { kind: "suppressed" };
 		return gated.response
 			? { kind: "response", response: gated.response }
@@ -2169,7 +2306,11 @@ export async function handleProxy(
 				// family is weekly-exhausted (it would only 429 again). The gate
 				// honors the CURRENT combo info (re-selection re-populates it) so a
 				// combo slot's model override is evaluated, not the request model.
-				// (reservation reorder intentionally omitted on the failover/fallback tail — already-degraded path)
+				// (soft-demotion reorder — family reservation AND pool liveness —
+				// intentionally omitted on the failover/fallback tail: already-degraded
+				// path. For pool liveness this is largely self-enforcing anyway: rule 4
+				// requires an absorbable peer, and on a degraded path there is none, so
+				// the reserve fails open regardless.)
 				const candidates = applyFamilyWeeklyGate(
 					rePostThrottle.filter((a) => isEligible(a)),
 					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
@@ -2285,6 +2426,7 @@ export async function handleProxy(
 					// nothing was attempted, so it counts as neither a relaxation
 					// attempt nor (crucially) as evidence about the request's SIZE.
 					const gated = await attemptThroughProbeGate(account, () => {
+						logFinalOrderOnce(account.id);
 						relaxAttempted = true;
 						return proxyWithAccount(
 							req,
@@ -2655,14 +2797,25 @@ export async function handleProxy(
 					holdConfidence =
 						heldCapacity === null ? "stale_should_retry" : "fresh_headroom";
 				}
-			} else if (accounts.some((a) => a.id === heldAccount.id)) {
-				// The held account is available (affinity_hit) — attempt it first,
-				// through the SAME single-flight probe gate as every other upstream
-				// attempt. Without the gate, concurrent affinity requests all reached
-				// a freshly-recovered account at once; and because no lease was held,
-				// a success here could not clear its capacity-restored marker either.
+			} else if (
+				requestMeta.routing?.primaryAttemptAccountId === heldAccount.id
+			) {
+				// The held account is available (affinity_hit) AND is still the GATED
+				// PRIMARY — attempt it first, through the SAME single-flight probe gate
+				// as every other upstream attempt. Without the gate, concurrent
+				// affinity requests all reached a freshly-recovered account at once;
+				// and because no lease was held, a success here could not clear its
+				// capacity-restored marker either.
+				//
+				// POSITION, not membership: this branch bypasses the ordinary attempt
+				// loop, so testing `accounts.some(...)` would attempt the affinity-held
+				// account first even after a soft-demotion reorder moved it to the back
+				// — silently bypassing every soft demotion on affinity_hit traffic,
+				// which is the dominant path. Once it is no longer the primary, fall
+				// through to the normal failover loop, which honors the reorder.
 				let firstOutcome: ProxyAttemptOutcome | null = null;
 				const gatedFirst = await attemptThroughProbeGate(heldAccount, () => {
+					logFinalOrderOnce(heldAccount.id);
 					// Record the attempt (only when it actually happens) so the normal
 					// loop below skips a duplicate if we fall through.
 					burstAttemptedAccountId = heldAccount.id;
@@ -2823,8 +2976,9 @@ export async function handleProxy(
 		// freshly-recovered account admits exactly ONE probe. Concurrent requests
 		// that would re-select it are suppressed and skip to the next candidate
 		// instead of stampeding it.
-		const gated = await attemptThroughProbeGate(accounts[i], () =>
-			proxyWithAccount(
+		const gated = await attemptThroughProbeGate(accounts[i], () => {
+			logFinalOrderOnce(accounts[i].id);
+			return proxyWithAccount(
 				req,
 				url,
 				accounts[i],
@@ -2846,8 +3000,8 @@ export async function handleProxy(
 				{
 					onOutcome: (o) => noteOverloadSuppression(accounts[i], o),
 				},
-			),
-		);
+			);
+		});
 		if (gated.suppressed) {
 			continue;
 		}
@@ -2906,7 +3060,11 @@ export async function handleProxy(
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
 		} = applyUsageThrottling(providerFallbackAccounts);
-		// (reservation reorder intentionally omitted on the failover/fallback tail — already-degraded path)
+		// (soft-demotion reorder — family reservation AND pool liveness —
+		// intentionally omitted on the failover/fallback tail: already-degraded
+		// path. For pool liveness this is largely self-enforcing anyway: rule 4
+		// requires an absorbable peer, and on a degraded path there is none, so
+		// the reserve fails open regardless.)
 		fallbackAccounts = applyContextWindowGate(
 			applyFamilyWeeklyGate(filteredFallbackAccounts),
 		);
@@ -2945,8 +3103,9 @@ export async function handleProxy(
 				// Single-flight recovery probe gate (same chokepoint as the primary
 				// failover loop above): admit only one probe for a freshly-recovered
 				// account; suppress concurrent stampeders.
-				const gated = await attemptThroughProbeGate(fallbackAccount, () =>
-					proxyWithAccount(
+				const gated = await attemptThroughProbeGate(fallbackAccount, () => {
+					logFinalOrderOnce(fallbackAccount.id);
+					return proxyWithAccount(
 						req,
 						url,
 						fallbackAccount,
@@ -2967,8 +3126,8 @@ export async function handleProxy(
 						{
 							onOutcome: (o) => noteOverloadSuppression(fallbackAccount, o),
 						},
-					),
-				);
+					);
+				});
 				if (gated.suppressed) {
 					continue;
 				}

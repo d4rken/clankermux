@@ -75,6 +75,14 @@ export interface RequestRoutingMeta {
 	affinityScope?: RequestAffinityScope | null;
 	affinityKey?: string | null;
 	selectedAccountId?: string | null;
+	/**
+	 * The account that post-selection gates resolved as the FIRST attempt, set
+	 * after every gate and reorder has run. Distinct from `selectedAccountId`
+	 * (the strategy's pick, pre-gate): a soft-demotion reorder can move the
+	 * strategy's pick out of first place, and consumers that must respect that
+	 * reorder have to test position, not list membership.
+	 */
+	primaryAttemptAccountId?: string | null;
 	previousAccountId?: string | null;
 	candidatesCount?: number | null;
 	failoverReason?: string | null;

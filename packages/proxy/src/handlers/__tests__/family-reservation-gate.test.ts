@@ -82,6 +82,8 @@ const capacity = (overrides: Partial<CapacitySignal> = {}): CapacitySignal => ({
 	weeklyResetMs: null,
 	bindingWeeklyResetMs: null,
 	weeklyHeadroom: 100,
+	sessionResetMs: null,
+	extraUsageUtilization: null,
 	...overrides,
 });
 
