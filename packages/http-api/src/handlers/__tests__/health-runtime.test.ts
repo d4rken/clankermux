@@ -45,6 +45,20 @@ function oauthAppsUsage(
 	};
 }
 
+/**
+ * A flat Anthropic payload whose only spent account-wide window is the rolling
+ * 5-hour session; the weekly window keeps headroom.
+ */
+function sessionSpentUsage(
+	sessionResetsAt: string | null,
+	sessionPercent = 100,
+): AnthropicUsageData {
+	return {
+		five_hour: { utilization: sessionPercent, resets_at: sessionResetsAt },
+		seven_day: { utilization: 40, resets_at: EXH_FUTURE_ISO },
+	};
+}
+
 /** Partial shape of the /health JSON body, covering fields asserted in tests. */
 interface HealthTestBody {
 	status?: string;
@@ -360,6 +374,35 @@ describe("computePoolStatus usage-window exhaustion", () => {
 		expect(status.routable).toBe(1);
 		expect(status.usage_exhausted).toBe(0);
 	});
+
+	// The 5h session is an ACCOUNT-WIDE window: a spent one sidelines the whole
+	// account exactly like a spent weekly, so the pool counters must classify it
+	// the same way instead of counting it as routable.
+	it("counts a 100%-session account as usage_exhausted and recovers at the 5h reset", () => {
+		const sessionReset = new Date(EXH_NOW + 12 * 60_000).toISOString();
+		const accounts = [
+			{ name: "healthy", paused: false, rate_limited_until: null },
+			{ name: "session-exhausted", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, (a) =>
+			a.name === "session-exhausted" ? sessionSpentUsage(sessionReset) : null,
+		);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(1);
+		expect(status.rate_limited).toBe(0);
+		expect(status.next_available_at).toBe(sessionReset);
+	});
+
+	it("does not flag a 100%-session window whose reset is already past (stale)", () => {
+		const accounts = [
+			{ name: "session-stale", paused: false, rate_limited_until: null },
+		] as unknown as Account[];
+		const status = computePoolStatus(accounts, EXH_NOW, () =>
+			sessionSpentUsage(new Date(EXH_NOW - 1000).toISOString()),
+		);
+		expect(status.routable).toBe(1);
+		expect(status.usage_exhausted).toBe(0);
+	});
 });
 
 describe("computeHealthStatus three-state logic", () => {
@@ -487,6 +530,51 @@ describe("HTTP status codes", () => {
 			config,
 		)(new URL("http://localhost/health"));
 		expect(response.status).toBe(503);
+	});
+
+	/**
+	 * DELIBERATE, DECLARED behaviour change: a session-exhausted, unlocked,
+	 * unpaused account no longer counts as `routable`, so a pool whose only
+	 * account is in that state reports `degraded` → HTTP 503 where it previously
+	 * reported `ok` → 200. This is not a new contract (a weekly-exhausted pool
+	 * already behaves exactly this way, and a LOCKED session-exhausted account
+	 * already zeroes `routable` via its lock); it only covers the pre-429 window
+	 * where the session window is spent but nothing has cooled the account yet.
+	 */
+	it("returns 503 (degraded) when the only unlocked account is session-exhausted", async () => {
+		const id = "health-session-503";
+		const sessionReset = new Date(Date.now() + 12 * 60_000).toISOString();
+		usageCache.set(id, sessionSpentUsage(sessionReset));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "session-exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+			const response = await createHealthHandler(
+				db,
+				config,
+			)(new URL("http://localhost/health"));
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.status).toBe("degraded");
+			expect(response.status).toBe(503);
+			// It recovers at the 5h reset rather than being reported as dead.
+			expect(
+				(body.pool as { next_available_at: string | null }).next_available_at,
+			).toBe(sessionReset);
+		} finally {
+			usageCache.delete(id);
+		}
 	});
 
 	it("returns 200 when some accounts rate-limited but routable accounts exist", async () => {
@@ -748,6 +836,49 @@ describe("?detail=1 parameter", () => {
 			});
 		});
 
+		// The `usage_exhausted_*` fields are gated on the same condition as the
+		// headline. Emitting them next to `status: "rate_limited"` would make the
+		// response contradict itself — an operator (or a script) reading the fields
+		// would be told to wait for a window reset when the real action is to pay.
+		it("locked + out_of_credits + session 100% ⇒ rate_limited with NO usage_exhausted_* fields", async () => {
+			const id = "health-exh-credits-session";
+			usageCache.set(
+				id,
+				sessionSpentUsage(new Date(Date.now() + 12 * 60_000).toISOString()),
+			);
+			try {
+				const db = {
+					getAllAccounts: async () => [
+						{
+							id,
+							name: id,
+							provider: "anthropic",
+							paused: false,
+							rate_limited_until: Date.now() + 600_000,
+							rate_limited_reason: "out_of_credits",
+							rate_limited_at: Date.now(),
+						},
+					],
+				} as unknown as import("@clankermux/database").DatabaseOperations;
+				const config = {
+					getStrategy: () => "session",
+				} as unknown as import("@clankermux/config").Config;
+				const handler = createHealthHandler(db, config);
+				const response = await handler(
+					new URL("http://localhost/health?detail=1"),
+				);
+				const body = (await response.json()) as HealthTestBody;
+
+				expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
+				expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
+				expect(
+					body.accounts_detail?.[0]?.usage_exhausted_binding,
+				).toBeUndefined();
+			} finally {
+				usageCache.delete(id);
+			}
+		});
+
 		it("locked + stored payment_required + weekly 100% ⇒ rate_limited", async () => {
 			const id = "health-exh-payment";
 			await withExhaustedUsage(id, async () => {
@@ -790,6 +921,116 @@ describe("?detail=1 parameter", () => {
 				).toBe("usage_exhausted");
 			});
 		});
+	});
+
+	it("marks a 100%-session account as usage_exhausted with binding `session`", async () => {
+		const id = "health-session-detail";
+		const sessionReset = new Date(Date.now() + 12 * 60_000).toISOString();
+		usageCache.set(id, sessionSpentUsage(sessionReset));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "session-exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe("session");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
+				Date.parse(sessionReset),
+			);
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("reports binding `weekly` for a weekly-exhausted account", async () => {
+		const id = "health-weekly-binding";
+		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
+		usageCache.set(id, weeklyAllUsage(100, futureIso));
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "weekly-exhausted",
+						provider: "anthropic",
+						paused: false,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe("weekly");
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
+	it("keeps paused ahead of a spent session window too", async () => {
+		const id = "health-paused-session";
+		usageCache.set(
+			id,
+			sessionSpentUsage(new Date(Date.now() + 12 * 60_000).toISOString()),
+		);
+		try {
+			const db = {
+				getAllAccounts: async () => [
+					{
+						id,
+						name: "paused-session-exhausted",
+						provider: "anthropic",
+						paused: true,
+						rate_limited_until: null,
+						rate_limited_reason: null,
+						rate_limited_at: null,
+					},
+				],
+			} as unknown as import("@clankermux/database").DatabaseOperations;
+			const config = {
+				getStrategy: () => "session",
+			} as unknown as import("@clankermux/config").Config;
+
+			const handler = createHealthHandler(db, config);
+			const response = await handler(
+				new URL("http://localhost/health?detail=1"),
+			);
+			const body = (await response.json()) as HealthTestBody;
+
+			expect(body.accounts_detail?.[0]?.status).toBe("paused");
+			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
+			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBeUndefined();
+		} finally {
+			usageCache.delete(id);
+		}
 	});
 
 	it("keeps rate_limited for a locked account whose weekly window has headroom", async () => {

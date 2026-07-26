@@ -1,4 +1,4 @@
-import type { RateLimitReason } from "./account";
+import type { RateLimitReason, UsageExhaustionBinding } from "./account";
 
 /** Whether a given integrity probe is a fast page-structure check or the
  *  slower full check (page structure + index/table cross-checks + foreign
@@ -522,8 +522,9 @@ export interface PoolStatus {
 	paused: number; // Manually or automatically paused
 	rate_limited: number; // Temporarily rate-limited
 	/**
-	 * Not routable because the account's account-wide weekly window is at/above
-	 * 100% (with a future reset), even though no `rate_limited_until` lock is set.
+	 * Not routable because one of the account's ACCOUNT-WIDE windows — a weekly
+	 * window or the rolling 5-hour session — is at/above 100% (with a future
+	 * reset), even though no `rate_limited_until` lock is set.
 	 * Optional/additive: absent when usage evidence wasn't available. Family-scoped
 	 * exhaustion does NOT count here (it's per-model, surfaced in accounts_detail).
 	 */
@@ -538,8 +539,17 @@ export interface AccountDetail {
 	rate_limited_until: number | null;
 	rate_limited_reason: RateLimitReason | null;
 	rate_limited_at: number | null;
-	/** Account-wide weekly window reset (ms) when status is `usage_exhausted`. */
+	/**
+	 * Reset (ms) of the binding account-wide window — a weekly one or the rolling
+	 * 5-hour session — when status is `usage_exhausted`.
+	 */
 	usage_exhausted_until?: number | null;
+	/**
+	 * WHICH account-wide window class bound, when status is `usage_exhausted`.
+	 * Lets an operator tell a ~minutes-long session wait from a multi-day weekly
+	 * one. Emitted only alongside the `usage_exhausted` headline.
+	 */
+	usage_exhausted_binding?: UsageExhaustionBinding | null;
 	/**
 	 * Per-model-family weekly windows currently exhausted (e.g. ["fable"]). Detail
 	 * only — a scoped-only exhausted account stays routable (status `available`).

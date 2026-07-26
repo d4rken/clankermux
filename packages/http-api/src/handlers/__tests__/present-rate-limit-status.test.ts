@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { weeklyExhaustion } from "@clankermux/core";
+import { accountWideExhaustion } from "@clankermux/core";
 import type { AnthropicUsageData } from "@clankermux/types";
 import {
 	presentRateLimitStatus,
@@ -19,8 +19,12 @@ const OK_FIELDS = {
 
 /** Run the exhaustion derivation exactly as the accounts handler does. */
 function statusForUsage(usage: AnthropicUsageData, now: number): string {
-	const { exhausted, resetMs } = weeklyExhaustion(usage, now);
-	return presentRateLimitStatus(OK_FIELDS, now, exhausted ? { resetMs } : null);
+	const { exhausted, resetMs, binding } = accountWideExhaustion(usage, now);
+	return presentRateLimitStatus(
+		OK_FIELDS,
+		now,
+		exhausted && binding !== null ? { resetMs, binding } : null,
+	);
 }
 
 describe("presentRateLimitStatus", () => {
@@ -259,7 +263,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: null,
 			},
 			NOW,
-			{ resetMs: NOW + 15 * MIN },
+			{ resetMs: NOW + 15 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (15m)");
 	});
@@ -273,7 +277,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: null,
 			},
 			NOW,
-			{ resetMs: null },
+			{ resetMs: null, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted");
 	});
@@ -291,7 +295,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW + 4 * MIN,
 			},
 			NOW,
-			{ resetMs: NOW + 15 * MIN },
+			{ resetMs: NOW + 15 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (15m)");
 	});
@@ -352,7 +356,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: null,
 			},
 			NOW,
-			{ resetMs: NOW + 12 * MIN },
+			{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (12m)");
 	});
@@ -372,7 +376,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW - MIN, // no active lock
 			},
 			NOW,
-			{ resetMs: NOW + 12 * MIN },
+			{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (12m)");
 	});
@@ -387,7 +391,7 @@ describe("presentRateLimitStatus", () => {
 					rate_limited_until: NOW - MIN,
 				},
 				NOW,
-				{ resetMs: NOW + 12 * MIN },
+				{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 			);
 			expect(status).toBe(stored);
 		}
@@ -403,7 +407,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_reason: "out_of_credits",
 			},
 			NOW,
-			{ resetMs: NOW + 12 * MIN },
+			{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("rate_limited (5m)");
 	});
@@ -420,7 +424,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW + 5 * MIN,
 			},
 			NOW,
-			{ resetMs: NOW + 12 * MIN },
+			{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (12m)");
 	});
@@ -436,7 +440,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW + 40 * MIN,
 			},
 			NOW,
-			{ resetMs: NOW + 12 * MIN },
+			{ resetMs: NOW + 12 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (40m)");
 	});
@@ -451,7 +455,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW + 4 * MIN,
 			},
 			NOW,
-			{ resetMs: null },
+			{ resetMs: null, binding: "weekly" },
 		);
 		expect(status).toBe("Rate limited (4m)");
 	});
@@ -465,7 +469,7 @@ describe("presentRateLimitStatus", () => {
 				rate_limited_until: NOW + 60_000, // 1-minute overload cooldown
 			},
 			NOW,
-			{ resetMs: NOW + 2760 * MIN },
+			{ resetMs: NOW + 2760 * MIN, binding: "weekly" },
 		);
 		expect(status).toBe("usage_exhausted (2760m)");
 	});
@@ -490,7 +494,7 @@ describe("resolveRateLimitPresentation — captured live accounts", () => {
 				rate_limited_until: WEEKLY_RESET - 30,
 			},
 			NOW,
-			{ resetMs: WEEKLY_RESET },
+			{ resetMs: WEEKLY_RESET, binding: "weekly" },
 		);
 		expect(presentation.cause).toBe("usage_exhausted");
 		expect(presentation.resetMs).toBe(WEEKLY_RESET);
@@ -509,7 +513,7 @@ describe("resolveRateLimitPresentation — captured live accounts", () => {
 				rate_limited_until: weeklyReset - 872,
 			},
 			NOW,
-			{ resetMs: weeklyReset },
+			{ resetMs: weeklyReset, binding: "weekly" },
 		);
 		expect(presentation.cause).toBe("usage_exhausted");
 		expect(presentation.status).toBe("usage_exhausted (4020m)");
@@ -525,11 +529,84 @@ describe("resolveRateLimitPresentation — captured live accounts", () => {
 				rate_limited_until: NOW - 5 * MIN,
 			},
 			NOW,
-			{ resetMs: weeklyReset },
+			{ resetMs: weeklyReset, binding: "weekly" },
 		);
 		expect(presentation.cause).toBe("usage_exhausted");
 		expect(presentation.resetMs).toBe(weeklyReset);
 		expect(presentation.status).toBe("usage_exhausted (2760m)");
+	});
+
+	/**
+	 * Claude-Backup-3 (`4b3a18eb-…`), captured verbatim from `/api/accounts` on
+	 * the live deployment at 2026-07-26T15:27:20Z. Its 5-HOUR session window was
+	 * fully spent while weekly sat at 79%, and every display surface read
+	 * "rate_limited (12m)" — the MECHANISM — because they all called the
+	 * weekly-only helper. The proxy's own classifier had it right
+	 * (`rate_limited_reason: "session_exhausted_429"`), which is what proved the
+	 * defect was display-only.
+	 */
+	describe("Claude-Backup-3 — session spent, weekly at 79%", () => {
+		const B3_NOW = 1_785_079_640_000; // 2026-07-26T15:27:20Z
+		const B3_LOCK = 1_785_080_399_401;
+		const SESSION_RESET_ISO = "2026-07-26T15:40:00.335173+00:00";
+		const WEEKLY_RESET_ISO = "2026-07-28T09:00:00.335198+00:00";
+
+		const usage = {
+			five_hour: { utilization: 100, resets_at: SESSION_RESET_ISO },
+			seven_day: { utilization: 79, resets_at: WEEKLY_RESET_ISO },
+			seven_day_oauth_apps: null,
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 100,
+					resets_at: SESSION_RESET_ISO,
+					scope: null,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 79,
+					resets_at: WEEKLY_RESET_ISO,
+					scope: null,
+				},
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 41,
+					resets_at: "2026-07-28T09:00:00.335494+00:00",
+					scope: { model: { display_name: "Fable" } },
+				},
+			],
+			extra_usage: { is_enabled: false },
+		} as unknown as AnthropicUsageData;
+
+		it("reports usage_exhausted bound to the SESSION window, not rate_limited", () => {
+			const { exhausted, resetMs, binding } = accountWideExhaustion(
+				usage,
+				B3_NOW,
+			);
+			expect(exhausted).toBe(true);
+			expect(binding).toBe("session");
+
+			const presentation = resolveRateLimitPresentation(
+				{
+					rate_limit_status: "rejected",
+					rate_limit_reset: null,
+					rate_limited: 1,
+					rate_limited_until: B3_LOCK,
+					rate_limited_reason: "session_exhausted_429",
+				},
+				B3_NOW,
+				binding !== null ? { resetMs, binding } : null,
+			);
+			expect(presentation.cause).toBe("usage_exhausted");
+			expect(presentation.binding).toBe("session");
+			expect(presentation.providerStatus).toBe("rejected");
+			// The session reset (15:40:00.335Z) outlives the lock, so it is the
+			// countdown: 12m40s → 13m.
+			expect(presentation.status).toBe("usage_exhausted (13m)");
+		});
 	});
 });
 
@@ -538,6 +615,7 @@ describe("resolveRateLimitPresentation — structured fields", () => {
 		expect(resolveRateLimitPresentation(OK_FIELDS, NOW)).toEqual({
 			cause: "ok",
 			resetMs: null,
+			binding: null,
 			providerStatus: null,
 			status: "OK",
 		});
@@ -653,9 +731,126 @@ describe("resolveRateLimitPresentation — structured fields", () => {
 	it("reports usage_exhausted with a null reset when the weekly reset is unknown", () => {
 		const presentation = resolveRateLimitPresentation(OK_FIELDS, NOW, {
 			resetMs: null,
+			binding: "weekly",
 		});
 		expect(presentation.cause).toBe("usage_exhausted");
 		expect(presentation.resetMs).toBeNull();
 		expect(presentation.status).toBe("usage_exhausted");
+	});
+
+	it("reports a null binding for a plain rate_limited result", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 7 * MIN,
+			},
+			NOW,
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.binding).toBeNull();
+	});
+});
+
+/**
+ * The 5-hour session class of `usage_exhausted`. Every case here would have read
+ * "rate_limited" (or "OK") before the display surfaces moved from the
+ * weekly-only helper to `accountWideExhaustion`.
+ */
+describe("resolveRateLimitPresentation — session-class exhaustion", () => {
+	/** A payload whose only spent account-wide window is the 5h session. */
+	function sessionSpent(
+		sessionResetsAt: string | null,
+		percent = 100,
+	): AnthropicUsageData {
+		return {
+			five_hour: { utilization: percent, resets_at: sessionResetsAt },
+			seven_day: {
+				utilization: 40,
+				resets_at: new Date(NOW + 3 * 24 * 60 * MIN).toISOString(),
+			},
+		} as AnthropicUsageData;
+	}
+
+	it("binds to WEEKLY (and the weekly reset) when both classes are spent", () => {
+		// Wholesale delegation: never a max across classes, even though the
+		// session window here resets LATER than the weekly one.
+		const usage = {
+			five_hour: {
+				utilization: 100,
+				resets_at: new Date(NOW + 5 * 24 * 60 * MIN).toISOString(),
+			},
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 2 * 24 * 60 * MIN).toISOString(),
+			},
+		} as AnthropicUsageData;
+		const { exhausted, resetMs, binding } = accountWideExhaustion(usage, NOW);
+		expect(exhausted).toBe(true);
+		expect(binding).toBe("weekly");
+		const presentation = resolveRateLimitPresentation(
+			OK_FIELDS,
+			NOW,
+			binding !== null ? { resetMs, binding } : null,
+		);
+		expect(presentation.binding).toBe("weekly");
+		expect(presentation.resetMs).toBe(NOW + 2 * 24 * 60 * MIN);
+	});
+
+	it("ignores a spent session whose reset is already PAST (stale evidence)", () => {
+		expect(
+			statusForUsage(
+				sessionSpent(new Date(NOW - MIN).toISOString()),
+				NOW,
+			),
+		).toBe("OK");
+	});
+
+	it("ignores a spent session with an ABSENT reset (unknown evidence)", () => {
+		expect(statusForUsage(sessionSpent(null), NOW)).toBe("OK");
+	});
+
+	it("does not flag a session at 99.9%", () => {
+		expect(
+			statusForUsage(
+				sessionSpent(new Date(NOW + 30 * MIN).toISOString(), 99.9),
+				NOW,
+			),
+		).toBe("OK");
+	});
+
+	it("keeps an out_of_credits cooldown over a spent session (billing, not quota)", () => {
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: null,
+				rate_limited: 1,
+				rate_limited_until: NOW + 5 * MIN,
+				rate_limited_reason: "out_of_credits",
+			},
+			NOW,
+			{ resetMs: NOW + 12 * MIN, binding: "session" },
+		);
+		expect(presentation.cause).toBe("rate_limited");
+		expect(presentation.binding).toBeNull();
+		expect(presentation.status).toBe("rate_limited (5m)");
+	});
+
+	it("keeps `payment_required` / `blocked` over a spent session (independent blocks)", () => {
+		for (const stored of ["payment_required", "blocked"]) {
+			const presentation = resolveRateLimitPresentation(
+				{
+					rate_limit_status: stored,
+					rate_limit_reset: null,
+					rate_limited: 0,
+					rate_limited_until: NOW - MIN,
+				},
+				NOW,
+				{ resetMs: NOW + 12 * MIN, binding: "session" },
+			);
+			expect(presentation.status).toBe(stored);
+			expect(presentation.binding).toBeNull();
+		}
 	});
 });

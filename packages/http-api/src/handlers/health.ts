@@ -1,10 +1,10 @@
 import type { Config } from "@clankermux/config";
 import {
+	accountWideExhaustion,
 	getExhaustedFamilies,
 	isAccountAvailable,
 	isIndependentBlock,
 	TtlCache,
-	weeklyExhaustion,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
@@ -39,6 +39,13 @@ export type AccountUsageResolver = (
  * returns "no evidence" for anything else, but this keeps the resolver honest.
  * Shared by `/health` and the dashboard's System Status so the two never disagree
  * about which accounts are usage-exhausted.
+ *
+ * FRESHNESS: `usageCache.peek()` is already TTL-gated at `USAGE_CACHE_TTL_MS`
+ * (10 min), so everything reached from here is on the ROUTING-fresh view. That
+ * is why `/health` calls `accountWideExhaustion` with two arguments while
+ * `/api/accounts` passes a third: the accounts endpoint renders from a 30-minute
+ * display horizon that is too generous to assert the fast-moving 5h session
+ * window, and has to narrow it explicitly. Here there is nothing to narrow.
  */
 export const usageCacheResolver: AccountUsageResolver = (account) =>
 	account.provider === "anthropic" || account.provider === "codex"
@@ -58,14 +65,18 @@ export function computePoolStatus(
 	const rate_limited = rateLimitedAccounts.length;
 
 	// Classic-available accounts (not paused, no live lock) may still be sidelined
-	// by an exhausted account-wide weekly window (no `rate_limited_until` yet).
+	// by an exhausted ACCOUNT-WIDE window — a weekly one or the rolling 5-hour
+	// session — with no `rate_limited_until` yet.
 	let routable = 0;
 	let usage_exhausted = 0;
 	const usageResetTimes: number[] = [];
 	for (const account of accounts) {
 		if (!isAccountAvailable(account, now)) continue;
 		if (getUsage) {
-			const { exhausted, resetMs } = weeklyExhaustion(getUsage(account), now);
+			const { exhausted, resetMs } = accountWideExhaustion(
+				getUsage(account),
+				now,
+			);
 			if (exhausted) {
 				usage_exhausted++;
 				if (resetMs !== null) usageResetTimes.push(resetMs);
@@ -225,15 +236,16 @@ export function createHealthHandler(
 					a.rate_limited_until >= now
 				);
 				const usage = getUsage(a);
-				// Account-wide weekly exhaustion sidelines the whole account. A live
-				// cooldown lock does NOT hide it: the lock is the mechanism, the spent
-				// weekly window is the cause, and reporting the mechanism made
-				// identically-exhausted accounts read differently depending on whether
-				// a cooldown happened to still be ticking. Paused stays excluded — a
-				// paused account is not routable for an unrelated reason.
-				const { exhausted, resetMs } = a.paused
-					? { exhausted: false, resetMs: null }
-					: weeklyExhaustion(usage, now);
+				// Account-wide exhaustion — a spent weekly window OR the spent 5-hour
+				// session — sidelines the whole account. A live cooldown lock does NOT
+				// hide it: the lock is the mechanism, the spent window is the cause,
+				// and reporting the mechanism made identically-exhausted accounts read
+				// differently depending on whether a cooldown happened to still be
+				// ticking. Paused stays excluded — a paused account is not routable for
+				// an unrelated reason.
+				const { exhausted, resetMs, binding } = a.paused
+					? ({ exhausted: false, resetMs: null, binding: null } as const)
+					: accountWideExhaustion(usage, now);
 				// …with ONE carve-out, shared with `/api/accounts` via
 				// `isIndependentBlock`: an administrative/billing block (a stored
 				// `payment_required` / `blocked`, or an `out_of_credits` cooldown) is
@@ -241,10 +253,10 @@ export function createHealthHandler(
 				// there would tell the operator to wait for a weekly reset when the
 				// real action is to pay. Gated to LOCKED accounts on purpose: an
 				// unlocked account with a stored `payment_required` is still routable
-				// (`isAccountAvailable` is true), so its spent weekly window is the
-				// more accurate health headline. A locked account with a GENERIC lock
-				// still yields to `usage_exhausted`.
-				const weeklyTakesHeadline =
+				// (`isAccountAvailable` is true), so its spent account-wide window is
+				// the more accurate health headline. A locked account with a GENERIC
+				// lock still yields to `usage_exhausted`.
+				const exhaustionTakesHeadline =
 					exhausted &&
 					!(
 						locked &&
@@ -262,7 +274,7 @@ export function createHealthHandler(
 					// lock. The lock itself is still reported in the fields below.
 					status: a.paused
 						? "paused"
-						: weeklyTakesHeadline
+						: exhaustionTakesHeadline
 							? "usage_exhausted"
 							: locked
 								? "rate_limited"
@@ -271,8 +283,16 @@ export function createHealthHandler(
 					rate_limited_reason: locked ? (a.rate_limited_reason ?? null) : null,
 					rate_limited_at: locked ? (a.rate_limited_at ?? null) : null,
 				};
-				if (exhausted && resetMs !== null) {
+				// Gated on the HEADLINE, not on bare `exhausted`: a locked
+				// `out_of_credits` / `payment_required` account reports
+				// `status: "rate_limited"`, and emitting `usage_exhausted_*` beside it
+				// would make the response contradict itself — telling the operator to
+				// wait for a window reset when the real action is to pay.
+				if (exhaustionTakesHeadline && resetMs !== null) {
 					detail.usage_exhausted_until = resetMs;
+				}
+				if (exhaustionTakesHeadline && binding !== null) {
+					detail.usage_exhausted_binding = binding;
 				}
 				if (scopedFamilies.length > 0) {
 					detail.usage_exhausted_families = scopedFamilies;
