@@ -42,10 +42,11 @@ export const NON_LIMITED_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 
 /**
  * Causes that block the account account-wide (as opposed to soft warnings /
- * queueing). `usage_exhausted` is included: a spent weekly window blocks the
- * account just as effectively as a provider-side `rate_limited`. `unknown` is
- * NOT included — an unrecognized status is not evidence of a hard block, so it
- * must not enable destructive affordances such as Force Reset.
+ * queueing). `usage_exhausted` is included: a spent ACCOUNT-WIDE window (a
+ * weekly window or the rolling 5-hour session) blocks the account just as
+ * effectively as a provider-side `rate_limited`. `unknown` is NOT included — an
+ * unrecognized status is not evidence of a hard block, so it must not enable
+ * destructive affordances such as Force Reset.
  */
 export const HARD_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 	new Set<RateLimitCause>([
@@ -55,6 +56,19 @@ export const HARD_RATE_LIMIT_CAUSES: ReadonlySet<RateLimitCause> =
 		"payment_required",
 		"usage_exhausted",
 	]);
+
+/**
+ * Which class of account-wide usage window drove a `usage_exhausted` cause: one
+ * of the `weekly` windows (account-wide weekly / Claude Code weekly) or the
+ * rolling 5-hour `session` window. Weekly outranks session, so a `weekly`
+ * binding does not imply the session window has headroom.
+ *
+ * Lives in `@clankermux/types` (the leaf dependency) because both
+ * `@clankermux/core` — which derives it — and the dashboard need it, and core
+ * may never be depended on by types. It is NOT provider-status vocabulary, so
+ * it deliberately does not live beside the rate-limit status sets in core.
+ */
+export type UsageExhaustionBinding = "weekly" | "session";
 
 /**
  * The full set of rate-limit reasons the proxy may persist, as a runtime tuple.
@@ -406,6 +420,12 @@ export interface AccountResponse {
 	rateLimitCause: RateLimitCause;
 	/** Epoch ms when `rateLimitCause` is expected to clear; null when unknown. */
 	rateLimitCauseResetMs: number | null;
+	/**
+	 * Which account-wide window drove a `usage_exhausted` cause (a `weekly`
+	 * window or the rolling 5-hour `session`); `null` for every other cause.
+	 * Optional + additive, so older dashboard bundles keep working.
+	 */
+	rateLimitCauseBinding?: UsageExhaustionBinding | null;
 	/**
 	 * Raw stored provider status (`anthropic-ratelimit-unified-status`), for
 	 * diagnostics — may be a value the vocabulary does not recognize.

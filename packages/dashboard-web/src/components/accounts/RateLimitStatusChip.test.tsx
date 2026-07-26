@@ -146,3 +146,58 @@ describe("RateLimitStatusChip — structured cause", () => {
 		expect(html).not.toContain("·");
 	});
 });
+
+/**
+ * The tooltip used to hard-code "Weekly usage quota is spent", which is simply
+ * false for a session-exhausted account — and the difference matters: a session
+ * window resets in minutes, a weekly one can take days. The LABEL and the amber
+ * variant stay the same in all cases; only the explanation changes.
+ */
+describe("RateLimitStatusChip — usage_exhausted binding", () => {
+	function renderExhausted(binding?: "session" | "weekly" | null): string {
+		return renderToStaticMarkup(
+			<RateLimitStatusChip
+				status="usage_exhausted (13m)"
+				cause="usage_exhausted"
+				binding={binding}
+				resetMs={NOW + 13 * MIN}
+				providerStatus="rejected"
+				now={NOW}
+			/>,
+		);
+	}
+
+	it("explains a session binding as the 5-hour window", () => {
+		const html = renderExhausted("session");
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("5-hour session quota is spent");
+		expect(html).not.toContain("Weekly usage quota");
+		// The countdown suffix still composes onto the description.
+		expect(html).toContain("Resets in 13m");
+	});
+
+	it("explains a weekly binding as the weekly window", () => {
+		const html = renderExhausted("weekly");
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("Weekly usage quota is spent");
+		expect(html).not.toContain("5-hour session");
+	});
+
+	it("falls back to generic wording when no binding is supplied (older payloads)", () => {
+		const html = renderExhausted();
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("A usage quota is spent");
+		expect(html).not.toContain("Weekly usage quota");
+		expect(html).not.toContain("5-hour session");
+	});
+
+	it("uses the generic wording on the string path, which carries no binding", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitStatusChip status="usage_exhausted (2760m)" />,
+		);
+		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("A usage quota is spent");
+	});
+});

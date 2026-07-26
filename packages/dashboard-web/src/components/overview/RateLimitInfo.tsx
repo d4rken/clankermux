@@ -29,6 +29,25 @@ function isLimited(account: AccountResponse): boolean {
 	);
 }
 
+/**
+ * Which account-wide window is spent, for a `usage_exhausted` account. The card
+ * renders the raw `rateLimitStatus` string, which says only "usage_exhausted" —
+ * yet the operator's reaction differs by class (minutes for a 5-hour session,
+ * days for a weekly). Null for every other cause and for payloads from servers
+ * that predate the field.
+ */
+function exhaustionDetail(account: AccountResponse): string | null {
+	if (account.rateLimitCause !== "usage_exhausted") return null;
+	switch (account.rateLimitCauseBinding) {
+		case "session":
+			return "5-hour session quota spent";
+		case "weekly":
+			return "weekly quota spent";
+		default:
+			return null;
+	}
+}
+
 /** Blocked account-wide (red) vs merely warning/queueing (amber). */
 function isHardLimited(account: AccountResponse): boolean {
 	if (account.rateLimitCause) {
@@ -66,7 +85,7 @@ export function RateLimitInfo({
 					{rateLimitedAccounts.map((account) => {
 						// The cause's own reset is authoritative — `rateLimitReset` is the
 						// raw provider header and can disagree with the countdown baked
-						// into the status string (e.g. when weekly exhaustion outranks a
+						// into the status string (e.g. when usage exhaustion outranks a
 						// shorter cooldown lock).
 						const resetMs =
 							account.rateLimitCauseResetMs ??
@@ -80,6 +99,7 @@ export function RateLimitInfo({
 								: null;
 
 						const hardLimited = isHardLimited(account);
+						const exhaustion = exhaustionDetail(account);
 						const bgClass = hardLimited ? "bg-destructive/10" : "bg-warning/10";
 						const iconColor = hardLimited ? "text-destructive" : "text-warning";
 
@@ -94,6 +114,7 @@ export function RateLimitInfo({
 										<p className="font-medium">{account.name}</p>
 										<p className="text-sm text-muted-foreground">
 											{account.rateLimitStatus}
+											{exhaustion && ` • ${exhaustion}`}
 											{account.rateLimitRemaining !== null &&
 												` • ${account.rateLimitRemaining} requests remaining`}
 										</p>

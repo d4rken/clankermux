@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
+	accountWideExhaustion,
 	isAnthropicUsageShape,
 	isIndependentBlock,
 	patterns,
@@ -13,7 +14,6 @@ import {
 	validateNumber,
 	validatePriority,
 	validateString,
-	weeklyExhaustion,
 } from "@clankermux/core";
 import type {
 	CodexResetCreditEventRow,
@@ -70,6 +70,7 @@ import type {
 	LoadBalancingStrategy,
 	RateLimitReason,
 	StaleUsageInfo,
+	UsageExhaustionBinding,
 } from "@clankermux/types";
 import {
 	computeDuplicateAccountFlags,
@@ -162,6 +163,11 @@ export interface RateLimitPresentation {
 	cause: RateLimitCause;
 	/** Epoch ms when the cause is expected to clear; null when unknown. */
 	resetMs: number | null;
+	/**
+	 * Which account-wide window drove a `usage_exhausted` cause (a `weekly`
+	 * window or the rolling 5-hour `session`); null for every other cause.
+	 */
+	binding: UsageExhaustionBinding | null;
 	/** Raw stored provider status, for diagnostics (may be an unrecognized value). */
 	providerStatus: string | null;
 	/** Back-compat `<base> (Nm)` projection — derived here so it cannot drift. */
@@ -188,16 +194,17 @@ function withCountdown(base: string, resetMs: number | null, now: number) {
  *  1. Independent blocks keep their own label — a stored `payment_required` /
  *     `blocked`, or an `out_of_credits` cooldown reason. These are
  *     administrative/billing states that a spent quota does not explain.
- *  2. Account-wide weekly exhaustion with a known future reset wins over every
- *     generic throttle signal. A cooldown lock, `rate_limited`, `queueing_hard`
- *     and `rejected` are all throttle MECHANISMS; the spent weekly window is the
- *     CAUSE, and reporting the mechanism is what made three identically-exhausted
- *     accounts read differently depending on whether a lock happened to still be
- *     ticking. The countdown is the LATER of the weekly reset and the lock, so it
- *     stays honest if a lock outlives the quota window.
+ *  2. ACCOUNT-WIDE exhaustion (a spent weekly window OR the spent 5-hour
+ *     session) with a known future reset wins over every generic throttle
+ *     signal. A cooldown lock, `rate_limited`, `queueing_hard` and `rejected`
+ *     are all throttle MECHANISMS; the spent window is the CAUSE, and reporting
+ *     the mechanism is what made identically-exhausted accounts read differently
+ *     depending on whether a lock happened to still be ticking. The countdown is
+ *     the LATER of the window reset and the lock, so it stays honest if a lock
+ *     outlives the quota window.
  *  3. Otherwise: an active lock over a non-hard stored status surfaces the lock;
  *     a hard stored status passes through; then the legacy `rate_limited` flag;
- *     then weekly exhaustion with an unknown reset; else OK.
+ *     then account-wide exhaustion with an unknown reset; else OK.
  *
  * Pure (caller injects `now`) so it can be unit tested directly.
  */
@@ -205,10 +212,14 @@ export function resolveRateLimitPresentation(
 	fields: RateLimitFields,
 	now: number,
 	/**
-	 * Account-wide weekly exhaustion (weeklyAll >= 100 with a future reset), when
-	 * known. Display-only — does not affect routing.
+	 * Account-wide exhaustion (a weekly window or the 5h session at >= 100% with
+	 * a future reset), when known, together with WHICH class bound. Display-only
+	 * — does not affect routing.
 	 */
-	weeklyExhausted?: { resetMs: number | null } | null,
+	accountWideExhausted?: {
+		resetMs: number | null;
+		binding: UsageExhaustionBinding;
+	} | null,
 ): RateLimitPresentation {
 	const providerStatus = fields.rate_limit_status || null;
 	const lockMs = fields.rate_limited_until
@@ -237,18 +248,19 @@ export function resolveRateLimitPresentation(
 		fields.rate_limited_reason,
 	);
 
-	// 2. Weekly exhaustion outranks every generic throttle mechanism.
-	const weeklyResetMs = weeklyExhausted?.resetMs ?? null;
+	// 2. Account-wide exhaustion outranks every generic throttle mechanism.
+	const exhaustedResetMs = accountWideExhausted?.resetMs ?? null;
 	if (
-		weeklyExhausted &&
+		accountWideExhausted &&
 		!independentBlock &&
-		weeklyResetMs !== null &&
-		weeklyResetMs > now
+		exhaustedResetMs !== null &&
+		exhaustedResetMs > now
 	) {
-		const resetMs = Math.max(weeklyResetMs, lockMs);
+		const resetMs = Math.max(exhaustedResetMs, lockMs);
 		return {
 			cause: "usage_exhausted",
 			resetMs,
+			binding: accountWideExhausted.binding,
 			providerStatus,
 			status: withCountdown("usage_exhausted", resetMs, now),
 		};
@@ -261,18 +273,20 @@ export function resolveRateLimitPresentation(
 			return {
 				cause: "rate_limited",
 				resetMs: lockMs,
+				binding: null,
 				providerStatus,
 				status: withCountdown("rate_limited", lockMs, now),
 			};
 		}
 		// A SOFT stored status (allowed/allowed_warning/…) does NOT block the
-		// account, but account-wide weekly exhaustion does. With no active lock and
-		// a spent weekly window (reset unknown), surface `usage_exhausted` instead
-		// of the reassuring soft status.
-		if (!hasActiveLock && !storedIsHard && weeklyExhausted) {
+		// account, but account-wide exhaustion does. With no active lock and a spent
+		// account-wide window (reset unknown), surface `usage_exhausted` instead of
+		// the reassuring soft status.
+		if (!hasActiveLock && !storedIsHard && accountWideExhausted) {
 			return {
 				cause: "usage_exhausted",
 				resetMs: null,
+				binding: accountWideExhausted.binding,
 				providerStatus,
 				status: "usage_exhausted",
 			};
@@ -282,6 +296,7 @@ export function resolveRateLimitPresentation(
 			return {
 				cause: storedCause,
 				resetMs: providerResetMs,
+				binding: null,
 				providerStatus,
 				status: withCountdown(providerStatus, providerResetMs, now),
 			};
@@ -294,6 +309,7 @@ export function resolveRateLimitPresentation(
 			return {
 				cause: storedCause,
 				resetMs: lockMs,
+				binding: null,
 				providerStatus,
 				status: withCountdown(providerStatus, lockMs, now),
 			};
@@ -301,6 +317,7 @@ export function resolveRateLimitPresentation(
 		return {
 			cause: storedCause,
 			resetMs: null,
+			binding: null,
 			providerStatus,
 			status: providerStatus,
 		};
@@ -311,24 +328,32 @@ export function resolveRateLimitPresentation(
 		return {
 			cause: "rate_limited",
 			resetMs: lockMs,
+			binding: null,
 			providerStatus,
 			status: withCountdown("Rate limited", lockMs, now),
 		};
 	}
 
-	// No live lock/status: a 100%-weekly account is genuinely blocked for
-	// account-wide requests even though nothing has cooled it yet — surface it
-	// rather than a misleading "OK".
-	if (weeklyExhausted) {
+	// No live lock/status: an account whose weekly or 5h session window is spent
+	// is genuinely blocked for account-wide requests even though nothing has
+	// cooled it yet — surface it rather than a misleading "OK".
+	if (accountWideExhausted) {
 		return {
 			cause: "usage_exhausted",
 			resetMs: null,
+			binding: accountWideExhausted.binding,
 			providerStatus,
 			status: "usage_exhausted",
 		};
 	}
 
-	return { cause: "ok", resetMs: null, providerStatus, status: "OK" };
+	return {
+		cause: "ok",
+		resetMs: null,
+		binding: null,
+		providerStatus,
+		status: "OK",
+	};
 }
 
 /**
@@ -339,9 +364,12 @@ export function resolveRateLimitPresentation(
 export function presentRateLimitStatus(
 	fields: RateLimitFields,
 	now: number,
-	weeklyExhausted?: { resetMs: number | null } | null,
+	accountWideExhausted?: {
+		resetMs: number | null;
+		binding: UsageExhaustionBinding;
+	} | null,
 ): string {
-	return resolveRateLimitPresentation(fields, now, weeklyExhausted).status;
+	return resolveRateLimitPresentation(fields, now, accountWideExhausted).status;
 }
 
 export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
@@ -678,10 +706,18 @@ export function createAccountsListHandler(
 		//    Codex credits chip — all of which describe a reading AS OF a stated
 		//    time and stay honest when that time is minutes ago.
 		//  - `routingFreshUsageByAccount` (ROUTING TTL, 10 min): anything that
-		//    DERIVES a value modelling "now". Today that is the exhaustion
-		//    prediction, which appends the live reading as a data point stamped
-		//    `t: now` (see build-account-predictions.ts) — an aged reading injected
-		//    there would read as a fresh sample and skew the regression.
+		//    DERIVES a value modelling "now". That is the exhaustion prediction,
+		//    which appends the live reading as a data point stamped `t: now` (see
+		//    build-account-predictions.ts) — an aged reading injected there would
+		//    read as a fresh sample and skew the regression — and the SESSION half
+		//    of the account-wide exhaustion verdict (below).
+		// The account-wide exhaustion verdict is the one consumer that reads BOTH,
+		// deliberately: the weekly windows move over days, so asserting them from a
+		// reading up to 30 min old is honest, while the 5h session window moves fast
+		// enough that a half-hour-old 100% is no longer evidence of anything. It
+		// therefore passes the display view for the weekly class and the
+		// routing-fresh view for the session class (see `accountWideExhaustion`'s
+		// third parameter).
 		// (The `isPrimary` routing simulation reads the cache itself via
 		// usageCache.peek(), which is TTL-gated independently of both maps.)
 		const liveUsageEntryByAccount = new Map(
@@ -843,20 +879,34 @@ export function createAccountsListHandler(
 					usageIsLiveCacheEntry = resolved.source === "cache";
 				}
 
-				// Account-wide weekly exhaustion (anthropic/codex only): the weeklyAll
-				// window OR the flat seven_day_oauth_apps (Claude Code weekly quota) at/
-				// above 100% with a future reset. Shared with /health via
-				// `weeklyExhaustion`, keeping the display consistent with the account-
-				// wide representative used for the cooldown-clear guard. Surfaced in
-				// rateLimitStatus so a 100%-weekly-not-yet-cooled account stops reading
-				// "OK". Family-scoped windows are per-model and NOT reflected here.
-				let weeklyExhausted: { resetMs: number | null } | null = null;
+				// Account-wide exhaustion (anthropic/codex only): the weeklyAll window,
+				// the flat seven_day_oauth_apps (Claude Code weekly quota) OR the
+				// rolling 5-hour session at/above 100% with a future reset, reported
+				// with WHICH class bound. Shared with /health via
+				// `accountWideExhaustion`, keeping the display consistent with the
+				// account-wide representative used for the cooldown-clear guard.
+				// Surfaced in rateLimitStatus so an exhausted-but-not-yet-cooled
+				// account stops reading "OK", and so a session-exhausted account
+				// reports the CAUSE rather than the cooldown MECHANISM.
+				// Family-scoped windows are per-model and NOT reflected here.
+				//
+				// TWO VIEWS (see the note above `liveUsageByAccount`): the weekly class
+				// is read from the 30-minute display horizon, the fast-moving session
+				// class from the 10-minute routing-fresh view.
+				let accountWideExhausted: {
+					resetMs: number | null;
+					binding: UsageExhaustionBinding;
+				} | null = null;
 				if (account.provider === "anthropic" || account.provider === "codex") {
-					const { exhausted, resetMs } = weeklyExhaustion(
+					const { exhausted, resetMs, binding } = accountWideExhaustion(
 						usageData as AnthropicUsageData | null,
 						now,
+						(routingFreshUsageByAccount.get(account.id) ??
+							null) as AnthropicUsageData | null,
 					);
-					if (exhausted) weeklyExhausted = { resetMs };
+					if (exhausted && binding !== null) {
+						accountWideExhausted = { resetMs, binding };
+					}
 				}
 
 				const rateLimitPresentation = resolveRateLimitPresentation(
@@ -868,7 +918,7 @@ export function createAccountsListHandler(
 						rate_limited_reason: account.rate_limited_reason,
 					},
 					now,
-					weeklyExhausted,
+					accountWideExhausted,
 				);
 				const rateLimitStatus = rateLimitPresentation.status;
 				// Codex-only credits state for the response chip; null for other
@@ -1129,6 +1179,7 @@ export function createAccountsListHandler(
 					rateLimitStatus,
 					rateLimitCause: rateLimitPresentation.cause,
 					rateLimitCauseResetMs: rateLimitPresentation.resetMs,
+					rateLimitCauseBinding: rateLimitPresentation.binding,
 					rateLimitProviderStatus: rateLimitPresentation.providerStatus,
 					rateLimitReset: account.rate_limit_reset
 						? new Date(Number(account.rate_limit_reset)).toISOString()

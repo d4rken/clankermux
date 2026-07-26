@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
-import type { AccountResponse } from "@clankermux/types";
+import { usageCache } from "@clankermux/providers";
+import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
 import { RATE_LIMIT_REASONS } from "@clankermux/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -160,5 +161,94 @@ describe("/api/accounts — rate_limited_reason round-trip", () => {
 		expect(body.find((a) => a.id === "acc-unknown")?.rateLimitedReason).toBe(
 			null,
 		);
+	});
+});
+
+/**
+ * End-to-end wiring of the account-wide exhaustion verdict through the
+ * serialized `/api/accounts` payload. The resolver unit tests above take the
+ * verdict as an argument, so only this level can prove the handler actually
+ * derives it — which is exactly what regressed: the handler called the
+ * weekly-only helper, so a session-exhausted account was serialized as
+ * `rate_limited` even though the proxy had classified it
+ * `session_exhausted_429`.
+ */
+describe("/api/accounts — usage_exhausted binding", () => {
+	const ACCOUNT_ID = "acc-binding";
+	const BASE = 1_785_000_000_000;
+	const MINUTE = 60_000;
+	const HOUR = 60 * MINUTE;
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(ACCOUNT_ID);
+	});
+	afterEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		nowSpy.mockRestore();
+	});
+
+	/** Flat Anthropic usage with the two account-wide window percentages. */
+	function usage(sessionPct: number, weeklyPct: number): AnthropicUsageData {
+		return {
+			five_hour: {
+				utilization: sessionPct,
+				resets_at: new Date(BASE + 2 * HOUR).toISOString(),
+			},
+			seven_day: {
+				utilization: weeklyPct,
+				resets_at: new Date(BASE + 3 * 24 * HOUR).toISOString(),
+			},
+		} as AnthropicUsageData;
+	}
+
+	async function accountFor(
+		data: AnthropicUsageData,
+		ageMs = 0,
+	): Promise<AccountResponse | undefined> {
+		usageCache.set(ACCOUNT_ID, data); // stamped at the mocked BASE
+		nowSpy.mockReturnValue(BASE + ageMs);
+		const body = await listAccounts([
+			makeAccountRow({ id: ACCOUNT_ID, provider: "anthropic" }),
+		]);
+		return body.find((a) => a.id === ACCOUNT_ID);
+	}
+
+	it("reports a session-exhausted account as usage_exhausted bound to `session`", async () => {
+		const account = await accountFor(usage(100, 40));
+		expect(account?.rateLimitCause).toBe("usage_exhausted");
+		expect(account?.rateLimitCauseBinding).toBe("session");
+	});
+
+	it("reports a weekly-exhausted account as usage_exhausted bound to `weekly`", async () => {
+		const account = await accountFor(usage(20, 100));
+		expect(account?.rateLimitCause).toBe("usage_exhausted");
+		expect(account?.rateLimitCauseBinding).toBe("weekly");
+	});
+
+	it("reports a null binding for a healthy account", async () => {
+		const account = await accountFor(usage(20, 40));
+		expect(account?.rateLimitCause).toBe("ok");
+		expect(account?.rateLimitCauseBinding).toBeNull();
+	});
+
+	// FRESH-GATE: past the 10-minute routing TTL but inside the 30-minute UI
+	// horizon, the reading is still rendered (with its age) — but the fast-moving
+	// 5h session window may no longer be asserted from it. The slow weekly
+	// windows still may.
+	it("stops asserting SESSION exhaustion once the reading is past the routing TTL", async () => {
+		const account = await accountFor(usage(100, 40), 12 * MINUTE);
+		// The bars still render from the aged reading…
+		expect(account?.usageData).not.toBeNull();
+		// …but the session claim is withdrawn.
+		expect(account?.rateLimitCause).not.toBe("usage_exhausted");
+		expect(account?.rateLimitCauseBinding).toBeNull();
+	});
+
+	it("still asserts WEEKLY exhaustion from the same aged reading", async () => {
+		const account = await accountFor(usage(20, 100), 12 * MINUTE);
+		expect(account?.rateLimitCause).toBe("usage_exhausted");
+		expect(account?.rateLimitCauseBinding).toBe("weekly");
 	});
 });
