@@ -64,6 +64,13 @@ interface CapacityMetric {
 	minHeadroom: number;
 	binding: number;
 	util: number;
+	/**
+	 * When a NEAR_LIMIT account stops being near-limit (ms). `POSITIVE_INFINITY`
+	 * means unknown or never — the account has no identifiable self-recovery.
+	 * Always `POSITIVE_INFINITY` outside the NEAR_LIMIT bucket (HARVEST ranks on
+	 * `harvestDeadline`, UNKNOWN on `util`), so it can never perturb them.
+	 */
+	recoveryDeadline: number;
 }
 
 /**
@@ -433,6 +440,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		let soonest = Number.POSITIVE_INFINITY;
 		let minHeadroom = 0;
 		let binding = 0;
+		let recoveryDeadline = Number.POSITIVE_INFINITY;
 		if (s !== null) {
 			minHeadroom = s.minHeadroom;
 			binding = s.bindingUtilization;
@@ -448,6 +456,29 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			) {
 				// 5h safety gate: an account near any hard window's limit serves last.
 				bucket = CAPACITY_BUCKET.NEAR_LIMIT;
+				// Recovery = when the account STOPS being near-limit: the LAST reset
+				// among the axes that bind it, not the first. extra_usage has no
+				// reset, so when it binds the account never self-recovers.
+				const extraBound =
+					s.extraUsageUtilization !== null &&
+					s.extraUsageUtilization > 100 - HEADROOM_EPS;
+				const sessionBound = s.sessionHeadroom <= HEADROOM_EPS;
+				const weeklyBound = s.weeklyHeadroom <= HEADROOM_EPS;
+				if (extraBound || (!sessionBound && !weeklyBound)) {
+					recoveryDeadline = Number.POSITIVE_INFINITY;
+				} else {
+					const bounds: Array<number | null> = [];
+					if (sessionBound) bounds.push(s.sessionResetMs);
+					// The BINDING weekly reset, never `weeklyResetMs`: the latter is the
+					// earliest across ALL weekly windows, i.e. potentially an unrelated,
+					// healthier window's reset. Unknown ⇒ Infinity, no fallback.
+					if (weeklyBound) bounds.push(s.bindingWeeklyResetMs);
+					recoveryDeadline = bounds.some(
+						(b) => b === null || !Number.isFinite(b),
+					)
+						? Number.POSITIVE_INFINITY
+						: Math.max(...(bounds as number[]));
+				}
 			} else if (s.weeklyResetMs === null) {
 				// No weekly deadline → not harvestable; do NOT rank via the 5h reset.
 				bucket = CAPACITY_BUCKET.UNKNOWN;
@@ -463,6 +494,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			minHeadroom,
 			binding,
 			util,
+			recoveryDeadline,
 		};
 	}
 
@@ -491,6 +523,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				minHeadroom: 0,
 				binding: 0,
 				util: 0,
+				recoveryDeadline: Number.POSITIVE_INFINITY,
 				seq: 0,
 			};
 		return avail.sort((a, b) => {
@@ -514,7 +547,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				if (x.util !== y.util) return x.util - y.util;
 				return x.seq - y.seq;
 			}
-			// NEAR_LIMIT: least-utilized first, then least-recently-picked.
+			// NEAR_LIMIT: an account constrained only by its 5h window recovers at that
+			// window's reset and returns to full HARVEST capacity; one constrained by
+			// its weekly is out for days. Prefer soonest genuine recovery, then least
+			// utilized, then least-recently-picked.
+			if (x.recoveryDeadline !== y.recoveryDeadline)
+				return x.recoveryDeadline - y.recoveryDeadline;
 			if (x.binding !== y.binding) return x.binding - y.binding;
 			return x.seq - y.seq;
 		});
@@ -557,8 +595,16 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				m.soonest === Number.POSITIVE_INFINITY
 					? "none"
 					: `${Math.round((m.soonest - now) / 60000)}m`;
+			// NEAR_LIMIT rows are ranked by the genuine recovery deadline, so show it
+			// — otherwise the logged order would look unexplained for that bucket.
+			const recovery =
+				m.bucket === CAPACITY_BUCKET.NEAR_LIMIT
+					? m.recoveryDeadline === Number.POSITIVE_INFINITY
+						? " recovery=none"
+						: ` recovery=${Math.round((m.recoveryDeadline - now) / 60000)}m`
+					: "";
 			const mark = chosen && a.id === chosen.id ? "*" : "";
-			return `${a.name}${mark}[${bucketLabel} reset=${reset}(5h=${fiveHour}) headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%]`;
+			return `${a.name}${mark}[${bucketLabel} reset=${reset}(5h=${fiveHour}) headroom=${Math.round(m.minHeadroom)}% util=${Math.round(m.util)}%${recovery}]`;
 		});
 		if (ranked.length > MAX) parts.push(`(+${ranked.length - MAX} more)`);
 		this.log.debug(

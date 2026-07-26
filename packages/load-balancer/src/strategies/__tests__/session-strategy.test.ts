@@ -1837,6 +1837,8 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 		soonestResetMs: number | null = 60_000, // 5h-ish, sooner than any weekly reset
 		sessionHeadroom = minHeadroom,
 		bindingWeeklyResetMs: number | null = weeklyResetMs,
+		sessionResetMs: number | null = null,
+		extraUsageUtilization: number | null = null,
 	): CapacitySignal {
 		return {
 			minHeadroom,
@@ -1846,6 +1848,8 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 			weeklyResetMs,
 			bindingWeeklyResetMs,
 			weeklyHeadroom,
+			sessionResetMs,
+			extraUsageUtilization,
 		};
 	}
 
@@ -2126,6 +2130,293 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 });
 
 // ---------------------------------------------------------------------------
+// NEAR_LIMIT recovery-aware ordering.
+//
+// Within the NEAR_LIMIT bucket, the primary key is the GENUINE recovery
+// deadline: the moment the account stops being near-limit. An account whose 5h
+// window is spent recovers in hours and returns to full HARVEST capacity; one
+// whose weekly is spent is out for days. Ordering: recoveryDeadline, then
+// bindingUtilization (least utilized), then least-recently-picked.
+//
+// Deliberate properties asserted below (they are easy to "simplify" away):
+//   - both axes bound ⇒ recovery is the LATER (max) reset, not weekly-first;
+//   - an unknown bindingWeeklyResetMs sorts LAST — there is no weeklyResetMs
+//     fallback, because that is an unrelated, healthier window's reset;
+//   - extra_usage is RESETLESS ⇒ recovery is never, even if another axis binds.
+// ---------------------------------------------------------------------------
+describe("SessionStrategy — NEAR_LIMIT recovery-aware ordering", () => {
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+	const T = 1_700_000_000_000; // ordinal base; only relative order matters
+	const HOUR = 3_600_000;
+	const DAY = 24 * HOUR;
+
+	function makeMeta(): RequestMeta {
+		return {
+			id: "near-limit-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: T,
+		};
+	}
+
+	// Non-session provider so no active-session path short-circuits the comparator.
+	function acct(id: string, overrides: Partial<Account> = {}): Account {
+		return makeAccount({ id, name: id, provider: "openrouter", ...overrides });
+	}
+
+	// Object-style builder: NEAR_LIMIT cases exercise many axes at once, so named
+	// overrides stay readable where the positional FEFO helper would not.
+	// Defaults describe a NEAR_LIMIT account bound by nothing in particular; each
+	// test opts into the axis it is about.
+	function nearLimit(overrides: Partial<CapacitySignal> = {}): CapacitySignal {
+		return {
+			minHeadroom: 2, // <= HEADROOM_EPS → NEAR_LIMIT bucket
+			sessionHeadroom: 50,
+			soonestResetMs: T + HOUR,
+			bindingUtilization: 98,
+			weeklyResetMs: null,
+			bindingWeeklyResetMs: null,
+			weeklyHeadroom: 50,
+			sessionResetMs: null,
+			extraUsageUtilization: null,
+			...overrides,
+		};
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	it("(a) a 5h-bound account resetting soon outranks a weekly-bound one", () => {
+		const fiveHour = acct("5h-bound");
+		const weekly = acct("weekly-bound");
+		// 5h spent, weekly healthy → recovers at the 5h reset (1h away).
+		mockStore.setCapacity(
+			fiveHour.id,
+			nearLimit({
+				sessionHeadroom: 1,
+				weeklyHeadroom: 60,
+				sessionResetMs: T + HOUR,
+				bindingWeeklyResetMs: T + 5 * DAY,
+				bindingUtilization: 99, // MORE utilized — recovery must still win
+			}),
+		);
+		// Weekly spent → out for days.
+		mockStore.setCapacity(
+			weekly.id,
+			nearLimit({
+				sessionHeadroom: 60,
+				weeklyHeadroom: 1,
+				sessionResetMs: T + HOUR,
+				bindingWeeklyResetMs: T + 5 * DAY,
+				bindingUtilization: 96,
+			}),
+		);
+
+		const result = strategy.select([weekly, fiveHour], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([fiveHour.id, weekly.id]);
+	});
+
+	it("(b) both axes bound ⇒ the LATER reset decides, even when weekly resets sooner", () => {
+		// A: session resets in 1h, weekly in 5d → recovery = 5d (the later).
+		const later = acct("later-recovery");
+		// B: session resets in 3h, weekly in 2h → recovery = 3h (the SESSION reset,
+		//    even though the weekly window resets sooner). A weekly-first rule would
+		//    read 2h here and wrongly rank B's recovery ahead of its real one.
+		const sooner = acct("sooner-recovery");
+		mockStore.setCapacity(
+			later.id,
+			nearLimit({
+				sessionHeadroom: 1,
+				weeklyHeadroom: 1,
+				sessionResetMs: T + HOUR,
+				bindingWeeklyResetMs: T + 5 * DAY,
+			}),
+		);
+		mockStore.setCapacity(
+			sooner.id,
+			nearLimit({
+				sessionHeadroom: 1,
+				weeklyHeadroom: 1,
+				sessionResetMs: T + 3 * HOUR,
+				bindingWeeklyResetMs: T + 2 * HOUR,
+			}),
+		);
+
+		const result = strategy.select([later, sooner], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([sooner.id, later.id]);
+	});
+
+	it("(c) an unknown bindingWeeklyResetMs sorts last — no weeklyResetMs fallback", () => {
+		const unknownBinding = acct("unknown-binding-reset");
+		const knownFarBinding = acct("known-far-binding-reset");
+		// Binding weekly reset unknown, but an UNRELATED healthier weekly window
+		// resets in 1 minute. Falling back to weeklyResetMs would rank this FIRST.
+		mockStore.setCapacity(
+			unknownBinding.id,
+			nearLimit({
+				weeklyHeadroom: 1,
+				weeklyResetMs: T + 60_000,
+				bindingWeeklyResetMs: null,
+				bindingUtilization: 96, // less utilized — must NOT rescue it
+			}),
+		);
+		mockStore.setCapacity(
+			knownFarBinding.id,
+			nearLimit({
+				weeklyHeadroom: 1,
+				weeklyResetMs: T + 5 * DAY,
+				bindingWeeklyResetMs: T + 5 * DAY,
+				bindingUtilization: 99,
+			}),
+		);
+
+		const result = strategy.select(
+			[unknownBinding, knownFarBinding],
+			makeMeta(),
+		);
+		expect(result.map((a) => a.id)).toEqual([
+			knownFarBinding.id,
+			unknownBinding.id,
+		]);
+	});
+
+	it("(d) an extra_usage-bound account sorts last even when another axis is bound", () => {
+		const extraBound = acct("extra-usage-bound");
+		const weeklyBound = acct("weekly-bound-far");
+		// extra_usage is RESETLESS: this account never self-recovers, even though
+		// its 5h window resets in a minute.
+		mockStore.setCapacity(
+			extraBound.id,
+			nearLimit({
+				sessionHeadroom: 1,
+				sessionResetMs: T + 60_000,
+				extraUsageUtilization: 99,
+				bindingUtilization: 99,
+			}),
+		);
+		mockStore.setCapacity(
+			weeklyBound.id,
+			nearLimit({
+				weeklyHeadroom: 1,
+				bindingWeeklyResetMs: T + 5 * DAY,
+				bindingUtilization: 99,
+			}),
+		);
+
+		const result = strategy.select([extraBound, weeklyBound], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([weeklyBound.id, extraBound.id]);
+	});
+
+	it("(e) NEAR_LIMIT with neither axis bound has no known recovery and sorts last", () => {
+		// bindingUtilization > 95 puts it in NEAR_LIMIT, but both headrooms are
+		// healthy → nothing identifiable binds it → recovery unknown.
+		const noAxis = acct("no-bound-axis");
+		const weeklyBound = acct("weekly-bound");
+		mockStore.setCapacity(
+			noAxis.id,
+			nearLimit({
+				minHeadroom: 40,
+				sessionHeadroom: 40,
+				weeklyHeadroom: 40,
+				bindingUtilization: 98,
+				sessionResetMs: T + 60_000,
+				bindingWeeklyResetMs: T + 60_000,
+			}),
+		);
+		mockStore.setCapacity(
+			weeklyBound.id,
+			nearLimit({
+				weeklyHeadroom: 1,
+				bindingWeeklyResetMs: T + 5 * DAY,
+				bindingUtilization: 99,
+			}),
+		);
+
+		const result = strategy.select([noAxis, weeklyBound], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([weeklyBound.id, noAxis.id]);
+	});
+
+	it("equal recovery deadlines fall back to least-utilized, then least-recently-picked", () => {
+		const heavier = acct("heavier");
+		const lighter = acct("lighter");
+		const sig = {
+			weeklyHeadroom: 1,
+			bindingWeeklyResetMs: T + 5 * DAY,
+		};
+		mockStore.setCapacity(
+			heavier.id,
+			nearLimit({ ...sig, bindingUtilization: 99 }),
+		);
+		mockStore.setCapacity(
+			lighter.id,
+			nearLimit({ ...sig, bindingUtilization: 96 }),
+		);
+		expect(
+			strategy.select([heavier, lighter], makeMeta()).map((a) => a.id),
+		).toEqual([lighter.id, heavier.id]);
+
+		// Fully tied → seq alternation (least-recently-picked).
+		const t1 = acct("tie-1");
+		const t2 = acct("tie-2");
+		mockStore.setCapacity(t1.id, nearLimit({ ...sig }));
+		mockStore.setCapacity(t2.id, nearLimit({ ...sig }));
+		const first = strategy.select([t1, t2], makeMeta())[0].id;
+		const second = strategy.select([t1, t2], makeMeta())[0].id;
+		expect(first).not.toBe(second);
+	});
+
+	// (f) Regression guard: the recovery key is NEAR_LIMIT-only. HARVEST stays
+	// weekly-FEFO and UNKNOWN stays least-used, regardless of the new fields.
+	it("(f) HARVEST ordering is unaffected by session reset / extra_usage fields", () => {
+		const soonWeekly = acct("harvest-soon-weekly");
+		const farWeekly = acct("harvest-far-weekly");
+		// farWeekly has a much sooner 5h reset and no extra_usage; soonWeekly has a
+		// far 5h reset and some extra_usage. FEFO must still follow the WEEKLY reset.
+		mockStore.setCapacity(soonWeekly.id, {
+			minHeadroom: 40,
+			sessionHeadroom: 40,
+			soonestResetMs: T + 10 * HOUR,
+			bindingUtilization: 60,
+			weeklyResetMs: T + 20 * HOUR,
+			bindingWeeklyResetMs: T + 20 * HOUR,
+			weeklyHeadroom: 40,
+			sessionResetMs: T + 10 * HOUR,
+			extraUsageUtilization: 30,
+		});
+		mockStore.setCapacity(farWeekly.id, {
+			minHeadroom: 40,
+			sessionHeadroom: 40,
+			soonestResetMs: T + 60_000,
+			bindingUtilization: 60,
+			weeklyResetMs: T + 6 * DAY,
+			bindingWeeklyResetMs: T + 6 * DAY,
+			weeklyHeadroom: 40,
+			sessionResetMs: T + 60_000,
+			extraUsageUtilization: null,
+		});
+
+		const result = strategy.select([farWeekly, soonWeekly], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([soonWeekly.id, farWeekly.id]);
+	});
+
+	it("(f) UNKNOWN ordering stays least-used and is unaffected by the new fields", () => {
+		const lowUtil = acct("unknown-low-util");
+		const highUtil = acct("unknown-high-util");
+		// No capacity signal at all → UNKNOWN bucket, ranked by legacy utilization.
+		mockStore.setUtilization(lowUtil.id, 10);
+		mockStore.setUtilization(highUtil.id, 80);
+
+		const result = strategy.select([highUtil, lowUtil], makeMeta());
+		expect(result.map((a) => a.id)).toEqual([lowUtil.id, highUtil.id]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Pinning survives FEFO.
 //
 // Once a project is pinned to an account (cache affinity), capacity signals
@@ -2179,6 +2470,8 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 		soonestResetMs: number | null = 60_000,
 		sessionHeadroom = minHeadroom,
 		bindingWeeklyResetMs: number | null = weeklyResetMs,
+		sessionResetMs: number | null = null,
+		extraUsageUtilization: number | null = null,
 	): CapacitySignal {
 		return {
 			minHeadroom,
@@ -2188,6 +2481,8 @@ describe("SessionStrategy — pinning survives FEFO", () => {
 			weeklyResetMs,
 			bindingWeeklyResetMs,
 			weeklyHeadroom,
+			sessionResetMs,
+			extraUsageUtilization,
 		};
 	}
 
