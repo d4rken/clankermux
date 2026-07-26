@@ -1,4 +1,7 @@
-import type { AnthropicUsageData } from "@clankermux/types";
+import type {
+	AnthropicUsageData,
+	UsageExhaustionBinding,
+} from "@clankermux/types";
 import { normalizeAnthropicUsage } from "./usage-normalizer";
 
 /** An account-level weekly window reduced to utilization + parsed reset ms. */
@@ -77,8 +80,13 @@ export type AccountWideWindow =
 	| "weekly_all"
 	| "seven_day_oauth_apps";
 
-/** Which class of account-wide window is responsible for the exhaustion. */
-export type AccountWideExhaustionBinding = "weekly" | "session";
+/**
+ * Which class of account-wide window is responsible for the exhaustion. Alias of
+ * the API-facing {@link UsageExhaustionBinding} (which lives in
+ * `@clankermux/types`, the leaf dependency) so the verdict this helper computes
+ * and the value `/api/accounts` serializes are the same type by construction.
+ */
+export type AccountWideExhaustionBinding = UsageExhaustionBinding;
 
 /**
  * Account-wide exhaustion across EVERY window that sidelines the whole account:
@@ -100,13 +108,22 @@ export type AccountWideExhaustionBinding = "weekly" | "session";
  * reset. A weekly window at 100% with a missing/past reset does NOT suppress a
  * validly-spent session window — in that case the session binds.
  *
- * `weeklyExhaustion` is left untouched and keeps its own callers (`/health` and
- * `/api/accounts` display); this helper is the wider verdict used to classify a
- * 429 against the account-wide windows the usage endpoint reports.
+ * `weeklyExhaustion` is retained as the WEEKLY-CLASS PRIMITIVE this helper
+ * delegates to (and keeps its own test file); it is no longer the display
+ * surfaces' entry point. `/health`, `/api/accounts` and the proxy's 429
+ * classification all call THIS helper, so a session-exhausted account reports
+ * the cause (a spent window) rather than the mechanism (a cooldown lock).
  */
 export function accountWideExhaustion(
 	usage: AnthropicUsageData | null | undefined,
 	now: number,
+	/**
+	 * Optional NARROWER/FRESHER view consulted for the fast-moving 5h session
+	 * window only. Defaults to `usage`, so every existing caller is unchanged.
+	 * Exists because `/api/accounts` renders weekly from a 30-minute UI horizon
+	 * that is too generous for a 5h window — see accounts.ts's "TWO VIEWS" note.
+	 */
+	sessionUsage: AnthropicUsageData | null | undefined = usage,
 ): {
 	exhausted: boolean;
 	binding: AccountWideExhaustionBinding | null;
@@ -116,7 +133,7 @@ export function accountWideExhaustion(
 	if (weekly.exhausted) {
 		return { exhausted: true, binding: "weekly", resetMs: weekly.resetMs };
 	}
-	const session = normalizeAnthropicUsage(usage, now).session;
+	const session = normalizeAnthropicUsage(sessionUsage, now).session;
 	if (
 		session &&
 		session.utilization >= 100 &&
