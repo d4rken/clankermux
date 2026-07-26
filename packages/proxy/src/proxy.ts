@@ -1265,6 +1265,42 @@ export async function handleProxy(
 		requestMeta.routing.primaryAttemptAccountId = accounts[0]?.id ?? null;
 	}
 
+	// Post-gate routing evidence, emitted EXACTLY ONCE per request at the moment
+	// an upstream attempt is ADMITTED — never before. SessionStrategy.logSelection()
+	// runs BEFORE these gates, so it shows the strategy's ranking, not the order
+	// clients actually follow; this line records the FINAL candidate order with
+	// each account's soft-demotion reason (if any) plus the account that was
+	// really attempted. It is the only runtime signal that a soft demotion bound.
+	//
+	// Why the ATTEMPTED account and not `primaryAttemptAccountId`: the latter is
+	// post-gate LIST POSITION, and at least three paths make the real first
+	// upstream attempt differ from it — the marker-active burst hold reprobes the
+	// affinity-pinned account regardless of position, the single-flight probe gate
+	// can suppress accounts[0], and the late provider-overload check skips it
+	// before any upstream call. Reporting position would misdescribe exactly the
+	// cases this line exists to diagnose, so it is called from the admission
+	// points themselves (every probe-gate callback body, plus every direct
+	// proxyWithAccount call site); the once-flag makes the extra call sites free.
+	// The gated primary is still reported alongside, labelled as position.
+	// Built only when DEBUG is on (mirrors logSelection's guard).
+	let finalOrderLogged = false;
+	const logFinalOrderOnce = (actualAccountId: string): void => {
+		if (finalOrderLogged) return;
+		if (log.getLevel() > LogLevel.DEBUG) return;
+		finalOrderLogged = true;
+		const order = accounts
+			.map((a) => {
+				const reason = softDemotionReasons.get(a.id);
+				return reason ? `${a.name}(demoted:${reason})` : a.name;
+			})
+			.join(" > ");
+		log.debug(
+			`Final candidate order: ${order || "none"} — attempted first upstream: ` +
+				`${actualAccountId} (gated primary by position: ` +
+				`${requestMeta.routing?.primaryAttemptAccountId ?? "none"})`,
+		);
+	};
+
 	// Transparent overload hold. When EVERY candidate is overload-gated (the
 	// zero-available terminal) or every attempt was suppressed behind an
 	// in-flight half-open probe (the suppressed-exhaustion terminal), a
@@ -1392,8 +1428,9 @@ export async function handleProxy(
 			const candidate = candidates[i];
 			// Same single-flight probe gate as every other upstream attempt: a hold
 			// wake must not stampede a freshly-recovered account either.
-			const gated = await attemptThroughProbeGate(candidate, () =>
-				proxyWithAccount(
+			const gated = await attemptThroughProbeGate(candidate, () => {
+				logFinalOrderOnce(candidate.id);
+				return proxyWithAccount(
 					req,
 					url,
 					candidate,
@@ -1423,8 +1460,8 @@ export async function handleProxy(
 							}
 						},
 					},
-				),
-			);
+				);
+			});
 			// Suppressed: another request is probing this candidate and NOTHING was
 			// attempted. Record the ACCOUNT — it is neither a failure nor a served
 			// round; the hold loops wait for this candidate's in-flight verdict and
@@ -1754,8 +1791,9 @@ export async function handleProxy(
 		probeAccount: Account,
 		signal: AbortSignal,
 	): Promise<ReprobeOutcome> => {
-		const gated = await attemptThroughProbeGate(probeAccount, () =>
-			proxyWithAccount(
+		const gated = await attemptThroughProbeGate(probeAccount, () => {
+			logFinalOrderOnce(probeAccount.id);
+			return proxyWithAccount(
 				req,
 				url,
 				probeAccount,
@@ -1770,8 +1808,8 @@ export async function handleProxy(
 				requestBodyContext,
 				false,
 				{ reprobe: true, signal },
-			),
-		);
+			);
+		});
 		if (gated.suppressed) return { kind: "suppressed" };
 		return gated.response
 			? { kind: "response", response: gated.response }
@@ -2009,6 +2047,7 @@ export async function handleProxy(
 				// synthetic, locally-answered request (no upstream call), so it must
 				// neither consume an account's single recovery probe nor be suppressed
 				// by another request holding it.
+				logFinalOrderOnce(codexForSynthesis.id);
 				const syntheticResponse = await proxyWithAccount(
 					req,
 					url,
@@ -2379,6 +2418,7 @@ export async function handleProxy(
 					// nothing was attempted, so it counts as neither a relaxation
 					// attempt nor (crucially) as evidence about the request's SIZE.
 					const gated = await attemptThroughProbeGate(account, () => {
+						logFinalOrderOnce(account.id);
 						relaxAttempted = true;
 						return proxyWithAccount(
 							req,
@@ -2639,25 +2679,6 @@ export async function handleProxy(
 		log.info(`Request: ${req.method} ${url.pathname}`);
 	}
 
-	// Post-gate routing evidence. SessionStrategy.logSelection() runs BEFORE
-	// these gates, so it shows the strategy's ranking, not the order clients
-	// actually follow. This line records the FINAL candidate order with each
-	// account's soft-demotion reason (if any) plus the account that will be
-	// attempted first — the only runtime signal that the reserve actually bound.
-	// Built only when DEBUG is on (mirrors logSelection's guard).
-	if (log.getLevel() <= LogLevel.DEBUG) {
-		const order = accounts
-			.map((a) => {
-				const reason = softDemotionReasons.get(a.id);
-				return reason ? `${a.name}(demoted:${reason})` : a.name;
-			})
-			.join(" > ");
-		log.debug(
-			`Final candidate order: ${order || "none"} — first attempt: ` +
-				`${requestMeta.routing?.primaryAttemptAccountId ?? "none"}`,
-		);
-	}
-
 	// 9. Try each account
 	const comboInfo = getComboSlotInfo(requestMeta);
 	const allowedAccountIds = new Set(accounts.map((account) => account.id));
@@ -2786,6 +2807,7 @@ export async function handleProxy(
 				// through to the normal failover loop, which honors the reorder.
 				let firstOutcome: ProxyAttemptOutcome | null = null;
 				const gatedFirst = await attemptThroughProbeGate(heldAccount, () => {
+					logFinalOrderOnce(heldAccount.id);
 					// Record the attempt (only when it actually happens) so the normal
 					// loop below skips a duplicate if we fall through.
 					burstAttemptedAccountId = heldAccount.id;
@@ -2946,8 +2968,9 @@ export async function handleProxy(
 		// freshly-recovered account admits exactly ONE probe. Concurrent requests
 		// that would re-select it are suppressed and skip to the next candidate
 		// instead of stampeding it.
-		const gated = await attemptThroughProbeGate(accounts[i], () =>
-			proxyWithAccount(
+		const gated = await attemptThroughProbeGate(accounts[i], () => {
+			logFinalOrderOnce(accounts[i].id);
+			return proxyWithAccount(
 				req,
 				url,
 				accounts[i],
@@ -2969,8 +2992,8 @@ export async function handleProxy(
 				{
 					onOutcome: (o) => noteOverloadSuppression(accounts[i], o),
 				},
-			),
-		);
+			);
+		});
 		if (gated.suppressed) {
 			continue;
 		}
@@ -3072,8 +3095,9 @@ export async function handleProxy(
 				// Single-flight recovery probe gate (same chokepoint as the primary
 				// failover loop above): admit only one probe for a freshly-recovered
 				// account; suppress concurrent stampeders.
-				const gated = await attemptThroughProbeGate(fallbackAccount, () =>
-					proxyWithAccount(
+				const gated = await attemptThroughProbeGate(fallbackAccount, () => {
+					logFinalOrderOnce(fallbackAccount.id);
+					return proxyWithAccount(
 						req,
 						url,
 						fallbackAccount,
@@ -3094,8 +3118,8 @@ export async function handleProxy(
 						{
 							onOutcome: (o) => noteOverloadSuppression(fallbackAccount, o),
 						},
-					),
-				);
+					);
+				});
 				if (gated.suppressed) {
 					continue;
 				}

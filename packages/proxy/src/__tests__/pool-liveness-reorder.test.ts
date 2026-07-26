@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
+import { Logger, LogLevel } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
@@ -119,10 +128,43 @@ function makeAffinityStrategy() {
 	} as never;
 }
 
-function makeContext(accounts: Account[]): ProxyContext {
+/**
+ * Plain in-order strategy with NO affinity pin (`heldAccountId: null`), so the
+ * burst-retry preflight branch is skipped entirely and the request reaches the
+ * ordinary failover loop — where the late provider-overload check lives.
+ */
+function makeOrderedStrategy() {
+	return {
+		select: (accs: Account[], meta: RequestMeta) => {
+			const now = Date.now();
+			const available = accs.filter(
+				(acc) =>
+					!acc.paused &&
+					(!acc.rate_limited_until || acc.rate_limited_until <= now),
+			);
+			meta.routing = {
+				strategy: "session",
+				decision: "affinity_miss",
+				affinityScope: "project",
+				affinityKey: "k",
+				selectedAccountId: available[0]?.id ?? null,
+				previousAccountId: null,
+				candidatesCount: available.length,
+				failoverReason: null,
+				heldAccountId: null,
+			};
+			return available;
+		},
+	} as never;
+}
+
+function makeContext(
+	accounts: Account[],
+	strategy = makeAffinityStrategy(),
+): ProxyContext {
 	const byId = new Map(accounts.map((a) => [a.id, a]));
 	return {
-		strategy: makeAffinityStrategy(),
+		strategy,
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getAccount: mock(async (id: string) => byId.get(id) ?? null),
@@ -247,12 +289,46 @@ function recordAttempts(originalFetch: typeof globalThis.fetch): string[] {
 			if (!isProxyCall(input)) return originalFetch(input as never, init);
 			const headers =
 				input instanceof Request ? input.headers : new Headers(init?.headers);
-			const auth = headers.get("authorization") ?? "";
+			// API-key providers (e.g. anthropic-compatible) authenticate with
+			// `x-api-key` instead of a bearer token — record whichever is present so
+			// the attempt array stays a faithful record for mixed-provider pools.
+			const auth =
+				headers.get("authorization") ?? headers.get("x-api-key") ?? "";
 			attempts.push(auth.replace(/^Bearer\s+/i, ""));
 			return ok200();
 		},
 	);
 	return attempts;
+}
+
+/**
+ * Capture the DEBUG lines the proxy emits during one request.
+ *
+ * `spyOn` on the Logger prototype (never `mock.module`, which leaks across this
+ * repo's whole suite): `getLevel` is forced to DEBUG so the proxy's
+ * DEBUG-guarded diagnostics are built, and `debug` is replaced by a collector so
+ * nothing reaches the console. Both spies are restored by the caller.
+ */
+function captureDebugLines(): {
+	lines: string[];
+	restore: () => void;
+} {
+	const lines: string[] = [];
+	const levelSpy = spyOn(Logger.prototype, "getLevel").mockReturnValue(
+		LogLevel.DEBUG,
+	);
+	const debugSpy = spyOn(Logger.prototype, "debug").mockImplementation(
+		(message: string) => {
+			lines.push(message);
+		},
+	);
+	return {
+		lines,
+		restore: () => {
+			levelSpy.mockRestore();
+			debugSpy.mockRestore();
+		},
+	};
 }
 
 describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy)", () => {
@@ -574,4 +650,77 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		expect(res.status).toBe(200);
 		expect(attempts).toEqual(["at-peer"]);
 	}, 10_000);
+
+	it("logs the account actually attempted, not the one in first position, when the late overload check skips accounts[0]", async () => {
+		// The final-order DEBUG line is the ONLY runtime evidence that a soft
+		// demotion bound, so it must follow the real upstream attempt rather than
+		// list position. Here accounts[0] passes the EARLY provider-overload gate
+		// and is then skipped by the LATE one inside the attempt loop:
+		//   - the early gate reads each account's EFFECTIVE (mapped) model — opus
+		//     for `first`, whose bucket is closed;
+		//   - the late gate reads the REQUEST model (sonnet), whose bucket is open.
+		// `second` sits behind a different provider overload key
+		// (anthropic-compatible, not the collapsed anthropic-upstream key), so
+		// neither gate touches it and it is the account really attempted.
+		const first = makeAccount({
+			id: "first",
+			name: "First",
+			access_token: "at-first",
+			model_mappings: JSON.stringify({
+				"claude-sonnet-4-5": "claude-opus-4-5",
+			}),
+		});
+		const second = makeAccount({
+			id: "second",
+			name: "Second",
+			provider: "anthropic-compatible",
+			api_key: "ak-second",
+			refresh_token: null,
+			access_token: null,
+		});
+		// Healthy on every window: no soft demotion, so the candidate order is
+		// exactly [first, second] and only the overload skip can move the attempt.
+		seedUsage(first.id, 20, 20);
+		seedUsage(second.id, 20, 20);
+
+		const ctx = makeContext([first, second], makeOrderedStrategy());
+		const attempts = recordAttempts(originalFetch);
+		const debug = captureDebugLines();
+
+		try {
+			applyProviderOverloadCooldown(
+				"anthropic",
+				Date.now() + 60_000,
+				"claude-sonnet-4-5",
+			);
+
+			const res = await callHandleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+
+			expect(res.status).toBe(200);
+			// accounts[0] was never sent upstream.
+			expect(attempts).toEqual(["ak-second"]);
+
+			const line = debug.lines.find((l) =>
+				l.startsWith("Final candidate order:"),
+			);
+			expect(line).toBeDefined();
+			// Exactly one such line per request.
+			expect(
+				debug.lines.filter((l) => l.startsWith("Final candidate order:"))
+					.length,
+			).toBe(1);
+			expect(line).toContain("First > Second");
+			// The logged attempt is the account that actually went upstream…
+			expect(line).toContain("attempted first upstream: second");
+			// …while the by-position primary — the skipped account — is reported as
+			// position, never as "the first attempt".
+			expect(line).toContain("gated primary by position: first");
+		} finally {
+			debug.restore();
+		}
+	});
 });
