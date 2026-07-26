@@ -64,11 +64,23 @@ export function statusSummary(data: SystemStatusResponse): {
 		const when = pool.next_available_at
 			? new Date(pool.next_available_at).toLocaleTimeString()
 			: null;
+		// WHY the pool is empty matters to the operator: a spent usage window just
+		// needs waiting out, a throttle may not. `usage_exhausted` is optional
+		// (older servers omit it), and the two counters are mutually exclusive per
+		// account, so a non-zero pair means a mixed pool — neither headline is true
+		// then, so say something neutral.
+		const exhausted = pool.usage_exhausted ?? 0;
+		const subject =
+			exhausted > 0
+				? pool.rate_limited === 0
+					? "All accounts usage-exhausted"
+					: "No accounts available"
+				: "All accounts rate-limited";
 		return {
 			label: "Degraded — capacity limited",
 			description: when
-				? `All accounts rate-limited; next recovers at ${when}`
-				: "All accounts rate-limited; recovering",
+				? `${subject}; next recovers at ${when}`
+				: `${subject}; recovering`,
 		};
 	}
 

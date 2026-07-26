@@ -200,3 +200,63 @@ describe("accountWideExhaustion", () => {
 		);
 	});
 });
+
+/**
+ * The optional third parameter is the FRESH-GATE: the 5h session window moves
+ * fast enough that a display-horizon reading (up to 30 min old in
+ * `/api/accounts`) must not be allowed to assert it, while the slow weekly
+ * windows stay readable from that wider view. Defaults to `usage`, so every
+ * caller above is unaffected.
+ */
+describe("accountWideExhaustion — sessionUsage fresh-gate", () => {
+	const weeklyHealthy = {
+		utilization: 40,
+		resets_at: iso(NOW + 3 * 24 * 60 * MIN),
+	};
+
+	it("does NOT report session exhaustion when the FRESH view shows headroom", () => {
+		const stale = {
+			five_hour: { utilization: 100, resets_at: iso(NOW + 30 * MIN) },
+			seven_day: weeklyHealthy,
+		} as AnthropicUsageData;
+		const fresh = {
+			five_hour: { utilization: 40, resets_at: iso(NOW + 30 * MIN) },
+			seven_day: weeklyHealthy,
+		} as AnthropicUsageData;
+		expect(accountWideExhaustion(stale, NOW, fresh)).toEqual({
+			exhausted: false,
+			binding: null,
+			resetMs: null,
+		});
+	});
+
+	it("reports binding: session from the FRESH view even when the wide view has headroom", () => {
+		const wide = {
+			five_hour: { utilization: 40, resets_at: iso(NOW + 30 * MIN) },
+			seven_day: weeklyHealthy,
+		} as AnthropicUsageData;
+		const fresh = {
+			five_hour: { utilization: 100, resets_at: iso(NOW + 45 * MIN) },
+			seven_day: weeklyHealthy,
+		} as AnthropicUsageData;
+		expect(accountWideExhaustion(wide, NOW, fresh)).toEqual({
+			exhausted: true,
+			binding: "session",
+			resetMs: NOW + 45 * MIN,
+		});
+	});
+
+	it("keeps reading the WEEKLY class from the wide view, not the fresh one", () => {
+		// Weekly is slow-moving: the 30-minute display horizon is still honest for
+		// it, so a fresh view that happens to lack the window must not suppress it.
+		const wide = {
+			five_hour: { utilization: 10, resets_at: iso(NOW + 30 * MIN) },
+			seven_day: { utilization: 100, resets_at: iso(NOW + 2 * 24 * 60 * MIN) },
+		} as AnthropicUsageData;
+		expect(accountWideExhaustion(wide, NOW, null)).toEqual({
+			exhausted: true,
+			binding: "weekly",
+			resetMs: NOW + 2 * 24 * 60 * MIN,
+		});
+	});
+});

@@ -51,7 +51,8 @@ export function createSystemStatusHandler(
 			const accounts = await dbOps.getAllAccounts();
 			const now = Date.now();
 			// Use the same usage resolver as `/health` so the System Status tile never
-			// disagrees about which accounts are usage-exhausted (weekly window spent).
+			// disagrees about which accounts are usage-exhausted (an account-wide
+			// window spent — a weekly one or the rolling 5-hour session).
 			const pool = computePoolStatus(accounts, now, usageCacheResolver);
 
 			const asyncWriterHealthy = getAsyncWriterHealth

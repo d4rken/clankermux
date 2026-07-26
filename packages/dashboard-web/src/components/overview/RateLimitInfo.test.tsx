@@ -99,6 +99,44 @@ describe("RateLimitInfo", () => {
 		expect(html).not.toContain("bg-destructive/10");
 	});
 
+	it("names the spent window class for a usage_exhausted account", () => {
+		const session = render([
+			makeAccount({
+				name: "session-exhausted",
+				rateLimitStatus: "usage_exhausted (13m)",
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseBinding: "session",
+				rateLimitCauseResetMs: NOW + 13 * MIN,
+			}),
+		]);
+		expect(session).toContain("5-hour session quota spent");
+
+		const weekly = render([
+			makeAccount({
+				name: "weekly-exhausted",
+				rateLimitStatus: "usage_exhausted (2760m)",
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseBinding: "weekly",
+				rateLimitCauseResetMs: NOW + 2760 * MIN,
+			}),
+		]);
+		expect(weekly).toContain("weekly quota spent");
+		expect(weekly).not.toContain("5-hour session");
+	});
+
+	it("omits the window class when the server sent no binding", () => {
+		const html = render([
+			makeAccount({
+				name: "exhausted",
+				rateLimitStatus: "usage_exhausted (10m)",
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseResetMs: NOW + 10 * MIN,
+			}),
+		]);
+		expect(html).toContain("usage_exhausted (10m)");
+		expect(html).not.toContain("quota spent");
+	});
+
 	it("falls back to the display string for legacy payloads without a cause", () => {
 		const html = render([
 			makeAccount({

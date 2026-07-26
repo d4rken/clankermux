@@ -1,5 +1,5 @@
 import { providerStatusToCause } from "@clankermux/core";
-import type { RateLimitCause } from "@clankermux/types";
+import type { RateLimitCause, UsageExhaustionBinding } from "@clankermux/types";
 import type { ComponentProps } from "react";
 import type { Badge } from "../ui/badge";
 import { StatusChip } from "./StatusChip";
@@ -26,15 +26,33 @@ interface StatusDescriptor {
 }
 
 /**
- * A spent weekly quota is a routine, self-healing state rather than a provider
- * fault, so it gets the amber warning treatment rather than the red one.
+ * A spent quota is a routine, self-healing state rather than a provider fault,
+ * so it gets the amber warning treatment rather than the red one — for both
+ * window classes.
+ *
+ * The WORDING is binding-aware because the wait is wildly different: a 5-hour
+ * session window resets in minutes, an account-wide weekly one can take days.
+ * `null` (an older API payload, or the string path, which carries no binding)
+ * gets deliberately non-committal wording rather than a guess.
  */
-const USAGE_EXHAUSTED_DESCRIPTOR: StatusDescriptor = {
-	label: "Usage exhausted",
-	variant: "warning",
-	description:
-		"Weekly usage quota is spent — requests resume when the window resets.",
-};
+function usageExhaustedDescriptor(
+	binding: UsageExhaustionBinding | null | undefined,
+): StatusDescriptor {
+	return {
+		label: "Usage exhausted",
+		variant: "warning",
+		description:
+			binding === "session"
+				? "5-hour session quota is spent — requests resume when the window resets."
+				: binding === "weekly"
+					? "Weekly usage quota is spent — requests resume when the window resets."
+					: "A usage quota is spent — requests resume when the window resets.",
+	};
+}
+
+/** The binding-less form, used by the raw-status path and as the cause default. */
+const USAGE_EXHAUSTED_DESCRIPTOR: StatusDescriptor =
+	usageExhaustedDescriptor(null);
 
 // Maps the provider's unified rate-limit status (e.g. the value of the
 // `anthropic-ratelimit-unified-status` header) to a human-readable chip.
@@ -162,6 +180,12 @@ interface RateLimitStatusChipProps {
 	status: string;
 	/** Normalized cause from the API — preferred over parsing `status`. */
 	cause?: RateLimitCause | null;
+	/**
+	 * Which account-wide window drove a `usage_exhausted` cause. Only the tooltip
+	 * wording depends on it; null/absent (older payloads, or the raw-status path)
+	 * yields the generic explanation.
+	 */
+	binding?: UsageExhaustionBinding | null;
 	/** Epoch ms when the cause clears; drives the countdown when `cause` is set. */
 	resetMs?: number | null;
 	/**
@@ -177,6 +201,7 @@ interface RateLimitStatusChipProps {
 export function RateLimitStatusChip({
 	status,
 	cause = null,
+	binding = null,
 	resetMs = null,
 	providerStatus = null,
 	now = Date.now(),
@@ -186,12 +211,15 @@ export function RateLimitStatusChip({
 		!!providerStatus && providerStatusToCause(providerStatus) === null;
 	// Prefer the structured cause, except when it is a normalization of a provider
 	// status we don't know (keep that one verbatim) — `usage_exhausted` is derived
-	// from usage data, not from the provider status, so it always wins.
+	// from usage data, not from the provider status, so it always wins. It is also
+	// the one cause whose wording depends on WHICH window is spent.
 	const causeDescriptor =
 		cause !== null &&
 		cause !== "ok" &&
 		(cause === "usage_exhausted" || !isUnknownProviderStatus)
-			? CAUSE_MAP[cause]
+			? cause === "usage_exhausted"
+				? usageExhaustedDescriptor(binding)
+				: CAUSE_MAP[cause]
 			: null;
 	const useCause = causeDescriptor !== null;
 	const descriptor = causeDescriptor ?? parsed.descriptor;

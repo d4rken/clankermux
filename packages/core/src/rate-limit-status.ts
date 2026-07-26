@@ -34,9 +34,9 @@ export const REJECTING_STATUSES: ReadonlySet<string> = new Set([
 
 /**
  * Administrative / billing blocks that are NOT explained by a spent quota, and
- * therefore outrank weekly exhaustion in the presentation: an account that is
- * blocked or needs payment stays labelled that way even when its weekly window
- * also happens to be spent.
+ * therefore outrank usage exhaustion in the presentation: an account that is
+ * blocked or needs payment stays labelled that way even when one of its
+ * account-wide windows (weekly or the 5-hour session) also happens to be spent.
  */
 export const INDEPENDENT_BLOCK_STATUSES: ReadonlySet<string> = new Set([
 	"payment_required",
@@ -51,7 +51,8 @@ const OUT_OF_CREDITS_REASON = "out_of_credits";
 
 /**
  * Administrative / billing blocks that a spent quota does not explain, so they
- * outrank weekly exhaustion wherever a cause is presented. Shared by
+ * outrank usage exhaustion (weekly OR the 5-hour session) wherever a cause is
+ * presented. Shared by
  * `/api/accounts` and `/health?detail=1` so the two surfaces cannot disagree
  * about whether an operator should wait for a reset or go and pay.
  *

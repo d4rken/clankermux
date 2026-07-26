@@ -88,7 +88,8 @@ export class AccountPresenter {
 
 	get isRateLimited(): boolean {
 		// The API's structured cause is authoritative when present: it already
-		// accounts for weekly exhaustion, which no lock/string check can see.
+		// accounts for account-wide usage exhaustion (a spent weekly window or the
+		// spent 5-hour session), which no lock/string check can see.
 		if ("rateLimitCause" in this.account && this.account.rateLimitCause) {
 			return !NON_LIMITED_RATE_LIMIT_CAUSES.has(this.account.rateLimitCause);
 		}

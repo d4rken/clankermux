@@ -521,6 +521,7 @@ export function AccountStatusChips({
 				<RateLimitStatusChip
 					status={status.rateLimitStatus}
 					cause={status.rateLimitCause}
+					binding={status.rateLimitCauseBinding}
 					resetMs={status.rateLimitCauseResetMs}
 					providerStatus={status.rateLimitProviderStatus}
 				/>
