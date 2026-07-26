@@ -128,7 +128,10 @@ the cherry-pick** — the goal is the fix, not upstream's tree.
 - **ALWAYS** use `--no-ff` when merging a topic branch into `main`.
 - **NEVER** `git push --force` (or `--force-with-lease`) to `origin/main` without
   explicit user confirmation for that specific operation.
-- **NEVER** bump the version manually (per `CLAUDE.md`).
+- **NEVER** bump `CLAUDE_CLI_VERSION` in `packages/core/src/version.ts` manually —
+  the pre-push hook tracks the real Claude Code CLI (per `CLAUDE.md`).
+- **ALWAYS** bump the app version (root `package.json`) when landing a notable
+  change into `main` — CalVer `YYYY.M.N`, per `CLAUDE.md` → Version Updates.
 - **ALWAYS** run `bun run lint && bun run typecheck && bun run format` before merging.
 - **NEVER** include the autogen inline files in commits (per `CLAUDE.md`).
 - **ALWAYS** use `git add <specific files>` rather than `git add .` (per `CLAUDE.md`).

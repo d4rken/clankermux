@@ -124,6 +124,30 @@ export function buildActiveSessionsTrend(
 	return { rows, series };
 }
 
+/**
+ * Per-bucket session totals keyed by bucket start, for charts that want a single
+ * "all clients" curve rather than the per-scope split.
+ *
+ * Reduces ActiveSessionsTimePoint[] DIRECTLY by ts, deliberately NOT via
+ * buildActiveSessionsTrend: that pivot only recognises the fixed SCOPE_ORDER and
+ * silently drops any scope outside it. The server casts the raw DB scope value
+ * without runtime validation (analytics-direct.ts:913), so a scope this client
+ * doesn't know about must still count toward an "all clients" total rather than
+ * vanish from it.
+ *
+ * Same PRESENCE caveat as ActiveSessionsTimePoint: these values are per-bucket
+ * and must never be summed across buckets to produce a range total.
+ */
+export function buildSessionTotalsByBucket(
+	timeSeries: ActiveSessionsTimePoint[],
+): Map<number, number> {
+	const totals = new Map<number, number>();
+	for (const point of timeSeries) {
+		totals.set(point.ts, (totals.get(point.ts) ?? 0) + point.sessions);
+	}
+	return totals;
+}
+
 /** One row of the "Active Sessions by account" bar list. */
 export type ActiveSessionsAccountRow = NonNullable<
 	ActiveSessionsAnalytics["perAccount"]
