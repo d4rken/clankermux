@@ -2,6 +2,7 @@ import { formatTokens } from "@clankermux/ui-common";
 import { useMemo } from "react";
 import { CHART_COLORS } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import type { OverviewTimeSeriesRow } from "../../lib/overview-timeseries";
 import {
 	type ProjectTokensRow,
 	toProjectDonutData,
@@ -16,15 +17,7 @@ import {
 } from "../ui/card";
 
 interface ChartsSectionProps {
-	timeSeriesData: Array<{
-		ts: number;
-		requests: number;
-		successRate: number;
-		responseTime: number;
-		cost: string;
-		planCost: number;
-		apiCost: number;
-	}>;
+	timeSeriesData: OverviewTimeSeriesRow[];
 	/** Selected dashboard range — forwarded to the time-series chart for labelling. */
 	timeRange: string;
 	modelData: Array<{ name: string; value: number }>;
@@ -82,8 +75,9 @@ export function ChartsSection({
 				<CardHeader>
 					<CardTitle>Request Volume &amp; Success Rate</CardTitle>
 					<CardDescription>
-						Requests per bucket (left axis) and success percentage (right axis)
-						over time
+						Requests per bucket (left axis), success percentage (right axis),
+						and distinct active sessions (own scale — compare shape, not height)
+						over time. Sessions are attributed for new requests only.
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
