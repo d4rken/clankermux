@@ -200,12 +200,20 @@ function createBurstRetryGiveUpResponse(heldAccount: Account): Response {
 }
 
 /**
- * Synthetic response returned when a transparent burst-retry hold gave up
- * because the CLIENT disconnected mid-hold (Finding 2). The client is already
- * gone, so the body is never read — we only need a terminal Response so the
- * handler stops WITHOUT issuing further sibling/Codex upstream requests for a
- * request nobody is waiting on. Uses 499 (Client Closed Request) so history/logs
- * reflect the disconnect rather than a server-side failure.
+ * The generic client-departed terminal: returned wherever this handler observes
+ * that the CLIENT disconnected — a burst-retry / overload / context-window hold
+ * giving up mid-hold, an attempt aborted in flight, or a disconnect detected at
+ * account selection or at the request-level tail.
+ *
+ * The client is already gone, so the body is never read — we only need a
+ * terminal Response so the handler stops WITHOUT issuing further sibling/Codex
+ * upstream requests, recording a synthetic failure row, or throwing an aggregate
+ * error for a request nobody is waiting on. Uses 499 (Client Closed Request) so
+ * history/logs reflect the disconnect rather than a server-side failure.
+ *
+ * The `x-clankermux-burst-retry: client-aborted` header predates the generic use
+ * and is deliberately KEPT as-is: it is an existing diagnostic other code and
+ * tests key on, and renaming it is a separate concern.
  */
 function createClientAbortResponse(): Response {
 	return new Response(
