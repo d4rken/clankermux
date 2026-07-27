@@ -2635,6 +2635,21 @@ export async function handleProxy(
 			);
 		}
 
+		// The client hung up while account selection was running. Both terminals
+		// below (pinned_target_unavailable and pool_exhausted) call
+		// recordSyntheticErrorResponse — and pool_exhausted additionally logs at
+		// ERROR — so letting an aborted request reach them writes a bogus 503 row
+		// into request history (skewing the dashboard fail rate) and shouts about a
+		// pool exhaustion nobody is waiting on. One guard covers both same-class
+		// terminals; skipping a synthetic history row for a departed client is
+		// correct in either case.
+		//
+		// No discardStaged is needed here: staging happens inside proxyWithAccount,
+		// and every path in this zero-accounts block that can reach it (the
+		// storm-degrade burst hold, the CW hold + last-resort) either returns before
+		// this point or already discarded its staged body.
+		if (req.signal.aborted) return createClientAbortResponse();
+
 		// A pin or the Codex-CLI Anthropic floor was active but post-selection
 		// gates removed every allowed candidate (and no more-specific terminal
 		// above applied). Return the pinned terminal rather than a generic
@@ -3185,6 +3200,33 @@ export async function handleProxy(
 	// proxyWithAccount, but no worker "end"/summary is emitted on this throw
 	// path — drop its staged body now instead of waiting for the age sweep.
 	cacheBodyStore.discardStaged(requestMeta.id);
+
+	// The client hung up while the last candidate was in flight. proxyWithAccount's
+	// abort path returns null (handleProxyError logs "not a failure" and returns —
+	// which suppresses the log line, not the control flow), so an aborted request
+	// would otherwise fall through to BOTH terminals below and be reported as
+	// ALL_ACCOUNTS_FAILED — the exact string an operator greps for during a real
+	// outage — or, worse, as "re-authenticate your accounts".
+	//
+	// Keyed on req.signal, NEVER on isAbortError: a hold-budget deadline is also an
+	// AbortError but is NOT a client disconnect and must still fail loudly (pinned
+	// by overload-hold.test.ts, "falls back to the synthetic 529 (not 499)"). Every
+	// budget abort builds its OWN controller and composes it via AbortSignal.any,
+	// so it can never mutate req.signal.
+	//
+	// POLICY, stated rather than overclaimed — "client disconnect wins at request
+	// level". This does NOT prove nothing is masked: a genuine 401/429/network
+	// failure can complete in the same tick the client hangs up, and this guard
+	// then returns 499 instead of the aggregate 503. That is deliberate and safe
+	// because every per-ATTEMPT effect already happened before the terminal was
+	// reached (cooldowns applied, upstream bodies drained, probe leases settled,
+	// per-attempt diagnostics logged); only the aggregate request-level verdict
+	// changes, and there is no client left to receive it.
+	//
+	// Placement is load-bearing: AFTER the staged-body discard above (so a 499
+	// return, which emits no worker end/summary, cannot leak it) and BEFORE the
+	// attempted-accounts computation below (so it covers the needsReauth throw too).
+	if (req.signal.aborted) return createClientAbortResponse();
 
 	// Check if OAuth token issues are the cause
 	const allAttemptedAccounts = filteredComboInfo
