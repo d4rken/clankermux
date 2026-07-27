@@ -119,6 +119,14 @@ export async function handleResponsesRequest(
 		method: "POST",
 		headers: syntheticHeaders,
 		body: JSON.stringify(anthropicBody),
+		// Carry the CLIENT's abort signal. Without it every downstream
+		// `req.signal.aborted` check sees a fresh, never-aborted signal, so
+		// /v1/responses (Codex CLI traffic) is invisible to all of the proxy's
+		// client-abort guards: an abandoned request runs to completion upstream and
+		// its terminal is reported as a server-side failure rather than a
+		// disconnect. This is a real change in cancellation semantics for this
+		// endpoint — it stops burning Codex quota on requests nobody is waiting on.
+		signal: req.signal,
 	});
 	// Native Responses passthrough (Stage A): carry the original (normalized)
 	// Responses body alongside the translated request. When the proxy selects a
