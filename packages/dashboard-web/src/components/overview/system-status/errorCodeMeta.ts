@@ -45,20 +45,26 @@ const KNOWN_ERROR_META: Record<
 		suggestion: "Wait for cooldown, or add more diverse fallback models.",
 		severity: "error",
 	},
+	// Both 529 entries are now LEGACY on every live Anthropic path. Since
+	// 2026-07-21 an Anthropic 529 — HTTP status or mid-stream overloaded_error —
+	// trips the family-scoped provider-overload breaker and applies NO per-account
+	// cooldown, so neither reason is written for it any more. They survive for
+	// rows recorded before that change, and for a 529 from a non-Anthropic
+	// provider, which still takes the per-account path.
 	upstream_529_overloaded_with_reset: {
-		title: "Provider overload",
+		title: "Provider overload (legacy per-account cooldown)",
 		description:
-			"The upstream provider returned 529 (overloaded). Account temporarily cooled down — the cooldown window comes from the Retry-After header when provided, or a synthesized window for mid-stream overloaded_error detections (no Retry-After is available in that path).",
+			"The upstream provider returned 529 (overloaded) with a Retry-After header, and the account was cooled down until that time. Current builds route Anthropic 529s to the family-scoped provider-overload breaker with no per-account cooldown, so this reason now appears only on rows written before 2026-07-21 or on a 529 from a non-Anthropic provider.",
 		suggestion:
-			"No action needed — the account will recover automatically. Traffic will shift to other configured accounts in the meantime.",
+			"No action needed — the account recovers automatically at the provider's reset time, and traffic shifts to other configured accounts in the meantime.",
 		severity: "warning",
 	},
 	upstream_529_overloaded_no_reset: {
-		title: "Provider overload (no Retry-After)",
+		title: "Provider overload (legacy, no Retry-After)",
 		description:
-			"The upstream provider returned 529 (overloaded) without a Retry-After header; entering probe cooldown.",
+			"The upstream provider returned 529 (overloaded) without a Retry-After header, and the account entered a probe cooldown. Current builds route Anthropic 529s to the family-scoped provider-overload breaker with no per-account cooldown, so this reason now appears only on rows written before 2026-07-21 or on a 529 from a non-Anthropic provider.",
 		suggestion:
-			"The account enters a short probe cooldown (about 60s), then the next request re-probes it automatically.",
+			"No action needed — the account enters an escalating probe cooldown (starting around 30s) and the next request re-probes it automatically.",
 		severity: "warning",
 	},
 	out_of_credits: {
