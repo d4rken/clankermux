@@ -418,6 +418,9 @@ export async function handleProxy(
 		sessionProjectCache,
 	);
 	const project = resolved.project;
+	// Which tier produced it (null = the request was never eligible). Carried
+	// beside `project` so the persisted row records HOW it was attributed.
+	const projectAttributionSource = resolved.source;
 	// Ingest-time context composition + per-tool call/error stats: walk the
 	// already-parsed body once (no second JSON.parse) for proxied /v1/messages
 	// requests only. null for other endpoints / unparseable bodies → context_*
@@ -553,6 +556,7 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	requestMeta.projectAttributionSource = projectAttributionSource;
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
@@ -809,6 +813,7 @@ export async function handleProxy(
 			apiKeyName: apiKeyName || null,
 			comboName: null,
 			project: project ?? null,
+			projectAttributionSource,
 			reasoningEffort: requestMeta.reasoningEffort ?? null,
 			routing: requestMeta.routing
 				? {

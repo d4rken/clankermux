@@ -7,6 +7,7 @@ import {
 import {
 	type ContextComposition,
 	NO_ACCOUNT_ID,
+	type ProjectAttributionSource,
 	type RequestResponse,
 	type ToolCallStat,
 } from "@clankermux/types";
@@ -87,6 +88,12 @@ export interface RecordMeta {
 	apiKeyName: string | null;
 	comboName: string | null;
 	project: string | null;
+	/**
+	 * Which tier produced `project` (see RequestMeta.projectAttributionSource).
+	 * null = the request was never eligible for project attribution, which is
+	 * distinct from the recorded value "none".
+	 */
+	projectAttributionSource: ProjectAttributionSource | null;
 	/**
 	 * Ingest-time context composition (see RequestMeta.contextComposition).
 	 * Optional: synthetic/audit rows intentionally omit it and stay
@@ -199,6 +206,7 @@ interface SaveRequestData {
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string | null;
+	projectAttributionSource?: ProjectAttributionSource | null;
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
@@ -791,6 +799,7 @@ export class RequestRecorder {
 					apiKeyId: meta.apiKeyId ?? undefined,
 					apiKeyName: meta.apiKeyName ?? undefined,
 					project: meta.project ?? null,
+					projectAttributionSource: meta.projectAttributionSource ?? null,
 					billingType: record.billingType,
 					comboName: meta.comboName ?? null,
 					reasoningEffort: meta.reasoningEffort ?? null,
@@ -923,6 +932,7 @@ export class RequestRecorder {
 				isStream: meta.isStream,
 				retry: meta.retryAttempt,
 				project: meta.project ?? undefined,
+				projectAttributionSource: meta.projectAttributionSource ?? undefined,
 				reasoningEffort: meta.reasoningEffort ?? undefined,
 				providerName: meta.providerName,
 				requestedModel: meta.requestedModel ?? undefined,
@@ -990,6 +1000,7 @@ export class RequestRecorder {
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,
 			project: meta.project ?? undefined,
+			projectAttributionSource: meta.projectAttributionSource ?? undefined,
 			billingType,
 			comboName: meta.comboName ?? undefined,
 			reasoningEffort: meta.reasoningEffort ?? undefined,

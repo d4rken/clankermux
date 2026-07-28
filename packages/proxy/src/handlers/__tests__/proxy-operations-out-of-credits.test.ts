@@ -71,6 +71,8 @@ function makeRequestMeta(): RequestMeta {
 		path: "/v1/messages",
 		timestamp: Date.now(),
 		headers: new Headers(),
+		project: "clankermux",
+		projectAttributionSource: "wd_primary",
 	} as RequestMeta;
 }
 
@@ -235,5 +237,10 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 		const row = saveRequestCalls[0];
 		expect(row.errorMessage).toBe("out_of_credits");
 		expect(row.usage).toEqual({ model: REQUEST_MODEL });
+
+		// (4) Project attribution travels with the directly-written audit row —
+		// otherwise these rows would look like un-attributable legacy rows.
+		expect(row.project).toBe("clankermux");
+		expect(row.projectAttributionSource).toBe("wd_primary");
 	});
 });

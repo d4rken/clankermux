@@ -1,4 +1,8 @@
-import type { ContextComposition, ToolCallStat } from "./request";
+import type {
+	ContextComposition,
+	ProjectAttributionSource,
+	ToolCallStat,
+} from "./request";
 
 /** Combo slot routing info — maps each returned account to its slot's model override */
 export interface ComboSlotInfo {
@@ -20,6 +24,13 @@ export interface RequestMeta {
 	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
 	affinityPartition?: string | null;
 	project?: string | null;
+	/**
+	 * Which attribution tier produced `project` (see ProjectAttributionSource).
+	 * `null`/absent = the request was never eligible for project attribution,
+	 * which is distinct from the recorded value `"none"` ("eligible, no tier
+	 * fired"). Derived once in handleProxy and threaded like `project`.
+	 */
+	projectAttributionSource?: ProjectAttributionSource | null;
 	/** Model resolved at ingress before an upstream response is available. */
 	requestedModel?: string | null;
 	/**
