@@ -29,9 +29,25 @@ export interface AlibabaCodingPlanUsageData {
  * Fetch usage data from Alibaba Coding Plan's quota endpoint.
  * This is non-blocking - failures return null and won't affect provider operation.
  */
+/**
+ * Hard bound on the usage fetch, mirroring the Anthropic fetcher's guard.
+ *
+ * Without a signal the request could hang indefinitely. `usage-fetcher.ts`
+ * tracks in-flight fetches in `inFlightFetches` and only deletes the entry in
+ * `promise.finally()`, so a hung fetch wedges that account's polling slot for
+ * the lifetime of the process -- and polling is the ONLY channel that observes a
+ * locked account recovering.
+ */
+const USAGE_FETCH_TIMEOUT_MS = 5000;
+
 export async function fetchAlibabaCodingPlanUsageData(
 	apiKey: string,
 ): Promise<AlibabaCodingPlanUsageData | null> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(
+		() => controller.abort(),
+		USAGE_FETCH_TIMEOUT_MS,
+	);
 	try {
 		const response = await fetch(USAGE_URL, {
 			method: "GET",
@@ -39,6 +55,7 @@ export async function fetchAlibabaCodingPlanUsageData(
 				Authorization: `Bearer ${apiKey}`,
 				Accept: "application/json",
 			},
+			signal: controller.signal,
 		});
 
 		if (!response.ok) {
@@ -144,8 +161,12 @@ export async function fetchAlibabaCodingPlanUsageData(
 			remainingDays: info.remainingDays ?? null,
 		};
 	} catch (error) {
+		// An abort lands here too, so a timeout degrades to the existing
+		// failure path (null) rather than propagating.
 		log.warn("Error fetching Alibaba Coding Plan usage data:", error);
 		return null;
+	} finally {
+		clearTimeout(timeoutId);
 	}
 }
 
