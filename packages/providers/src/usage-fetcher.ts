@@ -1695,6 +1695,13 @@ class UsageCache {
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
 				if (data) {
+					// BEFORE the cache write: the roll is detected by comparing the new
+					// reset against the CACHED baseline, so replacing the baseline first
+					// would make every rollover invisible (mirrors the zai/anthropic
+					// dispatchers).
+					const callback = this.windowResetCallbacks.get(accountId);
+					if (callback)
+						this.notifyWindowReset(accountId, data, "minimax", callback);
 					this.cache.set(accountId, { data, timestamp: Date.now() });
 					const utilization = getRepresentativeMinimaxUtilization(
 						data as MinimaxUsageData,

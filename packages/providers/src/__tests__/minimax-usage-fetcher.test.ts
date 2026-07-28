@@ -21,6 +21,7 @@ import {
 	MINIMAX_TOKEN_PLAN_REMAINS_ENDPOINT,
 	parseMinimaxTokenPlanResponse,
 } from "../minimax-usage-fetcher";
+import { usageCache } from "../usage-fetcher";
 
 const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -195,21 +196,56 @@ describe("Minimax usage fetcher — parsing", () => {
 		).toBeNull();
 	});
 
-	it("clamps out-of-range remaining percent before inverting", () => {
+	it("treats an out-of-range remaining percent as UNKNOWN, never clamping it", () => {
+		// Clamping fabricated the most damaging reading available: a negative
+		// remaining became 100% utilization (which can pull a HEALTHY account out
+		// of routing) and >100 became 0% (which hides a spent one). Both windows
+		// bogus ⇒ no evidence at all ⇒ null, not a reading of zero.
+		expect(
+			parseMinimaxTokenPlanResponse({
+				base_resp: { status_code: 0 },
+				model_remains: [
+					makeRow({
+						current_interval_remaining_percent: 250, // bogus
+						current_weekly_remaining_percent: -10, // bogus
+					}),
+				],
+			}),
+		).toBeNull();
+	});
+
+	it("keeps the window that IS valid when only the other one is out of range", () => {
 		const parsed = parseMinimaxTokenPlanResponse({
 			base_resp: { status_code: 0 },
 			model_remains: [
 				makeRow({
-					current_interval_remaining_percent: 250, // bogus
-					current_weekly_remaining_percent: -10, // bogus
+					current_interval_remaining_percent: -10, // bogus
+					current_weekly_remaining_percent: 30, // -> 70% util
 				}),
 			],
 		});
 
-		expect(parsed?.five_hour?.remainingPercent).toBe(100);
-		expect(parsed?.five_hour?.utilization).toBe(0);
-		expect(parsed?.seven_day?.remainingPercent).toBe(0);
-		expect(parsed?.seven_day?.utilization).toBe(100);
+		expect(parsed?.five_hour).toBeNull();
+		expect(parsed?.seven_day?.remainingPercent).toBe(30);
+		expect(parsed?.seven_day?.utilization).toBe(70);
+		// The representative reading comes from the surviving window only.
+		expect(getRepresentativeMinimaxUtilization(parsed)).toBe(70);
+		expect(getRepresentativeMinimaxWindow(parsed)).toBe("seven_day");
+	});
+
+	it("accepts the inclusive bounds 0 and 100", () => {
+		const parsed = parseMinimaxTokenPlanResponse({
+			base_resp: { status_code: 0 },
+			model_remains: [
+				makeRow({
+					current_interval_remaining_percent: 0, // spent
+					current_weekly_remaining_percent: 100, // untouched
+				}),
+			],
+		});
+
+		expect(parsed?.five_hour?.utilization).toBe(100);
+		expect(parsed?.seven_day?.utilization).toBe(0);
 	});
 });
 
@@ -334,4 +370,83 @@ describe("Minimax usage fetcher — fetch", () => {
 		}) as unknown as typeof fetch;
 		expect(await fetchMinimaxUsageData("k")).toBeNull();
 	});
+});
+
+describe("Minimax usage fetcher — poller dispatch", () => {
+	const ACCOUNT_ID = "minimax-window-roll";
+	let originalFetch: typeof fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		usageCache.delete(ACCOUNT_ID);
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		usageCache.stopPolling(ACCOUNT_ID);
+		usageCache.delete(ACCOUNT_ID);
+	});
+
+	/** A `general` row whose interval window ends at `endMs`. */
+	function rowEndingAt(endMs: number): Row {
+		return makeRow({
+			start_time: endMs - FIVE_HOUR_MS,
+			end_time: endMs,
+			remains_time: FIVE_HOUR_MS,
+			weekly_start_time: endMs - SEVEN_DAY_MS,
+			weekly_end_time: endMs + SEVEN_DAY_MS,
+			weekly_remains_time: SEVEN_DAY_MS,
+		});
+	}
+
+	it("fires the window-reset callback when the polled window rolls", async () => {
+		// The dispatcher cached the fresh data without ever calling
+		// notifyWindowReset, so every MiniMax rollover was invisible to the
+		// window-reset bookkeeping the other providers get.
+		const now = Date.now();
+		// Baseline: the previous window's reset has already ARRIVED (required by
+		// isGenuineWindowRoll — sub-second drift on a still-future window is not a
+		// roll).
+		usageCache.set(
+			ACCOUNT_ID,
+			parseMinimaxTokenPlanResponse({
+				base_resp: { status_code: 0 },
+				model_remains: [rowEndingAt(now - 1_000)],
+			}) as never,
+		);
+
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						base_resp: { status_code: 0 },
+						model_remains: [rowEndingAt(now + FIVE_HOUR_MS)],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+		) as unknown as typeof fetch;
+
+		const onWindowReset = mock(() => {});
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			"api-key",
+			"minimax",
+			// Long interval: only the immediate fetch should run during the test.
+			60 * 60 * 1000,
+			null,
+			onWindowReset,
+		);
+
+		const deadline = Date.now() + 5_000;
+		while (onWindowReset.mock.calls.length === 0 && Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 10));
+		}
+
+		expect(onWindowReset).toHaveBeenCalledTimes(1);
+		expect(onWindowReset).toHaveBeenCalledWith(ACCOUNT_ID);
+		// The fresh reading still replaced the cached baseline.
+		expect(
+			(usageCache.peek(ACCOUNT_ID) as { five_hour?: { resetAt: number } })
+				?.five_hour?.resetAt,
+		).toBe(now + FIVE_HOUR_MS);
+	}, 15_000);
 });

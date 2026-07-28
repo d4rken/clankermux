@@ -90,23 +90,32 @@ function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+/**
+ * A REMAINING percent we are willing to believe, or `null`.
+ *
+ * Out-of-range values are UNKNOWN, never clamped. Clamping fabricates evidence
+ * in the most damaging direction available: a negative remaining became 100%
+ * utilization (which can remove a HEALTHY account from routing) and a value
+ * above 100 became 0% utilization (which hides a spent one). That is exactly the
+ * `null`-means-unknown contract this fetcher has to honour —
+ * `.claude/rules/rate-limiting-architecture.md` §1 / invariant 1: "unknown" must
+ * stay distinct from BOTH 0% and 100%.
+ */
 function toRemainingPercent(value: unknown): number | null {
 	if (!isFiniteNumber(value)) return null;
-	if (value < 0) return 0;
-	if (value > 100) return 100;
+	if (value < 0 || value > 100) return null;
 	return value;
 }
 
 /**
  * Invert the API's REMAINING percent into our UTILIZATION percent:
  * `utilization = 100 - remaining_percent`. Forgetting to invert would report
- * healthy accounts as exhausted and vice versa.
+ * healthy accounts as exhausted and vice versa. The input is already validated
+ * to 0-100 by {@link toRemainingPercent}, so the result is in range by
+ * construction.
  */
 function remainingToUtilization(remainingPercent: number): number {
-	const util = 100 - remainingPercent;
-	if (util < 0) return 0;
-	if (util > 100) return 100;
-	return util;
+	return 100 - remainingPercent;
 }
 
 function buildWindow(
@@ -192,6 +201,9 @@ export function parseMinimaxTokenPlanResponse(
 	const row = pickTextInferenceRow(raw.model_remains);
 	if (!row) return null;
 
+	// Each window stands on its own evidence: an unusable percent in one leaves
+	// that window null while the other is still reported. With NEITHER usable
+	// there is no evidence at all, which is a failed poll, not a reading of zero.
 	const five_hour = buildWindow(row, "interval");
 	const seven_day = buildWindow(row, "weekly");
 
