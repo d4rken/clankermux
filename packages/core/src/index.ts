@@ -132,6 +132,7 @@ export {
 	type NormalizedUsageWindow,
 	normalizeAnthropicUsage,
 } from "./usage-normalizer";
+export { computeUsagePrediction } from "./usage-prediction";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

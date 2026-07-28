@@ -1,9 +1,9 @@
+import { computeUsagePrediction } from "@clankermux/core";
 import type {
 	AccountUsagePrediction,
 	PredictionPoint,
 	UsageSnapshotSample,
 } from "@clankermux/types";
-import { computeUsagePrediction } from "./usage-prediction";
 
 // Lookback windows (inline named constants — NO env vars, per project rule).
 const FIVE_HOUR_LOOKBACK_MS = 6 * 60 * 60 * 1000; // cap 5h-window points to last 6h
