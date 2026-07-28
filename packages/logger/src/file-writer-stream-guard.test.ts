@@ -424,6 +424,39 @@ describe("LogFileWriter stream failure guard", () => {
 		writer.close();
 	});
 
+	// F5: two independent paths can observe the same stream failing — end()
+	// throwing during close, and a late 'error' event from I/O that was still
+	// pending for that same stream. Both report, so both must share the WeakSet;
+	// otherwise the operator gets a duplicate outage alert at exactly the moment
+	// the log is hardest to read.
+	it("reports a stream that both fails to close and later errors exactly once", () => {
+		const mono = { t: 11_000_000 };
+
+		const stubborn = withThrowingEnd(new FakeWriteStream());
+		const good = new FakeWriteStream();
+		const queue: Writable[] = [stubborn, good];
+		stubCreateWriteStream(() => queue.shift() ?? good);
+
+		const writer = new LogFileWriter({ monotonicNow: () => mono.t });
+		writer.write(evt(1));
+
+		errorSpy?.mockClear();
+		// Path 1: end() throws while closing.
+		expect(() => writer.close()).not.toThrow();
+		expect(errorSpy).toHaveBeenCalledTimes(1);
+		expect(stubborn.destroyed).toBe(true);
+
+		// Path 2: pending filesystem I/O for that same stream errors afterwards.
+		stubborn.emit("error", enospc());
+		expect(errorSpy).toHaveBeenCalledTimes(1);
+
+		// ...and however often the dying device re-emits.
+		stubborn.emit("error", enospc());
+		expect(errorSpy).toHaveBeenCalledTimes(1);
+
+		writer.close();
+	});
+
 	it("keeps logging when the mid-stream rotation close() throws", async () => {
 		const mono = { t: 10_000_000 };
 

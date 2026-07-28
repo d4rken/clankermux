@@ -121,6 +121,32 @@ export class LogFileWriter implements Disposable {
 	}
 
 	/**
+	 * Report a stream's failure at most once, whichever path observes it first.
+	 *
+	 * A single stream can fail on two independent paths: end() throwing while it
+	 * is being closed, and a later asynchronous 'error' event from filesystem I/O
+	 * that was still pending for that same stream. Both must report — a lost log
+	 * line that is never reported is the failure mode hardest to notice — but the
+	 * operator reading a failing log must see one report, not a duplicate storm
+	 * at exactly the moment the log is hardest to read. The WeakSet is the single
+	 * place that decides, so every reporting path shares one answer.
+	 *
+	 * console.error, not the logger: the logger writes through this very stream,
+	 * so reporting through it would recurse into the failure.
+	 */
+	private reportStreamFailureOnce(
+		stream: object,
+		context: string,
+		err: unknown,
+	): void {
+		if (this.reportedFailures.has(stream)) {
+			return;
+		}
+		this.reportedFailures.add(stream);
+		console.error(`${context}:`, err);
+	}
+
+	/**
 	 * End the current stream, tolerating a throwing end() (EIO on a dying
 	 * filesystem, or a stream torn down underneath us). `this.stream` is cleared
 	 * first so a failure can never leave an unusable stream installed.
@@ -134,7 +160,7 @@ export class LogFileWriter implements Disposable {
 		try {
 			stream.end();
 		} catch (e: unknown) {
-			console.error(`${context}:`, e);
+			this.reportStreamFailureOnce(stream, context, e);
 			try {
 				stream.destroy();
 			} catch {
@@ -215,7 +241,9 @@ export class LogFileWriter implements Disposable {
 	 * - Reporting is per stream, and happens even for a stale stream. A stream
 	 *   replaced by rotation or dropped by close() can still emit ENOSPC while
 	 *   its buffered writes drain; those lines are lost, and a lost line that is
-	 *   never reported is the failure mode hardest to notice in production.
+	 *   never reported is the failure mode hardest to notice in production. It is
+	 *   deduplicated against every other reporting path — see
+	 *   reportStreamFailureOnce.
 	 * - Only the stream that is still current may null out `this.stream` and arm
 	 *   the backoff — a late error from an already-replaced stream must not knock
 	 *   out its successor.
@@ -225,11 +253,13 @@ export class LogFileWriter implements Disposable {
 		context: string,
 		err: unknown,
 	): void {
-		// Report once per stream: a failing disk can emit repeatedly.
-		if (!this.reportedFailures.has(stream)) {
-			this.reportedFailures.add(stream);
-			console.error(`${context}, suspending file logging:`, err);
-		}
+		// Report once per stream: a failing disk can emit repeatedly, and a stream
+		// whose end() already threw has reported through the same WeakSet.
+		this.reportStreamFailureOnce(
+			stream,
+			`${context}, suspending file logging`,
+			err,
+		);
 		if (this.stream === stream) {
 			this.stream = null;
 			this.armBackoff();
