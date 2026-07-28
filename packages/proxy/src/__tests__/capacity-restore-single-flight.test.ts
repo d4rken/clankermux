@@ -907,6 +907,139 @@ describe("probe-suppression recovery (handleProxy)", () => {
 		expect((await prober).status).toBe(200);
 	}, 20_000);
 
+	it("derives the UNGATED retry's terminal flag from the fresh combo state, not the pre-hold one", async () => {
+		// The other consumer of the same fresh state. The main pass entered recovery
+		// combo-routed, but the hold's re-selection dropped to plain SessionStrategy
+		// routing (the combo's slots went away). The ungated backup retry that ends
+		// the hold is therefore the request's LAST attempt — deriving its flag from
+		// the pre-recovery `filteredComboInfo` marks it non-terminal, which throws
+		// away a real upstream 529 and lets the (equally stale) combo-fallback block
+		// attempt the very same account a second time.
+		const comboAcct = makeAccount({
+			id: "combo",
+			name: "Combo",
+			access_token: "at-combo",
+		});
+		const normal = makeAccount({
+			id: "normal",
+			name: "Normal",
+			access_token: "at-normal",
+		});
+		// Both mid-probe: the combo slot so the main loop is wholly suppressed, the
+		// SessionStrategy account so the re-selection is suppressed too and the hold
+		// runs its budget out into the ungated retry.
+		holdProbeLease("combo");
+		holdProbeLease("normal");
+
+		const state = { comboCalls: 0, normalCalls: 0 };
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				if ((headers.get("authorization") ?? "").includes("at-combo")) {
+					state.comboCalls += 1;
+					return ok200();
+				}
+				state.normalCalls += 1;
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "overloaded_error", message: UPSTREAM_529_MESSAGE },
+					}),
+					{ status: 529, headers: { "content-type": "application/json" } },
+				);
+			},
+		);
+
+		const ctx = makeContext([comboAcct, normal], "normal", "none", {
+			strategyAccounts: [normal],
+			combo: {
+				name: "test-combo",
+				slots: [
+					{ account_id: "combo", model: "claude-sonnet-4-5", enabled: true },
+				],
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		// The combo slot leaves the pool, THEN its probe reports a verdict: the
+		// re-selection is plain SessionStrategy routing from here on.
+		comboAcct.paused = true;
+		releaseProbeLease("combo");
+
+		const response = await holder;
+		expect(response.status).toBe(529);
+		const body = (await response.json()) as {
+			error?: { type?: string; message?: string };
+		};
+		// The client got the REAL upstream body, so the retry was treated as terminal.
+		expect(body.error?.message).toBe(UPSTREAM_529_MESSAGE);
+		// And exactly ONE upstream call reached it — no stale combo fallback behind it.
+		expect(state.normalCalls).toBe(1);
+		expect(state.comboCalls).toBe(0);
+	}, 40_000);
+
+	it("does NOT re-enter the combo fallback once recovery dropped combo routing", async () => {
+		// Recovery re-selected plain SessionStrategy routing and ATTEMPTED that
+		// account; it failed ordinarily, so recovery hands control back with a null.
+		// Entering the combo-fallback block on the pre-recovery combo state then
+		// re-selects the SAME account and sends a SECOND upstream request —
+		// duplicate generation work, duplicate billing, and another hold on top.
+		const comboAcct = makeAccount({
+			id: "combo",
+			name: "Combo",
+			access_token: "at-combo",
+		});
+		const normal = makeAccount({
+			id: "normal",
+			name: "Normal",
+			access_token: "at-normal",
+		});
+		// Only the combo slot is mid-probe; the SessionStrategy account is freely
+		// attemptable, so the re-selection ATTEMPTS it rather than holding again.
+		holdProbeLease("combo");
+
+		const state = { comboCalls: 0, normalCalls: 0 };
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				if ((headers.get("authorization") ?? "").includes("at-combo")) {
+					state.comboCalls += 1;
+					return ok200();
+				}
+				state.normalCalls += 1;
+				// An ORDINARY failure: nothing is left in flight afterwards, so this is
+				// a plain failover — exactly the shape that reaches the fallback block.
+				throw new TypeError("upstream unreachable");
+			},
+		);
+
+		const ctx = makeContext([comboAcct, normal], "normal", "none", {
+			strategyAccounts: [normal],
+			combo: {
+				name: "test-combo",
+				slots: [
+					{ account_id: "combo", model: "claude-sonnet-4-5", enabled: true },
+				],
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		holder.catch(() => {});
+		await tick(20);
+		comboAcct.paused = true;
+		releaseProbeLease("combo");
+
+		await expect(holder).rejects.toThrow();
+		// The recovery attempt, and nothing after it.
+		expect(state.normalCalls).toBe(1);
+		expect(state.comboCalls).toBe(0);
+	}, 20_000);
+
 	it("pairs the surviving combo slot with ITS OWN model override after a gate drops an earlier slot", async () => {
 		// `runCandidateLoop` pairs accounts with slots POSITIONALLY, so a slot list
 		// that still carries an account the FRESH gates dropped hands the survivor

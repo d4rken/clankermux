@@ -2783,6 +2783,25 @@ export async function handleProxy(
 				),
 			}
 		: null;
+	/**
+	 * Is the LATEST main-pass routing decision still combo-routed?
+	 *
+	 * Seeded from the initial pipeline and re-written by every main-pass recovery
+	 * re-selection (`reselectCandidatesAfterProbe`). Combo state is REQUEST-WIDE
+	 * routing state, and probe-suppression recovery can legitimately change it:
+	 * when an initially combo-routed request holds for an in-flight probe and its
+	 * combo slots become unavailable during that hold, the fresh selection falls
+	 * back to plain SessionStrategy accounts.
+	 *
+	 * Everything downstream of recovery that asks "is this request combo-routed"
+	 * must therefore read THIS, not the pre-recovery `filteredComboInfo`:
+	 *  - the ungated backup retry's terminal-attempt flag — a stale `false` there
+	 *    discards a real terminal provider response;
+	 *  - the combo-fallback block below — a stale `true` there re-attempts the very
+	 *    SessionStrategy account the recovery just tried, duplicating generation
+	 *    work and billing and taking another hold.
+	 */
+	let latestMainComboActive = Boolean(filteredComboInfo?.comboName);
 	const _response: Response | null = null;
 
 	// Codex High finding: the held account may only enter the hold when it is
@@ -3298,6 +3317,15 @@ export async function handleProxy(
 			// attempt moves with it (see the initial pipeline).
 			requestMeta.routing.primaryAttemptAccountId = gated[0]?.id ?? null;
 		}
+		// Whether the request is combo-routed is REQUEST-WIDE state that this
+		// re-selection may have just changed, and it is consumed AFTER recovery
+		// returns (the ungated retry's terminal flag, the combo-fallback block).
+		// Publish it on the main pass so those consumers can never read the stale
+		// pre-recovery value. The combo-fallback pass deliberately runs with the
+		// combo already cleared, so it has nothing to publish.
+		if (mode === "main") {
+			latestMainComboActive = Boolean(comboInfo?.comboName);
+		}
 		return {
 			list: gated,
 			comboInfo,
@@ -3377,10 +3405,14 @@ export async function handleProxy(
 	 * Guarantees: nobody 503s while the probe answers within time-to-first-byte;
 	 * AT MOST ONE request bypasses the gate per account per lease generation; the
 	 * worst case is a bounded ~10s wait before a 503, and only for losers.
+	 *
+	 * The ungated retry's terminal-attempt flag is derived HERE, from the LATEST
+	 * routing state, and never handed in by the caller: a caller-computed flag is
+	 * necessarily pre-recovery, and a re-selection that dropped combo routing
+	 * mid-hold would then discard a real terminal provider response.
 	 */
 	const recoverFromProbeSuppression = async (
 		suppressed: SuppressedCandidate[],
-		isTerminalAttempt: boolean,
 		mode: RecoveryLoopMode,
 	): Promise<Response | null> => {
 		const deadline = Date.now() + PROBE_HOLD_MAX_MS;
@@ -3450,7 +3482,12 @@ export async function handleProxy(
 				apiKeyId,
 				apiKeyName,
 				requestBodyContext,
-				isTerminalAttempt,
+				// Terminal-attempt flag, evaluated against the LATEST routing state —
+				// never an index comparison and never the caller's pre-recovery
+				// snapshot. The combo-fallback pass is terminal by construction (there
+				// is no further fallback behind it); the main pass is terminal exactly
+				// while its most recent re-selection is NOT combo-routed.
+				mode === "combo-fallback" || !latestMainComboActive,
 				{
 					// Without the outcome sink a late authoritative provider-overload
 					// rejection would fall straight back into the generic 503 this
@@ -3475,8 +3512,6 @@ export async function handleProxy(
 	if (!anyMainAttemptAdmitted && mainLoop.suppressed.length > 0) {
 		const recovered = await recoverFromProbeSuppression(
 			mainLoop.suppressed,
-			// Terminal-attempt flag, passed EXPLICITLY — never an index comparison.
-			!filteredComboInfo?.comboName,
 			"main",
 		);
 		if (recovered) return recovered;
@@ -3501,10 +3536,17 @@ export async function handleProxy(
 		return giveUpResponse;
 	}
 
-	// 10. Combo fallback: if combo routing was active and all slots failed,
+	// 10. Combo fallback: if combo routing is STILL active and all slots failed,
 	//     fall back to normal SessionStrategy routing (REQ-14)
+	//
+	// `latestMainComboActive` is the load-bearing conjunct, not decoration: when a
+	// probe-suppression recovery re-selected mid-hold and the combo's slots were
+	// gone, the main pass already ran plain SessionStrategy routing. Entering this
+	// block on the pre-recovery `filteredComboInfo` alone would re-select the SAME
+	// SessionStrategy account and attempt it a second time — duplicate generation
+	// work, duplicate billing, and another hold on top.
 	let fallbackAccounts: Account[] | null = null;
-	if (filteredComboInfo?.comboName) {
+	if (filteredComboInfo?.comboName && latestMainComboActive) {
 		log.warn(
 			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
 		);
@@ -3559,13 +3601,11 @@ export async function handleProxy(
 			) {
 				const recovered = await recoverFromProbeSuppression(
 					fallbackLoop.suppressed,
-					// The fallback loop IS the terminal attempt path — there is no
-					// further fallback behind it. Passed explicitly, never derived from
-					// an index comparison.
-					true,
 					// The combo was cleared before this loop's own selection, which ran
 					// WITHOUT a model and WITHOUT the soft-demotion reorder — the
-					// recovery re-selection must match both.
+					// recovery re-selection must match both. The mode also makes the
+					// ungated retry terminal by construction: there is no further
+					// fallback behind this pass.
 					"combo-fallback",
 				);
 				if (recovered) return recovered;
