@@ -81,7 +81,7 @@ import {
 } from "@clankermux/types";
 import {
 	pauseAccount,
-	removeAccount,
+	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
 import {
@@ -1510,7 +1510,14 @@ export function createAccountAddHandler(
  * Create an account remove handler
  */
 export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
-	return async (req: Request, accountName: string): Promise<Response> => {
+	/**
+	 * `accountId` is the `:id` path segment, exactly as the documented
+	 * `DELETE /api/accounts/:id` contract says. It used to be treated as a NAME
+	 * all the way down to `DELETE FROM accounts WHERE name = ?`, so any consumer
+	 * following the documented contract got a silent 404 — and two accounts
+	 * sharing a name would both have been deleted.
+	 */
+	return async (req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Parse and validate confirmation
 			const body = await req.json();
@@ -1520,7 +1527,20 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				required: true,
 			});
 
-			if (confirm !== accountName) {
+			// Resolve the row FIRST: the confirm string is still typed as the account
+			// NAME (the deliberate "type the name to delete" UX), and the in-memory
+			// cleanup below needs the id while the row still exists.
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound(`Account '${accountId}' not found`));
+			}
+
+			if (confirm !== account.name) {
 				return errorResponse(
 					BadRequest("Confirmation string does not match account name", {
 						confirmationRequired: true,
@@ -1528,34 +1548,24 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			// Resolve the account ID BEFORE deletion — removeAccount deletes the row,
-			// after which a name lookup would return nothing and the in-memory
-			// cleanup below would silently never run (leaking the usage cache entry
-			// and any warm session-cache slots for the deleted account).
-			const db = dbOps.getAdapter();
-			const account = await db.get<{ id: string }>(
-				"SELECT id FROM accounts WHERE name = ?",
-				[accountName],
-			);
-
-			const result = await removeAccount(dbOps, accountName);
+			const result = await removeAccountById(dbOps, accountId, account.name);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
 			}
 
-			if (account) {
-				// Clear usage cache for removed account to prevent memory leaks
-				usageCache.delete(account.id);
-				codexRateLimitResetCreditsCache.delete(account.id);
-				// Evict any warm session-cache slots owned by the removed account so
-				// the keepalive scheduler never tries to replay against a deleted id.
-				sessionCacheStore.evictAccount(account.id);
-				// Drop any owed capacity-restored probe. The marker is deliberately
-				// never time-expired, so removal is the only way it can be dropped
-				// without a successful probe (or a restart).
-				clearCapacityRestoredProbePending(account.id);
-			}
+			// In-memory cleanup, keyed by the SAME id that was deleted — so a name
+			// collision can never evict a surviving account's state.
+			// Clear usage cache for removed account to prevent memory leaks
+			usageCache.delete(accountId);
+			codexRateLimitResetCreditsCache.delete(accountId);
+			// Evict any warm session-cache slots owned by the removed account so
+			// the keepalive scheduler never tries to replay against a deleted id.
+			sessionCacheStore.evictAccount(accountId);
+			// Drop any owed capacity-restored probe. The marker is deliberately
+			// never time-expired, so removal is the only way it can be dropped
+			// without a successful probe (or a restart).
+			clearCapacityRestoredProbePending(accountId);
 
 			return jsonResponse({
 				success: true,

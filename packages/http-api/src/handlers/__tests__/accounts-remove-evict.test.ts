@@ -8,50 +8,65 @@ import {
 import { createAccountRemoveHandler } from "../accounts";
 
 /**
- * Verifies the account-remove handler evicts the removed account's warm
- * session-cache slots (Fix A: deleted accounts' keepalive slots must not linger).
+ * `DELETE /api/accounts/:id` is genuinely id-keyed, and the removal evicts the
+ * removed account's in-memory state.
  *
- * Uses the REAL handler and the REAL sessionCacheStore singleton with a minimal
- * in-memory DB adapter so the lookup-before-delete ordering is exercised end to
- * end: the handler resolves the account id BEFORE removeAccount() deletes the
- * row, then calls sessionCacheStore.evictAccount(id).
+ * The router has always named the segment `accountId` and the documented
+ * contract has always been `:id`, but the handler treated it as a NAME all the
+ * way down to `DELETE FROM accounts WHERE name = ?`. Any consumer following the
+ * contract got a silent 404, and two accounts sharing a name would both have
+ * been deleted.
+ *
+ * These use the REAL handler and the REAL sessionCacheStore singleton with a
+ * minimal in-memory accounts table, so the resolve-by-id-before-delete ordering
+ * is exercised end to end.
  */
 
 const ACCOUNT_NAME = "to-remove";
 const ACCOUNT_ID = "acc-remove-1";
 const OTHER_ID = "acc-keep-1";
 
+type Row = { id: string; name: string };
+
 /** Tiny in-memory accounts table backing the DatabaseOperations shape used. */
-function makeDbOps(): {
+function makeDbOps(seed: Row[] = [{ id: ACCOUNT_ID, name: ACCOUNT_NAME }]): {
 	dbOps: unknown;
-	rows: Map<string, { id: string; name: string }>;
+	rows: Map<string, Row>;
 } {
-	const rows = new Map<string, { id: string; name: string }>();
-	rows.set(ACCOUNT_NAME, { id: ACCOUNT_ID, name: ACCOUNT_NAME });
+	const rows = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));
 
 	const adapter = {
 		get: async <T>(sql: string, params: unknown[]): Promise<T | null> => {
-			// Only the "SELECT id FROM accounts WHERE name = ?" lookup is exercised.
-			if (sql.includes("FROM accounts WHERE name")) {
+			// The handler resolves the row by PRIMARY KEY.
+			if (sql.includes("FROM accounts WHERE id")) {
 				const row = rows.get(params[0] as string);
-				return (row ? ({ id: row.id } as unknown as T) : null) ?? null;
+				return row ? ({ name: row.name } as unknown as T) : null;
 			}
 			return null;
 		},
 		runWithChanges: async (sql: string, params: unknown[]): Promise<number> => {
-			if (sql.startsWith("DELETE FROM accounts WHERE name")) {
-				const existed = rows.delete(params[0] as string);
-				return existed ? 1 : 0;
+			if (sql.startsWith("DELETE FROM accounts WHERE id")) {
+				return rows.delete(params[0] as string) ? 1 : 0;
 			}
-			return 0;
+			// A name-keyed delete must never be issued again.
+			throw new Error(`unexpected write: ${sql}`);
 		},
 	};
 
-	const dbOps = {
-		getAdapter: () => adapter,
-	};
+	return { dbOps: { getAdapter: () => adapter }, rows };
+}
 
-	return { dbOps, rows };
+function makeHandler(dbOps: unknown) {
+	return createAccountRemoveHandler(
+		dbOps as Parameters<typeof createAccountRemoveHandler>[0],
+	);
+}
+
+function deleteRequest(confirm: string): Request {
+	return new Request("http://internal/api/accounts", {
+		method: "DELETE",
+		body: JSON.stringify({ confirm }),
+	});
 }
 
 function seedSlot(accountId: string, sessionKey: string): void {
@@ -67,6 +82,49 @@ function seedSlot(accountId: string, sessionKey: string): void {
 		cacheCreationTokens: 0,
 	});
 }
+
+describe("createAccountRemoveHandler — id-keyed removal", () => {
+	it("deletes ONLY the targeted id when two accounts share a name", async () => {
+		const { dbOps, rows } = makeDbOps([
+			{ id: "dup-a", name: "duplicate" },
+			{ id: "dup-b", name: "duplicate" },
+		]);
+		const res = await makeHandler(dbOps)(deleteRequest("duplicate"), "dup-a");
+		expect(res.status).toBe(200);
+
+		expect(rows.has("dup-a")).toBe(false);
+		expect(rows.has("dup-b")).toBe(true);
+	});
+
+	it("404s for an unknown id — there is no name fallback", async () => {
+		const { dbOps, rows } = makeDbOps();
+		// The NAME, passed where the id belongs: exactly what the old handler
+		// accepted, and what a name fallback would keep accepting.
+		const res = await makeHandler(dbOps)(
+			deleteRequest(ACCOUNT_NAME),
+			ACCOUNT_NAME,
+		);
+		expect(res.status).toBe(404);
+		expect(rows.has(ACCOUNT_ID)).toBe(true);
+	});
+
+	it("still requires the typed NAME as the confirmation string", async () => {
+		const { dbOps, rows } = makeDbOps();
+		const wrong = await makeHandler(dbOps)(
+			deleteRequest(ACCOUNT_ID),
+			ACCOUNT_ID,
+		);
+		expect(wrong.status).toBe(400);
+		expect(rows.has(ACCOUNT_ID)).toBe(true);
+
+		const right = await makeHandler(dbOps)(
+			deleteRequest(ACCOUNT_NAME),
+			ACCOUNT_ID,
+		);
+		expect(right.status).toBe(200);
+		expect(rows.has(ACCOUNT_ID)).toBe(false);
+	});
+});
 
 describe("createAccountRemoveHandler — session-cache eviction", () => {
 	beforeEach(() => {
@@ -87,21 +145,35 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 		expect(sessionCacheStore.getSize()).toBe(3);
 
 		const { dbOps } = makeDbOps();
-		const handler = createAccountRemoveHandler(
-			dbOps as Parameters<typeof createAccountRemoveHandler>[0],
+		const res = await makeHandler(dbOps)(
+			deleteRequest(ACCOUNT_NAME),
+			ACCOUNT_ID,
 		);
-
-		const req = new Request("http://internal/api/accounts", {
-			method: "DELETE",
-			body: JSON.stringify({ confirm: ACCOUNT_NAME }),
-		});
-		const res = await handler(req, ACCOUNT_NAME);
 		expect(res.status).toBe(200);
 
 		// The removed account's slots are gone; the other account's slot remains.
 		const remaining = sessionCacheStore.getAllSlots();
 		expect(remaining).toHaveLength(1);
 		expect(remaining[0]?.accountId).toBe(OTHER_ID);
+	});
+
+	it("evicts only the TARGETED id's slots when two accounts share a name", async () => {
+		// The eviction used to resolve one id from a name; with a collision it could
+		// have evicted a surviving account's warm state.
+		seedSlot("dup-a", "session-a");
+		seedSlot("dup-b", "session-b");
+		const { dbOps } = makeDbOps([
+			{ id: "dup-a", name: "duplicate" },
+			{ id: "dup-b", name: "duplicate" },
+		]);
+
+		expect(
+			(await makeHandler(dbOps)(deleteRequest("duplicate"), "dup-a")).status,
+		).toBe(200);
+
+		const remaining = sessionCacheStore.getAllSlots();
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]?.accountId).toBe("dup-b");
 	});
 
 	it("drops an owed capacity-restored probe marker for the removed account", async () => {
@@ -111,14 +183,10 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 		markCapacityRestoredProbePending(OTHER_ID);
 		try {
 			const { dbOps } = makeDbOps();
-			const handler = createAccountRemoveHandler(
-				dbOps as Parameters<typeof createAccountRemoveHandler>[0],
-			);
-			const req = new Request("http://internal/api/accounts", {
-				method: "DELETE",
-				body: JSON.stringify({ confirm: ACCOUNT_NAME }),
-			});
-			expect((await handler(req, ACCOUNT_NAME)).status).toBe(200);
+			expect(
+				(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+					.status,
+			).toBe(200);
 
 			expect(hasCapacityRestoredProbePending(ACCOUNT_ID)).toBe(false);
 			expect(hasCapacityRestoredProbePending(OTHER_ID)).toBe(true);

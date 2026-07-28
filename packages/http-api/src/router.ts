@@ -183,7 +183,6 @@ export class APIRouter {
 			createAnthropicCompatibleAccountAddHandler(dbOps);
 		const ollamaAccountAddHandler = createOllamaAccountAddHandler(dbOps);
 		const openaiAccountAddHandler = createOpenAIAccountAddHandler(dbOps);
-		const _accountRemoveHandler = createAccountRemoveHandler(dbOps);
 		const requestsSummaryHandler = createRequestsSummaryHandler(
 			dbOps.getAdapter(),
 		);
