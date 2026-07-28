@@ -192,6 +192,23 @@ describe("expectsMessageStart (the gate)", () => {
 		expect(expectsMessageStart({ ...base, path: "/v1/responses" })).toBe(false);
 	});
 
+	it("does NOT match a native-MARKED response on /v1/messages", () => {
+		// Production shape: the /v1/responses adapter rewrites the request to
+		// /v1/messages, so the path arm above never fires for real traffic. The
+		// marker the Codex provider sets on a native passthrough is the only
+		// discriminator left.
+		expect(expectsMessageStart({ ...base, nativeResponsesMarker: "1" })).toBe(
+			false,
+		);
+		// Absent / any other value keeps the ordinary Anthropic-SSE contract.
+		expect(expectsMessageStart({ ...base, nativeResponsesMarker: null })).toBe(
+			true,
+		);
+		expect(expectsMessageStart({ ...base, nativeResponsesMarker: "0" })).toBe(
+			true,
+		);
+	});
+
 	it("does NOT match other SSE paths, non-200s, non-POSTs or non-SSE bodies", () => {
 		expect(expectsMessageStart({ ...base, path: "/v1/chat/completions" })).toBe(
 			false,

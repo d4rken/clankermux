@@ -466,17 +466,29 @@ export const STREAM_TRUNCATED_MID_CONTENT = "stream_truncated_mid_content";
  *    OpenAI-compatible and Ollama transformers all synthesize `message_start`
  *    when they translate into Anthropic SSE, so a missing one is a real defect
  *    on every backend.
- *  - But NOT "any streaming response": a successful NATIVE Codex stream on
- *    `/v1/responses` speaks `response.created` / `response.completed` and never
- *    emits `message_start` at all, so a broad gate would record every healthy
- *    Codex-native stream as truncated.
+ *  - But NOT "any streaming response": a successful NATIVE Codex stream speaks
+ *    `response.created` / `response.completed` and never emits `message_start`
+ *    at all, so a broad gate would record every healthy Codex-native stream as
+ *    truncated.
+ *
+ * The native exclusion is keyed on the RESPONSE MARKER, not on the path. The
+ * `/v1/responses` adapter rewrites the request to `/v1/messages` before the
+ * proxy ever sees it, so in production a native Codex stream arrives here as a
+ * streaming `POST /v1/messages` 200 — path-shaped exactly like the case this
+ * gate exists for. `x-clankermux-responses-native: 1` is set by the Codex
+ * provider on (and only on) a successful native passthrough, which makes it the
+ * only reliable discriminator. The `/v1/responses` path arm is kept for direct
+ * (non-adapter) callers.
  */
 export function expectsMessageStart(opts: {
 	method: string;
 	path: string;
 	status: number;
 	contentType: string | null;
+	/** Value of {@link NATIVE_RESPONSES_RESPONSE_HEADER} on the response. */
+	nativeResponsesMarker?: string | null;
 }): boolean {
+	if (opts.nativeResponsesMarker === "1") return false;
 	return (
 		opts.method.toUpperCase() === "POST" &&
 		opts.path === "/v1/messages" &&

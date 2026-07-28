@@ -4,11 +4,12 @@ import {
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type {
-	Account,
-	ContextComposition,
-	RequestRoutingMeta,
-	ToolCallStat,
+import {
+	type Account,
+	type ContextComposition,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+	type RequestRoutingMeta,
+	type ToolCallStat,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
@@ -488,6 +489,12 @@ async function forwardToClientInner(
 			path,
 			status: response.status,
 			contentType: response.headers.get("content-type"),
+			// Native Codex passthrough: the adapter rewrote the client's
+			// `/v1/responses` call to `/v1/messages`, so only this marker tells the
+			// two apart here (see `expectsMessageStart`).
+			nativeResponsesMarker: response.headers.get(
+				NATIVE_RESPONSES_RESPONSE_HEADER,
+			),
 		});
 
 		const clientStream = createStreamAnalyticsPassthrough(response.body, {
