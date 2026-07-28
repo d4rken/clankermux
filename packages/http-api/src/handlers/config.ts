@@ -21,7 +21,11 @@ import {
 	MAX_BRIDGE_HOURS,
 	riskFactorToBridgeHours,
 } from "@clankermux/proxy";
-import type { ConfigResponse, RetentionSetRequest } from "../types";
+import type {
+	ConfigResponse,
+	RetentionGetResponse,
+	RetentionSetRequest,
+} from "../types";
 
 /** The bridge horizon (hours/risk factor) only describes the promoted 1h-TTL slots.
  * The conversion + clamps live in @clankermux/proxy (bridge-policy) — the single
@@ -111,36 +115,36 @@ export function createConfigHandlers(
 		},
 
 		/**
-		 * Get current data retention in days
+		 * Get current data retention windows (payloads in hours, the rest in days)
 		 */
 		getRetention: (): Response => {
 			return jsonResponse({
-				payloadDays: config.getDataRetentionDays(),
+				payloadHours: config.getPayloadRetentionHours(),
 				requestDays: config.getRequestRetentionDays(),
 				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
 				memorySnapshotDays: config.getMemorySnapshotRetentionDays(),
 				cacheKeepaliveSnapshotDays:
 					config.getCacheKeepaliveSnapshotRetentionDays(),
 				storePayloads: config.getStorePayloads(),
-			});
+			} satisfies RetentionGetResponse);
 		},
 
 		/**
-		 * Set data retention in days
+		 * Set data retention windows (payloads in hours, the rest in days)
 		 */
 		setRetention: async (req: Request): Promise<Response> => {
 			const body = (await req.json()) as RetentionSetRequest;
 			let updated = false;
-			if (body.payloadDays !== undefined) {
-				const payloadDays = validateNumber(body.payloadDays, "payloadDays", {
+			if (body.payloadHours !== undefined) {
+				const payloadHours = validateNumber(body.payloadHours, "payloadHours", {
 					min: 1,
-					max: 365,
+					max: 8760,
 					integer: true,
 				});
-				if (typeof payloadDays !== "number") {
-					return errorResponse(BadRequest("Invalid 'payloadDays'"));
+				if (typeof payloadHours !== "number") {
+					return errorResponse(BadRequest("Invalid 'payloadHours'"));
 				}
-				config.setDataRetentionDays(payloadDays);
+				config.setPayloadRetentionHours(payloadHours);
 				updated = true;
 			}
 			if (body.requestDays !== undefined) {

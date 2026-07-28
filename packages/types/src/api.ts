@@ -114,7 +114,8 @@ export interface RequestRoutingMeta {
 
 // Retention and maintenance API shapes
 export interface RetentionGetResponse {
-	payloadDays: number;
+	/** Payload retention window in HOURS (all sibling windows are in days). */
+	payloadHours: number;
 	requestDays: number;
 	usageSnapshotDays: number;
 	memorySnapshotDays: number;
@@ -123,7 +124,8 @@ export interface RetentionGetResponse {
 }
 
 export interface RetentionSetRequest {
-	payloadDays?: number;
+	/** Payload retention window in HOURS (all sibling windows are in days). */
+	payloadHours?: number;
 	requestDays?: number;
 	usageSnapshotDays?: number;
 	memorySnapshotDays?: number;

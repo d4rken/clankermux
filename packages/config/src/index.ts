@@ -50,7 +50,9 @@ export interface ConfigData {
 	retry_backoff?: number;
 	session_duration_ms?: number;
 	port?: number;
+	/** @deprecated legacy key — converted to payload_retention_hours (×24) at load; never read after normalization. */
 	data_retention_days?: number;
+	payload_retention_hours?: number;
 	request_retention_days?: number;
 	usage_snapshot_retention_days?: number;
 	memory_snapshot_retention_days?: number;
@@ -183,6 +185,23 @@ export class Config extends EventEmitter {
 			try {
 				const content = readFileSync(this.configPath, "utf8");
 				this.data = JSON.parse(content) as ConfigData;
+				// Legacy `data_retention_days` predates hour-granularity payload
+				// retention. Convert once here so exactly one key is authoritative
+				// everywhere downstream; the next ordinary saveConfig() persists the
+				// canonical form. Deliberately no write from loadConfig() itself —
+				// startup must not rewrite a config file the operator did not ask to
+				// change.
+				const legacyDays = this.data.data_retention_days;
+				if (typeof legacyDays === "number") {
+					if (typeof this.data.payload_retention_hours !== "number") {
+						this.data.payload_retention_hours = this.clamp(
+							legacyDays * 24,
+							1,
+							8760,
+						);
+					}
+					delete this.data.data_retention_days;
+				}
 			} catch (error) {
 				log.error(`Failed to parse config file: ${error}`);
 				this.data = {};
@@ -261,20 +280,40 @@ export class Config extends EventEmitter {
 		return Math.max(min, Math.min(max, n));
 	}
 
-	getDataRetentionDays(): number {
-		const fromEnv = process.env.DATA_RETENTION_DAYS;
+	getPayloadRetentionHours(): number {
+		const fromEnv = process.env.PAYLOAD_RETENTION_HOURS;
 		if (fromEnv) {
 			const n = parseInt(fromEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n, 1, 365);
+			if (!Number.isNaN(n)) return this.clamp(n, 1, 8760);
 		}
-		const fromFile = this.data.data_retention_days;
-		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 365);
-		return 1; // default payload retention (1 day — payloads are large, kept only for short-term debugging)
+		// Deprecated: pre-hours deployments set this. Converted, never extended.
+		const legacyEnv = process.env.DATA_RETENTION_DAYS;
+		if (legacyEnv) {
+			const n = parseInt(legacyEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n * 24, 1, 8760);
+		}
+		// The legacy FILE key is not consulted here: loadConfig() converts it once
+		// and is the single migration point.
+		const fromFile = this.data.payload_retention_hours;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 8760);
+		return 24; // payloads dominate DB size; kept only for short-term debugging
 	}
 
-	setDataRetentionDays(days: number): void {
-		const clamped = this.clamp(days, 1, 365);
-		this.set("data_retention_days", clamped);
+	/**
+	 * The payload window as milliseconds, for cleanup call sites. Exists so no
+	 * caller multiplies by a unit constant itself — `hours * TIME_CONSTANTS.DAY`
+	 * typechecks perfectly and would silently retain 24× too much. Only the
+	 * payload window has this accessor; it is the only one whose unit differs
+	 * from the `*_days` settings around it.
+	 */
+	getPayloadRetentionMs(): number {
+		return this.getPayloadRetentionHours() * TIME_CONSTANTS.HOUR;
+	}
+
+	setPayloadRetentionHours(hours: number): void {
+		const clamped = this.clamp(hours, 1, 8760);
+		// No delete-before-set needed: loadConfig() already removed the legacy key.
+		this.set("payload_retention_hours", clamped);
 	}
 
 	getRequestRetentionDays(): number {
@@ -451,7 +490,7 @@ export class Config extends EventEmitter {
 		return {
 			...this.data,
 			lb_strategy: this.getStrategy(),
-			data_retention_days: this.getDataRetentionDays(),
+			payload_retention_hours: this.getPayloadRetentionHours(),
 			request_retention_days: this.getRequestRetentionDays(),
 			usage_snapshot_retention_days: this.getUsageSnapshotRetentionDays(),
 			memory_snapshot_retention_days: this.getMemorySnapshotRetentionDays(),

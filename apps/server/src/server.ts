@@ -264,7 +264,7 @@ async function runStartupMaintenance(
 ) {
 	const log = new Logger("StartupMaintenance");
 	try {
-		const payloadDays = config.getDataRetentionDays();
+		const payloadHours = config.getPayloadRetentionHours();
 		const requestDays = config.getRequestRetentionDays();
 		const snapshotDays = config.getUsageSnapshotRetentionDays();
 		const memorySnapshotDays = config.getMemorySnapshotRetentionDays();
@@ -274,13 +274,13 @@ async function runStartupMaintenance(
 			removedSnapshots,
 			removedMemorySnapshots,
 		} = await dbOps.cleanupOldRequests(
-			payloadDays * 24 * 60 * 60 * 1000,
+			config.getPayloadRetentionMs(),
 			requestDays * 24 * 60 * 60 * 1000,
 			snapshotDays * 24 * 60 * 60 * 1000,
 			memorySnapshotDays * 24 * 60 * 60 * 1000,
 		);
 		log.info(
-			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadDays}d, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
+			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadHours}h, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
 		);
 		// Prune the cache-keepalive economics time-series (separate table, separate
 		// retention). Mirrors the memory/usage snapshot cutoff math above.
@@ -836,7 +836,6 @@ export default async function startServer(options?: {
 	const dataRetentionCleanup = async () => {
 		const startTime = Date.now();
 		try {
-			const payloadDays = config.getDataRetentionDays();
 			const requestDays = config.getRequestRetentionDays();
 			const snapshotDays = config.getUsageSnapshotRetentionDays();
 			const memorySnapshotDays = config.getMemorySnapshotRetentionDays();
@@ -846,7 +845,7 @@ export default async function startServer(options?: {
 				removedSnapshots,
 				removedMemorySnapshots,
 			} = await dbOps.cleanupOldRequests(
-				payloadDays * TIME_CONSTANTS.DAY,
+				config.getPayloadRetentionMs(),
 				requestDays * TIME_CONSTANTS.DAY,
 				snapshotDays * TIME_CONSTANTS.DAY,
 				memorySnapshotDays * TIME_CONSTANTS.DAY,

@@ -13,14 +13,16 @@ import { createCleanupHandler } from "../maintenance";
 // ---------------------------------------------------------------------------
 
 function makeConfig(
-	payloadDays = 3,
+	payloadHours = 72,
 	requestDays = 90,
 	storePayloads?: boolean,
 	usageSnapshotDays = 90,
 	memorySnapshotDays = 90,
 ) {
 	return {
-		getDataRetentionDays: () => payloadDays,
+		// The handler consumes the millisecond accessor directly — the payload
+		// window is configured in HOURS, unlike the sibling *_days settings.
+		getPayloadRetentionMs: () => payloadHours * 3_600_000,
 		getRequestRetentionDays: () => requestDays,
 		getStorePayloads: () => storePayloads ?? true,
 		getUsageSnapshotRetentionDays: () => usageSnapshotDays,
@@ -89,7 +91,7 @@ describe("createCleanupHandler", () => {
 
 	describe("cutoff timestamps", () => {
 		it("payloadCutoffIso is a valid ISO 8601 string", async () => {
-			const handler = createCleanupHandler(makeDbOps(), makeConfig(3, 90));
+			const handler = createCleanupHandler(makeDbOps(), makeConfig(72, 90));
 			const before = Date.now();
 			const response = await handler();
 			const after = Date.now();
@@ -105,7 +107,7 @@ describe("createCleanupHandler", () => {
 		});
 
 		it("requestCutoffIso is a valid ISO 8601 string", async () => {
-			const handler = createCleanupHandler(makeDbOps(), makeConfig(3, 90));
+			const handler = createCleanupHandler(makeDbOps(), makeConfig(72, 90));
 			const before = Date.now();
 			const response = await handler();
 			const after = Date.now();
@@ -120,17 +122,32 @@ describe("createCleanupHandler", () => {
 			expect(ts).toBeLessThanOrEqual(after - ninetyDaysMs + 1000);
 		});
 
-		it("payloadCutoffIso is earlier than requestCutoffIso when payloadDays < requestDays", async () => {
-			const handler = createCleanupHandler(makeDbOps(), makeConfig(3, 90));
+		it("payloadCutoffIso is later than requestCutoffIso when the payload window is shorter", async () => {
+			const handler = createCleanupHandler(makeDbOps(), makeConfig(72, 90));
 			const response = await handler();
 			const body = (await response.json()) as Record<string, unknown>;
 
 			const payloadTs = Date.parse(body.payloadCutoffIso as string);
 			const requestTs = Date.parse(body.requestCutoffIso as string);
 
-			// 3-day cutoff is more recent in absolute time than 90-day cutoff
+			// 72-hour cutoff is more recent in absolute time than the 90-day cutoff
 			// so payloadCutoffIso > requestCutoffIso (less far in the past)
 			expect(payloadTs).toBeGreaterThan(requestTs);
+		});
+
+		it("honours a sub-day payload window (12 hours)", async () => {
+			// The whole point of the hours-granularity setting: a window smaller
+			// than a day must be expressible end to end.
+			const handler = createCleanupHandler(makeDbOps(), makeConfig(12, 90));
+			const before = Date.now();
+			const response = await handler();
+			const after = Date.now();
+			const body = (await response.json()) as Record<string, unknown>;
+
+			const ts = Date.parse(body.payloadCutoffIso as string);
+			const twelveHoursMs = 12 * 60 * 60 * 1000;
+			expect(ts).toBeGreaterThanOrEqual(before - twelveHoursMs - 1000);
+			expect(ts).toBeLessThanOrEqual(after - twelveHoursMs + 1000);
 		});
 	});
 
@@ -144,12 +161,12 @@ describe("createCleanupHandler", () => {
 
 		it("calls cleanupOldRequests with millisecond values derived from config", async () => {
 			const dbOps = makeDbOps();
-			// payloadDays=3, requestDays=90, storePayloads default, usageSnapshotDays=45,
+			// payloadHours=72, requestDays=90, storePayloads default, usageSnapshotDays=45,
 			// memorySnapshotDays=30 — prove the manual path threads the CONFIGURED
 			// snapshot windows instead of letting cleanupOldRequests fall back to 90d.
 			const handler = createCleanupHandler(
 				dbOps,
-				makeConfig(3, 90, undefined, 45, 30),
+				makeConfig(72, 90, undefined, 45, 30),
 			);
 			await handler();
 
@@ -177,7 +194,7 @@ describe("createCleanupHandler", () => {
 	describe("payload storage handling", () => {
 		it("payloadCutoffIso is null when storePayloads=false", async () => {
 			const dbOps = makeDbOps();
-			const handler = createCleanupHandler(dbOps, makeConfig(3, 90, false));
+			const handler = createCleanupHandler(dbOps, makeConfig(72, 90, false));
 			const response = await handler();
 			const body = (await response.json()) as Record<string, unknown>;
 
@@ -186,7 +203,7 @@ describe("createCleanupHandler", () => {
 
 		it("cleanupOldRequests called with payloadMs=0 when storePayloads=false", async () => {
 			const dbOps = makeDbOps();
-			const handler = createCleanupHandler(dbOps, makeConfig(3, 90, false));
+			const handler = createCleanupHandler(dbOps, makeConfig(72, 90, false));
 			await handler();
 
 			expect(dbOps.cleanupOldRequests).toHaveBeenCalledTimes(1);
@@ -197,7 +214,7 @@ describe("createCleanupHandler", () => {
 
 		it("payloadCutoffIso is a valid ISO string when storePayloads=true", async () => {
 			const dbOps = makeDbOps();
-			const handler = createCleanupHandler(dbOps, makeConfig(3, 90, true));
+			const handler = createCleanupHandler(dbOps, makeConfig(72, 90, true));
 			const response = await handler();
 			const body = (await response.json()) as Record<string, unknown>;
 
