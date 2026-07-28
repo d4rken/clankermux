@@ -358,6 +358,29 @@ describe("peekPrimaryAccountId", () => {
 		).toBe("anthropicA");
 	});
 
+	it("(o) models the NON-PROTECTED tier: an account in the 10–20% band is skipped", () => {
+		// 15% weekly headroom sits in the Fable-plus-emergencies band. The badge
+		// models a generic fresh request, so it must use the ordinary tier (20) —
+		// assuming Fable's deeper tier would report a primary that ordinary traffic
+		// would never be routed to.
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		usageCache.set("anthropicA", usage(now, 0, 85));
+		usageCache.set("codex", usage(now, 20, 20));
+
+		expect(
+			peekPrimaryAccountId(
+				[reserved, peer],
+				strategy,
+				throttleDisabledConfig,
+				now,
+			),
+		).toBe("codex");
+	});
+
 	it("(n) stays non-evicting: the reserved account's cache entry survives the peek", () => {
 		const now = Date.now();
 		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });

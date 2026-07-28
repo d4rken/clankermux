@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { computeUsagePrediction } from "@clankermux/core";
 import type { UsageSnapshotSample } from "@clankermux/types";
 import {
 	type AccountPredictionInput,
 	buildAccountUsagePredictions,
 } from "./build-account-predictions";
-import { computeUsagePrediction } from "./usage-prediction";
 
 const HOUR_MS = 3_600_000;
 const NOW = 1_700_000_000_000;

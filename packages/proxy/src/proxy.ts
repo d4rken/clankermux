@@ -6,6 +6,7 @@ import {
 	getModelFamily,
 	isAccountAvailable,
 	isDebugEnabled,
+	isProtectedFamily,
 	mapModelName,
 	NETWORK,
 	PROTECTED_FAMILY,
@@ -57,6 +58,7 @@ import {
 	type ReprobeOutcome,
 	RequestBodyContext,
 	resolveFamilyWeeklyExclusion,
+	resolveLivenessReserveThreshold,
 	resolvePoolLivenessDemotion,
 	resolveTransientlyCooledFamilySibling,
 	selectAccountsForRequest,
@@ -94,6 +96,7 @@ import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { sessionProjectCache } from "./session-project-cache";
 import { sessionPromotionTracker } from "./session-promotion";
 import { shouldRecordRequest } from "./should-record-request";
+import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
 export type { ProxyContext } from "./handlers";
 
@@ -1173,10 +1176,15 @@ export async function handleProxy(
 	//  - Shared-window reservation: a NON-protected request against an Anthropic
 	//    account whose shared 5h/7d window is near its limit, reserving the tail
 	//    of the shared window for the protected family (Fable).
-	//  - Pool liveness: an account inside the last LIVENESS_RESERVE_HEADROOM_PCT
-	//    of its weekly quota, while some peer can still absorb the traffic and
-	//    the binding weekly reset is still far off — keeping it alive as failover
-	//    capacity instead of draining it to a multi-day weekly wall.
+	//  - Pool liveness: an account inside the weekly-quota tail its TIER reserves,
+	//    while some peer can still absorb the traffic and the binding weekly reset
+	//    is still beyond the (burn-aware) release horizon — keeping it alive as
+	//    failover capacity instead of draining it to a multi-day weekly wall. The
+	//    tier is per-request: traffic this account would serve as the protected
+	//    family (Fable) may spend down to
+	//    LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT, everything else stops at
+	//    LIVENESS_RESERVE_HEADROOM_PCT, so the band between them is
+	//    Fable-plus-emergencies-only.
 	//
 	// They MUST be applied as ONE partition, not two sequential ones: two stable
 	// partitions do not compose. Family produces [K, F]; a second liveness
@@ -1219,8 +1227,16 @@ export async function handleProxy(
 			]),
 		);
 
-		// Pass 1 — family reservation, per account (unchanged inputs/semantics).
+		// Pass 1 — family reservation + the liveness TIER, per account.
 		const familyDemote = new Map<string, boolean>();
+		// Per-account liveness reserve threshold. The tier follows the LOGICAL
+		// request family: modelForAccount deliberately falls back to the logical
+		// Claude model when the mapped model resolves to no known family, so a Codex
+		// account serving a fable-logical request (explicit or default `fable →
+		// gpt-*` mapping) classifies as PROTECTED. That is intended — the tier
+		// privileges the user's protected-family traffic pool-wide, so an Anthropic
+		// outage that fails Fable over to Codex may spend deeper there too.
+		const livenessThreshold = new Map<string, number>();
 		for (const account of candidates) {
 			// Classify by the account's EFFECTIVE (mapped) model — the family it will
 			// actually serve — via modelForAccount, matching demand recording below and
@@ -1238,6 +1254,12 @@ export async function handleProxy(
 					now,
 				),
 			);
+			livenessThreshold.set(
+				account.id,
+				resolveLivenessReserveThreshold(
+					isProtectedFamily(getModelFamily(modelForGate ?? "")),
+				),
+			);
 		}
 
 		const reasons = new Map<string, string>();
@@ -1247,6 +1269,11 @@ export async function handleProxy(
 			// Pass 2 — how many OTHER candidates could absorb this account's traffic.
 			// A family-reserved peer is being held for Fable and a peer that owes a
 			// capacity-restored probe admits only that one probe, so neither counts.
+			// Peers are judged at the DECIDING account's tier threshold, which is what
+			// keeps "reserved" and "absorbing" exactly complementary.
+			const threshold =
+				livenessThreshold.get(account.id) ??
+				resolveLivenessReserveThreshold(false);
 			let absorbablePeerCount = 0;
 			for (const peer of candidates) {
 				if (peer.id === account.id) continue;
@@ -1255,16 +1282,29 @@ export async function handleProxy(
 						capacityById.get(peer.id) ?? null,
 						familyDemote.get(peer.id) === true,
 						hasCapacityRestoredProbePending(peer.id),
+						threshold,
 					)
 				) {
 					absorbablePeerCount++;
 				}
 			}
-			// Pass 3 — the liveness decision for this account.
+			// Pass 3 — the liveness decision for this account, at its tier and with
+			// its observed weekly burn (validated against the BINDING weekly window;
+			// null whenever there is no usable evidence, which yields the static
+			// tier-scaled horizon).
+			const accountCapacity = capacityById.get(account.id) ?? null;
 			const livenessDemote = resolvePoolLivenessDemotion(
-				capacityById.get(account.id) ?? null,
+				accountCapacity,
 				absorbablePeerCount,
 				now,
+				{
+					reserveThresholdPct: threshold,
+					weeklySlopePctPerHour: resolveEffectiveWeeklySlope(
+						account.id,
+						accountCapacity,
+						now,
+					),
+				},
 			);
 			const family = familyDemote.get(account.id) === true;
 			if (family || livenessDemote) {
