@@ -1040,6 +1040,95 @@ describe("probe-suppression recovery (handleProxy)", () => {
 		expect(state.comboCalls).toBe(0);
 	}, 20_000);
 
+	it("waits out a SHORT breaker deadline inside the remaining budget instead of bouncing a 529", async () => {
+		// The probe's own verdict is a 529 with a one-second Retry-After: it releases
+		// the lease and opens the breaker in the same step, so the waiter's fresh
+		// re-selection is entirely overload-gated. Nearly the whole recovery budget is
+		// still unspent at that point, and the breaker reopens well inside it — so
+		// constructing the synthetic 529 there strands a request the ordinary overload
+		// pipeline would have served.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		let calls = 0;
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				if (calls === 1) {
+					await gate;
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "overloaded_error", message: "Overloaded" },
+						}),
+						{
+							status: 529,
+							headers: {
+								"content-type": "application/json",
+								// Short and positive — the production Anthropic parser reads
+								// this as delta-seconds, so the breaker opens for ONE second.
+								"retry-after": "1",
+							},
+						},
+					);
+				}
+				return ok200();
+			},
+		);
+
+		const ctx = makeContext([restored], "restored", "none");
+		// Mirror the production parser for the shape under test: a 529's positive
+		// `Retry-After` becomes the breaker's deadline.
+		(
+			ctx.provider as unknown as {
+				parseRateLimit: (r: Response) => {
+					isRateLimited: boolean;
+					resetTime: number | undefined;
+					statusHeader: string | undefined;
+					remaining: number | undefined;
+				};
+			}
+		).parseRateLimit = (r: Response) => {
+			const retryAfter = Number(r.headers.get("retry-after") ?? "");
+			return {
+				isRateLimited: r.status === 529,
+				resetTime:
+					Number.isFinite(retryAfter) && retryAfter > 0
+						? Date.now() + retryAfter * 1000
+						: undefined,
+				statusHeader: undefined,
+				remaining: undefined,
+			};
+		};
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const prober = callHandleProxy(makeRequest(), url, ctx);
+		prober.catch(() => {});
+		while (calls === 0) await tick();
+
+		// The waiter's only candidate is suppressed, so it is holding for the probe.
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		release?.();
+
+		const response = await holder;
+		// Served on the far side of the breaker window — not a synthetic 529 handed
+		// back with ~9 seconds of recovery budget left unspent.
+		expect(response.status).toBe(200);
+		expect(calls).toBe(2);
+		await prober.catch(() => {});
+	}, 20_000);
+
 	it("pairs the surviving combo slot with ITS OWN model override after a gate drops an earlier slot", async () => {
 		// `runCandidateLoop` pairs accounts with slots POSITIONALLY, so a slot list
 		// that still carries an account the FRESH gates dropped hands the survivor

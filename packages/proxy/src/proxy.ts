@@ -3337,6 +3337,17 @@ export async function handleProxy(
 	};
 
 	/**
+	 * Did the fresh provider-overload gate alone empty this re-selection? True
+	 * exactly when selection produced accounts and every one of them was excluded
+	 * by an OPEN breaker bucket (a half-open bucket reads as attemptable, so it
+	 * never lands here).
+	 */
+	const isEntirelyOverloadGated = (selection: ProbeReselection): boolean =>
+		selection.selectedCount > 0 &&
+		selection.providerAvailableCount === 0 &&
+		selection.overloaded.length > 0;
+
+	/**
 	 * The truthful terminal for a post-probe re-selection that came back EMPTY.
 	 *
 	 * The fresh gates are the ONLY place this evidence exists. The pre-hold
@@ -3349,9 +3360,12 @@ export async function handleProxy(
 	 * breaker, so the re-selection is emptied by `applyProviderOverloadGate`.
 	 *
 	 * Terminal precedence mirrors the ordinary pipeline (throttling, then provider
-	 * overload). No nested hold: recovery already spent a bounded hold budget on
-	 * this request, and the 529 carries a cooldown-scaled Retry-After. `null` means
-	 * "no gate-specific evidence" — the caller's own terminals then report it.
+	 * overload). `null` means "no gate-specific evidence" — the caller's own
+	 * terminals then report it.
+	 *
+	 * This is the LAST resort for the overload shape, not the first: the caller
+	 * asks {@link overloadRecoveryWaitMs} first and only lands here once waiting
+	 * for the breaker no longer fits the recovery budget.
 	 */
 	const terminalForEmptyReselection = async (
 		selection: ProbeReselection,
@@ -3363,17 +3377,55 @@ export async function handleProxy(
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return createUsageThrottledResponse(selection.throttled);
 		}
-		if (
-			selection.selectedCount > 0 &&
-			selection.providerAvailableCount === 0 &&
-			selection.overloaded.length > 0
-		) {
+		if (isEntirelyOverloadGated(selection)) {
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return await createProviderOverloadedResponse(
 				refreshOverloadUntils(selection.overloaded),
 			);
 		}
 		return null;
+	};
+
+	/**
+	 * How long to wait before RE-SELECTING when a post-probe re-selection came
+	 * back empty because every candidate is provider-overload-gated — or `null`
+	 * when waiting is not the right answer and the caller must report its terminal.
+	 *
+	 * The recovery budget is a REQUEST-level budget, not a per-wait one, and the
+	 * probe it was waiting on can release EARLY: a 529 carrying a short
+	 * `Retry-After` is the canonical case (the Anthropic parser accepts a positive
+	 * delta-seconds value, one second included), and it opens the breaker as it
+	 * releases the lease. Most of `PROBE_HOLD_MAX_MS` is then still unspent, so
+	 * constructing the synthetic 529 right there strands a request the ordinary
+	 * overload pipeline would have served — the breaker closes well inside the
+	 * budget and the next attempt succeeds.
+	 *
+	 * `null` (report the terminal instead) when:
+	 *  - the selection is not the entirely-overload-gated shape. A usage-throttling
+	 *    verdict, or no gate evidence at all, does not self-heal on a breaker
+	 *    deadline, so there is nothing here to wait for.
+	 *  - the soonest breaker deadline has already passed. The gate would not have
+	 *    excluded the account in that case, and refusing a zero-length wait is also
+	 *    what guarantees the caller's loop makes progress.
+	 *  - recovery falls BEYOND the remaining budget. Same rule as the ordinary
+	 *    overload hold's "recovery beyond budget" break, and it is what keeps this
+	 *    inside the ONE budget instead of opening a nested one.
+	 */
+	const overloadRecoveryWaitMs = (
+		selection: ProbeReselection,
+		deadline: number,
+	): number | null => {
+		if (selection.list.length > 0) return null;
+		if (selection.throttled.length > 0) return null;
+		if (!isEntirelyOverloadGated(selection)) return null;
+		const now = Date.now();
+		const soonest = Math.min(...selection.overloaded.map(({ until }) => until));
+		if (soonest <= now) return null;
+		// Jittered exactly like the ordinary overload hold: several waiters can be
+		// released by the same breaker deadline, and an unspread wake is a stampede.
+		const waitMs =
+			soonest - now + Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+		return waitMs <= deadline - now ? waitMs : null;
 	};
 
 	/**
@@ -3391,11 +3443,16 @@ export async function handleProxy(
 	 *     budget: a fresh 10s per round would let a stampede of woken requests
 	 *     retry ungated immediately and repeatedly.
 	 *  3. Neither attempted nor suppressed (the fresh selection is empty — the
-	 *     account re-cooled, was paused, or a gate removed it) → report the fresh
-	 *     gates' own terminal, else null. The pre-hold target is STALE by then;
-	 *     attempting it ungated would bypass the fresh routing decision and can
-	 *     deepen a real cooldown. See {@link terminalForEmptyReselection} for why
-	 *     the evidence must come from the FRESH selection.
+	 *     account re-cooled, was paused, or a gate removed it). When the fresh
+	 *     PROVIDER-OVERLOAD gate alone emptied it and the breaker reopens inside
+	 *     what is left of the budget, wait for that deadline and re-select on the
+	 *     SAME budget ({@link overloadRecoveryWaitMs}) — an early-releasing probe
+	 *     leaves the budget mostly unspent, and bouncing a 529 there strands a
+	 *     recoverable request. Otherwise report the fresh gates' own terminal, else
+	 *     null. The pre-hold target is STALE by then; attempting it ungated would
+	 *     bypass the fresh routing decision and can deepen a real cooldown. See
+	 *     {@link terminalForEmptyReselection} for why the evidence must come from
+	 *     the FRESH selection.
 	 *  4. Budget expired → claim the single backup-probe permit for this account +
 	 *     lease generation. The winner attempts ungated; losers return null. That
 	 *     bound is the whole point: on a one-account pool with a stuck probe every
@@ -3421,19 +3478,27 @@ export async function handleProxy(
 			`All ${suppressed.length} candidate(s) were probe-suppressed and none was attempted — holding up to ${PROBE_HOLD_MAX_MS}ms for the in-flight probe on ${target.account.name} instead of failing the request`,
 		);
 		let remaining = deadline - Date.now();
+		// Set when the previous round waited on a BREAKER deadline rather than on a
+		// probe: the target's verdict is already in, so the next round goes straight
+		// to the fresh re-selection instead of re-entering the probe wait.
+		let awaitingOverloadRecovery = false;
 		while (remaining > 0) {
-			const released = await awaitProbeRelease(
-				target.account.id,
-				remaining,
-				req.signal,
-			);
-			if (req.signal.aborted) {
-				// This early return emits no worker end/summary, so the body a combo
-				// attempt staged for cache-keepalive would survive to the age sweep.
-				cacheBodyStore.discardStaged(requestMeta.id);
-				return createClientAbortResponse();
+			if (awaitingOverloadRecovery) {
+				awaitingOverloadRecovery = false;
+			} else {
+				const released = await awaitProbeRelease(
+					target.account.id,
+					remaining,
+					req.signal,
+				);
+				if (req.signal.aborted) {
+					// This early return emits no worker end/summary, so the body a combo
+					// attempt staged for cache-keepalive would survive to the age sweep.
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
+				if (!released) break; // no verdict within the remaining budget
 			}
-			if (!released) break; // no verdict within the remaining budget
 			const selection = await reselectCandidatesAfterProbe(mode);
 			const rerun = await runCandidateLoop(selection.list, selection.comboInfo);
 			if (rerun.response) return rerun.response;
@@ -3445,7 +3510,31 @@ export async function handleProxy(
 			// re-selection's own gate evidence is the truthful report, and it lives
 			// ONLY in this selection (the pre-hold arrays are empty in this shape).
 			if (rerun.suppressed.length === 0) {
-				return await terminalForEmptyReselection(selection);
+				// …but "report it" is only correct once nothing is left to wait for.
+				// An early-releasing probe (e.g. a 529 with a one-second Retry-After)
+				// leaves most of the budget unspent, and the breaker it opened closes
+				// inside it — so hold on the SAME budget and re-select, exactly as the
+				// ordinary overload pipeline would.
+				const overloadWaitMs = overloadRecoveryWaitMs(selection, deadline);
+				if (overloadWaitMs === null) {
+					return await terminalForEmptyReselection(selection);
+				}
+				log.info(
+					`Probe-suppression recovery: the fresh selection is entirely provider-overload-gated — waiting ${overloadWaitMs}ms for the breaker inside the remaining recovery budget instead of bouncing a synthetic 529`,
+				);
+				if (!(await abortableSleep(overloadWaitMs, req.signal))) {
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
+				remaining = deadline - Date.now();
+				// Budget gone: the wait bought nothing, so report the overload terminal
+				// rather than falling through to the ungated backup retry, whose target
+				// is the STALE pre-hold candidate.
+				if (remaining <= 0) {
+					return await terminalForEmptyReselection(selection);
+				}
+				awaitingOverloadRecovery = true;
+				continue;
 			}
 			target = rerun.suppressed[0];
 			remaining = deadline - Date.now();
