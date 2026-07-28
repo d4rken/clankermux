@@ -29,6 +29,7 @@ import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
 	clearCapacityRestoredProbePending,
+	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
@@ -259,6 +260,74 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 		const body = (await response.json()) as { error?: { type?: string } };
 		expect(body.error?.type).toBe("overloaded_error");
 	});
+
+	it("re-evaluates the flag WHEN THE 529 ARRIVES, so a tail released mid-flight is still tried", async () => {
+		// The flag used to be snapshotted before the fetch. A tail holding a
+		// recovery-probe lease at request-preparation time, whose probe completes
+		// and releases the lease while the head is still in flight, was therefore
+		// never tried: the head's 529 went straight to the client instead of
+		// failing over to a now-attemptable account.
+		const anthropic = makeAccount({
+			id: "anthropic-primary",
+			name: "Anthropic",
+			provider: "anthropic",
+			api_key: "sk-ant-test",
+			refresh_token: "",
+			access_token: null,
+		});
+		const codex = makeAccount({
+			id: CODEX_ID,
+			name: "Codex",
+			provider: "codex",
+			api_key: null,
+			refresh_token: "rt-codex",
+			access_token: "at-codex",
+		});
+		holdCodexProbeLease();
+
+		const state = { anthropicCalls: 0, codexCalls: 0 };
+		let releaseHead: (() => void) | null = null;
+		const headInFlight = new Promise<void>((resolve) => {
+			releaseHead = resolve;
+		});
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url.includes("api.anthropic.com")) {
+				state.anthropicCalls += 1;
+				// Hold the head open so the tail's lease can be released underneath it.
+				await headInFlight;
+				return new Response(OVERLOADED_BODY, {
+					status: 529,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("chatgpt.com")) {
+				state.codexCalls += 1;
+				return new Response('{"error":{"message":"nope"}}', {
+					status: 500,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("{}", {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as never;
+
+		const pending = callHandleProxy(makeContext([anthropic, codex]));
+		while (state.anthropicCalls === 0) {
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		// The tail's own probe reaches a verdict and releases the lease (the marker
+		// is deliberately retained), making it attemptable again.
+		completeRateLimitProbe(codex, "abandoned");
+		releaseHead?.();
+
+		const response = await pending;
+		expect(state.anthropicCalls).toBe(1);
+		expect(state.codexCalls).toBe(1);
+		expect(response.status).not.toBe(529);
+	}, 15_000);
 
 	it("still fails over to an ATTEMPTABLE cross-provider tail instead of forwarding the 529", async () => {
 		const anthropic = makeAccount({

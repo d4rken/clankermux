@@ -686,6 +686,15 @@ export async function proxyUnauthenticated(
  * @param createBodyStream - Function to create body stream (buffered earlier)
  * @param failoverAttempts - Number of failover attempts
  * @param ctx - The proxy context
+ * @param returnRateLimitedResponseOnExhaustion - "this is the request's last
+ *   realistic attempt, so forward a genuine upstream 529 instead of discarding
+ *   it in favour of the generic pool-exhausted terminal". Prefer the PREDICATE
+ *   form: whether a later candidate is still attemptable can change while this
+ *   attempt is in flight (a sibling's recovery-probe lease is released, an
+ *   overload bucket closes), and a boolean snapshotted before the fetch reports
+ *   the state at REQUEST-PREPARATION time, not at the moment the 529 arrives.
+ *   The predicate is evaluated at most once per attempt, when the response is
+ *   in hand, and memoized for the rest of that attempt.
  * @returns Promise resolving to response or null if failed
  */
 export async function proxyWithAccount(
@@ -701,10 +710,23 @@ export async function proxyWithAccount(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
-	returnRateLimitedResponseOnExhaustion = false,
+	returnRateLimitedResponseOnExhaustion: boolean | (() => boolean) = false,
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
+	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
+	// the clone decision and the forward decision, which straddle an await, can
+	// never disagree about whether this attempt is terminal.
+	let terminalAttemptResolved: boolean | undefined;
+	const isTerminalAttempt = (): boolean => {
+		if (typeof returnRateLimitedResponseOnExhaustion !== "function") {
+			return returnRateLimitedResponseOnExhaustion;
+		}
+		if (terminalAttemptResolved === undefined) {
+			terminalAttemptResolved = returnRateLimitedResponseOnExhaustion();
+		}
+		return terminalAttemptResolved;
+	};
 	// Best-effort re-arm of this connection's Bun idle timer, threaded into
 	// forwardToClient so long quiet gaps mid-stream don't reap the connection at
 	// the 180s base idleTimeout. ctx.server is unset in tests / non-HTTP callers
@@ -2037,7 +2059,7 @@ export async function proxyWithAccount(
 			// bump); "reopened" releases any remaining sibling-bucket lease too.
 			settleOverloadProbe("reopened");
 
-			if (returnRateLimitedResponseOnExhaustion) {
+			if (isTerminalAttempt()) {
 				log.warn(
 					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
@@ -2081,7 +2103,7 @@ export async function proxyWithAccount(
 
 		// Check for rate limit using account-specific provider
 		const responseForRateLimitCheck =
-			returnRateLimitedResponseOnExhaustion && response.status === 529
+			response.status === 529 && isTerminalAttempt()
 				? response.clone()
 				: response;
 		const isRateLimited = await processProxyResponse(
@@ -2102,7 +2124,7 @@ export async function proxyWithAccount(
 			await discardUpstreamBody(responseForRateLimitCheck);
 		}
 		if (isRateLimited) {
-			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
+			if (response.status === 529 && isTerminalAttempt()) {
 				log.warn(
 					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);

@@ -3140,7 +3140,13 @@ export async function handleProxy(
 					apiKeyId,
 					apiKeyName,
 					requestBodyContext,
-					!comboInfo?.comboName &&
+					// Evaluated when the 529 ARRIVES, not now: a later candidate can
+					// become attemptable while this attempt is in flight (a sibling's
+					// recovery-probe lease is released, an overload bucket closes), and
+					// a pre-fetch snapshot would forward the 529 to the client instead
+					// of failing over to it.
+					() =>
+						!comboInfo?.comboName &&
 						(i === list.length - 1 ||
 							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i) ||
 							everyRemainingCandidateUnattemptable(list, i)),
