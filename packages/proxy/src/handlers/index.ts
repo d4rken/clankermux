@@ -23,8 +23,13 @@ export {
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	isAbsorbablePeer,
+	LIVENESS_DESIGN_SLOPE_PCT_PER_HOUR,
+	LIVENESS_RELEASE_HORIZON_MAX_MS,
+	LIVENESS_RELEASE_HORIZON_MIN_MS,
 	LIVENESS_RESERVE_HEADROOM_PCT,
-	LIVENESS_RESERVE_RELEASE_HORIZON_MS,
+	LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT,
+	type PoolLivenessOptions,
+	resolveLivenessReserveThreshold,
 	resolvePoolLivenessDemotion,
 } from "./pool-liveness-gate";
 export {

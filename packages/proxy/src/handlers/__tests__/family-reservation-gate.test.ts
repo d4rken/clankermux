@@ -7,9 +7,10 @@ import type {
 } from "@clankermux/types";
 import {
 	PROTECTED_FAMILY_DEMAND_LOOKBACK_MS,
-	RESERVE_HEADROOM_PCT,
 	resolveReservationDemotion,
+	SESSION_RESERVE_HEADROOM_PCT,
 	WEEKLY_HARVEST_YIELD_HORIZON_MS,
+	WEEKLY_RESERVE_HEADROOM_PCT,
 } from "../family-reservation-gate";
 
 const NOW = 1_000_000_000_000;
@@ -223,10 +224,45 @@ describe("resolveReservationDemotion", () => {
 				weeklyResetMs: NOW + 5 * 3_600_000,
 				bindingWeeklyResetMs: NOW + 5 * 3_600_000,
 			}),
-			NOW - 2 * 3_600_000, // 2h ago > 60min lookback
+			NOW - PROTECTED_FAMILY_DEMAND_LOOKBACK_MS - 1, // just outside the lookback
 			NOW,
 		);
 		expect(result).toBe(false);
+	});
+
+	it("still reserves at EXACTLY the demand lookback edge (an overnight Fable gap does not disarm it)", () => {
+		// 12h back: a night without interactive Fable use must not drop the weekly
+		// reservation. `<=` on the lookback, so the edge itself still counts.
+		const atEdge = resolveReservationDemotion(
+			makeAccount(),
+			"claude-opus-4-8",
+			fableAvailable(),
+			capacity({
+				sessionHeadroom: 80,
+				weeklyHeadroom: 20,
+				weeklyResetMs: NOW + 5 * 3_600_000,
+				bindingWeeklyResetMs: NOW + 5 * 3_600_000,
+			}),
+			NOW - PROTECTED_FAMILY_DEMAND_LOOKBACK_MS,
+			NOW,
+		);
+		expect(atEdge).toBe(true);
+
+		// The old 60-minute lookback would have expired 8h ago; it must not.
+		const overnight = resolveReservationDemotion(
+			makeAccount(),
+			"claude-opus-4-8",
+			fableAvailable(),
+			capacity({
+				sessionHeadroom: 80,
+				weeklyHeadroom: 20,
+				weeklyResetMs: NOW + 5 * 3_600_000,
+				bindingWeeklyResetMs: NOW + 5 * 3_600_000,
+			}),
+			NOW - 8 * 3_600_000,
+			NOW,
+		);
+		expect(overnight).toBe(true);
 	});
 
 	it("keeps on the 7d axis when the weekly reset is within the harvest-yield horizon", () => {
@@ -291,11 +327,22 @@ describe("resolveReservationDemotion", () => {
 			makeAccount(),
 			"claude-opus-4-8",
 			fableAvailable(),
-			capacity({ sessionHeadroom: RESERVE_HEADROOM_PCT }),
+			capacity({ sessionHeadroom: SESSION_RESERVE_HEADROOM_PCT }),
 			NOW - 1000,
 			NOW,
 		);
 		expect(result).toBe(false);
+		// Just below it, the 5h axis demotes.
+		expect(
+			resolveReservationDemotion(
+				makeAccount(),
+				"claude-opus-4-8",
+				fableAvailable(),
+				capacity({ sessionHeadroom: SESSION_RESERVE_HEADROOM_PCT - 0.01 }),
+				NOW - 1000,
+				NOW,
+			),
+		).toBe(true);
 	});
 
 	it("keeps at the exact weekly-headroom boundary (strictly-less-than)", () => {
@@ -305,7 +352,7 @@ describe("resolveReservationDemotion", () => {
 			fableAvailable(),
 			capacity({
 				sessionHeadroom: 80,
-				weeklyHeadroom: RESERVE_HEADROOM_PCT,
+				weeklyHeadroom: WEEKLY_RESERVE_HEADROOM_PCT,
 				weeklyResetMs: NOW + 5 * 3_600_000,
 				bindingWeeklyResetMs: NOW + 5 * 3_600_000,
 			}),
@@ -313,11 +360,63 @@ describe("resolveReservationDemotion", () => {
 			NOW,
 		);
 		expect(result).toBe(false);
+		// Just below it, the 7d axis demotes.
+		expect(
+			resolveReservationDemotion(
+				makeAccount(),
+				"claude-opus-4-8",
+				fableAvailable(),
+				capacity({
+					sessionHeadroom: 80,
+					weeklyHeadroom: WEEKLY_RESERVE_HEADROOM_PCT - 0.01,
+					weeklyResetMs: NOW + 5 * 3_600_000,
+					bindingWeeklyResetMs: NOW + 5 * 3_600_000,
+				}),
+				NOW - 1000,
+				NOW,
+			),
+		).toBe(true);
+	});
+
+	it("applies the two axes INDEPENDENTLY (the 7d band is deeper than the 5h one)", () => {
+		// 35% headroom on both axes: above the 5h threshold (25) so the session axis
+		// keeps, below the 7d one (40) so the weekly axis demotes. A single shared
+		// constant could not express this.
+		expect(
+			resolveReservationDemotion(
+				makeAccount(),
+				"claude-opus-4-8",
+				fableAvailable(),
+				capacity({
+					sessionHeadroom: 35,
+					weeklyHeadroom: 100,
+					bindingWeeklyResetMs: NOW + 5 * 3_600_000,
+				}),
+				NOW - 1000,
+				NOW,
+			),
+		).toBe(false);
+		expect(
+			resolveReservationDemotion(
+				makeAccount(),
+				"claude-opus-4-8",
+				fableAvailable(),
+				capacity({
+					sessionHeadroom: 100,
+					weeklyHeadroom: 35,
+					weeklyResetMs: NOW + 5 * 3_600_000,
+					bindingWeeklyResetMs: NOW + 5 * 3_600_000,
+				}),
+				NOW - 1000,
+				NOW,
+			),
+		).toBe(true);
 	});
 
 	it("exposes the documented constant values", () => {
-		expect(RESERVE_HEADROOM_PCT).toBe(25);
-		expect(PROTECTED_FAMILY_DEMAND_LOOKBACK_MS).toBe(3_600_000);
+		expect(SESSION_RESERVE_HEADROOM_PCT).toBe(25);
+		expect(WEEKLY_RESERVE_HEADROOM_PCT).toBe(40);
+		expect(PROTECTED_FAMILY_DEMAND_LOOKBACK_MS).toBe(43_200_000); // 12h
 		expect(WEEKLY_HARVEST_YIELD_HORIZON_MS).toBe(7_200_000);
 	});
 });

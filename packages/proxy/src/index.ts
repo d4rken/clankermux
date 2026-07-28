@@ -122,3 +122,12 @@ export {
 export { sessionCacheStore } from "./session-cache-store";
 export { sessionPromotionTracker } from "./session-promotion";
 export type { ProxyRequest, ProxyResponse } from "./types";
+export {
+	getWeeklyBurnSlope,
+	recordWeeklyBurnSlope,
+	resolveEffectiveWeeklySlope,
+	WEEKLY_SLOPE_MAX_AGE_MS,
+	WEEKLY_SLOPE_RESET_MATCH_TOLERANCE_MS,
+	type WeeklyBurnSlopeEntry,
+	type WeeklyBurnSlopeRecord,
+} from "./weekly-burn-slope";

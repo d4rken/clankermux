@@ -61,6 +61,23 @@ admission in `proxy-operations.ts` both sit after admission and can still fail
 over. The question this line answers is which account ROUTING attempted first —
 a soft-demoted account being attempted first is the defect either way.
 
+## The family (shared-window) reservation
+
+`packages/proxy/src/handlers/family-reservation-gate.ts`. Demotes a NON-protected
+request off an Anthropic account whose shared window is near its limit, so the
+tail stays available for the protected family (Fable). The two axes are gated
+differently because they behave differently near their reset.
+
+| Parameter | Value | Why |
+|---|---|---|
+| `SESSION_RESERVE_HEADROOM_PCT` | 25 | 5h axis: unconditional and self-healing — the window rolls in hours, so reserving costs almost nothing and needs no demand signal |
+| `WEEKLY_RESERVE_HEADROOM_PCT` | 40 | 7d axis: DEEPER on purpose — a spent weekly window is a multi-day wall, and the soft demotion erodes under fail-open pool pressure. ~3–4× Fable's observed ~11% weekly demand share |
+| `PROTECTED_FAMILY_DEMAND_LOOKBACK_MS` | 12 h | 7d axis is demand-targeted; Fable use is bursty and human-shaped, so an overnight gap must not disarm the reservation. Restart loses the in-memory map — accepted fail-open (no demand ⇒ no reservation) |
+| `WEEKLY_HARVEST_YIELD_HORIZON_MS` | 2 h | inside this much of the BINDING weekly reset the reservation yields: Fable's own weekly window resets at the same wall-clock, so held quota would expire unused |
+
+Both axes are strictly-less-than (exactly the threshold still serves), and every
+branch of missing evidence keeps the account.
+
 ## The pool-liveness reserve
 
 `packages/proxy/src/handlers/pool-liveness-gate.ts`. FEFO on the weekly reset
@@ -69,24 +86,72 @@ weekly 100% one after another — and weekly 100% is dead for up to seven days.
 The reserve holds back the tail so an account survives as failover while a peer's
 (short, self-healing) 5h window cools.
 
+The reserve is TWO-TIER: the band depends on whose traffic is asking, not on the
+account. `resolveLivenessReserveThreshold(protectedRequest)` is the single source
+of the threshold, and the SAME value feeds both the demotion decision and the
+absorbable-peer count so they cannot drift.
+
 | Parameter | Value | Why |
 |---|---|---|
-| `LIVENESS_RESERVE_HEADROOM_PCT` | 10 | below this weekly headroom, quota is held, not harvested |
-| `LIVENESS_RESERVE_RELEASE_HORIZON_MS` | 12 h | release before the BINDING weekly reset so the tail is still spent |
-| absorbable peer test | `minHeadroom >= 10` | **not** `weeklyHeadroom`: a peer with a spent 5h session is the very failover case the reserve covers, so it must not count |
+| `LIVENESS_RESERVE_HEADROOM_PCT` | 20 | ordinary traffic stops here — below this weekly headroom quota is held, not harvested |
+| `LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT` | 10 | requests the account would serve as the protected family (Fable) may spend deeper; the 10–20% band is Fable-plus-emergencies-only |
+| `LIVENESS_RELEASE_HORIZON_MIN_MS` / `_MAX_MS` | 12 h / 36 h | clamps on the burn-aware release horizon |
+| `LIVENESS_DESIGN_SLOPE_PCT_PER_HOUR` | 0.66 %/h | the documented ~15.8%/day observed burn, used for the static fallback |
+| static fallback horizon | `threshold / 0.66` | ≈15.2 h protected, ≈30.3 h non-protected — the time that tier's tail actually needs |
+| absorbable peer test | `minHeadroom >= threshold` | **not** `weeklyHeadroom`: a peer with a spent 5h session is the very failover case the reserve covers, so it must not count |
 
-The `>= 10` (absorb) / `< 10` (reserve) split is exactly complementary — no
-account falls in a dead zone at exactly 10.
+Within a tier the `>= threshold` (absorb) / `< threshold` (reserve) split is
+exactly complementary — no account falls in a dead zone at the threshold.
 
-> **The 12h horizon deliberately may NOT fully drain a 10% tail.** At the
-> observed ~15.8%/day burn a 10% tail needs ~15h. Liveness is prioritized over
-> complete harvest: the failure this gate prevents is a total-pool outage, and a
-> partially unspent tail is a far cheaper loss. Revisit only if waste becomes
-> visible in practice.
+**Tiering follows the LOGICAL request family.** `modelForAccount` falls back to
+the logical Claude model when the mapped model has no recognized family, so a
+Codex account serving a fable-logical request (explicit or default `fable →
+gpt-*` mapping) classifies as protected. That is intended: the tier privileges
+the user's protected-family traffic pool-wide, so an Anthropic outage that fails
+Fable over to Codex may spend deeper there too. The dashboard Primary badge
+models a generic fresh request and therefore always uses the NON-protected tier.
+
+### The release horizon is burn-aware
+
+Rule 6 asks "how long would this tail actually take to drain?". With a usable
+weekly burn slope (see below) the horizon is `weeklyHeadroom / slope`, clamped to
+[12 h, 36 h]; without one it is the tier-scaled static fallback above.
+
+> **Self-suppression is expected and bounded.** A well-reserved account stops
+> receiving traffic, so its own slope collapses and `headroom / slope` pegs at the
+> 36 h max clamp — bounded EARLY release, chosen deliberately because a complete
+> drain beats quota that expires. The converse is the point: under fail-open pool
+> pressure the account IS being served, its slope is high, and the horizon
+> shortens toward the time really needed, holding the reserve longer exactly when
+> the pool is strained.
 
 Rule 4 (`absorbablePeerCount >= 1`) makes the reserve self-disabling on degraded
 paths: with no healthy peer there is nothing to hand traffic to, so it fails
 open. This is why the failover/fallback tails can omit the reorder safely.
+
+> **Accepted: rule 4 fail-opens BEFORE any release logic.** When every backup is
+> cooling, a reserved account keeps its place regardless of tier or horizon, so
+> the reserve erodes exactly in the incident it was built for. That channel stays
+> open BY DESIGN — serving the request now beats reserving into a 503.
+
+### The weekly burn slope feeding it
+
+`packages/proxy/src/weekly-burn-slope.ts` — an in-memory, per-account store of
+percent-of-weekly-window-per-hour, fitted by the usage-snapshot sampler
+(`refreshBurnSlopes`) with the pure estimator in `@clankermux/core`. It is a
+routing HINT: an empty map (fresh restart) just means the static fallback.
+
+| Rule | Why |
+|---|---|
+| `observedAt` = newest CONTRIBUTING snapshot, never the recompute time | refitting unchanged history must not make a stale slope look fresh |
+| usable for `WEEKLY_SLOPE_MAX_AGE_MS` = 15 min | ≈7 sampler ticks: tolerates a couple of missed samples, stops steering within minutes of a dead poller |
+| `lowConfidence` / non-finite ⇒ null | filtered on READ, so exactly one place decides usability |
+| `resolveEffectiveWeeklySlope` matches the fitted window's reset against `bindingWeeklyResetMs` (±5 min) | a slope fitted on the account-wide `seven_day` series must never steer a gate bound by `seven_day_oauth_apps` or a rolled window |
+
+The sampler refits after EVERY tick — including the no-fresh-rows and
+insert-failure paths (persisted history is independent of the write) — and once
+at `start()`, so a deploy restart does not blind the gates for the whole startup
+deferral. Accounts whose newest sample has not advanced are skipped.
 
 ## The 5h window is a throttle NESTED inside the weekly budget
 

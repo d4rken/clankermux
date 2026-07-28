@@ -36,19 +36,32 @@
  *    `packages/http-api/src/handlers/usage-history.ts`.
  */
 
-import { intervalManager, normalizeAnthropicUsage } from "@clankermux/core";
+import {
+	computeUsagePrediction,
+	intervalManager,
+	normalizeAnthropicUsage,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
+import { recordWeeklyBurnSlope } from "@clankermux/proxy";
 import type {
 	Account,
 	AnthropicUsageData,
+	PredictionPoint,
 	UsageSnapshotRow,
+	UsageSnapshotSample,
 } from "@clankermux/types";
 
 const log = new Logger("UsageSnapshotSampler");
 
 /** Sample cadence (2 minutes). */
 export const SAMPLE_INTERVAL_MS = 120_000;
+
+/**
+ * How far back the weekly burn-slope fit reads persisted snapshots. Matches the
+ * dashboard prediction service's 7d lookback: recent pace, not the whole window.
+ */
+export const BURN_SLOPE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Minimal cache surface the pure projection needs (matches `usageCache`). The
@@ -133,6 +146,14 @@ export interface UsageSnapshotSamplerDeps {
 	getAccounts: () => Promise<Account[]>;
 	/** Persist a batch of snapshot rows. */
 	insertSnapshots: (rows: UsageSnapshotRow[]) => Promise<void>;
+	/**
+	 * Read back the raw (un-bucketed) snapshots sampled at/after `sinceMs` for the
+	 * given accounts — the history the weekly burn-slope fit regresses over.
+	 */
+	getRecentSnapshots: (
+		accountIds: string[],
+		sinceMs: number,
+	) => Promise<UsageSnapshotSample[]>;
 	/** The shared in-memory usage cache. */
 	cache: SamplerCache;
 	/** Resolve the freshness window in ms (`max(2*pollInterval, 150_000)`). */
@@ -150,7 +171,13 @@ export interface UsageSnapshotSamplerDeps {
  *  1) stamps one shared `now`,
  *  2) reads the live account list,
  *  3) projects the cache → rows via `buildSnapshotRows` (pure read-through),
- *  4) writes any non-empty batch (DB errors are logged, never thrown).
+ *  4) writes any non-empty batch (DB errors are logged, never thrown),
+ *  5) refits the weekly burn slopes from PERSISTED history (`refreshBurnSlopes`).
+ *
+ * Step 5 is deliberately independent of steps 1–4: it regresses over rows already
+ * in the DB, so it runs on the no-fresh-rows and insert-failure paths too, and it
+ * is additionally bootstrapped once at `start()` so a deploy restart does not
+ * leave the routing gates blind for the whole startup deferral.
  *
  * Registered through `intervalManager` with `maxConcurrent: 1` so a slow tick
  * can never overlap the next.
@@ -160,6 +187,13 @@ export class UsageSnapshotSampler {
 	private stopInterval: (() => void) | null = null;
 	private startupTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly intervalId = "usage-snapshot-sampler";
+	/**
+	 * Per-account newest `sampledAt` that has already been fitted. Refitting
+	 * unchanged history is both wasted work and a freshness lie (the fit would be
+	 * re-recorded with the same, already-aging evidence), so an account whose
+	 * newest sample has not advanced is skipped entirely.
+	 */
+	private readonly lastFittedSampleAt = new Map<string, number>();
 
 	constructor(deps: UsageSnapshotSamplerDeps) {
 		this.deps = { ...deps };
@@ -203,6 +237,13 @@ export class UsageSnapshotSampler {
 		}, initialDelayMs);
 		// Don't let the deferral timer keep the process alive on its own.
 		this.startupTimer.unref?.();
+
+		// Bootstrap the burn-slope store from PERSISTED history right away, after
+		// the recurring schedule is already armed. Snapshots survive a restart, so
+		// there is no reason to leave the routing gates on their static fallback for
+		// the whole startup deferral. Best-effort and non-throwing by construction,
+		// so it can never prevent the interval from being registered.
+		await this.refreshBurnSlopes();
 	}
 
 	/** Stop the sampler: cancel the deferral timer and unregister the interval. */
@@ -217,8 +258,24 @@ export class UsageSnapshotSampler {
 		}
 	}
 
-	/** One sampling tick (exposed for tests / manual triggering). */
+	/**
+	 * One sampling tick (exposed for tests / manual triggering): record the cache
+	 * projection, then refit the weekly burn slopes.
+	 *
+	 * The refit runs in a `finally` because it reads PERSISTED history: whether
+	 * this tick found fresh cache entries, or its insert failed, has no bearing on
+	 * whether the stored series can be fitted.
+	 */
 	async tick(): Promise<void> {
+		try {
+			await this.recordSnapshots();
+		} finally {
+			await this.refreshBurnSlopes();
+		}
+	}
+
+	/** The cache → `usage_snapshots` write half of a tick. */
+	private async recordSnapshots(): Promise<void> {
 		const now = Date.now();
 
 		let accounts: Account[];
@@ -243,6 +300,90 @@ export class UsageSnapshotSampler {
 		} catch (err) {
 			// A DB error must not kill the interval — log and move on.
 			log.error(`Snapshot sampler: failed to persist snapshots: ${err}`);
+		}
+	}
+
+	/**
+	 * Refit each account's WEEKLY burn slope from persisted snapshots and publish
+	 * it to the routing store (`recordWeeklyBurnSlope`), where the pool-liveness
+	 * reserve reads it to size its release horizon.
+	 *
+	 * Best-effort in every sense: it reads the stored series (never the provider),
+	 * logs and swallows any failure, and is a pure add-on to the sampler — nothing
+	 * about the snapshot write depends on it, and vice versa.
+	 *
+	 * Details that matter:
+	 *  - Only accounts with WINDOWED usage (anthropic/codex) have a series at all.
+	 *  - `observedAt` is the newest CONTRIBUTING sample, never `Date.now()`: the
+	 *    store's staleness check is about the age of the evidence.
+	 *  - An account whose newest sample has not advanced since its last fit is
+	 *    skipped — the regression over unchanged rows yields the same answer.
+	 *  - `lowConfidence` fits are recorded as-is; the store filters them on read,
+	 *    so exactly one place decides usability.
+	 */
+	async refreshBurnSlopes(): Promise<void> {
+		try {
+			const now = Date.now();
+
+			const accountIds = (await this.deps.getAccounts())
+				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
+				.map((a) => a.id);
+			if (accountIds.length === 0) return;
+
+			const samples = await this.deps.getRecentSnapshots(
+				accountIds,
+				now - BURN_SLOPE_LOOKBACK_MS,
+			);
+
+			// Group the 7d series per account in a single pass (mirrors the 7d
+			// assembly in http-api's build-account-predictions).
+			const pointsByAccount = new Map<string, PredictionPoint[]>();
+			for (const s of samples) {
+				if (s.sevenDayPct == null) continue;
+				const point: PredictionPoint = {
+					t: s.sampledAt,
+					utilization: s.sevenDayPct,
+					resetsAt: s.sevenDayReset,
+				};
+				const list = pointsByAccount.get(s.accountId);
+				if (list) list.push(point);
+				else pointsByAccount.set(s.accountId, [point]);
+			}
+
+			let fitted = 0;
+			for (const [accountId, points] of pointsByAccount) {
+				let newestSampleAt = Number.NEGATIVE_INFINITY;
+				for (const p of points) {
+					if (p.t > newestSampleAt) newestSampleAt = p.t;
+				}
+				if (!Number.isFinite(newestSampleAt)) continue;
+				// Unchanged history → the fit cannot have changed. Skip.
+				if (this.lastFittedSampleAt.get(accountId) === newestSampleAt) continue;
+				this.lastFittedSampleAt.set(accountId, newestSampleAt);
+
+				const prediction = computeUsagePrediction(points);
+				// Without a window reset the slope cannot be matched to the gate's
+				// BINDING weekly window, and a non-finite slope is not a measurement.
+				if (prediction.resetsAtMs == null) continue;
+				if (!Number.isFinite(prediction.slopePerHour)) continue;
+
+				recordWeeklyBurnSlope(accountId, {
+					slopePctPerHour: prediction.slopePerHour,
+					lowConfidence: prediction.lowConfidence,
+					observedAt: newestSampleAt,
+					windowResetMs: prediction.resetsAtMs,
+				});
+				fitted++;
+			}
+
+			if (fitted > 0) {
+				log.debug(`Snapshot sampler: refit ${fitted} weekly burn slope(s)`);
+			}
+		} catch (err) {
+			// Never throws: the slope feed is an optimization for a fail-open gate.
+			log.warn(
+				`Snapshot sampler: failed to refresh weekly burn slopes: ${err}`,
+			);
 		}
 	}
 }
