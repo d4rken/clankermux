@@ -308,6 +308,34 @@ export function completeRateLimitProbe(
 }
 
 /**
+ * Would {@link getRateLimitProbeAdmission} refuse this account right now?
+ *
+ * Side-effect free: it mirrors BOTH admission arms (mature streak with an
+ * expired deadline, and a pending capacity-restored marker), reads `probeLeases`
+ * WITHOUT pruning, and takes no lease — so it is safe to call from a decision
+ * path that must not perturb gate state.
+ *
+ * Used to decide whether an attempt is the request's LAST realistic one: a
+ * remaining candidate that would only be suppressed cannot serve as fallback, so
+ * a real upstream 529 body must be forwarded rather than discarded in favour of
+ * a generic 503.
+ */
+export function wouldSuppressProbe(
+	account: Account,
+	now: number = Date.now(),
+): boolean {
+	const expiredMatureCooldown =
+		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
+		account.rate_limited_until != null &&
+		account.rate_limited_until <= now;
+	if (!expiredMatureCooldown && !capacityRestoredPending.has(account.id)) {
+		return false;
+	}
+	const existingLease = probeLeases.get(account.id);
+	return existingLease !== undefined && existingLease.leaseUntil > now;
+}
+
+/**
  * Remaining lifetime (ms) of an account's in-flight recovery-probe lease, or
  * `null` when no live lease is held.
  *

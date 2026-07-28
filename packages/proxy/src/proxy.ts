@@ -69,6 +69,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
+	wouldSuppressProbe,
 } from "./handlers/rate-limit-cooldown";
 import {
 	getOverloadHoldBudgetMs,
@@ -947,6 +948,32 @@ export async function handleProxy(
 						now,
 						modelForAccount(account),
 					),
+			);
+	};
+
+	/**
+	 * True when every candidate AFTER `index` would be refused before it could
+	 * ever reach upstream — by the single-flight recovery-probe gate or by the
+	 * provider-overload gate — so this attempt is the request's last realistic
+	 * one and its real 529 body must be FORWARDED, not discarded.
+	 *
+	 * Scope: the same-provider case is already covered by
+	 * {@link shouldForwardProviderOverloadIfNoCrossProviderFallback}. The residual
+	 * gap this closes is a MIXED-provider pool — e.g. [A(anthropic), B(codex)]
+	 * with B probe-suppressed — where A's genuine `overloaded_error` was thrown
+	 * away and the client got a generic 503 instead.
+	 */
+	const everyRemainingCandidateUnattemptable = (
+		candidates: Account[],
+		index: number,
+	): boolean => {
+		const now = Date.now();
+		return candidates
+			.slice(index + 1)
+			.every(
+				(account) =>
+					wouldSuppressProbe(account, now) ||
+					isProviderOverloaded(account.provider, now, modelForAccount(account)),
 			);
 	};
 
@@ -3083,7 +3110,8 @@ export async function handleProxy(
 					requestBodyContext,
 					!comboInfo?.comboName &&
 						(i === list.length - 1 ||
-							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i)),
+							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i) ||
+							everyRemainingCandidateUnattemptable(list, i)),
 					{
 						onOutcome: (o) => noteOverloadSuppression(list[i], o),
 					},
