@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import type { AccountResponse } from "@clankermux/types";
 import { deriveAccountStatus } from "./account-status";
 
-// Wednesday 2024-01-03, noon UTC. Anthropic peak is 13:00–19:00 UTC weekdays,
-// so noon is OFF-peak — a predictable default for non-peak-related assertions.
+// Wednesday 2024-01-03, noon UTC — a fixed, predictable default for the
+// assertions below, none of which depend on a peak window.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 const MINUTE = 60_000;
 
@@ -539,24 +539,16 @@ describe("deriveAccountStatus — peak windows", () => {
 		expect(status.peakChipLabel).toBe("Off-peak hours");
 	});
 
-	// Anthropic peak: weekdays 13:00–19:00 UTC.
-	it("flags an anthropic account during a weekday peak window", () => {
+	// Anthropic ran a weekday 5–11am PT limit reduction from ~2026-03-27 until
+	// 2026-05-06, when it was removed. No peak chip for anthropic accounts, even
+	// inside what used to be the window.
+	it("does not show a peak chip for an anthropic account", () => {
 		const status = deriveAccountStatus(
 			makeAccount({ provider: "anthropic" }),
-			Date.UTC(2024, 0, 3, 15, 0, 0), // Wed 15:00 UTC
+			Date.UTC(2024, 0, 3, 15, 0, 0), // Wed 15:00 UTC — the retired window
 		);
-		expect(status.showPeakChip).toBe(true);
-		expect(status.isPeak).toBe(true);
-		expect(status.peakChipLabel).toBe("Peak hours (5–11am PT, weekdays)");
-	});
-
-	it("treats anthropic peak hours on a weekend as off-peak", () => {
-		const status = deriveAccountStatus(
-			makeAccount({ provider: "anthropic" }),
-			Date.UTC(2024, 0, 6, 15, 0, 0), // Sat 15:00 UTC
-		);
+		expect(status.showPeakChip).toBe(false);
 		expect(status.isPeak).toBe(false);
-		expect(status.peakChipLabel).toBe("Off-peak hours");
 	});
 
 	it("does not show a peak chip for providers without peak windows", () => {

@@ -46,7 +46,7 @@ import {
 } from "../lib/request-filters";
 import { getRequestModelPresentation } from "../lib/request-model";
 import { cn } from "../lib/utils";
-import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
+import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
@@ -165,11 +165,6 @@ export function RequestsTab() {
 	const { data: knownProjects } = useRequestProjects();
 	const zaiAccountNames = new Set(
 		(accounts ?? []).filter((a) => a.provider === "zai").map((a) => a.name),
-	);
-	const oauthAccountNames = new Set(
-		(accounts ?? [])
-			.filter((a) => a.provider === "anthropic")
-			.map((a) => a.name),
 	);
 
 	// Unify both modes into a single { requests, summaries } shape so the row
@@ -762,9 +757,6 @@ export function RequestsTab() {
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
-							const isAnthropicPeak =
-								oauthAccountNames.has(request.meta.accountName ?? "") &&
-								isAnthropicPeakHour(request.meta.timestamp);
 							const statusClass = isError
 								? "bg-red-500/10 text-red-600 dark:text-red-400"
 								: statusCode == null
@@ -962,8 +954,7 @@ export function RequestsTab() {
 										(summary?.tokensPerSecond ?? 0) > 0 ||
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
-										isZaiPeak ||
-										isAnthropicPeak) && (
+										isZaiPeak) && (
 										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
 											{(modelPresentation || summary?.reasoningEffort) && (
 												<Badge
@@ -1018,7 +1009,7 @@ export function RequestsTab() {
 													Rate Limited
 												</Badge>
 											)}
-											{(isZaiPeak || isAnthropicPeak) && (
+											{isZaiPeak && (
 												<Badge
 													variant="outline"
 													className="text-xs border-orange-500 text-orange-500"

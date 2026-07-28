@@ -11,7 +11,7 @@ import {
 	ResetCreditEventsPanel,
 } from "./AccountStatusChips";
 
-// 2024-01-03 noon UTC, matching account-status.test.ts. Off-peak for anthropic.
+// 2024-01-03 noon UTC, matching account-status.test.ts.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 
 function makeAccount(
