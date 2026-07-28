@@ -30,8 +30,9 @@ git worktree add .claude/worktrees/<name> -b fix/<name> origin/main
 
 # 2. Code the fix and tests. Write tests first for new functionality.
 
-# 3. Verify — mandatory
-bun run lint && bun run typecheck && bun run format
+# 3. Verify — mandatory. `lint` rewrites files (biome check --write --unsafe),
+#    so typecheck must run after it. No trailing `format`: check already formats.
+bun run lint && bun run typecheck
 
 # 4. Commit with a recognized prefix
 git add <specific files>            # never `git add .`
@@ -115,7 +116,7 @@ git fetch upstream
 git log upstream/main --oneline           # find the commit you want
 # worktree off origin/main, then:
 git cherry-pick <upstream-sha>            # resolve conflicts; drop re-added removals
-bun run lint && bun run typecheck && bun run format
+bun run lint && bun run typecheck         # lint rewrites; typecheck runs after
 # merge --no-ff into main as above
 ```
 
