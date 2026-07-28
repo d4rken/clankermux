@@ -12,7 +12,10 @@ import {
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
 } from "../handlers/rate-limit-cooldown";
-import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
+import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+} from "../provider-overload-cooldown";
 
 /**
  * After the usage poller releases an account EARLY, the capacity-restored marker
@@ -114,14 +117,32 @@ function makeContext(
 	accounts: Account[],
 	heldAccountId: string,
 	decision: string,
+	options: {
+		/** Accounts the SessionStrategy fallback may return (defaults to all). */
+		strategyAccounts?: Account[];
+		/** Active combo for the request family, or null. */
+		combo?: {
+			name: string;
+			slots: Array<{ account_id: string; model: string; enabled: boolean }>;
+		} | null;
+	} = {},
 ): ProxyContext {
 	const byId = new Map(accounts.map((a) => [a.id, a]));
+	const strategyPool = options.strategyAccounts ?? accounts;
+	const baseStrategy = makeStrategy(heldAccountId, decision) as {
+		select: (accs: Account[], meta: RequestMeta) => Account[];
+	};
 	return {
-		strategy: makeStrategy(heldAccountId, decision),
+		strategy: {
+			// Restrict the pool the STRATEGY may return without touching what
+			// getAllAccounts reports (combo routing resolves slots from the latter).
+			select: (_accs: Account[], meta: RequestMeta) =>
+				baseStrategy.select(strategyPool, meta),
+		} as never,
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getAccount: mock(async (id: string) => byId.get(id) ?? null),
-			getActiveComboForFamily: mock(async () => null),
+			getActiveComboForFamily: mock(async () => options.combo ?? null),
 			markAccountRateLimited: mock(async () => 1),
 			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
@@ -228,10 +249,17 @@ const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
  * call parks until released, so the single-flight lease is still held while the
  * other concurrent requests run; the sibling always answers immediately.
  */
-function makeGatedFetch(originalFetch: typeof globalThis.fetch) {
+function makeGatedFetch(
+	originalFetch: typeof globalThis.fetch,
+	options: {
+		/** Auth-token fragment whose upstream call throws (network failure). */
+		failingToken?: string;
+	} = {},
+) {
 	const state = {
 		restoredCalls: 0,
 		siblingCalls: 0,
+		failingCalls: 0,
 		release: null as (() => void) | null,
 	};
 	const gate = new Promise<void>((resolve) => {
@@ -243,6 +271,10 @@ function makeGatedFetch(originalFetch: typeof globalThis.fetch) {
 			const headers =
 				input instanceof Request ? input.headers : new Headers(init?.headers);
 			const auth = headers.get("authorization") ?? "";
+			if (options.failingToken && auth.includes(options.failingToken)) {
+				state.failingCalls += 1;
+				throw new TypeError("upstream unreachable");
+			}
 			if (auth.includes("at-restored")) {
 				state.restoredCalls += 1;
 				// Only the FIRST call parks (holding the lease); any further call is
@@ -365,4 +397,222 @@ describe("capacity-restored single-flight (handleProxy)", () => {
 		expect((await first).status).toBe(200);
 		expect(state.restoredCalls).toBe(1);
 	});
+});
+
+/**
+ * A candidate suppressed by the single-flight gate was NEVER ATTEMPTED, so a
+ * request whose every candidate is suppressed has learned nothing about any of
+ * them. Both attempt loops used to `continue` past all of them and fall through
+ * to ServiceUnavailableError — a hard 503 against a pool of healthy accounts,
+ * not one of which was tried. No intermediate escape caught it: the burst
+ * terminal needs `burstHoldDeclined`, the combo terminal needs a combo name, the
+ * overload terminal needs an outcome that only an ATTEMPT can produce, and the
+ * abort terminal needs a disconnected client.
+ */
+describe("probe-suppression recovery (handleProxy)", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		resetHoldSlots();
+		resetRateLimitProbeGatesForTests();
+		usageCache.delete("restored");
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		resetHoldSlots();
+		resetRateLimitProbeGatesForTests();
+		clearCapacityRestoredProbePending("restored");
+		usageCache.delete("restored");
+	});
+
+	it("serves the request instead of 503ing when the ONLY candidate is probe-suppressed", async () => {
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		// Single-account pool: there is no sibling to fail over to, so a suppressed
+		// candidate leaves the loop with nothing at all.
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const first = callHandleProxy(makeRequest(), url, ctx);
+		while (state.restoredCalls === 0) await tick();
+
+		// Second request: its only candidate is suppressed. It must hold for the
+		// in-flight probe rather than fail.
+		const second = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		// Still bounded to the single admitted probe — the holder did not stampede.
+		expect(state.restoredCalls).toBe(1);
+
+		// The probe reaches its verdict; the holder re-selects and is served.
+		state.release?.();
+		expect((await first).status).toBe(200);
+		expect((await second).status).toBe(200);
+	});
+
+	it("bounds fan-in to ONE upstream call while many requests hold behind the probe", async () => {
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const first = callHandleProxy(makeRequest(), url, ctx);
+		while (state.restoredCalls === 0) await tick();
+
+		const holders = [
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+		];
+		await tick(30);
+		// The hold is the fan-in control: five concurrent requests against a
+		// one-account pool produced no extra upstream traffic at all.
+		expect(state.restoredCalls).toBe(1);
+
+		state.release?.();
+		expect((await first).status).toBe(200);
+		for (const r of await Promise.all(holders)) expect(r.status).toBe(200);
+	});
+
+	it("recovers in the COMBO FALLBACK loop even though the main loop already attempted (per-loop flag)", async () => {
+		// A request-wide "did anything get attempted" flag would be true here (the
+		// combo slot WAS attempted and failed), suppressing recovery in the
+		// fallback loop and reproducing the 503 this fix removes.
+		const comboAcct = makeAccount({
+			id: "combo",
+			name: "Combo",
+			access_token: "at-combo",
+		});
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch, { failingToken: "at-combo" });
+		// getAllAccounts reports both (combo slots resolve from it); the strategy
+		// fallback may only return the suppressed account.
+		const ctx = makeContext([comboAcct, restored], "restored", "none", {
+			strategyAccounts: [restored],
+			combo: {
+				name: "test-combo",
+				slots: [
+					{ account_id: "combo", model: "claude-sonnet-4-5", enabled: true },
+				],
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+
+		// Park the probe on the restored account with an unrelated request.
+		const prober = callHandleProxy(
+			makeRequest(),
+			url,
+			makeContext([restored], "restored", "none"),
+		);
+		while (state.restoredCalls === 0) await tick();
+
+		const comboRequest = callHandleProxy(makeRequest(), url, ctx);
+		await tick(30);
+		// The combo slot was attempted and failed; the fallback candidate is
+		// suppressed, so the request is now holding rather than 503ing.
+		expect(state.failingCalls).toBeGreaterThan(0);
+
+		state.release?.();
+		expect((await prober).status).toBe(200);
+		expect((await comboRequest).status).toBe(200);
+	});
+
+	it("falls back to an UNGATED retry when the probe hold times out", async () => {
+		// Slow by construction: the hold bound is PROBE_HOLD_MAX_MS (10s) and the
+		// only way to observe the timeout branch is to let it elapse.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		// This request parks upstream and never returns within the hold budget, so
+		// its lease is still held when the holder's wait expires.
+		callHandleProxy(makeRequest(), url, ctx).catch(() => {});
+		while (state.restoredCalls === 0) await tick();
+
+		const startedAt = Date.now();
+		const holder = await callHandleProxy(makeRequest(), url, ctx);
+		// Served by the ungated retry (a SECOND upstream call on the same account),
+		// not a 503 against an untried pool.
+		expect(holder.status).toBe(200);
+		expect(state.restoredCalls).toBe(2);
+		// It got there by TIMING OUT, not by being admitted straight away: the wait
+		// is bounded by PROBE_HOLD_MAX_MS (10s), so a fast return would mean the
+		// candidate was never suppressed and the test proved nothing.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(9_000);
+
+		state.release?.();
+	}, 30_000);
+
+	it("keeps the onOutcome sink wired on the ungated retry (a late overload rejection is not a generic 503)", async () => {
+		// Without `onOutcome: noteOverloadSuppression`, an authoritative
+		// provider-overload refusal inside the ungated retry would return null and
+		// fall straight back into the generic ALL_ACCOUNTS_FAILED 503 this recovery
+		// exists to eliminate. With the sink, the terminal is the 529 instead.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		callHandleProxy(makeRequest(), url, ctx).catch(() => {});
+		while (state.restoredCalls === 0) await tick();
+
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		// Trip the provider-overload breaker DURING the hold, after the holder's
+		// selection has already run: the ungated retry then hits the authoritative
+		// admission chokepoint and is refused without an upstream call. The 5-minute
+		// deadline is deliberately beyond the overload hold budget so the terminal
+		// is the immediate synthetic 529 rather than another hold.
+		setTimeout(() => {
+			applyProviderOverloadCooldown("anthropic", Date.now() + 5 * 60_000);
+		}, 200);
+
+		const response = await holder;
+		expect(response.status).toBe(529);
+		expect(state.restoredCalls).toBe(1);
+
+		state.release?.();
+	}, 30_000);
 });

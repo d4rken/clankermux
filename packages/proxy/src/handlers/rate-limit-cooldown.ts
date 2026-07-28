@@ -17,14 +17,22 @@ const log = new Logger("RateLimitCooldown");
 // the cooldown clears, we re-trigger the same 429 storm that produced the
 // streak. This process-local gate admits exactly ONE recovery probe per account
 // within a short lease; other concurrent requests skip the account and fall
-// through to the next candidate in the selection order.
+// through to the next candidate in the selection order — and, when there is no
+// next candidate left, recover instead of failing (see below).
 //
 // This is orthogonal to the transparent burst-retry hold (which holds a SINGLE
 // account WITHIN one request): the gate arbitrates MANY concurrent requests
 // re-selecting a freshly-recovered account ACROSS requests. Both compose — a
 // held/reprobing request keeps its lease until it reaches a terminal outcome.
+//
+// SUPPRESSION IS NOT A FAILURE. A suppressed candidate was never attempted, so
+// a request whose candidates are ALL suppressed has learned nothing about any
+// of them. It must not fall through to a terminal error — see
+// `awaitProbeRelease` and its caller in proxy.ts.
 const MATURE_COOLDOWN_STREAK = 5;
 const PROBE_LEASE_MS = 2 * 60 * 1000;
+/** Poll interval while waiting for an in-flight probe lease to be released. */
+const PROBE_RELEASE_POLL_MS = 25;
 const MAX_PROBE_GATES = 10_000;
 const probeLeases = new Map<
 	string,
@@ -207,6 +215,14 @@ function pruneProbeLeases(now: number): void {
  * NOTE: the global force-account override in `proxy.ts` bypasses account
  * selection entirely, so the "exactly one upstream probe" guarantee explicitly
  * excludes that operator override.
+ *
+ * IMPORTANT — "suppressed" is not "failed". Nothing was attempted, so a caller
+ * whose candidates are ALL suppressed knows nothing about any of them and must
+ * NOT fall through to a terminal error: that would 503 a request against a pool
+ * of healthy accounts, none of which was ever tried. Callers recover by waiting
+ * out the in-flight probe ({@link awaitProbeRelease}) and, only if that wait
+ * times out, attempting the first suppressed candidate ungated. See the
+ * recovery path in `proxy.ts`.
  */
 export function getRateLimitProbeAdmission(
 	account: Account,
@@ -289,6 +305,58 @@ export function completeRateLimitProbe(
 	} else if (outcome === "abandoned") {
 		log.debug(`[clankermux] account=${account.name} cooldown_probe_abandoned`);
 	}
+}
+
+/**
+ * Remaining lifetime (ms) of an account's in-flight recovery-probe lease, or
+ * `null` when no live lease is held.
+ *
+ * Read-only: it deliberately does NOT prune, so it can be called from a hot
+ * decision path without mutating gate state.
+ */
+export function getProbeLeaseRemainingMs(
+	accountId: string,
+	now: number = Date.now(),
+): number | null {
+	const lease = probeLeases.get(accountId);
+	if (!lease || lease.leaseUntil <= now) return null;
+	return lease.leaseUntil - now;
+}
+
+/**
+ * Bounded wait for an account's in-flight recovery probe to reach a verdict.
+ *
+ * A probe lease is released at RESPONSE-HEADER time (response-processor's
+ * `completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned")`),
+ * not at stream end, so the common wait here costs time-to-first-byte rather
+ * than a whole generation. That is what makes waiting viable at all.
+ *
+ * The wait is bounded by `min(maxWaitMs, remaining lease)`: a lease that is
+ * already nearly expired needs no further waiting, and a caller must never be
+ * held for the full two-minute lease.
+ *
+ * @returns `true` when the lease was released (or was never held) within the
+ *   bound, `false` on timeout or client abort. A `false` return means the caller
+ *   still has no verdict and must fall back rather than keep waiting.
+ */
+export async function awaitProbeRelease(
+	accountId: string,
+	maxWaitMs: number,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const now = Date.now();
+	const leaseRemaining = getProbeLeaseRemainingMs(accountId, now);
+	if (leaseRemaining === null) return true;
+	const deadline = now + Math.min(maxWaitMs, leaseRemaining);
+	while (Date.now() < deadline) {
+		if (signal?.aborted) return false;
+		const wait = Math.min(PROBE_RELEASE_POLL_MS, deadline - Date.now());
+		if (wait > 0) {
+			await new Promise((resolve) => setTimeout(resolve, wait));
+		}
+		if (getProbeLeaseRemainingMs(accountId) === null) return true;
+	}
+	return getProbeLeaseRemainingMs(accountId) === null;
 }
 
 /** Test-only: clears all in-memory probe leases/markers between test cases. */
