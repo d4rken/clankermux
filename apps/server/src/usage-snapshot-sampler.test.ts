@@ -517,6 +517,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 		});
 
 		await h.sampler.refreshBurnSlopes();
+		const after = Date.now();
 
 		const entry = getWeeklyBurnSlope(id, Date.now());
 		expect(entry).not.toBeNull();
@@ -525,10 +526,18 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 
 		// The history query is bounded to the 24h lookback and asks only for the
 		// windowed (anthropic/codex) accounts.
+		//
+		// `sinceMs` is derived from the sampler's OWN `Date.now()`, taken somewhere
+		// inside the `[now, after]` bracket around the call above — so it lands in
+		// `[now - 24h, after - 24h]`. Bracketing pins it exactly; the previous
+		// `now - sinceMs >= 24h` floor could only hold when no millisecond
+		// boundary fell between the test's read and the sampler's, which made it
+		// fail ~1 full-suite run in 10. Same idiom as memory-history.test.ts.
 		const q = h.snapshotQueries();
 		expect(q).toHaveLength(1);
 		expect(q[0]?.accountIds).toEqual([id]);
-		expect(now - (q[0]?.sinceMs ?? 0)).toBeGreaterThanOrEqual(24 * HOUR_MS);
+		expect(q[0]?.sinceMs).toBeGreaterThanOrEqual(now - 24 * HOUR_MS);
+		expect(q[0]?.sinceMs).toBeLessThanOrEqual(after - 24 * HOUR_MS);
 	});
 
 	it("goes evidence-stale when no new snapshot has landed for >15 minutes", async () => {
