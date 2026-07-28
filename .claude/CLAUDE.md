@@ -54,8 +54,14 @@ Exclude from all reads, edits, searches, and commits:
 - `packages/database/src/inline-{vacuum,integrity-check,incremental-vacuum}-worker.ts`
 
 Committed ambient `.d.ts` stubs satisfy `bun run typecheck` on a clean checkout,
-so fresh worktrees need no hand-created placeholders. Never commit the generated
-`.ts` files.
+so fresh worktrees need no hand-created placeholders. `bun test` is a different
+story — it loads the real modules, not the stubs — so a fresh worktree must run
+`bun run build:db-workers` before its first test run. Skip it and seven test
+files fail to load with
+`Cannot find module './inline-incremental-vacuum-worker'` — 65 reported
+failures, plus ~600 tests in those files that never register at all (3922 pass
+instead of 4588). A suite that is merely *smaller* than expected is the tell.
+Never commit the generated `.ts` files.
 
 `packages/proxy/src/{inline-worker,embedded-tiktoken-wasm}.ts` are **retired** —
 no longer generated or imported. Stale gitignored copies may linger in the live
@@ -76,7 +82,12 @@ error: `git log refs/heads/main`, `git diff refs/heads/main...`,
   modified so you can tell your changes from the user's throughout the session.
 - Stage with `git add <specific-files>`, never `git add .` — that picks up the
   gitignored autogen files.
-- After code changes: `bun run lint && bun run typecheck && bun run format`.
+- After code changes: `bun run lint && bun run typecheck` — in that order.
+  `lint` is `biome check --write --unsafe`, which **rewrites files** (formatting,
+  import sorting, and unsafe lint fixes), so typecheck has to run on the bytes it
+  produced. Do not append `bun run format`: `biome check` already formats, so a
+  trailing `biome format --write` reports "No fixes applied" and changes nothing.
+  Use `bun run format` only on its own, never as the last link of the chain.
 - New functionality: write the tests first, then implement, then run them.
 - Prefer the clean, robust implementation over the minimal diff.
 - Hand independent tasks to subagents rather than doing them sequentially in the
