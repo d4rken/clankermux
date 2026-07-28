@@ -45,11 +45,18 @@ export interface RequestData {
 	apiKeyName?: string;
 	project?: string | null;
 	/**
-	 * Which attribution tier produced `project`. Absent/null = "not recorded"
-	 * → the column stays NULL, which is distinct from the recorded value
-	 * `"none"` ("eligible request, no tier fired").
+	 * Which attribution tier produced `project`. REQUIRED — every caller must
+	 * state it, explicitly passing `null` when the request was never eligible
+	 * for attribution.
+	 *
+	 * `null` writes SQL NULL = "not recorded", which is distinct from the
+	 * recorded value `"none"` ("eligible request, no tier fired"). Because a
+	 * NULL is indistinguishable from a legacy pre-column row, an accidentally
+	 * omitted field would silently deflate `measured_requests` — the only
+	 * honest denominator for attribution coverage — so omission has to be a
+	 * compile error rather than a quiet NULL write.
 	 */
-	projectAttributionSource?: ProjectAttributionSource | null;
+	projectAttributionSource: ProjectAttributionSource | null;
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
@@ -75,6 +82,22 @@ export interface RequestData {
 		tokensPerSecondApproximate?: boolean;
 	};
 }
+
+/** Fails to compile unless `T` is exactly `true`. */
+type Assert<T extends true> = T;
+
+/**
+ * Compile-time guard: `RequestData.projectAttributionSource` must stay
+ * REQUIRED. `Record<never, never>` (the empty object type) only extends
+ * `Pick<T, K>` when `K` is optional, so re-adding a `?` flips the operand to
+ * `false` and breaks the `extends true` constraint below. Type-only — no
+ * runtime footprint.
+ */
+export type ProjectAttributionSourceIsRequired = Assert<
+	Record<never, never> extends Pick<RequestData, "projectAttributionSource">
+		? false
+		: true
+>;
 
 export interface RequestRoutingData {
 	requestId: string;

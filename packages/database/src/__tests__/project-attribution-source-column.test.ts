@@ -8,7 +8,8 @@
  *
  * Plus the persistence rules:
  *   - the value round-trips through DatabaseOperations.saveRequest,
- *   - an omitted value leaves the column NULL (legacy / ineligible rows),
+ *   - an explicit null leaves the column NULL (ineligible rows); the field is
+ *     REQUIRED, so omitting it is a compile error rather than a silent NULL,
  *   - a follow-up partial re-save does NOT null an already-recorded value
  *     (the UPSERT's COALESCE).
  */
@@ -124,7 +125,7 @@ describe("project_attribution_source persistence through saveRequest", () => {
 		expect(await readSource("src-ambiguous")).toBe("session_ambiguous");
 	});
 
-	it("leaves the column NULL when no source is supplied", async () => {
+	it("leaves the column NULL when the caller states an explicit null", async () => {
 		await dbOps.saveRequest({
 			id: "src-none",
 			method: "POST",
@@ -135,6 +136,7 @@ describe("project_attribution_source persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 100,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 		});
 
 		expect(await readSource("src-none")).toBeNull();
@@ -155,7 +157,8 @@ describe("project_attribution_source persistence through saveRequest", () => {
 			projectAttributionSource: "wd_primary",
 		});
 
-		// Re-save the same id WITHOUT the source — must not null the column.
+		// Re-save the same id with an explicit null source — must not null the
+		// column (the UPSERT COALESCEs against the stored value).
 		await dbOps.saveRequest({
 			id: "src-resave",
 			method: "POST",
@@ -166,6 +169,7 @@ describe("project_attribution_source persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 110,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 		});
 
 		expect(await readSource("src-resave")).toBe("wd_primary");

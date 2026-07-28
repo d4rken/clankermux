@@ -74,7 +74,7 @@ class FakeDbOps {
 		reasoningEffort?: string | null;
 		contextComposition?: unknown;
 		requestedModel?: string | null;
-		projectAttributionSource?: string | null;
+		projectAttributionSource: string | null;
 	}): Promise<void> {
 		this.order.push("request");
 		this.saveRequestCalls.push({

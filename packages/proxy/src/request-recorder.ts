@@ -206,13 +206,34 @@ interface SaveRequestData {
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string | null;
-	projectAttributionSource?: ProjectAttributionSource | null;
+	/**
+	 * REQUIRED — mirrors `RequestData.projectAttributionSource`. Callers must
+	 * state it (explicit `null` for a request that was never eligible), because
+	 * an omitted field would write SQL NULL, which is indistinguishable from a
+	 * legacy pre-column row and deflates the attribution-coverage denominator.
+	 */
+	projectAttributionSource: ProjectAttributionSource | null;
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
 	contextComposition?: ContextComposition | null;
 	requestedModel?: string | null;
 }
+
+/** Fails to compile unless `T` is exactly `true`. */
+type Assert<T extends true> = T;
+
+/**
+ * Compile-time guard mirroring the one on `RequestData`: an empty object type
+ * only extends `Pick<T, K>` when `K` is optional, so re-adding a `?` to
+ * `projectAttributionSource` breaks the `extends true` constraint. Type-only —
+ * no runtime footprint.
+ */
+export type ProjectAttributionSourceIsRequired = Assert<
+	Record<never, never> extends Pick<SaveRequestData, "projectAttributionSource">
+		? false
+		: true
+>;
 
 interface DbOpsLike {
 	saveRequest(data: SaveRequestData): Promise<void>;

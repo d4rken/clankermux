@@ -135,6 +135,7 @@ describe("context composition persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 120,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			project: "my-project",
 			billingType: "plan",
 			contextComposition: {
@@ -175,6 +176,7 @@ describe("context composition persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 80,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 		});
 
 		const row = await readRow("req-comp-null");
@@ -201,6 +203,7 @@ describe("context composition persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 100,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			contextComposition: {
 				systemChars: 10,
 				toolsChars: 20,
@@ -224,6 +227,7 @@ describe("context composition persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 110,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 		});
 
 		const row = await readRow("req-comp-resave");
@@ -250,6 +254,7 @@ describe("context composition persistence through saveRequest", () => {
 			errorMessage: null,
 			responseTime: 100,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			contextComposition: {
 				systemChars: 111,
 				toolsChars: 222,
