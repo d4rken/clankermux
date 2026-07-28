@@ -18,6 +18,8 @@ import {
 } from "../handlers/burst-cooldown";
 import {
 	clearCapacityRestoredProbePending,
+	completeRateLimitProbe,
+	getRateLimitProbeAdmission,
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
 } from "../handlers/rate-limit-cooldown";
@@ -135,6 +137,14 @@ function makeContext(
 			name: string;
 			slots: Array<{ account_id: string; model: string; enabled: boolean }>;
 		} | null;
+		/**
+		 * Called at the start of every account read — i.e. once per SELECTION,
+		 * including the recovery path's re-selection. The deterministic hook for
+		 * "another request grabbed the freshly-released probe before we re-attempted
+		 * it": it runs synchronously inside the re-selection, so no poll can
+		 * interleave between the release and the new lease.
+		 */
+		onAccountsRead?: () => void;
 	} = {},
 ): ProxyContext {
 	const byId = new Map(accounts.map((a) => [a.id, a]));
@@ -150,7 +160,10 @@ function makeContext(
 				baseStrategy.select(strategyPool, meta),
 		} as never,
 		dbOps: {
-			getAllAccounts: mock(async () => accounts),
+			getAllAccounts: mock(async () => {
+				options.onAccountsRead?.();
+				return accounts;
+			}),
 			getAccount: mock(async (id: string) => byId.get(id) ?? null),
 			getActiveComboForFamily: mock(async () => options.combo ?? null),
 			markAccountRateLimited: mock(async () => 1),
@@ -250,6 +263,56 @@ function seedFreshHeadroom(accountId: string) {
 			resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
 		},
 	} as never);
+}
+
+/**
+ * Seed fresh usage for the soft-demotion gates. `fiveHour`/`weekly` are
+ * utilization percentages; the weekly window resets well beyond the pool-liveness
+ * reserve's 12h release horizon, so a near-limit weekly account IS reserve-eligible.
+ */
+function seedCapacity(accountId: string, fiveHour: number, weekly: number) {
+	usageCache.set(accountId, {
+		five_hour: {
+			utilization: fiveHour,
+			resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+		},
+		seven_day: {
+			utilization: weekly,
+			resets_at: new Date(Date.now() + 5 * 86_400_000).toISOString(),
+		},
+	} as never);
+}
+
+/**
+ * Take an account's single-flight recovery-probe lease WITHOUT making a request,
+ * exactly as a concurrent mid-probe request would hold it. `gate` selects which
+ * admission arm gates the account: the capacity-restored marker, or a mature
+ * cooldown streak whose deadline has expired (which leaves
+ * `hasCapacityRestoredProbePending` false — the pool-liveness reserve refuses to
+ * count a peer that owes a capacity probe, so a liveness test must use this arm).
+ */
+function holdProbeLease(
+	accountId: string,
+	gate: "capacity" | "mature-streak" = "capacity",
+): void {
+	if (gate === "capacity") markCapacityRestoredProbePending(accountId);
+	const admission = getRateLimitProbeAdmission({
+		id: accountId,
+		name: `lease-holder-${accountId}`,
+		consecutive_rate_limits: gate === "mature-streak" ? 9 : 0,
+		rate_limited_until: gate === "mature-streak" ? Date.now() - 1 : null,
+	} as unknown as Account);
+	if (admission !== "admitted") {
+		throw new Error(`expected to take the probe lease, got ${admission}`);
+	}
+}
+
+/** Release a lease taken by {@link holdProbeLease} (the marker is retained). */
+function releaseProbeLease(accountId: string): void {
+	completeRateLimitProbe(
+		{ id: accountId, name: accountId } as Account,
+		"abandoned",
+	);
 }
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
@@ -843,6 +906,210 @@ describe("probe-suppression recovery (handleProxy)", () => {
 		}
 		expect((await prober).status).toBe(200);
 	}, 20_000);
+
+	it("pairs the surviving combo slot with ITS OWN model override after a gate drops an earlier slot", async () => {
+		// `runCandidateLoop` pairs accounts with slots POSITIONALLY, so a slot list
+		// that still carries an account the FRESH gates dropped hands the survivor
+		// the wrong slot: either the dropped slot's model override, or (once the
+		// slot/account desync check fires) no override at all. Two slots are the
+		// minimum that can show it — with one fallback candidate a mispairing is
+		// indistinguishable from a correct pairing.
+		const comboA = makeAccount({
+			id: "combo-a",
+			name: "ComboA",
+			access_token: "at-combo-a",
+		});
+		const comboB = makeAccount({
+			id: "combo-b",
+			name: "ComboB",
+			access_token: "at-combo-b",
+		});
+		// Both slots are mid-probe, so the main loop is wholly suppressed.
+		holdProbeLease("combo-a");
+		holdProbeLease("combo-b");
+
+		const models: string[] = [];
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const body =
+					input instanceof Request
+						? await input.clone().text()
+						: String(init?.body ?? "");
+				models.push((JSON.parse(body) as { model: string }).model);
+				return ok200();
+			},
+		);
+
+		const ctx = makeContext([comboA, comboB], "combo-a", "none", {
+			combo: {
+				name: "two-slot-combo",
+				slots: [
+					// Deliberately different FAMILIES: the first slot's family is what
+					// the gate below closes, and the second's is what must survive.
+					{ account_id: "combo-a", model: "claude-opus-4-7", enabled: true },
+					{ account_id: "combo-b", model: "claude-haiku-4-5", enabled: true },
+				],
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		// A POST-selection gate drops the FIRST slot: selection still returns both
+		// accounts (neither is paused or cooled), but the family-scoped 529 breaker
+		// excludes the opus slot. Then the probes report their verdicts.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-opus-4-7",
+		);
+		releaseProbeLease("combo-a");
+		releaseProbeLease("combo-b");
+
+		expect((await holder).status).toBe(200);
+		// Exactly one attempt, on the surviving slot, carrying ITS override — not
+		// the dropped slot's, and not the un-overridden request model.
+		expect(models).toHaveLength(1);
+		expect(models[0]).toContain("haiku");
+	}, 20_000);
+
+	it("keeps the ORDINARY combo-fallback order on recovery (no soft-demotion reorder)", async () => {
+		// The combo-fallback tail deliberately omits `applySoftDemotionReorder`
+		// (degraded-path fail-open, rate-limiting-architecture.md §8b). Recovery has
+		// to reproduce that pipeline exactly, or the post-hold order differs from the
+		// order the ordinary fallback would have followed and the request lands on a
+		// different account. Two candidates whose order the reorder WOULD reverse are
+		// the minimum that can detect it.
+		const comboAcct = makeAccount({
+			id: "combo",
+			name: "Combo",
+			access_token: "at-combo",
+		});
+		// `first` is inside the pool-liveness reserve (weekly headroom 5% < 10%);
+		// `second` can absorb its traffic — so the reorder, if applied, demotes
+		// `first` behind `second`.
+		const first = makeAccount({
+			id: "first",
+			name: "First",
+			access_token: "at-first",
+			consecutive_rate_limits: 9,
+			rate_limited_until: Date.now() - 1,
+		});
+		const second = makeAccount({
+			id: "second",
+			name: "Second",
+			access_token: "at-second",
+			consecutive_rate_limits: 9,
+			rate_limited_until: Date.now() - 1,
+		});
+		seedCapacity("first", 0, 95);
+		seedCapacity("second", 20, 20);
+		// Mature-streak gating, NOT a capacity marker: an account that owes a
+		// capacity probe is not an absorbable peer, which would disable the very
+		// reserve this test needs to be armed.
+		holdProbeLease("first", "mature-streak");
+		holdProbeLease("second", "mature-streak");
+
+		const calls: string[] = [];
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = headers.get("authorization") ?? "";
+				if (auth.includes("at-combo")) {
+					calls.push("combo");
+					throw new TypeError("upstream unreachable");
+				}
+				calls.push(auth.includes("at-first") ? "first" : "second");
+				return ok200();
+			},
+		);
+
+		const ctx = makeContext([comboAcct, first, second], "first", "none", {
+			strategyAccounts: [first, second],
+			combo: {
+				name: "test-combo",
+				slots: [
+					{ account_id: "combo", model: "claude-sonnet-4-5", enabled: true },
+				],
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		// The combo slot fails outright, then the fallback loop finds both
+		// candidates mid-probe and holds.
+		while (calls.length === 0) await tick();
+		await tick(20);
+		releaseProbeLease("first");
+		releaseProbeLease("second");
+
+		expect((await holder).status).toBe(200);
+		// The ordinary fallback order — the reserve must NOT reorder it here.
+		expect(calls).toEqual(["combo", "first"]);
+	}, 20_000);
+
+	it("spends ONE shared budget across repeated suppression, not a fresh one per round", async () => {
+		// The re-target loop is the branch a one-round timeout test cannot reach: the
+		// probe DOES answer, the re-selection is suppressed AGAIN by a newly-admitted
+		// probe, and recovery loops. A fresh PROBE_HOLD_MAX_MS per round would let a
+		// stampede of woken requests wait indefinitely (and, worse, retry ungated
+		// again and again); the whole budget is measured once, from entry.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		holdProbeLease("restored");
+
+		let calls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				return ok200();
+			},
+		);
+
+		let firstProbeReleased = false;
+		let reSuppressed = false;
+		const ctx = makeContext([restored], "restored", "none", {
+			onAccountsRead: () => {
+				if (!firstProbeReleased || reSuppressed) return;
+				// The recovery re-selection is running: another request takes the
+				// freshly-released probe out from under it.
+				holdProbeLease("restored");
+				reSuppressed = true;
+			},
+		});
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const startedAt = Date.now();
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		// The FIRST wait deliberately consumes most of the 10s budget: that is what
+		// makes the two designs distinguishable. Release it early and the second
+		// round has a nearly-full budget either way, so a per-round budget looks
+		// identical to a shared one.
+		await tick(7_000);
+		firstProbeReleased = true;
+		releaseProbeLease("restored");
+
+		const response = await holder;
+		const elapsed = Date.now() - startedAt;
+
+		// The second round really happened (otherwise this proves nothing)…
+		expect(reSuppressed).toBe(true);
+		// …and it drew from what was LEFT of the one budget (~3s), not a fresh 10s:
+		// the whole recovery still fits inside ~10s from entry.
+		expect(elapsed).toBeGreaterThanOrEqual(9_000);
+		expect(elapsed).toBeLessThan(13_000);
+		// Served by the single ungated backup attempt once the budget expired.
+		expect(response.status).toBe(200);
+		expect(calls).toBe(1);
+	}, 30_000);
 
 	it("discards the staged cache body when the client disconnects during the hold", async () => {
 		// The early 499 return emits no worker end/summary, so without an explicit
