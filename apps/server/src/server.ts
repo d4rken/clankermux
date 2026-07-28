@@ -1613,6 +1613,10 @@ Available endpoints:
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
+		// Persisted history for the weekly burn-slope fit that sizes the
+		// pool-liveness reserve's release horizon.
+		getRecentSnapshots: (accountIds, sinceMs) =>
+			dbOps.getRecentUsageSnapshotsForAccounts(accountIds, sinceMs),
 		cache: usageCache,
 		// freshness = max(2 * pollInterval, 150s): two missed polls before a gap.
 		getFreshnessMs: () =>

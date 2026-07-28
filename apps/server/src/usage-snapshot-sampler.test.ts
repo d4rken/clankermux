@@ -8,7 +8,12 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
-import type { Account, UsageSnapshotRow } from "@clankermux/types";
+import { getWeeklyBurnSlope } from "@clankermux/proxy";
+import type {
+	Account,
+	UsageSnapshotRow,
+	UsageSnapshotSample,
+} from "@clankermux/types";
 import {
 	buildSnapshotRows,
 	type SamplerCache,
@@ -333,22 +338,33 @@ function acct(id: string, provider: string, paused = false): Account {
 interface SamplerHarness {
 	sampler: UsageSnapshotSampler;
 	insertedRows: () => UsageSnapshotRow[];
+	snapshotQueries: () => Array<{ accountIds: string[]; sinceMs: number }>;
 }
 
 /**
  * Build a sampler with mocked deps. There is NO refresher/probe dependency —
  * the sampler is a pure read-through observer, so it only reads the supplied
- * cache and never spends quota.
+ * cache and never spends quota. `storedSnapshots` is the persisted history the
+ * weekly burn-slope fit regresses over (returned as-is; the real query filters
+ * by `sinceMs`).
  */
 function makeSampler(opts: {
 	accounts: Account[];
 	cache: SamplerCache;
+	storedSnapshots?: () => UsageSnapshotSample[];
 }): SamplerHarness {
 	const inserted: UsageSnapshotRow[] = [];
+	const queries: Array<{ accountIds: string[]; sinceMs: number }> = [];
 	const sampler = new UsageSnapshotSampler({
 		getAccounts: async () => opts.accounts,
 		insertSnapshots: async (rows) => {
 			inserted.push(...rows);
+		},
+		getRecentSnapshots: async (accountIds, sinceMs) => {
+			queries.push({ accountIds, sinceMs });
+			return (opts.storedSnapshots?.() ?? []).filter(
+				(s) => s.sampledAt >= sinceMs,
+			);
 		},
 		cache: opts.cache,
 		getFreshnessMs: () => FRESHNESS,
@@ -357,6 +373,7 @@ function makeSampler(opts: {
 	return {
 		sampler,
 		insertedRows: () => inserted,
+		snapshotQueries: () => queries,
 	};
 }
 
@@ -431,5 +448,282 @@ describe("UsageSnapshotSampler read-through tick", () => {
 		await h.sampler.tick();
 
 		expect(h.insertedRows()).toHaveLength(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Weekly burn-slope feed (refreshBurnSlopes)
+// ---------------------------------------------------------------------------
+
+const MINUTE = 60_000;
+const HOUR_MS = 3_600_000;
+
+// The burn-slope store is module-level state shared by every test file in one
+// Bun process, so each test uses a unique account id.
+let slopeSeq = 0;
+const slopeAccountId = () => `sampler-slope-${slopeSeq++}`;
+
+/**
+ * A rising 7d series: `count` samples spaced `stepMs` apart ending `endsAgoMs`
+ * before `base`, climbing `pctPerStep` each step. The weekly reset is constant
+ * across the series (no window roll), so the whole series is one segment.
+ */
+function risingSeries(opts: {
+	accountId: string;
+	base: number;
+	endsAgoMs: number;
+	count: number;
+	stepMs: number;
+	startPct: number;
+	pctPerStep: number;
+	resetMs: number;
+}): UsageSnapshotSample[] {
+	const rows: UsageSnapshotSample[] = [];
+	const newest = opts.base - opts.endsAgoMs;
+	for (let i = opts.count - 1; i >= 0; i--) {
+		rows.push({
+			accountId: opts.accountId,
+			provider: "anthropic",
+			sampledAt: newest - i * opts.stepMs,
+			fiveHourPct: null,
+			fiveHourReset: null,
+			sevenDayPct: opts.startPct + (opts.count - 1 - i) * opts.pctPerStep,
+			sevenDayReset: opts.resetMs,
+		});
+	}
+	return rows;
+}
+
+describe("UsageSnapshotSampler weekly burn-slope feed", () => {
+	it("fits the 7d series from persisted snapshots and publishes it to the store", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const resetMs = now + 3 * 24 * HOUR_MS;
+		// 1% per 5 minutes ⇒ 12%/h.
+		const rows = risingSeries({
+			accountId: id,
+			base: now,
+			endsAgoMs: 0,
+			count: 5,
+			stepMs: 5 * MINUTE,
+			startPct: 40,
+			pctPerStep: 1,
+			resetMs,
+		});
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.refreshBurnSlopes();
+
+		const entry = getWeeklyBurnSlope(id, Date.now());
+		expect(entry).not.toBeNull();
+		expect(entry?.slopePctPerHour).toBeCloseTo(12, 5);
+		expect(entry?.windowResetMs).toBe(resetMs);
+
+		// The history query is bounded to the 24h lookback and asks only for the
+		// windowed (anthropic/codex) accounts.
+		const q = h.snapshotQueries();
+		expect(q).toHaveLength(1);
+		expect(q[0]?.accountIds).toEqual([id]);
+		expect(now - (q[0]?.sinceMs ?? 0)).toBeGreaterThanOrEqual(24 * HOUR_MS);
+	});
+
+	it("goes evidence-stale when no new snapshot has landed for >15 minutes", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const newestSampledAt = now - 16 * MINUTE;
+		const rows = risingSeries({
+			accountId: id,
+			base: now,
+			endsAgoMs: 16 * MINUTE,
+			count: 5,
+			stepMs: 5 * MINUTE,
+			startPct: 40,
+			pctPerStep: 1,
+			resetMs: now + 3 * 24 * HOUR_MS,
+		});
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.refreshBurnSlopes();
+
+		// The SAME record read as of the newest sample is usable — freshness is
+		// keyed on the evidence, and this evidence has simply aged out by now.
+		expect(getWeeklyBurnSlope(id, newestSampledAt + MINUTE)).not.toBeNull();
+		expect(getWeeklyBurnSlope(id, Date.now())).toBeNull();
+	});
+
+	it("bootstraps stale-on-arrival from old history, then goes live as fresh samples accrue", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const resetMs = now + 3 * 24 * HOUR_MS;
+		// Restart case: everything in the DB predates the staleness bound.
+		let rows = risingSeries({
+			accountId: id,
+			base: now,
+			endsAgoMs: 40 * MINUTE,
+			count: 5,
+			stepMs: 5 * MINUTE,
+			startPct: 40,
+			pctPerStep: 1,
+			resetMs,
+		});
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.refreshBurnSlopes();
+		// Fitted, but not usable: the gates keep their static fallback.
+		expect(getWeeklyBurnSlope(id, Date.now())).toBeNull();
+
+		// A fresh sample lands and the next refit becomes usable immediately.
+		rows = [
+			...rows,
+			{
+				accountId: id,
+				provider: "anthropic",
+				sampledAt: now,
+				fiveHourPct: null,
+				fiveHourReset: null,
+				sevenDayPct: 52,
+				sevenDayReset: resetMs,
+			},
+		];
+		await h.sampler.refreshBurnSlopes();
+
+		expect(getWeeklyBurnSlope(id, Date.now())).not.toBeNull();
+	});
+
+	it("does not refit an account whose newest sample has not advanced", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const resetMs = now + 3 * 24 * HOUR_MS;
+		let rows = risingSeries({
+			accountId: id,
+			base: now,
+			endsAgoMs: 0,
+			count: 5,
+			stepMs: 5 * MINUTE,
+			startPct: 40,
+			pctPerStep: 1, // 12 %/h
+			resetMs,
+		});
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.refreshBurnSlopes();
+		expect(getWeeklyBurnSlope(id, Date.now())?.slopePctPerHour).toBeCloseTo(
+			12,
+			5,
+		);
+
+		// Same sample times, wildly different utilizations: a refit would change the
+		// slope. The account is skipped, so the earlier fit stands.
+		rows = rows.map((r) => ({ ...r, sevenDayPct: (r.sevenDayPct ?? 0) * 2 }));
+		await h.sampler.refreshBurnSlopes();
+
+		expect(getWeeklyBurnSlope(id, Date.now())?.slopePctPerHour).toBeCloseTo(
+			12,
+			5,
+		);
+	});
+
+	it("refits on a tick that recorded NO fresh rows (persisted history is independent)", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const h = makeSampler({
+			// Empty cache ⇒ buildSnapshotRows produces nothing and tick() early-returns
+			// from its write half.
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({ [id]: { ageMs: null, data: null } }),
+			storedSnapshots: () =>
+				risingSeries({
+					accountId: id,
+					base: now,
+					endsAgoMs: 0,
+					count: 5,
+					stepMs: 5 * MINUTE,
+					startPct: 40,
+					pctPerStep: 1,
+					resetMs: now + 3 * 24 * HOUR_MS,
+				}),
+		});
+
+		await h.sampler.tick();
+
+		expect(h.insertedRows()).toHaveLength(0);
+		expect(getWeeklyBurnSlope(id, Date.now())).not.toBeNull();
+	});
+
+	it("refits even when the snapshot insert fails", async () => {
+		const now = Date.now();
+		const id = slopeAccountId();
+		const failing = new UsageSnapshotSampler({
+			getAccounts: async () => [acct(id, "anthropic")],
+			insertSnapshots: async () => {
+				throw new Error("db down");
+			},
+			getRecentSnapshots: async () =>
+				risingSeries({
+					accountId: id,
+					base: now,
+					endsAgoMs: 0,
+					count: 5,
+					stepMs: 5 * MINUTE,
+					startPct: 40,
+					pctPerStep: 1,
+					resetMs: now + 3 * 24 * HOUR_MS,
+				}),
+			cache: makeCache({
+				[id]: { ageMs: 1_000, data: usageData({ sevenDayUtil: 44 }) },
+			}),
+			getFreshnessMs: () => FRESHNESS,
+			getPollIntervalMs: () => 90_000,
+		});
+
+		await failing.tick();
+
+		expect(getWeeklyBurnSlope(id, Date.now())).not.toBeNull();
+	});
+
+	it("never throws when the history read fails", async () => {
+		const id = slopeAccountId();
+		const sampler = new UsageSnapshotSampler({
+			getAccounts: async () => [acct(id, "anthropic")],
+			insertSnapshots: async () => {},
+			getRecentSnapshots: async () => {
+				throw new Error("db down");
+			},
+			cache: makeCache({}),
+			getFreshnessMs: () => FRESHNESS,
+			getPollIntervalMs: () => 90_000,
+		});
+
+		await sampler.refreshBurnSlopes();
+		expect(getWeeklyBurnSlope(id, Date.now())).toBeNull();
+	});
+
+	it("ignores providers that have no windowed usage series", async () => {
+		const id = slopeAccountId();
+		const h = makeSampler({
+			accounts: [acct(id, "zai")],
+			cache: makeCache({}),
+			storedSnapshots: () => [],
+		});
+
+		await h.sampler.refreshBurnSlopes();
+
+		expect(h.snapshotQueries()).toHaveLength(0);
 	});
 });
