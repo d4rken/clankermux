@@ -28,6 +28,7 @@ import {
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
+	applyRateLimitCooldown,
 	clearCapacityRestoredProbePending,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
@@ -327,6 +328,81 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 		expect(state.anthropicCalls).toBe(1);
 		expect(state.codexCalls).toBe(1);
 		expect(response.status).not.toBe(529);
+	}, 15_000);
+
+	it("treats a tail that RE-COOLED while the head was in flight as unattemptable", async () => {
+		// The mirror image of the test above, and the regression the lazy flag
+		// introduced. The tail's own recovery probe answers 429 mid-flight:
+		// applyRateLimitCooldown installs a FRESH future cooldown and releases the
+		// probe lease in the same call. Probe suppression alone therefore reads the
+		// tail as attemptable again — so the head's genuine 529 was discarded, an
+		// upstream request was made INSIDE a live cooldown (deepening the throttle),
+		// and the client got a later generic error instead.
+		const anthropic = makeAccount({
+			id: "anthropic-primary",
+			name: "Anthropic",
+			provider: "anthropic",
+			api_key: "sk-ant-test",
+			refresh_token: "",
+			access_token: null,
+		});
+		const codex = makeAccount({
+			id: CODEX_ID,
+			name: "Codex",
+			provider: "codex",
+			api_key: null,
+			refresh_token: "rt-codex",
+			access_token: "at-codex",
+		});
+		const ctx = makeContext([anthropic, codex]);
+		holdCodexProbeLease();
+
+		const state = { anthropicCalls: 0, codexCalls: 0 };
+		let releaseHead: (() => void) | null = null;
+		const headInFlight = new Promise<void>((resolve) => {
+			releaseHead = resolve;
+		});
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url.includes("api.anthropic.com")) {
+				state.anthropicCalls += 1;
+				// Hold the head open so the tail can re-cool underneath it.
+				await headInFlight;
+				return new Response(OVERLOADED_BODY, {
+					status: 529,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("chatgpt.com")) {
+				state.codexCalls += 1;
+				return new Response('{"error":{"message":"nope"}}', {
+					status: 500,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("{}", {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as never;
+
+		const pending = callHandleProxy(ctx);
+		while (state.anthropicCalls === 0) {
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		// The tail's probe 429s: a future cooldown lands AND its lease is released
+		// (production's `cooldown_reapplied` path, via the one cooldown entry point).
+		applyRateLimitCooldown(codex, { resetTime: Date.now() + 60_000 }, ctx);
+		releaseHead?.();
+
+		const response = await pending;
+		expect(state.anthropicCalls).toBe(1);
+		// No upstream request against an account that is cooling down right now.
+		expect(state.codexCalls).toBe(0);
+		// …and the head's real overload body reached the client.
+		expect(response.status).toBe(529);
+		const body = (await response.json()) as { error?: { type?: string } };
+		expect(body.error?.type).toBe("overloaded_error");
 	}, 15_000);
 
 	it("still fails over to an ATTEMPTABLE cross-provider tail instead of forwarding the 529", async () => {

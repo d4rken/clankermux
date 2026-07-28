@@ -21,6 +21,7 @@ import {
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
 } from "../handlers/rate-limit-cooldown";
+import { setOverloadHoldBudgetOverrideForTests } from "../overload-hold";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -252,6 +253,9 @@ function seedFreshHeadroom(accountId: string) {
 }
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+
+/** Marker body text for an upstream 529, to tell a forwarded body from a synthetic one. */
+const UPSTREAM_529_MESSAGE = "upstream-529-from-the-real-account";
 
 /**
  * Fetch stub that routes by access token. The RESTORED account's first upstream
@@ -683,6 +687,162 @@ describe("probe-suppression recovery (handleProxy)", () => {
 		// No second upstream call: the stale target was never attempted.
 		expect(state.restoredCalls).toBe(1);
 	}, 15_000);
+
+	it("reports the FRESH gate's 529 when the in-flight probe's own verdict opens the breaker", async () => {
+		// The other half of "the fresh selection is empty": it is empty BECAUSE the
+		// probe answered 529, which releases the lease AND trips the provider
+		// overload breaker in one step. The pre-hold overload array was captured
+		// before that (the account was selectable then — that is why this request
+		// was waiting on it), so returning a bare null degrades a genuine
+		// provider-overloaded 529 into the generic ALL_ACCOUNTS_FAILED 503.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		let calls = 0;
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				await gate;
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "overloaded_error", message: "Overloaded" },
+					}),
+					{ status: 529, headers: { "content-type": "application/json" } },
+				);
+			},
+		);
+
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const prober = callHandleProxy(makeRequest(), url, ctx);
+		prober.catch(() => {});
+		while (calls === 0) await tick();
+
+		// The waiter's only candidate is suppressed, so it is holding for the probe.
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		release?.();
+
+		const response = await holder;
+		expect(response.status).toBe(529);
+		const body = (await response.json()) as { error?: { type?: string } };
+		expect(body.error?.type).toBe("overloaded_error");
+		// The waiter never made an upstream call of its own — the terminal comes
+		// from the fresh gate's evidence, not from an attempt.
+		expect(calls).toBe(1);
+		await prober.catch(() => {});
+	}, 15_000);
+
+	it("stops treating a re-selection as combo-routed once the combo loses its slots", async () => {
+		// An initially active combo whose remaining slots become unavailable during
+		// the hold falls back to plain SessionStrategy accounts — but
+		// `selectByStrategy` does not clear `requestMeta.comboName`, so recovery
+		// keyed on the name alone kept treating those normal accounts as
+		// combo-routed. The visible consequence: `!comboInfo?.comboName` stays false
+		// for the (now slot-less) combo, so the normal account's attempt is never
+		// the terminal one and its genuine upstream 529 is discarded — the client
+		// gets a locally synthesized overload terminal instead of the real body.
+		const comboAcct = makeAccount({
+			id: "combo",
+			name: "Combo",
+			access_token: "at-combo",
+		});
+		const normal = makeAccount({
+			id: "normal",
+			name: "Normal",
+			access_token: "at-normal",
+		});
+		markCapacityRestoredProbePending("combo");
+
+		const state = { comboCalls: 0, normalCalls: 0 };
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const auth = headers.get("authorization") ?? "";
+				if (auth.includes("at-combo")) {
+					state.comboCalls += 1;
+					await gate;
+					return ok200();
+				}
+				state.normalCalls += 1;
+				// A distinctive message: it is what tells a FORWARDED upstream body
+				// apart from a locally synthesized overload terminal, which is what
+				// the client gets when the attempt is not treated as terminal.
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "overloaded_error", message: UPSTREAM_529_MESSAGE },
+					}),
+					{ status: 529, headers: { "content-type": "application/json" } },
+				);
+			},
+		);
+
+		const url = new URL("https://proxy.local/v1/messages");
+		// Park the probe on the combo account with an unrelated request.
+		const prober = callHandleProxy(
+			makeRequest(),
+			url,
+			makeContext([comboAcct], "combo", "none"),
+		);
+		while (state.comboCalls === 0) await tick();
+
+		// The combo request: its single slot is probe-suppressed, so it holds.
+		const ctx = makeContext([comboAcct, normal], "normal", "none", {
+			strategyAccounts: [normal],
+			combo: {
+				name: "test-combo",
+				slots: [
+					{ account_id: "combo", model: "claude-sonnet-4-5", enabled: true },
+				],
+			},
+		});
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		// The combo slot leaves the pool, THEN the probe reports its verdict: the
+		// re-selection falls back to normal SessionStrategy routing.
+		comboAcct.paused = true;
+		release?.();
+
+		// Discarding the 529 lands the request in the combo-fallback tail's overload
+		// terminal, which HOLDS first; cap that budget so the assertions below fail
+		// fast rather than at the test timeout.
+		setOverloadHoldBudgetOverrideForTests(50);
+		try {
+			const response = await holder;
+			expect(response.status).toBe(529);
+			const body = (await response.json()) as {
+				error?: { type?: string; message?: string };
+			};
+			expect(body.error?.type).toBe("overloaded_error");
+			// The normal account is the terminal attempt of a NON-combo re-selection,
+			// so the client gets its REAL upstream body — not a locally synthesized
+			// "provider temporarily overloaded" stand-in.
+			expect(body.error?.message).toBe(UPSTREAM_529_MESSAGE);
+			expect(state.normalCalls).toBe(1);
+		} finally {
+			setOverloadHoldBudgetOverrideForTests(null);
+		}
+		expect((await prober).status).toBe(200);
+	}, 20_000);
 
 	it("discards the staged cache body when the client disconnects during the hold", async () => {
 		// The early 499 return emits no worker end/summary, so without an explicit

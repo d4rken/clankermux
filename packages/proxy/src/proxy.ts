@@ -4,6 +4,7 @@ import {
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	getModelFamily,
+	isAccountAvailable,
 	isDebugEnabled,
 	mapModelName,
 	NETWORK,
@@ -955,15 +956,24 @@ export async function handleProxy(
 
 	/**
 	 * True when every candidate AFTER `index` would be refused before it could
-	 * ever reach upstream — by the single-flight recovery-probe gate or by the
-	 * provider-overload gate — so this attempt is the request's last realistic
-	 * one and its real 529 body must be FORWARDED, not discarded.
+	 * ever reach upstream — by the account's own cooldown, by the single-flight
+	 * recovery-probe gate, or by the provider-overload gate — so this attempt is
+	 * the request's last realistic one and its real 529 body must be FORWARDED,
+	 * not discarded.
 	 *
 	 * Scope: the same-provider case is already covered by
 	 * {@link shouldForwardProviderOverloadIfNoCrossProviderFallback}. The residual
 	 * gap this closes is a MIXED-provider pool — e.g. [A(anthropic), B(codex)]
 	 * with B probe-suppressed — where A's genuine `overloaded_error` was thrown
 	 * away and the client got a generic 503 instead.
+	 *
+	 * The COOLDOWN term is not redundant with selection. This predicate is
+	 * evaluated when the 529 ARRIVES, against a candidate list that was gated
+	 * before the attempt started: a tail whose own recovery probe 429'd in the
+	 * meantime has a fresh future cooldown AND a released lease, so probe
+	 * suppression alone reads it as attemptable. Attempting it would put an
+	 * upstream request inside a live cooldown (deepening the throttle) and replace
+	 * the head's genuine 529 with a later generic error.
 	 */
 	const everyRemainingCandidateUnattemptable = (
 		candidates: Account[],
@@ -974,6 +984,7 @@ export async function handleProxy(
 			.slice(index + 1)
 			.every(
 				(account) =>
+					!isAccountAvailable(account, now) ||
 					wouldSuppressProbe(account, now) ||
 					isProviderOverloaded(account.provider, now, modelForAccount(account)),
 			);
@@ -3183,6 +3194,26 @@ export async function handleProxy(
 	type RecoveryLoopMode = "main" | "combo-fallback";
 
 	/**
+	 * A post-probe re-selection: the gated candidate list, the combo state the
+	 * re-selection actually resolved, and the gates' own EXCLUSION evidence.
+	 *
+	 * The evidence is carried out rather than dropped because an empty `list` is
+	 * only explainable here — see {@link terminalForEmptyReselection}.
+	 */
+	type ProbeReselection = {
+		list: Account[];
+		comboInfo: ComboSlotInfo | null;
+		/** Accounts selection produced, BEFORE any gate ran. */
+		selectedCount: number;
+		/** How many survived the provider-overload gate (qualifies `overloaded`). */
+		providerAvailableCount: number;
+		/** Accounts the fresh provider-overload gate excluded, with deadlines. */
+		overloaded: ProviderOverloadedAccount[];
+		/** Accounts the fresh usage-throttling gate excluded. */
+		throttled: Account[];
+	};
+
+	/**
 	 * Re-run account selection + every gate, mirroring the overload hold's wake
 	 * re-selection. Used after an in-flight recovery probe reaches a verdict: a
 	 * recovered account is admissible again, a re-cooled one is now gated out so
@@ -3203,21 +3234,35 @@ export async function handleProxy(
 	 */
 	const reselectCandidatesAfterProbe = async (
 		mode: RecoveryLoopMode,
-	): Promise<{
-		list: Account[];
-		comboInfo: ComboSlotInfo | null;
-	}> => {
+	): Promise<ProbeReselection> => {
 		requestMeta.pinFailure = null;
 		const reSelected = await selectAccountsForRequest(
 			requestMeta,
 			ctx,
 			mode === "main" ? (effectiveRequestModel ?? undefined) : undefined,
 		);
-		const { available: reAvailable } = applyProviderOverloadGate(reSelected);
-		const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
-		const wakeComboInfo = requestMeta.comboName
-			? getComboSlotInfo(requestMeta)
-			: null;
+		const { available: reAvailable, overloaded: reOverloaded } =
+			applyProviderOverloadGate(reSelected);
+		const { available: rePostThrottle, throttled: reThrottled } =
+			applyUsageThrottling(reAvailable);
+		// Combo state is whatever the RE-SELECTION just decided, which is the
+		// routing strategy — never the leftover name. When an initially active
+		// combo's remaining slots become unavailable during the hold,
+		// `selectByStrategy` falls back to plain SessionStrategy accounts and
+		// deliberately does NOT clear `requestMeta.comboName` (nor its WeakMap
+		// entry), so keying off the name alone keeps treating normal accounts as
+		// combo-routed: a terminal 529 is discarded (`!comboInfo?.comboName` is
+		// false for an empty-slot combo), attribution stays stale, and a failed
+		// normal account can be re-attempted by the combo-fallback pass. Clearing
+		// the stale state here is what makes those three go away together.
+		const comboRouted =
+			requestMeta.routing?.strategy === "combo" &&
+			Boolean(requestMeta.comboName);
+		if (!comboRouted) {
+			requestMeta.comboName = null;
+			requestMeta.comboSlotIndex = null;
+		}
+		const wakeComboInfo = comboRouted ? getComboSlotInfo(requestMeta) : null;
 		const gated =
 			mode === "main"
 				? applySoftDemotionReorder(
@@ -3253,7 +3298,54 @@ export async function handleProxy(
 			// attempt moves with it (see the initial pipeline).
 			requestMeta.routing.primaryAttemptAccountId = gated[0]?.id ?? null;
 		}
-		return { list: gated, comboInfo };
+		return {
+			list: gated,
+			comboInfo,
+			selectedCount: reSelected.length,
+			providerAvailableCount: reAvailable.length,
+			overloaded: reOverloaded,
+			throttled: reThrottled,
+		};
+	};
+
+	/**
+	 * The truthful terminal for a post-probe re-selection that came back EMPTY.
+	 *
+	 * The fresh gates are the ONLY place this evidence exists. The pre-hold
+	 * `providerOverloadedAccounts` / `throttledAccounts` arrays were captured
+	 * BEFORE the probe reached its verdict and are empty in exactly this shape (the
+	 * account was selectable then — that is why the request was waiting on it), so
+	 * a bare `null` return here degrades a genuine provider-overloaded 529 into the
+	 * generic ALL_ACCOUNTS_FAILED 503. The realistic trigger is the in-flight probe
+	 * itself answering 529: it releases its lease AND opens the provider-overload
+	 * breaker, so the re-selection is emptied by `applyProviderOverloadGate`.
+	 *
+	 * Terminal precedence mirrors the ordinary pipeline (throttling, then provider
+	 * overload). No nested hold: recovery already spent a bounded hold budget on
+	 * this request, and the 529 carries a cooldown-scaled Retry-After. `null` means
+	 * "no gate-specific evidence" — the caller's own terminals then report it.
+	 */
+	const terminalForEmptyReselection = async (
+		selection: ProbeReselection,
+	): Promise<Response | null> => {
+		if (selection.list.length > 0) return null;
+		if (selection.throttled.length > 0) {
+			// These terminal returns emit no worker end/summary, so drop any staged
+			// body now (mirrors the all-accounts-failed cleanup).
+			cacheBodyStore.discardStaged(requestMeta.id);
+			return createUsageThrottledResponse(selection.throttled);
+		}
+		if (
+			selection.selectedCount > 0 &&
+			selection.providerAvailableCount === 0 &&
+			selection.overloaded.length > 0
+		) {
+			cacheBodyStore.discardStaged(requestMeta.id);
+			return await createProviderOverloadedResponse(
+				refreshOverloadUntils(selection.overloaded),
+			);
+		}
+		return null;
 	};
 
 	/**
@@ -3271,9 +3363,11 @@ export async function handleProxy(
 	 *     budget: a fresh 10s per round would let a stampede of woken requests
 	 *     retry ungated immediately and repeatedly.
 	 *  3. Neither attempted nor suppressed (the fresh selection is empty — the
-	 *     account re-cooled, was paused, or a gate removed it) → return null. The
-	 *     pre-hold target is STALE by then; attempting it ungated would bypass the
-	 *     fresh routing decision and can deepen a real cooldown.
+	 *     account re-cooled, was paused, or a gate removed it) → report the fresh
+	 *     gates' own terminal, else null. The pre-hold target is STALE by then;
+	 *     attempting it ungated would bypass the fresh routing decision and can
+	 *     deepen a real cooldown. See {@link terminalForEmptyReselection} for why
+	 *     the evidence must come from the FRESH selection.
 	 *  4. Budget expired → claim the single backup-probe permit for this account +
 	 *     lease generation. The winner attempts ungated; losers return null. That
 	 *     bound is the whole point: on a one-account pool with a stuck probe every
@@ -3308,16 +3402,19 @@ export async function handleProxy(
 				return createClientAbortResponse();
 			}
 			if (!released) break; // no verdict within the remaining budget
-			const { list, comboInfo } = await reselectCandidatesAfterProbe(mode);
-			const rerun = await runCandidateLoop(list, comboInfo);
+			const selection = await reselectCandidatesAfterProbe(mode);
+			const rerun = await runCandidateLoop(selection.list, selection.comboInfo);
 			if (rerun.response) return rerun.response;
 			// A genuine attempt happened and failed: that is an ordinary failover, so
 			// let the caller's normal terminals report it.
 			if (rerun.anyAttemptAdmitted) return null;
 			// Nothing attempted AND nothing suppressed: the fresh selection has no
 			// candidate at all. Never fall back on the stale pre-hold target — the
-			// re-selection's own terminal handling is the truthful report.
-			if (rerun.suppressed.length === 0) return null;
+			// re-selection's own gate evidence is the truthful report, and it lives
+			// ONLY in this selection (the pre-hold arrays are empty in this shape).
+			if (rerun.suppressed.length === 0) {
+				return await terminalForEmptyReselection(selection);
+			}
 			target = rerun.suppressed[0];
 			remaining = deadline - Date.now();
 		}
