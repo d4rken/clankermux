@@ -22,6 +22,17 @@ const LIMITS = {
 	LOG_READ_DEFAULT: 1000,
 } as const;
 
+/**
+ * How long file logging stays suspended after the write stream fails (an
+ * asynchronous 'error' event, a failed open, or a throwing write).
+ *
+ * Without a backoff, a persistently failing disk would make every single log
+ * line attempt a fresh createWriteStream — a performance problem of its own on
+ * the highest-frequency write path in the process, which runs at DEBUG level in
+ * production. Exported so tests can drive the window deterministically.
+ */
+export const STREAM_REINIT_BACKOFF_MS = 5000;
+
 // Simple disposable interface to avoid circular dependency
 interface Disposable {
 	dispose(): void;
@@ -39,6 +50,7 @@ export class LogFileWriter implements Disposable {
 	private stream: ReturnType<typeof createWriteStream> | null = null;
 	private maxFileSize = BUFFER_SIZES.LOG_FILE_MAX_SIZE;
 	private writeCount = 0;
+	private streamUnavailableUntil = 0;
 	private static readonly SIZE_CHECK_INTERVAL = 100;
 
 	constructor() {
@@ -67,8 +79,53 @@ export class LogFileWriter implements Disposable {
 			}
 		}
 
-		// Create write stream with append mode
-		this.stream = createWriteStream(this.logFile, { flags: "a" });
+		// Create write stream with append mode. On a full filesystem the open
+		// itself can fail, so a failed open must leave the writer stream-less
+		// rather than throw out of the constructor or out of write().
+		try {
+			const stream = createWriteStream(this.logFile, { flags: "a" });
+			// A write stream reports failures such as ENOSPC asynchronously, as an
+			// 'error' event — stream.write() does not throw for them. An 'error'
+			// event with no listener terminates the process, which is how a full
+			// disk turned into a crash loop. Logging must degrade, never take the
+			// process down with it.
+			stream.on("error", (err) => {
+				this.handleStreamFailure(stream, "Log file stream error", err);
+			});
+			this.stream = stream;
+			this.streamUnavailableUntil = 0;
+		} catch (e: unknown) {
+			this.stream = null;
+			this.streamUnavailableUntil = Date.now() + STREAM_REINIT_BACKOFF_MS;
+			// console.error, not the logger: the logger writes through this very
+			// stream, so reporting through it would recurse into the failure.
+			console.error("Failed to open log file stream:", e);
+		}
+	}
+
+	/**
+	 * Tear down a stream that failed and suspend file logging for the backoff
+	 * window. Only the stream that is still current may null out `this.stream`
+	 * and arm the backoff — a late error from an already-replaced stream must
+	 * not knock out its successor.
+	 */
+	private handleStreamFailure(
+		stream: ReturnType<typeof createWriteStream>,
+		context: string,
+		err: unknown,
+	): void {
+		const isCurrent = this.stream === stream;
+		if (isCurrent) {
+			// Report once per stream: a failing disk can emit repeatedly.
+			console.error(`${context}, suspending file logging:`, err);
+			this.stream = null;
+			this.streamUnavailableUntil = Date.now() + STREAM_REINIT_BACKOFF_MS;
+		}
+		try {
+			stream.destroy();
+		} catch {
+			// Nothing further to do — the stream is already unusable.
+		}
 	}
 
 	private rotateLog(): void {
@@ -103,7 +160,15 @@ export class LogFileWriter implements Disposable {
 
 	write(event: LogEvent): void {
 		if (!this.stream || this.stream.destroyed) {
+			// While the stream is suspended after a failure, writing is a cheap
+			// no-op: reopening per log line on a failing disk is its own problem.
+			if (Date.now() < this.streamUnavailableUntil) {
+				return;
+			}
 			this.initStream();
+			if (!this.stream) {
+				return;
+			}
 		}
 
 		// Periodic size check to trigger rotation mid-stream (every N writes)
@@ -127,8 +192,16 @@ export class LogFileWriter implements Disposable {
 		// substitutes a marker (preserving ts/level/msg) so a write can never throw
 		// or be silently lost.
 		const line = `${safeStringifyLogEvent(event)}\n`;
-		if (this.stream) {
-			this.stream.write(line);
+		const stream = this.stream;
+		if (stream) {
+			// write() can also throw synchronously (e.g. writing to a stream that
+			// was already destroyed). A logging failure must never propagate into
+			// the caller's business logic.
+			try {
+				stream.write(line);
+			} catch (e: unknown) {
+				this.handleStreamFailure(stream, "Log file write failed", e);
+			}
 		}
 	}
 
