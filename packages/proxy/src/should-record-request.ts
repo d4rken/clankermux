@@ -48,6 +48,18 @@ export interface ShouldRecordRequestInput {
 	providerName: string;
 	responseStatus: number;
 	/**
+	 * True only for an in-process dispatch — `handleProxy`'s own `isInternal`
+	 * parameter, which is never sourced from a request header and is therefore
+	 * unspoofable. The two probe-marker suppressions below are gated on it: the
+	 * `x-clankermux-auto-refresh` / `-keepalive` headers are client-settable, so
+	 * without this gate any caller could hide its traffic from Request History
+	 * (and from the cost/metrics it feeds) just by setting a header.
+	 *
+	 * Optional and defaulting to false so an omitted value is the SAFE one
+	 * (record the request) rather than the privileged one.
+	 */
+	internal?: boolean;
+	/**
 	 * Case-insensitive request-header accessor. Returns the header value or
 	 * `null`/`undefined` when absent.
 	 */
@@ -72,7 +84,13 @@ export interface ShouldRecordRequestInput {
  * Any request matching one of those is NOT recorded (returns `false`).
  */
 export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
-	const { path, providerName, responseStatus, getHeader } = input;
+	const {
+		path,
+		providerName,
+		responseStatus,
+		getHeader,
+		internal = false,
+	} = input;
 
 	// (1) count_tokens probes on the openai-compatible or codex provider are not
 	//     billable user traffic.
@@ -84,8 +102,10 @@ export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 	}
 
 	// (2) Synthetic auto-refresh probes — internal scheduler activity that must
-	//     not pollute user-visible dashboard metrics.
-	if (getHeader("x-clankermux-auto-refresh") === "true") {
+	//     not pollute user-visible dashboard metrics. Trust-gated on `internal`:
+	//     the marker is a plain header, so without the gate any client could
+	//     suppress its own Request-History rows.
+	if (internal && getHeader("x-clankermux-auto-refresh") === "true") {
 		return false;
 	}
 
@@ -93,7 +113,9 @@ export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 	//      probes: internal scheduler traffic that would otherwise inflate request
 	//      counts, cost, and the cache-effectiveness "real work" volume. Keepalive
 	//      activity is tracked separately in bridgeStats, not the requests table.
-	if (getHeader("x-clankermux-keepalive") === "true") {
+	//      The kinds are kept SEPARATE (rather than folded into one "any probe"
+	//      check) so neither marker can borrow the other's suppression.
+	if (internal && getHeader("x-clankermux-keepalive") === "true") {
 		return false;
 	}
 

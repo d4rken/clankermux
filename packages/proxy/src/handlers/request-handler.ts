@@ -47,6 +47,35 @@ async function tryUnwrapSyntheticResponse(
 }
 
 /**
+ * Matches every internal control header this proxy uses, current and future,
+ * under both the current (`x-clankermux-*`) and legacy (`x-better-ccflare-*`)
+ * prefixes.
+ */
+const INTERNAL_HEADER_PREFIX_PATTERN = /^x-(clankermux|better-ccflare)-/i;
+
+/**
+ * Deletes every internal control header from the FINAL outbound headers, as the
+ * last mutation before `fetch`.
+ *
+ * This generalizes the existing per-header policy in `proxy-operations.ts`
+ * ("DELETE the internal header so it never reaches the upstream Codex backend"):
+ * a hand-maintained delete list silently misses markers like
+ * `x-clankermux-request-stream`, `-skip-cache`, and anything added later, so we
+ * sweep by prefix instead.
+ *
+ * The key list is SNAPSHOTTED before deleting: mutating a live `Headers` while
+ * iterating it can advance past adjacent entries, which would leave some of the
+ * very headers this sweep exists to remove on the wire.
+ */
+function stripInternalControlHeaders(headers: Headers): void {
+	for (const key of [...headers.keys()]) {
+		if (INTERNAL_HEADER_PREFIX_PATTERN.test(key)) {
+			headers.delete(key);
+		}
+	}
+}
+
+/**
  * Creates request metadata for tracking and analytics
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -150,6 +179,7 @@ export async function makeProxyRequest(
 			const targetUrl = target.url;
 			const mutableHeaders = new Headers(target.headers);
 			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
+			stripInternalControlHeaders(mutableHeaders);
 
 			const response = await fetch(
 				new Request(target, {
@@ -163,6 +193,7 @@ export async function makeProxyRequest(
 
 		const mutableHeaders = new Headers(headers);
 		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
+		stripInternalControlHeaders(mutableHeaders);
 
 		const response = await fetch(target, {
 			method,

@@ -96,6 +96,14 @@ export interface UsageState {
 	/** True once a `message_stop` event was seen (clean-ending signal). */
 	sawMessageStop: boolean;
 	/**
+	 * True once a `message_start` event was seen. Every Anthropic-shape streaming
+	 * `/v1/messages` 200 opens with one — including the translated Codex /
+	 * OpenAI-compatible / Ollama streams, which all synthesize it — so its ABSENCE
+	 * at natural EOF means the stream died before producing any content at all.
+	 * That is not a success, however Bun-clean the close looked.
+	 */
+	sawMessageStart: boolean;
+	/**
 	 * True while we're discarding an overlong, newline-free line (see
 	 * `MAX_SSE_LINE_BYTES`). Once the `lineBuffer` exceeds the cap without a
 	 * terminating `\n`, the buffered content is dropped and this flag is set so
@@ -138,6 +146,7 @@ export function createUsageState(): UsageState {
 		lineBuffer: "",
 		currentEvent: undefined,
 		sawMessageStop: false,
+		sawMessageStart: false,
 		skippingOverlongLine: false,
 	};
 }
@@ -227,6 +236,7 @@ function applySseData(
 	const isMessageStart =
 		parsed.type === "message_start" || eventType === "message_start";
 	if (isMessageStart) {
+		state.sawMessageStart = true;
 		// Most shapes nest usage/model under `message`; some put them at the top
 		// level of the message_start data (S6) — handle both, preferring nested.
 		const usage = parsed.message?.usage ?? parsed.usage;
@@ -421,6 +431,70 @@ function flushLineBuffer(state: UsageState): void {
 	const rawLine = state.lineBuffer;
 	state.lineBuffer = "";
 	processLine(state, rawLine);
+}
+
+/**
+ * Flush the buffered trailing SSE line, exposed so a caller can CLASSIFY the
+ * stream before {@link finalizeUsage} runs.
+ *
+ * Ordering matters: `onEnd` fires before `finalizeUsage`, and a provider may
+ * close the connection right after the last `data:` byte with no trailing
+ * newline — so a final `message_start` (or `message_stop`) can still be sitting
+ * in the line buffer at classification time. Classifying first would report a
+ * complete stream as truncated.
+ *
+ * Idempotent: a second flush (finalizeUsage's own) sees an empty buffer and a
+ * drained decoder and does nothing.
+ */
+export function flushPendingSseLine(state: UsageState): void {
+	flushLineBuffer(state);
+}
+
+/**
+ * Recorder outcome reason for a stream that reached EOF without ever producing
+ * `message_start` — i.e. it died before any content.
+ */
+export const STREAM_TRUNCATED_MID_CONTENT = "stream_truncated_mid_content";
+
+/**
+ * Does this response shape REQUIRE a `message_start` to be considered complete?
+ *
+ * Narrow and explicit on purpose — `POST /v1/messages`, status 200,
+ * `content-type: text/event-stream`:
+ *
+ *  - Provider-INDEPENDENT (unlike {@link detectMissingMessageStop}): the Codex,
+ *    OpenAI-compatible and Ollama transformers all synthesize `message_start`
+ *    when they translate into Anthropic SSE, so a missing one is a real defect
+ *    on every backend.
+ *  - But NOT "any streaming response": a successful NATIVE Codex stream speaks
+ *    `response.created` / `response.completed` and never emits `message_start`
+ *    at all, so a broad gate would record every healthy Codex-native stream as
+ *    truncated.
+ *
+ * The native exclusion is keyed on the RESPONSE MARKER, not on the path. The
+ * `/v1/responses` adapter rewrites the request to `/v1/messages` before the
+ * proxy ever sees it, so in production a native Codex stream arrives here as a
+ * streaming `POST /v1/messages` 200 — path-shaped exactly like the case this
+ * gate exists for. `x-clankermux-responses-native: 1` is set by the Codex
+ * provider on (and only on) a successful native passthrough, which makes it the
+ * only reliable discriminator. The `/v1/responses` path arm is kept for direct
+ * (non-adapter) callers.
+ */
+export function expectsMessageStart(opts: {
+	method: string;
+	path: string;
+	status: number;
+	contentType: string | null;
+	/** Value of {@link NATIVE_RESPONSES_RESPONSE_HEADER} on the response. */
+	nativeResponsesMarker?: string | null;
+}): boolean {
+	if (opts.nativeResponsesMarker === "1") return false;
+	return (
+		opts.method.toUpperCase() === "POST" &&
+		opts.path === "/v1/messages" &&
+		opts.status === 200 &&
+		(opts.contentType ?? "").toLowerCase().includes("text/event-stream")
+	);
 }
 
 /**

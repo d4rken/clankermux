@@ -15,9 +15,25 @@ export interface KiloUsageData {
  * Fetch usage data from Kilo's user endpoint
  * This is non-blocking - failures return null and won't affect provider operation
  */
+/**
+ * Hard bound on the usage fetch, mirroring the Anthropic fetcher's guard.
+ *
+ * Without a signal the request could hang indefinitely. `usage-fetcher.ts`
+ * tracks in-flight fetches in `inFlightFetches` and only deletes the entry in
+ * `promise.finally()`, so a hung fetch wedges that account's polling slot for
+ * the lifetime of the process -- and polling is the ONLY channel that observes a
+ * locked account recovering.
+ */
+const USAGE_FETCH_TIMEOUT_MS = 5000;
+
 export async function fetchKiloUsageData(
 	apiKey: string,
 ): Promise<KiloUsageData | null> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(
+		() => controller.abort(),
+		USAGE_FETCH_TIMEOUT_MS,
+	);
 	try {
 		const response = await fetch("https://api.kilo.ai/api/user", {
 			method: "GET",
@@ -25,6 +41,7 @@ export async function fetchKiloUsageData(
 				Authorization: `Bearer ${apiKey}`,
 				Accept: "application/json",
 			},
+			signal: controller.signal,
 		});
 
 		if (!response.ok) {
@@ -73,8 +90,12 @@ export async function fetchKiloUsageData(
 			utilizationPercent,
 		};
 	} catch (error) {
+		// An abort lands here too, so a timeout degrades to the existing
+		// failure path (null) rather than propagating.
 		log.warn("Error fetching Kilo usage data:", error);
 		return null;
+	} finally {
+		clearTimeout(timeoutId);
 	}
 }
 

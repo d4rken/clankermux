@@ -179,20 +179,43 @@ export function isSyntheticInternalRequest(headers: Headers): boolean {
 }
 
 /**
+ * Which synthetic-probe marker a call site accepts.
+ *
+ * The kind is LOAD-BEARING and deliberately has no default: several exemptions
+ * are keepalive-only (the keepalive scheduler fans out in parallel and trips
+ * Anthropic's per-IP burst limit, which an auto-refresh probe does not do), and
+ * the Request-History suppressions are split one per marker. Flattening them all
+ * to "any" would silently widen each exemption to the other marker.
+ */
+export type SyntheticProbeKind = "any" | "keepalive" | "auto-refresh";
+
+/**
  * True only for a TRUSTED synthetic probe: an in-process scheduler dispatch
  * (`internal` — the flag handleProxy sets from its own `isInternal` parameter,
- * never from a request header) that also carries an auto-refresh/keepalive
- * marker. The `internal` gate is mandatory: the marker headers are
- * client-spoofable, so header presence alone must NOT let an external caller
- * bypass operator-side gates such as usage throttling. Use this (not the
- * header-only {@link isSyntheticInternalRequest}) wherever a probe exemption
- * would otherwise be a spoofable security hole.
+ * never from a request header) that also carries the requested marker.
+ *
+ * The `internal` gate is mandatory: the marker headers are client-spoofable, so
+ * header presence alone must NOT let an external caller bypass operator-side
+ * gates (usage throttling, 429 cooldowns, the out_of_credits floor, the
+ * family-weekly safety net, burst-retry classification, the stale-token 401
+ * retry, the overload hold, or Request-History recording). Use this — never the
+ * header-only {@link isSyntheticInternalRequest} — wherever a probe exemption
+ * would otherwise be a spoofable privilege.
  */
 export function isTrustedSyntheticProbe(
 	headers: Headers,
 	internal: boolean,
+	kind: SyntheticProbeKind,
 ): boolean {
-	return internal && isSyntheticInternalRequest(headers);
+	if (!internal) return false;
+	switch (kind) {
+		case "keepalive":
+			return !!headers.get("x-clankermux-keepalive");
+		case "auto-refresh":
+			return !!headers.get("x-clankermux-auto-refresh");
+		default:
+			return isSyntheticInternalRequest(headers);
+	}
 }
 
 /**
@@ -621,6 +644,7 @@ export async function proxyUnauthenticated(
 				method: req.method,
 				path: url.pathname,
 				account: null,
+				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: requestBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
@@ -662,6 +686,15 @@ export async function proxyUnauthenticated(
  * @param createBodyStream - Function to create body stream (buffered earlier)
  * @param failoverAttempts - Number of failover attempts
  * @param ctx - The proxy context
+ * @param returnRateLimitedResponseOnExhaustion - "this is the request's last
+ *   realistic attempt, so forward a genuine upstream 529 instead of discarding
+ *   it in favour of the generic pool-exhausted terminal". Prefer the PREDICATE
+ *   form: whether a later candidate is still attemptable can change while this
+ *   attempt is in flight (a sibling's recovery-probe lease is released, an
+ *   overload bucket closes), and a boolean snapshotted before the fetch reports
+ *   the state at REQUEST-PREPARATION time, not at the moment the 529 arrives.
+ *   The predicate is evaluated at most once per attempt, when the response is
+ *   in hand, and memoized for the rest of that attempt.
  * @returns Promise resolving to response or null if failed
  */
 export async function proxyWithAccount(
@@ -677,10 +710,23 @@ export async function proxyWithAccount(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
-	returnRateLimitedResponseOnExhaustion = false,
+	returnRateLimitedResponseOnExhaustion: boolean | (() => boolean) = false,
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
+	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
+	// the clone decision and the forward decision, which straddle an await, can
+	// never disagree about whether this attempt is terminal.
+	let terminalAttemptResolved: boolean | undefined;
+	const isTerminalAttempt = (): boolean => {
+		if (typeof returnRateLimitedResponseOnExhaustion !== "function") {
+			return returnRateLimitedResponseOnExhaustion;
+		}
+		if (terminalAttemptResolved === undefined) {
+			terminalAttemptResolved = returnRateLimitedResponseOnExhaustion();
+		}
+		return terminalAttemptResolved;
+	};
 	// Best-effort re-arm of this connection's Bun idle timer, threaded into
 	// forwardToClient so long quiet gaps mid-stream don't reap the connection at
 	// the 180s base idleTimeout. ctx.server is unset in tests / non-HTTP callers
@@ -739,6 +785,13 @@ export async function proxyWithAccount(
 	// family-scoped overload attribution (the 529 trip + forwardToClient's
 	// upstreamModel) so a breaker opens for the family that actually failed.
 	let activeUpstreamModel: string | null = null;
+	// Trust-gated probe predicate for every exemption below. `requestMeta.internal`
+	// is handleProxy's own `isInternal` parameter (default false, sourced only from
+	// dispatchProxyRequest) and is therefore unspoofable; the marker headers alone
+	// are not. The KIND is always explicit — several exemptions are keepalive-only
+	// and must not widen to auto-refresh probes (or vice versa).
+	const isTrustedProbe = (kind: SyntheticProbeKind): boolean =>
+		isTrustedSyntheticProbe(req.headers, requestMeta.internal === true, kind);
 	try {
 		if (isDebugEnabled("proxy") || process.env.NODE_ENV === "development") {
 			log.info(
@@ -789,7 +842,7 @@ export async function proxyWithAccount(
 		// staged this request id (same account), and stageRequest() does a real
 		// `Buffer.from(body)` copy (~0.5–1.5 MB) — re-staging it on every gentle
 		// re-probe would churn that copy needlessly.
-		if (!isSyntheticInternalRequest(req.headers) && !options?.reprobe) {
+		if (!isTrustedProbe("any") && !options?.reprobe) {
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
 				account.id,
@@ -1182,7 +1235,7 @@ export async function proxyWithAccount(
 			if (
 				rawResponse.status === 429 &&
 				isAnthropicOutOfCredits(rawResponse) &&
-				!isSyntheticInternalRequest(req.headers)
+				!isTrustedProbe("any")
 			) {
 				const now = Date.now();
 				const windowReset = usageCache.getRateLimitedUntil(account.id);
@@ -1251,14 +1304,13 @@ export async function proxyWithAccount(
 			//
 			// Fails open: with stale/absent usage every existing path behaves
 			// exactly as before. Anthropic only — Codex windows belong to
-			// the CodexSpendCoordinator. Trusted-probe gated (not the header-only
-			// `isSyntheticInternalRequest` its neighbours use) because the marker
+			// the CodexSpendCoordinator. Trusted-probe gated because the marker
 			// headers are client-spoofable.
 			if (
 				rawResponse.status === 429 &&
 				account.provider === "anthropic" &&
 				!options?.reprobe &&
-				!isTrustedSyntheticProbe(req.headers, requestMeta.internal === true)
+				!isTrustedProbe("any")
 			) {
 				const now = Date.now();
 				// getFreshCapacity is only the 180s FRESHNESS gate here; the
@@ -1352,7 +1404,7 @@ export async function proxyWithAccount(
 				rawResponse.status === 429 &&
 				requestedModel &&
 				!options?.reprobe &&
-				!isSyntheticInternalRequest(req.headers) &&
+				!isTrustedProbe("any") &&
 				!isAnthropicHardLimitStatus(rawResponse)
 			) {
 				const now = Date.now();
@@ -1418,7 +1470,7 @@ export async function proxyWithAccount(
 			if (
 				rawResponse.status === 429 &&
 				!options?.reprobe &&
-				!isSyntheticInternalRequest(req.headers)
+				!isTrustedProbe("any")
 			) {
 				const now = Date.now();
 				// Read fresh capacity once. When usage is stale/absent
@@ -1542,8 +1594,7 @@ export async function proxyWithAccount(
 						// account at the same instant. Applying real cooldowns
 						// here drains the pool to zero routable accounts even
 						// though no real user-facing rate limit was hit.
-						const isKeepalive =
-							req.headers.get("x-clankermux-keepalive") === "true";
+						const isKeepalive = isTrustedProbe("keepalive");
 						if (isKeepalive) {
 							log.warn(
 								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
@@ -1790,8 +1841,7 @@ export async function proxyWithAccount(
 					// Same keepalive-skip as the no-fallback path above: synthetic
 					// keepalive bursts can trip Anthropic's per-IP limit even when
 					// individual accounts are healthy.
-					const isKeepalive =
-						req.headers.get("x-clankermux-keepalive") === "true";
+					const isKeepalive = isTrustedProbe("keepalive");
 					if (isKeepalive) {
 						log.warn(
 							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
@@ -1927,7 +1977,7 @@ export async function proxyWithAccount(
 			if (
 				staleTokenRetryAttempt < STALE_TOKEN_MAX_RETRY &&
 				canAttemptStaleTokenRefresh(account) &&
-				!isSyntheticInternalRequest(req.headers) &&
+				!isTrustedProbe("any") &&
 				cooledDown
 			) {
 				// The 401 error body is abandoned the moment we choose the refresh
@@ -2009,7 +2059,7 @@ export async function proxyWithAccount(
 			// bump); "reopened" releases any remaining sibling-bucket lease too.
 			settleOverloadProbe("reopened");
 
-			if (returnRateLimitedResponseOnExhaustion) {
+			if (isTerminalAttempt()) {
 				log.warn(
 					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
@@ -2019,6 +2069,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
@@ -2052,7 +2103,7 @@ export async function proxyWithAccount(
 
 		// Check for rate limit using account-specific provider
 		const responseForRateLimitCheck =
-			returnRateLimitedResponseOnExhaustion && response.status === 529
+			response.status === 529 && isTerminalAttempt()
 				? response.clone()
 				: response;
 		const isRateLimited = await processProxyResponse(
@@ -2073,7 +2124,7 @@ export async function proxyWithAccount(
 			await discardUpstreamBody(responseForRateLimitCheck);
 		}
 		if (isRateLimited) {
-			if (returnRateLimitedResponseOnExhaustion && response.status === 529) {
+			if (response.status === 529 && isTerminalAttempt()) {
 				log.warn(
 					`Account ${account.name} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
@@ -2087,6 +2138,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
@@ -2148,6 +2200,7 @@ export async function proxyWithAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
@@ -2276,6 +2329,7 @@ export async function proxyForcedAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
@@ -2415,6 +2469,7 @@ export async function proxyForcedAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,

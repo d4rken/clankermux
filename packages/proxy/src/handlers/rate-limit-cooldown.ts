@@ -182,6 +182,41 @@ function pruneProbeLeases(now: number): void {
 	}
 }
 
+/** What {@link inspectProbeGate} observed about an account's gate state. */
+interface ProbeGateInspection {
+	/**
+	 * True when this account is subject to the single-flight recovery-probe gate
+	 * at all — i.e. a mature cooldown streak whose deadline has expired, or an
+	 * owed capacity-restored probe. False means "ordinary account, not gated".
+	 */
+	gatingRequired: boolean;
+	/** The pending capacity-restored generation, or undefined when none is owed. */
+	capacityGeneration: number | undefined;
+}
+
+/**
+ * The ONE definition of "is this account gated, and by which capacity
+ * generation". {@link getRateLimitProbeAdmission} (which then takes a lease) and
+ * {@link wouldSuppressProbe} (which must not perturb anything) both consume it,
+ * so the read-only predicate can never drift from the authoritative gate.
+ *
+ * PURE: no pruning, no lease acquisition, no logging. Both of those stay
+ * exclusively inside `getRateLimitProbeAdmission`.
+ */
+function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
+	const expiredMatureCooldown =
+		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
+		account.rate_limited_until != null &&
+		account.rate_limited_until <= now;
+	const capacityGeneration = capacityRestoredPending.get(
+		account.id,
+	)?.generation;
+	return {
+		gatingRequired: expiredMatureCooldown || capacityGeneration !== undefined,
+		capacityGeneration,
+	};
+}
+
 /**
  * Admits one process-local recovery probe for an account that just became
  * selectable again — either because a MATURE cooldown streak expired, or
@@ -212,15 +247,8 @@ export function getRateLimitProbeAdmission(
 	account: Account,
 	now: number = Date.now(),
 ): RateLimitProbeAdmission {
-	const expiredMatureCooldown =
-		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
-		account.rate_limited_until != null &&
-		account.rate_limited_until <= now;
-	const capacityGeneration = capacityRestoredPending.get(
-		account.id,
-	)?.generation;
-	if (!expiredMatureCooldown && capacityGeneration === undefined)
-		return "not_required";
+	const { gatingRequired, capacityGeneration } = inspectProbeGate(account, now);
+	if (!gatingRequired) return "not_required";
 
 	pruneProbeLeases(now);
 	const existingLease = probeLeases.get(account.id);
@@ -289,6 +317,28 @@ export function completeRateLimitProbe(
 	} else if (outcome === "abandoned") {
 		log.debug(`[clankermux] account=${account.name} cooldown_probe_abandoned`);
 	}
+}
+
+/**
+ * Would {@link getRateLimitProbeAdmission} refuse this account right now?
+ *
+ * Side-effect free: it asks the SHARED {@link inspectProbeGate} inspector (the
+ * same one the real gate consumes, so the two can never disagree), reads
+ * `probeLeases` WITHOUT pruning, and takes no lease — so it is safe to call from
+ * a decision path that must not perturb gate state.
+ *
+ * Used to decide whether an attempt is the request's LAST realistic one: a
+ * remaining candidate that would only be suppressed cannot serve as fallback, so
+ * a real upstream 529 body must be forwarded rather than discarded in favour of
+ * a generic 503.
+ */
+export function wouldSuppressProbe(
+	account: Account,
+	now: number = Date.now(),
+): boolean {
+	if (!inspectProbeGate(account, now).gatingRequired) return false;
+	const existingLease = probeLeases.get(account.id);
+	return existingLease !== undefined && existingLease.leaseUntil > now;
 }
 
 /** Test-only: clears all in-memory probe leases/markers between test cases. */

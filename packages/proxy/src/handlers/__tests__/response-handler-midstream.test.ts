@@ -416,6 +416,10 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 					"content-type": "application/json",
 					"x-clankermux-keepalive": "true",
 				}),
+				// The keepalive marker is a plain client-settable header, so the
+				// exemption is trust-gated on the unspoofable in-process dispatch
+				// flag. A genuine replay always carries it.
+				internal: true,
 				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
 				response: new Response(streamWithErrorFrame("rate_limit_error"), {
 					status: 200,
@@ -429,6 +433,74 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		);
 		await response.text();
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("SPOOF GUARD: DOES set the burst marker when the keepalive header arrives without an internal dispatch", async () => {
+		// Header-only, no trusted dispatch: an external caller must not be able to
+		// suppress the burst marker (and with it sibling diversion) by setting a
+		// header on its own requests.
+		const account = makeAccount(); // OAuth anthropic
+		const ctx = makeStreamCtx();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-keepalive-spoofed",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-keepalive": "true",
+				}),
+				// internal omitted → the safe (untrusted) default.
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(true);
+	});
+
+	it("CROSS-KIND GUARD: an internal AUTO-REFRESH probe does not get the keepalive-only burst-marker exemption", async () => {
+		// The keepalive exemption exists because that scheduler fans out in
+		// parallel and trips Anthropic's per-IP limit. An auto-refresh probe does
+		// not, so it must NOT inherit the exemption.
+		const account = makeAccount(); // OAuth anthropic
+		const ctx = makeStreamCtx();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-autorefresh",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-auto-refresh": "true",
+				}),
+				internal: true,
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		expect(isAnthropicBurstThrottleActive()).toBe(true);
 	});
 });
 

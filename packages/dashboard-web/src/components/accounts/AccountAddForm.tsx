@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import { runGuarded } from "../../lib/submit-guard";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -201,6 +202,24 @@ export function AccountAddForm({
 		}
 	};
 
+	/**
+	 * Re-entrancy latch for every account-creation submit.
+	 *
+	 * A ref, NOT React state: state updates are not synchronous, so two clicks
+	 * dispatched before the next render would BOTH observe `isSubmitting === false`
+	 * and both fire — creating a duplicate account, or a duplicate device/OAuth
+	 * session. The ref flips in the same tick as the click.
+	 *
+	 * The state mirror below exists ONLY so the buttons can render `disabled`; it
+	 * is never the guard.
+	 */
+	const submittingRef = useRef(false);
+	const [isSubmitting, setIsSubmitting] = useState(false);
+
+	/** Run `submit` at most once at a time (see runGuarded). */
+	const guardSubmit = (submit: () => Promise<void>): Promise<void> =>
+		runGuarded(submittingRef, setIsSubmitting, submit);
+
 	const stopCodexPolling = () => {
 		if (codexPollIntervalRef.current !== null) {
 			clearInterval(codexPollIntervalRef.current);
@@ -208,7 +227,7 @@ export function AccountAddForm({
 		}
 	};
 
-	const handleStartQwenAuth = async () => {
+	const handleStartQwenAuthInner = async () => {
 		if (!newAccount.name) {
 			onError("Account name is required");
 			return;
@@ -273,7 +292,7 @@ export function AccountAddForm({
 		}
 	};
 
-	const handleStartCodexAuth = async () => {
+	const handleStartCodexAuthInner = async () => {
 		if (!newAccount.name) {
 			onError("Account name is required");
 			return;
@@ -340,7 +359,7 @@ export function AccountAddForm({
 		}
 	};
 
-	const handleAddAccount = async () => {
+	const handleAddAccountInner = async () => {
 		if (!newAccount.name) {
 			onError("Account name is required");
 			return;
@@ -715,7 +734,7 @@ export function AccountAddForm({
 		setAuthStep("code");
 	};
 
-	const handleCodeSubmit = async () => {
+	const handleCodeSubmitInner = async () => {
 		const trimmedCode = authCode.trim();
 		if (!trimmedCode) {
 			onError("Authorization code is required");
@@ -747,6 +766,14 @@ export function AccountAddForm({
 		});
 		onSuccess();
 	};
+
+	// Guarded entry points. Every account-creation submit goes through the same
+	// latch — Qwen/Codex device-flow starts included, since a duplicate device
+	// session is the same bug class as a duplicate account row.
+	const handleStartQwenAuth = () => guardSubmit(handleStartQwenAuthInner);
+	const handleStartCodexAuth = () => guardSubmit(handleStartCodexAuthInner);
+	const handleAddAccount = () => guardSubmit(handleAddAccountInner);
+	const handleCodeSubmit = () => guardSubmit(handleCodeSubmitInner);
 
 	const handleCancel = () => {
 		stopQwenPolling();
@@ -1485,7 +1512,7 @@ export function AccountAddForm({
 					{newAccount.mode === "qwen" ? (
 						<>
 							{(qwenStep === "idle" || qwenStep === "error") && (
-								<Button onClick={handleStartQwenAuth}>
+								<Button onClick={handleStartQwenAuth} disabled={isSubmitting}>
 									Start Qwen Authentication
 								</Button>
 							)}
@@ -1496,7 +1523,7 @@ export function AccountAddForm({
 					) : newAccount.mode === "codex" ? (
 						<>
 							{(codexStep === "idle" || codexStep === "error") && (
-								<Button onClick={handleStartCodexAuth}>
+								<Button onClick={handleStartCodexAuth} disabled={isSubmitting}>
 									Start Codex Authentication
 								</Button>
 							)}
@@ -1506,7 +1533,9 @@ export function AccountAddForm({
 						</>
 					) : (
 						<>
-							<Button onClick={handleAddAccount}>Continue</Button>
+							<Button onClick={handleAddAccount} disabled={isSubmitting}>
+								Continue
+							</Button>
 							<Button variant="outline" onClick={handleCancel}>
 								Cancel
 							</Button>
@@ -1531,7 +1560,9 @@ export function AccountAddForm({
 						/>
 					</div>
 					<div className="flex gap-2">
-						<Button onClick={handleCodeSubmit}>Complete Setup</Button>
+						<Button onClick={handleCodeSubmit} disabled={isSubmitting}>
+							Complete Setup
+						</Button>
 						<Button variant="outline" onClick={handleCancel}>
 							Cancel
 						</Button>

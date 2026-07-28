@@ -6,7 +6,11 @@ import {
 	validatePriority,
 	validateString,
 } from "@clankermux/core";
-import type { DatabaseOperations } from "@clankermux/database";
+import {
+	type DatabaseOperations,
+	DuplicateAccountNameError,
+	insertAccountUnique,
+} from "@clankermux/database";
 import {
 	BadRequest,
 	errorResponse,
@@ -104,7 +108,8 @@ export function createQwenDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						? normalizeQwenBaseUrl(tokens.resource_url)
 						: null;
 
-					await dbOps.getAdapter().run(
+					await insertAccountUnique(
+						dbOps.getAdapter(),
 						`INSERT INTO accounts (
 							id, name, provider, api_key, refresh_token, access_token,
 							expires_at, created_at, request_count, total_requests, priority,
@@ -124,6 +129,7 @@ export function createQwenDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 							null,
 							null,
 						],
+						name,
 					);
 
 					qwenSessions.set(sessionId, {
@@ -393,7 +399,8 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						tokens.id_token ?? null,
 					);
 
-					await dbOps.getAdapter().run(
+					await insertAccountUnique(
+						dbOps.getAdapter(),
 						`INSERT INTO accounts (
 							id, name, provider, api_key, refresh_token, access_token,
 							expires_at, created_at, request_count, total_requests, priority,
@@ -420,6 +427,7 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 							identity?.planTier ?? null,
 							identity ? now : null,
 						],
+						name,
 					);
 
 					codexSessions.set(sessionId, {
@@ -900,9 +908,11 @@ export function createOAuthInitHandler(dbOps: DatabaseOperations) {
 					step: "authorize",
 				});
 			} catch (error) {
+				// Two sources of "name taken" reach here: OAuthFlow.begin()'s own
+				// pre-check (a plain Error) and the guarded insert (a typed one).
 				if (
-					error instanceof Error &&
-					error.message.includes("already exists")
+					error instanceof DuplicateAccountNameError ||
+					(error instanceof Error && error.message.includes("already exists"))
 				) {
 					return errorResponse(BadRequest(error.message));
 				}

@@ -6,6 +6,7 @@ export * from "./alibaba-coding-plan-usage-fetcher";
 export { BaseProvider } from "./base";
 // Export Kilo usage fetcher
 export * from "./kilo-usage-fetcher";
+export * from "./minimax-usage-fetcher";
 // Export OAuth utilities
 export * from "./oauth";
 // Factory functions for creating providers

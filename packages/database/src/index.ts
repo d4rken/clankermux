@@ -23,6 +23,12 @@ export {
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
 export { AccountRepository } from "./repositories/account.repository";
+export {
+	type AccountInsertAdapter,
+	buildNameGuardedInsert,
+	DuplicateAccountNameError,
+	insertAccountUnique,
+} from "./repositories/account-insert";
 // Re-export repositories (these are constructed directly by the read-only
 // dashboard worker against its own connection — stats, usage-history,
 // memory-history and payments-summary all run there)

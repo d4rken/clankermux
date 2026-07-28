@@ -1,5 +1,8 @@
 import type { Config } from "@clankermux/config";
-import type { DatabaseOperations } from "@clankermux/database";
+import {
+	type DatabaseOperations,
+	insertAccountUnique,
+} from "@clankermux/database";
 import {
 	fetchAnthropicProfile,
 	generatePKCE,
@@ -392,7 +395,8 @@ export class OAuthFlow {
 		const identity = await this.resolveAnthropicIdentity(tokens);
 		const now = Date.now();
 
-		await adapter.run(
+		await insertAccountUnique(
+			adapter,
 			`
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
@@ -423,6 +427,7 @@ export class OAuthFlow {
 				identity.hasIdentity ? now : null,
 				identity.profileFetchedAt,
 			],
+			name,
 		);
 
 		return {
@@ -456,7 +461,8 @@ export class OAuthFlow {
 	): Promise<AccountCreated> {
 		const adapter = this.dbOps.getAdapter();
 
-		await adapter.run(
+		await insertAccountUnique(
+			adapter,
 			`
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
@@ -473,6 +479,7 @@ export class OAuthFlow {
 				priority,
 				customEndpoint || null,
 			],
+			name,
 		);
 
 		return {

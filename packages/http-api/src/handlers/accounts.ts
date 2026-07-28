@@ -15,9 +15,11 @@ import {
 	validatePriority,
 	validateString,
 } from "@clankermux/core";
-import type {
-	CodexResetCreditEventRow,
-	DatabaseOperations,
+import {
+	type CodexResetCreditEventRow,
+	type DatabaseOperations,
+	DuplicateAccountNameError,
+	insertAccountUnique,
 } from "@clankermux/database";
 import { ValidationError } from "@clankermux/errors";
 import {
@@ -32,8 +34,11 @@ import {
 	type AnyUsageData,
 	codexRateLimitResetCreditsCache,
 	fetchUsageData,
+	getRepresentativeMinimaxUtilization,
+	getRepresentativeMinimaxWindow,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
+	type MinimaxUsageData,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	USAGE_CACHE_TTL_MS,
@@ -81,7 +86,7 @@ import {
 } from "@clankermux/types";
 import {
 	pauseAccount,
-	removeAccount,
+	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
 import {
@@ -1046,6 +1051,22 @@ export function createAccountsListHandler(
 							);
 						}
 					}
+				} else if (account.provider === "minimax" && usageData) {
+					// MiniMax Token Plan usage — 5h/7d windows from
+					// /v1/token_plan/remains. Statically imported (the neighbouring
+					// branches' `require()` inside a try/catch does not belong in an ESM
+					// handler), so a missing export is a build error rather than a
+					// silently swallowed runtime one.
+					const isMinimaxData =
+						"five_hour" in usageData || "seven_day" in usageData;
+					if (isMinimaxData) {
+						const minimax = usageData as unknown as MinimaxUsageData;
+						// Both helpers return null — never 0 — when there is no `general`
+						// row, so "unknown" stays distinct from "0% used".
+						usageUtilization = getRepresentativeMinimaxUtilization(minimax);
+						usageWindow = getRepresentativeMinimaxWindow(minimax);
+						fullUsageData = usageData as FullUsageData;
+					}
 				}
 
 				// Last-known usage recovered from a persisted snapshot when the live
@@ -1456,7 +1477,8 @@ export function createAccountAddHandler(
 				const accountId = crypto.randomUUID();
 				const now = Date.now();
 
-				await dbOps.getAdapter().run(
+				await insertAccountUnique(
+					dbOps.getAdapter(),
 					`INSERT INTO accounts (
 						id, name, provider, refresh_token, access_token,
 						created_at, request_count, total_requests, priority, custom_endpoint,
@@ -1472,6 +1494,7 @@ export function createAccountAddHandler(
 						priority,
 						customEndpoint || null,
 					],
+					name,
 				);
 
 				// Start usage polling immediately so the account's 5h/weekly bars
@@ -1489,10 +1512,11 @@ export function createAccountAddHandler(
 					accountId,
 				});
 			} catch (error) {
-				if (
-					error instanceof Error &&
-					error.message.includes("already exists")
-				) {
+				// The guarded insert refused a duplicate name. Matched by TYPE — the
+				// previous `message.includes("already exists")` string test was
+				// vestigial here (nothing on this path threw it) and would silently
+				// mis-handle any unrelated message that happened to contain the phrase.
+				if (error instanceof DuplicateAccountNameError) {
 					return errorResponse(BadRequest(error.message));
 				}
 				return errorResponse(InternalServerError((error as Error).message));
@@ -1510,7 +1534,14 @@ export function createAccountAddHandler(
  * Create an account remove handler
  */
 export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
-	return async (req: Request, accountName: string): Promise<Response> => {
+	/**
+	 * `accountId` is the `:id` path segment, exactly as the documented
+	 * `DELETE /api/accounts/:id` contract says. It used to be treated as a NAME
+	 * all the way down to `DELETE FROM accounts WHERE name = ?`, so any consumer
+	 * following the documented contract got a silent 404 — and two accounts
+	 * sharing a name would both have been deleted.
+	 */
+	return async (req: Request, accountId: string): Promise<Response> => {
 		try {
 			// Parse and validate confirmation
 			const body = await req.json();
@@ -1520,7 +1551,20 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				required: true,
 			});
 
-			if (confirm !== accountName) {
+			// Resolve the row FIRST: the confirm string is still typed as the account
+			// NAME (the deliberate "type the name to delete" UX), and the in-memory
+			// cleanup below needs the id while the row still exists.
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound(`Account '${accountId}' not found`));
+			}
+
+			if (confirm !== account.name) {
 				return errorResponse(
 					BadRequest("Confirmation string does not match account name", {
 						confirmationRequired: true,
@@ -1528,34 +1572,26 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			// Resolve the account ID BEFORE deletion — removeAccount deletes the row,
-			// after which a name lookup would return nothing and the in-memory
-			// cleanup below would silently never run (leaking the usage cache entry
-			// and any warm session-cache slots for the deleted account).
-			const db = dbOps.getAdapter();
-			const account = await db.get<{ id: string }>(
-				"SELECT id FROM accounts WHERE name = ?",
-				[accountName],
-			);
-
-			const result = await removeAccount(dbOps, accountName);
+			const result = await removeAccountById(dbOps, accountId, account.name);
 
 			if (!result.success) {
 				return errorResponse(NotFound(result.message));
 			}
 
-			if (account) {
-				// Clear usage cache for removed account to prevent memory leaks
-				usageCache.delete(account.id);
-				codexRateLimitResetCreditsCache.delete(account.id);
-				// Evict any warm session-cache slots owned by the removed account so
-				// the keepalive scheduler never tries to replay against a deleted id.
-				sessionCacheStore.evictAccount(account.id);
-				// Drop any owed capacity-restored probe. The marker is deliberately
-				// never time-expired, so removal is the only way it can be dropped
-				// without a successful probe (or a restart).
-				clearCapacityRestoredProbePending(account.id);
-			}
+			// In-memory cleanup, keyed by the SAME id that was deleted — so a name
+			// collision can never evict a surviving account's state.
+			// Clear usage cache for removed account to prevent memory leaks
+			usageCache.delete(accountId);
+			codexRateLimitResetCreditsCache.delete(accountId);
+			// Evict any warm session-cache slots owned by the removed account so
+			// the keepalive scheduler never tries to replay against a deleted id.
+			sessionCacheStore.evictAccount(accountId);
+			// Drop the account's recovery-probe state: any owed capacity-restored
+			// probe plus its spent backup-probe permit record. Neither is ever
+			// time-expired (both are deliberately retained until a successful probe
+			// or a superseding lease), so removal is the only way a deleted id
+			// stops occupying them.
+			clearCapacityRestoredProbePending(accountId);
 
 			return jsonResponse({
 				success: true,
@@ -1891,7 +1927,8 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -1911,6 +1948,7 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint || null,
 					modelMappingsJson,
 				],
+				name,
 			);
 
 			log.info(
@@ -2055,7 +2093,8 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2075,6 +2114,7 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint,
 					finalModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2184,7 +2224,8 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -2203,6 +2244,7 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 					priority,
 					null, // No custom endpoint for Minimax
 				],
+				name,
 			);
 
 			log.info(
@@ -2348,7 +2390,8 @@ export function createAnthropicCompatibleAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2368,6 +2411,7 @@ export function createAnthropicCompatibleAccountAddHandler(
 					customEndpoint || null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2498,7 +2542,8 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2518,6 +2563,7 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint || null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2634,7 +2680,8 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2654,6 +2701,7 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 					"https://ollama.com",
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3644,7 +3692,8 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3664,6 +3713,7 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 					null,
 					validatedModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3792,7 +3842,8 @@ export function createAlibabaCodingPlanAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3812,6 +3863,7 @@ export function createAlibabaCodingPlanAccountAddHandler(
 					null,
 					validatedModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3945,7 +3997,8 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3965,6 +4018,7 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 					null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(

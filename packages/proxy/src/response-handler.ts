@@ -4,15 +4,17 @@ import {
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type {
-	Account,
-	ContextComposition,
-	RequestRoutingMeta,
-	ToolCallStat,
+import {
+	type Account,
+	type ContextComposition,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+	type RequestRoutingMeta,
+	type ToolCallStat,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
 import { markAnthropicBurstThrottle } from "./handlers/burst-cooldown";
+import { isTrustedSyntheticProbe } from "./handlers/proxy-operations";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
@@ -38,9 +40,12 @@ import {
 import {
 	createUsageState,
 	detectMissingMessageStop,
+	expectsMessageStart,
 	feedChunk,
 	feedNonStreamBody,
 	finalizeUsage,
+	flushPendingSseLine,
+	STREAM_TRUNCATED_MID_CONTENT,
 	type UsageState,
 } from "./usage-collector";
 
@@ -191,6 +196,15 @@ export interface ResponseHandlerOptions {
 	account: Account | null;
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
+	/**
+	 * True only for an in-process dispatch (`handleProxy`'s own `isInternal`
+	 * parameter, threaded through `requestMeta.internal`). Unspoofable — it never
+	 * comes from a request header. Every synthetic-probe exemption in this module
+	 * is gated on it, because the `x-clankermux-keepalive` / `-auto-refresh`
+	 * marker headers are client-settable on their own. Defaults to false, so an
+	 * omitted value is the safe (untrusted) one.
+	 */
+	internal?: boolean;
 	/** Ingress model, supplied by the already-parsed request path when available. */
 	requestedModel?: string | null;
 	project?: string | null;
@@ -294,6 +308,7 @@ async function forwardToClientInner(
 		account,
 		requestHeaders,
 		requestBody,
+		internal: internalDispatch = false,
 		requestedModel: requestedModelOption,
 		project,
 		contextComposition,
@@ -332,6 +347,7 @@ async function forwardToClientInner(
 		path,
 		providerName: ctx.provider.name,
 		responseStatus: response.status,
+		internal: internalDispatch,
 		getHeader: (name) => requestHeaders.get(name),
 	});
 
@@ -460,7 +476,26 @@ async function forwardToClientInner(
 
 		// Computed once upfront from path + status only (isExpectedResponse does
 		// NOT read the body), matching the old analyticsResponse status.
+		//
+		// NOT the whole story for a stream: a Bun-clean `done:true` close midway
+		// through the content still leaves this `true`, which recorded a stream
+		// that produced no model, no tokens and no content as a success. The
+		// no-`message_start` check in `onEnd` refines it (see
+		// `expectsMessageStart`).
 		const success = isExpectedResponse(path, response);
+		// Precomputed here so `onEnd` only has to look at what the stream produced.
+		const mustSeeMessageStart = expectsMessageStart({
+			method,
+			path,
+			status: response.status,
+			contentType: response.headers.get("content-type"),
+			// Native Codex passthrough: the adapter rewrote the client's
+			// `/v1/responses` call to `/v1/messages`, so only this marker tells the
+			// two apart here (see `expectsMessageStart`).
+			nativeResponsesMarker: response.headers.get(
+				NATIVE_RESPONSES_RESPONSE_HEADER,
+			),
+		});
 
 		const clientStream = createStreamAnalyticsPassthrough(response.body, {
 			totalTimeoutMs: STREAM_TIMEOUT_MS,
@@ -540,10 +575,16 @@ async function forwardToClientInner(
 						// user-driven storm — tripping the marker on it would suppress
 						// sibling diversion for real requests off a synthetic burst.
 						// Mirrors the keepalive guard in response-processor.ts /
-						// proxy-operations.ts.
+						// proxy-operations.ts — including its trust gate: the marker
+						// header alone is client-spoofable, so an external caller must
+						// not be able to suppress the burst marker with it.
 						if (
 							isOAuthAnthropicAccount(account) &&
-							requestHeaders.get("x-clankermux-keepalive") !== "true"
+							!isTrustedSyntheticProbe(
+								requestHeaders,
+								internalDispatch,
+								"keepalive",
+							)
 						) {
 							markAnthropicBurstThrottle(Date.now());
 						}
@@ -557,6 +598,11 @@ async function forwardToClientInner(
 				// here). A non-success stream that drained cleanly is no health
 				// proof, so its lease is released without closing the bucket.
 				// Outside the usageState guard: filtered requests still settle.
+				//
+				// DELIBERATELY unaffected by the truncation check below: a truncated
+				// stream still means the provider returned 200 headers and streamed
+				// bytes, which IS evidence the family is not overloaded. Marking it
+				// "abandoned" would keep a healthy bucket half-open for no reason.
 				completeProviderOverloadProbe(
 					overloadProbeToken ?? null,
 					success && rateLimitSniffer?.firedReason == null
@@ -564,6 +610,18 @@ async function forwardToClientInner(
 						: "abandoned",
 				);
 				if (usageState) {
+					// Flush BEFORE classifying. A provider may close right after the
+					// last `data:` byte with no trailing newline, so a final
+					// `message_start` can still be sitting in the line buffer here —
+					// classifying first would call a complete stream truncated.
+					// finalizeUsage's own flush then no-ops.
+					flushPendingSseLine(usageState);
+					// A qualifying stream that never produced `message_start` died
+					// before any content. Bun reported a clean `done:true`, so the
+					// header-only `success` above says 200/OK — but the row would carry
+					// no model and no tokens, which is not a success.
+					const truncatedBeforeStart =
+						mustSeeMessageStart && !usageState.sawMessageStart;
 					// R3: finish transport FIRST (terminal responseTimeMs computed
 					// here), then finalize usage as a tracked async promise. The stream
 					// drained to completion → endedCleanly so the provider's reported
@@ -571,12 +629,15 @@ async function forwardToClientInner(
 					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
-						rateLimitSniffer.firedReason
+						rateLimitSniffer.firedReason || truncatedBeforeStart
 							? "error"
 							: success
 								? "success"
 								: "error",
-						rateLimitSniffer.firedReason ?? undefined,
+						// An in-band SSE error frame is the more specific diagnosis and
+						// keeps precedence — that path already records correctly.
+						rateLimitSniffer.firedReason ??
+							(truncatedBeforeStart ? STREAM_TRUNCATED_MID_CONTENT : undefined),
 					);
 					trackFinalize(
 						usageState,

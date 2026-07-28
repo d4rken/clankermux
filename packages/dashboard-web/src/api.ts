@@ -557,9 +557,14 @@ class API extends HttpClient {
 		}
 	}
 
-	async removeAccount(name: string, confirm: string): Promise<void> {
+	/**
+	 * DELETE /api/accounts/:id — keyed by the account ID, per the documented
+	 * contract. `confirm` is still the account NAME (the "type the name to
+	 * delete" UX), which the server checks against the row it resolved by id.
+	 */
+	async removeAccount(id: string, confirm: string): Promise<void> {
 		const startTime = Date.now();
-		const url = `/api/accounts/${name}`;
+		const url = `/api/accounts/${encodeURIComponent(id)}`;
 
 		this.logger.debug(`→ DELETE ${url}`, { confirm });
 

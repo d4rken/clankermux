@@ -46,6 +46,10 @@ function makeInput(
 		path: "/v1/messages",
 		providerName: "anthropic",
 		responseStatus: 200,
+		// Probe-marker suppressions are trust-gated on the unspoofable in-process
+		// dispatch flag, so the default fixture is an INTERNAL dispatch — that is
+		// the only configuration in which the marker headers mean anything.
+		internal: true,
 		getHeader: headersAccessor(),
 		...overrides,
 	};
@@ -170,6 +174,64 @@ describe("shouldRecordRequest — auto-refresh probe header", () => {
 				}),
 			),
 		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Trust gate: the probe markers are plain client-settable headers, so without
+// the unspoofable in-process `internal` flag they must NOT hide a request from
+// Request History (and from the cost/usage metrics that table feeds).
+// ---------------------------------------------------------------------------
+
+describe("shouldRecordRequest — probe markers are trust-gated", () => {
+	for (const header of [
+		"x-clankermux-auto-refresh",
+		"x-clankermux-keepalive",
+	]) {
+		it(`SPOOF GUARD: records an EXTERNAL request carrying ${header}`, () => {
+			expect(
+				shouldRecordRequest(
+					makeInput({
+						internal: false,
+						getHeader: headersAccessor({ [header]: "true" }),
+					}),
+				),
+			).toBe(true);
+		});
+
+		it(`records when internal is omitted entirely and ${header} is set (safe default)`, () => {
+			expect(
+				shouldRecordRequest({
+					method: "POST",
+					path: "/v1/messages",
+					providerName: "anthropic",
+					responseStatus: 200,
+					getHeader: headersAccessor({ [header]: "true" }),
+				}),
+			).toBe(true);
+		});
+	}
+
+	it("count_tokens and .well-known filters are NOT trust-gated (they are not privileges)", () => {
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					internal: false,
+					providerName: "codex",
+					path: "/v1/messages/count_tokens",
+				}),
+			),
+		).toBe(false);
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					internal: false,
+					method: "GET",
+					path: "/.well-known/oauth-authorization-server",
+					responseStatus: 404,
+				}),
+			),
+		).toBe(false);
 	});
 });
 

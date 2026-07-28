@@ -1,28 +1,35 @@
 import type { DatabaseOperations } from "@clankermux/database";
 
 /**
- * Remove an account by name
+ * Remove an account by its PRIMARY KEY.
+ *
+ * Deliberately id-only, with no name fallback: `DELETE /api/accounts/:id` is the
+ * documented contract, and a name-keyed delete would remove the wrong row (or
+ * several) whenever two accounts share a name.
  */
-export async function removeAccount(
+export async function removeAccountById(
 	dbOps: DatabaseOperations,
-	name: string,
+	id: string,
+	/** Display name, used only for the human-readable message. */
+	name?: string,
 ): Promise<{ success: boolean; message: string }> {
 	const adapter = dbOps.getAdapter();
 	const changes = await adapter.runWithChanges(
-		"DELETE FROM accounts WHERE name = ?",
-		[name],
+		"DELETE FROM accounts WHERE id = ?",
+		[id],
 	);
 
+	const label = name ?? id;
 	if (changes === 0) {
 		return {
 			success: false,
-			message: `Account '${name}' not found`,
+			message: `Account '${label}' not found`,
 		};
 	}
 
 	return {
 		success: true,
-		message: `Account '${name}' removed successfully`,
+		message: `Account '${label}' removed successfully`,
 	};
 }
 

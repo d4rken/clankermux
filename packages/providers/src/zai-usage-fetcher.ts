@@ -19,9 +19,25 @@ export interface ZaiUsageData {
  * Fetch usage data from Zai's monitoring usage endpoint
  * This is non-blocking - failures return null and won't affect provider operation
  */
+/**
+ * Hard bound on the usage fetch, mirroring the Anthropic fetcher's guard.
+ *
+ * Without a signal the request could hang indefinitely. `usage-fetcher.ts`
+ * tracks in-flight fetches in `inFlightFetches` and only deletes the entry in
+ * `promise.finally()`, so a hung fetch wedges that account's polling slot for
+ * the lifetime of the process -- and polling is the ONLY channel that observes a
+ * locked account recovering.
+ */
+const USAGE_FETCH_TIMEOUT_MS = 5000;
+
 export async function fetchZaiUsageData(
 	apiKey: string,
 ): Promise<ZaiUsageData | null> {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(
+		() => controller.abort(),
+		USAGE_FETCH_TIMEOUT_MS,
+	);
 	try {
 		const response = await fetch(
 			"https://api.z.ai/api/monitor/usage/quota/limit",
@@ -31,6 +47,7 @@ export async function fetchZaiUsageData(
 					"x-api-key": apiKey,
 					Accept: "application/json",
 				},
+				signal: controller.signal,
 			},
 		);
 
@@ -102,8 +119,12 @@ export async function fetchZaiUsageData(
 
 		return result;
 	} catch (error) {
+		// An abort lands here too, so a timeout degrades to the existing
+		// failure path (null) rather than propagating.
 		log.warn("Error fetching Zai usage data:", error);
 		return null;
+	} finally {
+		clearTimeout(timeoutId);
 	}
 }
 

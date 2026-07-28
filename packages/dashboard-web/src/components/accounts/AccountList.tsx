@@ -8,7 +8,7 @@ interface AccountListProps {
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
-	onRemove: (name: string) => void;
+	onRemove: (account: Account) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
 	onSaveNotes: (account: Account, notes: string | null) => void | Promise<void>;

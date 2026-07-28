@@ -10,6 +10,7 @@ import {
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
 	rollbackCapacityRestoredProbePending,
+	wouldSuppressProbe,
 } from "../rate-limit-cooldown";
 
 /**
@@ -304,5 +305,80 @@ describe("capacity-restored single-flight marker", () => {
 		completeRateLimitProbe(account, "recovered");
 
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
+	});
+});
+
+/**
+ * `wouldSuppressProbe` is the side-effect-free mirror of
+ * `getRateLimitProbeAdmission === "suppressed"`. It feeds the terminal-attempt
+ * decision (forward a real upstream 529 body vs discard it), so it must mirror
+ * BOTH admission arms, take no lease, and never prune.
+ */
+describe("wouldSuppressProbe", () => {
+	it("is false for an ordinary account (neither admission arm engaged)", () => {
+		Date.now = () => NOW;
+		expect(wouldSuppressProbe(makeAccount())).toBe(false);
+	});
+
+	it("mirrors the CAPACITY-RESTORED arm once a probe holds the lease", () => {
+		Date.now = () => NOW;
+		const account = makeAccount();
+		markCapacityRestoredProbePending(account.id);
+		// Marker armed but nobody probing yet: the next request would be ADMITTED,
+		// not suppressed.
+		expect(wouldSuppressProbe(account)).toBe(false);
+
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(wouldSuppressProbe(account)).toBe(true);
+
+		completeRateLimitProbe(account, "recovered");
+		expect(wouldSuppressProbe(account)).toBe(false);
+	});
+
+	it("mirrors the MATURE-STREAK arm once a probe holds the lease", () => {
+		Date.now = () => NOW;
+		const account = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		expect(wouldSuppressProbe(account)).toBe(false);
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(wouldSuppressProbe(account)).toBe(true);
+	});
+
+	it("does NOT suppress on an immature streak even while a stale lease lingers", () => {
+		Date.now = () => NOW;
+		const mature = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		expect(getRateLimitProbeAdmission(mature)).toBe("admitted");
+		// Same id, but no longer a gated shape: neither arm engages, so the lingering
+		// lease is irrelevant.
+		expect(
+			wouldSuppressProbe(
+				makeAccount({ consecutive_rate_limits: 0, rate_limited_until: null }),
+			),
+		).toBe(false);
+	});
+
+	it("takes no lease and does not prune (calling it never changes admission)", () => {
+		Date.now = () => NOW;
+		const account = makeAccount();
+		markCapacityRestoredProbePending(account.id);
+		for (let i = 0; i < 5; i++) wouldSuppressProbe(account);
+		// The single probe is still available — the predicate consumed nothing.
+		expect(admittedOutOf(account, 3)).toBe(1);
+	});
+
+	it("reports false once the lease has expired, without deleting it", () => {
+		Date.now = () => NOW;
+		const account = makeAccount();
+		markCapacityRestoredProbePending(account.id);
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(wouldSuppressProbe(account)).toBe(true);
+		// Past the two-minute lease.
+		const later = NOW + 3 * 60 * 1000;
+		expect(wouldSuppressProbe(account, later)).toBe(false);
 	});
 });

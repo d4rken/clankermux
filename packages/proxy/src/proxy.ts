@@ -4,6 +4,7 @@ import {
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	getModelFamily,
+	isAccountAvailable,
 	isDebugEnabled,
 	isProtectedFamily,
 	mapModelName,
@@ -19,6 +20,7 @@ import { Logger, LogLevel } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import {
 	type Account,
+	type ComboSlotInfo,
 	getNativeResponsesRequestContext,
 	setNativeResponsesMetaContext,
 } from "@clankermux/types";
@@ -69,6 +71,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
+	wouldSuppressProbe,
 } from "./handlers/rate-limit-cooldown";
 import {
 	getOverloadHoldBudgetMs,
@@ -760,6 +763,7 @@ export async function handleProxy(
 				path: url.pathname,
 				providerName: ctx.provider.name,
 				responseStatus: response.status,
+				internal: requestMeta.internal === true,
 				getHeader: (name) => req.headers.get(name),
 			})
 		) {
@@ -942,6 +946,42 @@ export async function handleProxy(
 			);
 	};
 
+	/**
+	 * True when every candidate AFTER `index` would be refused before it could
+	 * ever reach upstream — by the account's own cooldown, by the single-flight
+	 * recovery-probe gate, or by the provider-overload gate — so this attempt is
+	 * the request's last realistic one and its real 529 body must be FORWARDED,
+	 * not discarded.
+	 *
+	 * Scope: the same-provider case is already covered by
+	 * {@link shouldForwardProviderOverloadIfNoCrossProviderFallback}. The residual
+	 * gap this closes is a MIXED-provider pool — e.g. [A(anthropic), B(codex)]
+	 * with B probe-suppressed — where A's genuine `overloaded_error` was thrown
+	 * away and the client got a generic 503 instead.
+	 *
+	 * The COOLDOWN term is not redundant with selection. This predicate is
+	 * evaluated when the 529 ARRIVES, against a candidate list that was gated
+	 * before the attempt started: a tail whose own recovery probe 429'd in the
+	 * meantime has a fresh future cooldown AND a released lease, so probe
+	 * suppression alone reads it as attemptable. Attempting it would put an
+	 * upstream request inside a live cooldown (deepening the throttle) and replace
+	 * the head's genuine 529 with a later generic error.
+	 */
+	const everyRemainingCandidateUnattemptable = (
+		candidates: Account[],
+		index: number,
+	): boolean => {
+		const now = Date.now();
+		return candidates
+			.slice(index + 1)
+			.every(
+				(account) =>
+					!isAccountAvailable(account, now) ||
+					wouldSuppressProbe(account, now) ||
+					isProviderOverloaded(account.provider, now, modelForAccount(account)),
+			);
+	};
+
 	const {
 		available: providerAvailableAccounts,
 		overloaded: providerOverloadedAccounts,
@@ -956,7 +996,8 @@ export async function handleProxy(
 	// request cannot use it to dodge operator-configured usage throttling.
 	const isSyntheticProbeRequest = isTrustedSyntheticProbe(
 		req.headers,
-		requestMeta.internal,
+		requestMeta.internal === true,
+		"any",
 	);
 
 	const applyUsageThrottling = (accounts: Account[]) => {
@@ -1557,10 +1598,20 @@ export async function handleProxy(
 		// not a held connection: internal requests, auto-refresh probes,
 		// keepalive replays, and count_tokens (answered locally/quickly — same
 		// rationale as the pin hold's count_tokens skip).
+		//
+		// The probe-marker arm is trust-gated: the markers are client-settable, so
+		// on their own they would let any external caller opt out of the overload
+		// hold and get a synthetic 529 instead of a recovered response. Gating them
+		// makes them a strict SUBSET of the `requestMeta.internal` arm below — kept
+		// explicit so the intent survives, and ordered first so the compiler does
+		// not narrow `requestMeta.internal` out from under it.
 		if (
+			isTrustedSyntheticProbe(
+				req.headers,
+				requestMeta.internal === true,
+				"any",
+			) ||
 			requestMeta.internal ||
-			req.headers.get("x-clankermux-auto-refresh") === "true" ||
-			req.headers.get("x-clankermux-keepalive") === "true" ||
 			url.pathname === "/v1/messages/count_tokens"
 		) {
 			return null;
@@ -2761,7 +2812,6 @@ export async function handleProxy(
 				),
 			}
 		: null;
-	let response: Response | null = null;
 
 	// Codex High finding: the held account may only enter the hold when it is
 	// EITHER present in the gated `accounts` list (still available — fine to
@@ -2994,93 +3044,142 @@ export async function handleProxy(
 		}
 	}
 
-	for (let i = 0; i < accounts.length; i++) {
-		// Skip the held account if the burst-retry first attempt already tried it
-		// (and fell through non-retryably) — avoid a wasteful duplicate request.
-		if (burstAttemptedAccountId && accounts[i].id === burstAttemptedAccountId) {
-			continue;
-		}
-		// For combo routing: resolve the slot's model override FIRST so the
-		// overload skip below gates on the model this attempt actually sends
-		// upstream (a slot override can land in a different family than the
-		// request model).
-		let modelOverride: string | null = null;
-		if (filteredComboInfo?.slots[i]) {
-			const slot = filteredComboInfo.slots[i];
-			if (slot.accountId !== accounts[i].id) {
-				log.error(
-					`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${accounts[i].id}`,
+	// --- Attempt loop --------------------------------------------------------
+	//
+	// A candidate the single-flight recovery-probe gate SUPPRESSES was never
+	// attempted: another request holds its probe lease. The loop skips it and
+	// falls through to the next candidate, exactly as it always has.
+	/**
+	 * The ONE attempt loop, shared by the main pass and the combo-fallback pass.
+	 *
+	 * EQUIVALENCE NOTE (verified against the two hand-written loops this replaced):
+	 *  - ORDER: the caller passes the already-gated list; iteration is the same
+	 *    ascending index walk, and `i` is still the `failoverAttempts` argument.
+	 *  - GATING: the burst-attempted skip (`skipAccountId` — previously
+	 *    `burstAttemptedAccountId`, only ever set on the main pass), the combo
+	 *    slot/account desync check, the slot model override and the late
+	 *    provider-overload skip are byte-for-byte the previous logic; only the
+	 *    log noun is parameterised (`label`, defaulting to the main pass's
+	 *    "account").
+	 *  - TERMINAL FLAG: `!comboInfo?.comboName && (last || no-cross-provider ||
+	 *    every-remaining-unattemptable)`. The fallback pass previously omitted the
+	 *    `!comboName` conjunct because its combo was already cleared — with
+	 *    `comboInfo === null` the conjunct is vacuously true, so it is the same
+	 *    value. (`everyRemainingCandidateUnattemptable` is a separate, deliberate
+	 *    addition made for both passes.)
+	 *  - AFFINITY: unchanged — the burst preflight still attempts the held account
+	 *    outside this loop and hands its id in as `skipAccountId`; nothing here
+	 *    reads or writes affinity state.
+	 *  - OVERLOAD ACCOUNTING: every attempt still passes
+	 *    `onOutcome: noteOverloadSuppression`, and `logFinalOrderOnce` is still
+	 *    called from inside the probe-gate callback (the admission point).
+	 *  - The fallback pass now passes `modelOverride: null` where it previously
+	 *    passed `undefined`; every consumer is truthiness-based, so this is inert.
+	 */
+	const runCandidateLoop = async (
+		list: Account[],
+		comboInfo: ComboSlotInfo | null,
+		options: { skipAccountId?: string | null; label?: string } = {},
+	): Promise<Response | null> => {
+		const label = options.label ?? "account";
+		for (let i = 0; i < list.length; i++) {
+			// Skip the held account if the burst-retry first attempt already tried it
+			// (and fell through non-retryably) — avoid a wasteful duplicate request.
+			if (options.skipAccountId && list[i].id === options.skipAccountId) {
+				continue;
+			}
+			// For combo routing: resolve the slot's model override FIRST so the
+			// overload skip below gates on the model this attempt actually sends
+			// upstream (a slot override can land in a different family than the
+			// request model).
+			let modelOverride: string | null = null;
+			if (comboInfo?.slots[i]) {
+				const slot = comboInfo.slots[i];
+				if (slot.accountId !== list[i].id) {
+					log.error(
+						`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${list[i].id}`,
+					);
+				} else {
+					modelOverride = slot.modelOverride;
+				}
+			}
+
+			const overloadedUntil = getProviderOverloadUntil(
+				list[i].provider,
+				Date.now(),
+				modelOverride ?? effectiveRequestModel ?? null,
+			);
+			if (overloadedUntil) {
+				log.debug(
+					`Skipping ${label} ${list[i].name}; provider ${list[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
 				);
-			} else {
-				modelOverride = slot.modelOverride;
+				continue;
+			}
+
+			if (comboInfo?.slots[i]) {
+				requestMeta.comboSlotIndex = i;
+				log.info(
+					`Attempting combo slot ${i}/${list.length - 1} on account ${list[i].name} with model "${modelOverride}"`,
+				);
+			}
+
+			// Single-flight recovery probe gate (see attemptThroughProbeGate): a
+			// freshly-recovered account admits exactly ONE probe. Concurrent requests
+			// that would re-select it are suppressed and skip to the next candidate
+			// instead of stampeding it.
+			const gated = await attemptThroughProbeGate(list[i], () => {
+				logFinalOrderOnce(list[i].id);
+				return proxyWithAccount(
+					req,
+					url,
+					list[i],
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					i,
+					ctx,
+					modelOverride,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					// Evaluated when the 529 ARRIVES, not now: a later candidate can
+					// become attemptable while this attempt is in flight (a sibling's
+					// recovery-probe lease is released, an overload bucket closes), and
+					// a pre-fetch snapshot would forward the 529 to the client instead
+					// of failing over to it.
+					() =>
+						!comboInfo?.comboName &&
+						(i === list.length - 1 ||
+							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i) ||
+							everyRemainingCandidateUnattemptable(list, i)),
+					{
+						onOutcome: (o) => noteOverloadSuppression(list[i], o),
+					},
+				);
+			});
+			if (gated.suppressed) {
+				continue;
+			}
+			if (gated.response) {
+				return gated.response;
+			}
+
+			// Log combo slot failure
+			if (comboInfo) {
+				log.info(
+					`Combo slot ${i} failed on account ${list[i].name}${i < list.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
+				);
 			}
 		}
+		return null;
+	};
 
-		const overloadedUntil = getProviderOverloadUntil(
-			accounts[i].provider,
-			Date.now(),
-			modelOverride ?? effectiveRequestModel ?? null,
-		);
-		if (overloadedUntil) {
-			log.debug(
-				`Skipping account ${accounts[i].name}; provider ${accounts[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
-			);
-			continue;
-		}
-
-		if (filteredComboInfo?.slots[i]) {
-			requestMeta.comboSlotIndex = i;
-			log.info(
-				`Attempting combo slot ${i}/${accounts.length - 1} on account ${accounts[i].name} with model "${modelOverride}"`,
-			);
-		}
-
-		// Single-flight recovery probe gate (see attemptThroughProbeGate): a
-		// freshly-recovered account admits exactly ONE probe. Concurrent requests
-		// that would re-select it are suppressed and skip to the next candidate
-		// instead of stampeding it.
-		const gated = await attemptThroughProbeGate(accounts[i], () => {
-			logFinalOrderOnce(accounts[i].id);
-			return proxyWithAccount(
-				req,
-				url,
-				accounts[i],
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				i,
-				ctx,
-				modelOverride,
-				apiKeyId,
-				apiKeyName,
-				requestBodyContext,
-				!filteredComboInfo?.comboName &&
-					(i === accounts.length - 1 ||
-						shouldForwardProviderOverloadIfNoCrossProviderFallback(
-							accounts,
-							i,
-						)),
-				{
-					onOutcome: (o) => noteOverloadSuppression(accounts[i], o),
-				},
-			);
-		});
-		if (gated.suppressed) {
-			continue;
-		}
-		response = gated.response;
-
-		if (response) {
-			return response;
-		}
-
-		// Log combo slot failure
-		if (filteredComboInfo) {
-			log.info(
-				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
-			);
-		}
-	}
+	// The burst preflight attempts `heldAccount` OUTSIDE this loop; the loop then
+	// skips it via `skipAccountId`.
+	const mainResponse = await runCandidateLoop(accounts, filteredComboInfo, {
+		skipAccountId: burstAttemptedAccountId,
+	});
+	if (mainResponse) return mainResponse;
 
 	// Part 4 terminal: a burst hold was entered then declined/gave-up, AND the
 	// normal failover loop above (healthy Anthropic siblings + Codex-if-fits) also
@@ -3144,62 +3243,13 @@ export async function handleProxy(
 			log.info(
 				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
 			);
-			for (let i = 0; i < fallbackAccounts.length; i++) {
-				// No combo override on the fallback path (the combo was cleared
-				// above), so the request model is the effective model.
-				const overloadedUntil = getProviderOverloadUntil(
-					fallbackAccounts[i].provider,
-					Date.now(),
-					effectiveRequestModel ?? null,
-				);
-				if (overloadedUntil) {
-					log.debug(
-						`Skipping fallback account ${fallbackAccounts[i].name}; provider ${fallbackAccounts[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
-					);
-					continue;
-				}
-
-				// Const captures for the closures below: narrowing of the mutable
-				// `fallbackAccounts` binding does not survive into a callback.
-				const fallbackList = fallbackAccounts;
-				const fallbackAccount = fallbackList[i];
-				// Single-flight recovery probe gate (same chokepoint as the primary
-				// failover loop above): admit only one probe for a freshly-recovered
-				// account; suppress concurrent stampeders.
-				const gated = await attemptThroughProbeGate(fallbackAccount, () => {
-					logFinalOrderOnce(fallbackAccount.id);
-					return proxyWithAccount(
-						req,
-						url,
-						fallbackAccount,
-						requestMeta,
-						finalBodyBuffer,
-						finalCreateBodyStream,
-						i,
-						ctx,
-						undefined, // No model override for fallback path
-						apiKeyId,
-						apiKeyName,
-						requestBodyContext,
-						i === fallbackList.length - 1 ||
-							shouldForwardProviderOverloadIfNoCrossProviderFallback(
-								fallbackList,
-								i,
-							),
-						{
-							onOutcome: (o) => noteOverloadSuppression(fallbackAccount, o),
-						},
-					);
-				});
-				if (gated.suppressed) {
-					continue;
-				}
-				response = gated.response;
-
-				if (response) {
-					return response;
-				}
-			}
+			// No combo override on the fallback path (the combo was cleared above),
+			// so the request model is the effective model and the terminal-attempt
+			// flag reduces to the loop's own last-candidate / no-cross-provider test.
+			const fallbackResponse = await runCandidateLoop(fallbackAccounts, null, {
+				label: "fallback account",
+			});
+			if (fallbackResponse) return fallbackResponse;
 		} else if (throttledFallbackAccounts.length > 0) {
 			// Combo slots staged a body but all failed, and the fallback found only
 			// throttled accounts — this terminal return emits no worker summary, so

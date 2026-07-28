@@ -45,25 +45,31 @@ describe("getErrorMeta", () => {
 		expect(meta.severity).toBe("warning");
 	});
 
-	test("upstream_529_overloaded_with_reset returns provider overload warning", () => {
+	test("upstream_529_overloaded_with_reset is described as a LEGACY per-account cooldown", () => {
 		const meta = getErrorMeta("upstream_529_overloaded_with_reset");
-		expect(meta.title).toBe("Provider overload");
+		expect(meta.title).toBe("Provider overload (legacy per-account cooldown)");
 		expect(meta.severity).toBe("warning");
 		expect(meta.description).toContain("529");
-		// Reason is also used for mid-stream overloaded_error detections where
-		// no Retry-After header is parsed; the description must acknowledge that
-		// path so a dashboard reader doesn't assume the cooldown always came
-		// from an HTTP header.
-		expect(meta.description).toContain("mid-stream");
+		// Since 2026-07-21 an Anthropic 529 trips the family-scoped breaker with NO
+		// per-account cooldown, so the copy must not claim otherwise…
+		expect(meta.description).toContain("family-scoped");
+		expect(meta.description).toContain("2026-07-21");
+		// …and must no longer claim to cover mid-stream overloaded_error, which has
+		// not written this reason on any live Anthropic path since that change.
+		expect(meta.description).not.toContain("mid-stream");
 		expect(meta.suggestion).toContain("automatically");
 	});
 
-	test("upstream_529_overloaded_no_reset returns provider overload (no Retry-After) warning", () => {
+	test("upstream_529_overloaded_no_reset is described as legacy, without the wrong 60s claim", () => {
 		const meta = getErrorMeta("upstream_529_overloaded_no_reset");
-		expect(meta.title).toBe("Provider overload (no Retry-After)");
+		expect(meta.title).toBe("Provider overload (legacy, no Retry-After)");
 		expect(meta.severity).toBe("warning");
 		expect(meta.description).toContain("529");
+		expect(meta.description).toContain("family-scoped");
 		expect(meta.suggestion).toContain("probe cooldown");
+		// That path ramps from 30s via computeRateLimitBackoffMs(1) — the old
+		// "about 60s" was simply wrong.
+		expect(meta.suggestion).not.toContain("60s");
 	});
 
 	test("out_of_credits returns an error-severity entry about depleted credits", () => {

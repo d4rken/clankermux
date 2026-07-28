@@ -539,3 +539,73 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		expect(resText).toContain("message_start");
 	});
 });
+
+/**
+ * Recording outcome for the native path. The premature-SSE-termination check
+ * keys on `message_start`, which a healthy native Codex stream never emits — and
+ * the path it sees is NOT `/v1/responses`: the adapter rewrites the request to
+ * `/v1/messages` before handleProxy ever runs, so a path-only exclusion misses
+ * every production native stream and records it as `stream_truncated_mid_content`.
+ * Driven through `handleResponsesRequest` so the routing is the production one.
+ */
+describe("native Responses passthrough — request recording", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function nativeResponsesRequest(): Request {
+		return new Request("https://proxy.local/v1/responses", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(NATIVE_RESPONSES_BODY),
+		});
+	}
+
+	it("records a successful native Codex stream as a SUCCESS, not a truncated stream", async () => {
+		const { handleResponsesRequest } = await import(
+			"@clankermux/openai-responses-adapter"
+		);
+		const { handleProxy } = await import("../proxy");
+
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				return codexSseResponse();
+			},
+		) as never;
+
+		const ctx = makeContext([makeCodexAccount()]);
+		const finishTransport = ctx.requestRecorder.finishTransport as unknown as {
+			mock: { calls: unknown[][] };
+		};
+		const req = nativeResponsesRequest();
+		const res = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			handleProxy as never,
+			ctx,
+		);
+
+		expect(res.status).toBe(200);
+		// Drain so the single-reader passthrough runs its inline analytics.
+		const text = await res.text();
+		expect(text).toContain("response.completed");
+		expect(text).not.toContain("message_start");
+
+		const outcomes = finishTransport.mock.calls.map((call) => ({
+			outcome: call[1],
+			reason: call[2],
+		}));
+		expect(outcomes.length).toBeGreaterThan(0);
+		for (const o of outcomes) {
+			expect(o.reason).not.toBe("stream_truncated_mid_content");
+			expect(o.outcome).toBe("success");
+		}
+	});
+});

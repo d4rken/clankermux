@@ -117,6 +117,7 @@ describe("proxy-operations — isTrustedSyntheticProbe (trust-gated exemption)",
 			isTrustedSyntheticProbe(
 				withHeaders({ "x-clankermux-auto-refresh": "true" }),
 				true,
+				"any",
 			),
 		).toBe(true);
 	});
@@ -126,6 +127,7 @@ describe("proxy-operations — isTrustedSyntheticProbe (trust-gated exemption)",
 			isTrustedSyntheticProbe(
 				withHeaders({ "x-clankermux-keepalive": "true" }),
 				true,
+				"any",
 			),
 		).toBe(true);
 	});
@@ -137,16 +139,59 @@ describe("proxy-operations — isTrustedSyntheticProbe (trust-gated exemption)",
 			isTrustedSyntheticProbe(
 				withHeaders({ "x-clankermux-auto-refresh": "true" }),
 				false,
+				"any",
 			),
 		).toBe(false);
 	});
 
 	it("internal dispatch WITHOUT a probe header → NOT trusted", () => {
-		expect(isTrustedSyntheticProbe(withHeaders({}), true)).toBe(false);
+		expect(isTrustedSyntheticProbe(withHeaders({}), true, "any")).toBe(false);
 	});
 
 	it("external request without a probe header → NOT trusted", () => {
-		expect(isTrustedSyntheticProbe(withHeaders({}), false)).toBe(false);
+		expect(isTrustedSyntheticProbe(withHeaders({}), false, "any")).toBe(false);
+	});
+
+	// -------------------------------------------------------------------------
+	// Kind separation. Several exemptions are keepalive-ONLY (the keepalive
+	// scheduler fans out in parallel and trips Anthropic's per-IP burst limit;
+	// an auto-refresh probe does not), and the Request-History suppressions are
+	// split one marker each. A kind must never borrow the other's privilege.
+	// -------------------------------------------------------------------------
+
+	it("CROSS-KIND GUARD: an internal auto-refresh probe is NOT a keepalive probe", () => {
+		expect(
+			isTrustedSyntheticProbe(
+				withHeaders({ "x-clankermux-auto-refresh": "true" }),
+				true,
+				"keepalive",
+			),
+		).toBe(false);
+	});
+
+	it("CROSS-KIND GUARD: an internal keepalive replay is NOT an auto-refresh probe", () => {
+		expect(
+			isTrustedSyntheticProbe(
+				withHeaders({ "x-clankermux-keepalive": "true" }),
+				true,
+				"auto-refresh",
+			),
+		).toBe(false);
+	});
+
+	it("kind-specific matches still require the internal flag", () => {
+		for (const kind of ["keepalive", "auto-refresh"] as const) {
+			const header =
+				kind === "keepalive"
+					? "x-clankermux-keepalive"
+					: "x-clankermux-auto-refresh";
+			expect(
+				isTrustedSyntheticProbe(withHeaders({ [header]: "true" }), true, kind),
+			).toBe(true);
+			expect(
+				isTrustedSyntheticProbe(withHeaders({ [header]: "true" }), false, kind),
+			).toBe(false);
+		}
 	});
 });
 
@@ -155,7 +200,7 @@ describe("proxy-operations — isTrustedSyntheticProbe (trust-gated exemption)",
 // ---------------------------------------------------------------------------
 
 describe("response-handler — shouldRecordRequest suppresses auto-refresh probes", () => {
-	it("does not record (recorder.begin) for auto-refresh probe requests", async () => {
+	it("does not record (recorder.begin) for TRUSTED auto-refresh probe requests", async () => {
 		const { forwardToClient } = await import("../response-handler");
 
 		const begin = mock(() => {});
@@ -193,6 +238,7 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 				account,
 				requestHeaders,
 				requestBody: null,
+				internal: true,
 				response,
 				timestamp: Date.now(),
 				retryAttempt: 0,
@@ -204,6 +250,55 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 		// Inline collection is gated by the same shouldRecordRequest predicate —
 		// a probe is filtered, so the recorder is never started.
 		expect(begin).not.toHaveBeenCalled();
+	});
+
+	it("SPOOF GUARD: DOES record when the auto-refresh header arrives without an internal dispatch", async () => {
+		// The marker is a plain client-settable header. Without the trusted
+		// `internal` flag it must NOT hide the request from Request History (and
+		// therefore from the cost/usage metrics that table feeds).
+		const { forwardToClient } = await import("../response-handler");
+
+		const begin = mock(() => {});
+		const account = makeAccount();
+
+		const ctx = {
+			provider: {
+				name: "anthropic",
+				isStreamingResponse: () => false,
+			} as never,
+			config: { getStorePayloads: () => false } as never,
+			requestRecorder: {
+				begin,
+				captureResponseChunk: mock(() => {}),
+				finishTransport: mock(() => {}),
+				attachUsageSummary: mock(() => {}),
+				markUsageUnavailable: mock(() => {}),
+			} as never,
+		};
+
+		const response = new Response(JSON.stringify({ type: "message" }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		});
+
+		await forwardToClient(
+			{
+				requestId: "req-spoofed-probe",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({ "x-clankermux-auto-refresh": "true" }),
+				requestBody: null,
+				// internal omitted → the safe (untrusted) default.
+				response,
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx as never,
+		);
+
+		expect(begin).toHaveBeenCalled();
 	});
 
 	it("records (recorder.begin) for normal (non-probe) requests", async () => {
@@ -307,6 +402,11 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 			probeRequest,
 			new URL("https://proxy.local/v1/messages"),
 			ctx as never,
+			null,
+			null,
+			// isInternal: the in-process scheduler dispatch. Required — the marker
+			// header alone no longer buys the suppression.
+			true,
 		);
 
 		// Should still return 503
@@ -314,6 +414,59 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 
 		// But must NOT record the synthetic row for a probe.
 		expect(recordSynthetic).not.toHaveBeenCalled();
+	});
+
+	it("SPOOF GUARD: DOES record when the auto-refresh header arrives on an external request", async () => {
+		const { handleProxy } = await import("../proxy");
+
+		const recordSynthetic = mock(() => {});
+
+		const ctx = {
+			strategy: {
+				select: () => [],
+			} as never,
+			dbOps: {
+				getAllAccounts: mock(async () => []),
+				getActiveComboForFamily: mock(async () => null),
+			} as never,
+			runtime: { port: 8080, clientId: "test" } as never,
+			config: {
+				getUsageThrottlingFiveHourEnabled: () => false,
+				getUsageThrottlingWeeklyEnabled: () => false,
+				getCacheWarmingEnabled: () => false,
+				getCacheWarmingMinTokens: () => 100_000,
+			} as never,
+			provider: {
+				name: "anthropic",
+				canHandle: () => true,
+			} as never,
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) } as never,
+			requestRecorder: { recordSynthetic } as never,
+		};
+
+		const spoofedRequest = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-auto-refresh": "true",
+			},
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				messages: [{ role: "user", content: "hi" }],
+				max_tokens: 10,
+			}),
+		});
+
+		// No isInternal argument → external traffic.
+		const response = await handleProxy(
+			spoofedRequest,
+			new URL("https://proxy.local/v1/messages"),
+			ctx as never,
+		);
+
+		expect(response.status).toBe(503);
+		expect(recordSynthetic).toHaveBeenCalled();
 	});
 
 	it("records via requestRecorder.recordSynthetic when pool is exhausted and request is NOT an auto-refresh probe", async () => {
