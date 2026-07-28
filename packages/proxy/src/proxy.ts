@@ -65,10 +65,12 @@ import {
 } from "./handlers";
 import { resolveReservationDemotion } from "./handlers/family-reservation-gate";
 import {
+	acquireBackupProbePermit,
 	awaitProbeRelease,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
+	releaseBackupProbePermit,
 	wouldSuppressProbe,
 } from "./handlers/rate-limit-cooldown";
 import {
@@ -3038,6 +3040,36 @@ export async function handleProxy(
 		suppressed: SuppressedCandidate[];
 	};
 
+	/**
+	 * The ONE attempt loop, shared by the main pass and the combo-fallback pass.
+	 *
+	 * EQUIVALENCE NOTE (verified against the two hand-written loops this replaced,
+	 * commit "recover instead of 503ing when every candidate is probe-suppressed"):
+	 *  - ORDER: the caller passes the already-gated list; iteration is the same
+	 *    ascending index walk, and `i` is still the `failoverAttempts` argument.
+	 *  - GATING: the burst-attempted skip (`skipAccountId` — previously
+	 *    `burstAttemptedAccountId`, only ever set on the main pass), the combo
+	 *    slot/account desync check, the slot model override and the late
+	 *    provider-overload skip are byte-for-byte the previous logic; only the
+	 *    log noun is parameterised (`label`, defaulting to the main pass's
+	 *    "account").
+	 *  - TERMINAL FLAG: `!comboInfo?.comboName && (last || no-cross-provider ||
+	 *    every-remaining-unattemptable)`. The fallback pass previously omitted the
+	 *    `!comboName` conjunct because its combo was already cleared — with
+	 *    `comboInfo === null` the conjunct is vacuously true, so it is the same
+	 *    value. (`everyRemainingCandidateUnattemptable` is a separate, deliberate
+	 *    addition made for both passes.)
+	 *  - AFFINITY: unchanged — the burst preflight still attempts the held account
+	 *    outside this loop and hands its id in as `skipAccountId`; nothing here
+	 *    reads or writes affinity state.
+	 *  - OVERLOAD ACCOUNTING: every attempt still passes
+	 *    `onOutcome: noteOverloadSuppression`, and `logFinalOrderOnce` is still
+	 *    called from inside the probe-gate callback (the admission point).
+	 *  - The fallback pass now passes `modelOverride: null` where it previously
+	 *    passed `undefined`; every consumer is truthiness-based, so this is inert.
+	 * The only intentional behaviour change is bookkeeping: probe-suppressed
+	 * candidates are RECORDED (for recovery) instead of silently skipped.
+	 */
 	const runCandidateLoop = async (
 		list: Account[],
 		comboInfo: ComboSlotInfo | null,
@@ -3141,19 +3173,30 @@ export async function handleProxy(
 		return { response: null, anyAttemptAdmitted, suppressed };
 	};
 
+	/** Which attempt pass a probe-suppression recovery is running on behalf of. */
+	type RecoveryLoopMode = "main" | "combo-fallback";
+
 	/**
 	 * Re-run account selection + every gate, mirroring the overload hold's wake
 	 * re-selection. Used after an in-flight recovery probe reaches a verdict: a
 	 * recovered account is admissible again, a re-cooled one is now gated out so
 	 * the request fails over to a genuine sibling.
 	 *
-	 * `withComboModel` mirrors the model argument the CALLER's own selection used.
-	 * The combo-fallback path deliberately cleared the combo and re-selected
-	 * WITHOUT a model, so passing one there would resurrect the very combo routing
-	 * that just failed.
+	 * The mode mirrors the CALLER's own pipeline exactly, in two ways:
+	 *
+	 *  - MODEL. The main pass selected with the effective request model; the
+	 *    combo-fallback pass deliberately cleared the combo and re-selected
+	 *    WITHOUT a model, so passing one there would resurrect the very combo
+	 *    routing that just failed.
+	 *  - SOFT DEMOTIONS. The main pipeline applies `applySoftDemotionReorder`; the
+	 *    combo-fallback tail deliberately OMITS it (degraded-path fail-open — see
+	 *    `.claude/rules/rate-limiting-architecture.md` §8b, "rule 4 makes the
+	 *    reserve self-disabling on degraded paths"). Applying it here anyway made
+	 *    the post-hold fallback order differ from the ordinary fallback order and
+	 *    could route to a different account entirely.
 	 */
 	const reselectCandidatesAfterProbe = async (
-		withComboModel: boolean,
+		mode: RecoveryLoopMode,
 	): Promise<{
 		list: Account[];
 		comboInfo: ComboSlotInfo | null;
@@ -3162,64 +3205,126 @@ export async function handleProxy(
 		const reSelected = await selectAccountsForRequest(
 			requestMeta,
 			ctx,
-			withComboModel ? (effectiveRequestModel ?? undefined) : undefined,
+			mode === "main" ? (effectiveRequestModel ?? undefined) : undefined,
 		);
 		const { available: reAvailable } = applyProviderOverloadGate(reSelected);
 		const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
 		const wakeComboInfo = requestMeta.comboName
 			? getComboSlotInfo(requestMeta)
 			: null;
-		const list = applySoftDemotionReorder(
-			applyContextWindowGate(
-				applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
-				wakeComboInfo,
-			),
-			wakeComboInfo,
-		);
+		const gated =
+			mode === "main"
+				? applySoftDemotionReorder(
+						applyContextWindowGate(
+							applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+							wakeComboInfo,
+						),
+						wakeComboInfo,
+					)
+				: applyContextWindowGate(applyFamilyWeeklyGate(rePostThrottle));
+		// Pair the combo slots with the FINAL gated list, exactly as the initial
+		// pipeline does (section 9). `runCandidateLoop` pairs slots with accounts
+		// POSITIONALLY, so an unfiltered slot list — after a class pin or a
+		// post-selection gate dropped an earlier slot's account — hands the
+		// surviving account the wrong slot's model override and combo attribution.
+		const allowedIds = new Set(gated.map((account) => account.id));
+		const comboInfo = wakeComboInfo
+			? {
+					...wakeComboInfo,
+					slots: wakeComboInfo.slots.filter((slot) =>
+						allowedIds.has(slot.accountId),
+					),
+				}
+			: null;
+		if (!comboInfo) {
+			// Re-selection no longer resolves a combo (cleared, or the strategy
+			// picked plain routing): drop the stale slot index so a later attempt
+			// cannot be attributed to a combo slot that is not being used.
+			requestMeta.comboSlotIndex = null;
+		}
 		if (requestMeta.routing) {
 			// The re-selection replaces the candidate list, so the post-gate first
 			// attempt moves with it (see the initial pipeline).
-			requestMeta.routing.primaryAttemptAccountId = list[0]?.id ?? null;
+			requestMeta.routing.primaryAttemptAccountId = gated[0]?.id ?? null;
 		}
-		return { list, comboInfo: wakeComboInfo };
+		return { list: gated, comboInfo };
 	};
 
 	/**
 	 * Recovery for a loop that ended with ZERO admitted attempts and at least one
 	 * probe-suppressed candidate. Returns a served response, or null to let the
 	 * caller continue to its normal terminals.
+	 *
+	 * Shape: ONE overall budget (`PROBE_HOLD_MAX_MS`, measured from entry) that
+	 * every wait draws from, then a single-winner ungated retry.
+	 *
+	 *  1. Wait for the current target's probe, bounded by the REMAINING budget.
+	 *  2. Re-select and re-run the loop. Served → return it. A real attempt
+	 *     happened → return null (an ordinary failover; the caller's terminals
+	 *     report it). Suppressed again → re-target and loop, still inside the SAME
+	 *     budget: a fresh 10s per round would let a stampede of woken requests
+	 *     retry ungated immediately and repeatedly.
+	 *  3. Neither attempted nor suppressed (the fresh selection is empty — the
+	 *     account re-cooled, was paused, or a gate removed it) → return null. The
+	 *     pre-hold target is STALE by then; attempting it ungated would bypass the
+	 *     fresh routing decision and can deepen a real cooldown.
+	 *  4. Budget expired → claim the single backup-probe permit for this account +
+	 *     lease generation. The winner attempts ungated; losers return null. That
+	 *     bound is the whole point: on a one-account pool with a stuck probe every
+	 *     waiter's budget expires at once, and an unarbitrated bypass re-creates
+	 *     the 429 storm the gate exists to prevent.
+	 *
+	 * Guarantees: nobody 503s while the probe answers within time-to-first-byte;
+	 * AT MOST ONE request bypasses the gate per account per lease generation; the
+	 * worst case is a bounded ~10s wait before a 503, and only for losers.
 	 */
 	const recoverFromProbeSuppression = async (
 		suppressed: SuppressedCandidate[],
 		isTerminalAttempt: boolean,
-		withComboModel: boolean,
+		mode: RecoveryLoopMode,
 	): Promise<Response | null> => {
+		const deadline = Date.now() + PROBE_HOLD_MAX_MS;
 		let target = suppressed[0];
 		log.warn(
 			`All ${suppressed.length} candidate(s) were probe-suppressed and none was attempted — holding up to ${PROBE_HOLD_MAX_MS}ms for the in-flight probe on ${target.account.name} instead of failing the request`,
 		);
-		const released = await awaitProbeRelease(
-			target.account.id,
-			PROBE_HOLD_MAX_MS,
-			req.signal,
-		);
-		if (req.signal.aborted) return createClientAbortResponse();
-		if (released) {
-			const { list, comboInfo } =
-				await reselectCandidatesAfterProbe(withComboModel);
+		let remaining = deadline - Date.now();
+		while (remaining > 0) {
+			const released = await awaitProbeRelease(
+				target.account.id,
+				remaining,
+				req.signal,
+			);
+			if (req.signal.aborted) {
+				// This early return emits no worker end/summary, so the body a combo
+				// attempt staged for cache-keepalive would survive to the age sweep.
+				cacheBodyStore.discardStaged(requestMeta.id);
+				return createClientAbortResponse();
+			}
+			if (!released) break; // no verdict within the remaining budget
+			const { list, comboInfo } = await reselectCandidatesAfterProbe(mode);
 			const rerun = await runCandidateLoop(list, comboInfo);
 			if (rerun.response) return rerun.response;
 			// A genuine attempt happened and failed: that is an ordinary failover, so
 			// let the caller's normal terminals report it.
 			if (rerun.anyAttemptAdmitted) return null;
-			// Still nothing attempted. Same state as a timeout — fall through to the
-			// ungated retry below, re-targeting the first suppressed candidate of the
-			// fresh list when there is one.
-			if (rerun.suppressed.length > 0) target = rerun.suppressed[0];
+			// Nothing attempted AND nothing suppressed: the fresh selection has no
+			// candidate at all. Never fall back on the stale pre-hold target — the
+			// re-selection's own terminal handling is the truthful report.
+			if (rerun.suppressed.length === 0) return null;
+			target = rerun.suppressed[0];
+			remaining = deadline - Date.now();
 		}
-		// The probe never reached a verdict within budget. Attempt the FIRST
-		// suppressed candidate by POSITION, bypassing attemptThroughProbeGate.
-		//
+		// The probe never reached a verdict within budget. Exactly one request per
+		// (account, lease generation) may attempt the FIRST suppressed candidate by
+		// POSITION, bypassing attemptThroughProbeGate; everyone else falls through.
+		const permit = acquireBackupProbePermit(target.account.id);
+		if (!permit) {
+			log.warn(
+				`Probe hold on ${target.account.name} produced no verdict and the single ungated backup attempt is already taken — falling through to the normal terminals`,
+			);
+			return null;
+		}
 		// This retry deliberately takes NO lease, so completeRateLimitProbe no-ops
 		// and the capacity-restored marker is left for a genuinely admitted probe
 		// to clear. That is correct, not an oversight.
@@ -3228,27 +3333,31 @@ export async function handleProxy(
 		);
 		requestMeta.comboSlotIndex = target.comboSlotIndex;
 		logFinalOrderOnce(target.account.id);
-		return await proxyWithAccount(
-			req,
-			url,
-			target.account,
-			requestMeta,
-			finalBodyBuffer,
-			finalCreateBodyStream,
-			target.index,
-			ctx,
-			target.modelOverride,
-			apiKeyId,
-			apiKeyName,
-			requestBodyContext,
-			isTerminalAttempt,
-			{
-				// Without the outcome sink a late authoritative provider-overload
-				// rejection would fall straight back into the generic 503 this
-				// recovery exists to eliminate.
-				onOutcome: (o) => noteOverloadSuppression(target.account, o),
-			},
-		);
+		try {
+			return await proxyWithAccount(
+				req,
+				url,
+				target.account,
+				requestMeta,
+				finalBodyBuffer,
+				finalCreateBodyStream,
+				target.index,
+				ctx,
+				target.modelOverride,
+				apiKeyId,
+				apiKeyName,
+				requestBodyContext,
+				isTerminalAttempt,
+				{
+					// Without the outcome sink a late authoritative provider-overload
+					// rejection would fall straight back into the generic 503 this
+					// recovery exists to eliminate.
+					onOutcome: (o) => noteOverloadSuppression(target.account, o),
+				},
+			);
+		} finally {
+			releaseBackupProbePermit(permit);
+		}
 	};
 
 	// Seeded by the burst preflight: it attempts `heldAccount` OUTSIDE this loop
@@ -3265,7 +3374,7 @@ export async function handleProxy(
 			mainLoop.suppressed,
 			// Terminal-attempt flag, passed EXPLICITLY — never an index comparison.
 			!filteredComboInfo?.comboName,
-			true,
+			"main",
 		);
 		if (recovered) return recovered;
 	}
@@ -3352,8 +3461,9 @@ export async function handleProxy(
 					// an index comparison.
 					true,
 					// The combo was cleared before this loop's own selection, which ran
-					// WITHOUT a model — the recovery re-selection must match.
-					false,
+					// WITHOUT a model and WITHOUT the soft-demotion reorder — the
+					// recovery re-selection must match both.
+					"combo-fallback",
 				);
 				if (recovered) return recovered;
 			}

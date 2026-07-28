@@ -1,6 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
@@ -578,6 +587,143 @@ describe("probe-suppression recovery (handleProxy)", () => {
 
 		state.release?.();
 	}, 30_000);
+
+	it("admits exactly ONE ungated bypass when MANY waiters time out on the same probe", async () => {
+		// Fan-in control at the timeout boundary. Every waiter's budget expires at
+		// roughly the same instant against a stuck probe; without the single-winner
+		// permit each of them fires its own ungated request at the account the gate
+		// is protecting — the 429 storm this whole mechanism exists to prevent.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		// EVERY upstream call parks here, so the probe lease stays held for the
+		// whole test: no completion can release it and hand a later waiter a fresh,
+		// legitimately-admitted probe, which would blur what is being counted.
+		let calls = 0;
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				await gate;
+				return ok200();
+			},
+		);
+
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const prober = callHandleProxy(makeRequest(), url, ctx);
+		while (calls === 0) await tick();
+
+		const startedAt = Date.now();
+		const holders = [
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+			callHandleProxy(makeRequest(), url, ctx),
+		];
+		// The losers reject at the budget boundary, well before the winner settles.
+		for (const h of holders) h.catch(() => {});
+		while (calls < 2 && Date.now() - startedAt < 20_000) await tick(50);
+		// Give any further (wrongly-granted) bypass a chance to fire.
+		await tick(300);
+
+		// The parked probe plus exactly ONE backup attempt — not one per waiter.
+		expect(calls).toBe(2);
+		// The losers did not retry immediately: they waited out the shared budget
+		// (a fresh budget per round would let them re-run without ever waiting) and
+		// only then fell through to the normal terminal.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(9_000);
+
+		release?.();
+		const settled = await Promise.allSettled(holders);
+		expect(
+			settled.filter((r) => r.status === "fulfilled" && r.value.status === 200),
+		).toHaveLength(1);
+		expect(settled.filter((r) => r.status === "rejected")).toHaveLength(2);
+		expect((await prober).status).toBe(200);
+	}, 30_000);
+
+	it("does NOT attempt the stale pre-hold target when the fresh selection is empty", async () => {
+		// The probe reaches a verdict, but by then the account is gone from routing
+		// (paused here; a re-cooled, usage-throttled or family-gated account is the
+		// same shape). Attempting the pre-hold target anyway would bypass the fresh
+		// routing decision entirely.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const first = callHandleProxy(makeRequest(), url, ctx);
+		while (state.restoredCalls === 0) await tick();
+
+		const holder = callHandleProxy(makeRequest(), url, ctx);
+		await tick(20);
+		// The account leaves the pool, THEN the probe reports its verdict.
+		restored.paused = true;
+		state.release?.();
+
+		await expect(holder).rejects.toThrow();
+		expect((await first).status).toBe(200);
+		// No second upstream call: the stale target was never attempted.
+		expect(state.restoredCalls).toBe(1);
+	}, 15_000);
+
+	it("discards the staged cache body when the client disconnects during the hold", async () => {
+		// The early 499 return emits no worker end/summary, so without an explicit
+		// discard a staged body (0.5–1.5 MB) survives to the age sweep and evicts
+		// live staging entries.
+		const restored = makeAccount({
+			id: "restored",
+			name: "Restored",
+			access_token: "at-restored",
+		});
+		seedFreshHeadroom("restored");
+		markCapacityRestoredProbePending("restored");
+
+		const state = makeGatedFetch(originalFetch);
+		const ctx = makeContext([restored], "restored", "none");
+		const url = new URL("https://proxy.local/v1/messages");
+
+		const first = callHandleProxy(makeRequest(), url, ctx);
+		while (state.restoredCalls === 0) await tick();
+
+		const discard = spyOn(cacheBodyStore, "discardStaged");
+		try {
+			const controller = new AbortController();
+			const req = new Request(makeRequest(), { signal: controller.signal });
+			const holder = callHandleProxy(req, url, ctx);
+			await tick(20);
+			controller.abort();
+
+			const response = await holder;
+			expect(response.status).toBe(499);
+			// Nothing else in this request reached a terminal (its only candidate was
+			// suppressed, so no attempt ever staged or discarded), which makes this
+			// call unambiguously the hold's abort branch.
+			expect(discard.mock.calls.length).toBeGreaterThanOrEqual(1);
+		} finally {
+			discard.mockRestore();
+		}
+
+		state.release?.();
+		expect((await first).status).toBe(200);
+	}, 15_000);
 
 	it("keeps the onOutcome sink wired on the ungated retry (a late overload rejection is not a generic 503)", async () => {
 		// Without `onOutcome: noteOverloadSuppression`, an authoritative

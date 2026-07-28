@@ -36,8 +36,40 @@ const PROBE_RELEASE_POLL_MS = 25;
 const MAX_PROBE_GATES = 10_000;
 const probeLeases = new Map<
 	string,
-	{ leaseUntil: number; capacityGeneration?: number }
+	{ leaseUntil: number; capacityGeneration?: number; leaseGeneration: number }
 >();
+/**
+ * Monotonic lease id. Every admitted probe gets a fresh generation, which is what
+ * the backup-probe permit below is keyed by: one ungated bypass per LEASE, not
+ * one per process and not one per waiter.
+ */
+let probeLeaseGenerationCounter = 0;
+
+// --- Backup-probe permit -----------------------------------------------------
+//
+// When a request's recovery hold expires with the probe still unresolved, it may
+// attempt the account UNGATED rather than 503 against an untried pool. That
+// bypass must be single-flighted too: on a one-account pool with a stuck probe,
+// every waiter's budget expires at roughly the same instant, and without an
+// arbiter each of them fires its own ungated request — re-creating exactly the
+// 429 storm the gate exists to prevent.
+//
+// accountId → the lease generation whose bypass has already been handed out
+// (`null` = handed out while no lease was live). `active` is purely diagnostic
+// state for the in-flight window; ACQUISITION refuses on a generation match
+// whether or not the winner has finished, so a released permit never re-opens a
+// second bypass for the same lease. A newer lease generation supersedes the
+// record on the next acquire, so the map holds at most one entry per account.
+const backupProbePermits = new Map<
+	string,
+	{ generation: number | null; active: boolean }
+>();
+
+/** Opaque handle for a granted backup-probe permit. Release it in a `finally`. */
+export interface BackupProbePermit {
+	accountId: string;
+	generation: number | null;
+}
 
 // --- Capacity-restored single-flight marker ---------------------------------
 //
@@ -190,6 +222,41 @@ function pruneProbeLeases(now: number): void {
 	}
 }
 
+/** What {@link inspectProbeGate} observed about an account's gate state. */
+interface ProbeGateInspection {
+	/**
+	 * True when this account is subject to the single-flight recovery-probe gate
+	 * at all — i.e. a mature cooldown streak whose deadline has expired, or an
+	 * owed capacity-restored probe. False means "ordinary account, not gated".
+	 */
+	gatingRequired: boolean;
+	/** The pending capacity-restored generation, or undefined when none is owed. */
+	capacityGeneration: number | undefined;
+}
+
+/**
+ * The ONE definition of "is this account gated, and by which capacity
+ * generation". {@link getRateLimitProbeAdmission} (which then takes a lease) and
+ * {@link wouldSuppressProbe} (which must not perturb anything) both consume it,
+ * so the read-only predicate can never drift from the authoritative gate.
+ *
+ * PURE: no pruning, no lease acquisition, no logging. Both of those stay
+ * exclusively inside `getRateLimitProbeAdmission`.
+ */
+function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
+	const expiredMatureCooldown =
+		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
+		account.rate_limited_until != null &&
+		account.rate_limited_until <= now;
+	const capacityGeneration = capacityRestoredPending.get(
+		account.id,
+	)?.generation;
+	return {
+		gatingRequired: expiredMatureCooldown || capacityGeneration !== undefined,
+		capacityGeneration,
+	};
+}
+
 /**
  * Admits one process-local recovery probe for an account that just became
  * selectable again — either because a MATURE cooldown streak expired, or
@@ -228,15 +295,8 @@ export function getRateLimitProbeAdmission(
 	account: Account,
 	now: number = Date.now(),
 ): RateLimitProbeAdmission {
-	const expiredMatureCooldown =
-		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
-		account.rate_limited_until != null &&
-		account.rate_limited_until <= now;
-	const capacityGeneration = capacityRestoredPending.get(
-		account.id,
-	)?.generation;
-	if (!expiredMatureCooldown && capacityGeneration === undefined)
-		return "not_required";
+	const { gatingRequired, capacityGeneration } = inspectProbeGate(account, now);
+	if (!gatingRequired) return "not_required";
 
 	pruneProbeLeases(now);
 	const existingLease = probeLeases.get(account.id);
@@ -248,9 +308,15 @@ export function getRateLimitProbeAdmission(
 	}
 
 	const leaseUntil = now + PROBE_LEASE_MS;
+	probeLeaseGenerationCounter += 1;
 	// Record WHICH capacity generation this probe was admitted for, so its
-	// outcome can only ever clear that generation's marker.
-	probeLeases.set(account.id, { leaseUntil, capacityGeneration });
+	// outcome can only ever clear that generation's marker. The lease generation
+	// is separate and identifies THIS lease (see the backup-probe permit).
+	probeLeases.set(account.id, {
+		leaseUntil,
+		capacityGeneration,
+		leaseGeneration: probeLeaseGenerationCounter,
+	});
 	log.info(
 		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits}${
 			capacityGeneration !== undefined
@@ -310,10 +376,10 @@ export function completeRateLimitProbe(
 /**
  * Would {@link getRateLimitProbeAdmission} refuse this account right now?
  *
- * Side-effect free: it mirrors BOTH admission arms (mature streak with an
- * expired deadline, and a pending capacity-restored marker), reads `probeLeases`
- * WITHOUT pruning, and takes no lease — so it is safe to call from a decision
- * path that must not perturb gate state.
+ * Side-effect free: it asks the SHARED {@link inspectProbeGate} inspector (the
+ * same one the real gate consumes, so the two can never disagree), reads
+ * `probeLeases` WITHOUT pruning, and takes no lease — so it is safe to call from
+ * a decision path that must not perturb gate state.
  *
  * Used to decide whether an attempt is the request's LAST realistic one: a
  * remaining candidate that would only be suppressed cannot serve as fallback, so
@@ -324,15 +390,59 @@ export function wouldSuppressProbe(
 	account: Account,
 	now: number = Date.now(),
 ): boolean {
-	const expiredMatureCooldown =
-		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
-		account.rate_limited_until != null &&
-		account.rate_limited_until <= now;
-	if (!expiredMatureCooldown && !capacityRestoredPending.has(account.id)) {
-		return false;
-	}
+	if (!inspectProbeGate(account, now).gatingRequired) return false;
 	const existingLease = probeLeases.get(account.id);
 	return existingLease !== undefined && existingLease.leaseUntil > now;
+}
+
+/**
+ * Atomically claim the RIGHT to attempt `accountId` ungated after a recovery
+ * hold expired without a verdict.
+ *
+ * At most ONE permit is ever granted per (account, lease generation): the losers
+ * get `null` and must fall through to their caller's normal terminals. Without
+ * this, a stuck probe on a one-account pool lets every waiter bypass the gate at
+ * the same instant — unbounded fan-in onto the account the gate is protecting.
+ *
+ * Synchronous and allocation-cheap by design: the check-and-claim must not be
+ * split by an await, or two waiters could interleave between them.
+ *
+ * @returns the permit to release in a `finally`, or `null` when this account's
+ *   bypass for the current lease generation is already spoken for.
+ */
+export function acquireBackupProbePermit(
+	accountId: string,
+	now: number = Date.now(),
+): BackupProbePermit | null {
+	const lease = probeLeases.get(accountId);
+	// A lease that is still live identifies the generation being waited on. With
+	// none live (it expired while we waited, or was never taken) `null` is its own
+	// generation key — still exactly one bypass, and superseded by the next real
+	// lease.
+	const generation =
+		lease && lease.leaseUntil > now ? lease.leaseGeneration : null;
+	const existing = backupProbePermits.get(accountId);
+	if (existing && existing.generation === generation) return null;
+	backupProbePermits.set(accountId, { generation, active: true });
+	return { accountId, generation };
+}
+
+/**
+ * Release a granted backup-probe permit. The RECORD of the bypass is retained
+ * (only its in-flight flag clears): the one-bypass-per-lease-generation
+ * guarantee must survive the winner finishing, or the next waiter — whose budget
+ * expires moments later against the same stuck probe — would bypass too.
+ */
+export function releaseBackupProbePermit(permit: BackupProbePermit): void {
+	const existing = backupProbePermits.get(permit.accountId);
+	if (existing && existing.generation === permit.generation) {
+		existing.active = false;
+	}
+}
+
+/** Test-only: is a backup-probe bypass currently in flight for this account? */
+export function isBackupProbePermitActive(accountId: string): boolean {
+	return backupProbePermits.get(accountId)?.active === true;
 }
 
 /**
@@ -391,6 +501,7 @@ export async function awaitProbeRelease(
 export function resetRateLimitProbeGatesForTests(): void {
 	probeLeases.clear();
 	capacityRestoredPending.clear();
+	backupProbePermits.clear();
 }
 
 /**
