@@ -153,6 +153,29 @@ describe("payload retention hours", () => {
 				cleanup();
 			}
 		});
+
+		it("gives a legacy 0-day file value the old 1-DAY floor, not a 1-hour one", () => {
+			// The pre-hours code clamped data_retention_days to a 1-DAY floor, so
+			// `0` meant "keep 24 hours". Clamping after the ×24 would shrink that to
+			// a single hour; legacyDaysToHours() preserves the original window.
+			const { config, cleanup } = makeConfig({ data_retention_days: 0 });
+			try {
+				expect(config.getPayloadRetentionHours()).toBe(24);
+			} finally {
+				cleanup();
+			}
+		});
+
+		it("gives a negative legacy file value the old 1-DAY floor, not a 1-hour one", () => {
+			// Same contract as the 0 case: the pre-hours code clamped to a 1-DAY
+			// floor, and that is exactly what legacyDaysToHours() preserves.
+			const { config, cleanup } = makeConfig({ data_retention_days: -5 });
+			try {
+				expect(config.getPayloadRetentionHours()).toBe(24);
+			} finally {
+				cleanup();
+			}
+		});
 	});
 
 	describe("clamping", () => {
@@ -232,6 +255,31 @@ describe("payload retention hours", () => {
 			const { config, cleanup } = makeConfig();
 			try {
 				expect(config.getPayloadRetentionHours()).toBe(8760);
+			} finally {
+				cleanup();
+			}
+		});
+
+		it("gives DATA_RETENTION_DAYS=0 the old 1-DAY floor, not a 1-hour one", () => {
+			// An operator setting 0 got 24 hours from the pre-hours code, which
+			// clamped the value to a 1-DAY floor before any unit conversion;
+			// legacyDaysToHours() preserves that window instead of shrinking it 24×.
+			process.env.DATA_RETENTION_DAYS = "0";
+			const { config, cleanup } = makeConfig();
+			try {
+				expect(config.getPayloadRetentionHours()).toBe(24);
+			} finally {
+				cleanup();
+			}
+		});
+
+		it("gives a negative DATA_RETENTION_DAYS the old 1-DAY floor, not a 1-hour one", () => {
+			// Same contract as the 0 case: the pre-hours code clamped to a 1-DAY
+			// floor, and that is exactly what legacyDaysToHours() preserves.
+			process.env.DATA_RETENTION_DAYS = "-5";
+			const { config, cleanup } = makeConfig();
+			try {
+				expect(config.getPayloadRetentionHours()).toBe(24);
 			} finally {
 				cleanup();
 			}

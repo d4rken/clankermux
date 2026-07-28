@@ -194,11 +194,8 @@ export class Config extends EventEmitter {
 				const legacyDays = this.data.data_retention_days;
 				if (typeof legacyDays === "number") {
 					if (typeof this.data.payload_retention_hours !== "number") {
-						this.data.payload_retention_hours = this.clamp(
-							legacyDays * 24,
-							1,
-							8760,
-						);
+						this.data.payload_retention_hours =
+							this.legacyDaysToHours(legacyDays);
 					}
 					delete this.data.data_retention_days;
 				}
@@ -280,6 +277,16 @@ export class Config extends EventEmitter {
 		return Math.max(min, Math.min(max, n));
 	}
 
+	/**
+	 * Legacy day-based values convert with the OLD bounds applied first, so a
+	 * non-positive or oversized legacy value keeps exactly the window it had
+	 * before hour-granularity existed. Clamping after the ×24 would turn the old
+	 * 1-day floor into a 1-hour floor.
+	 */
+	private legacyDaysToHours(days: number): number {
+		return this.clamp(days, 1, 365) * 24;
+	}
+
 	getPayloadRetentionHours(): number {
 		const fromEnv = process.env.PAYLOAD_RETENTION_HOURS;
 		if (fromEnv) {
@@ -290,7 +297,7 @@ export class Config extends EventEmitter {
 		const legacyEnv = process.env.DATA_RETENTION_DAYS;
 		if (legacyEnv) {
 			const n = parseInt(legacyEnv, 10);
-			if (!Number.isNaN(n)) return this.clamp(n * 24, 1, 8760);
+			if (!Number.isNaN(n)) return this.legacyDaysToHours(n);
 		}
 		// The legacy FILE key is not consulted here: loadConfig() converts it once
 		// and is the single migration point.
