@@ -17,73 +17,19 @@ const log = new Logger("RateLimitCooldown");
 // the cooldown clears, we re-trigger the same 429 storm that produced the
 // streak. This process-local gate admits exactly ONE recovery probe per account
 // within a short lease; other concurrent requests skip the account and fall
-// through to the next candidate in the selection order — and, when there is no
-// next candidate left, recover instead of failing (see below).
+// through to the next candidate in the selection order.
 //
 // This is orthogonal to the transparent burst-retry hold (which holds a SINGLE
 // account WITHIN one request): the gate arbitrates MANY concurrent requests
 // re-selecting a freshly-recovered account ACROSS requests. Both compose — a
 // held/reprobing request keeps its lease until it reaches a terminal outcome.
-//
-// SUPPRESSION IS NOT A FAILURE. A suppressed candidate was never attempted, so
-// a request whose candidates are ALL suppressed has learned nothing about any
-// of them. It must not fall through to a terminal error — see
-// `awaitProbeRelease` and its caller in proxy.ts.
 const MATURE_COOLDOWN_STREAK = 5;
 const PROBE_LEASE_MS = 2 * 60 * 1000;
-/** Poll interval while waiting for an in-flight probe lease to be released. */
-const PROBE_RELEASE_POLL_MS = 25;
 const MAX_PROBE_GATES = 10_000;
 const probeLeases = new Map<
 	string,
-	{ leaseUntil: number; capacityGeneration?: number; leaseGeneration: number }
+	{ leaseUntil: number; capacityGeneration?: number }
 >();
-/**
- * Monotonic lease id. Every admitted probe gets a fresh generation, which is what
- * the backup-probe permit below is keyed by: one ungated bypass per LEASE, not
- * one per process and not one per waiter.
- */
-let probeLeaseGenerationCounter = 0;
-
-// --- Backup-probe permit -----------------------------------------------------
-//
-// When a request's recovery hold expires with the probe still unresolved, it may
-// attempt the account UNGATED rather than 503 against an untried pool. That
-// bypass must be single-flighted too: on a one-account pool with a stuck probe,
-// every waiter's budget expires at roughly the same instant, and without an
-// arbiter each of them fires its own ungated request — re-creating exactly the
-// 429 storm the gate exists to prevent.
-//
-// accountId → the lease generation whose bypass has already been handed out
-// (`null` = handed out while no lease was live). `active` is purely diagnostic
-// state for the in-flight window; ACQUISITION refuses on a generation match
-// whether or not the winner has finished, so a released permit never re-opens a
-// second bypass for the same lease. A newer lease generation supersedes the
-// record on the next acquire, so the map holds at most one entry per account.
-//
-// LIFECYCLE. The map holds at most one entry per account, but "one per account"
-// is only bounded while dead entries go away: admitting a new lease drops a spent
-// record (it can no longer refuse anything), and account removal evicts the
-// account via `clearCapacityRestoredProbePending`. Without the latter a
-// long-lived server accumulates deleted account ids.
-//
-// Removal may only evict a SPENT record outright. An ACTIVE one is marked
-// `evictOnRelease` and kept until its winner finishes: a recovery waiter retains
-// its pre-removal target and deliberately does not reselect on timeout, so a
-// later waiter for the same stuck lease still reaches `acquireBackupProbePermit`
-// — and deleting the record under it would hand out a SECOND ungated request for
-// the same lease generation, against an account that no longer exists. Retaining
-// the record keeps those waiters refused; the eviction happens on release.
-const backupProbePermits = new Map<
-	string,
-	{ generation: number | null; active: boolean; evictOnRelease: boolean }
->();
-
-/** Opaque handle for a granted backup-probe permit. Release it in a `finally`. */
-export interface BackupProbePermit {
-	accountId: string;
-	generation: number | null;
-}
 
 // --- Capacity-restored single-flight marker ---------------------------------
 //
@@ -207,35 +153,17 @@ export function rollbackCapacityRestoredProbePending(
 }
 
 /**
- * Drop an account's in-memory recovery-probe state: the capacity-restored marker
- * AND its spent backup-probe permit record. For account REMOVAL only — the
- * marker is otherwise cleared exclusively by a successful probe of the matching
- * generation (or a process restart).
+ * Drop any capacity-restored marker for an account. For account REMOVAL only —
+ * the marker is otherwise cleared exclusively by a successful probe of the
+ * matching generation (or a process restart).
  *
- * The marker is deliberately NEVER time-expired: a family gate, an open 529
- * breaker or a pinned client can legitimately delay probing indefinitely, and
- * expiring it would reopen fan-in at exactly the moment the account finally
- * becomes selectable. Both maps are keyed by account id, so they are bounded by
- * account count — but only while removal evicts them: a deleted id would
- * otherwise keep its spent-permit record forever on a long-lived server, and a
- * retained `null`-generation record would deny a legitimate no-live-lease claim
- * if that id were ever restored.
- *
- * Only a SPENT permit is safe to evict here. An ACTIVE one still has a bypass in
- * flight, and further waiters on that same stuck lease must stay refused — so it
- * is marked for eviction and dropped by {@link releaseBackupProbePermit}.
- * Deleting it outright would re-open a second ungated request per lease
- * generation, which is exactly the guarantee this permit exists to hold.
+ * It is deliberately NEVER time-expired: a family gate, an open 529 breaker or a
+ * pinned client can legitimately delay probing indefinitely, and expiring the
+ * marker would reopen fan-in at exactly the moment the account finally becomes
+ * selectable. The map is keyed by account id, so it is bounded by account count.
  */
 export function clearCapacityRestoredProbePending(accountId: string): void {
 	capacityRestoredPending.delete(accountId);
-	const permit = backupProbePermits.get(accountId);
-	if (permit === undefined) return;
-	if (permit.active) {
-		permit.evictOnRelease = true;
-		return;
-	}
-	backupProbePermits.delete(accountId);
 }
 
 /** Whether an early-release probe is still owed for this account. */
@@ -314,14 +242,6 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
  * NOTE: the global force-account override in `proxy.ts` bypasses account
  * selection entirely, so the "exactly one upstream probe" guarantee explicitly
  * excludes that operator override.
- *
- * IMPORTANT — "suppressed" is not "failed". Nothing was attempted, so a caller
- * whose candidates are ALL suppressed knows nothing about any of them and must
- * NOT fall through to a terminal error: that would 503 a request against a pool
- * of healthy accounts, none of which was ever tried. Callers recover by waiting
- * out the in-flight probe ({@link awaitProbeRelease}) and, only if that wait
- * times out, attempting the first suppressed candidate ungated. See the
- * recovery path in `proxy.ts`.
  */
 export function getRateLimitProbeAdmission(
 	account: Account,
@@ -340,24 +260,9 @@ export function getRateLimitProbeAdmission(
 	}
 
 	const leaseUntil = now + PROBE_LEASE_MS;
-	probeLeaseGenerationCounter += 1;
-	// A new lease supersedes any SPENT bypass record for this account: the record
-	// only ever guards its own generation, and acquisition would discard it on the
-	// next claim anyway. Dropping it here keeps the map from carrying dead
-	// generations (including the `null` "no live lease" key, which would otherwise
-	// deny a legitimate later no-lease claim). An ACTIVE record is left alone —
-	// its winner is still in flight and must be able to release it.
-	if (backupProbePermits.get(account.id)?.active === false) {
-		backupProbePermits.delete(account.id);
-	}
 	// Record WHICH capacity generation this probe was admitted for, so its
-	// outcome can only ever clear that generation's marker. The lease generation
-	// is separate and identifies THIS lease (see the backup-probe permit).
-	probeLeases.set(account.id, {
-		leaseUntil,
-		capacityGeneration,
-		leaseGeneration: probeLeaseGenerationCounter,
-	});
+	// outcome can only ever clear that generation's marker.
+	probeLeases.set(account.id, { leaseUntil, capacityGeneration });
 	log.info(
 		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits}${
 			capacityGeneration !== undefined
@@ -436,124 +341,10 @@ export function wouldSuppressProbe(
 	return existingLease !== undefined && existingLease.leaseUntil > now;
 }
 
-/**
- * Atomically claim the RIGHT to attempt `accountId` ungated after a recovery
- * hold expired without a verdict.
- *
- * At most ONE permit is ever granted per (account, lease generation): the losers
- * get `null` and must fall through to their caller's normal terminals. Without
- * this, a stuck probe on a one-account pool lets every waiter bypass the gate at
- * the same instant — unbounded fan-in onto the account the gate is protecting.
- *
- * Synchronous and allocation-cheap by design: the check-and-claim must not be
- * split by an await, or two waiters could interleave between them.
- *
- * @returns the permit to release in a `finally`, or `null` when this account's
- *   bypass for the current lease generation is already spoken for.
- */
-export function acquireBackupProbePermit(
-	accountId: string,
-	now: number = Date.now(),
-): BackupProbePermit | null {
-	const lease = probeLeases.get(accountId);
-	// A lease that is still live identifies the generation being waited on. With
-	// none live (it expired while we waited, or was never taken) `null` is its own
-	// generation key — still exactly one bypass, and superseded by the next real
-	// lease.
-	const generation =
-		lease && lease.leaseUntil > now ? lease.leaseGeneration : null;
-	const existing = backupProbePermits.get(accountId);
-	if (existing && existing.generation === generation) return null;
-	backupProbePermits.set(accountId, {
-		generation,
-		active: true,
-		evictOnRelease: false,
-	});
-	return { accountId, generation };
-}
-
-/**
- * Release a granted backup-probe permit. The RECORD of the bypass is retained
- * (only its in-flight flag clears): the one-bypass-per-lease-generation
- * guarantee must survive the winner finishing, or the next waiter — whose budget
- * expires moments later against the same stuck probe — would bypass too.
- *
- * The single exception is an account REMOVED while this bypass was in flight:
- * `clearCapacityRestoredProbePending` could not evict a live record without
- * re-opening the bypass, so it deferred the eviction to here.
- */
-export function releaseBackupProbePermit(permit: BackupProbePermit): void {
-	const existing = backupProbePermits.get(permit.accountId);
-	if (!existing || existing.generation !== permit.generation) return;
-	if (existing.evictOnRelease) {
-		backupProbePermits.delete(permit.accountId);
-		return;
-	}
-	existing.active = false;
-}
-
-/** Test-only: is a backup-probe bypass currently in flight for this account? */
-export function isBackupProbePermitActive(accountId: string): boolean {
-	return backupProbePermits.get(accountId)?.active === true;
-}
-
-/**
- * Remaining lifetime (ms) of an account's in-flight recovery-probe lease, or
- * `null` when no live lease is held.
- *
- * Read-only: it deliberately does NOT prune, so it can be called from a hot
- * decision path without mutating gate state.
- */
-export function getProbeLeaseRemainingMs(
-	accountId: string,
-	now: number = Date.now(),
-): number | null {
-	const lease = probeLeases.get(accountId);
-	if (!lease || lease.leaseUntil <= now) return null;
-	return lease.leaseUntil - now;
-}
-
-/**
- * Bounded wait for an account's in-flight recovery probe to reach a verdict.
- *
- * A probe lease is released at RESPONSE-HEADER time (response-processor's
- * `completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned")`),
- * not at stream end, so the common wait here costs time-to-first-byte rather
- * than a whole generation. That is what makes waiting viable at all.
- *
- * The wait is bounded by `min(maxWaitMs, remaining lease)`: a lease that is
- * already nearly expired needs no further waiting, and a caller must never be
- * held for the full two-minute lease.
- *
- * @returns `true` when the lease was released (or was never held) within the
- *   bound, `false` on timeout or client abort. A `false` return means the caller
- *   still has no verdict and must fall back rather than keep waiting.
- */
-export async function awaitProbeRelease(
-	accountId: string,
-	maxWaitMs: number,
-	signal?: AbortSignal,
-): Promise<boolean> {
-	const now = Date.now();
-	const leaseRemaining = getProbeLeaseRemainingMs(accountId, now);
-	if (leaseRemaining === null) return true;
-	const deadline = now + Math.min(maxWaitMs, leaseRemaining);
-	while (Date.now() < deadline) {
-		if (signal?.aborted) return false;
-		const wait = Math.min(PROBE_RELEASE_POLL_MS, deadline - Date.now());
-		if (wait > 0) {
-			await new Promise((resolve) => setTimeout(resolve, wait));
-		}
-		if (getProbeLeaseRemainingMs(accountId) === null) return true;
-	}
-	return getProbeLeaseRemainingMs(accountId) === null;
-}
-
 /** Test-only: clears all in-memory probe leases/markers between test cases. */
 export function resetRateLimitProbeGatesForTests(): void {
 	probeLeases.clear();
 	capacityRestoredPending.clear();
-	backupProbePermits.clear();
 }
 
 /**
