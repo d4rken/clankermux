@@ -9,11 +9,13 @@ import type {
 import { FAMILY_WEEKLY_MAX_USAGE_AGE_MS } from "./handlers/family-weekly-gate";
 import {
 	isAbsorbablePeer,
+	resolveLivenessReserveThreshold,
 	resolvePoolLivenessDemotion,
 } from "./handlers/pool-liveness-gate";
 import { hasCapacityRestoredProbePending } from "./handlers/rate-limit-cooldown";
 import { getUsageThrottleUntil } from "./handlers/usage-throttling";
 import { getProviderWideOverloadUntil } from "./provider-overload-cooldown";
+import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
 const log = new Logger("PrimaryAccountPeek");
 
@@ -131,6 +133,14 @@ export function peekPrimaryAccountId(
 	// The family-reservation input is `false` here for the same reason the family
 	// gate itself is not modeled: it is request-shape dependent and the badge
 	// assumes a fresh, nominal request.
+	//
+	// TIER CONVENTION: a generic fresh request is modeled, so the badge always
+	// uses the NON-PROTECTED tier — the deeper protected tier is a privilege of
+	// actual Fable traffic, and assuming it here would report a primary that
+	// ordinary traffic would never be routed to. The burn slope IS per account and
+	// is validated exactly as routing validates it (same helper, same binding
+	// weekly-window check), so the modeled release horizon matches routing's.
+	const reserveThresholdPct = resolveLivenessReserveThreshold(false);
 	for (const account of survivors) {
 		let absorbablePeerCount = 0;
 		for (const peer of survivors) {
@@ -140,17 +150,22 @@ export function peekPrimaryAccountId(
 					capacityById.get(peer.id) ?? null,
 					false,
 					hasCapacityRestoredProbePending(peer.id),
+					reserveThresholdPct,
 				)
 			) {
 				absorbablePeerCount++;
 			}
 		}
+		const accountCapacity = capacityById.get(account.id) ?? null;
 		if (
-			resolvePoolLivenessDemotion(
-				capacityById.get(account.id) ?? null,
-				absorbablePeerCount,
-				now,
-			)
+			resolvePoolLivenessDemotion(accountCapacity, absorbablePeerCount, now, {
+				reserveThresholdPct,
+				weeklySlopePctPerHour: resolveEffectiveWeeklySlope(
+					account.id,
+					accountCapacity,
+					now,
+				),
+			})
 		) {
 			skippedLivenessReserved.push(account.id);
 			continue;

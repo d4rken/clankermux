@@ -21,6 +21,7 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 } from "../provider-overload-cooldown";
+import { recordWeeklyBurnSlope } from "../weekly-burn-slope";
 
 // Deterministic burst-hold timing, mirroring burst-retry-hold-integration.test.ts:
 // drive the hold's injectable clock well past the held account's 60s no-reset
@@ -245,12 +246,12 @@ function seedUsage(
 	} as never);
 }
 
-function makeRequest(): Request {
+function makeRequest(model = "claude-sonnet-4-5"): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: "claude-sonnet-4-5",
+			model,
 			messages: [{ role: "user", content: "hello" }],
 			max_tokens: 10,
 		}),
@@ -650,6 +651,180 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		expect(res.status).toBe(200);
 		expect(attempts).toEqual(["at-peer"]);
 	}, 10_000);
+
+	// --- two-tier reserve + burn-aware release, through the real reorder ---
+
+	it("demotes a NON-protected request at 15% weekly headroom but keeps a FABLE one", async () => {
+		// 85% weekly ⇒ 15% headroom: inside the non-protected reserve band (20) but
+		// above the protected one (10), so the SAME account is judged differently
+		// depending on whose traffic is asking.
+		const pinned = makeAccount({
+			id: "tier-pinned",
+			name: "TierPinned",
+			access_token: "at-tier-pinned",
+		});
+		const peer = makeAccount({
+			id: "tier-peer",
+			name: "TierPeer",
+			access_token: "at-tier-peer",
+		});
+		seedUsage(pinned.id, 0, 85);
+		seedUsage(peer.id, 20, 20);
+
+		const ctx = makeContext([pinned, peer]);
+		const attempts = recordAttempts(originalFetch);
+
+		await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		await callHandleProxy(
+			makeRequest("claude-fable-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(attempts).toEqual(["at-tier-peer", "at-tier-pinned"]);
+	});
+
+	it("uses a MATCHING weekly burn slope for the release horizon, and ignores a mismatched one", async () => {
+		// Binding weekly reset 20h out. With a matching slope the tail needs ~12h to
+		// drain, so the reserve still holds; a slope fitted on a DIFFERENT weekly
+		// window is rejected and the 30.3h static fallback releases the reserve.
+		const matched = makeAccount({
+			id: "slope-matched",
+			name: "SlopeMatched",
+			access_token: "at-slope-matched",
+		});
+		const mismatched = makeAccount({
+			id: "slope-mismatched",
+			name: "SlopeMismatched",
+			access_token: "at-slope-mismatched",
+		});
+		const peer = makeAccount({
+			id: "slope-peer",
+			name: "SlopePeer",
+			access_token: "at-slope-peer",
+		});
+
+		const now = Date.now();
+		const weeklyReset = now + 20 * HOUR;
+		seedUsage(matched.id, 0, 85, 20 * HOUR);
+		seedUsage(mismatched.id, 0, 85, 20 * HOUR);
+		seedUsage(peer.id, 20, 20);
+		recordWeeklyBurnSlope(matched.id, {
+			slopePctPerHour: 1.5, // 15 / 1.5 = 10h → floored to the 12h minimum
+			lowConfidence: false,
+			observedAt: now,
+			windowResetMs: weeklyReset,
+		});
+		recordWeeklyBurnSlope(mismatched.id, {
+			slopePctPerHour: 1.5,
+			lowConfidence: false,
+			observedAt: now,
+			// A different weekly window entirely (a day off) — must not be applied.
+			windowResetMs: weeklyReset + DAY,
+		});
+
+		const attempts = recordAttempts(originalFetch);
+
+		await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			makeContext([matched, peer], makeOrderedStrategy()),
+		);
+		await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			makeContext([mismatched, peer], makeOrderedStrategy()),
+		);
+
+		expect(attempts).toEqual(["at-slope-peer", "at-slope-mismatched"]);
+	});
+
+	/**
+	 * Tiering follows the LOGICAL request family, so a Codex account serving a
+	 * fable-logical request is judged at the PROTECTED tier — whether the fable →
+	 * gpt-* mapping is explicit or left to the Codex default (in which case
+	 * `modelForAccount` keeps the logical Claude model, since the mapped model has
+	 * no recognized family). Asserted through the final-order DEBUG line so the
+	 * Codex account is never actually attempted: a healthy Anthropic account leads
+	 * the ranking and takes every upstream call.
+	 */
+	async function codexTierReason(opts: {
+		mappings: string | null;
+		model: string;
+		id: string;
+	}): Promise<string | undefined> {
+		const healthy = makeAccount({
+			id: `${opts.id}-healthy`,
+			name: "Healthy",
+			access_token: "at-healthy",
+		});
+		const codex = makeAccount({
+			id: opts.id,
+			name: "Codex",
+			provider: "codex",
+			api_key: "cx-key",
+			refresh_token: null,
+			access_token: null,
+			model_mappings: opts.mappings,
+		});
+		seedUsage(healthy.id, 10, 10);
+		// 85% weekly ⇒ 15% headroom: inside the non-protected band, above the
+		// protected one.
+		seedUsage(codex.id, 0, 85);
+
+		const ctx = makeContext([healthy, codex], makeOrderedStrategy());
+		recordAttempts(originalFetch);
+		const debug = captureDebugLines();
+		try {
+			await callHandleProxy(
+				makeRequest(opts.model),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+			return debug.lines.find((l) => l.startsWith("Final candidate order:"));
+		} finally {
+			debug.restore();
+		}
+	}
+
+	it("judges a Codex account serving a fable-logical request at the PROTECTED tier (explicit mapping)", async () => {
+		const fable = await codexTierReason({
+			mappings: JSON.stringify({ fable: "gpt-5.6-sol" }),
+			model: "claude-fable-5",
+			id: "codex-explicit-fable",
+		});
+		expect(fable).toContain("Healthy > Codex");
+		expect(fable).not.toContain("Codex(demoted");
+
+		// Control: the same account and headroom, ordinary traffic ⇒ demoted.
+		const sonnet = await codexTierReason({
+			mappings: JSON.stringify({ sonnet: "gpt-5.6-terra" }),
+			model: "claude-sonnet-4-5",
+			id: "codex-explicit-sonnet",
+		});
+		expect(sonnet).toContain("Codex(demoted:pool liveness)");
+	});
+
+	it("judges a Codex account serving a fable-logical request at the PROTECTED tier (default mapping)", async () => {
+		const fable = await codexTierReason({
+			mappings: null,
+			model: "claude-fable-5",
+			id: "codex-default-fable",
+		});
+		expect(fable).toContain("Healthy > Codex");
+		expect(fable).not.toContain("Codex(demoted");
+
+		const sonnet = await codexTierReason({
+			mappings: null,
+			model: "claude-sonnet-4-5",
+			id: "codex-default-sonnet",
+		});
+		expect(sonnet).toContain("Codex(demoted:pool liveness)");
+	});
 
 	it("logs the account actually attempted, not the one in first position, when the late overload check skips accounts[0]", async () => {
 		// The final-order DEBUG line is the ONLY runtime evidence that a soft
