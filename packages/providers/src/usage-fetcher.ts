@@ -22,6 +22,12 @@ import {
 	getRepresentativeKiloWindow,
 	type KiloUsageData,
 } from "./kilo-usage-fetcher";
+import {
+	fetchMinimaxUsageData,
+	getRepresentativeMinimaxUtilization,
+	getRepresentativeMinimaxWindow,
+	type MinimaxUsageData,
+} from "./minimax-usage-fetcher";
 import type { CodexCreditsInfo } from "./providers/codex/usage";
 import { isGenuineWindowRoll } from "./window-reset";
 import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
@@ -297,7 +303,8 @@ export type AnyUsageData =
 	| UsageData
 	| ZaiUsageData
 	| KiloUsageData
-	| AlibabaCodingPlanUsageData;
+	| AlibabaCodingPlanUsageData
+	| MinimaxUsageData;
 
 /**
  * Extract the primary window reset timestamp (ms) from usage data.
@@ -310,6 +317,15 @@ export function extractWindowResetTime(
 	if (provider === "zai") {
 		const zai = data as ZaiUsageData;
 		return zai.tokens_limit?.resetAt ?? null;
+	}
+	if (provider === "minimax") {
+		const m = data as MinimaxUsageData;
+		// Prefer the BINDING window's reset; with neither bound, the short window's
+		// reset is the sooner-actionable one.
+		if (getRepresentativeMinimaxWindow(m) === "seven_day") {
+			return m.seven_day?.resetAt ?? null;
+		}
+		return m.five_hour?.resetAt ?? m.seven_day?.resetAt ?? null;
 	}
 	if (provider === "anthropic" || provider === "codex") {
 		const d = data as UsageData;
@@ -696,6 +712,9 @@ export function getRepresentativeUtilizationForProvider(
 			return getRepresentativeAlibabaCodingPlanUtilization(
 				data as AlibabaCodingPlanUsageData,
 			);
+		}
+		case "minimax": {
+			return getRepresentativeMinimaxUtilization(data as MinimaxUsageData);
 		}
 		default:
 			return null;
@@ -1665,6 +1684,26 @@ class UsageCache {
 					const window = getRepresentativeKiloWindow(data as KiloUsageData);
 					log.debug(
 						`Successfully fetched Kilo usage data for account ${accountId}: $${(data as KiloUsageData).remainingUsd.toFixed(2)} remaining (${utilization?.toFixed(1)}% used, ${window})`,
+					);
+					return { success: true, retryAfterMs: null };
+				}
+			} else if (provider === "minimax") {
+				// MiniMax Token Plan remains — a metadata-only GET that costs zero
+				// quota. Request forwarding still goes through the generic
+				// anthropic-compatible path; this is polling only.
+				data = await fetchMinimaxUsageData(token);
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
+				if (data) {
+					this.cache.set(accountId, { data, timestamp: Date.now() });
+					const utilization = getRepresentativeMinimaxUtilization(
+						data as MinimaxUsageData,
+					);
+					const window = getRepresentativeMinimaxWindow(
+						data as MinimaxUsageData,
+					);
+					log.debug(
+						`Successfully fetched Minimax usage data for account ${accountId}: ${utilization?.toFixed(1)}% used (${window} window)`,
 					);
 					return { success: true, retryAfterMs: null };
 				}

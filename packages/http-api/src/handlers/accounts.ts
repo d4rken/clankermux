@@ -34,8 +34,11 @@ import {
 	type AnyUsageData,
 	codexRateLimitResetCreditsCache,
 	fetchUsageData,
+	getRepresentativeMinimaxUtilization,
+	getRepresentativeMinimaxWindow,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
+	type MinimaxUsageData,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	USAGE_CACHE_TTL_MS,
@@ -1047,6 +1050,22 @@ export function createAccountsListHandler(
 								error,
 							);
 						}
+					}
+				} else if (account.provider === "minimax" && usageData) {
+					// MiniMax Token Plan usage — 5h/7d windows from
+					// /v1/token_plan/remains. Statically imported (the neighbouring
+					// branches' `require()` inside a try/catch does not belong in an ESM
+					// handler), so a missing export is a build error rather than a
+					// silently swallowed runtime one.
+					const isMinimaxData =
+						"five_hour" in usageData || "seven_day" in usageData;
+					if (isMinimaxData) {
+						const minimax = usageData as unknown as MinimaxUsageData;
+						// Both helpers return null — never 0 — when there is no `general`
+						// row, so "unknown" stays distinct from "0% used".
+						usageUtilization = getRepresentativeMinimaxUtilization(minimax);
+						usageWindow = getRepresentativeMinimaxWindow(minimax);
+						fullUsageData = usageData as FullUsageData;
 					}
 				}
 
