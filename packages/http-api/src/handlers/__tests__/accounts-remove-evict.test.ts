@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+	codexRateLimitResetCreditsCache,
+	usageCache,
+} from "@clankermux/providers";
+import {
 	clearCapacityRestoredProbePending,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
@@ -157,23 +161,58 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 		expect(remaining[0]?.accountId).toBe(OTHER_ID);
 	});
 
-	it("evicts only the TARGETED id's slots when two accounts share a name", async () => {
+	it("evicts only the TARGETED id's state — in EVERY store — when two accounts share a name", async () => {
 		// The eviction used to resolve one id from a name; with a collision it could
-		// have evicted a surviving account's warm state.
+		// have evicted a surviving account's warm state. All FOUR stores the
+		// handler touches are seeded and asserted: checking only the session cache
+		// would let a later mis-keying of the others pass unnoticed.
 		seedSlot("dup-a", "session-a");
 		seedSlot("dup-b", "session-b");
-		const { dbOps } = makeDbOps([
-			{ id: "dup-a", name: "duplicate" },
-			{ id: "dup-b", name: "duplicate" },
-		]);
+		usageCache.set("dup-a", { five_hour: { utilization: 10 } } as never);
+		usageCache.set("dup-b", { five_hour: { utilization: 20 } } as never);
+		codexRateLimitResetCreditsCache.set("dup-a", {
+			availableCount: 1,
+			credits: null,
+		});
+		codexRateLimitResetCreditsCache.set("dup-b", {
+			availableCount: 2,
+			credits: null,
+		});
+		markCapacityRestoredProbePending("dup-a");
+		markCapacityRestoredProbePending("dup-b");
 
-		expect(
-			(await makeHandler(dbOps)(deleteRequest("duplicate"), "dup-a")).status,
-		).toBe(200);
+		try {
+			const { dbOps } = makeDbOps([
+				{ id: "dup-a", name: "duplicate" },
+				{ id: "dup-b", name: "duplicate" },
+			]);
 
-		const remaining = sessionCacheStore.getAllSlots();
-		expect(remaining).toHaveLength(1);
-		expect(remaining[0]?.accountId).toBe("dup-b");
+			expect(
+				(await makeHandler(dbOps)(deleteRequest("duplicate"), "dup-a")).status,
+			).toBe(200);
+
+			const remaining = sessionCacheStore.getAllSlots();
+			expect(remaining).toHaveLength(1);
+			expect(remaining[0]?.accountId).toBe("dup-b");
+
+			expect(usageCache.peek("dup-a")).toBeNull();
+			expect(usageCache.peek("dup-b")).not.toBeNull();
+
+			expect(codexRateLimitResetCreditsCache.get("dup-a")).toBeNull();
+			expect(
+				codexRateLimitResetCreditsCache.get("dup-b")?.summary.availableCount,
+			).toBe(2);
+
+			expect(hasCapacityRestoredProbePending("dup-a")).toBe(false);
+			expect(hasCapacityRestoredProbePending("dup-b")).toBe(true);
+		} finally {
+			usageCache.delete("dup-a");
+			usageCache.delete("dup-b");
+			codexRateLimitResetCreditsCache.delete("dup-a");
+			codexRateLimitResetCreditsCache.delete("dup-b");
+			clearCapacityRestoredProbePending("dup-a");
+			clearCapacityRestoredProbePending("dup-b");
+		}
 	});
 
 	it("drops an owed capacity-restored probe marker for the removed account", async () => {

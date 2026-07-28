@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import { runGuarded } from "./submit-guard";
 
 /** A submit that stays in flight until it is released, counting its runs. */
@@ -137,5 +138,65 @@ describe("AccountAddForm submit wiring", () => {
 		expect(source.split("disabled={isSubmitting}").length - 1).toBe(
 			handlers.length,
 		);
+	});
+
+	/**
+	 * The declarations above prove the guarded wrappers EXIST. They say nothing
+	 * about what the buttons are bound to: a refactor pointing a button at
+	 * `handleAddAccountInner` while leaving the wrapper declared re-enables
+	 * duplicate account / OAuth / device-session creation with every assertion
+	 * above still green. So walk the real AST and pin each `onClick`.
+	 */
+	describe("button onClick bindings (AST)", () => {
+		const sourceFile = ts.createSourceFile(
+			"AccountAddForm.tsx",
+			source,
+			ts.ScriptTarget.Latest,
+			/* setParentNodes */ true,
+			ts.ScriptKind.TSX,
+		);
+
+		/** Every identifier referenced inside each `onClick={...}` expression. */
+		const onClickBindings: Array<{ direct: string | null; names: string[] }> =
+			[];
+		const visit = (node: ts.Node): void => {
+			if (
+				ts.isJsxAttribute(node) &&
+				ts.isIdentifier(node.name) &&
+				node.name.text === "onClick" &&
+				node.initializer &&
+				ts.isJsxExpression(node.initializer) &&
+				node.initializer.expression
+			) {
+				const expression = node.initializer.expression;
+				const names: string[] = [];
+				const collect = (n: ts.Node): void => {
+					if (ts.isIdentifier(n)) names.push(n.text);
+					ts.forEachChild(n, collect);
+				};
+				collect(expression);
+				onClickBindings.push({
+					direct: ts.isIdentifier(expression) ? expression.text : null,
+					names,
+				});
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(sourceFile);
+
+		for (const handler of handlers) {
+			it(`binds a button's onClick directly to ${handler}`, () => {
+				expect(
+					onClickBindings.filter((b) => b.direct === handler),
+				).toHaveLength(1);
+			});
+		}
+
+		it("never binds an UNGUARDED *Inner handler to any onClick", () => {
+			const inner = onClickBindings.flatMap((b) =>
+				b.names.filter((name) => name.endsWith("Inner")),
+			);
+			expect(inner).toEqual([]);
+		});
 	});
 });
