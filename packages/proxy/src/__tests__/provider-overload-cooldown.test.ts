@@ -350,10 +350,61 @@ describe("provider overload cooldown", () => {
 				makeRequest({ "x-clankermux-auto-refresh": "true" }),
 				new URL("https://proxy.local/v1/messages"),
 				ctx,
+				null,
+				null,
+				// isInternal — the in-process scheduler dispatch. Both the
+				// overload-hold skip and the recording suppression are trust-gated
+				// on this flag; the marker header alone no longer buys either.
+				true,
 			);
 
 			expect(response.status).toBe(529);
 			expect(recordSynthetic).not.toHaveBeenCalled();
+		} finally {
+			Date.now = originalDateNow;
+		}
+	});
+
+	it("SPOOF GUARD: an external request with a forged auto-refresh header still ENTERS the overload hold", async () => {
+		// The hold-skip is a privilege (a fast synthetic 529 instead of a held
+		// connection). Trust-gating it means a forged marker no longer buys it, so
+		// the spoofed request enters the hold and waits — observable here because a
+		// mid-hold client disconnect surfaces as 499, which the immediate-529 path
+		// can never produce.
+		const now = Date.UTC(2026, 4, 29, 12, 0, 0);
+		const originalDateNow = Date.now;
+
+		Date.now = () => now;
+		try {
+			applyProviderOverloadCooldown("anthropic", now + 60_000);
+			const ctx = makeContext([
+				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
+			]);
+			const { handleProxy } = await import("../proxy");
+			const controller = new AbortController();
+			const req = new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-clankermux-auto-refresh": "true",
+				},
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 16,
+				}),
+				signal: controller.signal,
+			});
+			// No isInternal argument → external traffic with a forged marker.
+			const pending = handleProxy(
+				req,
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+			// Abort AFTER entry so the entry-time abort short-circuit can't fire.
+			setTimeout(() => controller.abort(), 25);
+			const response = await pending;
+			expect(response.status).toBe(499);
 		} finally {
 			Date.now = originalDateNow;
 		}

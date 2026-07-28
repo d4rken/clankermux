@@ -757,6 +757,7 @@ export async function handleProxy(
 				path: url.pathname,
 				providerName: ctx.provider.name,
 				responseStatus: response.status,
+				internal: requestMeta.internal === true,
 				getHeader: (name) => req.headers.get(name),
 			})
 		) {
@@ -953,7 +954,8 @@ export async function handleProxy(
 	// request cannot use it to dodge operator-configured usage throttling.
 	const isSyntheticProbeRequest = isTrustedSyntheticProbe(
 		req.headers,
-		requestMeta.internal,
+		requestMeta.internal === true,
+		"any",
 	);
 
 	const applyUsageThrottling = (accounts: Account[]) => {
@@ -1517,10 +1519,20 @@ export async function handleProxy(
 		// not a held connection: internal requests, auto-refresh probes,
 		// keepalive replays, and count_tokens (answered locally/quickly — same
 		// rationale as the pin hold's count_tokens skip).
+		//
+		// The probe-marker arm is trust-gated: the markers are client-settable, so
+		// on their own they would let any external caller opt out of the overload
+		// hold and get a synthetic 529 instead of a recovered response. Gating them
+		// makes them a strict SUBSET of the `requestMeta.internal` arm below — kept
+		// explicit so the intent survives, and ordered first so the compiler does
+		// not narrow `requestMeta.internal` out from under it.
 		if (
+			isTrustedSyntheticProbe(
+				req.headers,
+				requestMeta.internal === true,
+				"any",
+			) ||
 			requestMeta.internal ||
-			req.headers.get("x-clankermux-auto-refresh") === "true" ||
-			req.headers.get("x-clankermux-keepalive") === "true" ||
 			url.pathname === "/v1/messages/count_tokens"
 		) {
 			return null;

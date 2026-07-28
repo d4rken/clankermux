@@ -13,6 +13,7 @@ import type {
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
 import { markAnthropicBurstThrottle } from "./handlers/burst-cooldown";
+import { isTrustedSyntheticProbe } from "./handlers/proxy-operations";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
@@ -191,6 +192,15 @@ export interface ResponseHandlerOptions {
 	account: Account | null;
 	requestHeaders: Headers;
 	requestBody: ArrayBuffer | null;
+	/**
+	 * True only for an in-process dispatch (`handleProxy`'s own `isInternal`
+	 * parameter, threaded through `requestMeta.internal`). Unspoofable — it never
+	 * comes from a request header. Every synthetic-probe exemption in this module
+	 * is gated on it, because the `x-clankermux-keepalive` / `-auto-refresh`
+	 * marker headers are client-settable on their own. Defaults to false, so an
+	 * omitted value is the safe (untrusted) one.
+	 */
+	internal?: boolean;
 	/** Ingress model, supplied by the already-parsed request path when available. */
 	requestedModel?: string | null;
 	project?: string | null;
@@ -294,6 +304,7 @@ async function forwardToClientInner(
 		account,
 		requestHeaders,
 		requestBody,
+		internal: internalDispatch = false,
 		requestedModel: requestedModelOption,
 		project,
 		contextComposition,
@@ -332,6 +343,7 @@ async function forwardToClientInner(
 		path,
 		providerName: ctx.provider.name,
 		responseStatus: response.status,
+		internal: internalDispatch,
 		getHeader: (name) => requestHeaders.get(name),
 	});
 
@@ -540,10 +552,16 @@ async function forwardToClientInner(
 						// user-driven storm — tripping the marker on it would suppress
 						// sibling diversion for real requests off a synthetic burst.
 						// Mirrors the keepalive guard in response-processor.ts /
-						// proxy-operations.ts.
+						// proxy-operations.ts — including its trust gate: the marker
+						// header alone is client-spoofable, so an external caller must
+						// not be able to suppress the burst marker with it.
 						if (
 							isOAuthAnthropicAccount(account) &&
-							requestHeaders.get("x-clankermux-keepalive") !== "true"
+							!isTrustedSyntheticProbe(
+								requestHeaders,
+								internalDispatch,
+								"keepalive",
+							)
 						) {
 							markAnthropicBurstThrottle(Date.now());
 						}
