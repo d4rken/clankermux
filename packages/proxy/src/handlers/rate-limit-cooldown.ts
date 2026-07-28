@@ -60,6 +60,12 @@ let probeLeaseGenerationCounter = 0;
 // whether or not the winner has finished, so a released permit never re-opens a
 // second bypass for the same lease. A newer lease generation supersedes the
 // record on the next acquire, so the map holds at most one entry per account.
+//
+// LIFECYCLE. The map holds at most one entry per account, but "one per account"
+// is only bounded while dead entries go away: admitting a new lease drops a spent
+// record (it can no longer refuse anything), and account removal evicts the
+// account outright via `clearCapacityRestoredProbePending`. Without the latter a
+// long-lived server accumulates deleted account ids.
 const backupProbePermits = new Map<
 	string,
 	{ generation: number | null; active: boolean }
@@ -193,17 +199,23 @@ export function rollbackCapacityRestoredProbePending(
 }
 
 /**
- * Drop any capacity-restored marker for an account. For account REMOVAL only —
- * the marker is otherwise cleared exclusively by a successful probe of the
- * matching generation (or a process restart).
+ * Drop an account's in-memory recovery-probe state: the capacity-restored marker
+ * AND its spent backup-probe permit record. For account REMOVAL only — the
+ * marker is otherwise cleared exclusively by a successful probe of the matching
+ * generation (or a process restart).
  *
- * It is deliberately NEVER time-expired: a family gate, an open 529 breaker or a
- * pinned client can legitimately delay probing indefinitely, and expiring the
- * marker would reopen fan-in at exactly the moment the account finally becomes
- * selectable. The map is keyed by account id, so it is bounded by account count.
+ * The marker is deliberately NEVER time-expired: a family gate, an open 529
+ * breaker or a pinned client can legitimately delay probing indefinitely, and
+ * expiring it would reopen fan-in at exactly the moment the account finally
+ * becomes selectable. Both maps are keyed by account id, so they are bounded by
+ * account count — but only while removal evicts them: a deleted id would
+ * otherwise keep its spent-permit record forever on a long-lived server, and a
+ * retained `null`-generation record would deny a legitimate no-live-lease claim
+ * if that id were ever restored.
  */
 export function clearCapacityRestoredProbePending(accountId: string): void {
 	capacityRestoredPending.delete(accountId);
+	backupProbePermits.delete(accountId);
 }
 
 /** Whether an early-release probe is still owed for this account. */
@@ -309,6 +321,15 @@ export function getRateLimitProbeAdmission(
 
 	const leaseUntil = now + PROBE_LEASE_MS;
 	probeLeaseGenerationCounter += 1;
+	// A new lease supersedes any SPENT bypass record for this account: the record
+	// only ever guards its own generation, and acquisition would discard it on the
+	// next claim anyway. Dropping it here keeps the map from carrying dead
+	// generations (including the `null` "no live lease" key, which would otherwise
+	// deny a legitimate later no-lease claim). An ACTIVE record is left alone —
+	// its winner is still in flight and must be able to release it.
+	if (backupProbePermits.get(account.id)?.active === false) {
+		backupProbePermits.delete(account.id);
+	}
 	// Record WHICH capacity generation this probe was admitted for, so its
 	// outcome can only ever clear that generation's marker. The lease generation
 	// is separate and identifies THIS lease (see the backup-probe permit).

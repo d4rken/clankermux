@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import {
+	acquireBackupProbePermit,
 	applyRateLimitCooldown,
 	clearCapacityRestoredProbePending,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
+	releaseBackupProbePermit,
 	resetRateLimitProbeGatesForTests,
 	rollbackCapacityRestoredProbePending,
 	wouldSuppressProbe,
@@ -275,6 +277,45 @@ describe("capacity-restored single-flight marker", () => {
 		clearCapacityRestoredProbePending(account.id);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
 		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+	});
+
+	it("account removal ALSO drops the spent backup-probe permit record", () => {
+		// Spent records are deliberately retained (that is what makes the bypass
+		// one-per-generation), so removal is the only thing that can drop them.
+		// Without this, `backupProbePermits` accumulates deleted account ids for the
+		// life of the process, and a restored id inherits a stale refusal.
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const permit = acquireBackupProbePermit(account.id);
+		expect(permit).not.toBeNull();
+		if (permit) releaseBackupProbePermit(permit);
+		// Same generation (still no live lease) — correctly refused while retained.
+		expect(acquireBackupProbePermit(account.id)).toBeNull();
+
+		clearCapacityRestoredProbePending(account.id);
+
+		expect(acquireBackupProbePermit(account.id)).not.toBeNull();
+	});
+
+	it("admitting a new lease discards the spent permit record it supersedes", () => {
+		// The retained `null` generation ("handed out while no lease was live") is
+		// the harmful one: a LATER waiter whose own lease has since expired claims
+		// under that same key, so a stale record denies a legitimate bypass.
+		Date.now = () => NOW;
+		const account = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		const spent = acquireBackupProbePermit(account.id);
+		expect(spent).not.toBeNull();
+		if (spent) releaseBackupProbePermit(spent);
+
+		// A real probe is admitted and then settles, leaving no live lease.
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		completeRateLimitProbe(account, "abandoned");
+
+		// A waiter on the NEXT stuck probe may still claim its one bypass.
+		expect(acquireBackupProbePermit(account.id)).not.toBeNull();
 	});
 
 	it("still admits one probe when the mature-streak condition ALSO holds", () => {

@@ -1586,9 +1586,11 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// Evict any warm session-cache slots owned by the removed account so
 			// the keepalive scheduler never tries to replay against a deleted id.
 			sessionCacheStore.evictAccount(accountId);
-			// Drop any owed capacity-restored probe. The marker is deliberately
-			// never time-expired, so removal is the only way it can be dropped
-			// without a successful probe (or a restart).
+			// Drop the account's recovery-probe state: any owed capacity-restored
+			// probe plus its spent backup-probe permit record. Neither is ever
+			// time-expired (both are deliberately retained until a successful probe
+			// or a superseding lease), so removal is the only way a deleted id
+			// stops occupying them.
 			clearCapacityRestoredProbePending(accountId);
 
 			return jsonResponse({
