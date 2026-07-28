@@ -8,6 +8,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
+	isBackupProbePermitActive,
 	markCapacityRestoredProbePending,
 	releaseBackupProbePermit,
 	resetRateLimitProbeGatesForTests,
@@ -294,6 +295,41 @@ describe("capacity-restored single-flight marker", () => {
 
 		clearCapacityRestoredProbePending(account.id);
 
+		expect(acquireBackupProbePermit(account.id)).not.toBeNull();
+	});
+
+	it("account removal RETAINS an ACTIVE permit so a second claimant is still refused", () => {
+		// Removal must not evict a bypass that is IN FLIGHT. A recovery waiter keeps
+		// its pre-removal target and does not reselect on timeout, so a later waiter
+		// on the same stuck lease still reaches acquireBackupProbePermit: dropping
+		// the record under it would dispatch a SECOND ungated request for the same
+		// lease generation, against an account that no longer exists.
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const permit = acquireBackupProbePermit(account.id);
+		expect(permit).not.toBeNull();
+		expect(isBackupProbePermitActive(account.id)).toBe(true);
+
+		clearCapacityRestoredProbePending(account.id);
+
+		// The generation record survived the removal — still exactly one bypass.
+		expect(acquireBackupProbePermit(account.id)).toBeNull();
+		expect(isBackupProbePermitActive(account.id)).toBe(true);
+	});
+
+	it("evicts the removed account's permit once the in-flight bypass releases", () => {
+		// The deferred half of the rule above: retention is only for the in-flight
+		// window, so a deleted id cannot linger in the map afterwards.
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const permit = acquireBackupProbePermit(account.id);
+		expect(permit).not.toBeNull();
+		clearCapacityRestoredProbePending(account.id);
+
+		if (permit) releaseBackupProbePermit(permit);
+
+		expect(isBackupProbePermitActive(account.id)).toBe(false);
+		// Evicted, not merely spent: a restored id inherits no stale refusal.
 		expect(acquireBackupProbePermit(account.id)).not.toBeNull();
 	});
 

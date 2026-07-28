@@ -64,11 +64,19 @@ let probeLeaseGenerationCounter = 0;
 // LIFECYCLE. The map holds at most one entry per account, but "one per account"
 // is only bounded while dead entries go away: admitting a new lease drops a spent
 // record (it can no longer refuse anything), and account removal evicts the
-// account outright via `clearCapacityRestoredProbePending`. Without the latter a
+// account via `clearCapacityRestoredProbePending`. Without the latter a
 // long-lived server accumulates deleted account ids.
+//
+// Removal may only evict a SPENT record outright. An ACTIVE one is marked
+// `evictOnRelease` and kept until its winner finishes: a recovery waiter retains
+// its pre-removal target and deliberately does not reselect on timeout, so a
+// later waiter for the same stuck lease still reaches `acquireBackupProbePermit`
+// — and deleting the record under it would hand out a SECOND ungated request for
+// the same lease generation, against an account that no longer exists. Retaining
+// the record keeps those waiters refused; the eviction happens on release.
 const backupProbePermits = new Map<
 	string,
-	{ generation: number | null; active: boolean }
+	{ generation: number | null; active: boolean; evictOnRelease: boolean }
 >();
 
 /** Opaque handle for a granted backup-probe permit. Release it in a `finally`. */
@@ -212,9 +220,21 @@ export function rollbackCapacityRestoredProbePending(
  * otherwise keep its spent-permit record forever on a long-lived server, and a
  * retained `null`-generation record would deny a legitimate no-live-lease claim
  * if that id were ever restored.
+ *
+ * Only a SPENT permit is safe to evict here. An ACTIVE one still has a bypass in
+ * flight, and further waiters on that same stuck lease must stay refused — so it
+ * is marked for eviction and dropped by {@link releaseBackupProbePermit}.
+ * Deleting it outright would re-open a second ungated request per lease
+ * generation, which is exactly the guarantee this permit exists to hold.
  */
 export function clearCapacityRestoredProbePending(accountId: string): void {
 	capacityRestoredPending.delete(accountId);
+	const permit = backupProbePermits.get(accountId);
+	if (permit === undefined) return;
+	if (permit.active) {
+		permit.evictOnRelease = true;
+		return;
+	}
 	backupProbePermits.delete(accountId);
 }
 
@@ -444,7 +464,11 @@ export function acquireBackupProbePermit(
 		lease && lease.leaseUntil > now ? lease.leaseGeneration : null;
 	const existing = backupProbePermits.get(accountId);
 	if (existing && existing.generation === generation) return null;
-	backupProbePermits.set(accountId, { generation, active: true });
+	backupProbePermits.set(accountId, {
+		generation,
+		active: true,
+		evictOnRelease: false,
+	});
 	return { accountId, generation };
 }
 
@@ -453,12 +477,19 @@ export function acquireBackupProbePermit(
  * (only its in-flight flag clears): the one-bypass-per-lease-generation
  * guarantee must survive the winner finishing, or the next waiter — whose budget
  * expires moments later against the same stuck probe — would bypass too.
+ *
+ * The single exception is an account REMOVED while this bypass was in flight:
+ * `clearCapacityRestoredProbePending` could not evict a live record without
+ * re-opening the bypass, so it deferred the eviction to here.
  */
 export function releaseBackupProbePermit(permit: BackupProbePermit): void {
 	const existing = backupProbePermits.get(permit.accountId);
-	if (existing && existing.generation === permit.generation) {
-		existing.active = false;
+	if (!existing || existing.generation !== permit.generation) return;
+	if (existing.evictOnRelease) {
+		backupProbePermits.delete(permit.accountId);
+		return;
 	}
+	existing.active = false;
 }
 
 /** Test-only: is a backup-probe bypass currently in flight for this account? */
