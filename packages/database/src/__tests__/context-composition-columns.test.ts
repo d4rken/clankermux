@@ -125,24 +125,19 @@ describe("context composition persistence through saveRequest", () => {
 	}
 
 	it("round-trips all 8 columns including zero values staying 0 (not NULL)", async () => {
-		await dbOps.saveRequest(
-			"req-comp-1",
-			"POST",
-			"/v1/messages",
-			null,
-			200,
-			true,
-			null,
-			120,
-			0,
-			undefined,
-			undefined,
-			undefined,
-			"my-project",
-			"plan",
-			null,
-			null,
-			{
+		await dbOps.saveRequest({
+			id: "req-comp-1",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 120,
+			failoverAttempts: 0,
+			project: "my-project",
+			billingType: "plan",
+			contextComposition: {
 				systemChars: 1234,
 				// Zero buckets are valid recorded values (e.g. no tools defined)
 				// and must stay 0 — distinct from NULL = "not recorded".
@@ -154,7 +149,7 @@ describe("context composition persistence through saveRequest", () => {
 				largestToolResultChars: 450,
 				largestToolName: "read_file",
 			},
-		);
+		});
 
 		const row = await readRow("req-comp-1");
 		expect(row).toEqual({
@@ -170,17 +165,17 @@ describe("context composition persistence through saveRequest", () => {
 	});
 
 	it("leaves all 8 columns NULL when no composition is provided (legacy callers)", async () => {
-		await dbOps.saveRequest(
-			"req-comp-null",
-			"POST",
-			"/v1/messages",
-			null,
-			200,
-			true,
-			null,
-			80,
-			0,
-		);
+		await dbOps.saveRequest({
+			id: "req-comp-null",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 80,
+			failoverAttempts: 0,
+		});
 
 		const row = await readRow("req-comp-null");
 		expect(row).toEqual({
@@ -196,24 +191,17 @@ describe("context composition persistence through saveRequest", () => {
 	});
 
 	it("preserves the columns across a metadata-only re-save (UPSERT COALESCE)", async () => {
-		await dbOps.saveRequest(
-			"req-comp-resave",
-			"POST",
-			"/v1/messages",
-			null,
-			200,
-			true,
-			null,
-			100,
-			0,
-			undefined,
-			undefined,
-			undefined,
-			null,
-			undefined,
-			null,
-			null,
-			{
+		await dbOps.saveRequest({
+			id: "req-comp-resave",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 100,
+			failoverAttempts: 0,
+			contextComposition: {
 				systemChars: 10,
 				toolsChars: 20,
 				toolCount: 2,
@@ -223,20 +211,20 @@ describe("context composition persistence through saveRequest", () => {
 				largestToolResultChars: 0,
 				largestToolName: null,
 			},
-		);
+		});
 
 		// Re-save the same id WITHOUT composition — must not null the columns.
-		await dbOps.saveRequest(
-			"req-comp-resave",
-			"POST",
-			"/v1/messages",
-			null,
-			200,
-			true,
-			null,
-			110,
-			0,
-		);
+		await dbOps.saveRequest({
+			id: "req-comp-resave",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 110,
+			failoverAttempts: 0,
+		});
 
 		const row = await readRow("req-comp-resave");
 		expect(row).toEqual({
@@ -252,24 +240,17 @@ describe("context composition persistence through saveRequest", () => {
 	});
 
 	it("survives updateRequestUsage (plain usage UPDATE must not touch them)", async () => {
-		await dbOps.saveRequest(
-			"req-comp-usage",
-			"POST",
-			"/v1/messages",
-			null,
-			200,
-			true,
-			null,
-			100,
-			0,
-			undefined,
-			undefined,
-			undefined,
-			null,
-			undefined,
-			null,
-			null,
-			{
+		await dbOps.saveRequest({
+			id: "req-comp-usage",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 100,
+			failoverAttempts: 0,
+			contextComposition: {
 				systemChars: 111,
 				toolsChars: 222,
 				toolCount: 4,
@@ -279,7 +260,7 @@ describe("context composition persistence through saveRequest", () => {
 				largestToolResultChars: 22,
 				largestToolName: "bash",
 			},
-		);
+		});
 
 		await dbOps.updateRequestUsage("req-comp-usage", {
 			model: "claude-opus-4-8",

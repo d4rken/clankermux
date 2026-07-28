@@ -54,45 +54,45 @@ class FakeDbOps {
 		this.order = order;
 	}
 
-	async saveRequest(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		success: boolean,
-		errorMessage: string | null,
-		responseTime: number,
-		failoverAttempts: number,
-		usage?: unknown,
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-		billingType?: string,
-		comboName?: string | null,
-		reasoningEffort?: string | null,
-		_contextComposition?: unknown,
-		requestedModel?: string | null,
-	): Promise<void> {
+	async saveRequest(data: {
+		id: string;
+		method: string;
+		path: string;
+		accountUsed: string | null;
+		statusCode: number | null;
+		success: boolean;
+		errorMessage: string | null;
+		responseTime: number;
+		failoverAttempts: number;
+		usage?: unknown;
+		apiKeyId?: string;
+		apiKeyName?: string;
+		project?: string | null;
+		billingType?: string;
+		comboName?: string | null;
+		reasoningEffort?: string | null;
+		contextComposition?: unknown;
+		requestedModel?: string | null;
+	}): Promise<void> {
 		this.order.push("request");
 		this.saveRequestCalls.push({
-			id,
-			method,
-			path,
-			accountUsed,
-			statusCode,
-			success,
-			errorMessage,
-			responseTime,
-			failoverAttempts,
-			usage,
-			apiKeyId,
-			apiKeyName,
-			project,
-			billingType,
-			comboName,
-			reasoningEffort,
-			requestedModel,
+			id: data.id,
+			method: data.method,
+			path: data.path,
+			accountUsed: data.accountUsed,
+			statusCode: data.statusCode,
+			success: data.success,
+			errorMessage: data.errorMessage,
+			responseTime: data.responseTime,
+			failoverAttempts: data.failoverAttempts,
+			usage: data.usage,
+			apiKeyId: data.apiKeyId,
+			apiKeyName: data.apiKeyName,
+			project: data.project,
+			billingType: data.billingType,
+			comboName: data.comboName,
+			reasoningEffort: data.reasoningEffort,
+			requestedModel: data.requestedModel,
 		});
 	}
 

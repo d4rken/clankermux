@@ -105,7 +105,8 @@ function seedUsage(fiveHourUtil: number, sevenDayUtil: number) {
 	} as never);
 }
 
-type SaveRequestCall = unknown[];
+/** One persisted request row, as handed to dbOps.saveRequest. */
+type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
 	const saveRequestCalls: SaveRequestCall[] = [];
@@ -125,8 +126,8 @@ function makeProxyContext() {
 					return Promise.resolve();
 				},
 			),
-			saveRequest: mock((...args: unknown[]) => {
-				saveRequestCalls.push(args);
+			saveRequest: mock((data: SaveRequestCall) => {
+				saveRequestCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -256,10 +257,10 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		expect(markCalls).toHaveLength(0);
 		// Audit row carries the family reason + the request model.
 		const familyRow = saveRequestCalls.find(
-			(args) => args[6] === "family_weekly_exhausted_429",
+			(row) => row.errorMessage === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeDefined();
-		expect(familyRow?.[9]).toEqual({ model: "claude-fable-5" });
+		expect(familyRow?.usage).toEqual({ model: "claude-fable-5" });
 	});
 
 	it("defers to a hard account-level unified status (does NOT skip the cooldown)", async () => {
@@ -285,7 +286,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 
 		// The family guard must NOT fire on a hard account-level 429...
 		const familyRow = saveRequestCalls.find(
-			(args) => args[6] === "family_weekly_exhausted_429",
+			(row) => row.errorMessage === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 		// ...and the account-wide cooldown must be applied (normal handling).
@@ -313,7 +314,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 
 		// The family guard did NOT fire — no family_weekly_exhausted_429 row.
 		const familyRow = saveRequestCalls.find(
-			(args) => args[6] === "family_weekly_exhausted_429",
+			(row) => row.errorMessage === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 	});
@@ -338,7 +339,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 
 		const familyRow = saveRequestCalls.find(
-			(args) => args[6] === "family_weekly_exhausted_429",
+			(row) => row.errorMessage === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 	});

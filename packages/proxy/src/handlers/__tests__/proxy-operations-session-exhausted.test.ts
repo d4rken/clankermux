@@ -136,7 +136,8 @@ function seedFamilyOnlyExhausted() {
 	} as never);
 }
 
-type SaveRequestCall = unknown[];
+/** One persisted request row, as handed to dbOps.saveRequest. */
+type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
 	const saveRequestCalls: SaveRequestCall[] = [];
@@ -156,8 +157,8 @@ function makeProxyContext() {
 					return Promise.resolve();
 				},
 			),
-			saveRequest: mock((...args: unknown[]) => {
-				saveRequestCalls.push(args);
+			saveRequest: mock((data: SaveRequestCall) => {
+				saveRequestCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -231,7 +232,7 @@ function rejected429() {
 }
 
 function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((args) => args[6]);
+	return calls.map((row) => row.errorMessage);
 }
 
 async function run(

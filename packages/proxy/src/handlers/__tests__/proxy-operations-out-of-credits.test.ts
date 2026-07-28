@@ -83,7 +83,8 @@ function makeRequestBody(model = REQUEST_MODEL) {
 	return new TextEncoder().encode(body).buffer;
 }
 
-type SaveRequestCall = unknown[];
+/** One persisted request row, as handed to dbOps.saveRequest. */
+type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
 	const saveRequestCalls: SaveRequestCall[] = [];
@@ -103,8 +104,8 @@ function makeProxyContext() {
 					return Promise.resolve();
 				},
 			),
-			saveRequest: mock((...args: unknown[]) => {
-				saveRequestCalls.push(args);
+			saveRequest: mock((data: SaveRequestCall) => {
+				saveRequestCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -230,11 +231,9 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 		);
 
 		// (3) The audit saveRequest row carries reason + the request model.
-		// Positional saveRequest signature: id, method, path, accountId, status,
-		// success, reason(7th), responseTime, failoverAttempts, usage(10th)...
 		expect(saveRequestCalls).toHaveLength(1);
-		const args = saveRequestCalls[0];
-		expect(args[6]).toBe("out_of_credits"); // reason
-		expect(args[9]).toEqual({ model: REQUEST_MODEL }); // usage (10th arg, 0-indexed 9)
+		const row = saveRequestCalls[0];
+		expect(row.errorMessage).toBe("out_of_credits");
+		expect(row.usage).toEqual({ model: REQUEST_MODEL });
 	});
 });
