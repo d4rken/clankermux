@@ -34,6 +34,7 @@ interface SaveRequestCall {
 	comboName: string | null | undefined;
 	reasoningEffort: string | null | undefined;
 	requestedModel: string | null | undefined;
+	projectAttributionSource: string | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
@@ -54,45 +55,47 @@ class FakeDbOps {
 		this.order = order;
 	}
 
-	async saveRequest(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		success: boolean,
-		errorMessage: string | null,
-		responseTime: number,
-		failoverAttempts: number,
-		usage?: unknown,
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-		billingType?: string,
-		comboName?: string | null,
-		reasoningEffort?: string | null,
-		_contextComposition?: unknown,
-		requestedModel?: string | null,
-	): Promise<void> {
+	async saveRequest(data: {
+		id: string;
+		method: string;
+		path: string;
+		accountUsed: string | null;
+		statusCode: number | null;
+		success: boolean;
+		errorMessage: string | null;
+		responseTime: number;
+		failoverAttempts: number;
+		usage?: unknown;
+		apiKeyId?: string;
+		apiKeyName?: string;
+		project?: string | null;
+		billingType?: string;
+		comboName?: string | null;
+		reasoningEffort?: string | null;
+		contextComposition?: unknown;
+		requestedModel?: string | null;
+		projectAttributionSource: string | null;
+	}): Promise<void> {
 		this.order.push("request");
 		this.saveRequestCalls.push({
-			id,
-			method,
-			path,
-			accountUsed,
-			statusCode,
-			success,
-			errorMessage,
-			responseTime,
-			failoverAttempts,
-			usage,
-			apiKeyId,
-			apiKeyName,
-			project,
-			billingType,
-			comboName,
-			reasoningEffort,
-			requestedModel,
+			id: data.id,
+			method: data.method,
+			path: data.path,
+			accountUsed: data.accountUsed,
+			statusCode: data.statusCode,
+			success: data.success,
+			errorMessage: data.errorMessage,
+			responseTime: data.responseTime,
+			failoverAttempts: data.failoverAttempts,
+			usage: data.usage,
+			apiKeyId: data.apiKeyId,
+			apiKeyName: data.apiKeyName,
+			project: data.project,
+			billingType: data.billingType,
+			comboName: data.comboName,
+			reasoningEffort: data.reasoningEffort,
+			requestedModel: data.requestedModel,
+			projectAttributionSource: data.projectAttributionSource,
 		});
 	}
 
@@ -267,6 +270,7 @@ function makeMeta(overrides: Partial<RecordMeta> = {}): RecordMeta {
 		apiKeyName: null,
 		comboName: null,
 		project: null,
+		projectAttributionSource: null,
 		reasoningEffort: null,
 		routing: null,
 		timestamp: 1_700_000_000_000,
@@ -1209,6 +1213,93 @@ describe("RequestRecorder — reasoningEffort threading", () => {
 
 		expect(h.dbOps.saveRequestCalls[0].reasoningEffort).toBeNull();
 		expect(h.emitted[0].reasoningEffort).toBeUndefined();
+	});
+});
+
+describe("RequestRecorder — projectAttributionSource threading", () => {
+	it("persists the source into the row, the event and the payload envelope", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				project: "clankermux",
+				projectAttributionSource: "session_inherited",
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].project).toBe("clankermux");
+		expect(h.dbOps.saveRequestCalls[0].projectAttributionSource).toBe(
+			"session_inherited",
+		);
+		expect(h.emitted[0].projectAttributionSource).toBe("session_inherited");
+		expect(h.dbOps.savePayloadCalls.length).toBe(1);
+		const env = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			meta: Record<string, unknown>;
+		};
+		expect(env.meta.projectAttributionSource).toBe("session_inherited");
+	});
+
+	it("records an ambiguous session even though its project is null", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				project: null,
+				projectAttributionSource: "session_ambiguous",
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].project).toBeNull();
+		expect(h.dbOps.saveRequestCalls[0].projectAttributionSource).toBe(
+			"session_ambiguous",
+		);
+		expect(h.emitted[0].project).toBeUndefined();
+		expect(h.emitted[0].projectAttributionSource).toBe("session_ambiguous");
+	});
+
+	it("persists the source for locally produced synthetic rows", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(
+			makeMeta({
+				requestId: "syn-proj",
+				responseStatus: 529,
+				project: "clankermux",
+				projectAttributionSource: "codex_cwd",
+			}),
+			"error",
+			"provider_overloaded",
+		);
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveRequestCalls[0].projectAttributionSource).toBe(
+			"codex_cwd",
+		);
+		expect(h.emitted[0].projectAttributionSource).toBe("codex_cwd");
+		const env = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			meta: Record<string, unknown>;
+		};
+		expect(env.meta.projectAttributionSource).toBe("codex_cwd");
+	});
+
+	it("leaves the source absent when the request was never eligible", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ path: "/v1/responses" }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].projectAttributionSource).toBeNull();
+		expect(h.emitted[0].projectAttributionSource).toBeUndefined();
+		const env = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			meta: Record<string, unknown>;
+		};
+		expect(env.meta.projectAttributionSource).toBeUndefined();
 	});
 });
 

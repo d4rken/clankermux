@@ -7,6 +7,7 @@ import {
 import {
 	type ContextComposition,
 	NO_ACCOUNT_ID,
+	type ProjectAttributionSource,
 	type RequestResponse,
 	type ToolCallStat,
 } from "@clankermux/types";
@@ -87,6 +88,12 @@ export interface RecordMeta {
 	apiKeyName: string | null;
 	comboName: string | null;
 	project: string | null;
+	/**
+	 * Which tier produced `project` (see RequestMeta.projectAttributionSource).
+	 * null = the request was never eligible for project attribution, which is
+	 * distinct from the recorded value "none".
+	 */
+	projectAttributionSource: ProjectAttributionSource | null;
 	/**
 	 * Ingest-time context composition (see RequestMeta.contextComposition).
 	 * Optional: synthetic/audit rows intentionally omit it and stay
@@ -180,27 +187,56 @@ interface SaveRoutingData {
 	createdAt?: number;
 }
 
+/**
+ * Persisted request-row shape. Mirrors `RequestData`
+ * (database/src/repositories/request.repository.ts) — see SaveRoutingData for
+ * why these shapes are duplicated rather than imported.
+ */
+interface SaveRequestData {
+	id: string;
+	method: string;
+	path: string;
+	accountUsed: string | null;
+	statusCode: number | null;
+	success: boolean;
+	errorMessage: string | null;
+	responseTime: number;
+	failoverAttempts: number;
+	usage?: unknown;
+	apiKeyId?: string;
+	apiKeyName?: string;
+	project?: string | null;
+	/**
+	 * REQUIRED — mirrors `RequestData.projectAttributionSource`. Callers must
+	 * state it (explicit `null` for a request that was never eligible), because
+	 * an omitted field would write SQL NULL, which is indistinguishable from a
+	 * legacy pre-column row and deflates the attribution-coverage denominator.
+	 */
+	projectAttributionSource: ProjectAttributionSource | null;
+	billingType?: string;
+	comboName?: string | null;
+	reasoningEffort?: string | null;
+	contextComposition?: ContextComposition | null;
+	requestedModel?: string | null;
+}
+
+/** Fails to compile unless `T` is exactly `true`. */
+type Assert<T extends true> = T;
+
+/**
+ * Compile-time guard mirroring the one on `RequestData`: an empty object type
+ * only extends `Pick<T, K>` when `K` is optional, so re-adding a `?` to
+ * `projectAttributionSource` breaks the `extends true` constraint. Type-only —
+ * no runtime footprint.
+ */
+export type ProjectAttributionSourceIsRequired = Assert<
+	Record<never, never> extends Pick<SaveRequestData, "projectAttributionSource">
+		? false
+		: true
+>;
+
 interface DbOpsLike {
-	saveRequest(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		success: boolean,
-		errorMessage: string | null,
-		responseTime: number,
-		failoverAttempts: number,
-		usage?: unknown,
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-		billingType?: string,
-		comboName?: string | null,
-		reasoningEffort?: string | null,
-		contextComposition?: ContextComposition | null,
-		requestedModel?: string | null,
-	): Promise<void>;
+	saveRequest(data: SaveRequestData): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
 	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
 	saveRequestPayloadRaw(id: string, json: string): Promise<void>;
@@ -770,26 +806,27 @@ export class RequestRecorder {
 
 		const accepted = this.asyncWriter.enqueue(async () => {
 			try {
-				await this.dbOps.saveRequest(
-					meta.requestId,
-					meta.method,
-					meta.path,
+				await this.dbOps.saveRequest({
+					id: meta.requestId,
+					method: meta.method,
+					path: meta.path,
 					accountUsed,
-					meta.responseStatus,
+					statusCode: meta.responseStatus,
 					success,
 					errorMessage,
 					responseTime,
-					meta.failoverAttempts,
-					usage as never,
-					meta.apiKeyId ?? undefined,
-					meta.apiKeyName ?? undefined,
-					meta.project ?? null,
-					record.billingType,
-					meta.comboName ?? null,
-					meta.reasoningEffort ?? null,
-					meta.contextComposition ?? null,
-					meta.requestedModel ?? null,
-				);
+					failoverAttempts: meta.failoverAttempts,
+					usage,
+					apiKeyId: meta.apiKeyId ?? undefined,
+					apiKeyName: meta.apiKeyName ?? undefined,
+					project: meta.project ?? null,
+					projectAttributionSource: meta.projectAttributionSource ?? null,
+					billingType: record.billingType,
+					comboName: meta.comboName ?? null,
+					reasoningEffort: meta.reasoningEffort ?? null,
+					contextComposition: meta.contextComposition ?? null,
+					requestedModel: meta.requestedModel ?? null,
+				});
 				if (routing) {
 					await this.dbOps.saveRequestRouting({
 						requestId: meta.requestId,
@@ -916,6 +953,7 @@ export class RequestRecorder {
 				isStream: meta.isStream,
 				retry: meta.retryAttempt,
 				project: meta.project ?? undefined,
+				projectAttributionSource: meta.projectAttributionSource ?? undefined,
 				reasoningEffort: meta.reasoningEffort ?? undefined,
 				providerName: meta.providerName,
 				requestedModel: meta.requestedModel ?? undefined,
@@ -983,6 +1021,7 @@ export class RequestRecorder {
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,
 			project: meta.project ?? undefined,
+			projectAttributionSource: meta.projectAttributionSource ?? undefined,
 			billingType,
 			comboName: meta.comboName ?? undefined,
 			reasoningEffort: meta.reasoningEffort ?? undefined,

@@ -1,5 +1,6 @@
 import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
+import type { ProjectAttributionSource } from "@clankermux/types";
 import type { RequestResponse } from "../types";
 import {
 	buildRequestFilterClause,
@@ -70,6 +71,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			api_key_name: string | null;
 			api_key_display_name: string | null;
 			project: string | null;
+			project_attribution_source: string | null;
 			billing_type: string | null;
 			combo_name: string | null;
 			reasoning_effort: string | null;
@@ -121,6 +123,12 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			apiKeyName:
 				request.api_key_display_name || request.api_key_name || undefined,
 			project: request.project || undefined,
+			// Provenance of `project`. NULL (pre-column row, or a request that was
+			// never eligible) reads back as undefined — distinct from the recorded
+			// value "none".
+			projectAttributionSource:
+				(request.project_attribution_source as ProjectAttributionSource | null) ||
+				undefined,
 			billingType: request.billing_type || undefined,
 			comboName: request.combo_name || undefined,
 			reasoningEffort: request.reasoning_effort || undefined,

@@ -1,5 +1,9 @@
 import { Logger } from "@clankermux/logger";
-import type { ContextComposition, ToolCallStat } from "@clankermux/types";
+import type {
+	ContextComposition,
+	ProjectAttributionSource,
+	ToolCallStat,
+} from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 
@@ -40,6 +44,19 @@ export interface RequestData {
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string | null;
+	/**
+	 * Which attribution tier produced `project`. REQUIRED — every caller must
+	 * state it, explicitly passing `null` when the request was never eligible
+	 * for attribution.
+	 *
+	 * `null` writes SQL NULL = "not recorded", which is distinct from the
+	 * recorded value `"none"` ("eligible request, no tier fired"). Because a
+	 * NULL is indistinguishable from a legacy pre-column row, an accidentally
+	 * omitted field would silently deflate `measured_requests` — the only
+	 * honest denominator for attribution coverage — so omission has to be a
+	 * compile error rather than a quiet NULL write.
+	 */
+	projectAttributionSource: ProjectAttributionSource | null;
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
@@ -65,6 +82,22 @@ export interface RequestData {
 		tokensPerSecondApproximate?: boolean;
 	};
 }
+
+/** Fails to compile unless `T` is exactly `true`. */
+type Assert<T extends true> = T;
+
+/**
+ * Compile-time guard: `RequestData.projectAttributionSource` must stay
+ * REQUIRED. `Record<never, never>` (the empty object type) only extends
+ * `Pick<T, K>` when `K` is optional, so re-adding a `?` flips the operand to
+ * `false` and breaks the `extends true` constraint below. Type-only — no
+ * runtime footprint.
+ */
+export type ProjectAttributionSourceIsRequired = Assert<
+	Record<never, never> extends Pick<RequestData, "projectAttributionSource">
+		? false
+		: true
+>;
 
 export interface RequestRoutingData {
 	requestId: string;
@@ -92,13 +125,13 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					model, requested_model, prompt_tokens, completion_tokens, total_tokens, cost_usd,
 					input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 					output_tokens_per_second, output_tokens_per_second_approx,
-					api_key_id, api_key_name, project,
+					api_key_id, api_key_name, project, project_attribution_source,
 					billing_type, combo_name, reasoning_effort,
 					context_system_chars, context_tools_chars, context_tool_count,
 					context_messages_chars, context_message_count, context_tool_result_chars,
 					context_largest_tool_chars, context_largest_tool_name
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -124,6 +157,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				api_key_id = EXCLUDED.api_key_id,
 				api_key_name = EXCLUDED.api_key_name,
 				project = COALESCE(EXCLUDED.project, requests.project),
+				project_attribution_source = COALESCE(EXCLUDED.project_attribution_source, requests.project_attribution_source),
 				billing_type = COALESCE(EXCLUDED.billing_type, requests.billing_type),
 				combo_name = COALESCE(EXCLUDED.combo_name, requests.combo_name),
 				reasoning_effort = COALESCE(EXCLUDED.reasoning_effort, requests.reasoning_effort),
@@ -162,6 +196,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.apiKeyId || null,
 				data.apiKeyName || null,
 				data.project || null,
+				data.projectAttributionSource ?? null,
 				data.billingType || null,
 				data.comboName || null,
 				data.reasoningEffort || null,

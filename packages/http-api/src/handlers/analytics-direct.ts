@@ -209,6 +209,10 @@ export function createAnalyticsHandler(context: APIContext) {
 				cache_read_input_tokens: number;
 				cache_creation_input_tokens: number;
 				output_tokens: number;
+				attribution_measured: number;
+				attribution_none: number;
+				attribution_inherited: number;
+				attribution_ambiguous: number;
 			}>(
 				`
 				WITH filtered_requests AS (
@@ -230,7 +234,17 @@ export function createAnalyticsHandler(context: APIContext) {
 					(SELECT SUM(COALESCE(input_tokens, 0)) FROM filtered_requests) as input_tokens,
 					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) FROM filtered_requests) as cache_read_input_tokens,
 					(SELECT SUM(COALESCE(cache_creation_input_tokens, 0)) FROM filtered_requests) as cache_creation_input_tokens,
-					(SELECT SUM(COALESCE(output_tokens, 0)) FROM filtered_requests) as output_tokens
+					(SELECT SUM(COALESCE(output_tokens, 0)) FROM filtered_requests) as output_tokens,
+					-- Project-attribution coverage over the WHOLE filtered range.
+					-- Deliberately computed here and not by summing the
+					-- project_breakdown branch: that branch is truncated to the
+					-- top-N projects, so summing it would report full coverage
+					-- while unmeasured rows sit outside the cut. Appended last so
+					-- the existing positional bind order is untouched.
+					(SELECT SUM(CASE WHEN project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_measured,
+					(SELECT SUM(CASE WHEN project_attribution_source = 'none' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_none,
+					(SELECT SUM(CASE WHEN project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_inherited,
+					(SELECT SUM(CASE WHEN project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_ambiguous
 			`,
 				[...queryParams, NO_ACCOUNT_ID],
 			);
@@ -386,9 +400,12 @@ export function createAnalyticsHandler(context: APIContext) {
 				api_cost_usd: number | null;
 				total_cost_usd: number | null;
 				total_tokens: number | null;
+				measured_requests: number | null;
+				inferred_requests: number | null;
+				ambiguous_requests: number | null;
 			}>(
 				`
-				-- UNION 11-column contract (ALL 6 sub-selects MUST match in this exact column order):
+				-- UNION 14-column contract (ALL 7 sub-selects MUST match in this exact column order):
 				-- 1. data_type TEXT
 				-- 2. name TEXT
 				-- 3. secondary_name TEXT
@@ -400,6 +417,14 @@ export function createAnalyticsHandler(context: APIContext) {
 				-- 9. api_cost_usd DOUBLE PRECISION
 				-- 10. total_cost_usd DOUBLE PRECISION
 				-- 11. total_tokens BIGINT
+				-- 12. measured_requests BIGINT  (project_breakdown* only)
+				-- 13. inferred_requests BIGINT  (project_breakdown* only)
+				-- 14. ambiguous_requests BIGINT (project_breakdown* only)
+				--
+				-- q6/q7 split: the named-project branch is truncated to the top N by
+				-- tokens, so the no-project bucket — an ordinary GROUP BY row when
+				-- the two shared one branch — could be ranked out and vanish from
+				-- the dashboard. It gets its own untruncated branch instead.
 				SELECT * FROM (
 					SELECT
 						'model_distribution' as data_type,
@@ -412,7 +437,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens
+						CAST(NULL AS BIGINT) as total_tokens,
+						CAST(NULL AS BIGINT) as measured_requests,
+						CAST(NULL AS BIGINT) as inferred_requests,
+						CAST(NULL AS BIGINT) as ambiguous_requests
 					FROM requests r
 					WHERE ${whereClause} AND model IS NOT NULL
 					GROUP BY model
@@ -434,7 +462,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
 						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
 						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens
+						CAST(NULL AS BIGINT) as total_tokens,
+						CAST(NULL AS BIGINT) as measured_requests,
+						CAST(NULL AS BIGINT) as inferred_requests,
+						CAST(NULL AS BIGINT) as ambiguous_requests
 					FROM requests r
 					LEFT JOIN accounts a ON a.id = r.account_used
 					WHERE ${whereClause}
@@ -458,7 +489,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						SUM(COALESCE(total_tokens, 0)) as total_tokens
+						SUM(COALESCE(total_tokens, 0)) as total_tokens,
+						CAST(NULL AS BIGINT) as measured_requests,
+						CAST(NULL AS BIGINT) as inferred_requests,
+						CAST(NULL AS BIGINT) as ambiguous_requests
 					FROM requests r
 					WHERE ${whereClause} AND COALESCE(cost_usd, 0) > 0 AND model IS NOT NULL
 					GROUP BY model
@@ -484,7 +518,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens
+						CAST(NULL AS BIGINT) as total_tokens,
+						CAST(NULL AS BIGINT) as measured_requests,
+						CAST(NULL AS BIGINT) as inferred_requests,
+						CAST(NULL AS BIGINT) as ambiguous_requests
 					FROM requests r
 					LEFT JOIN api_keys k ON k.id = r.api_key_id
 					WHERE ${whereClause} AND r.api_key_id IS NOT NULL
@@ -508,7 +545,10 @@ export function createAnalyticsHandler(context: APIContext) {
 						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
 						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens
+						CAST(NULL AS BIGINT) as total_tokens,
+						CAST(NULL AS BIGINT) as measured_requests,
+						CAST(NULL AS BIGINT) as inferred_requests,
+						CAST(NULL AS BIGINT) as ambiguous_requests
 					FROM requests r
 					LEFT JOIN accounts a ON a.id = r.account_used
 					WHERE ${whereClause} AND r.model IS NOT NULL
@@ -523,9 +563,9 @@ export function createAnalyticsHandler(context: APIContext) {
 				SELECT * FROM (
 					SELECT
 						'project_breakdown' as data_type,
-						-- Raw column, no COALESCE: SQL NULL groups as one bucket
-						-- (mapped to null in TS) and a historical row literally
-						-- named 'no-project' stays a distinct project.
+						-- Raw column, no COALESCE: a historical row literally named
+						-- 'no-project' stays a distinct project rather than merging
+						-- into the NULL bucket, which q7 owns.
 						r.project as name,
 						CAST(NULL AS TEXT) as secondary_name,
 						CAST(NULL AS BIGINT) as count,
@@ -535,9 +575,16 @@ export function createAnalyticsHandler(context: APIContext) {
 						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
 						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
 						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
-						SUM(COALESCE(r.total_tokens, 0)) as total_tokens
+						SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
+						-- Attribution coverage for this bucket. measured_requests is
+						-- the ONLY honest denominator for the inference share: rows
+						-- written before the column existed carry SQL NULL and would
+						-- otherwise dilute every range that spans the deploy.
+						SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
+						SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
+						SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
 					FROM requests r
-					WHERE ${whereClause}
+					WHERE ${whereClause} AND r.project IS NOT NULL
 					-- Positional: "GROUP BY name" would bind to a source column if
 					-- one existed; 2 pins the grouping to the project label
 					-- (column 1 is the constant data_type).
@@ -545,10 +592,38 @@ export function createAnalyticsHandler(context: APIContext) {
 					ORDER BY total_tokens DESC
 					LIMIT ${PROJECT_BREAKDOWN_LIMIT}
 				) q6
+
+				UNION ALL
+
+				SELECT * FROM (
+					SELECT
+						'project_breakdown_none' as data_type,
+						-- The no-project bucket. Ungrouped aggregate over the NULL
+						-- rows, so the branch is never subject to q6's top-N cut;
+						-- HAVING suppresses the single all-NULL row a bare aggregate
+						-- would otherwise return for an empty match.
+						CAST(NULL AS TEXT) as name,
+						CAST(NULL AS TEXT) as secondary_name,
+						CAST(NULL AS BIGINT) as count,
+						COUNT(*) as requests,
+						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+						SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
+						SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
+						SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
+						SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
+					FROM requests r
+					WHERE ${whereClause} AND r.project IS NULL
+					HAVING COUNT(*) > 0
+				) q7
 			`,
 				[
 					...queryParams,
 					NO_ACCOUNT_ID,
+					...queryParams,
 					...queryParams,
 					...queryParams,
 					...queryParams,
@@ -603,19 +678,47 @@ export function createAnalyticsHandler(context: APIContext) {
 					count: Number(row.count) || 0,
 				}));
 
-			const projectBreakdown = additionalData
-				.filter((row) => row.data_type === "project_breakdown")
-				.map((row) => ({
-					// q6 selects the raw r.project column, so unlike the other
-					// branches `name` can be SQL NULL here (the no-project bucket).
-					project: (row.name as string | null) ?? null,
-					requests: Number(row.requests) || 0,
-					successRate: Number(row.success_rate) || 0,
-					planCostUsd: Number(row.plan_cost_usd) || 0,
-					apiCostUsd: Number(row.api_cost_usd) || 0,
-					totalCostUsd: Number(row.total_cost_usd) || 0,
-					totalTokens: Number(row.total_tokens) || 0,
-				}));
+			const toProjectRow = (row: (typeof additionalData)[number]) => ({
+				// q6 selects the raw r.project column and q7 selects a literal
+				// NULL, so unlike the other branches `name` can be SQL NULL here
+				// (the no-project bucket).
+				project: (row.name as string | null) ?? null,
+				requests: Number(row.requests) || 0,
+				successRate: Number(row.success_rate) || 0,
+				planCostUsd: Number(row.plan_cost_usd) || 0,
+				apiCostUsd: Number(row.api_cost_usd) || 0,
+				totalCostUsd: Number(row.total_cost_usd) || 0,
+				totalTokens: Number(row.total_tokens) || 0,
+				measuredRequests: Number(row.measured_requests) || 0,
+				inferredRequests: Number(row.inferred_requests) || 0,
+				ambiguousRequests: Number(row.ambiguous_requests) || 0,
+			});
+
+			// The no-project bucket comes from its own untruncated branch (q7),
+			// so it survives however many named projects the range holds. It is
+			// merged back into the same array the dashboard already renders and
+			// the combined rows are re-sorted, keeping the documented
+			// "ordered by total tokens" contract that a plain append would break.
+			const projectBreakdown = [
+				...additionalData
+					.filter((row) => row.data_type === "project_breakdown")
+					.map(toProjectRow),
+				...additionalData
+					.filter((row) => row.data_type === "project_breakdown_none")
+					.map(toProjectRow),
+			].sort((a, b) => b.totalTokens - a.totalTokens);
+
+			// Range-wide attribution coverage. Read from the totals query rather
+			// than summed from projectBreakdown, which only carries the top-N
+			// projects and would claim full coverage for a range whose unmeasured
+			// rows fall outside the cut.
+			const projectAttributionCoverage = {
+				total: Number(consolidatedResult?.total_requests) || 0,
+				measured: Number(consolidatedResult?.attribution_measured) || 0,
+				none: Number(consolidatedResult?.attribution_none) || 0,
+				inherited: Number(consolidatedResult?.attribution_inherited) || 0,
+				ambiguous: Number(consolidatedResult?.attribution_ambiguous) || 0,
+			};
 
 			// Get model performance metrics. Speed percentiles (median/p95) are
 			// computed over a separately-filtered row set (plausible speeds only)
@@ -1587,6 +1690,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				routing,
 				cacheFlow,
 				projectBreakdown,
+				projectAttributionCoverage,
 				contextComposition,
 				toolCallErrors,
 				activeSessions,

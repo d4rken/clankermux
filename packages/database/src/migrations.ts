@@ -104,6 +104,10 @@ export function ensureSchema(db: Database): void {
 			cache_creation_input_tokens INTEGER DEFAULT 0,
 			output_tokens INTEGER DEFAULT 0,
 			project TEXT,
+			-- Which attribution tier produced the project column
+			-- (ProjectAttributionSource). NULL = the row predates this column, or
+			-- the request was never eligible for project attribution at all.
+			project_attribution_source TEXT,
 			billing_type TEXT DEFAULT 'api',
 			api_key_id TEXT,
 			api_key_name TEXT,
@@ -665,6 +669,17 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_profile_fetched_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_profile_fetched_at INTEGER",
+	},
+	// Which attribution tier produced the row's `project` (see
+	// ProjectAttributionSource): header / wd_primary / wd_plain / codex_cwd /
+	// session_inherited / session_ambiguous / none. NULL means something
+	// different from 'none': the row predates this column, or the request was
+	// never eligible for project attribution. Deliberately NOT backfilled — a
+	// guessed source would defeat the point of measuring attribution quality.
+	{
+		table: "requests",
+		column: "project_attribution_source",
+		ddl: "ALTER TABLE requests ADD COLUMN project_attribution_source TEXT",
 	},
 ];
 

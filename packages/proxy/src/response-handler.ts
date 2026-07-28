@@ -8,6 +8,7 @@ import {
 	type Account,
 	type ContextComposition,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	type ProjectAttributionSource,
 	type RequestRoutingMeta,
 	type ToolCallStat,
 } from "@clankermux/types";
@@ -208,6 +209,8 @@ export interface ResponseHandlerOptions {
 	/** Ingress model, supplied by the already-parsed request path when available. */
 	requestedModel?: string | null;
 	project?: string | null;
+	/** Which tier produced `project` (see RequestMeta.projectAttributionSource). */
+	projectAttributionSource?: ProjectAttributionSource | null;
 	/** Ingest-time context composition (see RequestMeta.contextComposition). */
 	contextComposition?: ContextComposition | null;
 	/** Ingest-time per-tool call/error stats (see RequestMeta.toolCallStats). */
@@ -311,6 +314,7 @@ async function forwardToClientInner(
 		internal: internalDispatch = false,
 		requestedModel: requestedModelOption,
 		project,
+		projectAttributionSource,
 		contextComposition,
 		toolCallStats,
 		reasoningEffort,
@@ -418,6 +422,7 @@ async function forwardToClientInner(
 			apiKeyName: apiKeyName || null,
 			comboName: comboName || null,
 			project: project ?? null,
+			projectAttributionSource: projectAttributionSource ?? null,
 			contextComposition: contextComposition ?? null,
 			toolCallStats: toolCallStats ?? null,
 			reasoningEffort: reasoningEffort ?? null,

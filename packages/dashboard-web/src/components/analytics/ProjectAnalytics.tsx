@@ -8,6 +8,10 @@ import {
 import { FolderOpen } from "lucide-react";
 import { useMemo } from "react";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import {
+	attributionCoverage,
+	describeProjectAttribution,
+} from "../../lib/project-attribution";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
@@ -38,6 +42,12 @@ function projectKey(project: string | null): string {
 
 interface ProjectAnalyticsProps {
 	projectBreakdown: ProjectBreakdownRow[];
+	/**
+	 * Range-wide attribution coverage from the server. Separate from
+	 * `projectBreakdown` because that array is truncated to the top-N projects
+	 * and cannot describe the whole range.
+	 */
+	attributionCoverageTotals?: AnalyticsResponse["projectAttributionCoverage"];
 	loading?: boolean;
 }
 
@@ -48,6 +58,7 @@ interface ProjectAnalyticsProps {
  */
 export function ProjectAnalytics({
 	projectBreakdown,
+	attributionCoverageTotals,
 	loading = false,
 }: ProjectAnalyticsProps) {
 	const chartData = useMemo(
@@ -57,6 +68,15 @@ export function ProjectAnalytics({
 				tokens: row.totalTokens,
 			})),
 		[projectBreakdown],
+	);
+
+	// Coverage comes from the server's range-wide aggregate, never from the
+	// rows above: `projectBreakdown` is truncated to the top-N projects, so
+	// summing it would report full coverage for a range whose unmeasured rows
+	// were cut off. The rows' own per-project figures stay exact either way.
+	const coverage = useMemo(
+		() => attributionCoverage(attributionCoverageTotals),
+		[attributionCoverageTotals],
 	);
 
 	if (projectBreakdown.length === 0) {
@@ -125,6 +145,9 @@ export function ProjectAnalytics({
 								<th scope="col" className="text-right px-3 py-2">
 									Success
 								</th>
+								<th scope="col" className="text-right px-3 py-2">
+									Attribution
+								</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -154,11 +177,22 @@ export function ProjectAnalytics({
 									<td className="px-3 py-2 text-right">
 										{formatPercentage(row.successRate, 0)}
 									</td>
+									<td className="px-3 py-2 text-right text-muted-foreground">
+										{describeProjectAttribution(row)}
+									</td>
 								</tr>
 							))}
 						</tbody>
 					</table>
 				</div>
+				<p className="mt-2 text-xs text-muted-foreground">
+					{/* Rows exist by this point (the empty range returns early), so a
+					    null percent means the server sent no coverage aggregate —
+					    say so instead of implying an empty range or a real 0%. */}
+					{coverage.percent === null
+						? "Attribution coverage is not reported by this server."
+						: `Attribution source known for ${coverage.percent}% of requests in this range (${formatNumber(coverage.measured)} of ${formatNumber(coverage.total)}), including projects beyond the rows listed above. Rows recorded before the source was tracked are excluded from the inference share.`}
+				</p>
 			</CardContent>
 		</Card>
 	);

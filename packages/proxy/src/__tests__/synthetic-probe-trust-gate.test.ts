@@ -135,7 +135,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 	};
 }
 
-/** One directly-written audit row (`dbOps.saveRequest`), by position. */
+/** One directly-written audit row (`dbOps.saveRequest`). */
 type AuditRow = {
 	accountId: string;
 	status: number;
@@ -154,11 +154,11 @@ function makeAuditContext(accounts: Account[]): {
 	const audits: AuditRow[] = [];
 	const ctx = makeContext(accounts);
 	(ctx.dbOps as unknown as Record<string, unknown>).saveRequest = mock(
-		async (...args: unknown[]) => {
+		async (data: Record<string, unknown>) => {
 			audits.push({
-				accountId: args[3] as string,
-				status: args[4] as number,
-				reason: (args[6] ?? null) as string | null,
+				accountId: data.accountUsed as string,
+				status: data.statusCode as number,
+				reason: (data.errorMessage ?? null) as string | null,
 			});
 		},
 	);

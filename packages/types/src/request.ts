@@ -1,4 +1,31 @@
 /**
+ * Which tier of project attribution produced a request's `project` value.
+ * Shared by the proxy (which derives it), the database (which persists it),
+ * the HTTP API and the dashboard (which surface it), so the vocabulary can
+ * never drift between producer and consumers.
+ *
+ *  - `header`            — explicit `x-project` request header (tier 1)
+ *  - `wd_primary`        — "Primary working directory:" system-prompt label
+ *  - `wd_plain`          — plain "Working directory:" system-prompt label
+ *  - `codex_cwd`         — Codex `<cwd>…</cwd>` tag in the first user message
+ *  - `session_inherited` — inherited from the session cache (tier 4)
+ *  - `session_ambiguous` — the session seeded conflicting projects, so nothing
+ *                          was inherited (project stays null)
+ *  - `none`              — eligible request, no tier produced a project
+ *
+ * A persisted NULL means something different again: the row predates the
+ * column, or the request was never eligible for attribution at all.
+ */
+export type ProjectAttributionSource =
+	| "header"
+	| "wd_primary"
+	| "wd_plain"
+	| "codex_cwd"
+	| "session_inherited"
+	| "session_ambiguous"
+	| "none";
+
+/**
  * Per-request context composition: character counts per context-window bucket
  * (system prompt / tool definitions / messages / tool results), computed once
  * at ingest from the already-parsed /v1/messages body. Char counts are
@@ -72,6 +99,9 @@ export interface RequestRow {
 	api_key_id: string | null;
 	api_key_name: string | null;
 	project: string | null;
+	// Which tier produced `project` (ProjectAttributionSource). NULL = the row
+	// predates the column, or the request was never eligible for attribution.
+	project_attribution_source: string | null;
 	billing_type: string | null;
 	combo_name: string | null;
 	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
@@ -107,6 +137,7 @@ export interface Request {
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string;
+	projectAttributionSource?: ProjectAttributionSource;
 	billingType?: string;
 	comboName?: string;
 	reasoningEffort?: string;
@@ -142,6 +173,12 @@ export interface RequestResponse {
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string;
+	/**
+	 * Which tier produced `project`. Absent when unknown (pre-column rows) or
+	 * when the request was never eligible; `"none"` means the request WAS
+	 * eligible and no tier fired.
+	 */
+	projectAttributionSource?: ProjectAttributionSource;
 	billingType?: string;
 	comboName?: string;
 	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
@@ -196,6 +233,12 @@ export interface RequestPayload {
 		synthetic?: boolean;
 		/** Machine-readable origin for a locally produced terminal response. */
 		failureSource?: string;
+		/**
+		 * Which tier produced the request's project (see
+		 * ProjectAttributionSource). Absent for rows recorded before the field
+		 * existed and for requests that were never eligible.
+		 */
+		projectAttributionSource?: ProjectAttributionSource;
 	};
 }
 
@@ -244,6 +287,9 @@ export function toRequest(row: RequestRow): Request {
 		apiKeyId: row.api_key_id || undefined,
 		apiKeyName: row.api_key_name || undefined,
 		project: row.project || undefined,
+		projectAttributionSource:
+			(row.project_attribution_source as ProjectAttributionSource | null) ||
+			undefined,
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
 		reasoningEffort: row.reasoning_effort || undefined,
@@ -277,6 +323,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		apiKeyId: request.apiKeyId,
 		apiKeyName: request.apiKeyName,
 		project: request.project,
+		projectAttributionSource: request.projectAttributionSource,
 		billingType: request.billingType,
 		comboName: request.comboName,
 		reasoningEffort: request.reasoningEffort,

@@ -3,6 +3,7 @@ import {
 	extractProjectFromBody,
 	extractProjectFromRequest,
 	extractSessionId,
+	isAnchoredSource,
 	mapWorkingDirToProject,
 	normalizeProjectCandidate,
 	resolveProject,
@@ -104,7 +105,10 @@ describe("extractProjectFromBody", () => {
 				" - Platform: linux\n",
 			messages: [{ role: "user", content: "hello" }],
 		};
-		expect(extractProjectFromBody(body)).toBe("clankermux");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+		});
 	});
 
 	it("handles subagent array-form system with a Working directory env block", () => {
@@ -124,7 +128,10 @@ describe("extractProjectFromBody", () => {
 			],
 			messages: [{ role: "user", content: "do the thing" }],
 		};
-		expect(extractProjectFromBody(body)).toBe("clankermux");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "clankermux",
+			source: "wd_plain",
+		});
 	});
 
 	it("captures paths with spaces to end of line", () => {
@@ -133,7 +140,10 @@ describe("extractProjectFromBody", () => {
 				"# Environment\nPrimary working directory: /Users/Me/My Project\nIs a git repository: false\n",
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toBe("My Project");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "My Project",
+			source: "wd_primary",
+		});
 	});
 
 	it("strips surrounding quotes from the captured path", () => {
@@ -141,7 +151,10 @@ describe("extractProjectFromBody", () => {
 			system: '<env>\nWorking directory: "/home/darken/octi"\n</env>',
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toBe("octi");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "octi",
+			source: "wd_plain",
+		});
 	});
 
 	it("lets Primary working directory win over plain Working directory regardless of block order", () => {
@@ -158,7 +171,10 @@ describe("extractProjectFromBody", () => {
 			],
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toBe("clankermux");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+		});
 	});
 
 	it("falls back to the codex <cwd> tag in the first user message (array content)", () => {
@@ -181,7 +197,10 @@ describe("extractProjectFromBody", () => {
 				},
 			],
 		};
-		expect(extractProjectFromBody(body)).toBe("clankermux");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "clankermux",
+			source: "codex_cwd",
+		});
 	});
 
 	it("finds the <cwd> tag in first user message with string content", () => {
@@ -195,7 +214,10 @@ describe("extractProjectFromBody", () => {
 				},
 			],
 		};
-		expect(extractProjectFromBody(body)).toBe("clankermux");
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "clankermux",
+			source: "codex_cwd",
+		});
 	});
 
 	it("never scans past the first user message for <cwd>", () => {
@@ -211,7 +233,10 @@ describe("extractProjectFromBody", () => {
 				},
 			],
 		};
-		expect(extractProjectFromBody(body)).toBeNull();
+		expect(extractProjectFromBody(body)).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("returns null when system only contains unlabeled .claude paths (old regex regression)", () => {
@@ -223,7 +248,10 @@ describe("extractProjectFromBody", () => {
 				"- notes referencing /home/darken/.claude/rules/foo.md\n",
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toBeNull();
+		expect(extractProjectFromBody(body)).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("returns null for a markdown-H1-only system prompt (H1 fallback dropped)", () => {
@@ -231,16 +259,25 @@ describe("extractProjectFromBody", () => {
 			system: "# Harness\nstuff",
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toBeNull();
+		expect(extractProjectFromBody(body)).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("returns null for a null body", () => {
-		expect(extractProjectFromBody(null)).toBeNull();
+		expect(extractProjectFromBody(null)).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("returns null for a body with no system and no messages", () => {
 		const body: RequestJsonBody = { model: "claude-opus-4-8" };
-		expect(extractProjectFromBody(body)).toBeNull();
+		expect(extractProjectFromBody(body)).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 });
 
@@ -255,14 +292,20 @@ describe("extractProjectFromRequest", () => {
 		const headers = new Headers({ "x-project": "my-proj" });
 		expect(
 			extractProjectFromRequest("POST", "/v1/messages", headers, bodyWithWd),
-		).toBe("my-proj");
+		).toEqual({
+			project: "my-proj",
+			source: "header",
+		});
 	});
 
 	it("returns null for GET /v1/messages even with a header", () => {
 		const headers = new Headers({ "x-project": "my-proj" });
 		expect(
 			extractProjectFromRequest("GET", "/v1/messages", headers, bodyWithWd),
-		).toBeNull();
+		).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("extracts on POST /v1/messages/count_tokens (path gate widened for tier 4)", () => {
@@ -274,7 +317,10 @@ describe("extractProjectFromRequest", () => {
 				headers,
 				bodyWithWd,
 			),
-		).toBe("my-proj");
+		).toEqual({
+			project: "my-proj",
+			source: "header",
+		});
 	});
 
 	it("extracts body tiers on POST /v1/messages/count_tokens without a header", () => {
@@ -285,28 +331,40 @@ describe("extractProjectFromRequest", () => {
 				new Headers(),
 				bodyWithWd,
 			),
-		).toBe("clankermux");
+		).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+		});
 	});
 
 	it("still rejects unrelated paths", () => {
 		const headers = new Headers({ "x-project": "my-proj" });
 		expect(
 			extractProjectFromRequest("POST", "/v1/complete", headers, bodyWithWd),
-		).toBeNull();
+		).toEqual({
+			project: null,
+			source: "none",
+		});
 	});
 
 	it("falls through to body tiers when the header is dot-leading", () => {
 		const headers = new Headers({ "x-project": ".hidden" });
 		expect(
 			extractProjectFromRequest("POST", "/v1/messages", headers, bodyWithWd),
-		).toBe("clankermux");
+		).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+		});
 	});
 
 	it("falls through to body tiers when the header is whitespace-only", () => {
 		const headers = new Headers({ "x-project": "   " });
 		expect(
 			extractProjectFromRequest("POST", "/v1/messages", headers, bodyWithWd),
-		).toBe("clankermux");
+		).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+		});
 	});
 
 	it("works with Headers constructed from a plain object (payload envelope backfill)", () => {
@@ -317,7 +375,10 @@ describe("extractProjectFromRequest", () => {
 		});
 		expect(
 			extractProjectFromRequest("POST", "/v1/messages", headers, bodyWithWd),
-		).toBe("envelope-proj");
+		).toEqual({
+			project: "envelope-proj",
+			source: "header",
+		});
 	});
 });
 
@@ -418,7 +479,7 @@ describe("resolveProject", () => {
 		);
 		expect(resolved).toEqual({
 			project: "clankermux",
-			source: "anchored",
+			source: "wd_primary",
 			sessionKey: `key-1:${SESSION_UUID}`,
 		});
 		expect(cache.size()).toBe(0);
@@ -437,7 +498,7 @@ describe("resolveProject", () => {
 		);
 		expect(resolved).toEqual({
 			project: "clankermux",
-			source: "inherited",
+			source: "session_inherited",
 			sessionKey: `key-1:${SESSION_UUID}`,
 		});
 	});
@@ -452,7 +513,11 @@ describe("resolveProject", () => {
 			"key-1",
 			cache,
 		);
-		expect(resolved).toEqual({ project: null, source: null, sessionKey: null });
+		expect(resolved).toEqual({
+			project: null,
+			source: "none",
+			sessionKey: null,
+		});
 	});
 
 	it("scopes sessionKey to 'anon' when apiKeyId is null", () => {
@@ -479,7 +544,7 @@ describe("resolveProject", () => {
 			cache,
 		);
 		expect(resolved.project).toBe("clankermux");
-		expect(resolved.source).toBe("anchored");
+		expect(resolved.source).toBe("wd_primary");
 	});
 
 	it("count_tokens path is eligible for inheritance", () => {
@@ -495,7 +560,7 @@ describe("resolveProject", () => {
 		);
 		expect(resolved).toEqual({
 			project: "clankermux",
-			source: "inherited",
+			source: "session_inherited",
 			sessionKey: `key-1:${SESSION_UUID}`,
 		});
 	});
@@ -543,12 +608,69 @@ describe("resolveProject", () => {
 		);
 		expect(resolved).toEqual({
 			project: null,
-			source: null,
+			source: "none",
 			sessionKey: `key-2:${SESSION_UUID}`,
 		});
 	});
 
-	it("supports a session transitioning projects (seed A → inherit A → seed B → inherit B)", () => {
+	it("reports source 'none' for an eligible signal-less request with a cold session", () => {
+		const cache = new SessionProjectCache();
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			signalLessBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: null,
+			source: "none",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+
+	it("reports session_ambiguous (and no project) for a conflicted session", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "octi");
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			signalLessBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: null,
+			source: "session_ambiguous",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+
+	it("an anchored signal still wins over an ambiguous session", () => {
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "octi");
+		cache.set(`key-1:${SESSION_UUID}`, "clankermux");
+
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			anchoredBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: "clankermux",
+			source: "wd_primary",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+
+	it("marks a session that transitions projects ambiguous (seed A → inherit A → seed B)", () => {
 		const cache = new SessionProjectCache();
 		const headers = new Headers();
 		const projectABody: RequestJsonBody = {
@@ -597,7 +719,8 @@ describe("resolveProject", () => {
 			"octi",
 		);
 
-		// Inherit B from then on.
+		// The conflicting seed makes the session ambiguous: nothing is inherited
+		// until the ambiguity window decays (see SessionProjectCache).
 		expect(
 			resolveProject(
 				"POST",
@@ -606,7 +729,27 @@ describe("resolveProject", () => {
 				signalLessBody,
 				"key-1",
 				cache,
-			).project,
-		).toBe("clankermux");
+			),
+		).toEqual({
+			project: null,
+			source: "session_ambiguous",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
+});
+
+describe("isAnchoredSource", () => {
+	it("accepts every tier-1..3 source", () => {
+		expect(isAnchoredSource("header")).toBe(true);
+		expect(isAnchoredSource("wd_primary")).toBe(true);
+		expect(isAnchoredSource("wd_plain")).toBe(true);
+		expect(isAnchoredSource("codex_cwd")).toBe(true);
+	});
+
+	it("rejects inherited, ambiguous, none and the ineligible null", () => {
+		expect(isAnchoredSource("session_inherited")).toBe(false);
+		expect(isAnchoredSource("session_ambiguous")).toBe(false);
+		expect(isAnchoredSource("none")).toBe(false);
+		expect(isAnchoredSource(null)).toBe(false);
 	});
 });

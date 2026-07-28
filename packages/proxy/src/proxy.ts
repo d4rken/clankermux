@@ -78,7 +78,7 @@ import {
 	releaseOverloadHoldSlot,
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
-import { resolveProject } from "./project-extraction";
+import { isAnchoredSource, resolveProject } from "./project-extraction";
 import { getLastProtectedFamilyDemand } from "./protected-family-demand";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
@@ -418,6 +418,9 @@ export async function handleProxy(
 		sessionProjectCache,
 	);
 	const project = resolved.project;
+	// Which tier produced it (null = the request was never eligible). Carried
+	// beside `project` so the persisted row records HOW it was attributed.
+	const projectAttributionSource = resolved.source;
 	// Ingest-time context composition + per-tool call/error stats: walk the
 	// already-parsed body once (no second JSON.parse) for proxied /v1/messages
 	// requests only. null for other endpoints / unparseable bodies → context_*
@@ -520,7 +523,7 @@ export async function handleProxy(
 	// 3c. Tier-4 seed commit: the request survived validation (can no longer be
 	// 400-rejected above), so it's safe to remember session → project for
 	// signal-less sibling requests (sidechains, title generation, count_tokens).
-	if (resolved.source === "anchored" && resolved.sessionKey && project) {
+	if (isAnchoredSource(resolved.source) && resolved.sessionKey && project) {
 		const previousProject = sessionProjectCache.set(
 			resolved.sessionKey,
 			project,
@@ -553,6 +556,7 @@ export async function handleProxy(
 	requestMeta.affinityScope = affinity.scope;
 	requestMeta.affinityPartition = apiKeyId ? `api_key:${apiKeyId}` : null;
 	requestMeta.project = project;
+	requestMeta.projectAttributionSource = projectAttributionSource;
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
@@ -809,6 +813,7 @@ export async function handleProxy(
 			apiKeyName: apiKeyName || null,
 			comboName: null,
 			project: project ?? null,
+			projectAttributionSource,
 			reasoningEffort: requestMeta.reasoningEffort ?? null,
 			routing: requestMeta.routing
 				? {

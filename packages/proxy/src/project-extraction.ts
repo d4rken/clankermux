@@ -1,3 +1,4 @@
+import type { ProjectAttributionSource } from "@clankermux/types";
 import { sanitizeProjectName } from "./project-name";
 import type { RequestJsonBody } from "./request-body-context";
 import type { SessionProjectCache } from "./session-project-cache";
@@ -15,6 +16,12 @@ import type { SessionProjectCache } from "./session-project-cache";
  *      `session_id`, scoped per API key). `resolveProject` only READS the
  *      session cache — anchored seeds are committed by the caller AFTER
  *      request validation, so 400-rejected bodies can't poison the cache.
+ *      A session that has seeded CONFLICTING projects is reported as
+ *      `session_ambiguous` and inherits nothing (see session-project-cache).
+ *
+ * Every entry point reports WHICH tier fired alongside the project, so the
+ * attribution can be audited after the fact instead of being guessed from the
+ * project name (see `ProjectAttributionSource`).
  *
  * Each tier maps the captured path to a project name via
  * `mapWorkingDirToProject` and normalizes it; `null` means "unknown project"
@@ -150,10 +157,22 @@ function collectFirstUserMessageTexts(body: RequestJsonBody): string[] {
 	return [];
 }
 
-export function extractProjectFromBody(
-	body: RequestJsonBody | null,
-): string | null {
-	if (!body) return null;
+/** Sources a body-only extraction can report (tiers 2–3, or nothing). */
+export type BodyProjectSource = Extract<
+	ProjectAttributionSource,
+	"wd_primary" | "wd_plain" | "codex_cwd" | "none"
+>;
+
+/** Sources a full request extraction can report (tiers 1–3, or nothing). */
+export type RequestProjectSource = BodyProjectSource | "header";
+
+const NO_BODY_PROJECT = { project: null, source: "none" } as const;
+
+export function extractProjectFromBody(body: RequestJsonBody | null): {
+	project: string | null;
+	source: BodyProjectSource;
+} {
+	if (!body) return NO_BODY_PROJECT;
 
 	// Tier 2: anchored working-directory labels in the system prompt.
 	const systemPrompt = extractSystemPrompt(body);
@@ -161,10 +180,10 @@ export function extractProjectFromBody(
 		const primary = projectFromLabelMatch(
 			systemPrompt.match(PRIMARY_WORKING_DIR_RE),
 		);
-		if (primary) return primary;
+		if (primary) return { project: primary, source: "wd_primary" };
 
 		const plain = projectFromLabelMatch(systemPrompt.match(WORKING_DIR_RE));
-		if (plain) return plain;
+		if (plain) return { project: plain, source: "wd_plain" };
 	}
 
 	// Tier 3: codex <cwd> tag — first user message only, never the rest of
@@ -173,11 +192,11 @@ export function extractProjectFromBody(
 		const match = text.slice(0, CWD_SCAN_MAX_CHARS).match(CODEX_CWD_RE);
 		if (match?.[1]) {
 			const project = mapWorkingDirToProject(match[1].trim());
-			if (project) return project;
+			if (project) return { project, source: "codex_cwd" };
 		}
 	}
 
-	return null;
+	return NO_BODY_PROJECT;
 }
 
 // Paths eligible for project attribution (anchored tiers AND session
@@ -195,12 +214,14 @@ export function extractProjectFromRequest(
 	path: string,
 	headers: Headers,
 	body: RequestJsonBody | null,
-): string | null {
-	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) return null;
+): { project: string | null; source: RequestProjectSource } {
+	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) {
+		return NO_BODY_PROJECT;
+	}
 
 	// Tier 1: explicit header.
 	const headerProject = normalizeProjectCandidate(headers.get("x-project"));
-	if (headerProject) return headerProject;
+	if (headerProject) return { project: headerProject, source: "header" };
 
 	return extractProjectFromBody(body);
 }
@@ -235,17 +256,62 @@ export function extractSessionId(body: RequestJsonBody | null): string | null {
 	}
 }
 
-export interface ResolvedProject {
-	project: string | null;
-	source: "anchored" | "inherited" | null;
-	sessionKey: string | null;
+/** The tiers that come from the request itself rather than session history. */
+export type AnchoredProjectSource = Extract<
+	ProjectAttributionSource,
+	"header" | "wd_primary" | "wd_plain" | "codex_cwd"
+>;
+
+const ANCHORED_SOURCES: ReadonlySet<string> = new Set<AnchoredProjectSource>([
+	"header",
+	"wd_primary",
+	"wd_plain",
+	"codex_cwd",
+]);
+
+/**
+ * True for the tiers whose project came from THIS request (header, working-dir
+ * label, codex cwd). Only an anchored resolution may seed the session cache —
+ * seeding from an inherited value would let one mis-attribution self-perpetuate.
+ */
+export function isAnchoredSource(
+	source: ProjectAttributionSource | null,
+): source is AnchoredProjectSource {
+	return source !== null && ANCHORED_SOURCES.has(source);
 }
+
+/**
+ * Outcome of {@link resolveProject}. Discriminated on `source` so an
+ * "attributed to a project but the project is null" state is unrepresentable:
+ *
+ *  - `source: null` — the request was never ELIGIBLE for attribution (non-POST,
+ *    or a path outside PROJECT_ELIGIBLE_PATHS). Persisted as NULL.
+ *  - `source: "none" | "session_ambiguous"` — eligible, but no project: either
+ *    no tier fired, or the session's history is conflicted and was withheld.
+ *  - anything else — a project was resolved and is non-null.
+ */
+export type ResolvedProject =
+	| { source: null; project: null; sessionKey: string | null }
+	| {
+			source: "none" | "session_ambiguous";
+			project: null;
+			sessionKey: string | null;
+	  }
+	| {
+			source: Exclude<ProjectAttributionSource, "none" | "session_ambiguous">;
+			project: string;
+			sessionKey: string | null;
+	  };
 
 /**
  * Full project resolution: anchored tiers 1–3 first, then tier-4 session
  * inheritance from `cache`. READ-ONLY with respect to the cache (a hit only
  * refreshes LRU recency) — the caller commits anchored seeds after request
  * validation so invalid, 400-rejected bodies never poison the cache.
+ *
+ * A session the cache has flagged AMBIGUOUS (it seeded conflicting projects)
+ * yields `session_ambiguous` with a null project: the request is recorded as
+ * un-attributable rather than being given a coin-flip project.
  */
 export function resolveProject(
 	method: string,
@@ -263,16 +329,23 @@ export function resolveProject(
 	const sessionKey = sessionId ? `${apiKeyId ?? "anon"}:${sessionId}` : null;
 
 	const anchored = extractProjectFromRequest(method, path, headers, body);
-	if (anchored) {
-		return { project: anchored, source: "anchored", sessionKey };
+	if (anchored.project !== null && anchored.source !== "none") {
+		return { project: anchored.project, source: anchored.source, sessionKey };
 	}
 
 	if (sessionKey) {
-		const inherited = cache.get(sessionKey);
-		if (inherited) {
-			return { project: inherited, source: "inherited", sessionKey };
+		const inherited = cache.lookup(sessionKey);
+		if (inherited.ambiguous) {
+			return { project: null, source: "session_ambiguous", sessionKey };
+		}
+		if (inherited.project !== null) {
+			return {
+				project: inherited.project,
+				source: "session_inherited",
+				sessionKey,
+			};
 		}
 	}
 
-	return { project: null, source: null, sessionKey };
+	return { project: null, source: "none", sessionKey };
 }

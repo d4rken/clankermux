@@ -114,7 +114,8 @@ function seedWeeklyHealthy() {
 	} as never);
 }
 
-type SaveRequestCall = unknown[];
+/** One persisted request row, as handed to dbOps.saveRequest. */
+type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
 	const saveRequestCalls: SaveRequestCall[] = [];
@@ -134,8 +135,8 @@ function makeProxyContext() {
 					return Promise.resolve();
 				},
 			),
-			saveRequest: mock((...args: unknown[]) => {
-				saveRequestCalls.push(args);
+			saveRequest: mock((data: SaveRequestCall) => {
+				saveRequestCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -210,7 +211,7 @@ function rejected429() {
 }
 
 function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((args) => args[6]);
+	return calls.map((row) => row.errorMessage);
 }
 
 describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
@@ -254,10 +255,10 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		expect(result).toBeNull();
 		// The audit row names the real cause...
 		const row = saveRequestCalls.find(
-			(args) => args[6] === "weekly_exhausted_429",
+			(row) => row.errorMessage === "weekly_exhausted_429",
 		);
 		expect(row).toBeDefined();
-		expect(row?.[9]).toEqual({ model: "claude-opus-4-8" });
+		expect(row?.usage).toEqual({ model: "claude-opus-4-8" });
 		// ...and burst-retry was never entered.
 		expect(reasonsFrom(saveRequestCalls)).not.toContain("model_fallback_429");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);

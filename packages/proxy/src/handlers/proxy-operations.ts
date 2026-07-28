@@ -649,6 +649,7 @@ export async function proxyUnauthenticated(
 				requestBody: requestBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
 				project: requestMeta.project,
+				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
@@ -1253,24 +1254,25 @@ export async function proxyWithAccount(
 				const responseTime = Date.now() - requestMeta.timestamp;
 				// Deliberate direct audit row (synthetic UUID id), NOT recorder-owned.
 				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.saveRequest(
-						crypto.randomUUID(),
-						req.method,
-						url.pathname,
-						account.id,
-						429,
-						false,
-						reason,
+					ctx.dbOps.saveRequest({
+						id: crypto.randomUUID(),
+						method: req.method,
+						path: url.pathname,
+						accountUsed: account.id,
+						statusCode: 429,
+						success: false,
+						errorMessage: reason,
 						responseTime,
 						failoverAttempts,
-						requestedModel ? { model: requestedModel } : undefined,
-						apiKeyId ?? undefined,
-						apiKeyName ?? undefined,
-						requestMeta.project ?? null,
-						undefined,
-						requestMeta.comboName ?? null,
-						requestMeta.reasoningEffort ?? null,
-					),
+						usage: requestedModel ? { model: requestedModel } : undefined,
+						apiKeyId: apiKeyId ?? undefined,
+						apiKeyName: apiKeyName ?? undefined,
+						project: requestMeta.project ?? null,
+						projectAttributionSource:
+							requestMeta.projectAttributionSource ?? null,
+						comboName: requestMeta.comboName ?? null,
+						reasoningEffort: requestMeta.reasoningEffort ?? null,
+					}),
 				);
 				log.warn(
 					`Account ${account.name} out_of_credits (429) — long cooldown until ${new Date(floorUntil).toISOString()}, failing over (no burst-retry, no model cycling)`,
@@ -1355,24 +1357,25 @@ export async function proxyWithAccount(
 					// Deliberate direct audit row (synthetic UUID id), NOT
 					// recorder-owned — mirrors the out_of_credits path.
 					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest(
-							crypto.randomUUID(),
-							req.method,
-							url.pathname,
-							account.id,
-							429,
-							false,
-							reason,
+						ctx.dbOps.saveRequest({
+							id: crypto.randomUUID(),
+							method: req.method,
+							path: url.pathname,
+							accountUsed: account.id,
+							statusCode: 429,
+							success: false,
+							errorMessage: reason,
 							responseTime,
 							failoverAttempts,
-							requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId ?? undefined,
-							apiKeyName ?? undefined,
-							requestMeta.project ?? null,
-							undefined,
-							requestMeta.comboName ?? null,
-							requestMeta.reasoningEffort ?? null,
-						),
+							usage: requestedModel ? { model: requestedModel } : undefined,
+							apiKeyId: apiKeyId ?? undefined,
+							apiKeyName: apiKeyName ?? undefined,
+							project: requestMeta.project ?? null,
+							projectAttributionSource:
+								requestMeta.projectAttributionSource ?? null,
+							comboName: requestMeta.comboName ?? null,
+							reasoningEffort: requestMeta.reasoningEffort ?? null,
+						}),
 					);
 					log.warn(
 						`Account ${account.name} ${exhaustion.binding}-exhausted (429, ${exhaustion.binding} window spent until ${new Date(exhaustion.resetMs).toISOString()}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
@@ -1431,24 +1434,25 @@ export async function proxyWithAccount(
 					// the out_of_credits path. No applyRateLimitCooldown: the account
 					// keeps its account-wide availability for other families.
 					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest(
-							crypto.randomUUID(),
-							req.method,
-							url.pathname,
-							account.id,
-							429,
-							false,
-							reason,
+						ctx.dbOps.saveRequest({
+							id: crypto.randomUUID(),
+							method: req.method,
+							path: url.pathname,
+							accountUsed: account.id,
+							statusCode: 429,
+							success: false,
+							errorMessage: reason,
 							responseTime,
 							failoverAttempts,
-							requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId ?? undefined,
-							apiKeyName ?? undefined,
-							requestMeta.project ?? null,
-							undefined,
-							requestMeta.comboName ?? null,
-							requestMeta.reasoningEffort ?? null,
-						),
+							usage: requestedModel ? { model: requestedModel } : undefined,
+							apiKeyId: apiKeyId ?? undefined,
+							apiKeyName: apiKeyName ?? undefined,
+							project: requestMeta.project ?? null,
+							projectAttributionSource:
+								requestMeta.projectAttributionSource ?? null,
+							comboName: requestMeta.comboName ?? null,
+							reasoningEffort: requestMeta.reasoningEffort ?? null,
+						}),
 					);
 					log.warn(
 						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present) — failing over WITHOUT account-wide cooldown`,
@@ -1546,24 +1550,25 @@ export async function proxyWithAccount(
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 					const responseTime = Date.now() - requestMeta.timestamp;
 					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest(
-							crypto.randomUUID(),
-							req.method,
-							url.pathname,
-							account.id,
-							429,
-							false,
-							"model_fallback_429",
+						ctx.dbOps.saveRequest({
+							id: crypto.randomUUID(),
+							method: req.method,
+							path: url.pathname,
+							accountUsed: account.id,
+							statusCode: 429,
+							success: false,
+							errorMessage: "model_fallback_429",
 							responseTime,
 							failoverAttempts,
-							requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId ?? undefined,
-							apiKeyName ?? undefined,
-							requestMeta.project ?? null,
-							undefined,
-							requestMeta.comboName ?? null,
-							requestMeta.reasoningEffort ?? null,
-						),
+							usage: requestedModel ? { model: requestedModel } : undefined,
+							apiKeyId: apiKeyId ?? undefined,
+							apiKeyName: apiKeyName ?? undefined,
+							project: requestMeta.project ?? null,
+							projectAttributionSource:
+								requestMeta.projectAttributionSource ?? null,
+							comboName: requestMeta.comboName ?? null,
+							reasoningEffort: requestMeta.reasoningEffort ?? null,
+						}),
 					);
 					log.warn(
 						`Account ${account.name} hit transient burst 429 (${classification.confidence}) — intercepting before model-fallback cycling for hold-and-retry`,
@@ -1653,24 +1658,25 @@ export async function proxyWithAccount(
 						// (S2). The recorder records the single final outcome under
 						// requestMeta.id; these capture each individual failed attempt.
 						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.saveRequest(
-								crypto.randomUUID(),
-								req.method,
-								url.pathname,
-								account.id,
-								429,
-								false,
-								reason,
+							ctx.dbOps.saveRequest({
+								id: crypto.randomUUID(),
+								method: req.method,
+								path: url.pathname,
+								accountUsed: account.id,
+								statusCode: 429,
+								success: false,
+								errorMessage: reason,
 								responseTime,
 								failoverAttempts,
-								requestedModel ? { model: requestedModel } : undefined,
-								apiKeyId ?? undefined,
-								apiKeyName ?? undefined,
-								requestMeta.project ?? null,
-								undefined,
-								requestMeta.comboName ?? null,
-								requestMeta.reasoningEffort ?? null,
-							),
+								usage: requestedModel ? { model: requestedModel } : undefined,
+								apiKeyId: apiKeyId ?? undefined,
+								apiKeyName: apiKeyName ?? undefined,
+								project: requestMeta.project ?? null,
+								projectAttributionSource:
+									requestMeta.projectAttributionSource ?? null,
+								comboName: requestMeta.comboName ?? null,
+								reasoningEffort: requestMeta.reasoningEffort ?? null,
+							}),
 						);
 						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
 					}
@@ -1895,24 +1901,25 @@ export async function proxyWithAccount(
 						// (S2). The recorder records the single final outcome under
 						// requestMeta.id; these capture each individual failed attempt.
 						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.saveRequest(
-								crypto.randomUUID(),
-								req.method,
-								url.pathname,
-								account.id,
-								429,
-								false,
-								reason,
+							ctx.dbOps.saveRequest({
+								id: crypto.randomUUID(),
+								method: req.method,
+								path: url.pathname,
+								accountUsed: account.id,
+								statusCode: 429,
+								success: false,
+								errorMessage: reason,
 								responseTime,
 								failoverAttempts,
-								requestedModel ? { model: requestedModel } : undefined,
-								apiKeyId ?? undefined,
-								apiKeyName ?? undefined,
-								requestMeta.project ?? null,
-								undefined,
-								requestMeta.comboName ?? null,
-								requestMeta.reasoningEffort ?? null,
-							),
+								usage: requestedModel ? { model: requestedModel } : undefined,
+								apiKeyId: apiKeyId ?? undefined,
+								apiKeyName: apiKeyName ?? undefined,
+								project: requestMeta.project ?? null,
+								projectAttributionSource:
+									requestMeta.projectAttributionSource ?? null,
+								comboName: requestMeta.comboName ?? null,
+								reasoningEffort: requestMeta.reasoningEffort ?? null,
+							}),
 						);
 					}
 				}
@@ -2074,6 +2081,7 @@ export async function proxyWithAccount(
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
 						project: requestMeta.project,
+						projectAttributionSource: requestMeta.projectAttributionSource,
 						contextComposition: requestMeta.contextComposition,
 						toolCallStats: requestMeta.toolCallStats,
 						reasoningEffort: requestMeta.reasoningEffort,
@@ -2143,6 +2151,7 @@ export async function proxyWithAccount(
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
 						project: requestMeta.project,
+						projectAttributionSource: requestMeta.projectAttributionSource,
 						contextComposition: requestMeta.contextComposition,
 						toolCallStats: requestMeta.toolCallStats,
 						reasoningEffort: requestMeta.reasoningEffort,
@@ -2205,6 +2214,7 @@ export async function proxyWithAccount(
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
 				project: requestMeta.project,
+				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
@@ -2334,6 +2344,7 @@ export async function proxyForcedAccount(
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
 				project: requestMeta.project,
+				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
@@ -2474,6 +2485,7 @@ export async function proxyForcedAccount(
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
 				project: requestMeta.project,
+				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,

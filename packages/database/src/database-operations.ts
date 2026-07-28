@@ -1218,48 +1218,18 @@ OAuth tokens will need to be re-authenticated.
 
 	// Request operations delegated to repository
 
-	async saveRequest(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		success: boolean,
-		errorMessage: string | null,
-		responseTime: number,
-		failoverAttempts: number,
-		usage?: RequestData["usage"],
-		apiKeyId?: string,
-		apiKeyName?: string,
-		project?: string | null,
-		billingType?: string,
-		comboName?: string | null,
-		reasoningEffort?: string | null,
-		contextComposition?: RequestData["contextComposition"],
-		requestedModel?: string | null,
-	): Promise<void> {
+	/**
+	 * Persist (upsert) a request row.
+	 *
+	 * Takes a single options object ON PURPOSE: the row has a long tail of
+	 * optional metadata fields, and with a positional signature a call site that
+	 * forgot to pass a newly added one still type-checked and silently wrote SQL
+	 * NULL — indistinguishable from a legacy row. With an object, every call site
+	 * is named and a required field is a compile error.
+	 */
+	async saveRequest(data: RequestData): Promise<void> {
 		await withDatabaseRetry(
-			() =>
-				this.requests.save({
-					id,
-					method,
-					path,
-					accountUsed,
-					statusCode,
-					success,
-					errorMessage,
-					responseTime,
-					failoverAttempts,
-					usage,
-					apiKeyId,
-					apiKeyName,
-					project,
-					billingType,
-					comboName,
-					reasoningEffort,
-					contextComposition,
-					requestedModel,
-				}),
+			() => this.requests.save(data),
 			this.retryConfig,
 			"saveRequest",
 		);
