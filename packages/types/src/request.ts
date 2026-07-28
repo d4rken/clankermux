@@ -1,4 +1,31 @@
 /**
+ * Which tier of project attribution produced a request's `project` value.
+ * Shared by the proxy (which derives it), the database (which persists it),
+ * the HTTP API and the dashboard (which surface it), so the vocabulary can
+ * never drift between producer and consumers.
+ *
+ *  - `header`            — explicit `x-project` request header (tier 1)
+ *  - `wd_primary`        — "Primary working directory:" system-prompt label
+ *  - `wd_plain`          — plain "Working directory:" system-prompt label
+ *  - `codex_cwd`         — Codex `<cwd>…</cwd>` tag in the first user message
+ *  - `session_inherited` — inherited from the session cache (tier 4)
+ *  - `session_ambiguous` — the session seeded conflicting projects, so nothing
+ *                          was inherited (project stays null)
+ *  - `none`              — eligible request, no tier produced a project
+ *
+ * A persisted NULL means something different again: the row predates the
+ * column, or the request was never eligible for attribution at all.
+ */
+export type ProjectAttributionSource =
+	| "header"
+	| "wd_primary"
+	| "wd_plain"
+	| "codex_cwd"
+	| "session_inherited"
+	| "session_ambiguous"
+	| "none";
+
+/**
  * Per-request context composition: character counts per context-window bucket
  * (system prompt / tool definitions / messages / tool results), computed once
  * at ingest from the already-parsed /v1/messages body. Char counts are

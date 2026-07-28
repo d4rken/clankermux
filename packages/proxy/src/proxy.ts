@@ -78,7 +78,7 @@ import {
 	releaseOverloadHoldSlot,
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
-import { resolveProject } from "./project-extraction";
+import { isAnchoredSource, resolveProject } from "./project-extraction";
 import { getLastProtectedFamilyDemand } from "./protected-family-demand";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
@@ -520,7 +520,7 @@ export async function handleProxy(
 	// 3c. Tier-4 seed commit: the request survived validation (can no longer be
 	// 400-rejected above), so it's safe to remember session → project for
 	// signal-less sibling requests (sidechains, title generation, count_tokens).
-	if (resolved.source === "anchored" && resolved.sessionKey && project) {
+	if (isAnchoredSource(resolved.source) && resolved.sessionKey && project) {
 		const previousProject = sessionProjectCache.set(
 			resolved.sessionKey,
 			project,
