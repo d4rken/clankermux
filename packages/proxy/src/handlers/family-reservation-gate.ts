@@ -13,21 +13,43 @@ import type {
 } from "@clankermux/types";
 
 /**
- * Fraction of a shared window (as a whole-number percent of remaining headroom)
- * we keep in reserve for the protected family. When an account's remaining
- * headroom on a reserved axis drops BELOW this, a non-protected request is
- * demoted off the account so the tail of the window stays available for Fable.
- * Strictly-less-than: exactly `RESERVE_HEADROOM_PCT` left still serves.
+ * Fraction of the 5h SESSION window (as a whole-number percent of remaining
+ * headroom) kept in reserve for the protected family. When an account's session
+ * headroom drops BELOW this, a non-protected request is demoted off the account
+ * so the tail of the shared session window stays available for Fable.
+ * Strictly-less-than: exactly `SESSION_RESERVE_HEADROOM_PCT` left still serves.
  */
-export const RESERVE_HEADROOM_PCT = 25;
+export const SESSION_RESERVE_HEADROOM_PCT = 25;
+
+/**
+ * The same idea on the 7d WEEKLY window, and deliberately DEEPER than the
+ * session reserve. Two reasons the axes are sized differently:
+ *
+ *  - Weekly quota reserved here is the only thing standing between Fable and a
+ *    multi-day wall; the session window rolls in hours.
+ *  - The demotion is SOFT and erodes under fail-open pool pressure (a reserved
+ *    account still serves when no peer can absorb), so the nominal band is not
+ *    the effective one.
+ *
+ * 40% is ~3–4× Fable's observed ~11% share of weekly demand, which leaves room
+ * for that erosion. Strictly-less-than, as on the session axis.
+ */
+export const WEEKLY_RESERVE_HEADROOM_PCT = 40;
 
 /**
  * How recently the account must have actually served the protected family for
  * its WEEKLY quota to be reserved for Fable. The 7d axis is demand-targeted:
  * without observed Fable demand inside this window we do not hold weekly quota,
- * so an account Fable never routes to is not needlessly sidelined. 60 minutes.
+ * so an account Fable never routes to is not needlessly sidelined.
+ *
+ * 12 hours, sized to interactive use: Fable demand is bursty and human-shaped, so
+ * an evening's work followed by an overnight gap must NOT disarm the weekly
+ * reservation — a shorter window made the gate flap with the user's sleep
+ * schedule. The in-memory demand map is still lost on restart; that stays an
+ * accepted fail-open (no recorded demand ⇒ no weekly reservation, never
+ * over-reservation).
  */
-export const PROTECTED_FAMILY_DEMAND_LOOKBACK_MS = 3_600_000; // 60 min
+export const PROTECTED_FAMILY_DEMAND_LOOKBACK_MS = 43_200_000; // 12 h
 
 /**
  * How close to the weekly reset boundary we STOP reserving weekly quota. The
@@ -54,24 +76,29 @@ export const WEEKLY_HARVEST_YIELD_HORIZON_MS = 7_200_000; // 2 h
  * families on an Anthropic account, but they behave differently near their reset,
  * so the reservation is gated differently on each:
  *
- *  - **5h axis — unconditional & self-healing.** The 5h window rolls every few
- *    hours, so quota we decline to spend now is recovered soon regardless of who
- *    was demanding it. Reserving whenever session headroom is low costs almost
- *    nothing (the peer we route to shares the same short window) and needs no
- *    demand signal. So low `sessionHeadroom` alone demotes.
+ *  - **5h axis — unconditional & self-healing, shallower band.** The 5h window
+ *    rolls every few hours, so quota we decline to spend now is recovered soon
+ *    regardless of who was demanding it. Reserving whenever session headroom is
+ *    low costs almost nothing (the peer we route to shares the same short window)
+ *    and needs no demand signal. So `sessionHeadroom < SESSION_RESERVE_HEADROOM_PCT`
+ *    alone demotes.
  *
- *  - **7d axis — demand-gated & harvest-yielding.** The weekly window is
- *    expensive to hold: quota reserved here is unavailable for a full week. We
- *    therefore only reserve weekly quota when (a) Fable has ACTUALLY been routing
- *    to this account recently (`recentDemand`) — reserving for a family that never
- *    shows up just wastes the account — AND (b) we are NOT near the weekly reset
- *    boundary (`!nearReset`), measured on the BINDING weekly window (the one whose
- *    headroom is low), not the earliest-resetting one. The protected family's OWN
- *    weekly window resets at the same wall-clock as this shared weekly window, so
- *    any quota we hold in the last couple of hours would expire unused for Fable
- *    too; near the boundary the reservation yields and the current request harvests
- *    the remainder. An UNKNOWN (null) binding-weekly reset yields too (fails open):
- *    we only hold weekly quota when we KNOW the binding reset is beyond the horizon.
+ *  - **7d axis — demand-gated, harvest-yielding, and DEEPER.** The weekly window
+ *    is expensive to hold: quota reserved here is unavailable for a full week. It
+ *    is also the axis whose exhaustion actually hurts — a spent weekly window is a
+ *    multi-day wall — and the demotion is soft, so the reservation erodes under
+ *    fail-open pool pressure. Hence the deeper `WEEKLY_RESERVE_HEADROOM_PCT` band,
+ *    fenced by two conditions the 5h axis does not need: (a) Fable has ACTUALLY
+ *    been routing to this account recently (`recentDemand`) — reserving for a
+ *    family that never shows up just wastes the account — AND (b) we are NOT near
+ *    the weekly reset boundary (`!nearReset`), measured on the BINDING weekly
+ *    window (the one whose headroom is low), not the earliest-resetting one. The
+ *    protected family's OWN weekly window resets at the same wall-clock as this
+ *    shared weekly window, so any quota we hold in the last couple of hours would
+ *    expire unused for Fable too; near the boundary the reservation yields and the
+ *    current request harvests the remainder. An UNKNOWN (null) binding-weekly reset
+ *    yields too (fails open): we only hold weekly quota when we KNOW the binding
+ *    reset is beyond the horizon.
  *
  * ## Fail-open contract
  *
@@ -138,16 +165,17 @@ export function resolveReservationDemotion(
 	// 5. 5h AXIS (unconditional, self-healing): low session headroom alone demotes.
 	if (
 		Number.isFinite(capacity.sessionHeadroom) &&
-		capacity.sessionHeadroom < RESERVE_HEADROOM_PCT
+		capacity.sessionHeadroom < SESSION_RESERVE_HEADROOM_PCT
 	) {
 		return true;
 	}
 
-	// 6. 7d AXIS (demand-targeted + harvest-yield): only reserve weekly quota when
-	//    Fable demanded this account recently AND we are not near the weekly reset.
+	// 6. 7d AXIS (demand-targeted + harvest-yield, deeper band): only reserve
+	//    weekly quota when Fable demanded this account recently AND we are not near
+	//    the weekly reset.
 	if (
 		Number.isFinite(capacity.weeklyHeadroom) &&
-		capacity.weeklyHeadroom < RESERVE_HEADROOM_PCT
+		capacity.weeklyHeadroom < WEEKLY_RESERVE_HEADROOM_PCT
 	) {
 		const recentDemand =
 			lastProtectedDemandMs != null &&
