@@ -253,7 +253,16 @@ describe("analytics projectBreakdown", () => {
 
 	it("returns an empty projectBreakdown array when there are no requests in range", async () => {
 		const data = await fetchAnalytics({});
+		// The no-project branch is an ungrouped aggregate, so its HAVING guard
+		// is what keeps an all-NULL placeholder row out of the empty result.
 		expect(data.projectBreakdown).toEqual([]);
+		expect(data.projectAttributionCoverage).toEqual({
+			total: 0,
+			measured: 0,
+			none: 0,
+			inherited: 0,
+			ambiguous: 0,
+		});
 	});
 
 	it("reports inference against the MEASURED denominator, not total requests", async () => {
@@ -309,6 +318,15 @@ describe("analytics projectBreakdown", () => {
 		expect(delta.measuredRequests).toBe(3);
 		expect(delta.inferredRequests).toBe(1);
 		expect(delta.ambiguousRequests).toBe(0);
+
+		// The range-wide aggregate carries the same split for the whole range.
+		expect(data.projectAttributionCoverage).toEqual({
+			total: 4,
+			measured: 3,
+			none: 0,
+			inherited: 1,
+			ambiguous: 0,
+		});
 	});
 
 	it("splits the no-project bucket into none / ambiguous / legacy-unknown", async () => {
@@ -359,6 +377,130 @@ describe("analytics projectBreakdown", () => {
 				bucket.inferredRequests,
 		).toBe(1);
 		expect(bucket.requests - bucket.measuredRequests).toBe(1);
+	});
+
+	it("measures coverage over the whole range, not the truncated breakdown array", async () => {
+		const now = Date.now();
+		// More named projects than the server's project_breakdown limit (20).
+		// The 20 biggest all carry a recorded source; the 5 smallest are legacy
+		// rows with none, and they are exactly the ones the LIMIT cuts. Summing
+		// the returned array therefore reads as 100% covered.
+		for (let i = 0; i < 25; i++) {
+			await insertRequest({
+				id: `wide-${i}`,
+				timestamp: now - 1000 - i,
+				project: `proj-${i}`,
+				success: true,
+				totalTokens: (25 - i) * 100,
+				costUsd: 0,
+				billingType: "api",
+				attributionSource: i < 20 ? "wd_primary" : undefined,
+			});
+		}
+
+		const data = await fetchAnalytics({});
+
+		expect(data.projectBreakdown).toHaveLength(20);
+		const arrayRequests = data.projectBreakdown.reduce(
+			(sum: number, row: { requests: number }) => sum + row.requests,
+			0,
+		);
+		const arrayMeasured = data.projectBreakdown.reduce(
+			(sum: number, row: { measuredRequests: number }) =>
+				sum + row.measuredRequests,
+			0,
+		);
+		// The array-derived number is the wrong one: it says 20 of 20 = 100%.
+		expect(arrayMeasured).toBe(20);
+		expect(arrayRequests).toBe(20);
+
+		// The range-wide aggregate keeps the 5 truncated legacy rows in the
+		// denominator: 20 of 25 = 80%.
+		expect(data.projectAttributionCoverage).toEqual({
+			total: 25,
+			measured: 20,
+			none: 0,
+			inherited: 0,
+			ambiguous: 0,
+		});
+	});
+
+	it("returns the no-project bucket even when it ranks below the top 20 projects", async () => {
+		const now = Date.now();
+		for (let i = 0; i < 25; i++) {
+			await insertRequest({
+				id: `wide-${i}`,
+				timestamp: now - 1000 - i,
+				project: `proj-${i}`,
+				success: true,
+				totalTokens: (25 - i) * 1000,
+				costUsd: 0,
+				billingType: "api",
+				attributionSource: "wd_primary",
+			});
+		}
+		// Smallest bucket in the range by tokens. Grouped alongside the named
+		// projects it would rank 26th and be truncated away, taking the
+		// none/ambiguous/legacy split with it.
+		await insertRequest({
+			id: "np-none",
+			timestamp: now - 2000,
+			project: null,
+			success: true,
+			totalTokens: 1,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "none",
+		});
+		await insertRequest({
+			id: "np-ambiguous",
+			timestamp: now - 2001,
+			project: null,
+			success: true,
+			totalTokens: 1,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "session_ambiguous",
+		});
+		await insertRequest({
+			id: "np-legacy",
+			timestamp: now - 2002,
+			project: null,
+			success: true,
+			totalTokens: 1,
+			costUsd: 0,
+			billingType: "api",
+		});
+
+		const data = await fetchAnalytics({});
+
+		// 20 named projects (the cut still applies to them) plus the bucket.
+		const named = data.projectBreakdown.filter(
+			(row: { project: string | null }) => row.project !== null,
+		);
+		expect(named).toHaveLength(20);
+		expect(data.projectBreakdown).toHaveLength(21);
+
+		const bucket = data.projectBreakdown.find(
+			(row: { project: string | null }) => row.project === null,
+		);
+		expect(bucket).toBeDefined();
+		expect(bucket.requests).toBe(3);
+		expect(bucket.measuredRequests).toBe(2);
+		expect(bucket.ambiguousRequests).toBe(1);
+		expect(bucket.inferredRequests).toBe(0);
+		expect(bucket.totalTokens).toBe(3);
+
+		// Merged back in token order, so the fewest-token bucket sorts last.
+		expect(data.projectBreakdown[20].project).toBeNull();
+
+		expect(data.projectAttributionCoverage).toEqual({
+			total: 28,
+			measured: 27,
+			none: 1,
+			inherited: 0,
+			ambiguous: 1,
+		});
 	});
 
 	it("keeps the other UNION branches intact when the attribution columns are added", async () => {

@@ -395,8 +395,14 @@ export interface AnalyticsResponse {
 	cacheFlow?: CacheFlowPoint[];
 	// Per-project aggregates, ordered by total tokens. `project: null` is the
 	// bucket for requests with no recorded project (distinct from any literal
-	// project name). Optional because an older server may not populate it —
-	// consumers should `?? []`.
+	// project name); it is aggregated separately from the named projects and is
+	// therefore never truncated away by the server's top-N cut. Optional because
+	// an older server may not populate it — consumers should `?? []`.
+	//
+	// TRUNCATED: named projects beyond the server's top-N are omitted, so this
+	// array must NOT be summed to describe the range. Each row's own totals are
+	// exact; the row SET is not the whole range. Use
+	// `projectAttributionCoverage` for any range-wide statement.
 	projectBreakdown?: Array<{
 		project: string | null;
 		requests: number;
@@ -422,6 +428,28 @@ export interface AnalyticsResponse {
 		 */
 		ambiguousRequests: number;
 	}>;
+	// Attribution coverage over the WHOLE filtered range — every request the
+	// filters select, not just the projects that survive projectBreakdown's
+	// top-N cut. Summing projectBreakdown cannot produce these numbers: with
+	// more buckets than the limit it would report full coverage while
+	// unmeasured rows sit outside the truncation. Optional because an older
+	// server may not populate it — consumers should treat absence as unknown.
+	projectAttributionCoverage?: {
+		/** Every request in the filtered range. */
+		total: number;
+		/**
+		 * Requests whose attribution source was RECORDED (column non-NULL).
+		 * `total - measured` is the legacy-unknown remainder: rows written
+		 * before the column existed.
+		 */
+		measured: number;
+		/** Measured requests that were eligible but where no tier fired. */
+		none: number;
+		/** Measured requests attributed by session inheritance (tier 4). */
+		inherited: number;
+		/** Measured requests where a conflicted session withheld attribution. */
+		ambiguous: number;
+	};
 	// Context composition analytics. Char sums are recorded at ingest on
 	// "covered" rows (context columns non-NULL); coverage reports how much of
 	// the range is covered so partial history is labeled honestly. Token

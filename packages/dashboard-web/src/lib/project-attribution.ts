@@ -135,16 +135,18 @@ export function describeProjectAttribution(
  * How much of the range has a recorded attribution source at all. Rendered as
  * a note beside the breakdown so a partially-measured range is labeled instead
  * of silently reading as fully known.
+ *
+ * Takes the server's range-wide aggregate, NOT the project-breakdown rows:
+ * that array is truncated to the top-N projects, so summing it would report
+ * full coverage for any range whose unmeasured rows fall outside the cut.
+ * `undefined` (an older server that doesn't send the aggregate) yields a null
+ * percent, which renders as "not available" rather than a fabricated 0%.
  */
 export function attributionCoverage(
-	rows: Array<{ requests: number; measuredRequests: number }>,
+	coverage: { measured: number; total: number } | undefined,
 ): { measured: number; total: number; percent: number | null } {
-	let measured = 0;
-	let total = 0;
-	for (const row of rows) {
-		measured += row.measuredRequests;
-		total += row.requests;
-	}
+	const measured = coverage?.measured ?? 0;
+	const total = coverage?.total ?? 0;
 	return {
 		measured,
 		total,

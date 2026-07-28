@@ -57,6 +57,7 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 			{/* Project Breakdown */}
 			<ProjectAnalytics
 				projectBreakdown={analytics?.projectBreakdown ?? []}
+				attributionCoverageTotals={analytics?.projectAttributionCoverage}
 				loading={loading}
 			/>
 

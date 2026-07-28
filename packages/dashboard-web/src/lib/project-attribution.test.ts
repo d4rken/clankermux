@@ -162,17 +162,24 @@ describe("describeProjectAttribution", () => {
 });
 
 describe("attributionCoverage", () => {
-	it("sums measured rows over all requests in the range", () => {
-		expect(
-			attributionCoverage([
-				{ requests: 4, measuredRequests: 3 },
-				{ requests: 2, measuredRequests: 1 },
-			]),
-		).toEqual({ measured: 4, total: 6, percent: 67 });
+	it("reports the server's range-wide measured share", () => {
+		expect(attributionCoverage({ measured: 4, total: 6 })).toEqual({
+			measured: 4,
+			total: 6,
+			percent: 67,
+		});
 	});
 
 	it("has no percentage when the range is empty", () => {
-		expect(attributionCoverage([])).toEqual({
+		expect(attributionCoverage({ measured: 0, total: 0 })).toEqual({
+			measured: 0,
+			total: 0,
+			percent: null,
+		});
+	});
+
+	it("has no percentage when the server sent no aggregate", () => {
+		expect(attributionCoverage(undefined)).toEqual({
 			measured: 0,
 			total: 0,
 			percent: null,
