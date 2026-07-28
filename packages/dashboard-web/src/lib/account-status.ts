@@ -6,7 +6,7 @@ import type {
 } from "@clankermux/types";
 import { HARD_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
-import { isAnthropicPeakHour, isZaiPeakHour } from "../utils/provider-utils";
+import { isZaiPeakHour } from "../utils/provider-utils";
 import { computeRenewal, type RenewalUrgency } from "./renewal";
 
 /**
@@ -90,7 +90,7 @@ export interface AccountStatus {
 	overloadedFamilies: Array<{ family: string; until: number; minutes: number }>;
 	/** Family-scoped half-open buckets: cooldown elapsed, recovery probe pending/running. */
 	probingFamilies: string[];
-	/** Provider has peak / off-peak windows (zai, anthropic). */
+	/** Provider has peak / off-peak windows (zai only). */
 	showPeakChip: boolean;
 	/** Currently within the provider's peak window. */
 	isPeak: boolean;
@@ -234,17 +234,14 @@ export function deriveAccountStatus(
 		? Math.max(1, Math.ceil((providerOverloadedUntil - now) / 60000))
 		: null;
 
-	// Peak / off-peak status. Only zai and anthropic have peak-hour windows.
-	const isZaiPeak = account.provider === "zai" && isZaiPeakHour(now);
-	const isAnthropicPeak =
-		account.provider === "anthropic" && isAnthropicPeakHour(now);
-	const showPeakChip =
-		account.provider === "zai" || account.provider === "anthropic";
-	const isPeak = isZaiPeak || isAnthropicPeak;
+	// Peak / off-peak status. Only zai has a peak-hour window. Anthropic briefly
+	// drained 5h sessions faster on weekdays 5–11am PT (announced ~2026-03-27),
+	// but removed that reduction on 2026-05-06 alongside doubling the Claude Code
+	// 5h limits — so anthropic accounts get no peak chip.
+	const showPeakChip = account.provider === "zai";
+	const isPeak = showPeakChip && isZaiPeakHour(now);
 	const peakChipLabel = isPeak
-		? account.provider === "zai"
-			? "Peak hours (14:00–18:00 SGT)"
-			: "Peak hours (5–11am PT, weekdays)"
+		? "Peak hours (14:00–18:00 SGT)"
 		: "Off-peak hours";
 
 	const renewal = computeRenewal(
