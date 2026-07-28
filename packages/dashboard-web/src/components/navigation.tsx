@@ -15,7 +15,7 @@ import {
 	Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { cn } from "../lib/utils";
 import { commitRelationshipLabel, version } from "../lib/version";
 import logoUrl from "../logo.png";

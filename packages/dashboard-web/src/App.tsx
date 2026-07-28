@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense, useMemo } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 import { AccountsTab } from "./components/AccountsTab";
 import { ApiKeysTab } from "./components/ApiKeysTab";
 import { CombosTab } from "./components/combos/CombosTab";
