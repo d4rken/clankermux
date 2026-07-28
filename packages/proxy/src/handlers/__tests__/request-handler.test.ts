@@ -101,6 +101,78 @@ describe("makeProxyRequest — signal composition (Finding 3)", () => {
 	});
 });
 
+describe("makeProxyRequest — internal control header sweep", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function captureOutboundHeaders(): () => Headers {
+		let seen: Headers = new Headers();
+		globalThis.fetch = (async (
+			input: RequestInfo | URL,
+			init?: RequestInit,
+		) => {
+			seen =
+				input instanceof Request
+					? new Headers(input.headers)
+					: new Headers(init?.headers);
+			return new Response("{}", { status: 200 });
+		}) as typeof globalThis.fetch;
+		return () => seen;
+	}
+
+	// Three ADJACENT prefixed headers: deleting from a live Headers iterator can
+	// advance past neighbours, so a naive sweep leaves some of them on the wire.
+	function withInternalMarkers(headers: Headers): Headers {
+		headers.set("content-type", "application/json");
+		headers.set("x-clankermux-account-id", "acct-1");
+		headers.set("x-clankermux-keepalive", "true");
+		headers.set("x-clankermux-request-stream", "true");
+		headers.set("x-clankermux-skip-cache", "true");
+		headers.set("x-better-ccflare-account-id", "acct-legacy");
+		headers.set("accept", "application/json");
+		return headers;
+	}
+
+	function expectSwept(sent: Headers): void {
+		const surviving = [...sent.keys()].filter((k) =>
+			/^x-(clankermux|better-ccflare)-/i.test(k),
+		);
+		expect(surviving).toEqual([]);
+		// Ordinary headers must be untouched.
+		expect(sent.get("content-type")).toBe("application/json");
+		expect(sent.get("accept")).toBe("application/json");
+	}
+
+	it("strips every internal header on the headers-param branch", async () => {
+		const getSeen = captureOutboundHeaders();
+		await makeProxyRequest(
+			"https://example.invalid/v1/messages",
+			"POST",
+			withInternalMarkers(new Headers()),
+			() => undefined,
+			false,
+		);
+		expectSwept(getSeen());
+	});
+
+	it("strips every internal header on the Request-target branch", async () => {
+		const getSeen = captureOutboundHeaders();
+		const req = new Request("https://example.invalid/v1/responses", {
+			method: "POST",
+			headers: withInternalMarkers(new Headers()),
+			body: "{}",
+		});
+		await makeProxyRequest(req);
+		expectSwept(getSeen());
+	});
+});
+
 describe("makeProxyRequest — synthetic local response", () => {
 	let originalFetch: typeof globalThis.fetch;
 
