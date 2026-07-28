@@ -405,6 +405,22 @@ export interface AnalyticsResponse {
 		apiCostUsd: number;
 		totalCostUsd: number;
 		totalTokens: number;
+		/**
+		 * Rows in this bucket whose attribution source was RECORDED (the column
+		 * is non-NULL). The only honest denominator for the inference share:
+		 * rows written before the column existed carry NULL and would otherwise
+		 * dilute any range spanning the deploy into under-reporting inference.
+		 * `requests - measuredRequests` is the legacy-unknown remainder.
+		 */
+		measuredRequests: number;
+		/** Measured rows attributed by session inheritance (tier 4). */
+		inferredRequests: number;
+		/**
+		 * Measured rows where a conflicted session withheld attribution. Only
+		 * ever non-zero in the `project: null` bucket, since an ambiguous
+		 * session yields no project.
+		 */
+		ambiguousRequests: number;
 	}>;
 	// Context composition analytics. Char sums are recorded at ingest on
 	// "covered" rows (context columns non-NULL); coverage reports how much of

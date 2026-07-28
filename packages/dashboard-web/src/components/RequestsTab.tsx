@@ -36,6 +36,11 @@ import {
 import { useRequestStream } from "../hooks/useRequestStream";
 import { decodeBase64Utf8 } from "../lib/base64";
 import {
+	hasAttributionMetadata,
+	projectAttributionChip,
+	resolveProjectAttributionSource,
+} from "../lib/project-attribution";
+import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
 	mergeStatusCodes,
@@ -742,6 +747,14 @@ export function RequestsTab() {
 							// narrowed string in their onClick closures.
 							const apiKeyName = summary?.apiKeyName;
 							const project = summary?.project;
+							// Provenance of `project`. An ambiguous row has NO project, so this
+							// must also gate the attribution row below — otherwise an anonymous
+							// ambiguous request would never render its chip.
+							const attributionSource = resolveProjectAttributionSource(
+								summary?.projectAttributionSource,
+								request.meta.projectAttributionSource,
+							);
+							const attributionChip = projectAttributionChip(attributionSource);
 							// Tokens that weren't served from / written to the prompt cache.
 							// Derived from totalTokens (not input+output) because OpenAI rows
 							// count cached tokens inside inputTokens.
@@ -906,7 +919,12 @@ export function RequestsTab() {
 									</div>
 
 									{/* Row 2 "attribution": wraps freely — who/what triggered the request */}
-									{(apiKeyName || project || summary?.comboName) && (
+									{hasAttributionMetadata({
+										apiKeyName,
+										project,
+										comboName: summary?.comboName,
+										source: attributionSource,
+									}) && (
 										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5 pl-9 text-xs">
 											{apiKeyName && (
 												<button
@@ -935,6 +953,15 @@ export function RequestsTab() {
 													<Folder className="h-3 w-3 mr-1" />
 													{project}
 												</button>
+											)}
+											{attributionChip && (
+												<Badge
+													variant="outline"
+													className="text-xs border-amber-500 text-amber-500"
+													title={attributionChip.title}
+												>
+													{attributionChip.label}
+												</Badge>
 											)}
 											{summary?.comboName && (
 												<Badge

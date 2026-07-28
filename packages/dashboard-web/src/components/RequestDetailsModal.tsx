@@ -8,6 +8,10 @@ import { Eye } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { decodeBase64Utf8 } from "../lib/base64";
+import {
+	projectAttributionLabel,
+	resolveProjectAttributionSource,
+} from "../lib/project-attribution";
 import { getRequestModelPresentation } from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
@@ -139,6 +143,14 @@ export function RequestDetailsModal({
 		loadError?.id === request.id ? loadError.message : null;
 	const modelPresentation = getRequestModelPresentation(summary);
 	const requestSucceeded = summary?.success ?? effective.meta?.success;
+	// Live summaries carry the source; hydrated historical rows only have the
+	// stored envelope's meta block. Falling back keeps both views in agreement.
+	const attributionLabel = projectAttributionLabel(
+		resolveProjectAttributionSource(
+			summary?.projectAttributionSource,
+			effective.meta?.projectAttributionSource,
+		),
+	);
 
 	return (
 		<Dialog open={isOpen} onOpenChange={onClose}>
@@ -188,6 +200,14 @@ export function RequestDetailsModal({
 							)}
 							{summary?.costUsd && summary.costUsd > 0 && (
 								<Badge variant="default">{formatCost(summary.costUsd)}</Badge>
+							)}
+							{attributionLabel && (
+								<Badge
+									variant="outline"
+									title="How this request's project was determined"
+								>
+									{summary?.project ?? "no project"} · {attributionLabel}
+								</Badge>
 							)}
 						</div>
 						<div className="flex items-center gap-2">

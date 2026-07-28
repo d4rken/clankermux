@@ -8,6 +8,10 @@ import {
 import { FolderOpen } from "lucide-react";
 import { useMemo } from "react";
 import { formatCompactNumber } from "../../lib/chart-utils";
+import {
+	attributionCoverage,
+	describeProjectAttribution,
+} from "../../lib/project-attribution";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
@@ -56,6 +60,13 @@ export function ProjectAnalytics({
 				name: projectLabel(row.project),
 				tokens: row.totalTokens,
 			})),
+		[projectBreakdown],
+	);
+
+	// Coverage is measured over the WHOLE range, so a partially-measured range
+	// is labeled rather than silently reading as fully known.
+	const coverage = useMemo(
+		() => attributionCoverage(projectBreakdown),
 		[projectBreakdown],
 	);
 
@@ -125,6 +136,9 @@ export function ProjectAnalytics({
 								<th scope="col" className="text-right px-3 py-2">
 									Success
 								</th>
+								<th scope="col" className="text-right px-3 py-2">
+									Attribution
+								</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -154,11 +168,19 @@ export function ProjectAnalytics({
 									<td className="px-3 py-2 text-right">
 										{formatPercentage(row.successRate, 0)}
 									</td>
+									<td className="px-3 py-2 text-right text-muted-foreground">
+										{describeProjectAttribution(row)}
+									</td>
 								</tr>
 							))}
 						</tbody>
 					</table>
 				</div>
+				<p className="mt-2 text-xs text-muted-foreground">
+					{coverage.percent === null
+						? "No requests in this range."
+						: `Attribution source known for ${coverage.percent}% of rows (${formatNumber(coverage.measured)} of ${formatNumber(coverage.total)}). Rows recorded before the source was tracked are excluded from the inference share.`}
+				</p>
 			</CardContent>
 		</Card>
 	);

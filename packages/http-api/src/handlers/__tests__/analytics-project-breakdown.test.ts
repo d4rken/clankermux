@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
+import type { ProjectAttributionSource } from "@clankermux/types";
 import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics";
 import {
@@ -52,13 +53,15 @@ async function insertRequest(opts: {
 	totalTokens: number;
 	costUsd: number;
 	billingType: "plan" | "api" | null;
+	/** Omitted = a legacy row written before the column existed (SQL NULL). */
+	attributionSource?: ProjectAttributionSource;
 }): Promise<void> {
 	await dbOps.getAdapter().run(
 		`INSERT INTO requests (
 			id, timestamp, method, path, status_code, success,
 			response_time_ms, failover_attempts, model, total_tokens,
-			cost_usd, billing_type, project
-		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, 100, 0, 'claude-opus', ?, ?, ?, ?)`,
+			cost_usd, billing_type, project, project_attribution_source
+		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, 100, 0, 'claude-opus', ?, ?, ?, ?, ?)`,
 		[
 			opts.id,
 			opts.timestamp,
@@ -68,6 +71,7 @@ async function insertRequest(opts: {
 			opts.costUsd,
 			opts.billingType,
 			opts.project,
+			opts.attributionSource ?? null,
 		],
 	);
 }
@@ -159,6 +163,9 @@ describe("analytics projectBreakdown", () => {
 				apiCostUsd: 0,
 				totalCostUsd: 2.0,
 				totalTokens: 3000,
+				measuredRequests: 0,
+				inferredRequests: 0,
+				ambiguousRequests: 0,
 			},
 			{
 				project: "alpha",
@@ -168,6 +175,9 @@ describe("analytics projectBreakdown", () => {
 				apiCostUsd: 0.5,
 				totalCostUsd: 1.5,
 				totalTokens: 1500,
+				measuredRequests: 0,
+				inferredRequests: 0,
+				ambiguousRequests: 0,
 			},
 			{
 				project: null,
@@ -177,6 +187,9 @@ describe("analytics projectBreakdown", () => {
 				apiCostUsd: 0.2,
 				totalCostUsd: 0.2,
 				totalTokens: 300,
+				measuredRequests: 0,
+				inferredRequests: 0,
+				ambiguousRequests: 0,
 			},
 			{
 				project: "no-project",
@@ -186,6 +199,9 @@ describe("analytics projectBreakdown", () => {
 				apiCostUsd: 0.05,
 				totalCostUsd: 0.05,
 				totalTokens: 50,
+				measuredRequests: 0,
+				inferredRequests: 0,
+				ambiguousRequests: 0,
 			},
 		]);
 	});
@@ -238,6 +254,125 @@ describe("analytics projectBreakdown", () => {
 	it("returns an empty projectBreakdown array when there are no requests in range", async () => {
 		const data = await fetchAnalytics({});
 		expect(data.projectBreakdown).toEqual([]);
+	});
+
+	it("reports inference against the MEASURED denominator, not total requests", async () => {
+		const now = Date.now();
+		// delta: two anchored rows, one inherited row — 1/3 inferred — plus a
+		// legacy row with no recorded source, which must NOT dilute the ratio.
+		await insertRequest({
+			id: "d1",
+			timestamp: now - 1000,
+			project: "delta",
+			success: true,
+			totalTokens: 100,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "wd_primary",
+		});
+		await insertRequest({
+			id: "d2",
+			timestamp: now - 2000,
+			project: "delta",
+			success: true,
+			totalTokens: 100,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "header",
+		});
+		await insertRequest({
+			id: "d3",
+			timestamp: now - 3000,
+			project: "delta",
+			success: true,
+			totalTokens: 100,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "session_inherited",
+		});
+		await insertRequest({
+			id: "d4",
+			timestamp: now - 4000,
+			project: "delta",
+			success: true,
+			totalTokens: 100,
+			costUsd: 0,
+			billingType: "api",
+		});
+
+		const data = await fetchAnalytics({});
+		const delta = data.projectBreakdown.find(
+			(row: { project: string | null }) => row.project === "delta",
+		);
+		expect(delta.requests).toBe(4);
+		// Legacy (NULL-source) rows are excluded from the denominator.
+		expect(delta.measuredRequests).toBe(3);
+		expect(delta.inferredRequests).toBe(1);
+		expect(delta.ambiguousRequests).toBe(0);
+	});
+
+	it("splits the no-project bucket into none / ambiguous / legacy-unknown", async () => {
+		const now = Date.now();
+		await insertRequest({
+			id: "np1",
+			timestamp: now - 1000,
+			project: null,
+			success: true,
+			totalTokens: 10,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "none",
+		});
+		await insertRequest({
+			id: "np2",
+			timestamp: now - 2000,
+			project: null,
+			success: true,
+			totalTokens: 10,
+			costUsd: 0,
+			billingType: "api",
+			attributionSource: "session_ambiguous",
+		});
+		await insertRequest({
+			id: "np3",
+			timestamp: now - 3000,
+			project: null,
+			success: true,
+			totalTokens: 10,
+			costUsd: 0,
+			billingType: "api",
+		});
+
+		const data = await fetchAnalytics({});
+		const bucket = data.projectBreakdown.find(
+			(row: { project: string | null }) => row.project === null,
+		);
+		expect(bucket.requests).toBe(3);
+		expect(bucket.measuredRequests).toBe(2);
+		expect(bucket.ambiguousRequests).toBe(1);
+		expect(bucket.inferredRequests).toBe(0);
+		// The "none" count is what is measured but neither inferred nor
+		// ambiguous; legacy-unknown is requests - measured.
+		expect(
+			bucket.measuredRequests -
+				bucket.ambiguousRequests -
+				bucket.inferredRequests,
+		).toBe(1);
+		expect(bucket.requests - bucket.measuredRequests).toBe(1);
+	});
+
+	it("keeps the other UNION branches intact when the attribution columns are added", async () => {
+		await seedRequests(Date.now());
+
+		const data = await fetchAnalytics({});
+
+		// A malformed sub-select would fail the whole UNION at runtime, so every
+		// branch having rows is the real assertion here.
+		expect(data.modelDistribution.length).toBeGreaterThan(0);
+		expect(data.accountPerformance.length).toBeGreaterThan(0);
+		expect(data.costByModel.length).toBeGreaterThan(0);
+		expect(data.accountModelUsage.length).toBeGreaterThan(0);
+		expect(data.projectBreakdown.length).toBeGreaterThan(0);
 	});
 
 	it("counts NULL billing_type rows as token (api) cost in totals, timeSeries, accountPerformance, and projectBreakdown", async () => {
