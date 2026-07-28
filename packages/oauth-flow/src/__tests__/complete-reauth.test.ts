@@ -265,16 +265,31 @@ describe("OAuthFlow.completeReauth", () => {
 		const resumeSpy = mock(async () => {
 			throw new Error("db locked");
 		});
-		const flow = new OAuthFlow(makeDbOps(runSpy, resumeSpy), makeConfig());
-		const accountId = "dddddddd-0000-0000-0000-000000000004";
+		// `clearNeedsReauthPause` swallows this failure but reports it via
+		// `console.error`. Silence it here and assert on it instead: unsilenced,
+		// Bun prints the message and a full stack trace under this file's header
+		// on every suite run, which reads exactly like a real SQLite lock failure
+		// in this test — it has already been mistaken for one and filed as a
+		// nonexistent flake. Restored in `finally` so it can't leak to other files.
+		const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const flow = new OAuthFlow(makeDbOps(runSpy, resumeSpy), makeConfig());
+			const accountId = "dddddddd-0000-0000-0000-000000000004";
 
-		// Should resolve despite the resume failure (tokens were already updated).
-		await flow.completeReauth(
-			{ sessionId: "s5", code: "auth-code", name: "acct", id: accountId },
-			testFlowData,
-		);
+			// Should resolve despite the resume failure (tokens were already updated).
+			await flow.completeReauth(
+				{ sessionId: "s5", code: "auth-code", name: "acct", id: accountId },
+				testFlowData,
+			);
 
-		expect(runSpy).toHaveBeenCalled();
-		expect(resumeSpy).toHaveBeenCalledTimes(1);
+			expect(runSpy).toHaveBeenCalled();
+			expect(resumeSpy).toHaveBeenCalledTimes(1);
+			// Swallowed, but it must not be silent — the operator needs the reason.
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+			expect(String(errorSpy.mock.calls[0]?.[0])).toContain(accountId);
+			expect(errorSpy.mock.calls[0]?.[1]).toBeInstanceOf(Error);
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });
