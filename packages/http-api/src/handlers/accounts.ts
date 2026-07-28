@@ -15,9 +15,11 @@ import {
 	validatePriority,
 	validateString,
 } from "@clankermux/core";
-import type {
-	CodexResetCreditEventRow,
-	DatabaseOperations,
+import {
+	type CodexResetCreditEventRow,
+	type DatabaseOperations,
+	DuplicateAccountNameError,
+	insertAccountUnique,
 } from "@clankermux/database";
 import { ValidationError } from "@clankermux/errors";
 import {
@@ -1456,7 +1458,8 @@ export function createAccountAddHandler(
 				const accountId = crypto.randomUUID();
 				const now = Date.now();
 
-				await dbOps.getAdapter().run(
+				await insertAccountUnique(
+					dbOps.getAdapter(),
 					`INSERT INTO accounts (
 						id, name, provider, refresh_token, access_token,
 						created_at, request_count, total_requests, priority, custom_endpoint,
@@ -1472,6 +1475,7 @@ export function createAccountAddHandler(
 						priority,
 						customEndpoint || null,
 					],
+					name,
 				);
 
 				// Start usage polling immediately so the account's 5h/weekly bars
@@ -1489,10 +1493,11 @@ export function createAccountAddHandler(
 					accountId,
 				});
 			} catch (error) {
-				if (
-					error instanceof Error &&
-					error.message.includes("already exists")
-				) {
+				// The guarded insert refused a duplicate name. Matched by TYPE — the
+				// previous `message.includes("already exists")` string test was
+				// vestigial here (nothing on this path threw it) and would silently
+				// mis-handle any unrelated message that happened to contain the phrase.
+				if (error instanceof DuplicateAccountNameError) {
 					return errorResponse(BadRequest(error.message));
 				}
 				return errorResponse(InternalServerError((error as Error).message));
@@ -1901,7 +1906,8 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -1921,6 +1927,7 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint || null,
 					modelMappingsJson,
 				],
+				name,
 			);
 
 			log.info(
@@ -2065,7 +2072,8 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 			const now = Date.now();
 
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2085,6 +2093,7 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint,
 					finalModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2194,7 +2203,8 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint
@@ -2213,6 +2223,7 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 					priority,
 					null, // No custom endpoint for Minimax
 				],
+				name,
 			);
 
 			log.info(
@@ -2358,7 +2369,8 @@ export function createAnthropicCompatibleAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2378,6 +2390,7 @@ export function createAnthropicCompatibleAccountAddHandler(
 					customEndpoint || null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2508,7 +2521,8 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2528,6 +2542,7 @@ export function createOllamaAccountAddHandler(dbOps: DatabaseOperations) {
 					customEndpoint || null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -2644,7 +2659,8 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -2664,6 +2680,7 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 					"https://ollama.com",
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3654,7 +3671,8 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3674,6 +3692,7 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 					null,
 					validatedModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3802,7 +3821,8 @@ export function createAlibabaCodingPlanAccountAddHandler(
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3822,6 +3842,7 @@ export function createAlibabaCodingPlanAccountAddHandler(
 					null,
 					validatedModelMappings,
 				],
+				name,
 			);
 
 			log.info(
@@ -3955,7 +3976,8 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const db = dbOps.getAdapter();
-			await db.run(
+			await insertAccountUnique(
+				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
 					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
@@ -3975,6 +3997,7 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 					null,
 					modelMappings,
 				],
+				name,
 			);
 
 			log.info(
