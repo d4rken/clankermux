@@ -598,6 +598,26 @@ describe("PayloadWriteClient — fenced no-progress watchdog", () => {
 });
 
 describe("PayloadWriteClient — lifecycle", () => {
+	test("a spawn failure at the first publish keeps the entry and retries", async () => {
+		const h = makeHarness();
+		h.fleet.spawnThrowsOnGeneration = 1;
+		expect(await h.publish()).toBe(true);
+		expect(h.fleet.workers).toHaveLength(0);
+		expect(h.client.getStats().spawnFailures).toBe(1);
+		// The entry is retained, not dropped, and admission stays open.
+		expect(h.client.getStats().unackedEntries).toBe(1);
+		expect(h.client.acceptsWork()).toBe(true);
+
+		// Backoff respawn succeeds and delivers the buffered entry.
+		h.fleet.spawnThrowsOnGeneration = null;
+		h.clock.advance(300);
+		await h.tick();
+		h.fleet.last.ready();
+		await h.tick();
+		expect(h.fleet.last.writes.map((w) => w.id)).toEqual(["req-1"]);
+		await h.client.dispose(0);
+	});
+
 	test("dispose before the first publish spawns nothing", async () => {
 		const h = makeHarness();
 		await h.client.dispose(1000);

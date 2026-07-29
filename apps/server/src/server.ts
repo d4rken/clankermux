@@ -728,9 +728,11 @@ export default async function startServer(options?: {
 
 	// Initialize async DB writer. It owns the off-thread payload writer: the
 	// factory is only invoked on the first payload publication, so a run that
-	// never stores payloads never spawns a worker. Disposal order matters — the
-	// writer is registered BEFORE dbOps is closed elsewhere, so its metadata
-	// drain and the worker's bounded flush both finish while the DB is open.
+	// never stores payloads never spawns a worker. Its dispose() drains the
+	// metadata queue, gives the worker a bounded flush + close-ack window and
+	// terminates every generation — and it runs inside `shutdown()` (reverse
+	// registration order), while the DB handle is still open: the server never
+	// closes dbOps before exiting.
 	const asyncWriter = new AsyncDbWriter({
 		createPayloadWriter: dbOps.createPayloadWriterFactory({
 			getPayloadRetentionMs: () => config.getPayloadRetentionMs(),
