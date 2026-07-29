@@ -53,6 +53,8 @@ export interface ConfigData {
 	/** @deprecated legacy key — converted to payload_retention_hours (×24) at load; never read after normalization. */
 	data_retention_days?: number;
 	payload_retention_hours?: number;
+	/** Byte budget for stored payloads, in MEGABYTES. 0 disables the budget. */
+	payload_max_mb?: number;
 	request_retention_days?: number;
 	usage_snapshot_retention_days?: number;
 	memory_snapshot_retention_days?: number;
@@ -323,6 +325,41 @@ export class Config extends EventEmitter {
 		this.set("payload_retention_hours", clamped);
 	}
 
+	/**
+	 * Byte budget for stored payloads, in MEGABYTES; 0 (the default) disables it.
+	 * The time window bounds payload AGE, not bytes — a busy window can still
+	 * produce many GiB — so this is the second, independent ceiling: the cleanup
+	 * pass evicts oldest-first until the retained payload content fits.
+	 *
+	 * Deliberately opt-in: shipping a non-zero default would start evicting
+	 * payloads on every existing deployment at the next restart.
+	 */
+	getPayloadMaxMb(): number {
+		const fromEnv = process.env.PAYLOAD_MAX_MB;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 0, 1_048_576);
+		}
+		const fromFile = this.data.payload_max_mb;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 0, 1_048_576);
+		return 0; // disabled — the byte budget is opt-in
+	}
+
+	/**
+	 * The payload byte budget in BYTES, for cleanup call sites. Mirrors
+	 * getPayloadRetentionMs(): the unit conversion lives here exactly once so no
+	 * caller multiplies by 1024s itself (an off-by-1024 budget would evict the
+	 * table down to a thousandth of the intended size).
+	 */
+	getPayloadMaxBytes(): number {
+		return this.getPayloadMaxMb() * 1024 * 1024;
+	}
+
+	setPayloadMaxMb(mb: number): void {
+		const clamped = this.clamp(mb, 0, 1_048_576);
+		this.set("payload_max_mb", clamped);
+	}
+
 	getRequestRetentionDays(): number {
 		const fromEnv = process.env.REQUEST_RETENTION_DAYS;
 		if (fromEnv) {
@@ -498,6 +535,7 @@ export class Config extends EventEmitter {
 			...this.data,
 			lb_strategy: this.getStrategy(),
 			payload_retention_hours: this.getPayloadRetentionHours(),
+			payload_max_mb: this.getPayloadMaxMb(),
 			request_retention_days: this.getRequestRetentionDays(),
 			usage_snapshot_retention_days: this.getUsageSnapshotRetentionDays(),
 			memory_snapshot_retention_days: this.getMemorySnapshotRetentionDays(),
