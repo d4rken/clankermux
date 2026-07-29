@@ -239,20 +239,36 @@ interface DbOpsLike {
 	saveRequest(data: SaveRequestData): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
 	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
-	saveRequestPayloadRaw(id: string, json: string): Promise<void>;
+	/**
+	 * Encrypt-only: produces the STORED FORM of the payload envelope. The insert
+	 * itself happens off-thread in the payload-write worker, so there is no
+	 * main-thread payload write for the recorder to call.
+	 */
+	encryptPayloadForStorage(json: string): Promise<string>;
 	updateRequestUsage(requestId: string, usage: unknown): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
 	updateAccountUsage(accountId: string): Promise<void>;
+}
+
+/** Reserved payload capacity; release() is idempotent. */
+interface PayloadReservationLike {
+	readonly reservedBytes: number;
+	release(): void;
 }
 
 interface AsyncWriterLike {
 	enqueue(job: () => void | Promise<void>): boolean;
 	canAcceptPayload(bytes: number): boolean;
 	recordPayloadDrop(bytes: number): void;
+	reservePayload(estimatedBytes: number): PayloadReservationLike | null;
 	enqueuePayload(
-		id: string,
-		bytes: number,
-		run: () => void | Promise<void>,
+		reservation: PayloadReservationLike,
+		entry: {
+			requestId: string;
+			ciphertext: string;
+			timestamp: number;
+			payloadBytes: number;
+		},
 	): boolean;
 }
 
@@ -777,7 +793,17 @@ export class RequestRecorder {
 		}
 	}
 
-	/** Explicit FK order + two-stage payload check. */
+	/**
+	 * Explicit FK order + reserved-then-published payload.
+	 *
+	 * Ordering matters twice over. The payload row's FK points at requests(id),
+	 * and the payload is written by a DIFFERENT SQLite connection (the
+	 * off-thread writer), so the two writes are genuinely concurrent — the
+	 * payload may only be published once `saveRequest` has SPECIFICALLY
+	 * succeeded, which is tracked apart from the optional routing/tool-call
+	 * writes. And capacity is reserved BEFORE the metadata job is enqueued, so
+	 * we never serialize + encrypt an envelope only to find there is no room.
+	 */
 	private persistOrdered(
 		record: InternalRecord,
 		success: boolean,
@@ -788,23 +814,41 @@ export class RequestRecorder {
 		const meta = record.meta;
 		const storePayloads = this.getStorePayloads();
 
-		// Two-stage payload check: estimate BEFORE serializing.
-		let willStore = false;
+		// Stage 1: estimate BEFORE serializing, and reserve before enqueuing.
+		let reservation: PayloadReservationLike | null = null;
 		let estimatedBytes = 0;
 		if (storePayloads && !record.bodyDiscarded) {
 			estimatedBytes = this.estimatePayloadBytes(record);
-			if (this.asyncWriter.canAcceptPayload(estimatedBytes)) {
-				willStore = true;
-			} else {
+			reservation = this.asyncWriter.reservePayload(estimatedBytes);
+			if (!reservation) this.asyncWriter.recordPayloadDrop(estimatedBytes);
+		}
+
+		// Stage 2: serialize while the bodies are still held (the record frees
+		// them right after this method returns).
+		let json: string | null = null;
+		if (reservation) {
+			try {
+				json = this.buildEnvelope(record, success);
+			} catch (error) {
+				log.error(
+					`Failed to build payload envelope for ${meta.requestId}:`,
+					error,
+				);
+				reservation.release();
+				reservation = null;
 				this.asyncWriter.recordPayloadDrop(estimatedBytes);
 			}
 		}
-		const json = willStore ? this.buildEnvelope(record, success) : null;
 
 		const routing = meta.routing;
 		const accountUsed = meta.accountId;
+		const payloadJson = json;
+		const payloadReservation = reservation;
 
 		const accepted = this.asyncWriter.enqueue(async () => {
+			// Tracked separately from routing/tool-call outcomes: only a committed
+			// request row makes the payload's FK satisfiable.
+			let requestRowSaved = false;
 			try {
 				await this.dbOps.saveRequest({
 					id: meta.requestId,
@@ -827,29 +871,73 @@ export class RequestRecorder {
 					contextComposition: meta.contextComposition ?? null,
 					requestedModel: meta.requestedModel ?? null,
 				});
-				if (routing) {
-					await this.dbOps.saveRequestRouting({
-						requestId: meta.requestId,
-						strategy: routing.strategy,
-						decision: routing.decision,
-						affinityScope: routing.affinityScope,
-						affinityKeyHash: routing.affinityKeyHash,
-						selectedAccountId: routing.selectedAccountId,
-						previousAccountId: routing.previousAccountId,
-						candidatesCount: routing.candidatesCount,
-						failoverAttempts: meta.failoverAttempts,
-						failoverReason: routing.failoverReason,
-						createdAt: meta.timestamp,
-					});
-				}
-				if (meta.toolCallStats?.length) {
-					await this.dbOps.saveRequestToolCalls(
-						meta.requestId,
-						meta.toolCallStats,
-					);
-				}
+				requestRowSaved = true;
 			} catch (error) {
 				log.error(`Failed to save request for ${meta.requestId}:`, error);
+			}
+
+			if (requestRowSaved) {
+				try {
+					if (routing) {
+						await this.dbOps.saveRequestRouting({
+							requestId: meta.requestId,
+							strategy: routing.strategy,
+							decision: routing.decision,
+							affinityScope: routing.affinityScope,
+							affinityKeyHash: routing.affinityKeyHash,
+							selectedAccountId: routing.selectedAccountId,
+							previousAccountId: routing.previousAccountId,
+							candidatesCount: routing.candidatesCount,
+							failoverAttempts: meta.failoverAttempts,
+							failoverReason: routing.failoverReason,
+							createdAt: meta.timestamp,
+						});
+					}
+					if (meta.toolCallStats?.length) {
+						await this.dbOps.saveRequestToolCalls(
+							meta.requestId,
+							meta.toolCallStats,
+						);
+					}
+				} catch (error) {
+					log.error(
+						`Failed to save request routing/tool calls for ${meta.requestId}:`,
+						error,
+					);
+				}
+			}
+
+			if (!payloadReservation || !payloadJson) return;
+
+			if (!requestRowSaved) {
+				// The request row was NOT written — publishing the payload now would
+				// hand the writer a row whose FK parent does not exist.
+				payloadReservation.release();
+				this.asyncWriter.recordPayloadDrop(estimatedBytes);
+				return;
+			}
+
+			let stored: string;
+			try {
+				stored = await this.dbOps.encryptPayloadForStorage(payloadJson);
+			} catch (error) {
+				log.error(`Failed to encrypt payload for ${meta.requestId}:`, error);
+				payloadReservation.release();
+				this.asyncWriter.recordPayloadDrop(estimatedBytes);
+				return;
+			}
+
+			const published = this.asyncWriter.enqueuePayload(payloadReservation, {
+				requestId: meta.requestId,
+				ciphertext: stored,
+				timestamp: this.now(),
+				payloadBytes: Buffer.byteLength(payloadJson),
+			});
+			if (!published) {
+				// enqueuePayload already released the reservation and counted the drop.
+				log.warn(
+					`Payload write rejected post-serialization for ${meta.requestId}`,
+				);
 			}
 		});
 
@@ -861,28 +949,9 @@ export class RequestRecorder {
 			log.warn(
 				`Metadata enqueue dropped for ${meta.requestId} — request row not persisted (total dropped: ${this.metadataDropped})`,
 			);
-			return; // do not enqueue a payload for a row that was not written
-		}
-
-		// 3. payload AFTER the row job is enqueued — droppable without losing the
-		//    request row. Re-check admission before enqueuePayload.
-		if (json && this.asyncWriter.canAcceptPayload(estimatedBytes)) {
-			const payloadBytes = Buffer.byteLength(json);
-			const acceptedPayload = this.asyncWriter.enqueuePayload(
-				meta.requestId,
-				payloadBytes,
-				async () => {
-					try {
-						await this.dbOps.saveRequestPayloadRaw(meta.requestId, json);
-					} catch (error) {
-						log.error(`Failed to save payload for ${meta.requestId}:`, error);
-					}
-				},
-			);
-			if (!acceptedPayload) {
-				log.warn(
-					`Payload write rejected post-serialization for ${meta.requestId} (bytes=${payloadBytes})`,
-				);
+			if (payloadReservation) {
+				payloadReservation.release();
+				this.asyncWriter.recordPayloadDrop(estimatedBytes);
 			}
 		}
 	}

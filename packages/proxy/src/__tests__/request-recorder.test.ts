@@ -50,6 +50,12 @@ class FakeDbOps {
 	// Shared ordered log: pushed synchronously at invocation (before any await
 	// suspends the enqueued job) so request→routing→payload ordering is exact.
 	order: EnqueuedKind[];
+	/** Make saveRequest reject — the request row does NOT commit. */
+	failSaveRequest = false;
+	/** Make the optional routing write reject; must not block the payload. */
+	failRouting = false;
+	/** Make encrypt-only reject — no ciphertext, so nothing may be published. */
+	failEncrypt = false;
 
 	constructor(order: EnqueuedKind[]) {
 		this.order = order;
@@ -77,6 +83,7 @@ class FakeDbOps {
 		projectAttributionSource: string | null;
 	}): Promise<void> {
 		this.order.push("request");
+		if (this.failSaveRequest) throw new Error("saveRequest failed");
 		this.saveRequestCalls.push({
 			id: data.id,
 			method: data.method,
@@ -101,6 +108,7 @@ class FakeDbOps {
 
 	async saveRequestRouting(data: Record<string, unknown>): Promise<void> {
 		this.order.push("routing");
+		if (this.failRouting) throw new Error("saveRequestRouting failed");
 		this.saveRoutingCalls.push(data);
 	}
 
@@ -112,8 +120,17 @@ class FakeDbOps {
 		this.saveToolCallsCalls.push({ requestId, stats });
 	}
 
-	async saveRequestPayloadRaw(id: string, json: string): Promise<void> {
-		this.savePayloadCalls.push({ id, json });
+	encryptCalls: string[] = [];
+
+	/**
+	 * Encrypt-only stand-in. Returns the envelope unchanged so payload
+	 * assertions can still read the JSON, and records that it ran — the recorder
+	 * must only reach this once `saveRequest` has succeeded.
+	 */
+	async encryptPayloadForStorage(json: string): Promise<string> {
+		this.encryptCalls.push(json);
+		if (this.failEncrypt) throw new Error("encrypt failed");
+		return json;
 	}
 
 	async updateRequestUsage(requestId: string, usage: unknown): Promise<void> {
@@ -136,14 +153,44 @@ class FakeDbOps {
  * inspect call counts can drain implicitly; order-sensitive ones drain
  * synchronously via `drain()`.
  */
+/** Reservation token mirroring AsyncDbWriter's: release() is idempotent. */
+class FakeReservation {
+	settled = false;
+	constructor(
+		readonly reservedBytes: number,
+		private readonly onSettle: () => void,
+	) {}
+	consume(): boolean {
+		if (this.settled) return false;
+		this.settled = true;
+		this.onSettle();
+		return true;
+	}
+	release(): void {
+		this.consume();
+	}
+}
+
 class FakeAsyncWriter {
-	// Ordered log; populated by FakeDbOps + the payload run at execution time.
+	// Ordered log; populated by FakeDbOps + the payload publish at execution time.
 	order: EnqueuedKind[];
 	acceptMetadata = true;
 	acceptPayload = true;
-	canAcceptPayloadCalls: number[] = [];
+	/** Publication (not reservation) rejects — models a post-serialization reject. */
+	rejectPublish = false;
+	reserveCalls: number[] = [];
 	recordedDrops: number[] = [];
 	payloadEnqueues: Array<{ id: string; bytes: number }> = [];
+	/** Reservations handed out, so tests can assert none leaked. */
+	reservations: FakeReservation[] = [];
+	/** Reservations still outstanding (never released, never published). */
+	outstandingReservations = 0;
+	published: Array<{
+		id: string;
+		ciphertext: string;
+		timestamp: number;
+		payloadBytes: number;
+	}> = [];
 
 	private queue: Array<() => void | Promise<void>> = [];
 	private draining = false;
@@ -160,8 +207,7 @@ class FakeAsyncWriter {
 		return true;
 	}
 
-	canAcceptPayload(bytes: number): boolean {
-		this.canAcceptPayloadCalls.push(bytes);
+	canAcceptPayload(_bytes: number): boolean {
 		return this.acceptPayload;
 	}
 
@@ -169,19 +215,49 @@ class FakeAsyncWriter {
 		this.recordedDrops.push(bytes);
 	}
 
-	enqueuePayload(
-		id: string,
-		bytes: number,
-		run: () => void | Promise<void>,
-	): boolean {
-		if (!this.acceptPayload) return false;
-		this.payloadEnqueues.push({ id, bytes });
-		this.queue.push(async () => {
-			this.order.push("payload");
-			await run();
+	reservePayload(estimatedBytes: number): FakeReservation | null {
+		this.reserveCalls.push(estimatedBytes);
+		if (!this.acceptPayload) return null;
+		this.outstandingReservations++;
+		const reservation = new FakeReservation(estimatedBytes, () => {
+			this.outstandingReservations--;
 		});
+		this.reservations.push(reservation);
+		return reservation;
+	}
+
+	enqueuePayload(
+		reservation: FakeReservation,
+		entry: {
+			requestId: string;
+			ciphertext: string;
+			timestamp: number;
+			payloadBytes: number;
+		},
+	): boolean {
+		if (!reservation.consume()) return false;
+		if (this.rejectPublish) {
+			this.recordedDrops.push(entry.payloadBytes);
+			return false;
+		}
+		this.order.push("payload");
+		this.payloadEnqueues.push({
+			id: entry.requestId,
+			bytes: entry.payloadBytes,
+		});
+		this.published.push({
+			id: entry.requestId,
+			ciphertext: entry.ciphertext,
+			timestamp: entry.timestamp,
+			payloadBytes: entry.payloadBytes,
+		});
+		// Mirror the real writer's savePayload bookkeeping for the assertions.
+		this.savePayloadSink.push({ id: entry.requestId, json: entry.ciphertext });
 		return true;
 	}
+
+	/** Set by the harness to the FakeDbOps array the assertions read. */
+	savePayloadSink: Array<{ id: string; json: string }> = [];
 
 	/**
 	 * Drain the queue in strict FIFO order, fully awaiting each job. Jobs only
@@ -322,6 +398,10 @@ function makeHarness(
 	const order: EnqueuedKind[] = [];
 	const dbOps = new FakeDbOps(order);
 	const writer = new FakeAsyncWriter(order);
+	// Payload rows are no longer written through dbOps — the writer publishes
+	// them to the off-thread worker — so point the writer's sink at the same
+	// array the payload assertions read.
+	writer.savePayloadSink = dbOps.savePayloadCalls;
 	const emitted: RequestResponse[] = [];
 	const timers = new FakeTimers();
 	const storePayloads = { value: true };
@@ -1699,5 +1779,131 @@ describe("RequestRecorder — dispose", () => {
 		h.recorder.finishTransport("req-1", "success");
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(0);
+	});
+});
+
+describe("RequestRecorder — payload ordering and reservation", () => {
+	it("publishes the payload only after the request row committed", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		// Same job, strict order: the request row is written first, the payload
+		// is published afterwards — never the other way round.
+		expect(h.writer.order).toEqual(["request", "payload"]);
+		expect(h.writer.published).toHaveLength(1);
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("reserves capacity BEFORE the metadata job is enqueued", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		// Nothing has drained yet, but the reservation is already taken.
+		expect(h.writer.reserveCalls).toHaveLength(1);
+		expect(h.writer.outstandingReservations).toBe(1);
+		await h.flush();
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("publishes nothing and releases the reservation when saveRequest fails", async () => {
+		const h = makeHarness();
+		h.dbOps.failSaveRequest = true;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(0);
+		expect(h.writer.published).toHaveLength(0);
+		expect(h.dbOps.encryptCalls).toHaveLength(0);
+		// Reservation released exactly once, and the drop is counted.
+		expect(h.writer.outstandingReservations).toBe(0);
+		expect(h.writer.recordedDrops).toHaveLength(1);
+	});
+
+	it("still publishes when only the optional routing write fails", async () => {
+		const h = makeHarness();
+		h.dbOps.failRouting = true;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.writer.published).toHaveLength(1);
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("releases the reservation when encryption fails", async () => {
+		const h = makeHarness();
+		h.dbOps.failEncrypt = true;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.writer.published).toHaveLength(0);
+		expect(h.writer.outstandingReservations).toBe(0);
+		expect(h.writer.recordedDrops).toHaveLength(1);
+	});
+
+	it("releases the reservation when the metadata enqueue is rejected", async () => {
+		const h = makeHarness();
+		h.writer.acceptMetadata = false;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.droppedMetadata.count).toBe(1);
+		expect(h.writer.published).toHaveLength(0);
+		expect(h.writer.outstandingReservations).toBe(0);
+		expect(h.writer.recordedDrops).toHaveLength(1);
+	});
+
+	it("consumes the reservation exactly once when publication is rejected", async () => {
+		const h = makeHarness();
+		h.writer.rejectPublish = true;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.writer.published).toHaveLength(0);
+		expect(h.writer.outstandingReservations).toBe(0);
+		// The publish path counted the drop; the recorder must not double-count.
+		expect(h.writer.recordedDrops).toHaveLength(1);
+		// Releasing an already-consumed reservation is a no-op.
+		const reservation = h.writer.reservations[0];
+		reservation.release();
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("under a metadata backlog no payload can precede its request row", async () => {
+		const h = makeHarness();
+		for (let i = 0; i < 5; i++) {
+			const id = `req-${i}`;
+			h.recorder.begin(makeMeta({ requestId: id }));
+			h.recorder.attachUsageSummary(id, makeSummary({ requestId: id }));
+			h.recorder.finishTransport(id, "success");
+		}
+		await h.flush();
+
+		// Every "payload" entry is preceded by its own "request" entry: the pair
+		// lives in ONE queued job, so a backlog cannot reorder them.
+		const order = h.writer.order;
+		expect(order.filter((k) => k === "payload")).toHaveLength(5);
+		for (let i = 0; i < order.length; i++) {
+			if (order[i] !== "payload") continue;
+			expect(order.slice(0, i).filter((k) => k === "request").length).toBe(
+				order.slice(0, i).filter((k) => k === "payload").length + 1,
+			);
+		}
 	});
 });

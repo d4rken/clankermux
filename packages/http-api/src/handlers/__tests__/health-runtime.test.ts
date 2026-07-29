@@ -168,12 +168,24 @@ describe("AsyncDbWriter.getHealth", () => {
 			queuedJobs: 0,
 			metadataQueuedJobs: 0,
 			payloadQueuedJobs: 0,
+			payloadInFlightJobs: 0,
 			payloadBytesPending: 0,
+			payloadReservedBytes: 0,
+			payloadInFlightBytes: 0,
+			payloadInFlightOriginalBytes: 0,
 			oldestMetadataAgeMs: 0,
 			oldestPayloadAgeMs: 0,
 			metadataDropped: 0,
 			payloadDropped: 0,
 			payloadDroppedBytes: 0,
+			payloadCommitted: 0,
+			payloadExpired: 0,
+			payloadAbandoned: 0,
+			// No payload has been published, so no worker exists yet — an absent
+			// writer reports healthy rather than fabricating an unhealthy state.
+			payloadWriterHealthy: true,
+			payloadWriterSuspended: false,
+			payloadWriterFatal: null,
 		});
 
 		await writer.dispose();

@@ -726,8 +726,18 @@ export default async function startServer(options?: {
 	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
 	container.registerInstance(SERVICE_KEYS.Database, dbOps);
 
-	// Initialize async DB writer
-	const asyncWriter = new AsyncDbWriter();
+	// Initialize async DB writer. It owns the off-thread payload writer: the
+	// factory is only invoked on the first payload publication, so a run that
+	// never stores payloads never spawns a worker. Its dispose() drains the
+	// metadata queue, gives the worker a bounded flush + close-ack window and
+	// terminates every generation — and it runs inside `shutdown()` (reverse
+	// registration order), while the DB handle is still open: the server never
+	// closes dbOps before exiting.
+	const asyncWriter = new AsyncDbWriter({
+		createPayloadWriter: dbOps.createPayloadWriterFactory({
+			getPayloadRetentionMs: () => config.getPayloadRetentionMs(),
+		}),
+	});
 	container.registerInstance(SERVICE_KEYS.AsyncWriter, asyncWriter);
 	registerDisposable(asyncWriter);
 
@@ -736,7 +746,8 @@ export default async function startServer(options?: {
 	// side-effects) — extracted from the post-processor worker to stop
 	// transferring large request bodies into the long-lived worker (Bun #5709).
 	// initPayloadEncryption() ran above (before any payload write); the recorder
-	// writes payloads via dbOps.saveRequestPayloadRaw on this thread.
+	// encrypts on this thread and hands the ciphertext to the payload worker,
+	// which performs the INSERT off-thread.
 	const requestRecorder = new RequestRecorder({
 		dbOps,
 		asyncWriter,
