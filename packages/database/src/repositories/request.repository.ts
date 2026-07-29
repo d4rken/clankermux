@@ -326,25 +326,14 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	// Payload management
-	async savePayload(id: string, data: unknown): Promise<void> {
-		const json = JSON.stringify(data);
-		const stored = await encryptPayload(json);
-		const ts = Date.now();
-		await this.run(
-			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)
-			 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, timestamp = EXCLUDED.timestamp`,
-			[id, stored, ts],
-		);
-	}
-
-	async savePayloadRaw(id: string, json: string): Promise<void> {
-		const stored = await encryptPayload(json);
-		const ts = Date.now();
-		await this.run(
-			`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)
-			 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, timestamp = EXCLUDED.timestamp`,
-			[id, stored, ts],
-		);
+	//
+	// This repository has NO request_payloads write path: every payload row is
+	// inserted by the off-thread payload-write worker (see
+	// payload-write-worker.ts), which owns its own SQLite connection. The main
+	// thread only produces the STORED FORM of the payload here — encryption is
+	// Web Crypto and therefore async, and the worker needs no key.
+	async encryptPayloadForStorage(json: string): Promise<string> {
+		return encryptPayload(json);
 	}
 
 	async getPayload(id: string): Promise<unknown | null> {

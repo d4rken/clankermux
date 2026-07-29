@@ -36,6 +36,10 @@ import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-va
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
 import { runMigrations } from "./migrations";
 import { resolveDbPath } from "./paths";
+import {
+	PayloadWriteClient,
+	type PayloadWriterFactory,
+} from "./payload-write-client";
 import { AccountRepository } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
@@ -539,6 +543,29 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 */
 	getResolvedDbPath(): string {
 		return this.resolvedDbPath;
+	}
+
+	/**
+	 * Build the factory that AsyncDbWriter uses to create its off-thread payload
+	 * writer. DatabaseOperations owns the two things the client cannot resolve
+	 * itself — the resolved DB path and the worker busy timeout — while the
+	 * retention-window accessor is injected by the caller (it lives on the
+	 * runtime Config, not on this class).
+	 *
+	 * The factory is lazy in both directions: calling this creates nothing, and
+	 * AsyncDbWriter only invokes it on the first payload publication, so an
+	 * instance that never stores payloads never spawns a worker.
+	 */
+	createPayloadWriterFactory(deps: {
+		getPayloadRetentionMs: () => number;
+	}): PayloadWriterFactory {
+		return (hooks) =>
+			new PayloadWriteClient({
+				dbPath: this.resolvedDbPath,
+				busyTimeoutMs: this.dbConfig.busyTimeoutMs,
+				getRetentionMs: deps.getPayloadRetentionMs,
+				onSettled: hooks.onSettled,
+			});
 	}
 
 	/**
@@ -1265,20 +1292,14 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
-	async saveRequestPayload(id: string, data: unknown): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.savePayload(id, data),
-			this.retryConfig,
-			"saveRequestPayload",
-		);
-	}
-
-	async saveRequestPayloadRaw(id: string, json: string): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.savePayloadRaw(id, json),
-			this.retryConfig,
-			"saveRequestPayloadRaw",
-		);
+	/**
+	 * Produce the stored form of a payload envelope (ciphertext when
+	 * PAYLOAD_ENCRYPTION_KEY is set, plaintext otherwise). The INSERT itself
+	 * happens off-thread in the payload-write worker — there is deliberately no
+	 * main-thread request_payloads write path any more.
+	 */
+	async encryptPayloadForStorage(json: string): Promise<string> {
+		return this.requests.encryptPayloadForStorage(json);
 	}
 
 	async getRequestPayload(id: string): Promise<unknown | null> {
