@@ -6,6 +6,7 @@ function makeConfig() {
 	let cacheWarmingMinTokens = 100_000;
 	let cacheWarmingRiskFactor = 0.4;
 	let cacheKeepaliveSnapshotDays = 30;
+	let payloadMaxMb = 0;
 	return {
 		getAllSettings: () => ({
 			lb_strategy: "session",
@@ -29,6 +30,10 @@ function makeConfig() {
 			cacheKeepaliveSnapshotDays = v;
 		}),
 		getStorePayloads: () => true,
+		getPayloadMaxMb: () => payloadMaxMb,
+		setPayloadMaxMb: mock((v: number) => {
+			payloadMaxMb = v;
+		}),
 		setPayloadRetentionHours: mock(() => {}),
 		setRequestRetentionDays: mock(() => {}),
 		setUsageSnapshotRetentionDays: mock(() => {}),
@@ -437,6 +442,123 @@ describe("createConfigHandlers", () => {
 			),
 		).rejects.toThrow();
 		expect(config.setPayloadRetentionHours).not.toHaveBeenCalled();
+	});
+
+	it("includes payloadMaxMb in the retention payload", async () => {
+		const handlers = createConfigHandlers(makeConfig(), {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = handlers.getRetention();
+		const body = (await response.json()) as Record<string, unknown>;
+
+		// 0 = the byte budget is off; the field must still be present so the
+		// dashboard can render the control.
+		expect(body.payloadMaxMb).toBe(0);
+	});
+
+	it("persists payloadMaxMb from the retention setter", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setRetention(
+			new Request("http://localhost/api/config/retention", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ payloadMaxMb: 4096 }),
+			}),
+		);
+
+		expect(response.status).toBe(204);
+		expect(config.setPayloadMaxMb).toHaveBeenCalledWith(4096);
+		// Round-trip: the GET reflects what was just set.
+		const getBody = (await handlers.getRetention().json()) as Record<
+			string,
+			unknown
+		>;
+		expect(getBody.payloadMaxMb).toBe(4096);
+	});
+
+	it("accepts payloadMaxMb = 0 (disables the budget)", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setRetention(
+			new Request("http://localhost/api/config/retention", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ payloadMaxMb: 0 }),
+			}),
+		);
+
+		expect(response.status).toBe(204);
+		expect(config.setPayloadMaxMb).toHaveBeenCalledWith(0);
+	});
+
+	it("rejects a negative payloadMaxMb", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		// validateNumber THROWS a ValidationError (400) rather than returning;
+		// only the router turns that into an HTTP response.
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadMaxMb: -1 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadMaxMb).not.toHaveBeenCalled();
+	});
+
+	it("rejects an out-of-range payloadMaxMb", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadMaxMb: 1_048_577 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadMaxMb).not.toHaveBeenCalled();
+	});
+
+	it("rejects a fractional payloadMaxMb", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadMaxMb: 1.5 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadMaxMb).not.toHaveBeenCalled();
 	});
 
 	it("persists cacheKeepaliveSnapshotDays from the retention setter", async () => {
