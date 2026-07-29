@@ -287,7 +287,13 @@ interface GenerationState {
 	transport: PayloadWriteTransport;
 	status: GenerationStatus;
 	publishedBytes: number;
-	onReady: ((ok: boolean, detail?: string) => void) | null;
+	onReady:
+		| ((
+				ok: boolean,
+				detail?: string,
+				errorClass?: PayloadWriteErrorClass,
+		  ) => void)
+		| null;
 	onClosed: (() => void) | null;
 	readyTimer: TimerHandle | null;
 	closeTimer: TimerHandle | null;
@@ -591,7 +597,11 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			this.generations.set(id, generation);
 
 			let finished = false;
-			const finish = (ok: boolean, detail?: string): void => {
+			const finish = (
+				ok: boolean,
+				detail?: string,
+				errorClass?: PayloadWriteErrorClass,
+			): void => {
 				if (finished) return;
 				finished = true;
 				if (generation.readyTimer !== null) {
@@ -605,7 +615,15 @@ export class PayloadWriteClient implements PayloadWriterLike {
 					return;
 				}
 				this.killGeneration(generation, detail ?? "spawn failed");
-				this.onSpawnFailure(detail ?? "spawn failed");
+				if (errorClass === "writer-fatal") {
+					// The database itself is unusable (cannot open, read-only, full,
+					// corrupt). Every generation would fail identically, so latch
+					// instead of respawning: admission closes, health goes unhealthy
+					// and pending entries are retained.
+					this.onWriterFatal(detail ?? "payload writer init failed");
+				} else {
+					this.onSpawnFailure(detail ?? "spawn failed");
+				}
 				resolve(null);
 			};
 
@@ -709,7 +727,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				}
 				return;
 			case "error":
-				generation.onReady?.(false, message.detail);
+				generation.onReady?.(false, message.detail, message.errorClass);
 				generation.onReady = null;
 				return;
 			case "closed":

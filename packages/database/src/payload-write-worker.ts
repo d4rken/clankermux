@@ -90,7 +90,17 @@ export type PayloadWriteResponse =
 	| { type: "ready"; generation: number }
 	| { type: "ack"; generation: number; results: PayloadWriteAck[] }
 	| { type: "closed"; generation: number }
-	| { type: "error"; generation: number; detail: string };
+	| {
+			type: "error";
+			generation: number;
+			detail: string;
+			/**
+			 * How the init failure is attributed. `writer-fatal` (cannot open,
+			 * read-only, full, corrupt, not a database) means respawning cannot
+			 * help — the client latches instead of retrying forever.
+			 */
+			errorClass: PayloadWriteErrorClass;
+	  };
 
 // ---------------------------------------------------------------------------
 // Connection + batching constants
@@ -514,10 +524,16 @@ self.onmessage = (event: MessageEvent<PayloadWriteRequest>) => {
 			});
 			post({ type: "ready", generation: message.generation });
 		} catch (err) {
+			// Classify exactly as a COMMIT failure is classified: only lock
+			// contention is worth a respawn. A disk-full/read-only/corrupt/cannot-
+			// open database is fatal for every generation, so reporting it as a
+			// plain spawn failure would produce endless respawn churn while
+			// admission stayed open.
 			post({
 				type: "error",
 				generation: message.generation,
 				detail: errorDetail(err),
+				errorClass: classifyCommitError(err),
 			});
 		}
 		return;

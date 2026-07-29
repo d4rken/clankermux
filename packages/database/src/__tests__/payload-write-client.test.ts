@@ -380,6 +380,58 @@ describe("PayloadWriteClient — writer-fatal", () => {
 		expect(await h.publish()).toBe(false);
 		await h.client.dispose(0);
 	});
+
+	test("a writer-fatal init error latches instead of respawning forever", async () => {
+		const h = makeHarness();
+		expect(await h.publish()).toBe(true);
+		const first = h.fleet.last;
+		first.respond({
+			type: "error",
+			generation: first.generation,
+			detail: "SQLITE_CANTOPEN: unable to open database file",
+			errorClass: "writer-fatal",
+		});
+		await h.tick();
+
+		const stats = h.client.getStats();
+		expect(stats.writerFatal).toContain("SQLITE_CANTOPEN");
+		expect(stats.admissionSuspended).toBe(true);
+		expect(stats.healthy).toBe(false);
+		// Not a spawn failure: no respawn backoff is armed at all.
+		expect(stats.spawnFailures).toBe(0);
+		expect(first.terminated).toBe(true);
+
+		h.clock.advance(60_000);
+		await h.tick();
+		expect(h.fleet.workers).toHaveLength(1);
+		// The entry is retained, never dropped.
+		expect(h.client.getStats().unackedEntries).toBe(1);
+		expect(h.settlements).toHaveLength(0);
+		await h.client.dispose(0);
+	});
+
+	test("a retryable init error is still a spawn failure and respawns", async () => {
+		const h = makeHarness();
+		expect(await h.publish()).toBe(true);
+		h.fleet.last.respond({
+			type: "error",
+			generation: h.fleet.last.generation,
+			detail: "SQLITE_BUSY: database is locked",
+			errorClass: "retryable",
+		});
+		await h.tick();
+
+		expect(h.client.getStats().writerFatal).toBeNull();
+		expect(h.client.getStats().spawnFailures).toBe(1);
+
+		h.clock.advance(300);
+		await h.tick();
+		expect(h.fleet.workers).toHaveLength(2);
+		h.fleet.last.ready();
+		await h.tick();
+		expect(h.fleet.last.writes.map((w) => w.id)).toEqual(["req-1"]);
+		await h.client.dispose(0);
+	});
 });
 
 describe("PayloadWriteClient — rotation", () => {

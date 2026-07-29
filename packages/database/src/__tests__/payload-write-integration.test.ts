@@ -364,6 +364,42 @@ test(
 );
 
 test(
+	"an unopenable database latches writer-fatal instead of respawning forever",
+	async () => {
+		const settlements: PayloadSettlement[] = [];
+		const client = new PayloadWriteClient({
+			// The parent directory does not exist → SQLITE_CANTOPEN inside the
+			// worker's init, which no respawn can ever fix.
+			dbPath: join(dir, "no-such-directory", "payloads.db"),
+			getRetentionMs: () => 24 * 60 * 60 * 1000,
+			onSettled: (settlement) => settlements.push(settlement),
+		});
+		clients.push(client);
+
+		expect(publish(client, "fatal-1", '{"a":1}')).toBe(true);
+		await waitFor(
+			() => client.getStats().writerFatal !== null,
+			"writer-fatal latched",
+		);
+
+		const stats = client.getStats();
+		expect(stats.healthy).toBe(false);
+		expect(stats.admissionSuspended).toBe(true);
+		// Latched, not retried: no spawn-failure churn and no live generation.
+		expect(stats.spawnFailures).toBe(0);
+		expect(client.acceptsWork()).toBe(false);
+		// The entry is retained rather than dropped.
+		expect(stats.unackedEntries).toBe(1);
+		expect(settlements).toHaveLength(0);
+
+		await Bun.sleep(500);
+		expect(client.getStats().spawnFailures).toBe(0);
+		expect(client.getStats().liveGenerations).toBe(0);
+	},
+	TEST_TIMEOUT_MS,
+);
+
+test(
 	"dispose flushes in-flight payloads before terminating the worker",
 	async () => {
 		const settlements: PayloadSettlement[] = [];
