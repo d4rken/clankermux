@@ -20,12 +20,15 @@ import {
 	type PayloadReservation,
 	shouldLogAsyncWriterHealth,
 } from "../async-writer";
-import type {
-	PayloadEntryInput,
-	PayloadSettlement,
-	PayloadWriterLike,
-	PayloadWriterStats,
+import {
+	type PayloadEntryInput,
+	type PayloadSettlement,
+	PayloadWriteClient,
+	type PayloadWriterLike,
+	type PayloadWriterStats,
+	type PayloadWriteTransportFactory,
 } from "../payload-write-client";
+import type { PayloadWriteResponse } from "../payload-write-worker";
 
 const ONE_MB = 1024 * 1024;
 const TEN_MB = 10 * ONE_MB;
@@ -48,6 +51,7 @@ class FakeWriter implements PayloadWriterLike {
 	publishResult = true;
 	publishThrows = false;
 	disposed = 0;
+	disposeDrainStarted = 0;
 	lastDisposeDeadline: number | undefined;
 	stats: PayloadWriterStats = {
 		unackedEntries: 0,
@@ -91,6 +95,10 @@ class FakeWriter implements PayloadWriterLike {
 		return this.accept;
 	}
 
+	beginDisposeDrain(): void {
+		this.disposeDrainStarted++;
+	}
+
 	getStats(): PayloadWriterStats {
 		return this.stats;
 	}
@@ -111,6 +119,62 @@ class FakeWriter implements PayloadWriterLike {
 			outcome,
 		});
 	}
+}
+
+/**
+ * Transport factory for a REAL PayloadWriteClient: every generation reports
+ * ready, acks every write as committed and close-acks immediately. Used where
+ * the assertion is about the client's own generation behaviour (rotation),
+ * which the FakeWriter above cannot express.
+ */
+function makeAutoFleet(): {
+	spawn: PayloadWriteTransportFactory;
+	/** Generation ids handed out, in spawn order. */
+	generations: number[];
+	/** Request ids written, across every generation. */
+	writes: string[];
+} {
+	const generations: number[] = [];
+	const writes: string[] = [];
+	const spawn: PayloadWriteTransportFactory = (generation) => {
+		generations.push(generation);
+		let onMessage: ((message: PayloadWriteResponse) => void) | null = null;
+		const reply = (message: PayloadWriteResponse): void => {
+			queueMicrotask(() => onMessage?.(message));
+		};
+		return {
+			postMessage(message) {
+				switch (message.type) {
+					case "init":
+						reply({ type: "ready", generation });
+						return;
+					case "write":
+						writes.push(message.id);
+						reply({
+							type: "ack",
+							generation,
+							results: [
+								{ seq: message.seq, id: message.id, status: "committed" },
+							],
+						});
+						return;
+					case "close":
+						reply({ type: "closed", generation });
+						return;
+				}
+			},
+			onMessage(handler) {
+				onMessage = handler;
+			},
+			onError() {
+				// Auto workers never fail.
+			},
+			terminate() {
+				onMessage = null;
+			},
+		};
+	};
+	return { spawn, generations, writes };
 }
 
 function makeWriter(): { writer: AsyncDbWriter; fake: () => FakeWriter } {
@@ -486,6 +550,60 @@ describe("AsyncDbWriter", () => {
 		expect(reservedDuringDrain).toBeNull();
 		expect(harness.fake().published.map((p) => p.requestId)).toEqual(["req-1"]);
 		expect(w.getHealth().payloadDropped).toBe(0);
+	});
+
+	test("dispose flushes a near-budget writer's drain publish without rotating", async () => {
+		const fleet = makeAutoFleet();
+		const w = new AsyncDbWriter({
+			createPayloadWriter: (hooks) =>
+				new PayloadWriteClient({
+					dbPath: "/tmp/does-not-exist.db",
+					getRetentionMs: () => 24 * 60 * 60 * 1000,
+					onSettled: hooks.onSettled,
+					spawn: fleet.spawn,
+					// 6 bytes: the pre-dispose payload leaves generation 1 exactly one
+					// 3-byte entry short of its rotation budget.
+					rotationByteBudget: 6,
+				}),
+		});
+		writer = w;
+
+		const early = w.reservePayload(10);
+		if (!early) throw new Error("expected a reservation");
+		expect(publish(w, early, "req-1", "abc")).toBe(true);
+		await sleep(30);
+		expect(fleet.generations).toEqual([1]);
+
+		// Reserved while admission was open, published by a metadata job that is
+		// still on the queue when dispose() starts — and its bytes tip the
+		// generation over the rotation budget.
+		const reserved = w.reservePayload(10);
+		if (!reserved) throw new Error("expected a reservation");
+		const gate = makeGate();
+		releaseGate = gate.release;
+		w.enqueue(async () => {
+			await gate.wait();
+		});
+		w.enqueue(() => {
+			publish(w, reserved, "req-2", "def");
+		});
+
+		const disposal = w.dispose();
+		await sleep(20);
+		gate.release();
+		releaseGate = null;
+		await disposal;
+		writer = null;
+
+		// No rotation was started during the drain — a replacement spawn plus the
+		// outgoing close would have eaten the flush deadline — and both payloads
+		// committed through the one generation.
+		expect(fleet.generations).toEqual([1]);
+		expect(fleet.writes).toEqual(["req-1", "req-2"]);
+		const health = w.getHealth();
+		expect(health.payloadCommitted).toBe(2);
+		expect(health.payloadAbandoned).toBe(0);
+		expect(health.payloadDropped).toBe(0);
 	});
 
 	test("dispose awaits an in-flight metadata tick even after the queue is empty", async () => {

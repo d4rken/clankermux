@@ -391,6 +391,10 @@ export class AsyncDbWriter implements Disposable {
 		this.payloadWriter = this.createPayloadWriter({
 			onSettled: (settlement) => this.onPayloadSettled(settlement),
 		});
+		// A writer first created by a job running inside the dispose drain has to
+		// be born rotation-suppressed — dispose() already made its
+		// beginDisposeDrain call, and there was no writer to receive it.
+		if (this.closingForDispose) this.payloadWriter.beginDisposeDrain();
 		return this.payloadWriter;
 	}
 
@@ -554,6 +558,10 @@ export class AsyncDbWriter implements Disposable {
 		// those publishes here would drop payloads the worker still has its whole
 		// flush window for.
 		this.closingForDispose = true;
+		// Rotation must not start inside the drain: the last queued publishes can
+		// tip the active generation over its byte budget, and a replacement spawn
+		// plus the outgoing close would eat the flush deadline below.
+		this.payloadWriter?.beginDisposeDrain();
 
 		if (this.intervalId) {
 			clearInterval(this.intervalId);

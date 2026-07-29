@@ -872,6 +872,81 @@ describe("PayloadWriteClient — lifecycle", () => {
 		expect(first.terminated).toBe(true);
 	});
 
+	test("beginDisposeDrain stops rotation while the drain keeps publishing", async () => {
+		// Budget 2 KiB, 1 KiB per entry: generation 1 sits exactly one entry short
+		// of its rotation budget when the dispose drain begins.
+		const h = await primed({ rotationByteBudget: 2048 });
+		const first = h.fleet.workers[0];
+		first.ackAll("committed");
+		expect(h.fleet.workers).toHaveLength(1);
+
+		h.client.beginDisposeDrain();
+
+		// One of the last queued metadata jobs publishes its reserved payload and
+		// tips the generation over the budget. Without suppression that starts a
+		// rotation, whose replacement spawn plus outgoing close would eat the
+		// dispose deadline the flush needs.
+		expect(
+			h.client.publishReserved({
+				requestId: "req-drain",
+				ciphertext: "payload-drain",
+				timestamp: h.clock.now(),
+				transportBytes: 1024,
+				payloadBytes: 900,
+			}),
+		).toBe(true);
+		await h.tick();
+
+		expect(h.fleet.workers).toHaveLength(1);
+		expect(first.closeRequested).toBe(false);
+		expect(first.terminated).toBe(false);
+		expect(h.client.getStats().rotations).toBe(0);
+
+		// The entry still reaches — and acks through — the current generation.
+		expect(first.writes.map((w) => w.id)).toEqual(["req-drain"]);
+		first.ackAll("committed");
+		const stats = h.client.getStats();
+		expect(stats.committed).toBe(2);
+		expect(stats.unackedEntries).toBe(0);
+		await h.client.dispose(0);
+	});
+
+	test("beginDisposeDrain still permits the INITIAL generation and respawns", async () => {
+		// Nothing has been spawned yet: suppression covers rotations only, so the
+		// first generation must still come up and flush the drain's entries.
+		const h = makeHarness({ rotationByteBudget: 1024 });
+		h.client.beginDisposeDrain();
+		expect(
+			h.client.publishReserved({
+				requestId: "req-first",
+				ciphertext: "payload-first",
+				timestamp: h.clock.now(),
+				transportBytes: 1024,
+				payloadBytes: 900,
+			}),
+		).toBe(true);
+		await h.tick();
+		expect(h.fleet.workers).toHaveLength(1);
+
+		const first = h.fleet.workers[0];
+		first.ready();
+		await h.tick();
+		// Over budget on the very first send, yet no replacement is prewarmed.
+		expect(first.writes.map((w) => w.id)).toEqual(["req-first"]);
+		expect(h.fleet.workers).toHaveLength(1);
+		expect(h.client.getStats().rotations).toBe(0);
+
+		// A generation that dies is still replaced — only rotation is suppressed.
+		first.die("worker crashed");
+		h.clock.advance(300);
+		await h.tick();
+		expect(h.fleet.workers).toHaveLength(2);
+		h.fleet.last.ready();
+		await h.tick();
+		expect(h.fleet.last.writes.map((w) => w.id)).toEqual(["req-first"]);
+		await h.client.dispose(0);
+	});
+
 	test("dispose terminates on its deadline and abandons what never committed", async () => {
 		const h = await primed();
 		const worker = h.fleet.workers[0];

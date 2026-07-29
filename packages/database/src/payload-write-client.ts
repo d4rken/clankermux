@@ -170,6 +170,8 @@ export interface PayloadWriterLike {
 	publish(entry: PayloadEntryInput): boolean;
 	publishReserved(entry: PayloadEntryInput): boolean;
 	acceptsWork(): boolean;
+	/** Suppress rotation for the rest of the process lifetime (see below). */
+	beginDisposeDrain(): void;
 	getStats(): PayloadWriterStats;
 	dispose(deadlineMs?: number): Promise<void>;
 }
@@ -321,6 +323,8 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	private rotating = false;
 	/** The in-flight rotation (prewarm → close → cut over), for dispose. */
 	private rotationInFlight: Promise<void> | null = null;
+	/** Set by `beginDisposeDrain`: no NEW rotation may start (see the method). */
+	private rotationSuppressed = false;
 	private disposed = false;
 	private disposePromise: Promise<void> | null = null;
 
@@ -875,7 +879,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	// -- rotation --------------------------------------------------------------
 
 	private maybeRotate(): void {
-		if (this.disposed || this.rotating) return;
+		if (this.disposed || this.rotating || this.rotationSuppressed) return;
 		// A respawn is already pending on its backoff timer — usually because the
 		// previous rotation's replacement failed to spawn. Retrying the spawn on
 		// every publish would bypass that backoff entirely and hammer the thread
@@ -1058,6 +1062,29 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	}
 
 	// -- disposal ----------------------------------------------------------------
+
+	/**
+	 * Announce that shutdown has begun and the caller is about to drain the last
+	 * of its queued work into this writer.
+	 *
+	 * Shutdown ordering is: stop admission → drain the metadata queue → flush.
+	 * Those final drain publishes still charge the active generation's byte
+	 * budget, so a generation that was already near {@link
+	 * PAYLOAD_ROTATION_BYTE_BUDGET} would start a rotation *inside* the drain —
+	 * and a replacement spawn plus the outgoing worker's close can consume the
+	 * whole {@link PAYLOAD_DISPOSE_DEADLINE_MS}, after which dispose terminates
+	 * both generations and abandons payloads the outgoing worker could simply
+	 * have flushed. Rotation exists to bound a LONG-LIVED worker's native memory
+	 * (Bun #5709); with the process ending there is nothing left to bound.
+	 *
+	 * Only NEW rotations are suppressed. Sends, retries, respawns and creating
+	 * the INITIAL generation stay permitted — the drain still has to reach a
+	 * live worker — and a rotation already in flight is unaffected (`doDispose`
+	 * awaits it).
+	 */
+	beginDisposeDrain(): void {
+		this.rotationSuppressed = true;
+	}
 
 	dispose(deadlineMs: number = PAYLOAD_DISPOSE_DEADLINE_MS): Promise<void> {
 		if (this.disposePromise) return this.disposePromise;
