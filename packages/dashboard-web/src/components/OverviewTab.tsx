@@ -3,32 +3,34 @@ import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge, Users } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
-import {
-	useAccounts,
-	useAnalytics,
-	useMemoryHistory,
-	useStats,
-} from "../hooks/queries";
+import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
 import { SESSION_SCOPE_SHORT_LABELS } from "../lib/active-sessions";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
-import { MemoryUsageChart } from "./overview/MemoryUsageChart";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { SpendSummaryBand } from "./overview/SpendSummaryBand";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
-import { SystemStatus } from "./overview/SystemStatus";
+import { SystemHealthStrip } from "./overview/SystemHealthStrip";
+import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
+import { useVisibleRecentErrors } from "./overview/system-status/useVisibleRecentErrors";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
 
+/** Error window for the Overview's compact list, in hours. */
+export const OVERVIEW_ERROR_WINDOW_HOURS = 1;
+
 export const OverviewTab = React.memo(() => {
-	// Fetch all data using React Query hooks
+	// Fetch all data using React Query hooks. The 1-hour error window feeds the
+	// compact list below the health strip; nothing else on this page reads
+	// `recentErrors`, and the parameter only scopes that field server-side. The
+	// full, range-selectable list lives on /system.
 	const { data: stats, isLoading: statsLoading } = useStats(
 		REFRESH_INTERVALS.default,
-		24,
+		OVERVIEW_ERROR_WINDOW_HOURS,
 	);
 	const [timeRange, setTimeRange] = useState("6h");
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
@@ -38,11 +40,10 @@ export const OverviewTab = React.memo(() => {
 	);
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
 
-	// Memory chart has its own range, independent of the analytics range above;
-	// 7d by default so the leak-trend view is the landing state.
-	const [memoryRange, setMemoryRange] = useState("7d");
-	const { data: memoryHistory, isLoading: memoryLoading } =
-		useMemoryHistory(memoryRange);
+	// Resolved once here so the strip's count and the list below it can never
+	// disagree about what's been dismissed.
+	const { visible: visibleErrors, dismiss: dismissError } =
+		useVisibleRecentErrors(stats?.recentErrors);
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -232,13 +233,13 @@ export const OverviewTab = React.memo(() => {
 				loading={loading}
 			/>
 
-			<SystemStatus />
+			{/* Glance-level health; the full diagnostics live on /system. */}
+			<SystemHealthStrip errorGroupCount={visibleErrors.length} />
 
-			<MemoryUsageChart
-				memoryHistory={memoryHistory}
-				loading={memoryLoading}
-				range={memoryRange}
-				onRangeChange={setMemoryRange}
+			<CompactRecentErrors
+				errors={visibleErrors}
+				accounts={accounts}
+				onDismiss={dismissError}
 			/>
 
 			{accounts && <RateLimitInfo accounts={accounts} />}

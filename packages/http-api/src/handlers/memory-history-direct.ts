@@ -40,7 +40,7 @@ export interface MemoryHistorySources {
 
 /**
  * Direct (in-process) /api/analytics/memory-history implementation for the
- * Overview-tab "Memory Usage" chart.
+ * dashboard's "Memory Usage" chart and RSS sparkline.
  *
  * Pure read path: runs against whatever connection the supplied context
  * exposes via `dbOps.getAdapter()`. In production this executes inside the

@@ -16,8 +16,6 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { StorageIntegritySection } from "./StorageIntegrity";
-import { RecentErrorsCard } from "./system-status/RecentErrorsCard";
 import {
 	formatUptime,
 	statusColor,
@@ -27,9 +25,8 @@ import {
 export function SystemStatus() {
 	const { data, isLoading, error } = useSystemStatus();
 
-	// The system-status portion has three states (loading / unavailable / live).
-	// It's computed into `statusBody` so the storage-integrity sub-section below
-	// always renders, even while the status endpoint is loading or unreachable.
+	// Three states (loading / unavailable / live), computed into `statusBody` so
+	// the card's framing stays put while the endpoint is loading or unreachable.
 	let statusBody: ReactElement;
 
 	if (isLoading && !data) {
@@ -123,7 +120,8 @@ export function SystemStatus() {
 
 					{/* Event-loop health: current lag + recent (~60s window) max. A
 					    blocked main thread freezes all HTTP serving, so this is the
-					    primary stall signal. Memory moved to the chart below. */}
+					    primary stall signal. Memory lives in the Memory Usage chart
+					    further down this page. */}
 					<div className="rounded-lg border p-3">
 						<div className="flex items-center justify-between text-sm text-muted-foreground">
 							<span className="flex items-center gap-2">
@@ -189,8 +187,6 @@ export function SystemStatus() {
 						<dd className="font-medium tabular-nums">{pool.paused}</dd>
 					</div>
 				</dl>
-
-				<RecentErrorsCard />
 			</>
 		);
 	}
@@ -200,24 +196,11 @@ export function SystemStatus() {
 			<CardHeader>
 				<CardTitle>System Status</CardTitle>
 				<CardDescription>
-					Current operational status and recent events
+					Live health rollup, uptime, event-loop lag and account pool
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-4">
-					{statusBody}
-
-					{/* Storage integrity, merged in from its former standalone card */}
-					<div className="border-t pt-4 space-y-3">
-						<div>
-							<p className="text-sm font-medium">Storage Integrity</p>
-							<p className="text-xs text-muted-foreground">
-								Periodic SQLite integrity check (quick + full).
-							</p>
-						</div>
-						<StorageIntegritySection />
-					</div>
-				</div>
+				<div className="space-y-4">{statusBody}</div>
 			</CardContent>
 		</Card>
 	);

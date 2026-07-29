@@ -1,5 +1,5 @@
 /**
- * Predicate used by RecentErrorsCard to decide whether failover from the
+ * Predicate used by the recent-error lists to decide whether failover from the
  * account that produced an error has any chance of succeeding.
  *
  * An "available" account is one that is:

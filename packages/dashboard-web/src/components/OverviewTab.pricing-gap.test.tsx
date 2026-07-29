@@ -2,8 +2,9 @@ import { describe, expect, it } from "bun:test";
 import type { PricingGap, SystemStatusResponse } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router";
 import { queryKeys } from "../lib/query-keys";
-import { OverviewTab } from "./OverviewTab";
+import { OVERVIEW_ERROR_WINDOW_HOURS, OverviewTab } from "./OverviewTab";
 
 /**
  * Wiring test: a unit test of the banner component proves it renders, not that
@@ -54,7 +55,10 @@ function renderOverview(gaps: PricingGap[]): string {
 		defaultOptions: { queries: { retry: false, refetchOnMount: false } },
 	});
 	client.setQueryData(queryKeys.systemStatus(), systemStatus(gaps));
-	client.setQueryData(queryKeys.stats(24), {
+	// The stats key embeds the error window, so it has to track the component's
+	// constant — seeding a different window silently yields `undefined` stats and
+	// the page renders its loading skeleton instead of the banner.
+	client.setQueryData(queryKeys.stats(OVERVIEW_ERROR_WINDOW_HOURS), {
 		totalRequests: 0,
 		successRate: 0,
 		activeAccounts: 0,
@@ -98,10 +102,14 @@ function renderOverview(gaps: PricingGap[]): string {
 	);
 	client.setQueryData(queryKeys.accounts(), []);
 
+	// MemoryRouter, not just the query provider: the Overview's health strip and
+	// compact error list are <Link>s, which throw outside a router context.
 	return renderToStaticMarkup(
-		<QueryClientProvider client={client}>
-			<OverviewTab />
-		</QueryClientProvider>,
+		<MemoryRouter>
+			<QueryClientProvider client={client}>
+				<OverviewTab />
+			</QueryClientProvider>
+		</MemoryRouter>,
 	);
 }
 

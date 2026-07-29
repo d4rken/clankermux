@@ -54,7 +54,7 @@ const EMPTY_MESSAGE =
 	"Collecting data — this graph fills in as memory samples accumulate (one per minute). History starts at deploy; a full 7-day view needs about a week of uptime.";
 
 /**
- * Overview "Memory Usage" chart: the proxy process's own RSS (filled area),
+ * System Health "Memory Usage" chart: the proxy process's own RSS (filled area),
  * committed JS heap, and used JS heap (lines) over a configurable range. RSS
  * climbing while heap stays flat is the classic native-leak signal — the band
  * between RSS and heap-committed is non-heap (native) memory, while the

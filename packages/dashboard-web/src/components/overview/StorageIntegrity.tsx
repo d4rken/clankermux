@@ -24,9 +24,9 @@ function formatRelative(iso: string | null): string {
 
 /**
  * Storage-integrity status block (status panel, last-check timestamps, manual
- * check buttons) without a surrounding Card — designed to be embedded as a
- * sub-section of the System Status card. The sticky corruption banner lives in
- * {@link StorageIntegrityBanner}.
+ * check buttons) without a surrounding Card, so the caller supplies its own
+ * framing — the System Health page wraps it in one. The corruption banner lives
+ * in {@link StorageIntegrityBanner}.
  */
 export function StorageIntegritySection() {
 	const { data, isLoading, error } = useStorageInfo();
@@ -221,7 +221,7 @@ export function StorageIntegritySection() {
 }
 
 /**
- * Sticky banner shown across the dashboard when DB corruption is detected.
+ * Banner shown at the top of the Overview when DB corruption is detected.
  * Returns `null` when status is anything other than `corrupt` so the banner
  * doesn't take vertical space in the healthy case.
  */
@@ -240,7 +240,7 @@ export function StorageIntegrityBanner() {
 				</p>
 				<p className="text-muted-foreground">
 					{data?.last_integrity_error ??
-						"Check database integrity from the Overview (Storage / Integrity) and review the server logs for details."}
+						"Check database integrity from System Health → Storage Integrity and review the server logs for details."}
 				</p>
 			</div>
 		</div>
