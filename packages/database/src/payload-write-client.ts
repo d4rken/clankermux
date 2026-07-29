@@ -186,22 +186,26 @@ export type PayloadWriterFactory = (hooks: {
  * base64 → Blob → `new Worker(url, { smol: true })` pattern used by the
  * maintenance workers, with the on-disk source as the dev/test fallback.
  *
- * The Blob object URL is revoked immediately after construction — the Worker
- * has already resolved it, and without the revoke every rotation would leak one
- * URL (and its blob) for the process lifetime.
+ * Each spawn's Blob object URL is revoked exactly once — without that, every
+ * rotation would leak one URL (and its blob) for the process lifetime. It is
+ * NOT revoked straight after `new Worker(url)`: Bun resolves the URL while the
+ * worker thread boots, and revoking synchronously makes the spawn fail with
+ * "Blob URL is missing". Revoking on the worker's first message (proof that its
+ * code loaded) or on termination (whichever comes first) is both safe and
+ * leak-free.
  */
 export function createWorkerTransport(): PayloadWriteTransport {
 	let worker: Worker;
+	let objectUrl: string | null = null;
 	if (EMBEDDED_PAYLOAD_WRITE_WORKER_CODE) {
 		const code = Buffer.from(
 			EMBEDDED_PAYLOAD_WRITE_WORKER_CODE,
 			"base64",
 		).toString("utf8");
-		const url = URL.createObjectURL(
+		objectUrl = URL.createObjectURL(
 			new Blob([code], { type: "text/javascript" }),
 		);
-		worker = new Worker(url, { smol: true });
-		URL.revokeObjectURL(url);
+		worker = new Worker(objectUrl, { smol: true });
 	} else {
 		worker = new Worker(
 			new URL("./payload-write-worker.ts", import.meta.url).href,
@@ -209,22 +213,34 @@ export function createWorkerTransport(): PayloadWriteTransport {
 		);
 	}
 
+	const revokeOnce = (): void => {
+		if (objectUrl === null) return;
+		URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+	};
+
 	return {
 		postMessage(message) {
 			worker.postMessage(message);
 		},
 		onMessage(handler) {
-			worker.onmessage = (event: MessageEvent<PayloadWriteResponse>) =>
+			worker.onmessage = (event: MessageEvent<PayloadWriteResponse>) => {
+				revokeOnce();
 				handler(event.data);
+			};
 		},
 		onError(handler) {
-			worker.onerror = (event: ErrorEvent) =>
+			worker.onerror = (event: ErrorEvent) => {
+				revokeOnce();
 				handler(event.message || "payload writer worker error");
-			worker.addEventListener("close", () =>
-				handler("payload writer worker closed"),
-			);
+			};
+			worker.addEventListener("close", () => {
+				revokeOnce();
+				handler("payload writer worker closed");
+			});
 		},
 		terminate() {
+			revokeOnce();
 			worker.terminate();
 		},
 	};
@@ -242,6 +258,8 @@ interface RegistryEntry extends PayloadEntryInput {
 	/** Generation the entry was last sent to; null while buffered. */
 	generation: number | null;
 	attempts: number;
+	/** True once the entry has been handed to any generation. */
+	everSent: boolean;
 	sentAt: number;
 	retryTimer: TimerHandle | null;
 }
@@ -275,6 +293,8 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	private nextGeneration = 1;
 	private active: GenerationState | null = null;
 	private spawning = false;
+	/** The in-flight spawn chain (spawn → activate → flush), for dispose. */
+	private spawnInFlight: Promise<unknown> | null = null;
 	private rotating = false;
 	private disposed = false;
 	private disposePromise: Promise<void> | null = null;
@@ -329,6 +349,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			state: "buffered",
 			generation: null,
 			attempts: 0,
+			everSent: false,
 			sentAt: this.now(),
 			retryTimer: null,
 		};
@@ -393,6 +414,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		entry.generation = generation.id;
 		entry.sentAt = this.now();
 		entry.attempts++;
+		entry.everSent = true;
 
 		try {
 			generation.transport.postMessage({
@@ -433,8 +455,18 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				continue;
 			if (entry.state === "retry_wait") continue;
 			if (this.dropIfExpired(entry)) continue;
-			this.trySend(entry);
+			this.sendOrReplay(entry);
 		}
+	}
+
+	/**
+	 * Send an entry, counting it as a replay when it had already been handed to
+	 * a generation that is now gone. Retry resends are counted separately (see
+	 * `scheduleRetry`), so nothing is double-counted.
+	 */
+	private sendOrReplay(entry: RegistryEntry): void {
+		if (entry.everSent) this.replays++;
+		this.trySend(entry);
 	}
 
 	/**
@@ -452,10 +484,9 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				entry.retryTimer = null;
 			}
 			if (this.dropIfExpired(entry)) continue;
-			this.replays++;
 			entry.state = "buffered";
 			entry.generation = null;
-			this.trySend(entry);
+			this.sendOrReplay(entry);
 		}
 	}
 
@@ -501,10 +532,14 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		if (this.disposed || this.writerFatal !== null) return;
 		if (this.active || this.spawning || this.rotating) return;
 		if (this.respawnTimer !== null) return;
-		void this.spawnGeneration().then((generation) => {
+		const chain = this.spawnGeneration().then((generation) => {
 			if (!generation) return;
 			this.active = generation;
 			this.flushBuffered();
+		});
+		this.spawnInFlight = chain;
+		void chain.finally(() => {
+			if (this.spawnInFlight === chain) this.spawnInFlight = null;
 		});
 	}
 
@@ -945,6 +980,13 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		}
 
 		try {
+			// A spawn may be in flight with entries already buffered behind it —
+			// give it (bounded) time to land so a shutdown right after a respawn
+			// does not abandon work the worker could still have flushed.
+			if (this.spawnInFlight && this.unacked.size > 0) {
+				await this.raceDeadline(this.spawnInFlight, deadlineMs);
+			}
+
 			const active = this.active;
 			if (active && active.status === "ready" && this.writerFatal === null) {
 				// Hand over anything still buffered, then let the worker flush and
@@ -968,6 +1010,33 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				this.settle(entry, "abandoned");
 			}
 		}
+	}
+
+	/** Resolve when `promise` settles or `ms` elapses, whichever comes first. */
+	private raceDeadline(promise: Promise<unknown>, ms: number): Promise<void> {
+		if (ms <= 0) return Promise.resolve();
+		return new Promise<void>((resolve) => {
+			let settled = false;
+			const timer = this.setTimer(() => {
+				if (settled) return;
+				settled = true;
+				resolve();
+			}, ms);
+			void promise.then(
+				() => {
+					if (settled) return;
+					settled = true;
+					this.clearTimer(timer);
+					resolve();
+				},
+				() => {
+					if (settled) return;
+					settled = true;
+					this.clearTimer(timer);
+					resolve();
+				},
+			);
+		});
 	}
 
 	/** Like trySend, but bypasses the (now suspended) admission guards. */
