@@ -202,12 +202,16 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
-	// Create request_payloads table for storing full request/response data
+	// Create request_payloads table for storing full request/response data.
+	// `bytes` is the stored payload's UTF-8 length, recorded at write time so the
+	// byte-budget cleanup pass can sum sizes from an index instead of scanning
+	// the blobs (SUM(LENGTH(json)) measured 1.29 s per GiB — unusable per tick).
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
 			id TEXT PRIMARY KEY,
 			json TEXT NOT NULL,
 			timestamp INTEGER,
+			bytes INTEGER,
 			FOREIGN KEY (id) REFERENCES requests(id) ON DELETE CASCADE
 		)
 	`);
@@ -475,6 +479,38 @@ export function ensureSchema(db: Database): void {
 
 	// Performance indexes (covering/partial indexes for hot query paths)
 	addPerformanceIndexes(db);
+
+	// Guarded: on an upgraded DB `bytes` does not exist yet at this point (see
+	// createPayloadSizeIndex). runMigrations() creates it after the ALTERs.
+	createPayloadSizeIndex(db);
+}
+
+/**
+ * The payload-size covering index. Guarded because it references a column added
+ * via ADDITIVE_COLUMNS: runMigrations() runs ensureSchema() FIRST (and
+ * addPerformanceIndexes() is ensureSchema()'s last statement), so on an upgraded
+ * DB both of those execute before `bytes` exists and an unconditional CREATE
+ * INDEX there would throw `no such column: bytes` at startup. Fresh DBs get the
+ * column from CREATE TABLE and satisfy the guard immediately; upgraded DBs fail
+ * it here and get the index from the post-tx() call in runMigrations().
+ * `CREATE INDEX IF NOT EXISTS` makes the double call idempotent.
+ *
+ * Column order matters: `timestamp` first serves both the ORDER BY timestamp
+ * DESC running-sum and the cutoff delete; including `bytes` makes the window
+ * query index-only (SUM over an integer column scales with row count, not with
+ * the multi-MB blobs).
+ */
+function createPayloadSizeIndex(db: Database): void {
+	const hasBytes = (
+		db.prepare(`PRAGMA table_info(request_payloads)`).all() as Array<{
+			name: string;
+		}>
+	).some((c) => c.name === "bytes");
+	if (!hasBytes) return;
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_payloads_size
+		   ON request_payloads(timestamp, bytes)`,
+	);
 }
 
 /**
@@ -681,6 +717,18 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		column: "project_attribution_source",
 		ddl: "ALTER TABLE requests ADD COLUMN project_attribution_source TEXT",
 	},
+	// UTF-8 byte length of the stored payload, recorded at write time so the
+	// byte-budget cleanup pass can sum sizes off an index. NULL on rows that
+	// predate the column — deliberately NOT backfilled (policy forbids data
+	// backfills in migrations, and the retention window repopulates it within one
+	// window anyway). The size pass ignores NULL-bytes rows in BOTH its running
+	// sum and its delete predicate, so a legacy row can neither be counted nor
+	// evicted by it.
+	{
+		table: "request_payloads",
+		column: "bytes",
+		ddl: "ALTER TABLE request_payloads ADD COLUMN bytes INTEGER",
+	},
 ];
 
 export function runMigrations(db: Database): void {
@@ -714,4 +762,8 @@ export function runMigrations(db: Database): void {
 		}
 	});
 	tx();
+
+	// Only now can the payload-size index exist on an upgraded DB: its `bytes`
+	// column was just added by the ALTERs above.
+	createPayloadSizeIndex(db);
 }

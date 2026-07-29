@@ -1436,11 +1436,12 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — four explicit passes:
+	// Cleanup operations — five explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
 	// Pass 3: delete usage snapshots older than snapshotRetentionMs
 	// Pass 4: delete memory snapshots older than memorySnapshotRetentionMs
+	// Pass 5: evict oldest payloads until their content fits payloadMaxBytes
 	//
 	// `snapshotRetentionMs` and `memorySnapshotRetentionMs` are optional so
 	// existing callers (including the http-api "Clean up now" handler) prune
@@ -1448,14 +1449,19 @@ OAuth tokens will need to be re-authenticated.
 	// its DEFAULT_*_RETENTION_MS, matching the corresponding config getter's
 	// default. The server's hourly + startup jobs pass the configured values
 	// explicitly so a non-default retention is honored there.
+	//
+	// `payloadMaxBytes` defaults to 0 = the byte budget is disabled, so every
+	// existing call site keeps exactly its previous meaning.
 	async cleanupOldRequests(
 		payloadRetentionMs: number,
 		requestRetentionMs?: number,
 		snapshotRetentionMs?: number,
 		memorySnapshotRetentionMs?: number,
+		payloadMaxBytes = 0,
 	): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
+		removedPayloadsBySize: number;
 		removedSnapshots: number;
 		removedMemorySnapshots: number;
 	}> {
@@ -1489,6 +1495,7 @@ OAuth tokens will need to be re-authenticated.
 		const empty = {
 			removedRequests: 0,
 			removedPayloads: 0,
+			removedPayloadsBySize: 0,
 			removedSnapshots: 0,
 			removedMemorySnapshots: 0,
 		};
@@ -1508,6 +1515,7 @@ OAuth tokens will need to be re-authenticated.
 					requestCutoff,
 					usageSnapshotCutoff,
 					memorySnapshotCutoff,
+					payloadMaxBytes,
 				});
 			});
 
