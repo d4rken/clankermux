@@ -249,10 +249,14 @@ describe("db-workers target output check", () => {
 			"inline-incremental-vacuum-worker.ts",
 			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "AAAA";',
 		);
+		await writeInline(
+			"inline-payload-write-worker.ts",
+			'export const EMBEDDED_PAYLOAD_WRITE_WORKER_CODE = "AAAA";',
+		);
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});
 
-	it("treats all-three-filled as built", async () => {
+	it("treats all-four-filled as built", async () => {
 		await writeInline(
 			"inline-vacuum-worker.ts",
 			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
@@ -265,6 +269,10 @@ describe("db-workers target output check", () => {
 			"inline-incremental-vacuum-worker.ts",
 			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "CCCC";',
 		);
+		await writeInline(
+			"inline-payload-write-worker.ts",
+			'export const EMBEDDED_PAYLOAD_WRITE_WORKER_CODE = "DDDD";',
+		);
 		expect(await dbTarget().checkOutput(root)).toBe(true);
 	});
 
@@ -273,10 +281,29 @@ describe("db-workers target output check", () => {
 			"inline-vacuum-worker.ts",
 			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
 		);
-		// two of three present
+		// two of four present
 		await writeInline(
 			"inline-integrity-check-worker.ts",
 			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "BBBB";',
+		);
+		expect(await dbTarget().checkOutput(root)).toBe(false);
+	});
+
+	it("treats a missing payload-write inline file as NOT built", async () => {
+		// The payload writer is the newest entry in DB_WORKER_INLINE_FILES; an
+		// omission there would make the systemd guard skip the rebuild and boot
+		// with an empty EMBEDDED_* constant, silently losing all payload writes.
+		await writeInline(
+			"inline-vacuum-worker.ts",
+			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
+		);
+		await writeInline(
+			"inline-integrity-check-worker.ts",
+			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "BBBB";',
+		);
+		await writeInline(
+			"inline-incremental-vacuum-worker.ts",
+			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "CCCC";',
 		);
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});

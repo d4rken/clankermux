@@ -4,9 +4,9 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// This script embeds the 3 SQLite maintenance workers (vacuum, integrity-check,
-// incremental-vacuum) into gitignored `inline-*.ts` files that the database
-// package imports at runtime. For each worker it:
+// This script embeds the 4 SQLite workers (vacuum, integrity-check,
+// incremental-vacuum, payload-write) into gitignored `inline-*.ts` files that
+// the database package imports at runtime. For each worker it:
 //   1. writes an empty `EMBEDDED_*` placeholder if the inline file is missing,
 //      so imports resolve while the worker source is bundled;
 //   2. `bun build`s the worker source into a temporary dist dir;
@@ -54,6 +54,12 @@ const workers: Worker[] = [
 		inline: "inline-incremental-vacuum-worker.ts",
 		bundle: "incremental-vacuum-worker.js",
 		constName: "EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE",
+	},
+	{
+		source: "payload-write-worker.ts",
+		inline: "inline-payload-write-worker.ts",
+		bundle: "payload-write-worker.js",
+		constName: "EMBEDDED_PAYLOAD_WRITE_WORKER_CODE",
 	},
 ];
 

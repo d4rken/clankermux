@@ -41,6 +41,7 @@ const DB_WORKER_INLINE_FILES = [
 	"packages/database/src/inline-vacuum-worker.ts",
 	"packages/database/src/inline-integrity-check-worker.ts",
 	"packages/database/src/inline-incremental-vacuum-worker.ts",
+	"packages/database/src/inline-payload-write-worker.ts",
 ];
 
 export function buildTargets(repoRoot: string): BuildTarget[] {
