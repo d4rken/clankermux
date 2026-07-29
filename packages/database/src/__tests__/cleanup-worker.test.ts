@@ -135,6 +135,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 			cleanup?: {
 				removedRequests: number;
 				removedPayloads: number;
+				removedPayloadsBySize: number;
 				removedSnapshots: number;
 				removedMemorySnapshots: number;
 			};
@@ -152,6 +153,8 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					requestCutoff: CUTOFF,
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
+					// Byte budget disabled — these cases exercise the age rules only.
+					payloadMaxBytes: 0,
 				});
 			});
 		} finally {
@@ -271,6 +274,8 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					requestCutoff: CUTOFF,
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
+					// Byte budget disabled — these cases exercise the age rules only.
+					payloadMaxBytes: 0,
 				});
 			});
 		} finally {
@@ -292,10 +297,13 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		const dbOps = new DatabaseOperations(dbPath);
 		try {
 			const res = await dbOps.cleanupOldRequests(HOUR, HOUR, HOUR, HOUR);
-			// Exact shape (no stray fields) + nothing deleted.
+			// Exact shape (no stray fields) + nothing deleted. removedPayloads is
+			// the TOTAL across the age/orphan/size rules; removedPayloadsBySize is
+			// the byte-budget detail (the budget defaults to 0 = disabled here).
 			expect(res).toEqual({
 				removedRequests: 0,
 				removedPayloads: 0,
+				removedPayloadsBySize: 0,
 				removedSnapshots: 0,
 				removedMemorySnapshots: 0,
 			});

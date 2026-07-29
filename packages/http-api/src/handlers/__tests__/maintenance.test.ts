@@ -18,6 +18,7 @@ function makeConfig(
 	storePayloads?: boolean,
 	usageSnapshotDays = 90,
 	memorySnapshotDays = 90,
+	payloadMaxBytes = 0,
 ) {
 	return {
 		// The handler consumes the millisecond accessor directly — the payload
@@ -27,6 +28,9 @@ function makeConfig(
 		getStorePayloads: () => storePayloads ?? true,
 		getUsageSnapshotRetentionDays: () => usageSnapshotDays,
 		getMemorySnapshotRetentionDays: () => memorySnapshotDays,
+		// Byte budget in BYTES — same accessor the scheduled cleanup uses, so the
+		// manual path can't drift into its own unit conversion.
+		getPayloadMaxBytes: () => payloadMaxBytes,
 	} as unknown as import("@clankermux/config").Config;
 }
 
@@ -180,6 +184,22 @@ describe("createCleanupHandler", () => {
 			expect(memorySnapshotMs).toBe(30 * 24 * 60 * 60 * 1000);
 		});
 
+		it("threads the configured payload byte budget through to cleanupOldRequests", async () => {
+			// "Clean up now" must apply the SAME two rules as the hourly tick;
+			// dropping the budget here would make the manual path quietly weaker.
+			const dbOps = makeDbOps();
+			const handler = createCleanupHandler(
+				dbOps,
+				makeConfig(72, 90, true, 90, 90, 4 * 1024 * 1024 * 1024),
+			);
+			await handler();
+
+			const [, , , , payloadMaxBytes] = (
+				dbOps.cleanupOldRequests as ReturnType<typeof mock>
+			).mock.calls[0];
+			expect(payloadMaxBytes).toBe(4 * 1024 * 1024 * 1024);
+		});
+
 		it("does NOT call compact (cleanup and compact are separate handlers)", async () => {
 			const dbOps = makeDbOps();
 			const handler = createCleanupHandler(dbOps, makeConfig());
@@ -210,6 +230,23 @@ describe("createCleanupHandler", () => {
 			const [payloadMs] = (dbOps.cleanupOldRequests as ReturnType<typeof mock>)
 				.mock.calls[0];
 			expect(payloadMs).toBe(0);
+		});
+
+		it("passes a 0 byte budget when storePayloads=false", async () => {
+			// The payload cutoff already means "delete everything" there, so the
+			// budget has nothing left to do — and a non-zero one would only make the
+			// eviction pass scan a table that is being emptied anyway.
+			const dbOps = makeDbOps();
+			const handler = createCleanupHandler(
+				dbOps,
+				makeConfig(72, 90, false, 90, 90, 4 * 1024 * 1024 * 1024),
+			);
+			await handler();
+
+			const [, , , , payloadMaxBytes] = (
+				dbOps.cleanupOldRequests as ReturnType<typeof mock>
+			).mock.calls[0];
+			expect(payloadMaxBytes).toBe(0);
 		});
 
 		it("payloadCutoffIso is a valid ISO string when storePayloads=true", async () => {

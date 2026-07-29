@@ -120,6 +120,7 @@ export function createConfigHandlers(
 		getRetention: (): Response => {
 			return jsonResponse({
 				payloadHours: config.getPayloadRetentionHours(),
+				payloadMaxMb: config.getPayloadMaxMb(),
 				requestDays: config.getRequestRetentionDays(),
 				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
 				memorySnapshotDays: config.getMemorySnapshotRetentionDays(),
@@ -145,6 +146,20 @@ export function createConfigHandlers(
 					return errorResponse(BadRequest("Invalid 'payloadHours'"));
 				}
 				config.setPayloadRetentionHours(payloadHours);
+				updated = true;
+			}
+			if (body.payloadMaxMb !== undefined) {
+				// 0 is a valid value here (it disables the budget), unlike the
+				// retention windows whose minimum is 1.
+				const payloadMaxMb = validateNumber(body.payloadMaxMb, "payloadMaxMb", {
+					min: 0,
+					max: 1_048_576,
+					integer: true,
+				});
+				if (typeof payloadMaxMb !== "number") {
+					return errorResponse(BadRequest("Invalid 'payloadMaxMb'"));
+				}
+				config.setPayloadMaxMb(payloadMaxMb);
 				updated = true;
 			}
 			if (body.requestDays !== undefined) {

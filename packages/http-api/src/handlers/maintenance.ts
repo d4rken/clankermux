@@ -29,11 +29,20 @@ export function createCleanupHandler(
 		// cutoff + delete pass — out of scope here.
 		const usageSnapshotMs = config.getUsageSnapshotRetentionDays() * DAY_MS;
 		const memorySnapshotMs = config.getMemorySnapshotRetentionDays() * DAY_MS;
+		// The byte budget applies here exactly as it does on the hourly tick, so a
+		// manual "Clean up now" enforces the same two rules. With payload storage
+		// disabled the cutoff above already means "delete everything", leaving the
+		// budget nothing to do — pass 0 rather than have the eviction pass scan a
+		// table that is being emptied anyway.
+		const payloadMaxBytes = config.getStorePayloads()
+			? config.getPayloadMaxBytes()
+			: 0;
 		const { removedRequests, removedPayloads } = await dbOps.cleanupOldRequests(
 			payloadMs,
 			requestMs,
 			usageSnapshotMs,
 			memorySnapshotMs,
+			payloadMaxBytes,
 		);
 		const now = Date.now();
 		const payload: CleanupResponse = {

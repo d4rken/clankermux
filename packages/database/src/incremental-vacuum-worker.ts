@@ -150,11 +150,18 @@ export type IncrementalVacuumRequest =
 			requestCutoff: number | null;
 			usageSnapshotCutoff: number;
 			memorySnapshotCutoff: number;
+			// Byte budget for retained payload CONTENT (not file size); 0 disables
+			// the size pass. Applied on top of payloadCutoff — whichever rule
+			// deletes more wins.
+			payloadMaxBytes: number;
 	  };
 
 export type CleanupCounts = {
 	removedRequests: number;
+	/** TOTAL payload rows removed: age pass + orphan sweep + size pass. */
 	removedPayloads: number;
+	/** Detail: how many of `removedPayloads` the byte-budget pass evicted. */
+	removedPayloadsBySize: number;
 	removedSnapshots: number;
 	removedMemorySnapshots: number;
 };
@@ -304,48 +311,76 @@ function runOptimize(dbPath: string): void {
 }
 
 /**
- * Delete rows older than `cutoff` from `table` in small committed batches,
- * releasing the writer slot between each. `whereCond` is the age predicate on
- * that table (e.g. `timestamp < ?`), bound with `cutoff`; `table`/`whereCond`
- * are trusted internal constants, not caller input.
+ * Delete rows matching `whereCond` from `table` in small committed batches,
+ * releasing the writer slot between each. `whereCond` is the predicate on that
+ * table (e.g. `timestamp < ?`), bound with `cutoff`; `table`/`whereCond` are
+ * trusted internal constants, not caller input.
  *
- * Selects the target ids first (LIMIT), then deletes exactly those — so the
- * returned count reflects rows *of this table* deleted, NOT the FK-cascade
- * child rows that `.changes` would additionally include (which both inflates
- * the count and breaks a `.changes < batchSize` termination test). Loop ends
- * when a batch returns fewer ids than the batch size. A transient lock after
- * progress stops early (deleted rows persist; the next hourly tick resumes); a
- * transient lock on the first batch, or any non-lock error, propagates to the
- * caller's { ok: false }.
+ * TWO deletion modes, and the choice is a correctness decision per table:
+ *
+ *  - DEFAULT (`atomic` unset/false) — select the target ids first (LIMIT), then
+ *    delete exactly those, so the returned count reflects rows *of this table*
+ *    deleted, NOT the FK-cascade child rows that `.changes` would additionally
+ *    include (which both inflates the count and breaks a `.changes < batchSize`
+ *    termination test). REQUIRED for `requests`, whose four ON DELETE CASCADE
+ *    children would otherwise be counted.
+ *  - `atomic: true` — ONE statement per batch, with the predicate re-applied
+ *    inside the delete's subquery. This closes a select-then-delete race: the
+ *    id-only DELETE of the default mode does not re-check the predicate, so a
+ *    concurrent upsert landing between the two statements (rewriting a row's
+ *    json/bytes/timestamp) would have its FRESH payload deleted. Harmless for
+ *    the 12h age pass (nothing that old is being upserted) but very much not for
+ *    the byte-budget pass, whose cutoff targets recent rows. A single statement
+ *    is atomic under autocommit. `.changes` is exact here ONLY because
+ *    `request_payloads` has no FK children — never use this mode for a table
+ *    that cascades.
+ *
+ * Loop ends when a batch removes fewer rows than the batch size. A transient
+ * lock after progress stops early (deleted rows persist; the next hourly tick
+ * resumes); a transient lock on the first batch, or any non-lock error,
+ * propagates to the caller's { ok: false }.
+ *
+ * Exported for the eviction tests, which drive it against a wrapped handle to
+ * simulate a concurrent upsert; production callers are in runCleanup().
  */
-async function deleteBatched(
+export async function deleteBatched(
 	db: Database,
 	table: string,
 	whereCond: string,
 	cutoff: number,
+	opts?: { atomic?: boolean },
 ): Promise<number> {
 	const selectSql = `SELECT id FROM ${table} WHERE ${whereCond} LIMIT ?`;
+	const atomicSql = `DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} WHERE ${whereCond} LIMIT ?)`;
 	let total = 0;
 	for (;;) {
-		let ids: Array<{ id: string }>;
+		let removed: number;
 		try {
-			ids = db
-				.query(selectSql)
-				.all(cutoff, CLEANUP_DELETE_BATCH_ROWS) as Array<{ id: string }>;
-			if (ids.length > 0) {
-				const placeholders = ids.map(() => "?").join(",");
-				db.run(
-					`DELETE FROM ${table} WHERE id IN (${placeholders})`,
-					ids.map((r) => r.id),
-				);
+			if (opts?.atomic) {
+				removed = db.run(atomicSql, [
+					cutoff,
+					CLEANUP_DELETE_BATCH_ROWS,
+				]).changes;
+			} else {
+				const ids = db
+					.query(selectSql)
+					.all(cutoff, CLEANUP_DELETE_BATCH_ROWS) as Array<{ id: string }>;
+				if (ids.length > 0) {
+					const placeholders = ids.map(() => "?").join(",");
+					db.run(
+						`DELETE FROM ${table} WHERE id IN (${placeholders})`,
+						ids.map((r) => r.id),
+					);
+				}
+				removed = ids.length;
 			}
 		} catch (err) {
 			if (isTransientLockError(err) && total > 0) break;
 			throw err;
 		}
-		total += ids.length;
-		// A short batch means everything older than the cutoff is drained.
-		if (ids.length < CLEANUP_DELETE_BATCH_ROWS) break;
+		total += removed;
+		// A short batch means everything matching the predicate is drained.
+		if (removed < CLEANUP_DELETE_BATCH_ROWS) break;
 		await Bun.sleep(CLEANUP_DELETE_YIELD_MS);
 	}
 	return total;
@@ -411,6 +446,10 @@ async function tryDeleteSnapshotsBatched(
  * are chunked with slot-releasing yields (see CLEANUP_DELETE_BATCH_ROWS) so this
  * can't monopolize SQLite's single writer slot. The main thread still nulls its
  * in-process retentionUsageCache after this resolves — the worker can't.
+ *
+ * Payloads are bounded by TWO independent rules and both apply, whichever
+ * deletes more: the age cutoff (`payloadCutoff`) and, when enabled, the byte
+ * budget (`payloadMaxBytes`) enforced by the final oldest-first eviction pass.
  */
 async function runCleanup(
 	dbPath: string,
@@ -418,6 +457,7 @@ async function runCleanup(
 	requestCutoff: number | null,
 	usageSnapshotCutoff: number,
 	memorySnapshotCutoff: number,
+	payloadMaxBytes: number,
 ): Promise<void> {
 	let db: Database | undefined;
 	try {
@@ -434,11 +474,15 @@ async function runCleanup(
 		db.exec("PRAGMA busy_timeout = 200");
 		applyWorkerPragmas(db);
 
+		// atomic: request_payloads has no FK children, and using one deletion
+		// semantic for the whole table keeps the next reader from picking the
+		// racy one for the size pass below (see deleteBatched).
 		const removedPayloadsByAge = await deleteBatched(
 			db,
 			"request_payloads",
 			"timestamp IS NOT NULL AND timestamp < ?",
 			payloadCutoff,
+			{ atomic: true },
 		);
 
 		// Orphaned payloads (request row already gone). Typically ~0; a NOT IN
@@ -476,6 +520,56 @@ async function runCleanup(
 			memorySnapshotCutoff,
 		);
 
+		// Byte-budget pass — LAST, deliberately: it must run AFTER the `requests`
+		// age pass and its FK cascades. A payload whose parent request row is
+		// about to be deleted still counts toward the budget until that cascade
+		// happens, so evicting earlier would remove survivors unnecessarily.
+		//
+		// Governing invariant: the budget counts EXACTLY the rows this pass can
+		// evict. Both the running sum and the delete predicate are qualified by
+		// `bytes IS NOT NULL AND timestamp IS NOT NULL`. Any other pairing is a
+		// defect: counting a row the pass cannot delete lets it pin the total over
+		// budget forever (every tick evicts collectable rows without converging),
+		// and deleting a row the count ignores throws away data that contributed
+		// nothing to the overage.
+		let removedPayloadsBySize = 0;
+		if (payloadMaxBytes > 0) {
+			// ONE query resolves everything — no separate SELECT SUM(bytes)
+			// pre-check: two reads on separate autocommit snapshots can disagree,
+			// and the pre-check buys nothing because "no qualifying row" already
+			// means "under budget". The running sum walks newest-first and the
+			// first row whose cumulative total exceeds the budget marks the cutoff;
+			// everything at or older than it goes. The inner scan is already
+			// ordered by idx_request_payloads_size, so the first qualifying row IS
+			// the answer — an outer ORDER BY would force a temp B-tree.
+			const cutoffRow = db
+				.query(
+					`SELECT timestamp FROM (
+						SELECT timestamp,
+						       SUM(bytes) OVER (ORDER BY timestamp DESC) AS running
+						FROM request_payloads
+						WHERE bytes IS NOT NULL AND timestamp IS NOT NULL
+					)
+					WHERE running > ?
+					LIMIT 1`,
+				)
+				.get(payloadMaxBytes) as { timestamp: number } | null | undefined;
+			if (cutoffRow) {
+				// `timestamp <= cutoff` deletes rows tied on the cutoff millisecond
+				// as a whole bucket, which can land marginally UNDER budget. That is
+				// deliberate: measured live, 1741 rows spanned 1739 distinct
+				// timestamps (at most 2 sharing a millisecond), so the worst case is
+				// ~one extra row — far cheaper than tuple-cutoff complexity.
+				removedPayloadsBySize = await deleteBatched(
+					db,
+					"request_payloads",
+					"bytes IS NOT NULL AND timestamp IS NOT NULL AND timestamp <= ?",
+					cutoffRow.timestamp,
+					{ atomic: true },
+				);
+			}
+		}
+
 		// Close the worker's connection BEFORE signalling completion. The caller
 		// terminates the worker on receipt and may immediately open its own
 		// connection to the DB; closing first releases our write lock so that
@@ -486,7 +580,12 @@ async function runCleanup(
 			ok: true,
 			cleanup: {
 				removedRequests,
-				removedPayloads: removedPayloadsByAge + removedOrphans,
+				// TOTAL across all three payload rules — reporting the size
+				// evictions only in the detail field would make "Clean up now" say
+				// "Removed 0 payloads" right after a large size eviction.
+				removedPayloads:
+					removedPayloadsByAge + removedOrphans + removedPayloadsBySize,
+				removedPayloadsBySize,
 				removedSnapshots,
 				removedMemorySnapshots,
 			},
@@ -513,6 +612,7 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 			request.requestCutoff,
 			request.usageSnapshotCutoff,
 			request.memorySnapshotCutoff,
+			request.payloadMaxBytes,
 		);
 	} else {
 		// kind "vacuum" or absent (backward compat: kind-less messages

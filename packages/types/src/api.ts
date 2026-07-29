@@ -116,6 +116,11 @@ export interface RequestRoutingMeta {
 export interface RetentionGetResponse {
 	/** Payload retention window in HOURS (all sibling windows are in days). */
 	payloadHours: number;
+	/**
+	 * Byte budget for stored payloads in MEGABYTES; 0 = disabled. Counts payload
+	 * CONTENT bytes, not the database file size.
+	 */
+	payloadMaxMb: number;
 	requestDays: number;
 	usageSnapshotDays: number;
 	memorySnapshotDays: number;
@@ -126,6 +131,8 @@ export interface RetentionGetResponse {
 export interface RetentionSetRequest {
 	/** Payload retention window in HOURS (all sibling windows are in days). */
 	payloadHours?: number;
+	/** Byte budget for stored payloads in MEGABYTES; 0 disables it. */
+	payloadMaxMb?: number;
 	requestDays?: number;
 	usageSnapshotDays?: number;
 	memorySnapshotDays?: number;

@@ -138,8 +138,15 @@ export const PAYLOAD_BATCH_MAX_ROWS = 32;
  */
 export const PAYLOAD_BATCH_MAX_DELAY_MS = 25;
 
-const INSERT_SQL = `INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)
-	 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, timestamp = EXCLUDED.timestamp`;
+/**
+ * `bytes` is the row's UTF-8 length, recorded so the retention pass can enforce
+ * a byte budget by summing an integer column off an index instead of scanning
+ * the blobs. `bytes = EXCLUDED.bytes` on conflict is REQUIRED: the replay path
+ * re-sends entries and a payload may be rewritten with different content, so a
+ * stale size would otherwise survive indefinitely and mis-drive eviction.
+ */
+const INSERT_SQL = `INSERT INTO request_payloads (id, json, timestamp, bytes) VALUES (?, ?, ?, ?)
+	 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, timestamp = EXCLUDED.timestamp, bytes = EXCLUDED.bytes`;
 
 /**
  * SQLite primary result codes that are database-wide failures: the write path
@@ -247,7 +254,9 @@ export function classifyCommitError(err: unknown): PayloadWriteErrorClass {
  */
 export interface PayloadWriteDb {
 	exec(sql: string): void;
-	prepare(sql: string): { run(id: string, json: string, ts: number): unknown };
+	prepare(sql: string): {
+		run(id: string, json: string, ts: number, bytes: number): unknown;
+	};
 	close(): void;
 }
 
@@ -260,6 +269,12 @@ export interface PayloadWriteEngineOptions {
 	maxBatchDelayMs?: number;
 	setTimer?: (cb: () => void, ms: number) => unknown;
 	clearTimer?: (handle: unknown) => void;
+}
+
+/** A queued row plus its UTF-8 size, carried together from accept to insert. */
+interface PendingRow {
+	row: PayloadWriteRowMessage;
+	bytes: number;
 }
 
 export interface PayloadWriteEngine {
@@ -316,7 +331,10 @@ export function createPayloadWriteEngine(
 	// budget must be in BYTES: `String.length` counts UTF-16 code units, so a
 	// plaintext (unencrypted) payload of multibyte text would let a batch hold
 	// up to ~3x the byte budget and hold the WAL writer slot that much longer.
-	const pending: Array<{ row: PayloadWriteRowMessage; bytes: number }> = [];
+	// The same figure is written to request_payloads.bytes — computed once here
+	// and threaded through the batch rather than recomputed at insert time, so
+	// the stored size and the batch budget can never drift apart.
+	const pending: PendingRow[] = [];
 	let pendingBytes = 0;
 	let timer: unknown = null;
 	let fatal: string | null = null;
@@ -337,8 +355,8 @@ export function createPayloadWriteEngine(
 		}, maxBatchDelayMs);
 	}
 
-	function takeBatch(): PayloadWriteRowMessage[] {
-		const batch: PayloadWriteRowMessage[] = [];
+	function takeBatch(): PendingRow[] {
+		const batch: PendingRow[] = [];
 		let bytes = 0;
 		while (pending.length > 0) {
 			const next = pending[0];
@@ -350,20 +368,20 @@ export function createPayloadWriteEngine(
 			pending.shift();
 			pendingBytes -= next.bytes;
 			bytes += next.bytes;
-			batch.push(next.row);
+			batch.push(next);
 		}
 		return batch;
 	}
 
 	function nackAll(
-		batch: PayloadWriteRowMessage[],
+		batch: PendingRow[],
 		errorClass: PayloadWriteErrorClass,
 		detail: string,
 	): void {
 		post({
 			type: "ack",
 			generation,
-			results: batch.map((row) => ({
+			results: batch.map(({ row }) => ({
 				seq: row.seq,
 				id: row.id,
 				status: "failed" as const,
@@ -381,7 +399,7 @@ export function createPayloadWriteEngine(
 		}
 	}
 
-	function writeBatch(batch: PayloadWriteRowMessage[]): void {
+	function writeBatch(batch: PendingRow[]): void {
 		if (batch.length === 0) return;
 
 		if (fatal) {
@@ -406,10 +424,10 @@ export function createPayloadWriteEngine(
 			detail: string;
 		} | null = null;
 
-		for (const row of batch) {
+		for (const { row, bytes } of batch) {
 			try {
 				db.exec("SAVEPOINT payload_row");
-				insert.run(row.id, row.ciphertext, row.timestamp);
+				insert.run(row.id, row.ciphertext, row.timestamp, bytes);
 				db.exec("RELEASE payload_row");
 				results.push({ seq: row.seq, id: row.id, status: "committed" });
 			} catch (err) {
