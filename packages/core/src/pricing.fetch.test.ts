@@ -11,10 +11,12 @@ import { __pricingTestHooks, estimateCostUSD } from "./pricing";
  * fallback while the remote refresh happens in the background.
  */
 
-// Point the disk cache at a fresh empty dir so a stale models.dev cache can't
-// satisfy loadPricing() — we want to exercise the remote-fetch path. Restore in
+// Point the disk cache at a fresh empty dir so a real models.dev snapshot can't
+// satisfy loadPricing() — we want to exercise the remote-fetch path. The
+// catalogue cache lives under XDG_CACHE_HOME (it moved off the OS temp dir,
+// which is tmpfs and lost the snapshot on every reboot). Restore in
 // afterAll-equivalent teardown (bun shares one process across files).
-const originalTmpdir = process.env.TMPDIR;
+const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalFetch = globalThis.fetch;
 let cacheDir: string;
 
@@ -24,15 +26,15 @@ const PRICING_FETCH_TIMEOUT_MS = 4_000;
 
 beforeEach(() => {
 	cacheDir = mkdtempSync(join(tmpdir(), "cmux-pricing-fetch-"));
-	process.env.TMPDIR = cacheDir;
+	process.env.XDG_CACHE_HOME = cacheDir;
 	__pricingTestHooks.reset();
 });
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
 	__pricingTestHooks.reset();
-	if (originalTmpdir === undefined) delete process.env.TMPDIR;
-	else process.env.TMPDIR = originalTmpdir;
+	if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+	else process.env.XDG_CACHE_HOME = originalCacheHome;
 	rmSync(cacheDir, { recursive: true, force: true });
 });
 

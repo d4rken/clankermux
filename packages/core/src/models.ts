@@ -87,3 +87,29 @@ export function getModelDisplayName(modelId: string): string {
 export function isValidModelId(modelId: string): modelId is ClaudeModelId {
 	return Object.values(CLAUDE_MODEL_IDS).includes(modelId as ClaudeModelId);
 }
+
+/**
+ * Matches a model slug ending in a `-YYYY-MM-DD` release-date suffix, capturing
+ * the base slug. Restricted to a date-like suffix so a caller never borrows an
+ * arbitrary unknown suffix's identity (which could point at a differently-sized
+ * or differently-priced model) — only a dated variant of a KNOWN base resolves.
+ *
+ * Lives here, in the dependency-free model module, because two unrelated
+ * lookups need the same rule: the context-window map (model-mappings.ts) and the
+ * pricing catalogue (pricing.ts). pricing.ts must not import model-mappings.ts —
+ * that module constructs a Logger at import time, and the core↔logger import
+ * order is fragile.
+ */
+const DATED_MODEL_SUFFIX = /^(.+)-\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Strip a trailing `-YYYY-MM-DD` release-date suffix from a model slug.
+ *
+ * Returns the base slug (`gpt-5.6-sol` for `gpt-5.6-sol-2026-05-13`), or null
+ * when the slug carries no dated suffix. Callers use it as a SECOND lookup
+ * attempt only: an exact match must always win, because a dated snapshot that a
+ * table lists explicitly may differ from its base.
+ */
+export function stripDatedModelSuffix(modelId: string): string | null {
+	return DATED_MODEL_SUFFIX.exec(modelId)?.[1] ?? null;
+}

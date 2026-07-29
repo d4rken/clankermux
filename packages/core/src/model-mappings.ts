@@ -1,6 +1,7 @@
 import { Logger } from "@clankermux/logger";
 import type { Account, ContextComposition } from "@clankermux/types";
 import { isDebugEnabled } from "./env";
+import { stripDatedModelSuffix } from "./models";
 import { safeJsonParse, validateModelMappings } from "./validation";
 
 const log = new Logger("ModelMappings");
@@ -455,14 +456,6 @@ export const GATE_CHARS_PER_TOKEN = 3.0;
 export const GATE_OUTPUT_RESERVE_CAP = 4_000;
 
 /**
- * Matches a model slug ending in a `-YYYY-MM-DD` release-date suffix, capturing
- * the base slug. Restricted to a date-like suffix so we never borrow a window
- * for an arbitrary unknown suffix (which could point at a differently-sized
- * model) — only a dated variant of a KNOWN base resolves.
- */
-const DATED_MODEL_SUFFIX = /^(.+)-\d{4}-\d{2}-\d{2}$/;
-
-/**
  * Look up the context window for a Codex model.
  * Returns undefined for unknown/compaction models.
  *
@@ -473,8 +466,8 @@ const DATED_MODEL_SUFFIX = /^(.+)-\d{4}-\d{2}-\d{2}$/;
 export function resolveModelContextWindow(model: string): number | undefined {
 	const exact = MODEL_CONTEXT_WINDOWS[model];
 	if (exact !== undefined) return exact;
-	const dated = DATED_MODEL_SUFFIX.exec(model);
-	if (dated) return MODEL_CONTEXT_WINDOWS[dated[1]];
+	const base = stripDatedModelSuffix(model);
+	if (base !== null) return MODEL_CONTEXT_WINDOWS[base];
 	return undefined;
 }
 

@@ -26,24 +26,28 @@ globalThis.fetch = async () => {
 	throw new Error("pricing test network disabled");
 };
 
-// The pricing disk cache is rooted at `tmpdir()`, so redirect the OS temp dir to
-// a throwaway location. `bun test` shares one process across all test files, so
-// this mutation must be restored in afterAll — leaking it makes `tmpdir()`
-// return the throwaway dir for every file that runs afterward, which broke
-// security/path-validator's "should include temp directory" assertion (its
-// cached allowlist held the real /tmp while tmpdir() returned cmux-pricing-*).
-const originalTmpdir = process.env.TMPDIR;
-const pricingTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-"));
-process.env.TMPDIR = pricingTmpdir;
+// The catalogue snapshot is rooted at the XDG cache dir, so redirect that to a
+// throwaway location. `bun test` shares one process across all test files, so
+// this mutation must be restored in afterAll.
+//
+// It used to redirect TMPDIR instead, back when the snapshot lived under
+// `tmpdir()` — which leaked the throwaway dir into every file that ran
+// afterward and broke security/path-validator's "should include temp directory"
+// assertion (its cached allowlist held the real /tmp while tmpdir() returned
+// cmux-pricing-*). Overriding a variable only the pricing cache reads has no
+// such blast radius.
+const originalCacheHome = process.env.XDG_CACHE_HOME;
+const pricingCacheHome = mkdtempSync(join(tmpdir(), "cmux-pricing-"));
+process.env.XDG_CACHE_HOME = pricingCacheHome;
 
 afterAll(() => {
 	globalThis.fetch = originalFetch;
-	if (originalTmpdir === undefined) {
-		delete process.env.TMPDIR;
+	if (originalCacheHome === undefined) {
+		delete process.env.XDG_CACHE_HOME;
 	} else {
-		process.env.TMPDIR = originalTmpdir;
+		process.env.XDG_CACHE_HOME = originalCacheHome;
 	}
-	rmSync(pricingTmpdir, { recursive: true, force: true });
+	rmSync(pricingCacheHome, { recursive: true, force: true });
 });
 
 describe("estimateCostUSD", () => {
@@ -129,7 +133,7 @@ describe("bundled Opus pricing (offline fallback)", () => {
 describe("bundled cost fields backfill a partial remote entry", () => {
 	// models.dev can list a freshly-released model before it carries cache
 	// pricing. Merging "remote wins wholesale" would then leave the merged entry
-	// without cache_read/cache_write, getCostRate would throw, and the WHOLE
+	// without cache_read/cache_write, the rate lookup would throw, and the WHOLE
 	// request cost would collapse to 0 (persisted as NULL) — the same outage the
 	// bundled entry exists to prevent. Bundled must fill the per-field gaps while
 	// every value the remote does define still wins.
@@ -149,10 +153,13 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		run: () => Promise<void>,
 	): Promise<void> {
 		const offlineFetch = globalThis.fetch;
-		// Point the disk cache somewhere disposable so the stub catalogue can't
-		// leak into any later test through the on-disk pricing cache.
-		const remoteTmpdir = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
-		process.env.TMPDIR = remoteTmpdir;
+		// Point the snapshot dir somewhere disposable so the stub catalogue can't
+		// leak into any later test through the on-disk cache. This is load-bearing,
+		// not hygiene: the loader reads a fresh snapshot BEFORE trying the network,
+		// so a shared dir would feed each case the previous case's catalogue and the
+		// stub below would never be fetched at all.
+		const remoteCacheHome = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
+		process.env.XDG_CACHE_HOME = remoteCacheHome;
 		globalThis.fetch = (async () =>
 			new Response(JSON.stringify(remote), {
 				headers: { "content-type": "application/json" },
@@ -163,8 +170,8 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 			await run();
 		} finally {
 			globalThis.fetch = offlineFetch;
-			process.env.TMPDIR = pricingTmpdir;
-			rmSync(remoteTmpdir, { recursive: true, force: true });
+			process.env.XDG_CACHE_HOME = pricingCacheHome;
+			rmSync(remoteCacheHome, { recursive: true, force: true });
 			__pricingTestHooks.reset();
 		}
 	}
