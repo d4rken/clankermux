@@ -20,7 +20,7 @@ function makeConfig() {
 		setUsageThrottlingWeeklyEnabled: mock(() => {}),
 		getStrategy: () => "session",
 		setStrategy: mock(() => {}),
-		getDataRetentionDays: () => 3,
+		getPayloadRetentionHours: () => 72,
 		getRequestRetentionDays: () => 90,
 		getUsageSnapshotRetentionDays: () => 90,
 		getMemorySnapshotRetentionDays: () => 30,
@@ -29,7 +29,7 @@ function makeConfig() {
 			cacheKeepaliveSnapshotDays = v;
 		}),
 		getStorePayloads: () => true,
-		setDataRetentionDays: mock(() => {}),
+		setPayloadRetentionHours: mock(() => {}),
 		setRequestRetentionDays: mock(() => {}),
 		setUsageSnapshotRetentionDays: mock(() => {}),
 		setMemorySnapshotRetentionDays: mock(() => {}),
@@ -346,6 +346,97 @@ describe("createConfigHandlers", () => {
 
 		expect(body.cacheKeepaliveSnapshotDays).toBe(30);
 		expect(body.memorySnapshotDays).toBe(30);
+	});
+
+	it("reports the payload window in hours, not days", async () => {
+		const handlers = createConfigHandlers(makeConfig(), {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = handlers.getRetention();
+		const body = (await response.json()) as Record<string, unknown>;
+
+		expect(body.payloadHours).toBe(72);
+		expect(body).not.toHaveProperty("payloadDays");
+	});
+
+	it("persists a sub-day payloadHours from the retention setter", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		const response = await handlers.setRetention(
+			new Request("http://localhost/api/config/retention", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ payloadHours: 12 }),
+			}),
+		);
+
+		expect(response.status).toBe(204);
+		expect(config.setPayloadRetentionHours).toHaveBeenCalledWith(12);
+	});
+
+	it("rejects an out-of-range payloadHours", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		// validateNumber throws ValidationError (400) for out-of-range; only the
+		// router turns that into an HTTP 400, so assert rejection here.
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadHours: 8761 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadRetentionHours).not.toHaveBeenCalled();
+	});
+
+	it("rejects a zero payloadHours", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadHours: 0 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadRetentionHours).not.toHaveBeenCalled();
+	});
+
+	it("rejects a fractional payloadHours", async () => {
+		const config = makeConfig();
+		const handlers = createConfigHandlers(config, {
+			port: 8080,
+			tlsEnabled: false,
+		});
+
+		await expect(
+			handlers.setRetention(
+				new Request("http://localhost/api/config/retention", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ payloadHours: 1.5 }),
+				}),
+			),
+		).rejects.toThrow();
+		expect(config.setPayloadRetentionHours).not.toHaveBeenCalled();
 	});
 
 	it("persists cacheKeepaliveSnapshotDays from the retention setter", async () => {

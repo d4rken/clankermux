@@ -1,3 +1,4 @@
+import type { RetentionSetRequest } from "@clankermux/types";
 import {
 	useInfiniteQuery,
 	useMutation,
@@ -499,14 +500,8 @@ export const useRetention = () => {
 export const useSetRetention = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (partial: {
-			payloadDays?: number;
-			requestDays?: number;
-			usageSnapshotDays?: number;
-			memorySnapshotDays?: number;
-			cacheKeepaliveSnapshotDays?: number;
-			storePayloads?: boolean;
-		}) => api.setRetention(partial),
+		// Shared request shape — see the note on ApiClient.setRetention.
+		mutationFn: (partial: RetentionSetRequest) => api.setRetention(partial),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["retention"] });
 		},

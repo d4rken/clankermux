@@ -22,8 +22,8 @@ export function DataRetentionCard() {
 	const setRetention = useSetRetention();
 	const cleanupNow = useCleanupNow();
 	const { data: usage } = useStorageUsage();
-	const [payloadDays, setPayloadDays] = useState<number>(
-		data?.payloadDays ?? 1,
+	const [payloadHours, setPayloadHours] = useState<number>(
+		data?.payloadHours ?? 24,
 	);
 	const [requestDays, setRequestDays] = useState<number>(
 		data?.requestDays ?? 3650,
@@ -40,7 +40,8 @@ export function DataRetentionCard() {
 		useState<number>(data?.cacheKeepaliveSnapshotDays ?? 30);
 
 	useEffect(() => {
-		if (typeof data?.payloadDays === "number") setPayloadDays(data.payloadDays);
+		if (typeof data?.payloadHours === "number")
+			setPayloadHours(data.payloadHours);
 		if (typeof data?.requestDays === "number") setRequestDays(data.requestDays);
 		if (typeof data?.usageSnapshotDays === "number")
 			setUsageSnapshotDays(data.usageSnapshotDays);
@@ -49,7 +50,7 @@ export function DataRetentionCard() {
 		if (typeof data?.cacheKeepaliveSnapshotDays === "number")
 			setCacheKeepaliveSnapshotDays(data.cacheKeepaliveSnapshotDays);
 	}, [
-		data?.payloadDays,
+		data?.payloadHours,
 		data?.requestDays,
 		data?.usageSnapshotDays,
 		data?.memorySnapshotDays,
@@ -58,7 +59,7 @@ export function DataRetentionCard() {
 
 	const disabled = isLoading || setRetention.isPending;
 	const validPayload =
-		Number.isFinite(payloadDays) && payloadDays >= 1 && payloadDays <= 365;
+		Number.isFinite(payloadHours) && payloadHours >= 1 && payloadHours <= 8760;
 	const validRequests =
 		Number.isFinite(requestDays) && requestDays >= 1 && requestDays <= 3650;
 	const validUsageSnapshots =
@@ -106,24 +107,28 @@ export function DataRetentionCard() {
 							<Input
 								type="number"
 								min={1}
-								max={365}
-								value={payloadDays}
+								max={8760}
+								value={payloadHours}
 								onChange={(e) =>
-									setPayloadDays(parseInt(e.target.value || "0", 10))
+									setPayloadHours(parseInt(e.target.value || "0", 10))
 								}
 								className="w-24"
 							/>
-							<span className="text-sm text-muted-foreground">days</span>
+							<span className="text-sm text-muted-foreground">hours</span>
 						</div>
 						<Button
 							size="sm"
 							disabled={disabled || !validPayload}
-							onClick={() => setRetention.mutate({ payloadDays })}
+							onClick={() => setRetention.mutate({ payloadHours })}
 						>
 							Save
 						</Button>
 					</div>
 					{usageHint("payloads")}
+					<p className="text-xs text-muted-foreground mt-1">
+						Payloads are by far the largest table — this is the main lever on
+						database size.
+					</p>
 				</div>
 
 				<div className="pt-2">

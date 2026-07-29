@@ -17,6 +17,8 @@ import type {
 	PaymentsSummary,
 	RequestPayload,
 	RequestResponse,
+	RetentionGetResponse,
+	RetentionSetRequest,
 	StatsWithErrors,
 	StorageUsageResponse,
 	SystemStatusResponse,
@@ -1569,29 +1571,17 @@ class API extends HttpClient {
 		}
 	}
 
-	// Retention settings
-	async getRetention(): Promise<{
-		payloadDays: number;
-		requestDays: number;
-		usageSnapshotDays: number;
-		memorySnapshotDays: number;
-		cacheKeepaliveSnapshotDays: number;
-		storePayloads: boolean;
-	}> {
+	// Retention settings. The shapes are the SHARED types — re-declaring them
+	// inline here would let a server-side field rename pass typecheck with the
+	// client silently disagreeing.
+	async getRetention(): Promise<RetentionGetResponse> {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<{
-				payloadDays: number;
-				requestDays: number;
-				usageSnapshotDays: number;
-				memorySnapshotDays: number;
-				cacheKeepaliveSnapshotDays: number;
-				storePayloads: boolean;
-			}>(url);
+			const response = await this.get<RetentionGetResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
@@ -1605,14 +1595,7 @@ class API extends HttpClient {
 		}
 	}
 
-	async setRetention(partial: {
-		payloadDays?: number;
-		requestDays?: number;
-		usageSnapshotDays?: number;
-		memorySnapshotDays?: number;
-		cacheKeepaliveSnapshotDays?: number;
-		storePayloads?: boolean;
-	}): Promise<void> {
+	async setRetention(partial: RetentionSetRequest): Promise<void> {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
 

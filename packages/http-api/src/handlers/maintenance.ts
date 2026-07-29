@@ -12,9 +12,11 @@ export function createCleanupHandler(
 		const requestDays = config.getRequestRetentionDays();
 		const requestMs = requestDays * DAY_MS;
 		// When payload storage is disabled, delete all existing payloads (cutoff = now).
-		// When enabled, honour the configured retention window.
+		// When enabled, honour the configured retention window. The payload window
+		// is configured in HOURS, so it comes straight from the ms accessor rather
+		// than being multiplied by DAY_MS like the sibling windows.
 		const payloadMs = config.getStorePayloads()
-			? config.getDataRetentionDays() * DAY_MS
+			? config.getPayloadRetentionMs()
 			: 0;
 		// Thread the configured usage- and memory-snapshot windows through too.
 		// The previous 2-arg call let cleanupOldRequests fall back to its 90d/14d
