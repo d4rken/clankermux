@@ -268,9 +268,11 @@ async function runStartupMaintenance(
 		const requestDays = config.getRequestRetentionDays();
 		const snapshotDays = config.getUsageSnapshotRetentionDays();
 		const memorySnapshotDays = config.getMemorySnapshotRetentionDays();
+		const payloadMaxMb = config.getPayloadMaxMb();
 		const {
 			removedRequests,
 			removedPayloads,
+			removedPayloadsBySize,
 			removedSnapshots,
 			removedMemorySnapshots,
 		} = await dbOps.cleanupOldRequests(
@@ -278,9 +280,10 @@ async function runStartupMaintenance(
 			requestDays * 24 * 60 * 60 * 1000,
 			snapshotDays * 24 * 60 * 60 * 1000,
 			memorySnapshotDays * 24 * 60 * 60 * 1000,
+			config.getPayloadMaxBytes(),
 		);
 		log.info(
-			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadHours}h, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
+			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadHours}h/${payloadMaxMb > 0 ? `${payloadMaxMb}MB` : "no byte budget"}, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
 		);
 		// Prune the cache-keepalive economics time-series (separate table, separate
 		// retention). Mirrors the memory/usage snapshot cutoff math above.
@@ -853,6 +856,7 @@ export default async function startServer(options?: {
 			const {
 				removedRequests,
 				removedPayloads,
+				removedPayloadsBySize,
 				removedSnapshots,
 				removedMemorySnapshots,
 			} = await dbOps.cleanupOldRequests(
@@ -860,6 +864,7 @@ export default async function startServer(options?: {
 				requestDays * TIME_CONSTANTS.DAY,
 				snapshotDays * TIME_CONSTANTS.DAY,
 				memorySnapshotDays * TIME_CONSTANTS.DAY,
+				config.getPayloadMaxBytes(),
 			);
 			// Prune the cache-keepalive economics time-series (separate table,
 			// separate retention). Mirrors the memory/usage snapshot cutoff math.
@@ -877,7 +882,10 @@ export default async function startServer(options?: {
 				removedKeepaliveSnapshots > 0
 			) {
 				log.info(
-					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads, ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots in ${Date.now() - startTime}ms`,
+					// Payload removals are split so the age rule and the byte budget
+					// are distinguishable in the journal — they delete for different
+					// reasons and only one of them is operator-tunable by size.
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots in ${Date.now() - startTime}ms`,
 				);
 				// Reclaim freed pages to the OS, off-thread via the incremental-
 				// vacuum worker, which batches the budget into slot-releasing

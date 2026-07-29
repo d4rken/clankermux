@@ -25,6 +25,10 @@ export function DataRetentionCard() {
 	const [payloadHours, setPayloadHours] = useState<number>(
 		data?.payloadHours ?? 24,
 	);
+	// Edited in GB (the settable range spans 0–1024 GB); the API speaks MB.
+	const [payloadMaxGb, setPayloadMaxGb] = useState<number>(
+		(data?.payloadMaxMb ?? 0) / 1024,
+	);
 	const [requestDays, setRequestDays] = useState<number>(
 		data?.requestDays ?? 3650,
 	);
@@ -42,6 +46,8 @@ export function DataRetentionCard() {
 	useEffect(() => {
 		if (typeof data?.payloadHours === "number")
 			setPayloadHours(data.payloadHours);
+		if (typeof data?.payloadMaxMb === "number")
+			setPayloadMaxGb(data.payloadMaxMb / 1024);
 		if (typeof data?.requestDays === "number") setRequestDays(data.requestDays);
 		if (typeof data?.usageSnapshotDays === "number")
 			setUsageSnapshotDays(data.usageSnapshotDays);
@@ -51,6 +57,7 @@ export function DataRetentionCard() {
 			setCacheKeepaliveSnapshotDays(data.cacheKeepaliveSnapshotDays);
 	}, [
 		data?.payloadHours,
+		data?.payloadMaxMb,
 		data?.requestDays,
 		data?.usageSnapshotDays,
 		data?.memorySnapshotDays,
@@ -60,6 +67,9 @@ export function DataRetentionCard() {
 	const disabled = isLoading || setRetention.isPending;
 	const validPayload =
 		Number.isFinite(payloadHours) && payloadHours >= 1 && payloadHours <= 8760;
+	// 0 is valid and means "no byte budget"; the server cap is 1048576 MB.
+	const validPayloadMax =
+		Number.isFinite(payloadMaxGb) && payloadMaxGb >= 0 && payloadMaxGb <= 1024;
 	const validRequests =
 		Number.isFinite(requestDays) && requestDays >= 1 && requestDays <= 3650;
 	const validUsageSnapshots =
@@ -128,6 +138,46 @@ export function DataRetentionCard() {
 					<p className="text-xs text-muted-foreground mt-1">
 						Payloads are by far the largest table — this is the main lever on
 						database size.
+					</p>
+				</div>
+
+				<div className="pt-2">
+					<div className="flex items-center gap-2">
+						<div className="flex items-center gap-2">
+							<span className="text-sm font-medium w-28">Payload size cap</span>
+							<Input
+								type="number"
+								min={0}
+								max={1024}
+								step={0.5}
+								value={payloadMaxGb}
+								onChange={(e) =>
+									setPayloadMaxGb(parseFloat(e.target.value || "0"))
+								}
+								className="w-24"
+							/>
+							<span className="text-sm text-muted-foreground">
+								GB{payloadMaxGb === 0 ? " (off)" : ""}
+							</span>
+						</div>
+						<Button
+							size="sm"
+							disabled={disabled || !validPayloadMax}
+							onClick={() =>
+								setRetention.mutate({
+									payloadMaxMb: Math.round(payloadMaxGb * 1024),
+								})
+							}
+						>
+							Save
+						</Button>
+					</div>
+					<p className="text-xs text-muted-foreground mt-1">
+						Second limit on top of the window above: once stored payloads exceed
+						this, the oldest are deleted until they fit. 0 disables it. Counts
+						payload content bytes, <strong>not the database file size</strong> —
+						the file stays larger and only shrinks as the vacuum returns freed
+						pages to disk.
 					</p>
 				</div>
 
