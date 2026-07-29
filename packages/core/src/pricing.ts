@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { platform } from "node:process";
 import {
 	PROVIDER_NAMES,
 	type PricingGap,
 	type PricingGapReason,
 } from "@clankermux/types";
 import { TIME_CONSTANTS } from "./constants";
-import { CLAUDE_MODEL_IDS, MODEL_DISPLAY_NAMES } from "./models";
+import {
+	CLAUDE_MODEL_IDS,
+	MODEL_DISPLAY_NAMES,
+	stripDatedModelSuffix,
+} from "./models";
 
 export interface TokenBreakdown {
 	inputTokens?: number;
@@ -252,6 +257,108 @@ BUNDLED_PRICING.minimax = {
 	},
 };
 
+/**
+ * Pricing for the Codex-served OpenAI models (dollars per 1M tokens).
+ *
+ * Scope is exactly the slug set in `MODEL_CONTEXT_WINDOWS` (model-mappings.ts) —
+ * the models a Codex account can actually be routed to. A test asserts the two
+ * lists stay in lockstep, so a new routable slug fails CI until it is priced
+ * here. The keys are string literals rather than an import: pricing.ts must not
+ * depend on model-mappings.ts, which builds a Logger at import time.
+ *
+ * Every rate is a VERBATIM snapshot of the models.dev base tier, not an
+ * independent estimate. That is deliberate: bundled values only ever fill holes
+ * (mergePricingData backfills per field, remote wins wherever it is defined), so
+ * a bundled number that disagreed with remote would be a silent second opinion
+ * that surfaces only when the network is down. Mirroring makes the merge a
+ * no-op against a live catalogue.
+ *
+ * `cache_write` is omitted wherever models.dev omits it. Codex uses an automatic
+ * prompt cache and never reports cache-creation tokens, so `estimateCostUSD`
+ * never asks for that rate — inventing one would be an unverifiable price on a
+ * bucket that is always zero.
+ *
+ * models.dev also carries a >272K-context tier (roughly 2x) for these models.
+ * the lookup reads only the base rates — for every provider, not just this one —
+ * so requests above that threshold are undercharged. Pre-existing behaviour,
+ * unchanged here.
+ *
+ * Note these entries are now also visible to the synchronous bundled-only
+ * lookups (`resolveBundledCost` / `getModelCacheRates`). That is inert today:
+ * the only caller is the cache keep-alive, which `isBridgeableProvider` gates to
+ * Anthropic accounts.
+ */
+BUNDLED_PRICING.openai = {
+	models: {
+		"gpt-5.6-sol": {
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			cost: {
+				input: 5,
+				output: 30,
+				cache_read: 0.5,
+				cache_write: 6.25,
+			},
+		},
+		"gpt-5.6-terra": {
+			id: "gpt-5.6-terra",
+			name: "GPT-5.6 Terra",
+			cost: {
+				input: 2.5,
+				output: 15,
+				cache_read: 0.25,
+				cache_write: 3.125,
+			},
+		},
+		"gpt-5.6-luna": {
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			cost: {
+				input: 1,
+				output: 6,
+				cache_read: 0.1,
+				cache_write: 1.25,
+			},
+		},
+		"gpt-5.5": {
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			cost: {
+				input: 5,
+				output: 30,
+				cache_read: 0.5,
+			},
+		},
+		"gpt-5.4": {
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			cost: {
+				input: 2.5,
+				output: 15,
+				cache_read: 0.25,
+			},
+		},
+		"gpt-5.4-mini": {
+			id: "gpt-5.4-mini",
+			name: "GPT-5.4 mini",
+			cost: {
+				input: 0.75,
+				output: 4.5,
+				cache_read: 0.075,
+			},
+		},
+		"gpt-5.3-codex-spark": {
+			id: "gpt-5.3-codex-spark",
+			name: "GPT-5.3 Codex Spark",
+			cost: {
+				input: 1.75,
+				output: 14,
+				cache_read: 0.175,
+			},
+		},
+	},
+};
+
 interface Logger {
 	warn(message: string, ...args: unknown[]): void;
 	debug(message: string, ...args: unknown[]): void;
@@ -264,6 +371,18 @@ const DEFAULT_PRICING_FETCH_TIMEOUT_MS = 4_000;
 /** How long a fetched pricing catalogue is treated as fresh before a background
  * refresh is triggered. */
 const PRICING_REFRESH_HOURS = 24;
+
+/**
+ * Hard ceiling on how long a pricing lookup will wait for an in-flight
+ * catalogue load before pricing from whatever is already published.
+ *
+ * The load's AbortController bounds the network call, but not the snapshot
+ * `stat`/read/write around it — and the snapshot lives under the home
+ * directory, which can be a slow or wedged network mount. Comfortably above the
+ * 4s fetch timeout so a normal cold load is never cut short; its only job is to
+ * stop a stuck filesystem from parking usage finalizers forever.
+ */
+const MAX_CATALOGUE_WAIT_MS = 6_000;
 
 /**
  * Hard cap on distinct (provider, model) REPORTABLE pricing misses held in
@@ -398,6 +517,83 @@ class PricingLookupError extends Error {
 	}
 }
 
+/**
+ * Does this model entry carry at least one rate this codebase can charge — one
+ * of the four known keys, holding a finite non-negative number?
+ *
+ * "Any numeric property" would not do: it accepts `Infinity`, and it accepts
+ * unrelated fields such as a context size, neither of which prices anything.
+ */
+function hasUsableRate(model: unknown): boolean {
+	if (!model || typeof model !== "object") return false;
+	const cost = (model as { cost?: unknown }).cost as
+		| Record<string, unknown>
+		| undefined;
+	if (!cost || typeof cost !== "object") return false;
+	return COST_KINDS.some((kind) => {
+		const rate = cost[kind];
+		return typeof rate === "number" && Number.isFinite(rate) && rate >= 0;
+	});
+}
+
+/**
+ * Accept a parsed catalogue only if it can actually price something — at least
+ * one provider carrying at least one model with at least one usable rate.
+ *
+ * Both the network response and the disk snapshot are unvalidated JSON, and
+ * anything that merges down to exactly the bundled table would otherwise still
+ * mark the catalogue "loaded" — the one signal saying the bundled seed has been
+ * replaced, which gates both the cold-start wait and the backfill preflight.
+ * `{}` is the obvious case, but so are a truncated write, an error page that
+ * happened to parse, and a structurally-plausible shape whose model entries are
+ * null or priceless. The check is deliberately about usable CONTENT, not shape.
+ */
+function asUsableCatalogue(parsed: unknown): ApiResponse | null {
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return null;
+	}
+	for (const provider of Object.values(parsed as Record<string, unknown>)) {
+		if (!provider || typeof provider !== "object" || Array.isArray(provider)) {
+			continue;
+		}
+		const models = (provider as { models?: unknown }).models;
+		if (!models || typeof models !== "object" || Array.isArray(models))
+			continue;
+		for (const model of Object.values(models as Record<string, unknown>)) {
+			if (hasUsableRate(model)) return parsed as ApiResponse;
+		}
+	}
+	return null;
+}
+
+/** Every model id the bundled fallback table already covers. */
+const BUNDLED_MODEL_IDS: ReadonlySet<string> = new Set(
+	Object.values(BUNDLED_PRICING).flatMap((provider) =>
+		Object.keys(provider.models ?? {}),
+	),
+);
+
+/**
+ * Does a merged table PRICE anything the bundled fallback does not?
+ *
+ * This is the honest test of "a real catalogue is loaded". Validating the raw
+ * response is not enough on either axis: the merge drops whole providers
+ * (coding-plan name patterns, all-zero-cost tables), so a response can pass
+ * validation and still merge down to exactly the bundled seed; and validation is
+ * satisfied by ANY one usable entry, which a bundled id can supply while every
+ * unknown id in the table is priceless. Both are asked here instead — an unknown
+ * model id AND a rate on it. Short-circuits on the first, which a genuine
+ * catalogue hits almost immediately.
+ */
+function addsCoverageBeyondBundled(merged: ApiResponse): boolean {
+	for (const provider of Object.values(merged)) {
+		for (const [modelId, model] of Object.entries(provider.models ?? {})) {
+			if (!BUNDLED_MODEL_IDS.has(modelId) && hasUsableRate(model)) return true;
+		}
+	}
+	return false;
+}
+
 class PriceCatalogue {
 	private static instance: PriceCatalogue;
 	private priceData: ApiResponse | null = null;
@@ -437,6 +633,31 @@ class PriceCatalogue {
 	 * models.dev fetch instead of each firing their own. Cleared when it settles.
 	 */
 	private inFlightLoad: Promise<ApiResponse> | null = null;
+	/**
+	 * Single in-flight BACKGROUND refresh promise, kept separate from
+	 * {@link inFlightLoad} so a refresh can never be mistaken for the initial
+	 * load that {@link awaitInFlightLoad} waits on.
+	 */
+	private inFlightRefresh: Promise<void> | null = null;
+	/**
+	 * Whether a real catalogue (remote or disk snapshot) has replaced the bundled
+	 * cold-start seed.
+	 *
+	 * `priceData !== null` cannot answer this: getPricing() publishes the bundled
+	 * table synchronously so the per-request finalizer never blocks, which means
+	 * for the first few hundred milliseconds of a process "the catalogue" is 26
+	 * models and every non-bundled lookup legitimately misses. Requests that
+	 * finalized in that window were recorded with cost NULL and raised a pricing
+	 * gap for a model that was in the catalogue all along.
+	 */
+	private catalogueLoaded = false;
+	/**
+	 * Whether the loaded catalogue came from a disk snapshot past its refresh
+	 * window because the remote was unreachable. Live pricing accepts that
+	 * happily — an old real catalogue beats the bundled fallback — but a tool
+	 * writing durable prices deserves to know before it commits them.
+	 */
+	private catalogueStale = false;
 
 	private constructor() {}
 
@@ -459,8 +680,29 @@ class PriceCatalogue {
 		return PriceCatalogue.instance;
 	}
 
+	/**
+	 * Directory holding the models.dev catalogue snapshot.
+	 *
+	 * Deliberately NOT the OS temp dir. /tmp is tmpfs on a normal Linux install,
+	 * so the snapshot was destroyed on every reboot and the first start afterwards
+	 * had to re-download the full catalogue (~5MB) over the network before any
+	 * non-bundled model could be priced. A cache that survives reboots is what
+	 * makes the cache-first path in {@link loadPricing} actually cheap.
+	 *
+	 * The platform rule mirrors `getPlatformConfigDir()` in @clankermux/config.
+	 * It is restated rather than imported because @clankermux/config depends on
+	 * @clankermux/core — importing it here would close a cycle.
+	 */
 	private getCacheDir(): string {
-		return join(tmpdir(), "clankermux");
+		if (platform === "win32") {
+			const base =
+				process.env.LOCALAPPDATA ??
+				process.env.APPDATA ??
+				join(homedir(), "AppData", "Local");
+			return join(base, "clankermux", "cache");
+		}
+		const base = process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache");
+		return join(base, "clankermux");
 	}
 
 	private getCachePath(): string {
@@ -548,9 +790,14 @@ class PriceCatalogue {
 				// leaves undefined. Remote values always win where they are defined
 				// (including 0) — bundled only backfills holes. Without the per-field
 				// backfill, a remote entry that lists a model but omits e.g.
-				// cache_read makes getCostRate throw and collapses the ENTIRE request
-				// cost to 0 (persisted as NULL), which is exactly what the bundled
-				// table exists to prevent.
+				// cache_read makes the rate lookup throw and collapses the ENTIRE
+				// request cost to 0 (persisted as NULL), which is exactly what the
+				// bundled table exists to prevent. This backfill only reaches an entry
+				// under the SAME provider and id: a partial entry under a DIFFERENT
+				// provider is deliberately left alone, since preferring some other
+				// provider's complete entry would reprice the request off a reseller's
+				// list (see selectModelEntry, which only does that for the base slug of
+				// a dated snapshot, and only when the rates agree).
 				let addedModels = 0;
 				let backfilledModels = 0;
 				for (const [modelId, modelData] of Object.entries(
@@ -711,15 +958,27 @@ class PriceCatalogue {
 		return null;
 	}
 
-	private async loadFromCache(): Promise<ApiResponse | null> {
+	/**
+	 * Read the catalogue snapshot from disk.
+	 *
+	 * By default only a snapshot inside the refresh window is returned — that is
+	 * the copy {@link loadPricing} is willing to serve requests from without
+	 * touching the network. Pass `allowStale` to accept one of any age: an
+	 * out-of-date real catalogue still prices thousands of models the 26-model
+	 * bundled table has never heard of, so it is strictly better than the bundled
+	 * fallback when the remote is unreachable.
+	 */
+	private async loadFromCache(
+		opts: { allowStale?: boolean } = {},
+	): Promise<ApiResponse | null> {
 		try {
 			const cachePath = this.getCachePath();
 			const stats = await fs.stat(cachePath);
 			const age = Date.now() - stats.mtime.getTime();
 
-			if (age < this.getCacheDurationMs()) {
+			if (opts.allowStale || age < this.getCacheDurationMs()) {
 				const content = await fs.readFile(cachePath, "utf-8");
-				return JSON.parse(content);
+				return asUsableCatalogue(JSON.parse(content));
 			}
 		} catch {
 			// Cache miss or error - that's ok
@@ -757,7 +1016,10 @@ class PriceCatalogue {
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 			}
-			const data = await response.json();
+			const data = asUsableCatalogue(await response.json());
+			if (!data) {
+				throw new Error("models.dev returned no usable model data");
+			}
 			await this.saveToCache(data);
 			return data;
 		} catch (error) {
@@ -776,30 +1038,100 @@ class PriceCatalogue {
 	}
 
 	/**
-	 * Resolve the full pricing table from remote (bounded) or disk cache, merged
-	 * with bundled; falls back to bundled-only. De-duped behind a single
-	 * in-flight promise so concurrent cold callers share one fetch.
+	 * Resolve the full pricing table, merged with bundled; falls back to
+	 * bundled-only. De-duped behind a single in-flight promise so concurrent cold
+	 * callers share one load.
+	 *
+	 * Cache-first, in this order:
+	 *
+	 *  1. a disk snapshot inside the refresh window — a local read, no network,
+	 *     with a background remote refresh kicked off so freshness is still bound
+	 *     by the snapshot's own age rather than by process lifetime;
+	 *  2. otherwise the remote fetch (bounded by its own timeout);
+	 *  3. otherwise a STALE disk snapshot, which used to be skipped entirely —
+	 *     an unreachable remote dropped straight to the 26-model bundled table
+	 *     even when a complete, slightly-old catalogue sat on disk;
+	 *  4. otherwise bundled-only.
+	 *
+	 * Steps 1-3 can produce a real catalogue and step 4 cannot, but none of them
+	 * SETS `catalogueLoaded` by virtue of having run: the flag is decided by
+	 * {@link addsCoverageBeyondBundled} on the merged result, because a response
+	 * from any of the first three can still merge down to exactly the bundled
+	 * table. That flag is what {@link estimateCostUSD} keys its cold-start retry
+	 * on, so it must mean "the bundled seed has been replaced", never "a load
+	 * ran".
 	 */
 	private loadPricing(): Promise<ApiResponse> {
 		if (this.inFlightLoad) return this.inFlightLoad;
 		const load = (async () => {
-			let data = await this.fetchRemote();
+			let data = await this.loadFromCache();
+			const servedFromFreshCache = data !== null;
 			if (!data) {
-				data = await this.loadFromCache();
+				data = await this.fetchRemote();
+			}
+			let servedFromStaleCache = false;
+			if (!data) {
+				data = await this.loadFromCache({ allowStale: true });
+				servedFromStaleCache = data !== null;
 			}
 			if (data) {
 				data = this.mergePricingData(data, BUNDLED_PRICING);
+				// Judged on the MERGE RESULT, not on what went in. Provider filtering
+				// runs inside the merge (coding-plan name patterns, all-zero-cost
+				// providers), so a response whose only usable provider is dropped
+				// yields exactly the bundled table — loaded, but with no more coverage
+				// than the seed it was supposed to replace.
+				this.catalogueLoaded = addsCoverageBeyondBundled(data);
+				this.catalogueStale = this.catalogueLoaded && servedFromStaleCache;
 			} else {
 				data = this.cloneBundled();
+				// A refresh that finds nothing usable REPLACES a catalogue that had
+				// loaded earlier, so the flag has to come back down with it. Leaving it
+				// set would tell estimateCostUSD the bundled seed was already replaced
+				// and make the offline backfill preflight a false positive.
+				this.catalogueLoaded = false;
+				this.catalogueStale = false;
 			}
 			this.priceData = data;
 			this.lastFetch = Date.now();
+			// Kick the refresh AFTER priceData is published so the fast path is
+			// already serving requests while the network call runs.
+			if (servedFromFreshCache) {
+				void this.refreshFromRemote();
+			}
 			return data;
 		})().finally(() => {
 			this.inFlightLoad = null;
 		});
 		this.inFlightLoad = load;
 		return load;
+	}
+
+	/**
+	 * Background remote refresh, used when {@link loadPricing} answered from a
+	 * fresh disk snapshot. Without it, serving from a nearly-expired snapshot and
+	 * then resetting the TTL would let the in-memory catalogue drift up to two
+	 * refresh windows behind models.dev.
+	 *
+	 * Failure is silent and harmless: whatever the snapshot provided stays in
+	 * place. Guarded by its own in-flight promise (not `inFlightLoad`) so it can
+	 * never be mistaken for the initial load the cold-start retry waits on.
+	 */
+	private refreshFromRemote(): Promise<void> {
+		if (this.inFlightRefresh) return this.inFlightRefresh;
+		const refresh = (async () => {
+			const remote = await this.fetchRemote();
+			if (!remote) return;
+			const merged = this.mergePricingData(remote, BUNDLED_PRICING);
+			this.priceData = merged;
+			this.lastFetch = Date.now();
+			this.catalogueLoaded = addsCoverageBeyondBundled(merged);
+			this.catalogueStale = false;
+		})().finally(() => {
+			this.inFlightRefresh = null;
+		});
+		this.inFlightRefresh = refresh;
+		return refresh;
 	}
 
 	async getPricing(): Promise<ApiResponse> {
@@ -832,6 +1164,90 @@ class PriceCatalogue {
 	}
 
 	/**
+	 * Whether a real catalogue has replaced the bundled cold-start seed. A lookup
+	 * that fails while this is false may simply be early, not missing.
+	 */
+	isCatalogueLoaded(): boolean {
+		return this.catalogueLoaded;
+	}
+
+	/**
+	 * Is a catalogue load or background refresh running right now — i.e. is there
+	 * anything a failed lookup could usefully wait for? False means the table on
+	 * hand is the best that exists, so a miss against it is real.
+	 */
+	hasPendingCatalogueWork(): boolean {
+		return this.inFlightLoad !== null || this.inFlightRefresh !== null;
+	}
+
+	/** Did the loaded catalogue come from a snapshot past its refresh window? */
+	isCatalogueStale(): boolean {
+		return this.catalogueStale;
+	}
+
+	/**
+	 * Await a catalogue load or background refresh if one is ALREADY running,
+	 * then hand back whatever table is current.
+	 *
+	 * Deliberately never starts one. A lookup miss must not be able to trigger
+	 * network traffic: in the degraded state where the first load already
+	 * finished without producing a catalogue (remote down, no snapshot on disk),
+	 * every subsequent miss would fire its own fetch. In that state there is
+	 * genuinely nothing to wait for and the miss is real, so the caller should
+	 * record it.
+	 *
+	 * The background refresh counts too. Serving from a fresh disk snapshot marks
+	 * the catalogue loaded, so without this a model that is missing from a
+	 * ≤24h-old snapshot but present in the refresh landing right now would still
+	 * be recorded unpriced — the original bug in a narrower window.
+	 *
+	 * Bounded: the load's own 4s abort covers the network, but not the disk reads
+	 * and writes around it, and the snapshot now lives under the home directory,
+	 * which can be a wedged network mount. On timeout the caller simply prices
+	 * from what is already published, which is the pre-existing behaviour.
+	 *
+	 * `settled` says whether the awaited work actually finished. It is what stops
+	 * a caller from waiting the full deadline twice over on one stuck promise, and
+	 * what lets a tool writing durable prices tell "nothing left to do" apart from
+	 * "gave up while work was still running".
+	 */
+	async awaitInFlightLoad(): Promise<{
+		pricing: ApiResponse;
+		settled: boolean;
+	}> {
+		if (!this.hasPendingCatalogueWork()) {
+			return { pricing: this.priceData ?? this.cloneBundled(), settled: true };
+		}
+
+		// One stage per call — the initial load if there is one, otherwise the
+		// refresh. A load that answered from a disk snapshot starts the refresh as
+		// its final act, so a caller still missing its model after the first call
+		// can call again to wait out the refresh. Staged rather than chained so the
+		// common case (the snapshot had the model) never pays for the network.
+		const inFlight: Promise<unknown> =
+			this.inFlightLoad ?? (this.inFlightRefresh as Promise<unknown>);
+
+		// A rejection counts as settled: the work is over, just unsuccessfully, and
+		// there is nothing further to wait for. Swallowing it here also keeps an
+		// internal load error from surfacing as a bogus "model not found".
+		const completion = inFlight.then(
+			() => true,
+			() => true,
+		);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<boolean>((resolve) => {
+			timer = setTimeout(() => resolve(false), MAX_CATALOGUE_WAIT_MS);
+		});
+		let settled: boolean;
+		try {
+			settled = await Promise.race([completion, deadline]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+		return { pricing: this.priceData ?? this.cloneBundled(), settled };
+	}
+
+	/**
 	 * Test-only: clear cached pricing + in-flight load so a test can exercise the
 	 * cold-start path deterministically. Not part of the public runtime surface.
 	 */
@@ -839,10 +1255,18 @@ class PriceCatalogue {
 		this.priceData = null;
 		this.lastFetch = 0;
 		this.inFlightLoad = null;
+		this.inFlightRefresh = null;
+		this.catalogueLoaded = false;
+		this.catalogueStale = false;
 		this.pricingMisses.clear();
 		this.warnedModels.clear();
 		this.pricingMissOverflow = 0;
 		this.warnedPricingMissOverflow = false;
+	}
+
+	/** Test-only: the resolved catalogue-snapshot directory. */
+	getCacheDirForTests(): string {
+		return this.getCacheDir();
 	}
 
 	/** Test-only: size of the reported-gap registry. */
@@ -1067,6 +1491,14 @@ export const __pricingTestHooks = {
 	hasInFlightLoad(): boolean {
 		return PriceCatalogue.get().hasInFlightLoadForTests();
 	},
+	/** Has a real catalogue replaced the bundled cold-start seed? */
+	isCatalogueLoaded(): boolean {
+		return PriceCatalogue.get().isCatalogueLoaded();
+	},
+	/** Directory the catalogue snapshot is read from and written to. */
+	cacheDir(): string {
+		return PriceCatalogue.get().getCacheDirForTests();
+	},
 	getPricing(): Promise<unknown> {
 		return PriceCatalogue.get().getPricing();
 	},
@@ -1077,10 +1509,16 @@ export const __pricingTestHooks = {
 
 /**
  * Resolve a model id to its bundled ModelCost entry, synchronously, by searching
- * every provider in BUNDLED_PRICING for an exact id match. This mirrors the exact
- * lookup `getCostRate` uses (`provider.models?.[modelId]`) — no normalization,
- * family matching, or case folding — so callers resolve models identically.
- * Returns null when the id is not in the bundled table.
+ * every provider in BUNDLED_PRICING for an exact id match — no normalization,
+ * family matching, or case folding. Returns null when the id is not in the
+ * bundled table.
+ *
+ * This is the EXACT-match step of the async lookup only: {@link selectModelEntry}
+ * additionally falls back to the base slug of a dated snapshot. The divergence is inert
+ * for the one caller ({@link getModelCacheRates}, whose cache-keepalive callers
+ * are gated to Anthropic accounts): Anthropic ids carry an undelimited date
+ * (`claude-sonnet-4-20250514`), which is not the `-YYYY-MM-DD` form the fallback
+ * recognises, so both paths resolve them identically.
  */
 function resolveBundledCost(modelId: string): ModelCost | null {
 	for (const provider of Object.values(BUNDLED_PRICING)) {
@@ -1121,53 +1559,152 @@ export function getModelCacheRates(modelId: string): {
 	};
 }
 
+/** The four rate kinds a request can be charged for. */
+const COST_KINDS = ["input", "output", "cache_read", "cache_write"] as const;
+type CostKind = (typeof COST_KINDS)[number];
+
 /**
- * Get the cost rate for a specific model and token type
- * @returns Cost in dollars per token (NOT per million)
- * @throws If model or cost type is unknown
+ * Pick the ONE entry a request is priced from.
+ *
+ * A `-YYYY-MM-DD` release-date suffix is the only id rewriting allowed:
+ * `gpt-5.4-mini-2026-03-17` may resolve through `gpt-5.4-mini`. Codex serves
+ * dated snapshots that most catalogues never list, and pricing a snapshot at its
+ * base rate is right where the catalogue is silent — the same reasoning, and the
+ * same helper, as `resolveModelContextWindow`.
+ *
+ * Selecting per request rather than per rate is deliberate. A request is charged
+ * from a single price list; taking `input` from one provider's entry and
+ * `cache_read` from another's would silently blend two price tiers into a number
+ * that matches no real bill.
+ *
+ * Among EXACT id matches the first one wins, unchanged from before. It is
+ * tempting to prefer whichever entry covers the most rates — a partial entry
+ * otherwise voids the whole request — but across resellers of the same id that
+ * trades a visible failure for a silent, badly wrong number. models.dev lists
+ * `gemini-3-pro-image-preview` at $2/$120 from Google with no cache_read and at
+ * $2/$12 from a reseller WITH cache_read: a coverage-first rule would move every
+ * cached request onto an output rate ten times too low. A NULL cost is loud (it
+ * raises the unpriced-model banner); a 10x-wrong cost is not.
+ *
+ * The dated-snapshot fallback is the ONE place coverage decides, and only in one
+ * of its two cases:
+ *
+ *  - nothing publishes the dated id — first base entry wins, no coverage scan.
+ *    There is no dated entry to check a candidate against, so scanning on for a
+ *    complete one would hand the request to whichever reseller lists every rate:
+ *    the same silent repricing refused above.
+ *  - the dated id IS published but cannot price the request — this is the real
+ *    case. 16 recorded `gpt-5.4-mini-2026-03-17` requests cost NULL because a
+ *    reseller listed that exact id with input and output but no `cache_read`,
+ *    and a single missing rate collapses the ENTIRE cost. Here a base entry may
+ *    supply the hole, but only where it AGREES with the rates the dated entry
+ *    does publish ({@link entriesAgree}) — a base slug priced differently is a
+ *    different product, not a source of the missing rate.
  */
-async function getCostRate(
+function selectModelEntry(
+	pricing: ApiResponse,
 	modelId: string,
-	kind: "input" | "output" | "cache_read" | "cache_write",
-): Promise<number> {
-	const catalogue = PriceCatalogue.get();
-	const pricing = await catalogue.getPricing();
+	needed: readonly CostKind[],
+): { entry: ModelDef | null; exact: boolean } {
+	const exact = firstEntryFor(pricing, modelId);
+	if (exact && entryCovers(exact, needed)) return { entry: exact, exact: true };
 
-	// Search all providers for the model
-	for (const provider of Object.values(pricing)) {
-		if (provider.models?.[modelId]) {
-			const model = provider.models[modelId];
-			if (!model.cost) {
-				throw new PricingLookupError(
-					`Model ${modelId} has no cost information`,
-					"cost_missing",
-				);
+	const base = stripDatedModelSuffix(modelId);
+	if (base !== null) {
+		if (!exact) {
+			// Nothing publishes the dated id, so the base slug is the whole answer:
+			// first entry wins, exactly as for an ordinary id. Scanning on for a
+			// COVERING base entry here would reintroduce the repricing this function
+			// refuses everywhere else — with no exact entry there is nothing to check
+			// a later candidate against, so a cheap reseller listing every rate would
+			// beat the vendor's own partial one.
+			return { entry: firstEntryFor(pricing, base), exact: false };
+		}
+		// The dated id IS published but cannot price this request. A base entry may
+		// supply the missing rate only where it agrees with every rate the dated
+		// entry does publish — evidence that the two are the same price list rather
+		// than two products that happen to share a prefix.
+		for (const provider of Object.values(pricing)) {
+			const entry = provider.models?.[base];
+			if (!entry) continue;
+			if (entryCovers(entry, needed) && entriesAgree(exact, entry)) {
+				return { entry, exact: false };
 			}
-
-			const costKey =
-				kind === "cache_read" || kind === "cache_write"
-					? kind
-					: kind === "input"
-						? "input"
-						: "output";
-			const costPerMillion = model.cost[costKey];
-
-			if (costPerMillion === undefined) {
-				throw new PricingLookupError(
-					`Model ${modelId} has no ${kind} cost`,
-					"cost_missing",
-				);
-			}
-
-			// Convert from per-million to per-token
-			return costPerMillion / 1_000_000;
 		}
 	}
 
-	throw new PricingLookupError(
-		`Model ${modelId} not found in pricing catalogue`,
-		"model_missing",
-	);
+	return { entry: exact, exact: exact !== null };
+}
+
+/**
+ * Do two entries share at least one rate and agree on every rate they both
+ * define?
+ *
+ * Guards the dated-snapshot fallback: filling a hole in a snapshot's price list
+ * from its base slug is only sound while the two describe the same product, and
+ * matching overlapping rates is the strongest available evidence of that. A base
+ * entry that prices input differently from the snapshot is rejected rather than
+ * quietly overriding an explicitly published rate.
+ *
+ * Only reached when a dated entry exists to be contradicted; with none, the
+ * caller does not scan for coverage at all.
+ */
+function entriesAgree(a: ModelDef, b: ModelDef): boolean {
+	const costA = a.cost;
+	const costB = b.cost;
+	if (!costA || !costB) return false;
+	let shared = 0;
+	for (const kind of COST_KINDS) {
+		const rateA = costA[kind];
+		const rateB = costB[kind];
+		if (rateA === undefined || rateB === undefined) continue;
+		if (rateA !== rateB) return false;
+		shared++;
+	}
+	// No overlap is not agreement. A priceless dated stub, or one whose rates
+	// simply do not intersect the base entry's, is no evidence that the two are
+	// the same product — and treating it as agreement would let a cheap reseller's
+	// complete base entry reprice the request, which is what this guard exists to
+	// stop.
+	return shared > 0;
+}
+
+/** First entry for an exact id across providers, in catalogue order. */
+function firstEntryFor(pricing: ApiResponse, modelId: string): ModelDef | null {
+	for (const provider of Object.values(pricing)) {
+		const entry = provider.models?.[modelId];
+		if (entry) return entry;
+	}
+	return null;
+}
+
+/** Does this entry price every rate the request needs? */
+function entryCovers(
+	entry: ModelDef | null,
+	needed: readonly CostKind[],
+): boolean {
+	const cost = entry?.cost;
+	if (!cost) return false;
+	return needed.every((kind) => cost[kind] !== undefined);
+}
+
+/**
+ * Read one rate off the selected entry, in dollars per token (NOT per million).
+ * @throws PricingLookupError when the entry does not define it.
+ */
+function rateFromEntry(
+	entry: ModelDef,
+	modelId: string,
+	kind: CostKind,
+): number {
+	const costPerMillion = entry.cost?.[kind];
+	if (costPerMillion === undefined) {
+		throw new PricingLookupError(
+			`Model ${modelId} has no ${kind} cost`,
+			"cost_missing",
+		);
+	}
+	return costPerMillion / 1_000_000;
 }
 
 /**
@@ -1206,6 +1743,56 @@ const PRICING_GAP_SUPPRESSED_PROVIDERS: ReadonlySet<string> = new Set<string>([
 	PROVIDER_NAMES.OLLAMA_CLOUD,
 ]);
 
+/** Outcome of {@link loadPricingCatalogue}. */
+export interface PricingCatalogueStatus {
+	/** A real catalogue is in memory (not just the bundled fallback). */
+	loaded: boolean;
+	/**
+	 * The catalogue came from a disk snapshot older than the refresh window,
+	 * because the remote could not be reached. Its prices may be out of date.
+	 */
+	stale: boolean;
+	/**
+	 * All catalogue work has finished, so the table in memory will not change
+	 * underneath the caller. False means a load or refresh was still running when
+	 * the wait gave up — it can still land later and replace the table, so a tool
+	 * pricing many rows against it would write two different generations.
+	 */
+	stable: boolean;
+}
+
+/**
+ * Force the pricing catalogue to settle and report what is now in memory.
+ *
+ * For offline tools — the cost backfill script — that write durable prices and
+ * must know up front what they are writing from, instead of discovering it as a
+ * silently smaller or silently outdated repair. Waits out the background refresh
+ * as well as the initial load, so the table cannot change generation underneath
+ * a caller that then prices thousands of rows against it.
+ *
+ * The proxy never needs this: `estimateCostUSD` already waits on in-flight
+ * catalogue work before declaring a model unpriced.
+ */
+export async function loadPricingCatalogue(): Promise<PricingCatalogueStatus> {
+	const catalogue = PriceCatalogue.get();
+	await catalogue.getPricing();
+	// Two rounds: the first settles the initial load, which is what STARTS the
+	// background refresh when it answered from a snapshot; the second waits that
+	// refresh out. Unlike a live lookup, a tool writing durable prices wants the
+	// final generation even when an earlier one would have answered — otherwise
+	// the refresh lands mid-run and neighbouring rows get different prices.
+	await catalogue.awaitInFlightLoad();
+	await catalogue.awaitInFlightLoad();
+	return {
+		loaded: catalogue.isCatalogueLoaded(),
+		stale: catalogue.isCatalogueStale(),
+		// Asked of the catalogue rather than inferred from the waits: whether they
+		// settled or timed out, the only thing that matters is that nothing is left
+		// running which could swap the table mid-run.
+		stable: !catalogue.hasPendingCatalogueWork(),
+	};
+}
+
 /**
  * Cloned snapshots of the pricing-catalogue misses observed since process start
  * (cumulative — an entry is never retracted, because a later successful
@@ -1236,26 +1823,86 @@ export async function estimateCostUSD(
 	const catalogue = PriceCatalogue.get();
 
 	try {
+		// Only the buckets this request actually used are priced. A model whose
+		// catalogue entry omits, say, cache_write is perfectly usable for a request
+		// that created no cache — and the entry chosen below is scored on these
+		// rates alone, so an irrelevant hole never rejects an otherwise complete
+		// entry.
+		const needed: CostKind[] = [];
+		if (tokens.inputTokens) needed.push("input");
+		if (tokens.outputTokens) needed.push("output");
+		if (tokens.cacheReadInputTokens) needed.push("cache_read");
+		if (tokens.cacheCreationInputTokens) needed.push("cache_write");
+		// No metered tokens: nothing to charge, and nothing to look up — an
+		// unknown model on an empty request is not a pricing gap.
+		if (needed.length === 0) return 0;
+
+		let match = selectModelEntry(await catalogue.getPricing(), modelId, needed);
+		// A result that is a miss, a partial entry, or an INFERENCE from a dated
+		// snapshot's base slug proves nothing while a catalogue load is still in
+		// flight. That window is short, but it is exactly when the first requests
+		// after a restart finalize, and every one of them used to be persisted with
+		// a NULL cost and reported as an unpriced model. Inferences count because
+		// the bundled seed can satisfy a base slug on its own: taking that as final
+		// would price a dated snapshot from the fallback while the real catalogue —
+		// which may list that exact id at its own rate — was still loading.
+		//
+		// Keyed on work actually being in flight rather than on the catalogue being
+		// unloaded, so it also covers a background refresh landing right now, and so
+		// it never waits once the best available table is already published.
+		// awaitInFlightLoad never starts a load and gives up after a bounded wait;
+		// once it does give up, waiting on the same stuck promise again would only
+		// spend the deadline twice, so a timeout ends the loop.
+		//
+		// At most two rounds, because there are at most two things to wait for: the
+		// initial load, and the background refresh that a load answering from a disk
+		// snapshot starts as its final act.
+		for (
+			let round = 0;
+			round < 2 &&
+			!(match.exact && entryCovers(match.entry, needed)) &&
+			catalogue.hasPendingCatalogueWork();
+			round++
+		) {
+			const waited = await catalogue.awaitInFlightLoad();
+			match = selectModelEntry(waited.pricing, modelId, needed);
+			if (!waited.settled) break;
+		}
+		const entry = match.entry;
+		if (!entry) {
+			throw new PricingLookupError(
+				`Model ${modelId} not found in pricing catalogue`,
+				"model_missing",
+			);
+		}
+		if (!entry.cost) {
+			throw new PricingLookupError(
+				`Model ${modelId} has no cost information`,
+				"cost_missing",
+			);
+		}
+
 		let totalCost = 0;
 
 		if (tokens.inputTokens) {
-			const rate = await getCostRate(modelId, "input");
-			totalCost += tokens.inputTokens * rate;
+			totalCost += tokens.inputTokens * rateFromEntry(entry, modelId, "input");
 		}
 
 		if (tokens.outputTokens) {
-			const rate = await getCostRate(modelId, "output");
-			totalCost += tokens.outputTokens * rate;
+			totalCost +=
+				tokens.outputTokens * rateFromEntry(entry, modelId, "output");
 		}
 
 		if (tokens.cacheReadInputTokens) {
-			const rate = await getCostRate(modelId, "cache_read");
-			totalCost += tokens.cacheReadInputTokens * rate;
+			totalCost +=
+				tokens.cacheReadInputTokens *
+				rateFromEntry(entry, modelId, "cache_read");
 		}
 
 		if (tokens.cacheCreationInputTokens) {
-			const rate = await getCostRate(modelId, "cache_write");
-			totalCost += tokens.cacheCreationInputTokens * rate;
+			totalCost +=
+				tokens.cacheCreationInputTokens *
+				rateFromEntry(entry, modelId, "cache_write");
 		}
 
 		return totalCost;

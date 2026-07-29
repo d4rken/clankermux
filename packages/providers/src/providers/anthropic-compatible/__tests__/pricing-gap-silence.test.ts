@@ -32,18 +32,19 @@ const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => {
 	throw new Error("pricing test network disabled");
 };
-const originalTmpdir = process.env.TMPDIR;
-const pricingTmpdir = mkdtempSync(join(tmpdir(), "cmux-provider-pricing-"));
-process.env.TMPDIR = pricingTmpdir;
+// The catalogue snapshot is rooted at the XDG cache dir, not the OS temp dir.
+const originalCacheHome = process.env.XDG_CACHE_HOME;
+const pricingCacheHome = mkdtempSync(join(tmpdir(), "cmux-provider-pricing-"));
+process.env.XDG_CACHE_HOME = pricingCacheHome;
 
 afterAll(() => {
 	globalThis.fetch = originalFetch;
-	if (originalTmpdir === undefined) {
-		delete process.env.TMPDIR;
+	if (originalCacheHome === undefined) {
+		delete process.env.XDG_CACHE_HOME;
 	} else {
-		process.env.TMPDIR = originalTmpdir;
+		process.env.XDG_CACHE_HOME = originalCacheHome;
 	}
-	rmSync(pricingTmpdir, { recursive: true, force: true });
+	rmSync(pricingCacheHome, { recursive: true, force: true });
 	__pricingTestHooks.reset();
 });
 

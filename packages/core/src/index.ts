@@ -106,6 +106,7 @@ export {
 	getModelCacheRates,
 	getPricingGapOverflowCount,
 	getPricingGaps,
+	loadPricingCatalogue,
 	type PricingEstimateContext,
 	setPricingLogger,
 	type TokenBreakdown,
