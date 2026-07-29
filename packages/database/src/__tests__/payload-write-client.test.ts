@@ -520,6 +520,39 @@ describe("PayloadWriteClient — rotation", () => {
 		await h.client.dispose(0);
 	});
 
+	test("a replacement that dies during cutover is never installed as active", async () => {
+		// Budget 1 KiB → the very first send trips rotation.
+		const h = await primed({ rotationByteBudget: 1024 });
+		const first = h.fleet.workers[0];
+		const second = h.fleet.workers[1];
+
+		second.ready();
+		await h.tick();
+		expect(first.closeRequested).toBe(true);
+
+		// The replacement dies while the outgoing worker is still closing.
+		second.die("replacement crashed during cutover");
+		first.closed();
+		await h.tick();
+
+		// A dead generation must NOT become active — that would buffer everything
+		// forever against a thread that no longer exists.
+		const stats = h.client.getStats();
+		expect(stats.activeGeneration).toBeNull();
+		expect(stats.liveGenerations).toBe(0);
+		expect(stats.rotations).toBe(0);
+
+		// The scheduled respawn recovers and replays the retained entry.
+		h.clock.advance(300);
+		await h.tick();
+		expect(h.fleet.workers).toHaveLength(3);
+		const third = h.fleet.workers[2];
+		third.ready();
+		await h.tick();
+		expect(third.writes.map((w) => w.id)).toEqual(["req-1"]);
+		await h.client.dispose(0);
+	});
+
 	test("a spawn failure rolls back: the outgoing generation keeps draining", async () => {
 		const h = makeHarness({ rotationByteBudget: 1024 });
 		await h.publish();

@@ -854,6 +854,22 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			}
 
 			await this.closeGeneration(outgoing, PAYLOAD_ROTATION_DEADLINE_MS);
+			// The replacement can die (crash, close event) while the outgoing
+			// worker is still closing. Installing a dead generation as active would
+			// wedge the client permanently: everything would buffer against a
+			// thread that no longer exists, and the watchdog — which only looks at
+			// SENT entries — would keep reporting healthy.
+			if (
+				replacement.status !== "ready" ||
+				!this.generations.has(replacement.id)
+			) {
+				log.warn(
+					`Payload writer replacement generation ${replacement.id} died during cutover — respawning`,
+				);
+				this.active = null;
+				this.scheduleRespawn();
+				return;
+			}
 			// Only now — the outgoing worker is closed or terminated — does the
 			// replacement become active, so two writers are never active at once.
 			this.active = replacement;
