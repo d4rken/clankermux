@@ -297,9 +297,12 @@ export const useUsageHistory = (range: string) => {
 };
 
 /**
- * Process memory footprint (RSS + JS heap) time-series for the Overview-tab
- * "Memory Usage" chart. Same polling cadence as useUsageHistory (45s stale, 60s
- * refetch, paused in the background) since both feed time-series charts.
+ * Process memory footprint (RSS + JS heap) time-series, feeding the System
+ * Health page's "Memory Usage" chart and the Overview health strip's RSS
+ * sparkline. Keyed by range, so the two share a cache entry only when the
+ * chart's selector happens to sit on the sparkline's 24h window. Same polling
+ * cadence as useUsageHistory (45s stale, 60s refetch, paused in the background)
+ * since both feed time-series charts.
  */
 export const useMemoryHistory = (range: string) => {
 	return useQuery({

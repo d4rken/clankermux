@@ -5,6 +5,7 @@ import {
 	FileText,
 	Gauge,
 	GitBranch,
+	HeartPulse,
 	Key,
 	LayoutDashboard,
 	Menu,
@@ -50,6 +51,7 @@ const NAV_ITEMS: NavItem[] = [
 	{ label: "Routing Chains", icon: Zap, path: "/combos" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
+	{ label: "System", icon: HeartPulse, path: "/system" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
 ];
 

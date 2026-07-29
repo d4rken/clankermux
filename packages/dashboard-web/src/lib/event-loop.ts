@@ -1,6 +1,7 @@
-// Event-loop lag display helpers, shared by the Overview memory chart's lag
-// overlay and the System Status "Event loop" tile. Thresholds mirror the
-// in-process monitor's WARN/ERROR levels (@clankermux/core event-loop-monitor).
+// Event-loop lag display helpers, shared by the memory chart's lag overlay, the
+// System Status "Event loop" tile and the Overview health strip. Thresholds
+// mirror the in-process monitor's WARN/ERROR levels (@clankermux/core
+// event-loop-monitor).
 
 /** Lag at or above this is a degraded signal (monitor WARN threshold). */
 export const EVENT_LOOP_WARN_MS = 250;

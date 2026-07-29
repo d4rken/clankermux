@@ -898,7 +898,7 @@ class API extends HttpClient {
 		}
 	}
 
-	// Process memory footprint (RSS + JS heap) time-series for the Overview-tab
+	// Process memory footprint (RSS + JS heap) time-series for the System Health
 	// "Memory Usage" chart. Backed by the direct (non-worker) memory-history handler.
 	async getMemoryHistory(range: string): Promise<MemoryHistoryResponse> {
 		const startTime = Date.now();

@@ -20,11 +20,14 @@ export interface EventLoopLagStats {
  *
  * Served by `GET /api/system/status`. Unlike `/health` (consumed by external
  * load balancers and intentionally terse), this bundles the health rollup with
- * process uptime and memory so the dashboard can render uptime + an RSS
- * sparkline without hitting the `/api/debug/*` profiling endpoints.
+ * process uptime and memory so the dashboard can render uptime and current RSS
+ * without hitting the `/api/debug/*` profiling endpoints.
  *
- * Point-in-time only: `memory.rss_mb` is the current RSS. The sparkline history
- * is accumulated client-side across polls; the server keeps no time series.
+ * Point-in-time only: `memory.rss_mb` is the current RSS, and no history is
+ * carried here. Trend lines read `GET /api/analytics/memory-history` instead,
+ * which serves bucketed `memory_snapshots` rows — do NOT accumulate a series
+ * client-side across polls, it would reset on every navigation and disagree
+ * with the chart.
  */
 export interface SystemStatusResponse {
 	/** Rollup health, computed identically to `/health` (runtime + pool). */
