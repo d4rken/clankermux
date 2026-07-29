@@ -321,6 +321,24 @@ describe("PayloadWriteClient — retry", () => {
 		await h.client.dispose(0);
 	});
 
+	test("oldestUnackedAgeMs measures from publication, not from the last resend", async () => {
+		const h = await primed();
+		const worker = h.fleet.workers[0];
+
+		// The entry sits unacked for 5s, then a retryable NACK resends it. The
+		// resend must NOT make an old entry look fresh.
+		h.clock.advance(5_000);
+		worker.ackAll("failed", "retryable");
+		h.clock.advance(200);
+		await h.tick();
+		expect(worker.writes).toHaveLength(1);
+
+		expect(h.client.getStats().oldestUnackedAgeMs).toBeGreaterThanOrEqual(
+			5_200,
+		);
+		await h.client.dispose(0);
+	});
+
 	test("retry backoff grows and the entry keeps its registry slot", async () => {
 		const h = await primed();
 		const worker = h.fleet.workers[0];

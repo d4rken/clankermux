@@ -260,6 +260,13 @@ interface RegistryEntry extends PayloadEntryInput {
 	attempts: number;
 	/** True once the entry has been handed to any generation. */
 	everSent: boolean;
+	/**
+	 * When the entry entered the registry. Immutable — retries, replays and
+	 * cross-generation handovers must NOT reset it, or an entry stuck for hours
+	 * would report an age of milliseconds.
+	 */
+	publishedAt: number;
+	/** When the entry was last handed to a generation; watchdog progress basis. */
 	sentAt: number;
 	retryTimer: TimerHandle | null;
 }
@@ -350,6 +357,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			generation: null,
 			attempts: 0,
 			everSent: false,
+			publishedAt: this.now(),
 			sentAt: this.now(),
 			retryTimer: null,
 		};
@@ -365,12 +373,14 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	getStats(): PayloadWriterStats {
 		let transportBytes = 0;
 		let payloadBytes = 0;
-		let oldestSentAt: number | null = null;
+		// Age is measured from PUBLICATION, not from the last send: retries and
+		// replays reset `sentAt`, which would make a long-stuck entry look fresh.
+		let oldestPublishedAt: number | null = null;
 		for (const entry of this.unacked.values()) {
 			transportBytes += entry.transportBytes;
 			payloadBytes += entry.payloadBytes;
-			if (oldestSentAt === null || entry.sentAt < oldestSentAt) {
-				oldestSentAt = entry.sentAt;
+			if (oldestPublishedAt === null || entry.publishedAt < oldestPublishedAt) {
+				oldestPublishedAt = entry.publishedAt;
 			}
 		}
 		return {
@@ -378,9 +388,9 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			unackedTransportBytes: transportBytes,
 			unackedPayloadBytes: payloadBytes,
 			oldestUnackedAgeMs:
-				oldestSentAt === null
+				oldestPublishedAt === null
 					? 0
-					: Math.max(0, Math.round(this.now() - oldestSentAt)),
+					: Math.max(0, Math.round(this.now() - oldestPublishedAt)),
 			committed: this.committed,
 			droppedPermanent: this.droppedPermanent,
 			expired: this.expired,
