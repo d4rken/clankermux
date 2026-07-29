@@ -302,7 +302,11 @@ export function createPayloadWriteEngine(
 	} = options;
 
 	const insert = db.prepare(INSERT_SQL);
-	const pending: PayloadWriteRowMessage[] = [];
+	// Rows are queued with their UTF-8 byte size, computed once on accept. The
+	// budget must be in BYTES: `String.length` counts UTF-16 code units, so a
+	// plaintext (unencrypted) payload of multibyte text would let a batch hold
+	// up to ~3x the byte budget and hold the WAL writer slot that much longer.
+	const pending: Array<{ row: PayloadWriteRowMessage; bytes: number }> = [];
 	let pendingBytes = 0;
 	let timer: unknown = null;
 	let fatal: string | null = null;
@@ -328,16 +332,15 @@ export function createPayloadWriteEngine(
 		let bytes = 0;
 		while (pending.length > 0) {
 			const next = pending[0];
-			const nextBytes = next.ciphertext.length;
 			// Always take at least one row so an over-budget payload still moves.
 			if (batch.length > 0) {
 				if (batch.length >= maxBatchRows) break;
-				if (bytes + nextBytes > maxBatchBytes) break;
+				if (bytes + next.bytes > maxBatchBytes) break;
 			}
 			pending.shift();
-			pendingBytes -= nextBytes;
-			bytes += nextBytes;
-			batch.push(next);
+			pendingBytes -= next.bytes;
+			bytes += next.bytes;
+			batch.push(next.row);
 		}
 		return batch;
 	}
@@ -457,8 +460,9 @@ export function createPayloadWriteEngine(
 	return {
 		accept(row: PayloadWriteRowMessage): void {
 			if (closed) return;
-			pending.push(row);
-			pendingBytes += row.ciphertext.length;
+			const bytes = Buffer.byteLength(row.ciphertext);
+			pending.push({ row, bytes });
+			pendingBytes += bytes;
 			if (pending.length >= maxBatchRows || pendingBytes >= maxBatchBytes) {
 				flush();
 				return;

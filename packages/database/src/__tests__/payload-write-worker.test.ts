@@ -153,6 +153,49 @@ describe("payload write engine — batching and acks", () => {
 		expect(ack.results[0].status).toBe("committed");
 	});
 
+	test("the batch byte budget counts UTF-8 bytes, not UTF-16 code units", () => {
+		seedRequest("multibyte");
+		const posted: PayloadWriteResponse[] = [];
+		const engine = createPayloadWriteEngine({
+			db,
+			generation: 1,
+			post: (m) => posted.push(m),
+			maxBatchBytes: 16,
+			maxBatchRows: 100,
+		});
+
+		// 8 "€" = 8 UTF-16 code units but 24 UTF-8 bytes, i.e. over the 16-byte
+		// budget. Counting code units left it at 8 and never tripped the flush.
+		engine.accept(row({ id: "multibyte", ciphertext: "€".repeat(8) }));
+		expect(posted).toHaveLength(1);
+	});
+
+	test("takeBatch splits on real byte size", () => {
+		seedRequest("a");
+		seedRequest("b");
+		const posted: PayloadWriteResponse[] = [];
+		const engine = createPayloadWriteEngine({
+			db,
+			generation: 1,
+			post: (m) => posted.push(m),
+			maxBatchBytes: 16,
+			maxBatchRows: 100,
+		});
+
+		// 12 bytes each: two rows exceed the 16-byte budget, so they must land in
+		// two separate transactions rather than one 24-byte batch.
+		engine.accept(row({ seq: 1, id: "a", ciphertext: "€".repeat(4) }));
+		engine.accept(row({ seq: 2, id: "b", ciphertext: "€".repeat(4) }));
+		engine.flush();
+
+		expect(posted).toHaveLength(2);
+		for (const message of posted) {
+			if (message.type !== "ack") throw new Error("expected ack");
+			expect(message.results).toHaveLength(1);
+			expect(message.results[0].status).toBe("committed");
+		}
+	});
+
 	test("replaying the same id is an idempotent upsert", () => {
 		seedRequest("a");
 		const posted: PayloadWriteResponse[] = [];
