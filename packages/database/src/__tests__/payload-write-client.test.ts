@@ -788,6 +788,35 @@ describe("PayloadWriteClient — lifecycle", () => {
 		expect(stats.liveGenerations).toBe(0);
 	});
 
+	test("dispose during a rotation still hands over instead of abandoning", async () => {
+		// Budget 1 KiB → the first send trips rotation, so dispose lands in the
+		// window where `active` is null and the replacement is still prewarming.
+		const h = await primed({ rotationByteBudget: 1024 });
+		const first = h.fleet.workers[0];
+		expect(h.fleet.workers).toHaveLength(2);
+		await h.publish(); // buffers behind the rotation
+		expect(h.client.getStats().activeGeneration).toBeNull();
+
+		const disposal = h.client.dispose(30_000);
+		await h.tick();
+		// The replacement never reports ready, so the rotation rolls back onto the
+		// outgoing generation — which dispose must then flush through.
+		h.clock.advance(PAYLOAD_READY_TIMEOUT_MS + 1);
+		await h.tick();
+
+		expect(first.closeRequested).toBe(true);
+		expect(first.writes.map((w) => w.id)).toContain("req-2");
+		first.ackAll("committed");
+		first.closed();
+		await disposal;
+
+		const stats = h.client.getStats();
+		expect(stats.committed).toBe(2);
+		expect(stats.abandoned).toBe(0);
+		expect(stats.unackedEntries).toBe(0);
+		expect(first.terminated).toBe(true);
+	});
+
 	test("dispose terminates on its deadline and abandons what never committed", async () => {
 		const h = await primed();
 		const worker = h.fleet.workers[0];

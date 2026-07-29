@@ -318,6 +318,8 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	/** The in-flight spawn chain (spawn → activate → flush), for dispose. */
 	private spawnInFlight: Promise<unknown> | null = null;
 	private rotating = false;
+	/** The in-flight rotation (prewarm → close → cut over), for dispose. */
+	private rotationInFlight: Promise<void> | null = null;
 	private disposed = false;
 	private disposePromise: Promise<void> | null = null;
 
@@ -848,7 +850,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		const generation = this.active;
 		if (!generation) return;
 		if (generation.publishedBytes < this.rotationByteBudget) return;
-		void this.rotate(generation);
+		this.rotationInFlight = this.rotate(generation);
 	}
 
 	private async rotate(outgoing: GenerationState): Promise<void> {
@@ -890,6 +892,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			this.rotations++;
 		} finally {
 			this.rotating = false;
+			this.rotationInFlight = null;
 			if (this.active) this.replayToActive();
 		}
 	}
@@ -1052,6 +1055,12 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			// does not abandon work the worker could still have flushed.
 			if (this.spawnInFlight && this.unacked.size > 0) {
 				await this.raceDeadline(this.spawnInFlight, deadlineMs);
+			}
+			// Likewise for a rotation: while it runs `active` is null, so reading it
+			// now would skip the graceful handover entirely and abandon everything
+			// unacked. Wait (bounded) for the rotation to settle on a generation.
+			if (this.rotationInFlight) {
+				await this.raceDeadline(this.rotationInFlight, deadlineMs);
 			}
 
 			const active = this.active;
