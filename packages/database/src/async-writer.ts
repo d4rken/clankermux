@@ -343,7 +343,11 @@ export class AsyncDbWriter implements Disposable {
 
 		let published = false;
 		try {
-			published = writer.publish({
+			// publishReserved, not publish: this entry's admission decision was made
+			// when its capacity was reserved. A writer that has since suspended
+			// admission (no-progress watchdog or writer-fatal) must RETAIN it, not
+			// hand it back as an ordinary drop.
+			published = writer.publishReserved({
 				requestId: entry.requestId,
 				ciphertext: entry.ciphertext,
 				timestamp: entry.timestamp,

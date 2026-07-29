@@ -74,6 +74,12 @@ class FakeWriter implements PayloadWriterLike {
 	constructor(readonly onSettled: (s: PayloadSettlement) => void) {}
 
 	publish(entry: PayloadEntryInput): boolean {
+		if (!this.accept) return false;
+		return this.publishReserved(entry);
+	}
+
+	/** Mirrors the real client: only a disposed writer refuses a reservation. */
+	publishReserved(entry: PayloadEntryInput): boolean {
 		if (this.publishThrows) throw new Error("publish exploded");
 		if (!this.publishResult) return false;
 		this.published.push(entry);
@@ -388,6 +394,32 @@ describe("AsyncDbWriter", () => {
 
 		// Admission is closed while the writer refuses work.
 		expect(writer.canAcceptPayload(10)).toBe(false);
+		expect(writer.reservePayload(10)).toBeNull();
+	});
+
+	test("a reservation taken before suspension still publishes, not drops", () => {
+		const harness = makeWriter();
+		writer = harness.writer;
+		// Force the writer to exist, then reserve while admission is still open.
+		const first = writer.reservePayload(10);
+		if (!first) throw new Error("expected a reservation");
+		publish(writer, first, "req-1", "abc");
+		const second = writer.reservePayload(10);
+		if (!second) throw new Error("expected a reservation");
+
+		// The writer suspends admission (no-progress watchdog / writer-fatal)
+		// after the reservation was taken.
+		harness.fake().accept = false;
+
+		expect(publish(writer, second, "req-2", "defg")).toBe(true);
+		const h = writer.getHealth();
+		expect(h.payloadDropped).toBe(0);
+		expect(h.payloadInFlightJobs).toBe(2);
+		expect(harness.fake().published.map((p) => p.requestId)).toEqual([
+			"req-1",
+			"req-2",
+		]);
+		// Fresh admission stays closed.
 		expect(writer.reservePayload(10)).toBeNull();
 	});
 

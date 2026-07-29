@@ -168,6 +168,7 @@ export interface PayloadWriteClientOptions {
 /** The surface AsyncDbWriter depends on — kept narrow so it is trivial to fake. */
 export interface PayloadWriterLike {
 	publish(entry: PayloadEntryInput): boolean;
+	publishReserved(entry: PayloadEntryInput): boolean;
 	acceptsWork(): boolean;
 	getStats(): PayloadWriterStats;
 	dispose(deadlineMs?: number): Promise<void>;
@@ -364,9 +365,36 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		);
 	}
 
+	/** Fresh admission: refused whenever the writer is not accepting work. */
 	publish(entry: PayloadEntryInput): boolean {
 		if (!this.acceptsWork()) return false;
+		const registryEntry = this.register(entry);
+		this.ensureActiveGeneration();
+		this.trySend(registryEntry);
+		return true;
+	}
 
+	/**
+	 * Publish an entry whose capacity was reserved while admission was still
+	 * open. Only a disposed client refuses it.
+	 *
+	 * Suspension — watchdog no-progress or writer-fatal — closes ADMISSION, and
+	 * admission happens at reservation time. Refusing the publish of an
+	 * already-reserved entry would turn work the writer is designed to RETAIN
+	 * into an ordinary drop. The entry is therefore registered in `buffered`
+	 * state with no send attempt, and drains through `flushBuffered` once the
+	 * suspension clears (writer-fatal is sticky, so those stay retained).
+	 */
+	publishReserved(entry: PayloadEntryInput): boolean {
+		if (this.disposed) return false;
+		const registryEntry = this.register(entry);
+		if (this.admissionSuspended || this.writerFatal !== null) return true;
+		this.ensureActiveGeneration();
+		this.trySend(registryEntry);
+		return true;
+	}
+
+	private register(entry: PayloadEntryInput): RegistryEntry {
 		const registryEntry: RegistryEntry = {
 			...entry,
 			seq: this.nextSeq++,
@@ -380,9 +408,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		};
 		this.unacked.set(registryEntry.seq, registryEntry);
 		this.startWatchdog();
-		this.ensureActiveGeneration();
-		this.trySend(registryEntry);
-		return true;
+		return registryEntry;
 	}
 
 	// -- stats ---------------------------------------------------------------
@@ -760,11 +786,15 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		results: PayloadWriteAck[],
 	): void {
 		this.lastAckAt = this.now();
+		let resumed = false;
 		if (this.watchdogUnhealthy) {
 			// Progress resumed — clear the no-progress suspension. A writer-fatal
 			// suspension is sticky and is NOT cleared here.
 			this.watchdogUnhealthy = false;
-			if (this.writerFatal === null) this.admissionSuspended = false;
+			if (this.writerFatal === null) {
+				this.admissionSuspended = false;
+				resumed = true;
+			}
 		}
 
 		for (const result of results) {
@@ -801,6 +831,10 @@ export class PayloadWriteClient implements PayloadWriterLike {
 					break;
 			}
 		}
+
+		// Entries published while admission was suspended were held buffered; now
+		// that the suspension has lifted they have to be handed to the writer.
+		if (resumed) this.flushBuffered();
 	}
 
 	private scheduleRetry(entry: RegistryEntry, detail?: string): void {
@@ -973,6 +1007,8 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			if (this.watchdogUnhealthy) {
 				this.watchdogUnhealthy = false;
 				this.admissionSuspended = false;
+				// Anything published while suspended is buffered — drain it.
+				this.flushBuffered();
 			}
 			return;
 		}

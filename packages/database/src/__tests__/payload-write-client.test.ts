@@ -389,6 +389,30 @@ describe("PayloadWriteClient — writer-fatal", () => {
 		await h.client.dispose(0);
 	});
 
+	test("an already-reserved entry is retained, not refused", async () => {
+		const h = await primed();
+		h.fleet.workers[0].ackAll("failed", "writer-fatal");
+		expect(h.client.acceptsWork()).toBe(false);
+
+		// Fresh admission is closed, but an entry whose capacity was reserved
+		// before the suspension must still be taken and RETAINED.
+		expect(
+			h.client.publishReserved({
+				requestId: "reserved",
+				ciphertext: "x",
+				timestamp: h.clock.now(),
+				transportBytes: 1,
+				payloadBytes: 1,
+			}),
+		).toBe(true);
+
+		const stats = h.client.getStats();
+		expect(stats.unackedEntries).toBe(2);
+		expect(stats.droppedPermanent).toBe(0);
+		expect(h.settlements).toHaveLength(0);
+		await h.client.dispose(0);
+	});
+
 	test("a writer-fatal init error latches instead of respawning forever", async () => {
 		const h = makeHarness();
 		expect(await h.publish()).toBe(true);
@@ -726,6 +750,37 @@ describe("PayloadWriteClient — fenced no-progress watchdog", () => {
 		stats = h.client.getStats();
 		expect(stats.healthy).toBe(true);
 		expect(stats.admissionSuspended).toBe(false);
+		await h.client.dispose(0);
+	});
+
+	test("a reserved entry published while suspended buffers and drains on resume", async () => {
+		const h = await primed();
+		const worker = h.fleet.workers[0];
+
+		// Alive but not acking → admission suspended.
+		h.clock.advance(PAYLOAD_NO_PROGRESS_UNHEALTHY_MS + 1_000);
+		expect(h.client.getStats().admissionSuspended).toBe(true);
+
+		expect(
+			h.client.publishReserved({
+				requestId: "reserved",
+				ciphertext: "x",
+				timestamp: h.clock.now(),
+				transportBytes: 1,
+				payloadBytes: 1,
+			}),
+		).toBe(true);
+		await h.tick();
+		// Held buffered: a suspended writer gets no new work pushed at it…
+		expect(worker.writes.map((w) => w.id)).toEqual(["req-1"]);
+		expect(h.client.getStats().unackedEntries).toBe(2);
+
+		// …but the moment progress resumes the buffered entry is handed over.
+		worker.ackAll("committed");
+		await h.tick();
+		expect(h.client.getStats().admissionSuspended).toBe(false);
+		expect(worker.writes.map((w) => w.id)).toEqual(["reserved"]);
+		expect(h.settlements.map((s) => s.outcome)).toEqual(["committed"]);
 		await h.client.dispose(0);
 	});
 
