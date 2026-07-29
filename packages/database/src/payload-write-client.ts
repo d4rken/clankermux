@@ -205,7 +205,16 @@ export function createWorkerTransport(): PayloadWriteTransport {
 		objectUrl = URL.createObjectURL(
 			new Blob([code], { type: "text/javascript" }),
 		);
-		worker = new Worker(objectUrl, { smol: true });
+		try {
+			worker = new Worker(objectUrl, { smol: true });
+		} catch (err) {
+			// No worker exists to revoke the URL later, so revoke it here — a
+			// throwing constructor would otherwise leak the blob for the process
+			// lifetime, once per failed spawn.
+			URL.revokeObjectURL(objectUrl);
+			objectUrl = null;
+			throw err;
+		}
 	} else {
 		worker = new Worker(
 			new URL("./payload-write-worker.ts", import.meta.url).href,
