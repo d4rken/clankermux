@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { platform } from "node:process";
 import {
 	PROVIDER_NAMES,
 	type PricingGap,
@@ -692,9 +691,17 @@ class PriceCatalogue {
 	 * The platform rule mirrors `getPlatformConfigDir()` in @clankermux/config.
 	 * It is restated rather than imported because @clankermux/config depends on
 	 * @clankermux/core — importing it here would close a cycle.
+	 *
+	 * Read off the `process` global rather than imported from `node:process` or
+	 * `node:os`. This module is bundled into the DASHBOARD, whose browser target
+	 * has no real Node runtime: `import { platform } from "node:process"` broke
+	 * that build outright ("Browser polyfill ... doesn't have a matching export
+	 * named platform") and took the service down on its next restart, since the
+	 * dashboard build is a systemd ExecStartPre. A property read on a global
+	 * gives a bundler nothing to resolve, so it cannot fail that way again.
 	 */
 	private getCacheDir(): string {
-		if (platform === "win32") {
+		if (typeof process !== "undefined" && process.platform === "win32") {
 			const base =
 				process.env.LOCALAPPDATA ??
 				process.env.APPDATA ??
