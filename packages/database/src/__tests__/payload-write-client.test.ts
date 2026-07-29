@@ -150,9 +150,17 @@ class FakeFleet {
 	/** Ordered log of writes and terminations across every generation. */
 	readonly events: string[] = [];
 	spawnThrowsOnGeneration: number | null = null;
+	/** Every generation at or above this one fails to spawn. */
+	spawnThrowsFromGeneration: number | null = null;
 
 	spawn = (generation: number): PayloadWriteTransport => {
 		if (this.spawnThrowsOnGeneration === generation) {
+			throw new Error("spawn failed");
+		}
+		if (
+			this.spawnThrowsFromGeneration !== null &&
+			generation >= this.spawnThrowsFromGeneration
+		) {
 			throw new Error("spawn failed");
 		}
 		const worker = new FakeWorker(generation, this.events);
@@ -574,6 +582,40 @@ describe("PayloadWriteClient — rotation", () => {
 		expect(first.writes.map((w) => w.id)).toEqual(["req-1"]);
 		first.ackAll("committed");
 		expect(h.client.getStats().committed).toBe(1);
+		await h.client.dispose(0);
+	});
+
+	test("a failed rotation spawn retries on the backoff, not on every publish", async () => {
+		const h = makeHarness({ rotationByteBudget: 1024 });
+		await h.publish();
+		const first = h.fleet.workers[0];
+		// Every replacement spawn fails from here on.
+		h.fleet.spawnThrowsFromGeneration = 2;
+		first.ready();
+		await h.tick();
+
+		// Rolled back onto the outgoing generation, one spawn failure counted.
+		expect(h.client.getStats().spawnFailures).toBe(1);
+		expect(h.client.getStats().activeGeneration).toBe(first.generation);
+		expect(h.fleet.workers).toHaveLength(1);
+
+		// Traffic keeps flowing while the backoff timer is pending: it must NOT
+		// trigger a fresh spawn attempt on every publish.
+		await h.publish();
+		await h.publish();
+		await h.publish();
+		expect(h.client.getStats().spawnFailures).toBe(1);
+
+		// The backoff timer owns the retry — and retries the ROTATION, since the
+		// rolled-back generation is still over its byte budget.
+		h.clock.advance(300);
+		await h.tick();
+		expect(h.client.getStats().spawnFailures).toBe(2);
+		expect(h.client.getStats().activeGeneration).toBe(first.generation);
+
+		// The outgoing generation keeps draining throughout.
+		first.ackAll("committed");
+		expect(h.client.getStats().committed).toBe(4);
 		await h.client.dispose(0);
 	});
 

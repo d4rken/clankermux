@@ -674,6 +674,15 @@ export class PayloadWriteClient implements PayloadWriterLike {
 		this.respawnAttempts++;
 		this.respawnTimer = this.setTimer(() => {
 			this.respawnTimer = null;
+			// A rotation whose replacement spawn failed rolled back to the outgoing
+			// generation, so there IS an active generation — but it is over its byte
+			// budget and must still be retired. Retry the rotation from the backoff
+			// timer; ensureActiveGeneration would simply no-op here.
+			const active = this.active;
+			if (active && active.publishedBytes >= this.rotationByteBudget) {
+				this.maybeRotate();
+				return;
+			}
 			this.ensureActiveGeneration();
 		}, delay);
 	}
@@ -831,6 +840,11 @@ export class PayloadWriteClient implements PayloadWriterLike {
 
 	private maybeRotate(): void {
 		if (this.disposed || this.rotating) return;
+		// A respawn is already pending on its backoff timer — usually because the
+		// previous rotation's replacement failed to spawn. Retrying the spawn on
+		// every publish would bypass that backoff entirely and hammer the thread
+		// pool for as long as traffic keeps arriving.
+		if (this.respawnTimer !== null) return;
 		const generation = this.active;
 		if (!generation) return;
 		if (generation.publishedBytes < this.rotationByteBudget) return;
