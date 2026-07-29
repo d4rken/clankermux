@@ -196,6 +196,14 @@ export class AsyncDbWriter implements Disposable {
 	private payloadDroppedSinceLastLog = 0;
 	private lastIntervalDrops = 0;
 
+	/**
+	 * Shutdown is two-phase. `closingForDispose` stops NEW reservations the
+	 * moment dispose() starts; `disposed` — which also refuses publishes — is
+	 * only set once the metadata queue has drained, because the jobs in that
+	 * queue may still hold reservations whose payloads the worker has a full
+	 * flush window for.
+	 */
+	private closingForDispose = false;
 	private disposed = false;
 
 	constructor(options: AsyncDbWriterOptions = {}) {
@@ -252,7 +260,7 @@ export class AsyncDbWriter implements Disposable {
 	 * now? The real admission decision is made by {@link reservePayload}.
 	 */
 	canAcceptPayload(estimatedBytes: number): boolean {
-		if (this.disposed) return false;
+		if (this.disposed || this.closingForDispose) return false;
 		if (estimatedBytes > MAX_PAYLOAD_ENTRY_BYTES) return false;
 		if (this.payloadJobCount() >= this.PAYLOAD_QUEUE_HARD_CAP) return false;
 		if (this.payloadBytesPending() + estimatedBytes > this.PAYLOAD_BYTES_CAP) {
@@ -541,8 +549,11 @@ export class AsyncDbWriter implements Disposable {
 	async dispose(): Promise<void> {
 		logger.info("Flushing async DB writer queue...");
 
-		// Stop admission (and, through it, rotation) before draining.
-		this.disposed = true;
+		// Stop NEW reservations only. Metadata jobs already on the queue may hold
+		// a reservation and will publish its payload as they run below; refusing
+		// those publishes here would drop payloads the worker still has its whole
+		// flush window for.
+		this.closingForDispose = true;
 
 		if (this.intervalId) {
 			clearInterval(this.intervalId);
@@ -561,8 +572,11 @@ export class AsyncDbWriter implements Disposable {
 			await this.processQueue();
 		}
 
-		// Then let the worker flush its batches and close-ack, bounded; every
-		// generation is terminated in the client's `finally`.
+		// The drain is done, so no further publish can come from a queued job:
+		// close publication too, then let the worker flush its batches and
+		// close-ack, bounded; every generation is terminated in the client's
+		// `finally`.
+		this.disposed = true;
 		if (this.payloadWriter) {
 			await this.payloadWriter.dispose(PAYLOAD_FLUSH_DEADLINE_MS);
 		}

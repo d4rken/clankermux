@@ -451,6 +451,43 @@ describe("AsyncDbWriter", () => {
 		expect(disposed.reservePayload(10)).toBeNull();
 	});
 
+	test("dispose lets a queued metadata job publish its reserved payload", async () => {
+		const harness = makeWriter();
+		const w = harness.writer;
+		writer = w;
+
+		// Reserved while admission was open, published by a job that is still on
+		// the metadata queue when dispose() starts.
+		const reservation = w.reservePayload(10);
+		if (!reservation) throw new Error("expected a reservation");
+
+		const gate = makeGate();
+		releaseGate = gate.release;
+		w.enqueue(async () => {
+			await gate.wait();
+		});
+		let reservedDuringDrain: PayloadReservation | null = null;
+		let publishedDuringDrain = false;
+		w.enqueue(() => {
+			publishedDuringDrain = publish(w, reservation, "req-1", "abc");
+			// New reservations, by contrast, are refused from the moment dispose
+			// starts — admission closes first, publication only after the drain.
+			reservedDuringDrain = w.reservePayload(10);
+		});
+
+		const disposal = w.dispose();
+		await sleep(20);
+		gate.release();
+		releaseGate = null;
+		await disposal;
+		writer = null;
+
+		expect(publishedDuringDrain).toBe(true);
+		expect(reservedDuringDrain).toBeNull();
+		expect(harness.fake().published.map((p) => p.requestId)).toEqual(["req-1"]);
+		expect(w.getHealth().payloadDropped).toBe(0);
+	});
+
 	test("dispose awaits an in-flight metadata tick even after the queue is empty", async () => {
 		writer = new AsyncDbWriter();
 
