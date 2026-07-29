@@ -81,9 +81,12 @@ export function RecentErrorsCard() {
 				{/* The card body collapses, never the card: hiding the whole thing
 				    would take the window selector with it, stranding anyone who
 				    dismissed everything at a narrow range with no way to widen it. */}
-				{error && !data ? (
-					// Never fall through to "no errors" here: a failed fetch means we
-					// don't know what the window contains, which is the opposite claim.
+				{error ? (
+					// Never fall through to "no errors" here: any failed poll — not just
+					// the first fetch — means we don't know what the window contains right
+					// now, which is the opposite claim. React Query keeps the previous
+					// payload around after a later failure, so keying on the error alone
+					// stops stale (possibly empty) data from being shown as current.
 					<p role="alert" className="text-sm text-destructive">
 						Could not load recent errors.
 					</p>

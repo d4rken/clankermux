@@ -265,8 +265,8 @@ export function DataRetentionCard() {
 					</div>
 					{usageHint("memory_snapshots")}
 					<p className="text-xs text-muted-foreground mt-1">
-						How long process memory history (RSS + heap) is kept for the
-						Overview Memory Usage graph.
+						How long process memory history (RSS + heap) is kept for the System
+						Health Memory Usage graph.
 					</p>
 				</div>
 
