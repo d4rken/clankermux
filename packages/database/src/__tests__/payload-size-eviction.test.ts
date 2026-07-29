@@ -449,6 +449,34 @@ describe("byte-budget eviction pass", () => {
 		}
 	});
 
+	it("empties the table when the NEWEST row alone exceeds the budget", async () => {
+		// Policy, not collateral damage: retention keeps a CONTIGUOUS PREFIX of the
+		// newest rows. When the newest row alone busts the budget, no prefix fits,
+		// so nothing is retained. The older small rows are not innocent bystanders —
+		// they are older than a row that itself cannot be kept, and keeping them
+		// while discarding a newer row would be a different, non-age-prioritized
+		// policy.
+		const db = open();
+		try {
+			seedPayload(db, "small-old", now - 3000, 100);
+			seedPayload(db, "small-mid", now - 2000, 100);
+			seedPayload(db, "huge", now - 1000, 5000);
+		} finally {
+			db.close();
+		}
+
+		const res = await runSizeCleanup(1000);
+		expect(res.removedPayloadsBySize).toBe(3);
+
+		const reader = open();
+		try {
+			expect(payloadIds(reader)).toEqual([]);
+			expect(totalPayloadBytes(reader)).toBe(0);
+		} finally {
+			reader.close();
+		}
+	});
+
 	it("removes rows tied on the cutoff millisecond as a whole bucket", async () => {
 		// Deliberate: `timestamp <= cutoff` can land marginally UNDER budget
 		// rather than carry tuple-cutoff complexity. Measured live, at most two
