@@ -97,6 +97,7 @@ export {
 } from "./token-manager";
 export {
 	abortableSleep,
+	BURST_RETRY_COOLDOWN_CAP_MS,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	HOLD_OVERFLOW,
 	type HoldResult,

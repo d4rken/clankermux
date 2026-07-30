@@ -1956,6 +1956,24 @@ class UsageCache {
 	}
 
 	/**
+	 * Test-only: seed the cache with an explicit age so freshness-bounded readers
+	 * (`getFreshCapacity`) can be exercised at a chosen point.
+	 *
+	 * The 429 ladder in proxy-operations reads the same cache through two
+	 * DIFFERENT bounds — 180s for the account-wide/family rungs, 120s for the
+	 * burst classifier — so the band between them is a real, reachable state with
+	 * its own behaviour, and `set()` (always age 0) cannot construct it. Mirrors
+	 * `resetRateLimitProbeGatesForTests`; never called from production paths.
+	 */
+	setWithAgeForTests(
+		accountId: string,
+		data: AnyUsageData,
+		ageMs: number,
+	): void {
+		this.cache.set(accountId, { data, timestamp: Date.now() - ageMs });
+	}
+
+	/**
 	 * Check if the usage window has reset by comparing the new data's reset time
 	 * against the previously cached data, and fire the callback if it has advanced.
 	 * Should be called after successfully fetching new data, before updating the cache.

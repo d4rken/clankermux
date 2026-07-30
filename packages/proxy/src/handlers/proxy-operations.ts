@@ -62,6 +62,7 @@ import {
 	refreshAccessTokenSafe,
 } from "./token-manager";
 import {
+	BURST_RETRY_COOLDOWN_CAP_MS,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	classify429Transient,
 } from "./transparent-retry";
@@ -1197,10 +1198,24 @@ export async function proxyWithAccount(
 				rawResponse.status === 429 &&
 				!isAnthropicOutOfCredits(rawResponse)
 			) {
-				const cooldownUntil = extractCooldownUntil(
-					rawResponse,
-					account.id,
-					usageCache.getRateLimitedUntil.bind(usageCache),
+				// Same ceiling as the burst intercept, for the same reason and with
+				// more force: a re-probe only happens INSIDE an active hold, so this
+				// 429 is by construction one the orchestrator is still treating as
+				// transient, and it reaches here without passing the account-wide or
+				// family rungs at all (they sit below this short-circuit). Copying a
+				// multi-day `retry-after` verbatim would push the held account's
+				// in-memory deadline out to that value, which both ends the hold on
+				// `cooldownWait > remaining` and — because the give-up terminal
+				// derives its client-facing `Retry-After` from this same field — hands
+				// the caller a 92-hour retry instruction while describing the
+				// condition as brief. See BURST_RETRY_COOLDOWN_CAP_MS.
+				const cooldownUntil = Math.min(
+					extractCooldownUntil(
+						rawResponse,
+						account.id,
+						usageCache.getRateLimitedUntil.bind(usageCache),
+					),
+					Date.now() + BURST_RETRY_COOLDOWN_CAP_MS,
 				);
 				applyRateLimitCooldown(
 					account,
@@ -1281,6 +1296,58 @@ export async function proxyWithAccount(
 					{ kind: "hard_429", cooldownUntil: floorUntil },
 					rawResponse,
 				);
+			}
+
+			// ── One shared usage refresh for every 429 evidence rung ───────────
+			// The three rungs below — account-wide exhaustion, the family-weekly
+			// safety net, and the transparent burst-retry intercept — all decide
+			// from the same usage cache, but they used to reach it at different
+			// times: only the burst rung refreshed a stale cache, and it sits LAST.
+			// On a stale cache the two rungs above it failed open on missing
+			// evidence, the burst rung refreshed, and the fresh headroom it then
+			// read got the 429 classified as a transient burst. That is the exact
+			// inversion the ladder's ORDER exists to prevent, and it is not a rare
+			// window: on 2026-07-30 a fable-weekly 429 arrived 203s after the last
+			// poll — 23s past FAMILY_WEEKLY_MAX_USAGE_AGE_MS — and cooled the
+			// account ACCOUNT-WIDE for 92 hours instead of failing over for one
+			// family. Ordering only protects the rungs if the earlier ones are not
+			// evidence-starved relative to the later ones.
+			//
+			// The trigger is the LOOSEST bound in the ladder
+			// (FAMILY_WEEKLY_MAX_USAGE_AGE_MS, 180s) — deliberately not the burst
+			// rung's tighter 120s — so this never buys a fetch the old code wouldn't
+			// have made. Null at 180s means the two rungs above are about to fail
+			// open on missing evidence and hand the 429 to the burst rung, which
+			// would then have refreshed anyway: same one fetch, just early enough to
+			// be useful. Triggering at 120s instead would fire in the 120-180s band,
+			// where the rungs above are still satisfied and may return before the
+			// burst rung ever runs — costing a fetch AND up to 5s of latency that
+			// the old code did not spend. The burst rung keeps its own lazy refresh
+			// for exactly that band, gated on `usageRefreshAttempted` below.
+			//
+			// refreshNow single-flights and bounds itself (5s timeout, failure →
+			// false), so a dead usage endpoint costs one bounded wait and every rung
+			// then fails open exactly as it did before. `usageRefreshAttempted`
+			// records the ATTEMPT, not its success: a refresh that fails, or that
+			// succeeds with content still yielding no capacity, leaves the cache
+			// null, and single-flight does not dedupe a second SEQUENTIAL call — so
+			// without the flag the burst rung would fetch again and a dead endpoint
+			// would cost two bounded waits (~10s) on one request.
+			let usageRefreshAttempted = false;
+			if (
+				rawResponse.status === 429 &&
+				!options?.reprobe &&
+				!isTrustedProbe("any") &&
+				getFreshCapacity(
+					usageCache,
+					account.id,
+					account.provider,
+					Date.now(),
+					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+				) === null
+			) {
+				usageRefreshAttempted = true;
+				await usageCache.refreshNow(account.id);
 			}
 
 			// ── Account-wide exhaustion: name the cause, skip the hold ─────────
@@ -1478,14 +1545,21 @@ export async function proxyWithAccount(
 			) {
 				const now = Date.now();
 				// Read fresh capacity once. When usage is stale/absent
-				// (getFreshCapacity → null), the plan calls for ONE best-effort
-				// usage refresh before falling back to the `x-should-retry` hint —
-				// so a real burst 429 doesn't fall through to sibling failover just
-				// because the usage cache happened to be cold. The refresh is a
-				// single, self-bounded fetch (usageCache.refreshNow handles its own
-				// 5s timeout + failure → false); we re-read capacity afterward. The
-				// predicate itself stays pure/synchronous: it classifies on the
-				// pre-resolved capacity value via the closure below.
+				// (getFreshCapacity → null), ONE best-effort refresh runs before
+				// falling back to the `x-should-retry` hint — so a real burst 429
+				// doesn't fall through to sibling failover just because the usage
+				// cache happened to be cold. This rung's bound (120s) is TIGHTER
+				// than the shared refresh's trigger (180s), so it still owns the
+				// 120-180s band: there the rungs above are satisfied and no shared
+				// refresh ran, but this rung wants tighter evidence before spending
+				// the full hold budget. `usageRefreshAttempted` keeps the total at
+				// ONE fetch per 429 — above 180s the shared block already tried, and
+				// re-trying here would only re-pay a failed endpoint's timeout. The
+				// refresh is a single, self-bounded fetch (usageCache.refreshNow
+				// handles its own 5s timeout + failure → false); we re-read capacity
+				// afterward. The predicate itself stays pure/synchronous: it
+				// classifies on the pre-resolved capacity value via the closure
+				// below.
 				let capacity = getFreshCapacity(
 					usageCache,
 					account.id,
@@ -1493,7 +1567,7 @@ export async function proxyWithAccount(
 					now,
 					BURST_RETRY_MAX_USAGE_AGE_MS,
 				);
-				if (capacity === null) {
+				if (capacity === null && !usageRefreshAttempted) {
 					const refreshed = await usageCache.refreshNow(account.id);
 					if (refreshed) {
 						// Re-read against the same `now` budget; refreshNow updated the
@@ -1526,10 +1600,24 @@ export async function proxyWithAccount(
 					// double set is harmless), but the authoritative set must happen
 					// here, regardless of whether a hold slot is later acquired.
 					markAnthropicBurstThrottle(now);
-					const cooldownUntil = extractCooldownUntil(
-						rawResponse,
-						account.id,
-						usageCache.getRateLimitedUntil.bind(usageCache),
+					// Cap the deadline at the burst ceiling. The classification above
+					// and `extractCooldownUntil` read different evidence — headroom vs
+					// whatever `retry-after` the response carried — and they disagree
+					// whenever the window Anthropic rejected on is one the unified
+					// headers don't express (a family-scoped weekly, the
+					// overage-included seven-day claim). Honouring the header verbatim
+					// then writes a multi-day ACCOUNT-WIDE lock off a "transient burst"
+					// verdict. A genuine burst carries no reset header at all, so it
+					// lands on extractCooldownUntil's shorter 60s fallback and this
+					// min() leaves it alone; server hints that fit the hold budget
+					// survive too. See BURST_RETRY_COOLDOWN_CAP_MS.
+					const cooldownUntil = Math.min(
+						extractCooldownUntil(
+							rawResponse,
+							account.id,
+							usageCache.getRateLimitedUntil.bind(usageCache),
+						),
+						now + BURST_RETRY_COOLDOWN_CAP_MS,
 					);
 					// Mark the cache account rate-limited via the normal (non-reprobe)
 					// cooldown so the affinity strategy holds the pin and concurrent
