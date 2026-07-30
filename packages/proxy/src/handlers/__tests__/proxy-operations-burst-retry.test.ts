@@ -11,6 +11,7 @@ import {
 	proxyWithAccount,
 } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
+import { BURST_RETRY_COOLDOWN_CAP_MS } from "../transparent-retry";
 
 // OAuth-Anthropic account fixture: provider "anthropic" + a refresh token + a
 // valid (future) access token so getValidAccessToken returns it without a
@@ -406,6 +407,180 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		// Not OAuth-Anthropic → no retryable_429; classified hard_429 (no fallbacks).
 		expect(outcomes.at(-1)?.kind).toBe("hard_429");
 	});
+
+	it("clamps the cooldown to the burst ceiling when the 429 carries a multi-day retry-after", async () => {
+		// Regression (2026-07-30): a 429 whose headers said "retry in 92.5h" was
+		// classified `fresh_headroom` (the account really did have 5h/7d headroom —
+		// the spent window was a family-scoped one the unified headers don't
+		// express) and the server deadline was written verbatim as an ACCOUNT-WIDE
+		// cooldown. A rung that concluded "transient burst" must never be able to
+		// emit a multi-day lock: the deadline is capped at what the hold can
+		// actually wait out and still probe after.
+		usageCache.set("acc-oauth", {
+			five_hour: {
+				utilization: 2,
+				resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 85,
+				resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+			},
+		} as never);
+
+		globalThis.fetch = mock(async () =>
+			rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+		);
+
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const bodyBuffer = makeRequestBody();
+		const account = makeOAuthAnthropicAccount();
+		const before = Date.now();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ onOutcome: (o) => outcomes.push(o) },
+		);
+
+		expect(result).toBeNull();
+		// Fresh positive headroom ⇒ the burst rung owns this 429.
+		expect(outcomes.at(-1)?.kind).toBe("retryable_429");
+		if (outcomes.at(-1)?.kind === "retryable_429") {
+			const outcome = outcomes.at(-1) as Extract<
+				ProxyAttemptOutcome,
+				{ kind: "retryable_429" }
+			>;
+			expect(outcome.confidence).toBe("fresh_headroom");
+			// The outcome the hold orchestrator waits on is capped too — not just
+			// the persisted account field.
+			expect(outcome.cooldownUntil).toBeLessThanOrEqual(
+				before + BURST_RETRY_COOLDOWN_CAP_MS + 1_000,
+			);
+		}
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(account.rate_limited_until as number).toBeLessThanOrEqual(
+			before + BURST_RETRY_COOLDOWN_CAP_MS + 1_000,
+		);
+		// Sanity: the uncapped server deadline was ~92.5h out, so a regression here
+		// is unmissable rather than off-by-a-margin.
+		expect(account.rate_limited_until as number).toBeLessThan(
+			before + 3_600_000,
+		);
+	});
+
+	it("preserves a real server retry-after that the hold can actually wait out", async () => {
+		// The ceiling exists to keep the deadline USABLE by the hold, not to impose
+		// a house value. A 75s hint fits inside the budget with room for the probe,
+		// so honouring it is both possible and correct — clamping it down would
+		// expire the cooldown 15s into a window the upstream said was still
+		// throttled, guaranteeing a premature probe and contradicting the
+		// orchestrator's never-wake-early rule. Asserted narrowly: a loose lower
+		// bound would let a substantial shortening regression through.
+		usageCache.set("acc-oauth", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+			},
+		} as never);
+
+		globalThis.fetch = mock(async () =>
+			rl429Response({ "x-should-retry": "true", "retry-after": "75" }),
+		);
+
+		const account = makeOAuthAnthropicAccount();
+		const before = Date.now();
+		await proxyWithAccount(
+			makeRequest(makeRequestBody()),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			makeRequestBody(),
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		// Exactly 75s (± clock), not the 60s floor below it and not the ceiling
+		// above it — so both a shortening and a widening regression fail here.
+		expect(account.rate_limited_until as number).toBeGreaterThanOrEqual(
+			before + 74_000,
+		);
+		expect(account.rate_limited_until as number).toBeLessThanOrEqual(
+			before + 76_000,
+		);
+		// Guards the premise: 75s must sit strictly inside the ceiling, else this
+		// test would pass for the wrong reason.
+		expect(75_000).toBeLessThan(BURST_RETRY_COOLDOWN_CAP_MS);
+	});
+
+	it("attempts only ONE usage refresh per 429 even when the usage endpoint is down", async () => {
+		// The shared refresh above the ladder and the burst rung's own refresh are
+		// both reachable on one request. refreshNow single-flights CONCURRENT
+		// callers, but these two are sequential — the first has already settled —
+		// so a failing endpoint would be paid for twice (~10s of bounded waits) if
+		// the burst rung were not gated on the shared attempt.
+		let refreshCalls = 0;
+		const refreshSpy = mock(async () => {
+			refreshCalls += 1;
+			return false; // endpoint down: cache stays absent
+		});
+		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
+		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
+
+		try {
+			// No cached usage (deleted in beforeEach) ⇒ the shared refresh fires and
+			// fails, leaving capacity null for the burst rung too.
+			globalThis.fetch = mock(async () =>
+				rl429Response({ "x-should-retry": "true" }),
+			);
+
+			const outcomes: ProxyAttemptOutcome[] = [];
+			await proxyWithAccount(
+				makeRequest(makeRequestBody()),
+				new URL("https://proxy.local/v1/messages"),
+				makeOAuthAnthropicAccount(),
+				makeRequestMeta(),
+				makeRequestBody(),
+				() => undefined,
+				0,
+				makeProxyContext(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				false,
+				{ onOutcome: (o) => outcomes.push(o) },
+			);
+
+			expect(refreshCalls).toBe(1);
+			// Behaviour on the failure path is unchanged: no capacity, but the
+			// x-should-retry hint still classifies it as a single-probe burst.
+			expect(outcomes.at(-1)?.kind).toBe("retryable_429");
+			if (outcomes.at(-1)?.kind === "retryable_429") {
+				const outcome = outcomes.at(-1) as Extract<
+					ProxyAttemptOutcome,
+					{ kind: "retryable_429" }
+				>;
+				expect(outcome.confidence).toBe("stale_should_retry");
+			}
+		} finally {
+			usageCache.refreshNow = originalRefreshNow;
+		}
+	});
 });
 
 describe("proxyWithAccount — reprobe mode", () => {
@@ -459,6 +634,57 @@ describe("proxyWithAccount — reprobe mode", () => {
 			typeof mock
 		>;
 		expect(markMock.mock.calls).toHaveLength(0);
+	});
+
+	it("clamps a multi-day retry-after on a reprobe 429 (it never reaches the evidence rungs)", async () => {
+		// The reprobe short-circuit sits ABOVE the account-wide and family rungs, so
+		// a family-scoped or overage-included 429 arriving mid-hold gets no
+		// evidence-based handling at all. Copying its deadline verbatim pushes the
+		// held account's in-memory rate_limited_until out to that value, which ends
+		// the hold AND becomes the client-facing Retry-After of the give-up terminal
+		// — a 92-hour retry instruction on a response that calls the condition brief.
+		globalThis.fetch = mock(async () =>
+			rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+		);
+
+		const account = makeOAuthAnthropicAccount({
+			rate_limited_until: Date.now() + 5_000,
+		});
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const bodyBuffer = makeRequestBody();
+		const before = Date.now();
+
+		await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ reprobe: true, onOutcome: (o) => outcomes.push(o) },
+		);
+
+		expect(account.rate_limited_until as number).toBeLessThanOrEqual(
+			before + BURST_RETRY_COOLDOWN_CAP_MS + 1_000,
+		);
+		// The outcome the hold orchestrator and the give-up terminal read.
+		expect(outcomes.at(-1)?.kind).toBe("retryable_429");
+		if (outcomes.at(-1)?.kind === "retryable_429") {
+			const outcome = outcomes.at(-1) as Extract<
+				ProxyAttemptOutcome,
+				{ kind: "retryable_429" }
+			>;
+			expect(outcome.cooldownUntil).toBeLessThanOrEqual(
+				before + BURST_RETRY_COOLDOWN_CAP_MS + 1_000,
+			);
+		}
 	});
 
 	it("reprobe success (200) forwards the response", async () => {

@@ -56,6 +56,53 @@ const BURST_RETRY_SUPPRESSED_POLL_MS = 1_000;
 export const BURST_RETRY_MAX_USAGE_AGE_MS = 120_000;
 
 /**
+ * Time (ms) reserved for the re-probe request itself when capping a
+ * burst-classified cooldown. A deadline is only useful if the orchestrator can
+ * wait it out AND still have budget left for the probe to come back: the hold
+ * sleeps `cooldownWait + jitter`, then issues `reprobe()` against the remaining
+ * budget. Reserving nothing makes the deadline "waitable" by the
+ * `cooldownWait > remaining` comparison while leaving the probe itself to be cut
+ * off — a hold that spends its whole budget sleeping and learns nothing.
+ *
+ * 30s is a judgement call, not a derived value — the codebase has no upstream
+ * response-time SLA to reference. It is meant to cover an LLM upstream's
+ * time-to-first-header comfortably.
+ */
+const BURST_RETRY_PROBE_RESPONSE_BUDGET_MS = 30_000;
+
+/**
+ * Hard ceiling (ms from now) on the cooldown a BURST-classified 429 may write.
+ *
+ * A rung that concluded "transient burst" must not be able to emit a long lock.
+ * It can otherwise, because the classification and the deadline come from
+ * different evidence: `classify429Transient` decides on the account's unified
+ * 5h/7d headroom, while `extractCooldownUntil` copies whatever `retry-after` the
+ * response carried. Those disagree whenever the window Anthropic actually
+ * rejected on is one the unified headers don't express — a family-scoped weekly,
+ * or the overage-included seven-day claim. On 2026-07-30 that combination
+ * (headroom present, `retry-after: 333111`) cooled an account ACCOUNT-WIDE for
+ * 92 hours on a request that should have failed over for one model family.
+ *
+ * The ceiling is derived from what the hold can actually complete, NOT from some
+ * shorter "typical burst" value, because the property that matters is
+ * usefulness: a deadline the orchestrator can sit through *and still probe
+ * after* is honoured verbatim however it was derived, and only a deadline that
+ * can't be is overridden. Budget minus jitter minus the probe reservation is
+ * exactly that boundary. It keeps two behaviours intact — a genuine burst
+ * carries no reset header at all (973 of 1145 measured 429s), so it still lands
+ * on `extractCooldownUntil`'s shorter 60s fallback, and a real server hint that
+ * fits (say `retry-after: 75`) is preserved rather than expired early into a
+ * still-throttled window.
+ *
+ * A capped cooldown is self-correcting: if the account really is unable to
+ * serve, the next attempt 429s again and lands on a rung with proper evidence.
+ */
+export const BURST_RETRY_COOLDOWN_CAP_MS =
+	BURST_RETRY_MAX_HOLD_MS -
+	BURST_RETRY_JITTER_MS -
+	BURST_RETRY_PROBE_RESPONSE_BUDGET_MS;
+
+/**
  * Classification of a 429 response for the transparent burst-retry feature.
  *
  * - `fresh_headroom`: the account still has known, fresh quota headroom, so the

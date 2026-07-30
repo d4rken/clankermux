@@ -343,4 +343,179 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 		expect(familyRow).toBeUndefined();
 	});
+
+	it("stale usage: the shared refresh runs BEFORE the family rung, so a family 429 is not misread as a transient burst", async () => {
+		// Regression (2026-07-30, Claude-Backup-2 locked account-wide for 92h).
+		//
+		// The family rung reads the usage cache; the burst rung below it used to be
+		// the only rung that refreshed a stale cache. A fable 429 arriving with the
+		// cache 203s old (23s past FAMILY_WEEKLY_MAX_USAGE_AGE_MS) therefore found
+		// the family rung failing open on missing evidence, the burst rung
+		// refreshing, and the fresh headroom it read classifying the 429 as a
+		// transient burst — which cooled the account ACCOUNT-WIDE until the fable
+		// weekly reset. The refresh now runs once above all three rungs, so the
+		// family rung sees exactly what the burst rung would have seen.
+		//
+		// Absent cache (deleted in beforeEach) is the same "stale" input as an
+		// over-age one: getFreshCapacity returns null for both.
+		let refreshCalls = 0;
+		const refreshSpy = mock(async (accountId: string) => {
+			refreshCalls += 1;
+			// What a successful poll would have written: fable weekly spent, unified
+			// 5h/7d with headroom left.
+			usageCache.set(accountId, {
+				five_hour: {
+					utilization: 2,
+					resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+				},
+				seven_day: {
+					utilization: 85,
+					resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+				},
+				limits: [
+					{
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 100,
+						resets_at: new Date(Date.now() + 92 * 3_600_000).toISOString(),
+						scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+						is_active: true,
+					},
+				],
+			} as never);
+			return true;
+		});
+		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
+		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
+
+		try {
+			// The production headers verbatim: a 92.5h retry-after alongside unified
+			// 5h/7d headroom — the shape that produced the multi-day lock.
+			globalThis.fetch = mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "rate limited" },
+						}),
+						{
+							status: 429,
+							headers: {
+								"content-type": "application/json",
+								"x-should-retry": "true",
+								"retry-after": "333111",
+							},
+						},
+					),
+			);
+
+			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const account = makeOAuthAnthropicAccount();
+			const bodyBuffer = makeRequestBody("claude-fable-5");
+
+			const result = await proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				ctx,
+			);
+
+			// Exactly one refresh for the whole 429 — hoisting must not add a fetch.
+			expect(refreshCalls).toBe(1);
+			expect(result).toBeNull();
+			// The family rung won: no account-wide cooldown, so the account still
+			// serves opus/sonnet/haiku.
+			expect(account.rate_limited_until).toBeNull();
+			expect(markCalls).toHaveLength(0);
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "family_weekly_exhausted_429",
+				),
+			).toBeDefined();
+			// And specifically NOT the burst rung's reason.
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "model_fallback_429",
+				),
+			).toBeUndefined();
+		} finally {
+			usageCache.refreshNow = originalRefreshNow;
+		}
+	});
+
+	it("usage aged between the two bounds (120s < age <= 180s) does NOT buy an extra refresh", async () => {
+		// The shared refresh triggers on the LOOSEST bound (180s), not the burst
+		// rung's 120s. In this band the family rung is still satisfied and returns
+		// before the burst rung ever runs, so triggering at 120s would spend a
+		// usage fetch — and up to 5s of refreshNow latency — that the pre-fix code
+		// never spent. Guards the fix against being "simplified" to the tighter
+		// bound.
+		let refreshCalls = 0;
+		const refreshSpy = mock(async () => {
+			refreshCalls += 1;
+			return true;
+		});
+		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
+		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
+
+		try {
+			globalThis.fetch = mock(async () => plain429());
+			// Same payload seedUsage writes, aged into the band.
+			usageCache.setWithAgeForTests(
+				ACCOUNT_ID,
+				{
+					five_hour: {
+						utilization: 0,
+						resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+					},
+					seven_day: {
+						utilization: 83,
+						resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+					},
+					limits: [
+						{
+							kind: "weekly_scoped",
+							group: "weekly",
+							percent: 100,
+							resets_at: new Date(Date.now() + 16 * 3_600_000).toISOString(),
+							scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+							is_active: true,
+						},
+					],
+				} as never,
+				150_000,
+			);
+
+			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const account = makeOAuthAnthropicAccount();
+			const bodyBuffer = makeRequestBody("claude-fable-5");
+
+			await proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				ctx,
+			);
+
+			// No fetch: the family rung had everything it needed at 150s.
+			expect(refreshCalls).toBe(0);
+			expect(account.rate_limited_until).toBeNull();
+			expect(markCalls).toHaveLength(0);
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "family_weekly_exhausted_429",
+				),
+			).toBeDefined();
+		} finally {
+			usageCache.refreshNow = originalRefreshNow;
+		}
+	});
 });
