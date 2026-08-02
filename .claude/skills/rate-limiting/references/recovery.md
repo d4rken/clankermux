@@ -27,6 +27,18 @@ like this:
    cooldown is not strictly older than `fetchStartedAt`
    (`cooldown_newer_than_evidence`), or the atomic UPDATE matched no row
    (`cas_mismatch`). Success logs `capacity_restored_clear`.
+
+   An `ineligible_reason` refusal is elevated to WARN (extra token
+   `lock_contradiction`, once per exact lock) when the lock has >30 min
+   remaining and is not the intentional `out_of_credits` floor: every
+   non-quota cooldown the current code can write ceilings at 5 min, so a
+   long lock that polling actively contradicts is worth one WARN — either
+   a misclassified 429 (the Backup-2 model_fallback_429 incident) or a
+   genuine long server-directed penalty that usage cannot express. (The
+   legacy never-emitted `upstream_429_no_reset_default_5h` would draw one
+   WARN per lock if it ever reappeared — accepted.) Report-only — the
+   refusal itself is unchanged. The dedupe map is capped at 64 entries,
+   oldest-evicted.
 3. The DB compare-and-clear re-asserts deadline + write instant + exact reason +
    the causal boundary in ONE `UPDATE`.
 4. A released account is selectable again with streak 0 and no deadline, so a

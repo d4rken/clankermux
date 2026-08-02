@@ -61,6 +61,9 @@ interface Harness {
 	clearCalls: ClearCall[];
 	debugMsgs: string[];
 	infoMsgs: string[];
+	warnMsgs: string[];
+	/** Fresh per-harness contradiction-warn dedupe map (never the module default). */
+	warned: Map<string, string>;
 	marker: CapacityRestoredProbeMarker;
 	/** Marker call trace: "mark:<gen>" / "rollback:<gen>", in order. */
 	markerCalls: string[];
@@ -79,6 +82,8 @@ function makeHarness(
 	const clearCalls: ClearCall[] = [];
 	const debugMsgs: string[] = [];
 	const infoMsgs: string[] = [];
+	const warnMsgs: string[] = [];
+	const warned = new Map<string, string>();
 	const markerCalls: string[] = [];
 	const pending = new Set<number>();
 	let generation = 0;
@@ -88,6 +93,8 @@ function makeHarness(
 		clearCalls,
 		debugMsgs,
 		infoMsgs,
+		warnMsgs,
+		warned,
 		markerCalls,
 		pending,
 		marker: {
@@ -105,6 +112,7 @@ function makeHarness(
 		logger: {
 			debug: (m) => debugMsgs.push(m),
 			info: (m) => infoMsgs.push(m),
+			warn: (m) => warnMsgs.push(m),
 		},
 		dbOps: {
 			getAccount: async () => getAccount(),
@@ -199,9 +207,22 @@ describe("clearRateLimitOnCapacityRestored — eligibility", () => {
 				evidence(),
 				h.marker,
 				NOW,
+				h.warned,
 			);
 			expect(h.clearCalls).toEqual([]);
-			expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
+			// The refusal is never silent: the greppable token lands at DEBUG, or
+			// at WARN when the long-lock contradiction alarm elevates it (60m
+			// remaining here — above the alarm threshold — so everything except
+			// the intentional out_of_credits billing floor elevates).
+			expect(skipToken([...h.debugMsgs, ...h.warnMsgs])).toEqual([
+				"ineligible_reason",
+			]);
+			if (reason === "out_of_credits") {
+				expect(h.warnMsgs).toEqual([]);
+			} else {
+				expect(h.debugMsgs).toEqual([]);
+				expect(h.warnMsgs).toHaveLength(1);
+			}
 		}
 	});
 
@@ -547,5 +568,190 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.infoMsgs[0]).toContain("extra_usage=100");
+	});
+});
+
+describe("clearRateLimitOnCapacityRestored — lock-contradiction alarm", () => {
+	// The Backup-2 incident shape (2026-08-02): a fable-scoped 429 misclassified
+	// four seconds after a restart wrote an account-wide model_fallback_429 lock
+	// until the weekly reset (~14h). Two seconds later polling observed weekly
+	// headroom — and could only say so at DEBUG. These tests pin the WARN that
+	// makes the contradiction visible, and its guards: it must never fire for
+	// the intentional out_of_credits billing floor, never for short locks that
+	// legitimate transient cooldowns produce (burst ≤90s, 429-backoff and 529
+	// caps at 5min), and never twice for the same lock.
+	const LONG_LOCK = NOW + 14 * 60 * 60 * 1000; // ~the incident's remaining time
+	const SHORT_LOCK = NOW + 5 * 60 * 1000; // the legitimate cooldown ceiling
+
+	it("warns ONCE per lock for a long non-releasable lock contradicted by headroom", async () => {
+		const h = makeHarness(
+			makeAccount({
+				rate_limited_reason: "model_fallback_429",
+				rate_limited_until: LONG_LOCK,
+			}),
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({ utilization: 95 }),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.clearCalls).toEqual([]);
+		expect(h.markerCalls).toEqual([]);
+		expect(h.warnMsgs).toHaveLength(1);
+		expect(h.warnMsgs[0]).toContain("capacity_restored_skip ineligible_reason");
+		expect(h.warnMsgs[0]).toContain("lock_contradiction");
+		expect(h.warnMsgs[0]).toContain("reason=model_fallback_429");
+		expect(h.warnMsgs[0]).toContain("utilization=95%");
+		expect(h.warnMsgs[0]).toContain("remaining=840m");
+
+		// The poller is level-triggered (~90s): the same lock must not WARN again.
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({ utilization: 95 }),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toHaveLength(1);
+		expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
+	});
+
+	it("warns again when a DIFFERENT lock replaces the warned one", async () => {
+		let until = LONG_LOCK;
+		const h = makeHarness(() =>
+			makeAccount({
+				rate_limited_reason: "model_fallback_429",
+				rate_limited_until: until,
+			}),
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		until = LONG_LOCK + 60_000; // a new cooldown write → new lock identity
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toHaveLength(2);
+	});
+
+	it("re-arms after the lock clears: the same signature warns again on a fresh lock", async () => {
+		let account: ReturnType<typeof makeAccount> | null = makeAccount({
+			rate_limited_reason: "model_fallback_429",
+			rate_limited_until: LONG_LOCK,
+		});
+		const h = makeHarness(() => account);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toHaveLength(1);
+		// Lock expires/clears: the healthy poll prunes the dedupe entry…
+		account = makeAccount({
+			rate_limited_reason: null as never,
+			rate_limited_until: null as never,
+		});
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warned.size).toBe(0);
+		// …so an identical future lock is a new incident, not a deduped repeat.
+		account = makeAccount({
+			rate_limited_reason: "model_fallback_429",
+			rate_limited_until: LONG_LOCK,
+		});
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toHaveLength(2);
+	});
+
+	it("caps the dedupe map at 64 entries, evicting the oldest", async () => {
+		const h = makeHarness(
+			makeAccount({
+				rate_limited_reason: "model_fallback_429",
+				rate_limited_until: LONG_LOCK,
+			}),
+		);
+		for (let i = 0; i < 64; i++) h.warned.set(`old-acc-${i}`, "sig");
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toHaveLength(1);
+		expect(h.warned.size).toBe(64);
+		expect(h.warned.has("old-acc-0")).toBe(false); // oldest evicted
+		expect(h.warned.has("acc-1")).toBe(true); // newest kept
+	});
+
+	it("stays at DEBUG for the intentional out_of_credits billing floor", async () => {
+		const h = makeHarness(
+			makeAccount({
+				rate_limited_reason: "out_of_credits",
+				rate_limited_until: LONG_LOCK,
+			}),
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.warnMsgs).toEqual([]);
+		expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
+	});
+
+	it("stays at DEBUG at and below the legitimate-cooldown ceiling", async () => {
+		for (const until of [SHORT_LOCK, NOW + 30 * 60 * 1000]) {
+			const h = makeHarness(
+				makeAccount({
+					rate_limited_reason: "upstream_429_with_reset",
+					rate_limited_until: until,
+				}),
+			);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+				h.warned,
+			);
+			expect(h.warnMsgs).toEqual([]);
+			expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
+		}
 	});
 });
