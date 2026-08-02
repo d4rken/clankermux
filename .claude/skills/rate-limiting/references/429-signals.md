@@ -14,6 +14,14 @@ Measured over **1,145 real 429s** from the production journal (2026-05→07):
   `queueing_hard`, or `payment_required`.
 - The real discriminator is **header presence + reset presence**, not the status
   *value* the code was originally written around.
+- Real-limit 429s enumerate PER-CLAIM lines
+  (`anthropic-ratelimit-unified-<claim>-status/utilization/reset`). Observed
+  claims: `5h`, `7d` (account-wide), `7d_oi` (scoped —
+  `seven_day_overage_included`, the shape both 2026-08-02 fable incidents
+  carried: `7d_oi` rejected at 1.0 with 5h/7d headroom), plus a non-window
+  `overage` axis. The family rung's header-evidence fallback keys on the
+  `(5h|7d)_*` scoped-token shape and runs only when the usage cache is
+  unavailable.
 - `anthropic-ratelimit-unified-overage-disabled-reason: out_of_credits` marks
   credit depletion (a billing state, not a quota one).
 

@@ -27,7 +27,10 @@ either when its cooldown expires, or when polling observes the quota recovered.
 reprobe
   → out_of_credits            (long floor, no burst-retry)
   → account-wide exhausted    (weekly OR 5h session spent; no burst-retry)
-  → family-weekly safety net  (fails over WITHOUT an account-wide cooldown)
+  → family-weekly safety net  (fails over WITHOUT an account-wide cooldown;
+                               cache evidence first — with the cache UNAVAILABLE
+                               it can read the 429's own scoped unified headers,
+                               e.g. `7d_oi` rejected while 5h/7d show headroom)
   → transparent burst-retry   (classify429Transient → hold & re-probe)
   → model fallback / no-fallback / all-models-exhausted
   → response-processor generic path
