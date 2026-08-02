@@ -1036,6 +1036,65 @@ describe("client-abort terminals", () => {
 		).toBe(0);
 	}, 15_000);
 
+	it("forced account + upstream resolving INSIDE the deferral window → 499, nothing recorded", async () => {
+		// The deferred-abort mirror opens a one-task window where the native
+		// req.signal is aborted but the composed fetch signal is not yet. An
+		// upstream that RESOLVES in that window must not be forwarded or
+		// recorded as a served request — the resolved-response boundary check
+		// keys on the native signal and discards the body.
+		const { proxyForcedAccount } = await import("../handlers");
+		const account = makeApiKeyPool(1)[0];
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+
+		const controller = new AbortController();
+		globalThis.fetch = (async () => {
+			// Client vanishes at the exact moment the upstream answers: abort the
+			// native signal synchronously, then resolve 200 — the mirror's
+			// deferred abort has NOT fired yet when the response lands.
+			controller.abort();
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		const requestMeta = {
+			id: "forced-resolved-in-window-1",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: "claude-sonnet-4-5",
+			routing: null,
+		} as unknown as RequestMeta;
+
+		const response = await proxyForcedAccount(
+			makeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			requestMeta,
+			null,
+			ctx,
+		);
+
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		// The resolved 200 was discarded, not forwarded: no recorder begin, no row.
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					begin: { mock: { calls: unknown[] } };
+				}
+			).begin.mock.calls.length,
+		).toBe(0);
+		expect(
+			(ctx.dbOps as unknown as { saveRequest: { mock: { calls: unknown[] } } })
+				.saveRequest.mock.calls.length,
+		).toBe(0);
+	}, 15_000);
+
 	it("forced account + disconnect while the token refresh fails → 499, and nothing is recorded", async () => {
 		// The token-resolution catch has its OWN `return`, so the outer catch's
 		// abort check never runs for it. Without a matching check at the top of

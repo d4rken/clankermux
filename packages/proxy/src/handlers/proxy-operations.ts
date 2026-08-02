@@ -51,6 +51,7 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // module) — see the module comment.
 import { createClientAbortResponse } from "./client-abort-response";
 import { applyCodexObservation } from "./codex-observation";
+import { deferredClientSignal } from "./deferred-client-signal";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	hasAccountWideUnifiedRejection,
@@ -2187,6 +2188,15 @@ export async function proxyWithAccount(
 			settleOverloadProbe("reopened");
 
 			if (isTerminalAttempt()) {
+				// Client-departed boundary (see the success-path chokepoint): do not
+				// begin recording a terminal 529 for a client that is already gone.
+				// The probe lease was settled above; dispose the tee branch + staged
+				// body directly.
+				if (req.signal.aborted) {
+					discardUpstreamBody(response);
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
 				log.warn(
 					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
@@ -2268,6 +2278,12 @@ export async function proxyWithAccount(
 				// was intercepted above): no family trip fires here, and streaming a
 				// known-error body yields no health verdict — release the lease.
 				settleOverloadProbe("abandoned");
+				// Client-departed boundary (see the success-path chokepoint).
+				if (req.signal.aborted) {
+					discardUpstreamBody(response);
+					cacheBodyStore.discardStaged(requestMeta.id);
+					return createClientAbortResponse();
+				}
 				return forwardToClient(
 					{
 						requestId: requestMeta.id,
@@ -2337,6 +2353,20 @@ export async function proxyWithAccount(
 			isProtectedFamily(getModelFamily(activeUpstreamModel ?? ""))
 		) {
 			recordProtectedFamilyDemand(account.id, Date.now());
+		}
+		// Client-departed boundary AT THE OWNERSHIP CHOKEPOINT: the upstream can
+		// RESOLVE inside the deferred mirror's one-task window (native signal
+		// aborted, fetch signal not yet — see deferred-client-signal.ts). Once
+		// forwardToClient is called, recording has begun and the 499-without-
+		// recording contract is unmeetable, so the check must sit here. fail()
+		// performs the attempt's ordinary cleanup (probe settled, upstream body
+		// disposed, outcome recorded); the staged-body discard is this path's own
+		// responsibility because the caller returns immediately at
+		// `if (gated.response)`, bypassing the loop cleanup and request tail.
+		if (req.signal.aborted) {
+			await fail({ kind: "other" }, response);
+			cacheBodyStore.discardStaged(requestMeta.id);
+			return createClientAbortResponse();
 		}
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
@@ -2625,7 +2655,7 @@ export async function proxyForcedAccount(
 			undefined,
 			undefined,
 			undefined,
-			req.signal,
+			deferredClientSignal(req),
 		);
 		liveForcedUpstream = rawResponse;
 
@@ -2655,6 +2685,21 @@ export async function proxyForcedAccount(
 			req.headers,
 		);
 		liveForcedUpstream = response;
+
+		// Client-departed boundary: the upstream can RESOLVE inside the deferred
+		// mirror's one-task window (native signal aborted, fetch signal not yet
+		// — see deferred-client-signal.ts). Without this check the response would
+		// proceed into forwardToClient and be recorded as a normal served request
+		// for a client that is already gone; the catch below only covers the
+		// THROWN abort. Keyed on `req.signal.aborted` like the catch.
+		if (req.signal.aborted) {
+			discardUpstreamBody(liveForcedUpstream);
+			liveForcedUpstream = null;
+			log.debug(
+				`Forced account ${account.name}: client disconnected before forwarding — returning 499 without recording`,
+			);
+			return createClientAbortResponse();
+		}
 
 		// Forward to client for recording + streaming. disableCooldown:true keeps
 		// the mid-stream rate-limit sniffer from mutating cooldown state on a
