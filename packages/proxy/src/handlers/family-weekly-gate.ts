@@ -3,6 +3,8 @@ import {
 	getModelFamily,
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ModelFamily,
+	REJECTING_STATUSES,
+	SOFT_WARNING_STATUSES,
 } from "@clankermux/core";
 import type { AnyUsageData } from "@clankermux/providers";
 import type {
@@ -71,6 +73,129 @@ export function resolveFamilyWeeklyExclusion(
 		(e) => e.family === family,
 	);
 	return { account, family, resetAt: match?.resetsAtMs ?? now };
+}
+
+/**
+ * Header-evidence fallback for the REACTIVE family-weekly rung, used ONLY when
+ * the usage cache is unavailable (empty/stale even after the shared pre-ladder
+ * refresh — post-restart with the usage endpoint down, or the endpoint 429ing
+ * its own poll). In that evidence-starved state the 429 response ITSELF can
+ * carry the verdict: Anthropic's unified headers enumerate per-claim status
+ * lines, and both 2026-08-02 incidents showed the exact shape this reads —
+ * `7d_oi` rejected at 1.0 while the account-wide `5h`/`7d` pair reported
+ * headroom. Without this fallback that input fell through to the
+ * model-fallback rung, which copied the claim-scoped retry-after (the weekly
+ * reset, 14.4h) into an account-wide lock under a reason the poller's
+ * capacity-restored release may not clear.
+ *
+ * Why this cannot misfire on the shapes that matter (measured over 1,145
+ * production 429s — see the rate-limiting skill's 429-signals reference):
+ *  - A per-IP BURST carries NO unified headers at all (973/973 measured), so
+ *    the missing `unified-status` alone yields null.
+ *  - A genuine ACCOUNT-WIDE 429 rejects `5h` or `7d` themselves (or shows no
+ *    scoped claim), so it falls through to the existing cooldown handling.
+ *  - The `overage` axis is a billing state, not a window: its token does not
+ *    match the scoped-window shape and never counts as family evidence.
+ *  - Worst case for an unknown future claim wrongly read as scoped: the 429
+ *    fails over WITHOUT an account-wide cooldown, costing extra failover
+ *    attempts — never a multi-hour lock. The proactive gate re-excludes from
+ *    the cache as soon as polling recovers.
+ *
+ * Every predicate is conservative-AND: the overall unified status must be
+ * `rejected`, BOTH account-wide windows must be present, non-rejecting AND
+ * parse to utilization < 1 (a contradictory pair bails), and at least one
+ * scoped-window token (`5h_*`/`7d_*`, e.g. `7d_oi`) must report `rejected`.
+ */
+const UNIFIED_STATUS_HEADER_RE = /^anthropic-ratelimit-unified-(.+)-status$/;
+const SCOPED_WINDOW_TOKEN_RE = /^(?:5h|7d)_[a-z0-9_]+$/;
+/** Full-string non-negative decimal — parseFloat's prefix tolerance ("0.94x",
+ *  "0x1", comma-combined duplicates) must not manufacture headroom. */
+const STRICT_DECIMAL_RE = /^\d+(?:\.\d+)?$/;
+/**
+ * Account-wide window statuses that positively assert HEADROOM. Whitelist, not
+ * a `!== "rejected"` check: a hard status (`rate_limited`, `blocked`, …), an
+ * empty value, or an unknown future status must all fail the predicate — only
+ * an explicit non-blocking vocabulary entry counts as evidence of headroom.
+ */
+const HEADROOM_STATUSES: ReadonlySet<string> = new Set([
+	"allowed",
+	...SOFT_WARNING_STATUSES,
+]);
+
+function parseStrictDecimal(value: string | null): number | null {
+	if (value === null || !STRICT_DECIMAL_RE.test(value)) return null;
+	return Number.parseFloat(value);
+}
+
+/**
+ * True when the live 429's unified headers report the ACCOUNT-WIDE `5h` or
+ * `7d` window itself as rejecting. Live account-wide evidence outranks every
+ * family verdict — including one derived from a fresh-looking cache that
+ * simply lags the exhaustion — so the reactive family rung skips entirely and
+ * the normal cooldown handling applies. A burst 429 carries no unified headers
+ * at all, so this is false for it.
+ */
+export function hasAccountWideUnifiedRejection(response: Response): boolean {
+	for (const win of ["5h", "7d"]) {
+		const status = response.headers.get(
+			`anthropic-ratelimit-unified-${win}-status`,
+		);
+		if (status !== null && REJECTING_STATUSES.has(status)) return true;
+	}
+	return false;
+}
+
+export function resolveFamilyWeeklyExclusionFromHeaders(
+	account: Account,
+	modelForGate: string | null,
+	response: Response,
+	now: number,
+): FamilyWeeklyExcludedAccount | null {
+	// Header evidence is only trusted from the official Anthropic OAuth
+	// upstream: anthropic-compatible providers (and anthropic accounts pointed
+	// at a custom endpoint) could emit or forward these headers with different
+	// semantics — or adversarially — to suppress their own cooldowns.
+	if (account.provider !== "anthropic" || account.custom_endpoint) return null;
+	const family = modelForGate ? getModelFamily(modelForGate) : null;
+	if (!family) return null;
+
+	const h = response.headers;
+	if (h.get("anthropic-ratelimit-unified-status") !== "rejected") return null;
+
+	// Account-wide pair: present, POSITIVELY non-blocking, and strictly under 1
+	// on a full-string numeric parse. Any contradiction or unknown value bails.
+	for (const win of ["5h", "7d"]) {
+		const status = h.get(`anthropic-ratelimit-unified-${win}-status`);
+		if (status === null || !HEADROOM_STATUSES.has(status)) return null;
+		const utilization = parseStrictDecimal(
+			h.get(`anthropic-ratelimit-unified-${win}-utilization`),
+		);
+		if (utilization === null || utilization >= 1) return null;
+	}
+
+	// At least one REJECTING scoped-window claim (e.g. `7d_oi`). Soonest finite
+	// future reset among them becomes the exclusion's resetAt.
+	let sawScopedRejection = false;
+	let soonestResetMs = Number.POSITIVE_INFINITY;
+	h.forEach((value, name) => {
+		const token = UNIFIED_STATUS_HEADER_RE.exec(name)?.[1];
+		if (!token || !SCOPED_WINDOW_TOKEN_RE.test(token)) return;
+		if (value !== "rejected") return;
+		sawScopedRejection = true;
+		const resetSec = parseStrictDecimal(
+			h.get(`anthropic-ratelimit-unified-${token}-reset`),
+		);
+		if (resetSec !== null && resetSec * 1000 > now) {
+			soonestResetMs = Math.min(soonestResetMs, resetSec * 1000);
+		}
+	});
+	if (!sawScopedRejection) return null;
+
+	return {
+		account,
+		family,
+		resetAt: Number.isFinite(soonestResetMs) ? soonestResetMs : now,
+	};
 }
 
 /**

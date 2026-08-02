@@ -46,7 +46,9 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { applyCodexObservation } from "./codex-observation";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+	hasAccountWideUnifiedRejection,
 	resolveFamilyWeeklyExclusion,
+	resolveFamilyWeeklyExclusionFromHeaders,
 } from "./family-weekly-gate";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import { applyRateLimitCooldown } from "./rate-limit-cooldown";
@@ -1475,22 +1477,53 @@ export async function proxyWithAccount(
 				requestedModel &&
 				!options?.reprobe &&
 				!isTrustedProbe("any") &&
-				!isAnthropicHardLimitStatus(rawResponse)
+				!isAnthropicHardLimitStatus(rawResponse) &&
+				// Live account-wide evidence outranks EVERY family verdict: when the
+				// 429's own unified headers report the 5h/7d window itself rejecting,
+				// the account is genuinely spent right now, and a cache- OR
+				// header-derived family exclusion (from a cache that merely lags the
+				// exhaustion) must not suppress the legitimate cooldown. Bursts carry
+				// no unified headers, so they never trip this veto.
+				!hasAccountWideUnifiedRejection(rawResponse)
 			) {
 				const now = Date.now();
-				const familyExclusion = resolveFamilyWeeklyExclusion(
+				const familyFreshCapacity = getFreshCapacity(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+				);
+				const cacheFamilyExclusion = resolveFamilyWeeklyExclusion(
 					account,
 					requestedModel,
 					usageCache.get(account.id),
-					getFreshCapacity(
-						usageCache,
-						account.id,
-						account.provider,
-						now,
-						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-					),
+					familyFreshCapacity,
 					now,
 				);
+				// Header-evidence fallback, gated on the cache being UNAVAILABLE
+				// (null even after the shared refresh above — post-restart with the
+				// usage endpoint down, or the endpoint 429ing its own poll). The
+				// cache path stays primary: when fresh usage exists, whatever it
+				// says (including "not exhausted") wins and the headers stay out of
+				// the decision. See resolveFamilyWeeklyExclusionFromHeaders for why
+				// this cannot misread a burst (bursts carry no unified headers) or
+				// an account-wide 429 (its 5h/7d reject), and why the worst case of
+				// an unknown claim shape is bounded (failover without a cooldown,
+				// never a lock). Without this, the exact 2026-08-02 input — cache
+				// empty, refresh failed, `7d_oi` rejected with 5h/7d headroom —
+				// fell to the model-fallback rung, which copied the claim-scoped
+				// retry-after into a 14.4h ACCOUNT-WIDE lock.
+				const headerFamilyExclusion =
+					!cacheFamilyExclusion && familyFreshCapacity === null
+						? resolveFamilyWeeklyExclusionFromHeaders(
+								account,
+								requestedModel,
+								rawResponse,
+								now,
+							)
+						: null;
+				const familyExclusion = cacheFamilyExclusion ?? headerFamilyExclusion;
 				if (familyExclusion) {
 					const reason: RateLimitReason = "family_weekly_exhausted_429";
 					// Persist the 429's unified-status header so the dashboard chip
@@ -1522,7 +1555,7 @@ export async function proxyWithAccount(
 						}),
 					);
 					log.warn(
-						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present) — failing over WITHOUT account-wide cooldown`,
+						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present${headerFamilyExclusion ? "; header evidence — usage cache unavailable" : ""}) — failing over WITHOUT account-wide cooldown`,
 					);
 					return await fail({ kind: "other" }, rawResponse);
 				}

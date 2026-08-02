@@ -8,7 +8,9 @@ import type {
 import {
 	createFamilyWeeklyExhaustedResponse,
 	type FamilyWeeklyExcludedAccount,
+	hasAccountWideUnifiedRejection,
 	resolveFamilyWeeklyExclusion,
+	resolveFamilyWeeklyExclusionFromHeaders,
 	resolveTransientlyCooledFamilySibling,
 } from "../family-weekly-gate";
 
@@ -384,5 +386,258 @@ describe("resolveTransientlyCooledFamilySibling", () => {
 		);
 		expect(result).not.toBeNull();
 		expect(result?.availableAt).toBe(NOW + 60_000);
+	});
+});
+
+describe("resolveFamilyWeeklyExclusionFromHeaders", () => {
+	// The 2026-08-02 incident: with the usage cache empty and unrefreshable
+	// (post-restart / usage endpoint down), the 429 response ITSELF carried
+	// enough scoped evidence to classify — `7d_oi` rejected at 1.0 while the
+	// account-wide 5h/7d pair showed headroom. Production measurement
+	// (429-signals.md): per-IP bursts carry NO unified headers at all (973/973),
+	// so this resolver can never misread a burst — a burst yields null on the
+	// missing unified-status alone.
+	const INCIDENT_NOW = 1_785_684_988_613; // the lock's write instant
+	const INCIDENT_RESET_MS = 1_785_736_800_000; // the fable weekly reset
+
+	/** The production 429 headers of 2026-08-02T15:36:28Z, verbatim. */
+	function incidentHeaders(): Record<string, string> {
+		return {
+			"anthropic-ratelimit-unified-5h-reset": "1785685200",
+			"anthropic-ratelimit-unified-5h-status": "allowed",
+			"anthropic-ratelimit-unified-5h-utilization": "0.0",
+			"anthropic-ratelimit-unified-7d-reset": "1785736800",
+			"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+			"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
+			"anthropic-ratelimit-unified-7d-utilization": "0.94",
+			"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
+			"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+			"anthropic-ratelimit-unified-7d_oi-surpassed-threshold": "1.0",
+			"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+			"anthropic-ratelimit-unified-fallback-percentage": "0.5",
+			"anthropic-ratelimit-unified-overage-disabled-reason":
+				"org_level_disabled",
+			"anthropic-ratelimit-unified-overage-status": "rejected",
+			"anthropic-ratelimit-unified-representative-claim":
+				"seven_day_overage_included",
+			"anthropic-ratelimit-unified-reset": "1785736800",
+			"anthropic-ratelimit-unified-status": "rejected",
+			"retry-after": "51811",
+			"x-should-retry": "true",
+		};
+	}
+
+	function res429(headers: Record<string, string>): Response {
+		return new Response("{}", { status: 429, headers });
+	}
+
+	const resolve = (
+		headers: Record<string, string>,
+		model = "claude-fable-5",
+		now = INCIDENT_NOW,
+	) =>
+		resolveFamilyWeeklyExclusionFromHeaders(
+			makeAccount(),
+			model,
+			res429(headers),
+			now,
+		);
+
+	it("classifies the incident headers verbatim: scoped claim rejected, account-wide headroom", () => {
+		const exclusion = resolve(incidentHeaders());
+		expect(exclusion).not.toBeNull();
+		expect(exclusion?.family).toBe("fable");
+		expect(exclusion?.resetAt).toBe(INCIDENT_RESET_MS);
+	});
+
+	it("returns null for a burst-shaped 429 (no unified headers at all)", () => {
+		expect(
+			resolve({ "x-should-retry": "true", "retry-after": "5" }),
+		).toBeNull();
+	});
+
+	it("returns null when the account-wide 7d window itself rejects", () => {
+		const h = incidentHeaders();
+		h["anthropic-ratelimit-unified-7d-status"] = "rejected";
+		h["anthropic-ratelimit-unified-7d-utilization"] = "1.0";
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("returns null when the account-wide 5h window rejects", () => {
+		const h = incidentHeaders();
+		h["anthropic-ratelimit-unified-5h-status"] = "rejected";
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("ignores the overage axis: overage rejected without a scoped window claim is not family evidence", () => {
+		const h = incidentHeaders();
+		delete h["anthropic-ratelimit-unified-7d_oi-reset"];
+		delete h["anthropic-ratelimit-unified-7d_oi-status"];
+		delete h["anthropic-ratelimit-unified-7d_oi-surpassed-threshold"];
+		delete h["anthropic-ratelimit-unified-7d_oi-utilization"];
+		// overage-status: rejected remains — it must NOT count as a scoped claim.
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("returns null on a headroom contradiction (7d utilization at 1.0 despite a non-rejecting status)", () => {
+		const h = incidentHeaders();
+		h["anthropic-ratelimit-unified-7d-utilization"] = "1.0";
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("returns null when a rejecting token does not match the scoped-window shape", () => {
+		const h = incidentHeaders();
+		delete h["anthropic-ratelimit-unified-7d_oi-status"];
+		h["anthropic-ratelimit-unified-weekly_fable-status"] = "rejected";
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("returns null when the account-wide window statuses are absent", () => {
+		const h = incidentHeaders();
+		delete h["anthropic-ratelimit-unified-5h-status"];
+		expect(resolve(h)).toBeNull();
+	});
+
+	it("returns null when the requested model has no recognized family", () => {
+		expect(resolve(incidentHeaders(), "gpt-5.2")).toBeNull();
+		expect(
+			resolveFamilyWeeklyExclusionFromHeaders(
+				makeAccount(),
+				null,
+				res429(incidentHeaders()),
+				INCIDENT_NOW,
+			),
+		).toBeNull();
+	});
+
+	it("falls back to `now` when the scoped claim's reset is missing or malformed", () => {
+		const h = incidentHeaders();
+		delete h["anthropic-ratelimit-unified-7d_oi-reset"];
+		const exclusion = resolve(h);
+		expect(exclusion?.resetAt).toBe(INCIDENT_NOW);
+
+		const h2 = incidentHeaders();
+		h2["anthropic-ratelimit-unified-7d_oi-reset"] = "not-a-number";
+		expect(resolve(h2)?.resetAt).toBe(INCIDENT_NOW);
+	});
+
+	it("falls back to `now` when the scoped reset is in the past", () => {
+		const h = incidentHeaders();
+		const exclusion = resolve(h, "claude-fable-5", INCIDENT_RESET_MS + 1);
+		expect(exclusion?.resetAt).toBe(INCIDENT_RESET_MS + 1);
+	});
+});
+
+describe("resolveFamilyWeeklyExclusionFromHeaders — hardening (Codex review)", () => {
+	const INCIDENT_NOW = 1_785_684_988_613;
+
+	function incidentHeaders(): Record<string, string> {
+		return {
+			"anthropic-ratelimit-unified-5h-status": "allowed",
+			"anthropic-ratelimit-unified-5h-utilization": "0.0",
+			"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+			"anthropic-ratelimit-unified-7d-utilization": "0.94",
+			"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
+			"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+			"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+			"anthropic-ratelimit-unified-status": "rejected",
+		};
+	}
+
+	const resolve = (
+		headers: Record<string, string>,
+		accountOverrides: Partial<Account> = {},
+	) =>
+		resolveFamilyWeeklyExclusionFromHeaders(
+			makeAccount(accountOverrides),
+			"claude-fable-5",
+			new Response("{}", { status: 429, headers }),
+			INCIDENT_NOW,
+		);
+
+	it("only positively non-blocking statuses count as headroom (hard/empty/unknown all bail)", () => {
+		for (const status of [
+			"rate_limited",
+			"blocked",
+			"payment_required",
+			"queueing_hard",
+			"",
+			"some_future_status",
+		]) {
+			const h = incidentHeaders();
+			h["anthropic-ratelimit-unified-7d-status"] = status;
+			expect(resolve(h)).toBeNull();
+		}
+		// The whitelisted trio passes.
+		for (const status of ["allowed", "allowed_warning", "queueing_soft"]) {
+			const h = incidentHeaders();
+			h["anthropic-ratelimit-unified-7d-status"] = status;
+			expect(resolve(h)).not.toBeNull();
+		}
+	});
+
+	it("utilization must be a full-string decimal in [0, 1): prefix junk and negatives bail", () => {
+		for (const util of ["0.94extra", "0x1", "-0.5", "", "NaN", "1", "1.0"]) {
+			const h = incidentHeaders();
+			h["anthropic-ratelimit-unified-7d-utilization"] = util;
+			expect(resolve(h)).toBeNull();
+		}
+		const h = incidentHeaders();
+		h["anthropic-ratelimit-unified-7d-utilization"] = "0.999";
+		expect(resolve(h)).not.toBeNull();
+	});
+
+	it("a malformed scoped reset falls back to now instead of poisoning resetAt", () => {
+		const h = incidentHeaders();
+		h["anthropic-ratelimit-unified-7d_oi-reset"] = "1785736800garbage";
+		expect(resolve(h)?.resetAt).toBe(INCIDENT_NOW);
+	});
+
+	it("trusts only the official Anthropic OAuth upstream", () => {
+		// Baseline sanity: the same headers pass for the official upstream.
+		expect(resolve(incidentHeaders())).not.toBeNull();
+		// Anthropic-compatible provider: bail.
+		expect(resolve(incidentHeaders(), { provider: "zai" as never })).toBeNull();
+		// Anthropic account pointed at a custom endpoint: bail.
+		expect(
+			resolve(incidentHeaders(), {
+				custom_endpoint: "https://relay.example/v1",
+			}),
+		).toBeNull();
+	});
+});
+
+describe("hasAccountWideUnifiedRejection", () => {
+	const res = (headers: Record<string, string>) =>
+		new Response("{}", { status: 429, headers });
+
+	it("true when 5h or 7d reports any rejecting status", () => {
+		expect(
+			hasAccountWideUnifiedRejection(
+				res({ "anthropic-ratelimit-unified-7d-status": "rejected" }),
+			),
+		).toBe(true);
+		expect(
+			hasAccountWideUnifiedRejection(
+				res({ "anthropic-ratelimit-unified-5h-status": "rate_limited" }),
+			),
+		).toBe(true);
+	});
+
+	it("false for headroom statuses, absent headers (burst shape), and scoped-only rejection", () => {
+		expect(
+			hasAccountWideUnifiedRejection(
+				res({
+					"anthropic-ratelimit-unified-5h-status": "allowed",
+					"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+				}),
+			),
+		).toBe(false);
+		expect(hasAccountWideUnifiedRejection(res({}))).toBe(false);
+		expect(
+			hasAccountWideUnifiedRejection(
+				res({ "anthropic-ratelimit-unified-7d_oi-status": "rejected" }),
+			),
+		).toBe(false);
 	});
 });

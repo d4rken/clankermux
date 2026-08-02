@@ -447,6 +447,285 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		}
 	});
 
+	it("cold cache + dead usage endpoint: the 429's own scoped headers rescue the family verdict", async () => {
+		// The residual gap after the registration fix (v2026.7.51): the cache is
+		// empty AND refreshNow fails (usage endpoint down / its own 429). Before
+		// this rung learned to read the response's unified headers, this exact
+		// input fell through to the model-fallback rung and copied the
+		// claim-scoped retry-after (51811s = the fable weekly reset) into an
+		// account-wide lock (Claude-Backup-2, 2026-08-02, reason
+		// model_fallback_429 — not poller-releasable, so it stuck for 14.4h).
+		let refreshCalls = 0;
+		const refreshSpy = mock(async () => {
+			refreshCalls += 1;
+			return false; // endpoint down: no cache write
+		});
+		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
+		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
+
+		try {
+			// The production 429 of 2026-08-02T15:36:28Z, headers verbatim.
+			globalThis.fetch = mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "rate limited" },
+						}),
+						{
+							status: 429,
+							headers: {
+								"content-type": "application/json",
+								"anthropic-ratelimit-unified-5h-reset": "1785685200",
+								"anthropic-ratelimit-unified-5h-status": "allowed",
+								"anthropic-ratelimit-unified-5h-utilization": "0.0",
+								"anthropic-ratelimit-unified-7d-reset": "1785736800",
+								"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+								"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
+								"anthropic-ratelimit-unified-7d-utilization": "0.94",
+								"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
+								"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+								"anthropic-ratelimit-unified-7d_oi-surpassed-threshold": "1.0",
+								"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+								"anthropic-ratelimit-unified-fallback-percentage": "0.5",
+								"anthropic-ratelimit-unified-overage-disabled-reason":
+									"org_level_disabled",
+								"anthropic-ratelimit-unified-overage-status": "rejected",
+								"anthropic-ratelimit-unified-representative-claim":
+									"seven_day_overage_included",
+								"anthropic-ratelimit-unified-reset": "1785736800",
+								"anthropic-ratelimit-unified-status": "rejected",
+								"retry-after": "51811",
+								"x-should-retry": "true",
+							},
+						},
+					),
+			);
+
+			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const account = makeOAuthAnthropicAccount();
+			const bodyBuffer = makeRequestBody("claude-fable-5");
+
+			const result = await proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				ctx,
+			);
+
+			// One refresh attempt was made (and failed) — no double fetch.
+			expect(refreshCalls).toBe(1);
+			expect(result).toBeNull();
+			// The header evidence carried the verdict: no account-wide cooldown.
+			expect(account.rate_limited_until).toBeNull();
+			expect(markCalls).toHaveLength(0);
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "family_weekly_exhausted_429",
+				),
+			).toBeDefined();
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "model_fallback_429",
+				),
+			).toBeUndefined();
+		} finally {
+			usageCache.refreshNow = originalRefreshNow;
+		}
+	});
+
+	it("cold cache + dead endpoint + account-wide-shape headers: falls through to normal cooldown handling", async () => {
+		// Same evidence-starved state, but the headers report the account-wide 7d
+		// window itself rejecting: header evidence must NOT rescue this — the lock
+		// is truthful and the existing (model-fallback) path applies it.
+		const refreshSpy = mock(async () => false);
+		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
+		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
+
+		try {
+			globalThis.fetch = mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "rate limited" },
+						}),
+						{
+							status: 429,
+							headers: {
+								"content-type": "application/json",
+								"anthropic-ratelimit-unified-5h-status": "allowed",
+								"anthropic-ratelimit-unified-5h-utilization": "0.2",
+								"anthropic-ratelimit-unified-7d-reset": "1785736800",
+								"anthropic-ratelimit-unified-7d-status": "rejected",
+								"anthropic-ratelimit-unified-7d-utilization": "1.0",
+								"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+								"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+								"anthropic-ratelimit-unified-reset": "1785736800",
+								"anthropic-ratelimit-unified-status": "rejected",
+								"retry-after": "51811",
+								"x-should-retry": "true",
+							},
+						},
+					),
+			);
+
+			const { ctx, saveRequestCalls } = makeProxyContext();
+			const account = makeOAuthAnthropicAccount();
+			const bodyBuffer = makeRequestBody("claude-fable-5");
+
+			await proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				ctx,
+			);
+
+			// No family rescue — the account-wide cooldown applies as before.
+			expect(
+				saveRequestCalls.find(
+					(row) => row.errorMessage === "family_weekly_exhausted_429",
+				),
+			).toBeUndefined();
+			expect(account.rate_limited_until).not.toBeNull();
+		} finally {
+			usageCache.refreshNow = originalRefreshNow;
+		}
+	});
+
+	it("live account-wide rejection vetoes a fresh-cache family verdict (cooldown NOT suppressed)", async () => {
+		// A <=180s cache can lag the exhaustion: it still says "fable exhausted,
+		// unified headroom" while the LIVE 429 reports the account-wide 7d window
+		// itself rejecting. Live evidence outranks the cache: the family rung must
+		// stand down and let the normal cooldown handling run.
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "rate_limit_error", message: "rate limited" },
+					}),
+					{
+						status: 429,
+						headers: {
+							"content-type": "application/json",
+							"anthropic-ratelimit-unified-5h-status": "allowed",
+							"anthropic-ratelimit-unified-5h-utilization": "0.1",
+							"anthropic-ratelimit-unified-7d-reset": "1785736800",
+							"anthropic-ratelimit-unified-7d-status": "rejected",
+							"anthropic-ratelimit-unified-7d-utilization": "1.0",
+							"anthropic-ratelimit-unified-status": "rejected",
+							"retry-after": "3600",
+							"x-should-retry": "true",
+						},
+					},
+				),
+		);
+		seedUsage(0, 83); // fresh cache: fable exhausted + unified headroom
+
+		const { ctx, saveRequestCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const bodyBuffer = makeRequestBody("claude-fable-5");
+
+		await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		expect(
+			saveRequestCalls.find(
+				(row) => row.errorMessage === "family_weekly_exhausted_429",
+			),
+		).toBeUndefined();
+		expect(account.rate_limited_until).not.toBeNull();
+	});
+
+	it("fresh cache saying NOT exhausted wins over scoped headers (header fallback is cache-unavailable-only)", async () => {
+		// A fresh cache that does NOT confirm family exhaustion means the header
+		// fallback must stay out of the decision: the rung is scoped to the
+		// evidence-starved case only, so cache-vs-header disagreements keep the
+		// existing (burst/model-fallback) behavior.
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "rate_limit_error", message: "rate limited" },
+					}),
+					{
+						status: 429,
+						headers: {
+							"content-type": "application/json",
+							"anthropic-ratelimit-unified-5h-status": "allowed",
+							"anthropic-ratelimit-unified-5h-utilization": "0.0",
+							"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+							"anthropic-ratelimit-unified-7d-utilization": "0.94",
+							"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+							"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+							"anthropic-ratelimit-unified-status": "rejected",
+							"x-should-retry": "true",
+						},
+					},
+				),
+		);
+		// Fresh cache: fable weekly at 50% — NOT exhausted.
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 83,
+				resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 50,
+					resets_at: new Date(Date.now() + 16 * 3_600_000).toISOString(),
+					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		} as never);
+
+		const { ctx, saveRequestCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const bodyBuffer = makeRequestBody("claude-fable-5");
+
+		await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		expect(
+			saveRequestCalls.find(
+				(row) => row.errorMessage === "family_weekly_exhausted_429",
+			),
+		).toBeUndefined();
+	});
+
 	it("usage aged between the two bounds (120s < age <= 180s) does NOT buy an extra refresh", async () => {
 		// The shared refresh triggers on the LOOSEST bound (180s), not the burst
 		// rung's 120s. In this band the family rung is still satisfied and returns
