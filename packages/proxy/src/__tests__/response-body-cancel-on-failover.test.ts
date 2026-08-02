@@ -4,13 +4,28 @@ import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 
 /**
- * Regression: failover/return-null paths in proxy-operations.ts MUST cancel the
+ * Regression: failover/return-null paths in proxy-operations.ts MUST dispose the
  * abandoned upstream response body. At Bun 1.3.x a fetch() Response body that is
  * neither read to EOF nor cancelled keeps its socket + ~512 KB native read
  * buffer committed forever — an off-heap leak that ratchets up with every 429 /
- * 401 / 529 failover under load (observed: ~1.6 GB/h on the live proxy). These
- * tests drive a real upstream error through handleProxy with a body backed by a
- * ReadableStream whose cancel() is spied, and assert the body was cancelled.
+ * 401 / 529 failover under load (observed: ~1.6 GB/h on the live proxy).
+ *
+ * WHAT THESE TESTS PIN, AND WHAT THEY DO NOT
+ * ------------------------------------------
+ * They pin the CONTRACT: a native upstream body on a failover path is DRAINED
+ * to EOF, not merely cancelled. That distinction is the whole point of
+ * `discardUpstreamBody` — cancelling alone does not reliably return Bun's native
+ * read allocation, which is why the previous version of this file (which
+ * asserted only `state.cancelled`) looked green while the leak was still live.
+ * Asserting "the call happened" is not asserting "the memory was released".
+ *
+ * They do NOT pin native memory behaviour. That was established out-of-band with
+ * RSS measurements against Bun 1.3.14; no soak test is added to this suite,
+ * because a memory soak is neither fast nor deterministic enough to belong here.
+ *
+ * Because disposal is fire-and-forget (it must not block failover), `fullyRead`
+ * is NOT true synchronously when handleProxy returns — every assertion below
+ * polls for it.
  */
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
@@ -129,9 +144,42 @@ function makeContext(accounts: Account[]): ProxyContext {
 }
 
 /**
- * Build an error Response whose body is a ReadableStream we can observe. The
- * returned `cancelled` ref flips true if the proxy cancels the body (the leak
- * fix); it stays false if the body is dropped on the floor (the leak).
+ * Poll until `predicate()` holds, or fail the test after `timeoutMs`.
+ *
+ * Required because body disposal is intentionally fire-and-forget: the failover
+ * path returns as soon as the drain is LAUNCHED, so the drain completes a few
+ * microtasks later. A synchronous assertion would race it.
+ */
+async function waitFor(
+	predicate: () => boolean,
+	label: string,
+	timeoutMs = 2_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${label}`);
+}
+
+/**
+ * Build an error Response whose body is a ReadableStream we can observe.
+ *
+ * `fullyRead` flips true only when the stream is actually pulled to EOF — i.e.
+ * when the proxy DRAINED the body and Bun can release the native read buffer.
+ * `cancelled` flips true on a bare `cancel()`, which is what the OLD (leaky)
+ * behaviour did: it proves a call was made, not that anything was released.
+ * The assertions below therefore key on `fullyRead`.
+ *
+ * The payload is deliberately emitted in SEVERAL chunks. A single-chunk stream
+ * cannot distinguish the two behaviours: with the default highWaterMark of 1 the
+ * stream calls `pull` eagerly at construction to fill its queue, so a one-shot
+ * `enqueue`+`close` would set `fullyRead` before anyone read anything — and the
+ * assertion would pass even for cancel-only disposal. Chunking forces one `pull`
+ * per `read()`, so EOF is reached only by a consumer that actually drains.
+ * Concatenated, the chunks are byte-identical to `json`, so any other reader on
+ * the path still parses the same body.
  */
 function errorResponseWithObservableBody(
 	status: number,
@@ -140,11 +188,17 @@ function errorResponseWithObservableBody(
 ): { response: Response; state: { cancelled: boolean; fullyRead: boolean } } {
 	const state = { cancelled: false, fullyRead: false };
 	const payload = new TextEncoder().encode(json);
+	const chunkSize = Math.max(1, Math.ceil(payload.byteLength / 4));
+	let offset = 0;
 	const body = new ReadableStream<Uint8Array>({
 		pull(controller) {
-			controller.enqueue(payload);
-			controller.close();
-			state.fullyRead = true;
+			if (offset >= payload.byteLength) {
+				controller.close();
+				state.fullyRead = true;
+				return;
+			}
+			controller.enqueue(payload.slice(offset, offset + chunkSize));
+			offset += chunkSize;
 		},
 		cancel() {
 			state.cancelled = true;
@@ -157,7 +211,7 @@ function errorResponseWithObservableBody(
 	return { response, state };
 }
 
-describe("failover cancels the abandoned upstream response body", () => {
+describe("failover drains the abandoned upstream response body", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {
@@ -168,7 +222,7 @@ describe("failover cancels the abandoned upstream response body", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("cancels the 429 body on the no-model-fallback failover (return null)", async () => {
+	it("drains the 429 body on the no-model-fallback failover (return null)", async () => {
 		const account = makeAccount({ id: "anthropic-a", provider: "anthropic" });
 		const { response, state } = errorResponseWithObservableBody(
 			429,
@@ -192,12 +246,14 @@ describe("failover cancels the abandoned upstream response body", () => {
 		const ctx = makeContext([account]);
 		await runFailover(ctx);
 
-		// The abandoned 429 body must be cancelled (or drained), never dropped.
-		expect(state.cancelled || state.fullyRead).toBe(true);
-		expect(state.cancelled).toBe(true);
+		// The abandoned 429 body must be READ TO EOF, not merely cancelled: only
+		// a drain returns Bun's native read buffer. Polled because the drain is
+		// launched fire-and-forget so failover isn't blocked by it.
+		await waitFor(() => state.fullyRead, "the abandoned 429 body to drain");
+		expect(state.fullyRead).toBe(true);
 	});
 
-	it("cancels the 401 body on the auth-failure failover (return null)", async () => {
+	it("drains the 401 body on the auth-failure failover (return null)", async () => {
 		const account = makeAccount({ id: "anthropic-a", provider: "anthropic" });
 		const { response, state } = errorResponseWithObservableBody(
 			401,
@@ -219,6 +275,7 @@ describe("failover cancels the abandoned upstream response body", () => {
 		const ctx = makeContext([account]);
 		await runFailover(ctx);
 
-		expect(state.cancelled).toBe(true);
+		await waitFor(() => state.fullyRead, "the abandoned 401 body to drain");
+		expect(state.fullyRead).toBe(true);
 	});
 });
