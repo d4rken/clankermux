@@ -149,6 +149,18 @@ export interface PollingPolicy {
 	idleIntervalMs?: number;
 	/** Override the activity-recency threshold (defaults to ACTIVITY_RECENCY_MS). */
 	activityRecencyMs?: number;
+	/**
+	 * Defer the FIRST fetch by this many ms (the server's boot stagger, so a
+	 * restart doesn't 429 the shared /oauth/usage bucket with one burst per
+	 * account). Registration is NOT deferred: the token provider is installed
+	 * synchronously, so `refreshNow` works from t=0. The stagger used to defer
+	 * the whole `startPolling` call instead, which made `refreshNow` a silent
+	 * no-op for the first `index * 5s` after every restart — a 429 in that
+	 * window found the cache empty AND unrefreshable, every evidence rung of
+	 * the 429 ladder failed open, and a family-scoped 429 locked the account
+	 * account-wide (Claude-Backup-2, 2026-08-02, 14.4h).
+	 */
+	initialDelayMs?: number;
 }
 
 /**
@@ -1325,41 +1337,71 @@ class UsageCache {
 		// Default to 90s if not provided
 		const baseIntervalMs = intervalMs ?? 90000;
 
-		// Immediate fetch
-		this.fetchAndCache(
-			accountId,
-			tokenProvider,
-			generation,
-			provider,
-			customEndpoint,
-		).then(({ success, retryAfterMs, superseded }) => {
-			// Stale result from a generation that has since been replaced: it says
-			// nothing about THIS poller, so it must not seed a failure streak.
-			if (superseded) return;
-			if (!success) {
-				this.failureCounts.set(accountId, 1);
-			}
-			// Generation + identity guards: only start the loop if this generation
-			// is still current (a concurrent restart/replacement may have
-			// superseded it). scheduleNextPoll re-checks the generation too.
-			if (
-				this.pollGenerations.get(accountId) === generation &&
-				this.tokenProviders.get(accountId) === tokenProvider
-			) {
-				this.scheduleNextPoll(
-					accountId,
-					tokenProvider,
-					generation,
-					baseIntervalMs,
-					provider,
-					customEndpoint,
-					retryAfterMs,
-				);
-			}
-		});
+		// First fetch — immediate by default, deferred by `policy.initialDelayMs`
+		// (see its doc: the boot stagger defers only the fetch; registration
+		// above already happened, so refreshNow works during the delay).
+		const runFirstFetch = () => {
+			this.fetchAndCache(
+				accountId,
+				tokenProvider,
+				generation,
+				provider,
+				customEndpoint,
+			).then(({ success, retryAfterMs, superseded }) => {
+				// Stale result from a generation that has since been replaced: it says
+				// nothing about THIS poller, so it must not seed a failure streak.
+				if (superseded) return;
+				if (!success) {
+					this.failureCounts.set(accountId, 1);
+				}
+				// Generation + identity guards: only start the loop if this generation
+				// is still current (a concurrent restart/replacement may have
+				// superseded it). scheduleNextPoll re-checks the generation too.
+				if (
+					this.pollGenerations.get(accountId) === generation &&
+					this.tokenProviders.get(accountId) === tokenProvider
+				) {
+					this.scheduleNextPoll(
+						accountId,
+						tokenProvider,
+						generation,
+						baseIntervalMs,
+						provider,
+						customEndpoint,
+						retryAfterMs,
+					);
+				}
+			});
+		};
+
+		const initialDelayMs = Math.max(0, policy?.initialDelayMs ?? 0);
+		if (initialDelayMs > 0) {
+			// The deferred first fetch is a first-class scheduled poll: tracked in
+			// pollTimeouts/pollSchedule so stopPolling and a replacement
+			// startPolling clear it, and generation+identity-guarded at fire time
+			// like every armed tick. isIdle:false keeps noteActivity's idle re-arm
+			// off it (traffic must not bypass the boot stagger), and a healthy
+			// refreshNow during the delay leaves it in place
+			// (rearmAfterOnDemandSuccess only replaces backoff timers).
+			const timeoutId = setTimeout(() => {
+				this.pollTimeouts.delete(accountId);
+				this.pollSchedule.delete(accountId);
+				if (this.pollGenerations.get(accountId) !== generation) return;
+				if (this.tokenProviders.get(accountId) !== tokenProvider) return;
+				runFirstFetch();
+			}, initialDelayMs);
+			this.pollTimeouts.set(accountId, timeoutId);
+			this.pollSchedule.set(accountId, {
+				wakeAt: Date.now() + initialDelayMs,
+				isIdle: false,
+				activeBaseMs: baseIntervalMs,
+			});
+		} else {
+			runFirstFetch();
+		}
 
 		log.debug(
-			`Started usage polling for account ${accountId} (provider: ${provider}) with base interval ${Math.round(baseIntervalMs / 1000)}s`,
+			`Started usage polling for account ${accountId} (provider: ${provider}) with base interval ${Math.round(baseIntervalMs / 1000)}s${initialDelayMs > 0 ? ` (first fetch in ${Math.round(initialDelayMs / 1000)}s)` : ""}`,
 		);
 	}
 

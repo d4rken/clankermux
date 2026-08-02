@@ -465,6 +465,13 @@ function startUsagePollingWithRefresh(
 				// on-demand refresh (account-selector's refreshNow) covers real traffic.
 				{
 					demandAware: account.provider === "anthropic",
+					// Boot stagger: defers only the FIRST fetch. Registration is
+					// synchronous so the 429 ladder's on-demand refreshNow works from
+					// t=0 — deferring the whole startPolling call left refreshNow a
+					// silent no-op for `index * 5s` after every restart, and a 429 in
+					// that window got misclassified account-wide (Claude-Backup-2,
+					// 2026-08-02).
+					initialDelayMs: startupDelayMs,
 					getLastActivityMs: (accountId) =>
 						proxyContext.dbOps
 							.getAccount(accountId)
@@ -573,12 +580,9 @@ function startUsagePollingWithRefresh(
 		}
 	};
 
-	// Start the polling (with optional startup delay to stagger multiple accounts)
-	if (startupDelayMs > 0) {
-		setTimeout(() => pollWithRefresh(), startupDelayMs);
-	} else {
-		pollWithRefresh();
-	}
+	// Register the poller NOW; the boot stagger rides in as the policy's
+	// initialDelayMs (first fetch only), never as a registration delay.
+	pollWithRefresh();
 }
 
 // Export for programmatic use
@@ -1526,7 +1530,9 @@ Available endpoints:
 			if (account.access_token || account.refresh_token) {
 				// Start usage polling with token refresh capability
 				// Usage data fetching should work independently of account paused status
-				// Stagger startup by 5s per account to avoid simultaneous 429s on boot
+				// Stagger the FIRST FETCH by 5s per account to avoid simultaneous
+				// 429s on boot; registration itself is immediate so refreshNow works
+				// during the stagger window.
 				const startupDelayMs = index * 5000;
 				startUsagePollingWithRefresh(
 					account,
@@ -1535,7 +1541,7 @@ Available endpoints:
 					config.getUsagePollIntervalMs(),
 				);
 				log.info(
-					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
+					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (first fetch delayed ${startupDelayMs / 1000}s)` : ""}`,
 				);
 			} else {
 				log.warn(
