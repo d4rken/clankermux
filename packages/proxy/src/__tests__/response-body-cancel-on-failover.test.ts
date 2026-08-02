@@ -98,7 +98,10 @@ function makeRequest(headers: Record<string, string> = {}): Request {
 	});
 }
 
-function makeContext(accounts: Account[]): ProxyContext {
+function makeContext(
+	accounts: Account[],
+	providerOverride?: unknown,
+): ProxyContext {
 	return {
 		strategy: {
 			select: mock((allAccounts: Account[]) => allAccounts),
@@ -127,7 +130,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			getCacheWarmingMinTokens: () => 100_000,
 			getStorePayloads: () => true,
 		} as never,
-		provider: getProvider("anthropic") as never,
+		provider: (providerOverride ?? getProvider("anthropic")) as never,
 		refreshInFlight: new Map(),
 		asyncWriter: { enqueue: mock(() => undefined) } as never,
 		requestRecorder: {
@@ -277,5 +280,107 @@ describe("failover drains the abandoned upstream response body", () => {
 
 		await waitFor(() => state.fullyRead, "the abandoned 401 body to drain");
 		expect(state.fullyRead).toBe(true);
+	});
+});
+
+/**
+ * The ONE failover site where drain is the wrong primitive.
+ *
+ * The rate-limited failover runs AFTER processProxyResponse →
+ * updateAccountMetadata, which — whenever a requestId is set, i.e. always on
+ * this path — hands a `response.clone()` to a floating usage-extraction IIFE.
+ * The response being disposed there is a tee branch whose twin may still be
+ * reading, and draining a branch makes the tee pull and buffer the whole body
+ * for that twin. So this site cancels; every other fail() site still drains.
+ *
+ * The context below deliberately supplies a provider WITHOUT extractUsageInfo /
+ * parseUsage, so no extraction clone is made and the disposal primitive is
+ * observable at the stream source (with a live twin the tee absorbs the
+ * difference: the twin's own read pulls the source to EOF either way, and a
+ * single branch cancelling never runs the source's cancel algorithm). That is
+ * the only way to see WHICH primitive the site used; it does not change which
+ * one it uses.
+ */
+describe("the rate-limited failover cancels its tee branch instead of draining", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("cancels the body of a 200 whose unified-status header reports the account is rate-limited", async () => {
+		// A rate-limited verdict is driven by the unified-status header
+		// INDEPENDENTLY of the HTTP status, so a successful 200 completion can
+		// take this branch — which is exactly why usage extraction still runs
+		// here (and therefore why the body is a tee branch).
+		const account = makeAccount({
+			id: "stub-a",
+			provider: "test-provider" as Account["provider"],
+		});
+		const { response, state } = errorResponseWithObservableBody(
+			200,
+			'{"type":"message","usage":{"input_tokens":10,"output_tokens":20}}',
+			{ "anthropic-ratelimit-unified-status": "rate_limited" },
+		);
+
+		// No extractUsageInfo / parseUsage: see the block comment above.
+		const stubProvider = {
+			name: "test-provider",
+			canHandle: () => true,
+			buildUrl: () => "https://upstream.local/v1/messages",
+			prepareHeaders: () => new Headers(),
+			transformRequestBody: null,
+			processResponse: async (r: Response) => r,
+			parseRateLimit: (r: Response) => {
+				const statusHeader = r.headers.get(
+					"anthropic-ratelimit-unified-status",
+				);
+				return {
+					isRateLimited: statusHeader === "rate_limited" || r.status === 429,
+					resetTime: undefined,
+					statusHeader: statusHeader ?? undefined,
+					remaining: undefined,
+				};
+			},
+			isStreamingResponse: () => false,
+		};
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const request =
+				input instanceof Request ? input : new Request(String(input));
+			if (request.url.includes("models.dev")) {
+				return new Response("{}", {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			upstreamCalls++;
+			return response;
+		}) as never;
+
+		const ctx = makeContext([account], stubProvider);
+		await runFailover(ctx);
+
+		// Non-vacuity: the attempt really happened and really was classified
+		// rate-limited (so the disposal below is the rate-limited fail() site,
+		// not some other path). The cooldown is read off the in-memory account —
+		// this file's asyncWriter mock never runs the enqueued DB job.
+		expect(upstreamCalls).toBe(1);
+		expect(account.rate_limited_until ?? 0).toBeGreaterThan(Date.now());
+
+		// Disposal is fire-and-forget, so wait for whichever primitive ran.
+		await waitFor(
+			() => state.cancelled || state.fullyRead,
+			"the rate-limited body to be disposed",
+		);
+		expect(state.cancelled).toBe(true);
+		// Never pulled to EOF: draining is what would make the tee buffer the
+		// whole body for a live twin.
+		expect(state.fullyRead).toBe(false);
 	});
 });
