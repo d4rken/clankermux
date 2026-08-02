@@ -111,6 +111,54 @@ function makeAffinityHitStrategy(heldAccountId: string) {
 }
 
 /**
+ * Plain round-robin strategy stub: NO affinity, so every candidate is served by
+ * `runCandidateLoop` rather than by the affinity_hit preflight. Required by the
+ * fan-out tests — see the T4 block for why a single-account affinity pool cannot
+ * prove anything about fan-out.
+ */
+function makeRoundRobinStrategy() {
+	return {
+		select: (accs: Account[], meta: RequestMeta) => {
+			const now = Date.now();
+			const available = accs.filter(
+				(acc) =>
+					!acc.paused &&
+					(!acc.rate_limited_until || acc.rate_limited_until <= now),
+			);
+			meta.routing = {
+				strategy: "session",
+				decision: "round_robin",
+				affinityScope: null,
+				affinityKey: null,
+				selectedAccountId: available[0]?.id ?? null,
+				previousAccountId: null,
+				candidatesCount: available.length,
+				failoverReason: null,
+			};
+			return available;
+		},
+	} as never;
+}
+
+/**
+ * A pool of API-key accounts (no refresh token), so a 401 fails straight over
+ * instead of detouring through the stale-token refresh-and-retry path.
+ */
+function makeApiKeyPool(size: number): Account[] {
+	return Array.from({ length: size }, (_, i) =>
+		makeAccount({
+			id: `apikey-${i + 1}`,
+			name: `ApiKey-${i + 1}`,
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			refresh_token_issued_at: null,
+		}),
+	);
+}
+
+/**
  * Selection-time strategy stub: the client hangs up WHILE account selection is
  * running, and selection then finds nothing available. Drives the T2 terminals.
  */
@@ -374,7 +422,10 @@ describe("client-abort terminals", () => {
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("client_closed_request");
-		// Exactly ONE upstream attempt: a disconnect must not fan out to siblings.
+		// NOTE: this pool has ONE account and the affinity preflight attempts it
+		// outside `runCandidateLoop` (the loop then skips it via `skipAccountId`),
+		// so `calls === 1` here says nothing about fan-out. The real fan-out
+		// assertions live in the T4 block below, against a 3-account pool.
 		expect(state.calls).toBe(1);
 	}, 15_000);
 
@@ -694,5 +745,210 @@ describe("client-abort terminals", () => {
 		};
 		expect(body.error.type).toBe("client_closed_request");
 		expect(calls).toBe(1);
+	}, 15_000);
+
+	// ===== T4: the candidate loop must not fan out after a disconnect =====
+	//
+	// Every test here uses a >= 3 account, NON-affinity pool, so `runCandidateLoop`
+	// owns all of them. The T1 fan-out claim was vacuous: with one affinity-held
+	// account the preflight attempts it outside the loop and `skipAccountId` makes
+	// the loop skip the only entry, so the loop body never executed at all.
+
+	it("disconnect on the first candidate → 499 and candidates 2 and 3 are never attempted", async () => {
+		const accounts = makeApiKeyPool(3);
+		const ctx = makeContext(accounts, makeRoundRobinStrategy());
+
+		const state = { calls: 0, signal: null as AbortSignal | null };
+		globalThis.fetch = hangUntilAbortedFetch(state);
+
+		const controller = new AbortController();
+		const pending = callHandleProxy(
+			makeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		await waitFor(() => state.calls === 1);
+		controller.abort();
+
+		const response = await pending;
+
+		expect(state.signal?.aborted).toBe(true);
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		// The pool had two more healthy candidates and neither was touched.
+		expect(state.calls).toBe(1);
+	}, 15_000);
+
+	it("disconnect during an attempt that RETURNS a 401 → 499 before candidate 2, no cooldown written", async () => {
+		// Designed so it CANNOT pass via the proxyWithAccount catch: the first
+		// attempt does not throw, it returns an ordinary 401 Response and signals
+		// failover by returning null. Only the loop's own top-of-body abort check
+		// can stop candidate 2 here. A 401 (not a 429) so the "no cooldown" claim
+		// is about the abort guard and not about which status writes a cooldown.
+		const accounts = makeApiKeyPool(3);
+		const ctx = makeContext(accounts, makeRoundRobinStrategy());
+
+		const controller = new AbortController();
+		let calls = 0;
+		globalThis.fetch = upstreamOnlyFetch(() => {
+			calls++;
+			// The client hangs up while this attempt is being processed. The
+			// attempt itself completes normally.
+			controller.abort();
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "authentication_error", message: "invalid x-api-key" },
+				}),
+				{ status: 401, headers: { "content-type": "application/json" } },
+			);
+		});
+
+		const response = await callHandleProxy(
+			makeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		expect(calls).toBe(1);
+		expect(cooldownCalls(ctx)).toBe(0);
+	}, 15_000);
+
+	it("disconnect on the first candidate of a multi-account pool discards the staged cache body", async () => {
+		// proxyWithAccount stages a cacheable body BEFORE fetching, and its
+		// client-abort terminal returns a Response — at which point the candidate
+		// loop returns immediately and both the loop's cleanup and the
+		// request-level tail are bypassed. The discard therefore has to happen
+		// inside that terminal itself; without it the staged body is left to the
+		// age sweep.
+		cacheBodyStore.setEnabled(true);
+		const baseline = cacheBodyStore.getStagingSize();
+
+		const accounts = makeApiKeyPool(3);
+		const ctx = makeContext(accounts, makeRoundRobinStrategy());
+
+		const state = { calls: 0, signal: null as AbortSignal | null };
+		let stagedDuringAttempt = -1;
+		const inner = hangUntilAbortedFetch(state);
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const result = inner(input as never);
+			if (isUpstreamCall(input)) {
+				stagedDuringAttempt = cacheBodyStore.getStagingSize();
+			}
+			return result;
+		}) as never;
+
+		const controller = new AbortController();
+		const pending = callHandleProxy(
+			makeCacheableRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		await waitFor(() => state.calls === 1);
+		controller.abort();
+
+		const response = await pending;
+
+		expect(response.status).toBe(499);
+		// Non-vacuity: something really WAS staged for this request.
+		expect(stagedDuringAttempt).toBe(baseline + 1);
+		expect(cacheBodyStore.getStagingSize()).toBe(baseline);
+		expect(state.calls).toBe(1);
+	}, 15_000);
+
+	it("AbortError with a LIVE client (composed budget/timeout signal) still fails over", async () => {
+		// The discriminator is `req.signal.aborted`, never `isAbortError`. The
+		// burst / overload / context-window holds each build their own
+		// AbortController and compose it with the client signal via
+		// AbortSignal.any, and makeProxyRequest composes its internal request
+		// timeout the same way — so an AbortError can perfectly well arrive while
+		// the client is still connected and waiting. That case MUST keep failing
+		// over rather than short-circuiting to 499.
+		const accounts = makeApiKeyPool(2);
+		const ctx = makeContext(accounts, makeRoundRobinStrategy());
+
+		let calls = 0;
+		globalThis.fetch = upstreamOnlyFetch(() => {
+			calls++;
+			throw new DOMException("The operation was aborted.", "AbortError");
+		});
+
+		// No client signal at all: req.signal.aborted is false throughout.
+		await expect(
+			callHandleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			),
+		).rejects.toThrow(/All accounts failed to proxy the request/);
+		// Both candidates attempted — the AbortError did not terminate the loop.
+		expect(calls).toBe(2);
+	}, 15_000);
+
+	// ===== T5: the forced-account path =====
+
+	it("forced account + client disconnect → 499, and nothing is recorded", async () => {
+		// proxyForcedAccount now threads the client signal into its single upstream
+		// fetch. Without a matching abort check, that change would turn every
+		// client disconnect into a recorded forced-account failure (a local 502 plus
+		// a Request History row) — trading a leak for a new mis-classification.
+		const { proxyForcedAccount } = await import("../handlers");
+		const account = makeApiKeyPool(1)[0];
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+
+		const state = { calls: 0, signal: null as AbortSignal | null };
+		globalThis.fetch = hangUntilAbortedFetch(state);
+
+		const controller = new AbortController();
+		const requestMeta = {
+			id: "forced-abort-1",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: "claude-sonnet-4-5",
+			routing: null,
+		} as unknown as RequestMeta;
+
+		const pending = proxyForcedAccount(
+			makeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			requestMeta,
+			null,
+			ctx,
+		);
+
+		await waitFor(() => state.calls === 1);
+		controller.abort();
+
+		const response = await pending;
+
+		expect(state.signal?.aborted).toBe(true);
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		// Nothing recorded: no forced_account_unavailable row, no recorder begin.
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					begin: { mock: { calls: unknown[] } };
+				}
+			).begin.mock.calls.length,
+		).toBe(0);
+		expect(
+			(ctx.dbOps as unknown as { saveRequest: { mock: { calls: unknown[] } } })
+				.saveRequest.mock.calls.length,
+		).toBe(0);
 	}, 15_000);
 });
