@@ -865,6 +865,90 @@ describe("client-abort terminals", () => {
 		expect(state.calls).toBe(1);
 	}, 15_000);
 
+	// The two tests above drive `handleProxy`, so neither can pin the
+	// ATTEMPT-level terminal inside `proxyWithAccount`: that function returning
+	// `null` (the pre-fix behaviour) is indistinguishable from there, because the
+	// candidate loop's own top-of-body abort check then produces the 499 and
+	// discards the staged body for candidate two. The attempt-level terminal has
+	// to be observed where it returns — directly.
+
+	it("proxyWithAccount RETURNS the 499 itself on an aborted attempt, and discards its own staged body", async () => {
+		// Invoked directly, with no candidate loop underneath to paper over it:
+		// if the attempt-level terminal returned `null` (signalling failover) or
+		// skipped its own `discardStaged`, nothing else in this call could
+		// substitute for either.
+		const { proxyWithAccount } = await import("../handlers");
+		cacheBodyStore.setEnabled(true);
+		const baseline = cacheBodyStore.getStagingSize();
+
+		const account = makeApiKeyPool(1)[0];
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+
+		const state = { calls: 0, signal: null as AbortSignal | null };
+		let stagedDuringAttempt = -1;
+		const inner = hangUntilAbortedFetch(state);
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const result = inner(input as never);
+			if (isUpstreamCall(input)) {
+				// Sampled AFTER proxyWithAccount staged the body, BEFORE the abort.
+				stagedDuringAttempt = cacheBodyStore.getStagingSize();
+			}
+			return result;
+		}) as never;
+
+		const controller = new AbortController();
+		const req = makeCacheableRequest(controller.signal);
+		const requestBodyBuffer = await req.clone().arrayBuffer();
+		const requestMeta = {
+			id: "direct-attempt-abort-1",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: "claude-sonnet-4-5",
+			routing: null,
+		} as unknown as RequestMeta;
+
+		const pending = proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			requestMeta,
+			requestBodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+			null,
+			null,
+			null,
+			null,
+			false,
+			// The candidate loop threads the CLIENT's signal in here; without it the
+			// upstream fetch would be armed with the internal timeout controller
+			// alone and a disconnect would never reach this attempt.
+			{ signal: req.signal },
+		);
+
+		await waitFor(() => state.calls === 1);
+		controller.abort();
+
+		const response = await pending;
+
+		// (1) The attempt itself is terminal — NOT a `null` failover signal.
+		expect(response).not.toBeNull();
+		expect(response?.status).toBe(499);
+		const body = (await (response as Response).json()) as Record<
+			string,
+			unknown
+		>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		// (2) Non-vacuity: something really WAS staged by this attempt...
+		expect(stagedDuringAttempt).toBe(baseline + 1);
+		// ...and this attempt reclaimed it on its own way out.
+		expect(cacheBodyStore.getStagingSize()).toBe(baseline);
+	}, 15_000);
+
 	it("AbortError with a LIVE client (composed budget/timeout signal) still fails over", async () => {
 		// The discriminator is `req.signal.aborted`, never `isAbortError`. The
 		// burst / overload / context-window holds each build their own
