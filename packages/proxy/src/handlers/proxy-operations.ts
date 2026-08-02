@@ -2508,6 +2508,16 @@ export async function proxyForcedAccount(
 			try {
 				accessToken = await getValidAccessToken(account, ctx);
 			} catch (tokenErr) {
+				// Client disconnect during the refresh: return the terminal 499
+				// WITHOUT recording, exactly as the outer catch does. This catch has
+				// its own `return`, so it never reaches that check — without this
+				// line a disconnect that races a token refresh would still produce a
+				// logged forced-account failure, a history row and a 502.
+				//
+				// Keyed on `req.signal.aborted`, NEVER `isAbortError`: a genuine
+				// token-refresh failure (invalid_grant, upstream 5xx, refresh
+				// timeout) must still be recorded as a forced-account failure.
+				if (req.signal.aborted) return createClientAbortResponse();
 				const reason =
 					tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
 				log.warn(
