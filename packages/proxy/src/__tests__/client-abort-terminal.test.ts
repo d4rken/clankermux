@@ -951,4 +951,87 @@ describe("client-abort terminals", () => {
 				.saveRequest.mock.calls.length,
 		).toBe(0);
 	}, 15_000);
+
+	it("forced account + disconnect while the token refresh fails → 499, and nothing is recorded", async () => {
+		// The token-resolution catch has its OWN `return`, so the outer catch's
+		// abort check never runs for it. Without a matching check at the top of
+		// that catch, a disconnect racing a failing refresh becomes a recorded
+		// forced-account failure (local 502 + Request History row) — the same
+		// defect the outer check fixed, one site short.
+		const { proxyForcedAccount } = await import("../handlers");
+		// OAuth account with an already-expired access token, so
+		// getValidAccessToken must go to the network to refresh.
+		const account = makeAccount({
+			id: "forced-oauth-refresh-abort",
+			name: "Forced-OAuth",
+			api_key: null,
+			refresh_token: "rt-token",
+			access_token: "expired-at-token",
+			expires_at: Date.now() - 60_000,
+		});
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+
+		const controller = new AbortController();
+		let refreshCalls = 0;
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const target = input instanceof Request ? input.url : String(input);
+			if (target.includes("/v1/oauth/token")) {
+				refreshCalls++;
+				// The client hangs up while the refresh is in flight, and the
+				// refresh then fails (transient network error — NOT invalid_grant,
+				// so no account pause is involved).
+				controller.abort();
+				throw new TypeError("connection reset");
+			}
+			if (isUpstreamCall(input)) {
+				upstreamCalls++;
+				return new Response("should never be reached", { status: 500 });
+			}
+			return new Response("unavailable", { status: 500 });
+		}) as never;
+
+		const requestMeta = {
+			id: "forced-token-abort-1",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: "claude-sonnet-4-5",
+			routing: null,
+		} as unknown as RequestMeta;
+
+		const response = await proxyForcedAccount(
+			makeRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			requestMeta,
+			null,
+			ctx,
+		);
+
+		// Non-vacuity: the refresh really was attempted and really did fail, and
+		// the request never reached upstream.
+		expect(refreshCalls).toBe(1);
+		expect(upstreamCalls).toBe(0);
+
+		expect(response.status).toBe(499);
+		const body = (await response.json()) as Record<string, unknown>;
+		expect((body.error as Record<string, unknown>).type).toBe(
+			"client_closed_request",
+		);
+		// Nothing recorded: no forced_account_unavailable row, no recorder begin,
+		// no DB write of any kind.
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					begin: { mock: { calls: unknown[] } };
+				}
+			).begin.mock.calls.length,
+		).toBe(0);
+		expect(
+			(ctx.dbOps as unknown as { saveRequest: { mock: { calls: unknown[] } } })
+				.saveRequest.mock.calls.length,
+		).toBe(0);
+		expect(recordSyntheticCalls(ctx)).toBe(0);
+	}, 15_000);
 });
