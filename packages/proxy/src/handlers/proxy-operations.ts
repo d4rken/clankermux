@@ -11,10 +11,6 @@ import {
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
-import {
-	discardTeeBranch,
-	discardUpstreamBody,
-} from "@clankermux/core/response-body-disposal";
 import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
@@ -47,9 +43,6 @@ import {
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
-// Direct leaf import (not via the `handlers` barrel, which re-exports this
-// module) — see the module comment.
-import { createClientAbortResponse } from "./client-abort-response";
 import { applyCodexObservation } from "./codex-observation";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
@@ -559,6 +552,34 @@ export async function isModelUnavailableError(
 }
 
 /**
+ * Cancel an abandoned upstream response body so Bun releases its socket and the
+ * ~512 KB native read buffer immediately.
+ *
+ * A `fetch()` Response body that is neither read to EOF nor cancelled keeps that
+ * memory committed indefinitely (Bun 1.3.x). On the proxy's failover/retry paths
+ * we obtain an upstream Response and then discard it — return `null` to try the
+ * next account, or overwrite `rawResponse` with a retry — without ever consuming
+ * its body. Each dropped body is a ~512 KB off-heap leak that ratchets up with
+ * every 429/401/529 failover under load (observed live: ~1.6 GB/h). Calling this
+ * before every such drop releases the buffer.
+ *
+ * Safe to call with any Response/null: skips a `null`/locked body (locked means
+ * a reader already owns it — it will be drained or was cloned) and swallows the
+ * harmless error from a body that is already cancelled/errored.
+ */
+async function discardUpstreamBody(
+	response: Response | null | undefined,
+): Promise<void> {
+	const body = response?.body;
+	if (!body || body.locked) return;
+	try {
+		await body.cancel();
+	} catch {
+		// Body already cancelled/errored — nothing left to release.
+	}
+}
+
+/**
  * Validate the native Responses body and apply a combo model override to it
  * (native Responses passthrough, Stage A). The body is ALWAYS parsed — even
  * with no override — so a corrupt nativeBody can never enter the native path.
@@ -737,38 +758,18 @@ export async function proxyWithAccount(
 	};
 
 	// Single helper that records a categorical outcome into the optional sink AND
-	// disposes the upstream body, so the many failover (`return null`) paths can't
-	// let recording and body-disposal drift apart (Codex's anti-drift requirement).
+	// cancels the upstream body, so the many failover (`return null`) paths can't
+	// let recording and body-cancel drift apart (Codex's anti-drift requirement).
 	// Returns `null` so call sites can `return fail(...)` directly. Also releases
 	// a still-held overload-probe lease as "abandoned" — a failover means the
 	// probe never reached a verdict on this attempt.
-	//
-	// The disposal is deliberately NOT awaited: `discardUpstreamBody` drains the
-	// abandoned body in the background so this attempt can fail over to the next
-	// candidate immediately. Awaiting it would make every failover wait for the
-	// dead account's body — the exact stall this helper exists to avoid.
-	//
-	// `dispose` selects the disposal PRIMITIVE, because the two are not
-	// interchangeable (see response-body-disposal):
-	//   - "native" (default): a native fetch() body, which must be DRAINED so Bun
-	//     releases the socket + ~512 KB native read buffer. Every call site that
-	//     disposes a body nothing else has cloned uses this.
-	//   - "tee": the body has already been cloned by something still reading it
-	//     (updateAccountMetadata's usage-extraction clone), so `response` is a tee
-	//     branch. Draining a branch makes the tee pull and buffer the WHOLE body
-	//     for the live twin; cancel it instead.
 	const fail = async (
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
-		dispose: "native" | "tee" = "native",
 	): Promise<null> => {
 		settleOverloadProbe("abandoned");
 		options?.onOutcome?.(outcome);
-		if (dispose === "tee") {
-			discardTeeBranch(response);
-		} else {
-			discardUpstreamBody(response);
-		}
+		await discardUpstreamBody(response);
 		return null;
 	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
@@ -1083,10 +1084,10 @@ export async function proxyWithAccount(
 					? await provider.transformRequestBody(retryProviderRequest, account)
 					: retryProviderRequest;
 
-				// Acquire the retry FIRST, then discard the original body so its
+				// Acquire the retry FIRST, then cancel the original body so its
 				// socket + ~512 KB read buffer is released. Acquiring first means a
 				// throw here leaves the original intact for the outer catch/failover
-				// instead of proceeding with an already-discarded body.
+				// instead of proceeding with an already-cancelled body.
 				const retryResponse = await makeProxyRequest(
 					retryTransformedRequest,
 					undefined,
@@ -1095,7 +1096,7 @@ export async function proxyWithAccount(
 					undefined,
 					options?.signal,
 				);
-				discardUpstreamBody(rawResponse);
+				await discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} else {
@@ -1129,7 +1130,7 @@ export async function proxyWithAccount(
 				});
 				// Acquire the retry FIRST: if makeProxyRequest throws, the local
 				// catch below continues with the original 400 still intact (its body
-				// not yet discarded), preserving the "forward the original 400 on
+				// not yet cancelled), preserving the "forward the original 400 on
 				// retry failure" contract.
 				const retryResponse = await makeProxyRequest(
 					retryRequest,
@@ -1139,7 +1140,7 @@ export async function proxyWithAccount(
 					undefined,
 					options?.signal,
 				);
-				discardUpstreamBody(rawResponse);
+				await discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} catch (err) {
@@ -1892,7 +1893,7 @@ export async function proxyWithAccount(
 					activeUpstreamModel = nextModel;
 					overloadAttributionModel = computeOverloadAttributionModel();
 
-					// Acquire the retry first, then discard the previous attempt's
+					// Acquire the retry first, then cancel the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
 					const retryResponse = await makeProxyRequest(
 						retryTransformedRequest,
@@ -1902,7 +1903,7 @@ export async function proxyWithAccount(
 						undefined,
 						options?.signal,
 					);
-					discardUpstreamBody(rawResponse);
+					await discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
 					liveUpstream = rawResponse;
 
@@ -2079,7 +2080,7 @@ export async function proxyWithAccount(
 				// deduped refresh can't pin the socket + ~512 KB native read buffer.
 				// discardUpstreamBody is idempotent, so the failover path below can
 				// safely discard again.
-				discardUpstreamBody(response);
+				await discardUpstreamBody(response);
 				liveUpstream = null;
 				lastStaleTokenRefreshAt.set(account.id, now);
 				const tokenBefore = account.access_token;
@@ -2213,18 +2214,10 @@ export async function proxyWithAccount(
 		);
 		// processProxyResponse only needed the rate-limit view (headers, or a
 		// provider body-parse that consumes it). When it was a distinct clone
-		// (final-529 path), release its tee branch now — the original `response`
-		// is what gets forwarded/returned below.
-		//
-		// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
-		// above), so `!== response` implies it is a `response.clone()` on every
-		// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
-		// drained: draining it would make the tee keep pulling and buffering for
-		// the twin that is about to be streamed to the client. And it must never
-		// be awaited — a tee branch's cancel does not settle until BOTH branches
-		// cancel, and the twin here is the live response.
+		// (final-529 path), release its possibly tee-buffered branch now — the
+		// original `response` is what gets forwarded/returned below.
 		if (responseForRateLimitCheck !== response) {
-			discardTeeBranch(responseForRateLimitCheck);
+			await discardUpstreamBody(responseForRateLimitCheck);
 		}
 		if (isRateLimited) {
 			if (response.status === 529 && isTerminalAttempt()) {
@@ -2268,20 +2261,11 @@ export async function proxyWithAccount(
 			// 429 — those are intercepted in the isModelUnavailableError branch
 			// above — but a 529/other rate-limit signal): record as hard_429-class
 			// so the proxy never treats it as hold-eligible.
-			//
-			// Disposed as a TEE branch, not a native body: processProxyResponse →
-			// updateAccountMetadata has already run above and, since requestId is
-			// always set here, handed a `response.clone()` to a floating usage-
-			// extraction IIFE. `response` is therefore a tee branch whose twin may
-			// still be reading, and draining a branch forces the tee to buffer the
-			// entire body for that twin. This is the one fail() site where drain is
-			// the wrong primitive — every other site disposes an un-cloned body.
 			return await fail(
 				response.status === 529
 					? { kind: "overload_529" }
 					: { kind: "hard_429" },
 				response,
-				"tee",
 			);
 		}
 
@@ -2340,28 +2324,7 @@ export async function proxyWithAccount(
 		handleProxyError(err, account, log);
 		// Release any upstream body owned at the point of failure so a thrown
 		// error (e.g. mid-processResponse) doesn't leak its socket/read buffer.
-		// `fail()` also settles the overload-probe lease as "abandoned" and records
-		// the outcome, so it must run BEFORE the client-abort terminal below — the
-		// disconnect changes the request's verdict, not this attempt's cleanup.
-		const failed = await fail({ kind: "network_error" }, liveUpstream);
-
-		// Client disconnect: the throw is the upstream fetch reacting to the
-		// client's own signal, so return the terminal 499 rather than signalling
-		// failover into a fan-out nobody is waiting for. Keyed on
-		// `req.signal.aborted`, NEVER `isAbortError` — the burst / overload /
-		// context-window holds compose their own AbortControllers, and a budget
-		// deadline must still fail over.
-		//
-		// The staged-body discard is this function's own responsibility here:
-		// proxyWithAccount stages cacheable bodies before fetching, and once this
-		// catch returns a Response the caller's candidate loop returns immediately
-		// at `if (gated.response)` — so the loop's cleanup AND the request-level
-		// tail are both bypassed and nothing else would drop it.
-		if (req.signal.aborted) {
-			cacheBodyStore.discardStaged(requestMeta.id);
-			return createClientAbortResponse();
-		}
-		return failed;
+		return await fail({ kind: "network_error" }, liveUpstream);
 	}
 }
 
@@ -2446,11 +2409,6 @@ export async function proxyForcedAccount(
 	// recordable-request predicate and stream detection.
 	let effectiveBodyBuffer: ArrayBuffer | null = null;
 	let provider = ctx.provider;
-	// The live, undisposed upstream body owned at each stage, so the catch can
-	// release it when processResponse / forwardToClient throws after the fetch
-	// succeeded (mirrors `liveUpstream` on the normal path). Ownership transfers
-	// to forwardToClient on the success path, so it is nulled out there.
-	let liveForcedUpstream: Response | null = null;
 
 	// Record a forced-mode LOCAL error (token-resolution throw / outer catch)
 	// under the forced account so it appears in Request History, exactly like
@@ -2532,16 +2490,6 @@ export async function proxyForcedAccount(
 			try {
 				accessToken = await getValidAccessToken(account, ctx);
 			} catch (tokenErr) {
-				// Client disconnect during the refresh: return the terminal 499
-				// WITHOUT recording, exactly as the outer catch does. This catch has
-				// its own `return`, so it never reaches that check — without this
-				// line a disconnect that races a token refresh would still produce a
-				// logged forced-account failure, a history row and a 502.
-				//
-				// Keyed on `req.signal.aborted`, NEVER `isAbortError`: a genuine
-				// token-refresh failure (invalid_grant, upstream 5xx, refresh
-				// timeout) must still be recorded as a forced-account failure.
-				if (req.signal.aborted) return createClientAbortResponse();
 				const reason =
 					tokenErr instanceof Error ? tokenErr.message : String(tokenErr);
 				log.warn(
@@ -2582,19 +2530,8 @@ export async function proxyForcedAccount(
 			: providerRequest;
 
 		// Exactly ONE upstream request. No thinking-signature / cache-control
-		// pre-retries, no model-fallback cycling. The CLIENT's signal is threaded
-		// in (composed with the internal timeout inside makeProxyRequest) so a
-		// disconnect tears the upstream request down instead of letting it run to
-		// completion for a client that has gone.
-		const rawResponse = await makeProxyRequest(
-			transformedRequest,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			req.signal,
-		);
-		liveForcedUpstream = rawResponse;
+		// pre-retries, no model-fallback cycling.
+		const rawResponse = await makeProxyRequest(transformedRequest);
 
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID (mirrors the normal path).
@@ -2621,14 +2558,10 @@ export async function proxyForcedAccount(
 			account,
 			req.headers,
 		);
-		liveForcedUpstream = response;
 
 		// Forward to client for recording + streaming. disableCooldown:true keeps
 		// the mid-stream rate-limit sniffer from mutating cooldown state on a
-		// forced 429/529. Ownership of the body transfers to forwardToClient at
-		// CALL time, so drop our reference — if forwardToClient itself throws, the
-		// catch's discard would be a no-op anyway (locked body).
-		liveForcedUpstream = null;
+		// forced 429/529.
 		return forwardToClient(
 			{
 				requestId: requestMeta.id,
@@ -2657,29 +2590,6 @@ export async function proxyForcedAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
-		// Release any upstream body owned at the point of failure (e.g. a
-		// processResponse throw after the fetch succeeded) before either terminal
-		// below — neither of them forwards it.
-		discardUpstreamBody(liveForcedUpstream);
-
-		// Client disconnect: threading `req.signal` into the fetch above means a
-		// disconnect now surfaces here as an AbortError. Return the terminal 499
-		// WITHOUT logging an error or calling recordLocalError — otherwise
-		// threading the signal would have converted every client disconnect into a
-		// recorded forced-account failure plus a history row, i.e. traded a leak
-		// for a new mis-classification.
-		//
-		// Keyed on `req.signal.aborted`, NEVER `isAbortError`: makeProxyRequest
-		// composes the client signal with its own internal timeout controller, so
-		// a genuine upstream timeout also throws an AbortError and must still be
-		// recorded as a forced-account failure.
-		if (req.signal.aborted) {
-			log.debug(
-				`Forced account ${account.name}: client disconnected — returning 499 without recording`,
-			);
-			return createClientAbortResponse();
-		}
-
 		// catch returns a local error Response, NEVER null — force forbids failover.
 		// Routed through forwardToClient so the local failure is recorded under the
 		// forced account (history intact). If recording itself throws (e.g. the

@@ -266,16 +266,7 @@ export function createRequestPayloadHandler(dbOps: DatabaseOperations) {
 		const payload = await dbOps.getRequestPayload(requestId);
 
 		if (!payload) {
-			// Deliberately generic. `getRequestPayload` returns null for THREE
-			// different situations — the request does not exist, the request exists
-			// but has no stored payload (retention swept it, or payload storage was
-			// off), and the stored JSON is malformed — and this handler never checks
-			// which. "Request not found" confidently asserted the first, so a request
-			// that is right there in the history with its payload aged out reported
-			// itself as nonexistent. Anything more specific would mislabel one of the
-			// other two; distinguishing them needs a discriminated repository result,
-			// which was considered and judged disproportionate for a 404 message.
-			return new Response(JSON.stringify({ error: "Payload not found" }), {
+			return new Response(JSON.stringify({ error: "Request not found" }), {
 				status: 404,
 				headers: { "Content-Type": "application/json" },
 			});

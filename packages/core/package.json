@@ -6,8 +6,7 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./env": "./src/env.ts",
-		"./renewal": "./src/renewal.ts",
-		"./response-body-disposal": "./src/response-body-disposal.ts"
+		"./renewal": "./src/renewal.ts"
 	},
 	"scripts": {
 		"typecheck": "bunx tsc --noEmit"
