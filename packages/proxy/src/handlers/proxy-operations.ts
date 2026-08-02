@@ -746,13 +746,28 @@ export async function proxyWithAccount(
 	// abandoned body in the background so this attempt can fail over to the next
 	// candidate immediately. Awaiting it would make every failover wait for the
 	// dead account's body — the exact stall this helper exists to avoid.
+	//
+	// `dispose` selects the disposal PRIMITIVE, because the two are not
+	// interchangeable (see response-body-disposal):
+	//   - "native" (default): a native fetch() body, which must be DRAINED so Bun
+	//     releases the socket + ~512 KB native read buffer. Every call site that
+	//     disposes a body nothing else has cloned uses this.
+	//   - "tee": the body has already been cloned by something still reading it
+	//     (updateAccountMetadata's usage-extraction clone), so `response` is a tee
+	//     branch. Draining a branch makes the tee pull and buffer the WHOLE body
+	//     for the live twin; cancel it instead.
 	const fail = async (
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
+		dispose: "native" | "tee" = "native",
 	): Promise<null> => {
 		settleOverloadProbe("abandoned");
 		options?.onOutcome?.(outcome);
-		discardUpstreamBody(response);
+		if (dispose === "tee") {
+			discardTeeBranch(response);
+		} else {
+			discardUpstreamBody(response);
+		}
 		return null;
 	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
@@ -2283,11 +2298,20 @@ export async function proxyWithAccount(
 			// 429 — those are intercepted in the isModelUnavailableError branch
 			// above — but a 529/other rate-limit signal): record as hard_429-class
 			// so the proxy never treats it as hold-eligible.
+			//
+			// Disposed as a TEE branch, not a native body: processProxyResponse →
+			// updateAccountMetadata has already run above and, since requestId is
+			// always set here, handed a `response.clone()` to a floating usage-
+			// extraction IIFE. `response` is therefore a tee branch whose twin may
+			// still be reading, and draining a branch forces the tee to buffer the
+			// entire body for that twin. This is the one fail() site where drain is
+			// the wrong primitive — every other site disposes an un-cloned body.
 			return await fail(
 				response.status === 529
 					? { kind: "overload_529" }
 					: { kind: "hard_429" },
 				response,
+				"tee",
 			);
 		}
 
