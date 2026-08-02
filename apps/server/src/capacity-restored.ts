@@ -7,7 +7,45 @@ import { isQuotaDerivedRateLimitReason } from "@clankermux/types";
 export interface CapacityRestoredLogger {
 	debug: (msg: string) => void;
 	info: (msg: string) => void;
+	warn: (msg: string) => void;
 }
+
+/**
+ * Locks with MORE than this remaining are eligible for the lock-contradiction
+ * WARN below. Every non-quota-derived cooldown the CURRENT code can write is
+ * far shorter: the transparent-burst hold caps at ~90s, the 429 exponential
+ * backoff and the 529 provider-overload cooldown both ceiling at 5 minutes.
+ * Only a server-directed deadline (extractCooldownUntil honoring a provider
+ * reset/retry-after, which bypasses the backoff cap) can push a lock past this
+ * threshold — and a MULTI-HOUR server-directed lock that polling actively
+ * contradicts is exactly the signature this alarm exists for, whether the 429
+ * was misclassified (Claude-Backup-2, 2026-08-02: a fable-scoped 429 wrote an
+ * account-wide model_fallback_429 lock until the weekly reset; polling saw the
+ * headroom two seconds later and could only say so at DEBUG) or the provider
+ * really directed a long penalty that usage cannot express — either deserves
+ * one WARN. 30 minutes = 6× the largest current ceiling.
+ *
+ * Known qualification: the legacy `upstream_429_no_reset_default_5h` reason
+ * (never emitted since ccflare ≤3.5.x) represented a legitimate 5-hour
+ * cooldown. If a row with it ever reappeared it would draw one WARN per lock —
+ * accepted noise over an exemption branch for a reason that cannot be written.
+ */
+export const LOCK_CONTRADICTION_MIN_REMAINING_MS = 30 * 60 * 1000;
+
+/**
+ * Process-lifetime dedupe for the lock-contradiction WARN: accountId → the
+ * exact lock identity (until:at:reason) already warned about. The poller is
+ * level-triggered (~90s), so without this one misclassified 14h lock would WARN
+ * ~560 times. Entries are pruned on the first healthy (lock-free) poll of the
+ * same account, so an identical future lock is a new incident, not a deduped
+ * repeat. An account removed (or whose polling dies) between warn and prune
+ * leaves its entry behind, so boundedness is enforced explicitly: inserts
+ * beyond {@link LOCK_CONTRADICTION_DEDUPE_MAX} evict the oldest entry
+ * (insertion order — at worst a very old lock re-warns once). Injectable for
+ * tests.
+ */
+export const LOCK_CONTRADICTION_DEDUPE_MAX = 64;
+const defaultWarnedLockContradictions = new Map<string, string>();
 
 /**
  * The single-flight marker API (injected, so this module never deep-imports a
@@ -76,19 +114,56 @@ export async function clearRateLimitOnCapacityRestored(
 	evidence: CapacityRestoredEvidence,
 	marker: CapacityRestoredProbeMarker,
 	now: number = Date.now(),
+	warnedLockContradictions: Map<
+		string,
+		string
+	> = defaultWarnedLockContradictions,
 ): Promise<void> {
 	const { accountId } = evidence;
 	const acc = await dbOps.getAccount(accountId);
 	// No active lock: the normal state for a healthy account on every poll. NOT
-	// logged — it would drown the rejection tokens below in debug output.
+	// logged — it would drown the rejection tokens below in debug output. Prune
+	// the contradiction-warn dedupe entry so the next lock is a fresh incident.
 	if (!acc?.rate_limited_until || Number(acc.rate_limited_until) <= now) {
+		warnedLockContradictions.delete(accountId);
 		return;
 	}
 	const reason = acc.rate_limited_reason;
 	if (!isQuotaDerivedRateLimitReason(reason)) {
-		logger.debug(
-			`[clankermux] account=${acc.name} capacity_restored_skip ineligible_reason reason=${reason ?? "null"}`,
-		);
+		// Lock-contradiction alarm: this refusal is CORRECT (the reason is not
+		// releasable by quota evidence — see the gate rationale above), but when
+		// the lock is far longer than any legitimate non-quota cooldown can be
+		// AND polling actively observes account-wide headroom, the combination is
+		// the signature of a misclassified 429 and deserves more than DEBUG.
+		// Report-only: nothing here releases or shortens the lock. The
+		// intentional out_of_credits billing floor is exempt — account-wide
+		// usage excludes extra_usage, so headroom under a credits floor is the
+		// EXPECTED state, not a contradiction.
+		const remainingMs = Number(acc.rate_limited_until) - now;
+		const lockIdentity = `${acc.rate_limited_until}:${acc.rate_limited_at ?? "null"}:${reason ?? "null"}`;
+		if (
+			reason !== "out_of_credits" &&
+			remainingMs > LOCK_CONTRADICTION_MIN_REMAINING_MS &&
+			warnedLockContradictions.get(accountId) !== lockIdentity
+		) {
+			// Re-set (delete-then-set) so a refreshed account moves to the back of
+			// the insertion order before the size-cap eviction considers victims.
+			warnedLockContradictions.delete(accountId);
+			warnedLockContradictions.set(accountId, lockIdentity);
+			if (warnedLockContradictions.size > LOCK_CONTRADICTION_DEDUPE_MAX) {
+				const oldest = warnedLockContradictions.keys().next().value;
+				if (oldest !== undefined) warnedLockContradictions.delete(oldest);
+			}
+			logger.warn(
+				`[clankermux] account=${acc.name} capacity_restored_skip ineligible_reason lock_contradiction reason=${reason ?? "null"} utilization=${evidence.utilization}% remaining=${Math.round(
+					remainingMs / 60_000,
+				)}m until=${new Date(Number(acc.rate_limited_until)).toISOString()} — polling observes account-wide headroom but this lock's reason is not releasable by evidence; if the lock is unexpected, the 429 that wrote it was likely misclassified (clear it manually or wait out the deadline)`,
+			);
+		} else {
+			logger.debug(
+				`[clankermux] account=${acc.name} capacity_restored_skip ineligible_reason reason=${reason ?? "null"}`,
+			);
+		}
 		return;
 	}
 	// Fail CLOSED on a missing write instant: without it the cooldown cannot be
