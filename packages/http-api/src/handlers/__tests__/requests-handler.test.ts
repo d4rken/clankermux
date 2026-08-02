@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { BunSqlAdapter } from "@clankermux/database";
+import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import {
+	createRequestPayloadHandler,
 	createRequestProjectsHandler,
 	createRequestsCountHandler,
 	createRequestsSummaryHandler,
@@ -143,5 +144,35 @@ describe("createRequestProjectsHandler", () => {
 		const res = await createRequestProjectsHandler(db)();
 		const body = (await res.json()) as string[];
 		expect(body).toEqual([]);
+	});
+});
+
+describe("createRequestPayloadHandler", () => {
+	function payloadDbOps(payload: unknown): DatabaseOperations {
+		return {
+			getRequestPayload: async () => payload,
+		} as unknown as DatabaseOperations;
+	}
+
+	it("404s with a GENERIC 'Payload not found' when the payload is absent", async () => {
+		// `getRequestPayload` returns null for a missing REQUEST, a missing
+		// PAYLOAD (retention swept it, or payload storage was off) and malformed
+		// stored JSON alike, and this handler cannot tell them apart. The previous
+		// "Request not found" asserted the first, so a request sitting in the
+		// history with its payload aged out reported itself as nonexistent.
+		const res = await createRequestPayloadHandler(payloadDbOps(null))("req-1");
+		expect(res.status).toBe(404);
+		expect(res.headers.get("Content-Type")).toBe("application/json");
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe("Payload not found");
+	});
+
+	it("returns the payload unchanged when one exists", async () => {
+		const payload = { request: { model: "claude-sonnet-4-5" }, response: null };
+		const res = await createRequestPayloadHandler(payloadDbOps(payload))(
+			"req-2",
+		);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual(payload);
 	});
 });
