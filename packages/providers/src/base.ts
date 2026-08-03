@@ -138,8 +138,6 @@ export abstract class BaseProvider implements Provider {
 	/**
 	 * Extract tier information from response if available
 	 * Default implementation: Return null (no tier info)
-	 *
-	 * DISPOSABLE-RESPONSE CONTRACT — see {@link BaseProvider.extractUsageInfo}.
 	 */
 	async extractTierInfo?(_response: Response): Promise<number | null> {
 		return null;
@@ -148,19 +146,6 @@ export abstract class BaseProvider implements Provider {
 	/**
 	 * Extract usage information from response if available
 	 * Default implementation: Return null (no usage info)
-	 *
-	 * DISPOSABLE-RESPONSE CONTRACT (applies to `extractUsageInfo`,
-	 * {@link BaseProvider.extractTierInfo} and `parseUsage` alike):
-	 *
-	 *   The `Response` handed to this method is DISPOSABLE. The callee MAY
-	 *   consume its body, and the CALLER MUST NOT use it afterwards.
-	 *
-	 * Overrides must read the supplied response DIRECTLY and must NOT clone it:
-	 * a second clone tees the caller's branch in two, and cancelling the outer
-	 * branch cannot release the inner one. An override that acquires a reader
-	 * MUST release it on EVERY path including `throw` (`reader.cancel()` in a
-	 * `finally`), because the caller can no longer dispose a locked body.
-	 * Reading `response.headers` stays valid after the body is consumed.
 	 */
 	async extractUsageInfo?(_response: Response): Promise<{
 		model?: string;
