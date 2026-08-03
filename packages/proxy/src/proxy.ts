@@ -15,8 +15,6 @@ import {
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@clankermux/core";
-// Direct leaf import (not via the `handlers` barrel) — see the module comment.
-import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger, LogLevel } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
@@ -68,9 +66,6 @@ import {
 	type TransientlyCooledFamilySibling,
 	validateProviderPath,
 } from "./handlers";
-import { createClientAbortResponse } from "./handlers/client-abort-response";
-// Leaf import: the deferred-abort mirror (Bun onAbort segfault workaround).
-import { deferredClientSignal } from "./handlers/deferred-client-signal";
 import { resolveReservationDemotion } from "./handlers/family-reservation-gate";
 import {
 	completeRateLimitProbe,
@@ -205,6 +200,41 @@ function createBurstRetryGiveUpResponse(heldAccount: Account): Response {
 				"Content-Type": "application/json",
 				"Retry-After": String(retryAfterSeconds),
 				"x-clankermux-burst-retry": "exhausted",
+			},
+		},
+	);
+}
+
+/**
+ * The generic client-departed terminal: returned wherever this handler observes
+ * that the CLIENT disconnected — a burst-retry / overload / context-window hold
+ * giving up mid-hold, an attempt aborted in flight, or a disconnect detected at
+ * account selection or at the request-level tail.
+ *
+ * The client is already gone, so the body is never read — we only need a
+ * terminal Response so the handler stops WITHOUT issuing further sibling/Codex
+ * upstream requests, recording a synthetic failure row, or throwing an aggregate
+ * error for a request nobody is waiting on. Uses 499 (Client Closed Request) so
+ * history/logs reflect the disconnect rather than a server-side failure.
+ *
+ * The `x-clankermux-burst-retry: client-aborted` header predates the generic use
+ * and is deliberately KEPT as-is: it is an existing diagnostic other code and
+ * tests key on, and renaming it is a separate concern.
+ */
+function createClientAbortResponse(): Response {
+	return new Response(
+		JSON.stringify({
+			type: "error",
+			error: {
+				type: "client_closed_request",
+				message: "Client disconnected before the request could be served.",
+			},
+		}),
+		{
+			status: 499,
+			headers: {
+				"Content-Type": "application/json",
+				"x-clankermux-burst-retry": "client-aborted",
 			},
 		},
 	);
@@ -1545,15 +1575,6 @@ export async function handleProxy(
 			}
 			const r = gated.response;
 			if (r) {
-				// Client-departed boundary: the attempt may have RESOLVED inside the
-				// deferred mirror's one-task window (native signal aborted, fetch
-				// signal not yet). A response nobody is waiting for must not become
-				// the request's verdict — dispose it and surface the 499 terminal.
-				if (req.signal.aborted) {
-					discardUpstreamBody(r);
-					round.response = createClientAbortResponse();
-					return round;
-				}
 				round.response = r;
 				return round;
 			}
@@ -1681,7 +1702,7 @@ export async function handleProxy(
 						Math.max(0, soonest - nowMs) +
 						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 					if (waitMs > remaining) break; // recovery beyond budget
-					if (!(await abortableSleep(waitMs, deferredClientSignal(req)))) {
+					if (!(await abortableSleep(waitMs, req.signal))) {
 						return createClientAbortResponse();
 					}
 					continue;
@@ -1752,10 +1773,7 @@ export async function handleProxy(
 				);
 				const wakeSignal = req.signal.aborted
 					? req.signal
-					: AbortSignal.any([
-							deferredClientSignal(req),
-							budgetController.signal,
-						]);
+					: AbortSignal.any([req.signal, budgetController.signal]);
 				let round: AttemptRound;
 				try {
 					round = await attemptCandidates(attemptableCandidates, {
@@ -1809,7 +1827,7 @@ export async function handleProxy(
 					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 				const postAttemptRemaining = holdBudgetMs - (Date.now() - holdStart);
 				if (pollMs > postAttemptRemaining) break;
-				if (!(await abortableSleep(pollMs, deferredClientSignal(req)))) {
+				if (!(await abortableSleep(pollMs, req.signal))) {
 					return createClientAbortResponse();
 				}
 			}
@@ -1950,7 +1968,7 @@ export async function handleProxy(
 		const holdResult = await holdAndRetryCacheAccount({
 			account: heldAccount,
 			confidence,
-			signal: deferredClientSignal(req),
+			signal: req.signal,
 			reprobe,
 			// Family-scoped overload precedence inside the hold's reprobe loop
 			// (defense in depth for a breaker that opens mid-hold).
@@ -2367,14 +2385,8 @@ export async function handleProxy(
 
 				if (waitMs > remaining) break; // soonest expiry is beyond budget
 
-				const completed = await abortableSleep(
-					waitMs,
-					deferredClientSignal(req),
-				);
-				// `|| req.signal.aborted`: the hold timer can win the race against the
-				// mirror's one-task deferral — a completed sleep for a departed client
-				// is still a departed client.
-				if (!completed || req.signal.aborted) {
+				const completed = await abortableSleep(waitMs, req.signal);
+				if (!completed) {
 					log.info(`${label}: client disconnected during wait`);
 					return createClientAbortResponse();
 				}
@@ -2439,9 +2451,7 @@ export async function handleProxy(
 				// the next pass so the "nothing to wait for" exit above waits for the
 				// probe's verdict instead of giving up on a candidate that may serve
 				// us — and so that pass targets exactly them.
-				const round = await attemptCandidates(attemptList, {
-					signal: deferredClientSignal(req),
-				});
+				const round = await attemptCandidates(attemptList);
 				if (round.response) return round.response;
 				probeSuppressedIds = round.probeSuppressedAccountIds;
 				// All candidates returned null — loop back to recheck.
@@ -2541,7 +2551,7 @@ export async function handleProxy(
 							i === relaxCandidates.length - 1,
 							// Thread the client signal so a disconnect aborts the in-flight
 							// attempt instead of waiting for the upstream timeout.
-							{ signal: deferredClientSignal(req) },
+							{ signal: req.signal },
 						);
 					});
 					if (gated.suppressed) {
@@ -2942,7 +2952,7 @@ export async function handleProxy(
 						requestBodyContext,
 						false,
 						{
-							signal: deferredClientSignal(req),
+							signal: req.signal,
 							onOutcome: (o) => {
 								firstOutcome = o;
 								// The normal loop below skips the held account (attempted-id
@@ -2953,12 +2963,6 @@ export async function handleProxy(
 					);
 				});
 				if (gatedFirst.response) {
-					// Same client-departed boundary as attemptCandidates: a response
-					// resolved inside the mirror's deferral window must not be served.
-					if (req.signal.aborted) {
-						discardUpstreamBody(gatedFirst.response);
-						return createClientAbortResponse();
-					}
 					return gatedFirst.response;
 				}
 				// Suppressed: another request is already probing this account. Nothing
@@ -3084,25 +3088,6 @@ export async function handleProxy(
 	): Promise<Response | null> => {
 		const label = options.label ?? "account";
 		for (let i = 0; i < list.length; i++) {
-			// Client-disconnect terminal, mirroring the hold loop's pattern above.
-			// Placed at the TOP of the loop BODY, so it fires both before the FIRST
-			// candidate can stage a cacheable body or acquire a probe lease, and
-			// between every pair of candidates. Without it a disconnect mid-attempt
-			// fanned the request out across every remaining sibling — cooldowns,
-			// probe leases and upstream traffic for a client that is already gone.
-			//
-			// The discriminator is `req.signal.aborted`, NEVER `isAbortError`: the
-			// burst / overload / context-window holds each compose their OWN
-			// AbortController via AbortSignal.any, so a budget deadline surfaces as
-			// an AbortError while the client is still waiting and must keep failing
-			// over.
-			//
-			// A 499 return emits no worker end/summary, so any body staged by an
-			// earlier candidate has to be discarded here or it leaks.
-			if (req.signal.aborted) {
-				cacheBodyStore.discardStaged(requestMeta.id);
-				return createClientAbortResponse();
-			}
 			// Skip the held account if the burst-retry first attempt already tried it
 			// (and fell through non-retryably) — avoid a wasteful duplicate request.
 			if (options.skipAccountId && list[i].id === options.skipAccountId) {
@@ -3173,13 +3158,6 @@ export async function handleProxy(
 							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i) ||
 							everyRemainingCandidateUnattemptable(list, i)),
 					{
-						// Thread the CLIENT's signal into the upstream fetch, mirroring
-						// the burst-hold loop. Without it `options?.signal` was undefined
-						// here and the fetch was armed with the internal timeout
-						// controller alone, so a disconnect left the upstream request
-						// running to completion. This loop serves both the main pass and
-						// the combo-fallback pass.
-						signal: deferredClientSignal(req),
 						onOutcome: (o) => noteOverloadSuppression(list[i], o),
 					},
 				);
@@ -3188,11 +3166,6 @@ export async function handleProxy(
 				continue;
 			}
 			if (gated.response) {
-				// Client-departed boundary (see attemptCandidates).
-				if (req.signal.aborted) {
-					discardUpstreamBody(gated.response);
-					return createClientAbortResponse();
-				}
 				return gated.response;
 			}
 

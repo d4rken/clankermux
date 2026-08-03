@@ -1,5 +1,4 @@
 import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
-import { discardTeeBranch } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import {
 	getFreshCapacity,
@@ -134,39 +133,17 @@ export function updateAccountMetadata(
 	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
 	// successful response. No need to duplicate that logic here.
 
-	// Extract usage info if supported.
-	//
-	// DISPOSAL: extraction gets exactly ONE clone of the client-facing response,
-	// held in a local so it can be released in a `finally` AFTER the await — the
-	// extractor owns it under the disposable-response contract (see
-	// Provider.extractUsageInfo), and disposing before the await would truncate
-	// extraction and silently NULL the request's token accounting.
-	//
-	// The branch is a TEE branch, so `discardTeeBranch` (cancel, never drain, and
-	// never awaited — a tee branch's cancel does not settle until BOTH branches
-	// cancel and the twin here is the response being streamed to the client).
-	//
-	// The guard tests bodyUsed AND body.locked, not `locked` alone: `locked`
-	// returns to false once `await response.json()` resolves (the non-streaming
-	// extractor path), so a locked-only guard would happily cancel an
-	// already-consumed body — harmless thanks to the internal catch, but it would
-	// not mean what it claims.
+	// Extract usage info if supported
 	if (requestId) {
-		const disposeExtractionClone = (clone: Response): void => {
-			if (!clone.bodyUsed && !clone.body?.locked) {
-				discardTeeBranch(clone);
-			}
-		};
 		// For streaming responses, prefer parseUsage (handles SSE final events)
 		// For non-streaming, use extractUsageInfo (handles JSON responses)
 		const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 
 		if (isStream && ctx.provider.parseUsage) {
 			const parseUsage = ctx.provider.parseUsage.bind(ctx.provider);
-			const usageClone = response.clone() as Response;
 			(async () => {
 				try {
-					const usageInfo = await parseUsage(usageClone);
+					const usageInfo = await parseUsage(response.clone() as Response);
 					if (usageInfo) {
 						log.debug(
 							`Extracted streaming usage for account ${account.name}: ${JSON.stringify(usageInfo)}`,
@@ -185,16 +162,15 @@ export function updateAccountMetadata(
 						`Failed to extract streaming usage for account ${account.name}:`,
 						error,
 					);
-				} finally {
-					disposeExtractionClone(usageClone);
 				}
 			})();
 		} else if (ctx.provider.extractUsageInfo) {
 			const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
-			const usageClone = response.clone() as Response;
 			(async () => {
 				try {
-					const usageInfo = await extractUsageInfo(usageClone);
+					const usageInfo = await extractUsageInfo(
+						response.clone() as Response,
+					);
 					if (usageInfo) {
 						log.debug(
 							`Extracted usage info for account ${account.name}: ${JSON.stringify(usageInfo)}`,
@@ -213,8 +189,6 @@ export function updateAccountMetadata(
 						`Failed to extract usage info for account ${account.name}:`,
 						error,
 					);
-				} finally {
-					disposeExtractionClone(usageClone);
 				}
 			})();
 		}

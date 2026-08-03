@@ -76,33 +76,12 @@ export interface Provider {
 	transformRequestBody?(request: Request, account?: Account): Promise<Request>;
 
 	/**
-	 * Extract tier information from response if available.
-	 *
-	 * DISPOSABLE-RESPONSE CONTRACT — see {@link Provider.extractUsageInfo}.
+	 * Extract tier information from response if available
 	 */
 	extractTierInfo?(response: Response): Promise<number | null>;
 
 	/**
-	 * Extract usage information from response if available.
-	 *
-	 * DISPOSABLE-RESPONSE CONTRACT (applies to `extractUsageInfo`,
-	 * {@link Provider.extractTierInfo} and {@link Provider.parseUsage} alike):
-	 *
-	 *   The `Response` handed to this method is DISPOSABLE. The callee MAY
-	 *   consume its body, and the CALLER MUST NOT use it afterwards.
-	 *
-	 * Callers pass a dedicated `clone()` and treat it as spent. Implementations
-	 * must therefore read the supplied response DIRECTLY and must NOT clone it
-	 * again: a second clone tees the caller's branch in two, and cancelling the
-	 * outer branch cannot release the inner one — that inner branch is the leak
-	 * this contract removes.
-	 *
-	 * Because the caller can no longer dispose a body this method has locked, an
-	 * implementation that acquires a reader MUST release it on EVERY path,
-	 * including `throw` — i.e. `reader.cancel()` in a `finally`, not only on the
-	 * happy path.
-	 *
-	 * Reading `response.headers` remains valid after the body is consumed.
+	 * Extract usage information from response if available
 	 */
 	extractUsageInfo?(response: Response): Promise<{
 		model?: string;
@@ -120,8 +99,6 @@ export interface Provider {
 	 * Parse usage information from streaming SSE response if available
 	 * This is called for streaming responses to extract usage from final SSE events
 	 * Falls back to extractUsageInfo for non-streaming responses
-	 *
-	 * DISPOSABLE-RESPONSE CONTRACT — see {@link Provider.extractUsageInfo}.
 	 */
 	parseUsage?(response: Response): Promise<{
 		model?: string;
