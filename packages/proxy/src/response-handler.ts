@@ -77,6 +77,12 @@ const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 /**
  * Stable event id — the non-streaming analytics read stopped at its 256 KiB cap
  * without ever seeing EOF, so the body fed to the usage collector is truncated.
+ *
+ * The consequence is total, not partial: a truncated JSON body fails
+ * `JSON.parse`, so the collector never learns the model, and
+ * `RequestRecorder.toRequestUsage()` returns `undefined` for a summary with no
+ * model — the request row persists with NO tokens and NO cost at all.
+ *
  * A stable identifier (rather than log prose) so post-deploy occurrences can be
  * counted by field.
  */
@@ -784,6 +790,11 @@ async function forwardToClientInner(
 				// `while` condition, without EOF and without ever entering the
 				// oversize branch below. Warning only from that branch would miss it.
 				let observedEof = false;
+				// Set by the oversize branch, which SAW bytes past the cap: that is a
+				// proven truncation, and the reader is cancelled there, so the
+				// disambiguating read below must not run for it (a cancelled reader
+				// reports `done` and would erase a true positive).
+				let sawDataPastCap = false;
 				while (bytesRead < MAX_NON_STREAM_BODY_BYTES) {
 					const { value, done } = await reader.read();
 					if (done) {
@@ -797,15 +808,34 @@ async function forwardToClientInner(
 					} else {
 						chunks.push(value.slice(0, remaining));
 						bytesRead += remaining;
+						sawDataPastCap = true;
 						await reader.cancel();
 						break;
 					}
 				}
+				if (
+					!observedEof &&
+					!sawDataPastCap &&
+					bytesRead === MAX_NON_STREAM_BODY_BYTES
+				) {
+					// Exactly-at-the-cap is ambiguous: the loop left through its `while`
+					// condition WITHOUT performing the read that would have reported
+					// `done`, so a complete body and a truncated one look identical here.
+					// One extra read settles it. A `done` means the body really ended at
+					// the cap, its usage is exact, and warning would be a false positive
+					// — and since any occurrence of this event is a rollback trigger, a
+					// false positive is a false rollback.
+					const { done } = await reader.read();
+					if (done) observedEof = true;
+				}
 				if (!observedEof) {
-					// The usage collector is fed `cappedBuf`, so a truncated body means
+					// The usage collector is fed `cappedBuf`, so a truncated body loses
 					// the tail — where a non-streaming response carries its `usage`
-					// object — was never seen, and this request's tokens are estimated
-					// rather than reported. Production says non-streaming bodies are far
+					// object. The damage is not an estimate, it is total: the truncated
+					// JSON fails to parse, the collector never learns the model, and
+					// `RequestRecorder.toRequestUsage()` drops the WHOLE usage summary
+					// for a model-less summary. The request row therefore persists with
+					// NO tokens and NO cost. Production says non-streaming bodies are far
 					// below 256 KiB; this proves it, and names the request if not.
 					log.warn(
 						`event=${EVENT_ANALYTICS_BODY_CAP_WITHOUT_EOF} ` +
@@ -814,7 +844,7 @@ async function forwardToClientInner(
 							`provider=${ctx.provider.name} accountProvider=${
 								accountProvider ?? "unknown"
 							} — non-streaming analytics body hit the cap before EOF; ` +
-							`usage was parsed from a truncated body`,
+							`the request row will persist with NO usage and NO cost`,
 					);
 				}
 				cappedBuf = Buffer.concat(chunks);

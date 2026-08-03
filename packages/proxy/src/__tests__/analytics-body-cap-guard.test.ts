@@ -10,17 +10,20 @@ import {
  * Guard A: the non-streaming analytics read stops at a 256 KiB cap. Whatever it
  * did NOT read is invisible to the usage collector — and a non-streaming
  * Anthropic body carries its `usage` object at the END — so a body that hits
- * the cap yields ESTIMATED tokens while looking exactly like a normal request.
+ * the cap loses its usage ENTIRELY (truncated JSON fails to parse, the model is
+ * never learned, and the recorder drops a model-less usage summary whole) while
+ * looking exactly like a normal request.
  *
  * Production says non-streaming bodies are far below the cap. This guard proves
  * that stays true and names the request if it does not. It is log-only: the
  * read, the cancellation and the recorded row are unchanged.
  *
  * The EOF flag is tracked EXPLICITLY rather than inferred from the
- * oversize-chunk branch, and both exit paths are covered below: chunks whose
- * sum CROSSES the cap (oversize branch), and chunks summing to EXACTLY the cap
- * with more data behind them (the `while` condition, which never enters that
- * branch).
+ * oversize-chunk branch, and all three exits are covered below: chunks whose sum
+ * CROSSES the cap (oversize branch), chunks summing to EXACTLY the cap with more
+ * data behind them, and chunks summing to exactly the cap that then EOF — the
+ * last two both leave through the `while` condition and are told apart by one
+ * extra disambiguating read.
  */
 
 const CAP_BYTES = 256 * 1024;
@@ -80,10 +83,38 @@ function bodyOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
 	});
 }
 
+/** A valid JSON body whose UTF-8 length is EXACTLY `CAP_BYTES`. */
+function exactCapJson(): Uint8Array {
+	const usage = { input_tokens: 10, output_tokens: 2 };
+	const skeleton = JSON.stringify({
+		model: "claude-sonnet-4-5",
+		pad: "",
+		usage,
+	});
+	const body = JSON.stringify({
+		model: "claude-sonnet-4-5",
+		pad: "x".repeat(CAP_BYTES - skeleton.length),
+		usage,
+	});
+	const bytes = new TextEncoder().encode(body);
+	if (bytes.byteLength !== CAP_BYTES) {
+		throw new Error(`fixture is ${bytes.byteLength} bytes, want ${CAP_BYTES}`);
+	}
+	return bytes;
+}
+
+/** Split `bytes` into `count` equal chunks (the fixture divides evenly). */
+function split(bytes: Uint8Array, count: number): Uint8Array[] {
+	const size = bytes.byteLength / count;
+	return Array.from({ length: count }, (_, i) =>
+		bytes.slice(i * size, (i + 1) * size),
+	);
+}
+
 async function forwardAndDrain(
 	body: BodyInit,
 	requestId: string,
-): Promise<void> {
+): Promise<ProxyContext> {
 	const ctx = createCtx();
 	const response = await forwardToClient(
 		{
@@ -107,6 +138,7 @@ async function forwardAndDrain(
 	// client side so both branches progress, then let the background IIFE settle.
 	await response.text();
 	for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 2));
+	return ctx;
 }
 
 function capWarnings(lines: string[]): string[] {
@@ -137,22 +169,35 @@ describe("Guard A — non-streaming analytics body cap", () => {
 		expect(capWarnings(capture.lines)).toEqual([]);
 	});
 
-	it("warns for a body that ends exactly at the cap — deliberately conservative", async () => {
-		// Sums to the cap and then EOFs, so nothing was actually lost. The loop
-		// still warns: it leaves through its `while` condition BEFORE the read that
-		// would have reported `done`, and the only way to tell this apart from a
-		// truncation is to issue that extra read — which would change the read
-		// behaviour the guard is supposed to observe, not alter. A 262144-byte
-		// body is the price of a guard that cannot miss a real truncation.
-		const chunks = Array.from({ length: 4 }, () => new Uint8Array(64 * 1024));
+	it("stays silent for a body that ends exactly at the cap — nothing was lost", async () => {
+		// Sums to the cap and then EOFs, so the body is complete and its usage is
+		// exact. The loop leaves through its `while` condition BEFORE the read that
+		// would have reported `done`, so the guard issues one extra read to tell
+		// this apart from a truncation. Warning here would be a false positive —
+		// and a false positive is a false rollback.
+		const bytes = exactCapJson();
 		const capture = captureWarnings();
+		let ctx: ProxyContext;
 		try {
-			await forwardAndDrain(bodyOf(chunks), "req-exact-cap-eof");
+			ctx = await forwardAndDrain(bodyOf(split(bytes, 4)), "req-exact-cap-eof");
 		} finally {
 			capture.restore();
 		}
 
-		expect(capWarnings(capture.lines)).toHaveLength(1);
+		expect(capWarnings(capture.lines)).toEqual([]);
+		// …and the collector really did get the whole, parseable body.
+		const captured = (
+			ctx.requestRecorder.captureResponseChunk as unknown as {
+				mock: { calls: unknown[][] };
+			}
+		).mock.calls;
+		expect(captured).toHaveLength(1);
+		const captureBuf = captured[0][1] as Buffer;
+		expect(captureBuf.byteLength).toBe(CAP_BYTES);
+		expect(JSON.parse(captureBuf.toString("utf8")).usage).toEqual({
+			input_tokens: 10,
+			output_tokens: 2,
+		});
 	});
 
 	it("warns once when a single chunk crosses the cap", async () => {
@@ -176,10 +221,12 @@ describe("Guard A — non-streaming analytics body cap", () => {
 	it("warns once when chunks total exactly the cap and more data follows", async () => {
 		// The exit path the oversize branch cannot see: `bytesRead` reaches the cap
 		// on a chunk boundary, so the loop leaves through its `while` condition
-		// with data still queued and EOF never observed.
+		// with data still queued and EOF never observed. The disambiguating read
+		// returns that queued data rather than `done`, so the warning stands — the
+		// body really was truncated.
 		const chunks = [
-			...Array.from({ length: 4 }, () => new Uint8Array(64 * 1024)),
-			new Uint8Array(1024),
+			...split(exactCapJson(), 4),
+			new TextEncoder().encode("x".repeat(1024)),
 		];
 		const capture = captureWarnings();
 		try {
