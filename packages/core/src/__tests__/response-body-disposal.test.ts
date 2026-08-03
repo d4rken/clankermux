@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import {
 	type DrainReport,
 	discardUpstreamBody,
@@ -18,6 +18,7 @@ import {
  */
 
 const DRAIN_BYTE_BUDGET = 8 * 1024 * 1024;
+const MARKER_SCAN_BYTES = 64 * 1024;
 
 /** A Response whose body yields `chunks` one per `pull`, then EOF. */
 function bodyOf(chunks: Uint8Array[]): Response {
@@ -138,6 +139,63 @@ describe("discardUpstreamBody — drain report", () => {
 		expect(report.marker).toBeNull();
 	});
 
+	it("sees a terminal SSE frame far past the 64 KiB prefix window", async () => {
+		// The terminal frames are at the TAIL of a real response. A head-only scan
+		// would miss a completed answer in exactly the case this guard exists for.
+		const filler = "-".repeat(4 * MARKER_SCAN_BYTES);
+		const report = await drainAndReport(
+			textBody(
+				`${filler}event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9}}\n\n`,
+				8,
+			),
+		);
+		expect(report.marker).toBe("sse-message-delta");
+	});
+
+	it('combines a head `"type":"message"` with a `"usage"` megabytes later', async () => {
+		// A long non-streaming completion: the type is in the prefix window, the
+		// root `usage` object only in the suffix one, and the two halves latch
+		// across both.
+		const filler = "a".repeat(6 * MARKER_SCAN_BYTES);
+		const report = await drainAndReport(
+			textBody(
+				`{"type":"message","content":"${filler}","usage":{"input_tokens":10,"output_tokens":2}}`,
+				12,
+			),
+		);
+		expect(report.marker).toBe("anthropic-message-usage");
+	});
+
+	it("never decodes more than one window's worth of an oversized chunk", async () => {
+		// The scan is bounded by construction, not just by an early return: a huge
+		// first chunk must not be decoded wholesale on the failover path.
+		const decodedSizes: number[] = [];
+		const original = TextDecoder.prototype.decode;
+		const spy = spyOn(TextDecoder.prototype, "decode").mockImplementation(
+			function (
+				this: TextDecoder,
+				input?: ArrayBufferView | ArrayBuffer,
+				options?: { stream?: boolean },
+			): string {
+				decodedSizes.push(input?.byteLength ?? 0);
+				return original.call(this, input as ArrayBufferView, options);
+			} as typeof TextDecoder.prototype.decode,
+		);
+
+		try {
+			const report = await drainAndReport(
+				bodyOf([new Uint8Array(1024 * 1024)]),
+			);
+			expect(report.marker).toBeNull();
+			expect(report.bytesRead).toBe(1024 * 1024);
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(decodedSizes.length).toBeGreaterThan(0);
+		expect(Math.max(...decodedSizes)).toBeLessThanOrEqual(MARKER_SCAN_BYTES);
+	});
+
 	it("reports partial bytes accurately when the byte budget stops the drain", async () => {
 		// 1 MiB per chunk: the loop exits the moment `drained` reaches the budget,
 		// so the reported count is the budget exactly, EOF was never seen, and the
@@ -151,6 +209,27 @@ describe("discardUpstreamBody — drain report", () => {
 		expect(report.reachedEof).toBe(false);
 		expect(report.bytesRead).toBe(DRAIN_BYTE_BUDGET);
 	});
+
+	it("reports a timed-out drain as 'time-budget', never as a clean EOF", async () => {
+		// The deadline cancels the reader, and that cancellation is what resolves
+		// the pending `read()` with `done: true`. A report that trusted `done`
+		// would call a forcibly abandoned body a clean EOF.
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode("partial"));
+			},
+			pull() {
+				// Never resolves: the drain hangs until its deadline fires.
+				return new Promise<void>(() => {});
+			},
+		});
+
+		const report = await drainAndReport(new Response(stream));
+
+		expect(report.stopReason).toBe("time-budget");
+		expect(report.reachedEof).toBe(false);
+		expect(report.bytesRead).toBe(7);
+	}, 15_000);
 
 	it("reports a stream error without claiming EOF", async () => {
 		const stream = new ReadableStream<Uint8Array>({

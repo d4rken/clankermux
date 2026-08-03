@@ -55,10 +55,14 @@ const DRAIN_TIME_BUDGET_MS = 5_000;
 const DRAIN_BYTE_BUDGET = 8 * 1024 * 1024;
 
 /**
- * How many bytes of an abandoned body the marker scan looks at before giving
- * up. Every signature we look for appears in the FIRST frames of a response
- * (SSE `message_start`, a short non-streaming completion, Codex's terminal
- * event), so a small window catches them all while keeping the scan O(1) for a
+ * Size of EACH of the two windows the marker scan looks at — a prefix window
+ * over the first bytes of the body and a rolling suffix window over the last
+ * ones. Two windows are needed because the signatures live at both ends: the
+ * opening frame (`message_start`, a short non-streaming completion) is at the
+ * head, while the terminal ones (`message_delta`, `response.completed`, and the
+ * root `"usage"` of a long non-streaming completion) are at the TAIL. Scanning
+ * only the head would miss a completed answer in exactly the case this guard
+ * exists for. Both windows are fixed, so the scan stays O(1) in memory for a
  * multi-megabyte body.
  */
 const MARKER_SCAN_BYTES = 64 * 1024;
@@ -116,27 +120,76 @@ const USAGE_PROPERTY_RE = /"usage"\s*:/;
 /**
  * Bounded, allocation-light scan for completion/usage signatures over bytes the
  * drain is already reading. Deliberately NOT a JSON/SSE parser: it never
- * materialises the body, never buffers past {@link MARKER_SCAN_BYTES}, and stops
- * dead once something matches.
+ * materialises the body and stops dead once something matches.
+ *
+ * Two fixed windows, each {@link MARKER_SCAN_BYTES} (see that constant for why
+ * one end is not enough):
+ *
+ *   - PREFIX: `feed` decodes only the part of a chunk that still fits in the
+ *     window — never the whole chunk — so a single huge first chunk costs the
+ *     failover path one 64 KiB decode, not a multi-megabyte one.
+ *   - SUFFIX: every chunk is copied into a fixed-size ring buffer, so the last
+ *     64 KiB of the body are always available. Nothing is decoded until
+ *     {@link finish}, which runs once, after the last chunk.
  */
 function createMarkerScanner(): {
 	feed(chunk: Uint8Array): void;
+	finish(): void;
 	marker(): DrainMarker | null;
 } {
 	const decoder = new TextDecoder("utf-8", { fatal: false });
 	let carry = "";
-	let scanned = 0;
+	let prefixScanned = 0;
 	let marker: DrainMarker | null = null;
 	// The two halves of the non-streaming signature can be far apart in a long
-	// body, so they latch independently across chunks.
+	// body — `"type":"message"` at the head, `"usage"` at the tail — so they
+	// latch independently, across chunks AND across the two windows.
 	let sawMessageType = false;
 	let sawUsage = false;
 
+	// Fixed-size ring holding the most recent MARKER_SCAN_BYTES bytes.
+	const suffix = new Uint8Array(MARKER_SCAN_BYTES);
+	let suffixWrite = 0;
+	let suffixFilled = 0;
+
+	function appendSuffix(chunk: Uint8Array): void {
+		// Only the tail of an oversized chunk can survive in the window.
+		const src =
+			chunk.byteLength > MARKER_SCAN_BYTES
+				? chunk.subarray(chunk.byteLength - MARKER_SCAN_BYTES)
+				: chunk;
+		if (src.byteLength === 0) return;
+		const head = Math.min(src.byteLength, MARKER_SCAN_BYTES - suffixWrite);
+		suffix.set(src.subarray(0, head), suffixWrite);
+		if (head < src.byteLength) suffix.set(src.subarray(head), 0);
+		suffixWrite = (suffixWrite + src.byteLength) % MARKER_SCAN_BYTES;
+		suffixFilled = Math.min(MARKER_SCAN_BYTES, suffixFilled + src.byteLength);
+	}
+
+	/** The ring's contents in stream order. */
+	function suffixBytes(): Uint8Array {
+		if (suffixFilled < MARKER_SCAN_BYTES)
+			return suffix.subarray(0, suffixWrite);
+		const ordered = new Uint8Array(MARKER_SCAN_BYTES);
+		ordered.set(suffix.subarray(suffixWrite));
+		ordered.set(
+			suffix.subarray(0, suffixWrite),
+			MARKER_SCAN_BYTES - suffixWrite,
+		);
+		return ordered;
+	}
+
 	return {
 		feed(chunk: Uint8Array): void {
-			if (marker !== null || scanned >= MARKER_SCAN_BYTES) return;
-			scanned += chunk.byteLength;
-			const text = carry + decoder.decode(chunk, { stream: true });
+			if (marker !== null) return;
+			appendSuffix(chunk);
+
+			const room = MARKER_SCAN_BYTES - prefixScanned;
+			if (room <= 0) return;
+			// Decode ONLY what still fits in the prefix window.
+			const slice = chunk.byteLength <= room ? chunk : chunk.subarray(0, room);
+			prefixScanned += slice.byteLength;
+			const text = carry + decoder.decode(slice, { stream: true });
 
 			if (text.includes("message_start")) {
 				marker = "sse-message-start";
@@ -159,6 +212,27 @@ function createMarkerScanner(): {
 			}
 
 			carry = text.slice(-MARKER_CARRY_CHARS);
+		},
+		finish(): void {
+			if (marker !== null) return;
+			const bytes = suffixBytes();
+			if (bytes.byteLength === 0) return;
+			// A ring window can start mid-codepoint; a non-fatal decode turns that
+			// into a replacement character rather than throwing, and no signature we
+			// match is affected.
+			const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
+			if (text.includes("message_delta")) {
+				marker = "sse-message-delta";
+				return;
+			}
+			if (text.includes("response.completed")) {
+				marker = "codex-response-completed";
+				return;
+			}
+			if (!sawUsage) sawUsage = USAGE_PROPERTY_RE.test(text);
+			// The head half may have latched in the prefix window many megabytes ago.
+			if (sawMessageType && sawUsage) marker = "anthropic-message-usage";
 		},
 		marker(): DrainMarker | null {
 			return marker;
@@ -257,6 +331,15 @@ async function drainToRelease(
 	try {
 		while (!expired && drained < DRAIN_BYTE_BUDGET) {
 			const { value, done } = await reader.read();
+			// `expired` is checked BEFORE `done`: the deadline timer cancels the
+			// reader, and that cancellation is what resolves this very `read()` with
+			// `done: true`. Trusting `done` first would report a forcibly timed-out
+			// drain as a clean EOF — and the guard's value rests on these fields
+			// being trustworthy.
+			if (expired) {
+				stopReason = "time-budget";
+				return;
+			}
 			if (done) {
 				reachedEof = true;
 				stopReason = "eof";
@@ -273,6 +356,9 @@ async function drainToRelease(
 		clearTimeout(deadline);
 		// No-op after a clean EOF; the real release when a budget expired.
 		reader.cancel().catch(() => {});
+		// Scan the tail window before the report is built — the terminal
+		// signatures only ever appear there.
+		scanner?.finish();
 		report(onDrained, {
 			bytesRead: drained,
 			reachedEof,
