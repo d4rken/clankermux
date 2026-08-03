@@ -152,6 +152,43 @@ describe("discardUpstreamBody — drain report", () => {
 		expect(report.marker).toBe("sse-message-delta");
 	});
 
+	it("flags a Codex response.completed that falls between BOTH windows", async () => {
+		// The terminal event NAMES itself before its payload: `response.completed`
+		// is preceded by every delta of the answer and followed by the whole final
+		// response object, either side of which is routinely more than one window.
+		// The marker text then sits near neither end, so a window-bounded scan sees
+		// nothing and the guard can only say "something big was thrown away".
+		const deltas = `event: response.output_text.delta\ndata: {"delta":"${"d".repeat(2 * MARKER_SCAN_BYTES)}"}\n\n`;
+		const payload = "x".repeat(2 * MARKER_SCAN_BYTES);
+		const report = await drainAndReport(
+			textBody(
+				`${deltas}event: response.completed\ndata: {"response":{"output_text":"${payload}"}}\n\n`,
+				16,
+			),
+		);
+		expect(report.marker).toBe("codex-response-completed");
+	});
+
+	it("sees a fixed literal split across two chunk boundaries", async () => {
+		// `response.completed` arrives in three pieces, none of which contains it:
+		// the matcher must carry its partial match across both boundaries.
+		const report = await drainAndReport(
+			bodyOf(
+				["event: response.", "compl", "eted\ndata: {}\n\n"].map((part) =>
+					new TextEncoder().encode(part),
+				),
+			),
+		);
+		expect(report.marker).toBe("codex-response-completed");
+	});
+
+	it("matches a literal that restarts inside its own false start", async () => {
+		// A matcher that reset to zero AND consumed the mismatching byte would skip
+		// the `m` that begins the real occurrence and never match.
+		const report = await drainAndReport(textBody("message_message_start", 4));
+		expect(report.marker).toBe("sse-message-start");
+	});
+
 	it('combines a head `"type":"message"` with a `"usage"` megabytes later', async () => {
 		// A long non-streaming completion: the type is in the prefix window, the
 		// root `usage` object only in the suffix one, and the two halves latch

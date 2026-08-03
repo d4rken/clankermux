@@ -55,14 +55,16 @@ const DRAIN_TIME_BUDGET_MS = 5_000;
 const DRAIN_BYTE_BUDGET = 8 * 1024 * 1024;
 
 /**
- * Size of EACH of the two windows the marker scan looks at — a prefix window
- * over the first bytes of the body and a rolling suffix window over the last
- * ones. Two windows are needed because the signatures live at both ends: the
- * opening frame (`message_start`, a short non-streaming completion) is at the
- * head, while the terminal ones (`message_delta`, `response.completed`, and the
- * root `"usage"` of a long non-streaming completion) are at the TAIL. Scanning
- * only the head would miss a completed answer in exactly the case this guard
- * exists for. Both windows are fixed, so the scan stays O(1) in memory for a
+ * Size of EACH of the two windows the DECODED half of the marker scan looks at
+ * — a prefix window over the first bytes of the body and a rolling suffix window
+ * over the last ones.
+ *
+ * Only the whitespace-tolerant Anthropic non-streaming signature needs decoded
+ * text (`"type":"message"` at the head, a root `"usage"` at the tail, either
+ * side of a body that can be megabytes long), which is why there are two of
+ * them. The fixed literals are matched over EVERY byte instead (see
+ * {@link MARKER_LITERALS}) and are therefore not bounded by these windows at
+ * all. Both windows are fixed, so the scan stays O(1) in memory for a
  * multi-megabyte body.
  */
 const MARKER_SCAN_BYTES = 64 * 1024;
@@ -70,7 +72,7 @@ const MARKER_SCAN_BYTES = 64 * 1024;
 /**
  * Characters of the previous chunk carried into the next one so a signature
  * split across a chunk boundary is still seen. Comfortably longer than the
- * longest literal we match.
+ * regexes matched over the decoded windows.
  */
 const MARKER_CARRY_CHARS = 64;
 
@@ -117,20 +119,75 @@ export interface DrainReport {
 const ANTHROPIC_MESSAGE_TYPE_RE = /"type"\s*:\s*"message"/;
 const USAGE_PROPERTY_RE = /"usage"\s*:/;
 
+/** A fixed marker literal, precompiled for streaming byte matching. */
+interface MarkerLiteral {
+	readonly marker: DrainMarker;
+	/** UTF-8 (here: ASCII) bytes of the literal. */
+	readonly pattern: Uint8Array;
+	/**
+	 * KMP failure function: `failure[i]` is the length of the longest proper
+	 * prefix of `pattern[0..i]` that is also a suffix of it. It is what lets the
+	 * matcher fall back on a mismatch while keeping ONLY a match index as state
+	 * — no re-reading, no buffering of already-consumed bytes.
+	 */
+	readonly failure: Int32Array;
+}
+
+function compileMarkerLiteral(
+	marker: DrainMarker,
+	literal: string,
+): MarkerLiteral {
+	const pattern = new TextEncoder().encode(literal);
+	const failure = new Int32Array(pattern.length);
+	let matched = 0;
+	for (let i = 1; i < pattern.length; i++) {
+		while (matched > 0 && pattern[matched] !== pattern[i])
+			matched = failure[matched - 1];
+		if (pattern[matched] === pattern[i]) matched++;
+		failure[i] = matched;
+	}
+	return { marker, pattern, failure };
+}
+
+/**
+ * The signatures that are FIXED text, matched over every byte of the body.
+ *
+ * They cannot be confined to a window at either end: a Codex
+ * `response.completed` event is followed by its full response payload, which is
+ * routinely larger than {@link MARKER_SCAN_BYTES}, so on a body over two
+ * windows' worth the marker text lands in neither window. Matching them
+ * byte-by-byte costs one match index per literal and finds them anywhere in a
+ * body of any size, chunk boundaries included.
+ *
+ * Order is the reported priority when several complete in the same chunk, and
+ * mirrors the order the frames appear in a real Anthropic stream.
+ */
+const MARKER_LITERALS: readonly MarkerLiteral[] = [
+	compileMarkerLiteral("sse-message-start", "message_start"),
+	compileMarkerLiteral("sse-message-delta", "message_delta"),
+	compileMarkerLiteral("codex-response-completed", "response.completed"),
+];
+
 /**
  * Bounded, allocation-light scan for completion/usage signatures over bytes the
  * drain is already reading. Deliberately NOT a JSON/SSE parser: it never
  * materialises the body and stops dead once something matches.
  *
- * Two fixed windows, each {@link MARKER_SCAN_BYTES} (see that constant for why
- * one end is not enough):
+ * Two mechanisms, both O(1) in memory:
  *
- *   - PREFIX: `feed` decodes only the part of a chunk that still fits in the
- *     window — never the whole chunk — so a single huge first chunk costs the
- *     failover path one 64 KiB decode, not a multi-megabyte one.
- *   - SUFFIX: every chunk is copied into a fixed-size ring buffer, so the last
- *     64 KiB of the body are always available. Nothing is decoded until
- *     {@link finish}, which runs once, after the last chunk.
+ *   - FIXED LITERALS ({@link MARKER_LITERALS}): a streaming byte matcher per
+ *     literal, fed every chunk in full. State is one integer each, so a literal
+ *     split across chunks — or sitting megabytes from either end — still
+ *     matches, and nothing is decoded or buffered to do it.
+ *   - ANTHROPIC `"type":"message"` + `"usage"`: whitespace-tolerant, so it needs
+ *     decoded text, and its two halves can be megabytes apart. Two fixed
+ *     {@link MARKER_SCAN_BYTES} windows cover them:
+ *       - PREFIX: `feed` decodes only the part of a chunk that still fits in the
+ *         window — never the whole chunk — so a single huge first chunk costs
+ *         the failover path one 64 KiB decode, not a multi-megabyte one.
+ *       - SUFFIX: every chunk is copied into a fixed-size ring buffer, so the
+ *         last 64 KiB of the body are always available. Nothing is decoded until
+ *         {@link finish}, which runs once, after the last chunk.
  */
 function createMarkerScanner(): {
 	feed(chunk: Uint8Array): void;
@@ -146,6 +203,31 @@ function createMarkerScanner(): {
 	// latch independently, across chunks AND across the two windows.
 	let sawMessageType = false;
 	let sawUsage = false;
+
+	// One partial-match index per fixed literal — the matchers' entire state.
+	const literalProgress = new Int32Array(MARKER_LITERALS.length);
+
+	/**
+	 * Advance one literal's matcher across `chunk`, returning true the moment the
+	 * literal completes. Reads each byte once and keeps nothing but the index.
+	 */
+	function matchLiteral(index: number, chunk: Uint8Array): boolean {
+		const { pattern, failure } = MARKER_LITERALS[index];
+		const length = pattern.length;
+		let matched = literalProgress[index];
+		for (let i = 0; i < chunk.length; i++) {
+			const byte = chunk[i];
+			while (matched > 0 && pattern[matched] !== byte)
+				matched = failure[matched - 1];
+			if (pattern[matched] === byte) matched++;
+			if (matched === length) {
+				literalProgress[index] = 0;
+				return true;
+			}
+		}
+		literalProgress[index] = matched;
+		return false;
+	}
 
 	// Fixed-size ring holding the most recent MARKER_SCAN_BYTES bytes.
 	const suffix = new Uint8Array(MARKER_SCAN_BYTES);
@@ -182,6 +264,16 @@ function createMarkerScanner(): {
 	return {
 		feed(chunk: Uint8Array): void {
 			if (marker !== null) return;
+
+			// Fixed literals first, over the WHOLE chunk: unlike the decoded windows
+			// below, these are not bounded to either end of the body.
+			for (let i = 0; i < MARKER_LITERALS.length; i++) {
+				if (matchLiteral(i, chunk)) {
+					marker = MARKER_LITERALS[i].marker;
+					return;
+				}
+			}
+
 			appendSuffix(chunk);
 
 			const room = MARKER_SCAN_BYTES - prefixScanned;
@@ -191,18 +283,6 @@ function createMarkerScanner(): {
 			prefixScanned += slice.byteLength;
 			const text = carry + decoder.decode(slice, { stream: true });
 
-			if (text.includes("message_start")) {
-				marker = "sse-message-start";
-				return;
-			}
-			if (text.includes("message_delta")) {
-				marker = "sse-message-delta";
-				return;
-			}
-			if (text.includes("response.completed")) {
-				marker = "codex-response-completed";
-				return;
-			}
 			if (!sawMessageType)
 				sawMessageType = ANTHROPIC_MESSAGE_TYPE_RE.test(text);
 			if (!sawUsage) sawUsage = USAGE_PROPERTY_RE.test(text);
@@ -217,19 +297,13 @@ function createMarkerScanner(): {
 			if (marker !== null) return;
 			const bytes = suffixBytes();
 			if (bytes.byteLength === 0) return;
+			// The tail is decoded ONLY for the Anthropic combination — the fixed
+			// literals were already matched over every byte as it streamed past.
 			// A ring window can start mid-codepoint; a non-fatal decode turns that
-			// into a replacement character rather than throwing, and no signature we
-			// match is affected.
+			// into a replacement character rather than throwing, and neither regex we
+			// run here is affected.
 			const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 
-			if (text.includes("message_delta")) {
-				marker = "sse-message-delta";
-				return;
-			}
-			if (text.includes("response.completed")) {
-				marker = "codex-response-completed";
-				return;
-			}
 			if (!sawUsage) sawUsage = USAGE_PROPERTY_RE.test(text);
 			// The head half may have latched in the prefix window many megabytes ago.
 			if (sawMessageType && sawUsage) marker = "anthropic-message-usage";
