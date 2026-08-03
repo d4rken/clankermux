@@ -403,9 +403,11 @@ const MAX_PRICING_MISS_ENTRIES = 128;
 /**
  * Hard cap on the warn-de-duplication cache — the bounded replacement for the
  * unbounded `warnedModels` Set. Keyed by MODEL ONLY (no provider) so an unpriced
- * model logs exactly once however many callers price it, and once per model
- * rather than once per affected request. Kept separate from the gap registry so
- * warn traffic can never evict a reported gap, and vice versa.
+ * model logs exactly once no matter which of the two pricing paths observed it
+ * (a provider's usage extractor prices the response without account
+ * attribution, then the proxy's usage collector prices it again with the real
+ * provider). Kept separate from the gap registry so warn traffic can never
+ * evict a reported gap, and vice versa.
  */
 const MAX_PRICING_WARN_ENTRIES = 128;
 

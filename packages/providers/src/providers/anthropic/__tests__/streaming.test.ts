@@ -406,7 +406,132 @@ describe("AnthropicProvider — streaming.test.ts", () => {
 	});
 
 	// ─────────────────────────────────────────────
-	// 3. processResponse — SSE pass-through
+	// 3. extractUsageInfo — SSE cache token fields
+	// ─────────────────────────────────────────────
+	describe("extractUsageInfo — SSE cache token fields", () => {
+		it("SSE message_start with cache_creation and cache_read tokens → maps to correct fields", async () => {
+			const messageStartData = JSON.stringify({
+				type: "message_start",
+				message: {
+					model: "claude-opus-4-5",
+					usage: {
+						input_tokens: 100,
+						output_tokens: 5,
+						cache_creation_input_tokens: 10,
+						cache_read_input_tokens: 5,
+					},
+				},
+			});
+			const sseBody = [
+				"event: message_start",
+				`data: ${messageStartData}`,
+				"",
+				"event: content_block_start",
+				'data: {"type":"content_block_start","index":0}',
+				"",
+			].join("\n");
+
+			const response = new Response(sseBody, {
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).not.toBeNull();
+			expect(usage?.cacheCreationInputTokens).toBe(10);
+			expect(usage?.cacheReadInputTokens).toBe(5);
+			// promptTokens = input + cache_creation + cache_read = 100 + 10 + 5
+			expect(usage?.promptTokens).toBe(115);
+			expect(usage?.inputTokens).toBe(100);
+		});
+
+		it("SSE message_start includes output_tokens (captured from message_start)", async () => {
+			// The implementation only reads message_start (output_tokens from message_delta
+			// is not captured — the code comments confirm this). Verify initial output_tokens
+			// from message_start are returned correctly.
+			const messageStartData = JSON.stringify({
+				type: "message_start",
+				message: {
+					model: "claude-3-5-sonnet",
+					usage: {
+						input_tokens: 50,
+						output_tokens: 0,
+						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: 0,
+					},
+				},
+			});
+			const sseBody = [
+				"event: message_start",
+				`data: ${messageStartData}`,
+				"",
+			].join("\n");
+
+			const response = new Response(sseBody, {
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).not.toBeNull();
+			expect(usage?.outputTokens).toBe(0);
+			expect(usage?.completionTokens).toBe(0);
+			expect(usage?.inputTokens).toBe(50);
+			expect(usage?.totalTokens).toBe(50);
+		});
+	});
+
+	// ─────────────────────────────────────────────
+	// 4. extractUsageInfo — edge cases
+	// ─────────────────────────────────────────────
+	describe("extractUsageInfo — edge cases", () => {
+		it("usage: {} (all fields missing) → returns object with 0 tokens, not null", async () => {
+			const body = JSON.stringify({
+				model: "claude-3-haiku",
+				usage: {},
+			});
+			const response = new Response(body, {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			// usage key is present so it returns an object (not null)
+			expect(usage).not.toBeNull();
+			expect(usage?.inputTokens).toBe(0);
+			expect(usage?.outputTokens).toBe(0);
+			expect(usage?.promptTokens).toBe(0);
+			expect(usage?.completionTokens).toBe(0);
+			expect(usage?.totalTokens).toBe(0);
+		});
+
+		it("JSON: input_tokens + cache_creation + cache_read → summed into promptTokens", async () => {
+			const body = JSON.stringify({
+				model: "claude-opus-4-5",
+				usage: {
+					input_tokens: 100,
+					output_tokens: 20,
+					cache_creation_input_tokens: 10,
+					cache_read_input_tokens: 5,
+				},
+			});
+			const response = new Response(body, {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).not.toBeNull();
+			// promptTokens = 100 + 10 + 5 = 115
+			expect(usage?.promptTokens).toBe(115);
+			// totalTokens = promptTokens + outputTokens = 115 + 20 = 135
+			expect(usage?.totalTokens).toBe(135);
+			expect(usage?.completionTokens).toBe(20);
+		});
+	});
+
+	// ─────────────────────────────────────────────
+	// 5. processResponse — SSE pass-through
 	// ─────────────────────────────────────────────
 	describe("processResponse — SSE pass-through for native Anthropic clients", () => {
 		it("SSE body is returned byte-for-byte when anthropic-version header is present", async () => {
@@ -501,7 +626,7 @@ describe("AnthropicProvider — streaming.test.ts", () => {
 	});
 
 	// ─────────────────────────────────────────────
-	// 4. buildUrl
+	// 6. buildUrl
 	// ─────────────────────────────────────────────
 	describe("buildUrl", () => {
 		it("default endpoint: builds https://api.anthropic.com URL", () => {
@@ -537,7 +662,7 @@ describe("AnthropicProvider — streaming.test.ts", () => {
 	});
 
 	// ─────────────────────────────────────────────
-	// 5. prepareHeaders
+	// 7. prepareHeaders
 	// ─────────────────────────────────────────────
 	describe("prepareHeaders", () => {
 		it("sets Authorization: Bearer <accessToken> for OAuth accounts", () => {

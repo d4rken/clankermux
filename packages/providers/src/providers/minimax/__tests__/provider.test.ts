@@ -199,6 +199,15 @@ describe("MinimaxProvider", () => {
 		});
 	});
 
+	describe("extractTierInfo", () => {
+		it("should return null for tier info", async () => {
+			const response = new Response();
+			const tierInfo = await provider.extractTierInfo(response);
+
+			expect(tierInfo).toBeNull();
+		});
+	});
+
 	describe("processResponse", () => {
 		it("should sanitize response headers", async () => {
 			const originalResponse = new Response("test body", {
@@ -269,6 +278,56 @@ describe("MinimaxProvider", () => {
 				const transformedBody = await transformedRequest.json();
 				expect(transformedBody.model).toBe(expected);
 			}
+		});
+	});
+
+	describe("extractUsageInfo", () => {
+		it("should extract usage from non-streaming JSON response", async () => {
+			const mockUsageData = {
+				model: "MiniMax-M2",
+				usage: {
+					input_tokens: 100,
+					output_tokens: 50,
+					cache_creation_input_tokens: 10,
+					cache_read_input_tokens: 5,
+				},
+			};
+
+			const response = new Response(JSON.stringify(mockUsageData), {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).toEqual({
+				model: "MiniMax-M2",
+				promptTokens: 115, // 100 + 10 + 5
+				completionTokens: 50,
+				totalTokens: 165,
+				inputTokens: 100,
+				cacheReadInputTokens: 5,
+				cacheCreationInputTokens: 10,
+				outputTokens: 50,
+				costUsd: expect.any(Number),
+			});
+		});
+
+		it("should return null for response without usage info", async () => {
+			const response = new Response(JSON.stringify({ model: "MiniMax-M2" }), {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+			expect(usage).toBeNull();
+		});
+
+		it("should handle non-JSON responses gracefully", async () => {
+			const response = new Response("invalid json", {
+				headers: { "content-type": "text/plain" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+			expect(usage).toBeNull();
 		});
 	});
 });

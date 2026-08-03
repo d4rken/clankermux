@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __pricingTestHooks, getPricingGaps } from "@clankermux/core";
+import { AnthropicCompatibleProvider } from "@clankermux/providers";
 import {
 	createUsageState,
 	feedNonStreamBody,
@@ -17,11 +18,12 @@ import {
 } from "../usage-collector";
 
 /**
- * The usage collector is the ONLY thing that prices a request, and the only
- * caller that opts into pricing-gap reporting. A single request that misses the
- * pricing catalogue must therefore produce exactly ONE gap record with
- * `occurrences: 1` — `occurrences` is a count of affected REQUESTS, so any
- * second pricing pass over the same response would inflate the dashboard number.
+ * A normal Anthropic-compatible request is priced TWICE: the provider's usage
+ * extractor computes its own `costUsd`, and the proxy's usage collector computes
+ * the one that is actually persisted. Only the collector opts into gap
+ * reporting, so a single request that misses the pricing catalogue must produce
+ * exactly ONE gap record with `occurrences: 1` — otherwise the count on the
+ * dashboard would be double the real number of affected requests.
  */
 
 // Offline + disposable disk cache, so the bundled table is the sole source of
@@ -72,10 +74,11 @@ function unpricedResponseBody(): string {
 }
 
 describe("one request through the main path yields exactly one gap record", () => {
-	it("records the miss exactly once, with one operator log line", async () => {
+	it("records once even though the provider prices the same response first", async () => {
 		const body = unpricedResponseBody();
-		// The warn cache is model-keyed, so the operator sees one log line for the
-		// model rather than one per affected request.
+		// The same response is priced twice, by call sites with different provider
+		// attribution. The warn cache is model-keyed, so the operator sees exactly
+		// one log line rather than one per pricing path.
 		// (The catalogue also warns about the deliberately-disabled network fetch,
 		// so keep only the "no price" lines.)
 		const warnings: string[] = [];
@@ -86,7 +89,14 @@ describe("one request through the main path yields exactly one gap record", () =
 			debug: () => {},
 		});
 
-		// The proxy's usage collector — the real estimator, no injected fake.
+		// 1. Provider-level extraction (response-processor drives this first).
+		const provider = new AnthropicCompatibleProvider();
+		await provider.extractUsageInfo(
+			new Response(body, { headers: { "content-type": "application/json" } }),
+		);
+		expect(getPricingGaps()).toEqual([]);
+
+		// 2. The proxy's usage collector — the real estimator, no injected fake.
 		const state = createUsageState();
 		feedNonStreamBody(state, body);
 		const summary = await finalizeUsage(state, {

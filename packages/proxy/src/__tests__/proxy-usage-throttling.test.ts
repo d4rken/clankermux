@@ -184,6 +184,8 @@ function makeProcessCtx(opts: { rateLimited: boolean; resetTime?: number }) {
 				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
 				remaining: undefined,
 			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: async (

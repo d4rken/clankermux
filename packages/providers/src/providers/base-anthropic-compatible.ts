@@ -1,5 +1,7 @@
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
+	BUFFER_SIZES,
+	estimateCostUSD,
 	mapModelName,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
@@ -237,6 +239,336 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 			statusText: response.statusText,
 			headers,
 		});
+	}
+
+	async extractTierInfo(_response: Response): Promise<number | null> {
+		// Generic implementation - specific providers may override
+		return null;
+	}
+
+	async extractUsageInfo(response: Response): Promise<{
+		model?: string;
+		promptTokens?: number;
+		completionTokens?: number;
+		totalTokens?: number;
+		costUsd?: number;
+		inputTokens?: number;
+		cacheReadInputTokens?: number;
+		cacheCreationInputTokens?: number;
+		outputTokens?: number;
+	} | null> {
+		try {
+			const clone = response.clone();
+			const contentType = response.headers.get("content-type");
+
+			// Handle streaming responses if supported
+			if (
+				this.config.supportsStreaming &&
+				contentType?.includes("text/event-stream")
+			) {
+				return this.extractStreamingUsage(clone, response.headers);
+			}
+
+			// Handle non-streaming JSON responses
+			const json = await clone.json();
+
+			if (!json.usage) return null;
+
+			const inputTokens = json.usage.input_tokens || 0;
+			const cacheCreationInputTokens =
+				json.usage.cache_creation_input_tokens || 0;
+			const cacheReadInputTokens = json.usage.cache_read_input_tokens || 0;
+			const outputTokens = json.usage.output_tokens || 0;
+
+			const promptTokens =
+				inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+			const completionTokens = outputTokens;
+			const totalTokens = promptTokens + completionTokens;
+
+			// Calculate cost if we have a model
+			const model = json.model || this.config.defaultModel;
+			let costUsd: number | undefined;
+			if (model) {
+				try {
+					costUsd = await estimateCostUSD(model, {
+						inputTokens,
+						outputTokens,
+						cacheReadInputTokens,
+						cacheCreationInputTokens,
+					});
+				} catch (error) {
+					log.warn(`Failed to calculate cost for model ${model}:`, error);
+				}
+			}
+
+			return {
+				model,
+				promptTokens,
+				completionTokens,
+				totalTokens,
+				inputTokens,
+				cacheReadInputTokens,
+				cacheCreationInputTokens,
+				outputTokens,
+				costUsd,
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Extract usage information from streaming responses
+	 * Uses sophisticated SSE parsing for message_start and message_delta events
+	 */
+	protected async extractStreamingUsage(
+		clone: Response,
+		_originalHeaders: Headers,
+	): Promise<{
+		model?: string;
+		promptTokens?: number;
+		completionTokens?: number;
+		totalTokens?: number;
+		costUsd?: number;
+		inputTokens?: number;
+		cacheReadInputTokens?: number;
+		cacheCreationInputTokens?: number;
+		outputTokens?: number;
+	} | null> {
+		const reader = clone.body?.getReader();
+		if (!reader) return null;
+
+		let buffered = "";
+		const maxBytes = BUFFER_SIZES.ANTHROPIC_STREAM_CAP_BYTES;
+		const decoder = new TextDecoder();
+		const READ_TIMEOUT_MS = TIME_CONSTANTS.STREAM_READ_TIMEOUT_MS;
+		const startTime = Date.now();
+
+		// Track usage from both message_start and message_delta
+		let messageStartUsage: {
+			input_tokens?: number;
+			output_tokens?: number;
+			cache_creation_input_tokens?: number;
+			cache_read_input_tokens?: number;
+			model?: string;
+		} | null = null;
+
+		let messageDeltaUsage: {
+			input_tokens?: number;
+			output_tokens?: number;
+			cache_read_input_tokens?: number;
+		} | null = null;
+
+		try {
+			while (buffered.length < maxBytes) {
+				if (Date.now() - startTime > READ_TIMEOUT_MS) {
+					await reader.cancel();
+					throw new Error("Stream read timeout while extracting usage info");
+				}
+
+				const readPromise = reader.read();
+				const timeoutPromise = new Promise<{
+					value?: Uint8Array;
+					done: boolean;
+				}>((_, reject) =>
+					setTimeout(
+						() => reject(new Error("Read operation timeout")),
+						TIME_CONSTANTS.STREAM_OPERATION_TIMEOUT_MS,
+					),
+				);
+
+				let value: Uint8Array | undefined, done: boolean;
+				try {
+					({ value, done } = await Promise.race([readPromise, timeoutPromise]));
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message === "Read operation timeout"
+					) {
+						log.warn(
+							"Stream read operation timed out while extracting usage info - continuing without usage data",
+						);
+						return null;
+					}
+					throw error; // Re-throw other errors
+				}
+
+				if (done) break;
+
+				buffered += decoder.decode(value, { stream: true });
+
+				// Process all complete lines in the buffer
+				const lines = buffered.split("\n");
+				buffered = lines.pop() || ""; // Keep incomplete line in buffer
+
+				for (let i = 0; i < lines.length; i++) {
+					const line = lines[i].trim();
+					if (!line) continue;
+
+					// Parse SSE event
+					if (
+						line.startsWith("event: message_start") ||
+						line.startsWith("event:message_start")
+					) {
+						// Look for the next data line, skipping empty lines
+						let dataLine = null;
+						for (let j = i + 1; j < lines.length; j++) {
+							const nextLine = lines[j].trim();
+							if (
+								nextLine.startsWith("data: ") ||
+								nextLine.startsWith("data:")
+							) {
+								dataLine = nextLine;
+								break;
+							} else if (nextLine && !nextLine.startsWith("event: ")) {
+								// If we encounter a non-empty line that's not an event, break
+								break;
+							}
+						}
+
+						if (dataLine) {
+							try {
+								// Handle both "data: {...}" and "data:{...}" formats
+								const jsonStr = dataLine.startsWith("data: ")
+									? dataLine.slice(6)
+									: dataLine.slice(5);
+								const data = JSON.parse(jsonStr) as {
+									message?: {
+										model?: string;
+										usage?: {
+											input_tokens?: number;
+											output_tokens?: number;
+											cache_creation_input_tokens?: number;
+											cache_read_input_tokens?: number;
+										};
+									};
+								};
+
+								if (data.message?.usage) {
+									messageStartUsage = {
+										input_tokens: data.message.usage.input_tokens,
+										output_tokens: data.message.usage.output_tokens,
+										cache_creation_input_tokens:
+											data.message.usage.cache_creation_input_tokens,
+										cache_read_input_tokens:
+											data.message.usage.cache_read_input_tokens,
+										model: data.message.model,
+									};
+								}
+							} catch {
+								// Ignore parse errors
+							}
+						}
+					} else if (
+						line.startsWith("event: message_delta") ||
+						line.startsWith("event:message_delta")
+					) {
+						// Look for the next data line, skipping empty lines
+						let dataLine = null;
+						for (let j = i + 1; j < lines.length; j++) {
+							const nextLine = lines[j].trim();
+							if (
+								nextLine.startsWith("data: ") ||
+								nextLine.startsWith("data:")
+							) {
+								dataLine = nextLine;
+								break;
+							} else if (nextLine && !nextLine.startsWith("event: ")) {
+								// If we encounter a non-empty line that's not an event, break
+								break;
+							}
+						}
+
+						if (dataLine) {
+							try {
+								// Handle both "data: {...}" and "data:{...}" formats
+								const jsonStr = dataLine.startsWith("data: ")
+									? dataLine.slice(6)
+									: dataLine.slice(5);
+								const data = JSON.parse(jsonStr) as {
+									usage?: {
+										input_tokens?: number;
+										output_tokens?: number;
+										cache_read_input_tokens?: number;
+									};
+								};
+
+								if (data.usage) {
+									messageDeltaUsage = {
+										input_tokens: data.usage.input_tokens,
+										output_tokens: data.usage.output_tokens,
+										cache_read_input_tokens: data.usage.cache_read_input_tokens,
+									};
+								}
+							} catch {
+								// Ignore parse errors
+							}
+						}
+					}
+				}
+
+				// If we have both message_start and message_delta, we can return the complete usage
+				if (messageDeltaUsage) {
+					break; // We have the final usage from message_delta
+				}
+			}
+		} finally {
+			reader.cancel().catch(() => {});
+		}
+
+		// For streaming responses, message_delta always contains the final authoritative token counts
+		// We should always prefer message_delta when available, regardless of whether tokens are zero
+		const finalUsage = messageDeltaUsage || messageStartUsage;
+
+		if (!finalUsage) return null;
+
+		// Use the model from message_start
+		const model = messageStartUsage?.model || this.config.defaultModel;
+
+		// For message_delta, input_tokens and cache_read_input_tokens may be the final counts
+		// For message_start, we have all the detailed breakdown
+		const inputTokens =
+			finalUsage.input_tokens || messageStartUsage?.input_tokens || 0;
+		const cacheReadInputTokens =
+			finalUsage.cache_read_input_tokens ||
+			messageStartUsage?.cache_read_input_tokens ||
+			0;
+		const cacheCreationInputTokens =
+			messageStartUsage?.cache_creation_input_tokens || 0;
+		const outputTokens =
+			finalUsage.output_tokens || messageStartUsage?.output_tokens || 0;
+
+		const promptTokens =
+			(inputTokens || 0) + cacheReadInputTokens + cacheCreationInputTokens;
+		const completionTokens = outputTokens;
+		const totalTokens = promptTokens + completionTokens;
+
+		// Calculate cost if we have a model
+		let costUsd: number | undefined;
+		if (model) {
+			try {
+				costUsd = await estimateCostUSD(model, {
+					inputTokens,
+					outputTokens,
+					cacheReadInputTokens,
+					cacheCreationInputTokens,
+				});
+			} catch (error) {
+				log.warn(`Failed to calculate cost for model ${model}:`, error);
+			}
+		}
+
+		return {
+			model,
+			promptTokens,
+			completionTokens,
+			totalTokens,
+			inputTokens,
+			cacheReadInputTokens,
+			cacheCreationInputTokens,
+			outputTokens,
+			costUsd,
+		};
 	}
 
 	/**

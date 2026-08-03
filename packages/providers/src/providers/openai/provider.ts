@@ -212,6 +212,120 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		}
 	}
 
+	async extractUsageInfo(response: Response): Promise<{
+		model?: string;
+		promptTokens?: number;
+		completionTokens?: number;
+		totalTokens?: number;
+		costUsd?: number;
+		inputTokens?: number;
+		cacheReadInputTokens?: number;
+		cacheCreationInputTokens?: number;
+		outputTokens?: number;
+	} | null> {
+		try {
+			const clone = response.clone();
+			const contentType = response.headers.get("content-type");
+
+			// Handle streaming responses (SSE)
+			if (contentType?.includes("text/event-stream")) {
+				// For streaming, we can only extract usage from the final chunk
+				// This is complex to implement properly, so we'll return null for now
+				// In a full implementation, we'd need to buffer the entire stream
+				return null;
+			} else {
+				// Handle non-streaming JSON responses
+				const json = (await clone.json()) as {
+					model?: string;
+					usage?: {
+						prompt_tokens?: number;
+						completion_tokens?: number;
+						total_tokens?: number;
+						prompt_tokens_details?: Record<string, unknown>;
+					};
+				};
+
+				if (!json.usage) return null;
+
+				const promptTokens = json.usage.prompt_tokens || 0;
+				const completionTokens = json.usage.completion_tokens || 0;
+				const totalTokens =
+					json.usage.total_tokens || promptTokens + completionTokens;
+
+				// Extract cache statistics from prompt_tokens_details (Qwen/DashScope)
+				const promptTokensDetails = json.usage.prompt_tokens_details as
+					| {
+							cache_creation_input_tokens?: number;
+							cached_tokens?: number;
+					  }
+					| undefined;
+
+				const cacheCreationInputTokens =
+					promptTokensDetails?.cache_creation_input_tokens || 0;
+				const cacheReadInputTokens = promptTokensDetails?.cached_tokens || 0;
+
+				// Calculate cost using OpenAI-compatible pricing
+				const costUsd = this.calculateCost(
+					json.model,
+					promptTokens,
+					completionTokens,
+				);
+
+				return {
+					model: json.model,
+					promptTokens,
+					completionTokens,
+					totalTokens,
+					costUsd,
+					inputTokens: promptTokens,
+					outputTokens: completionTokens,
+					cacheReadInputTokens,
+					cacheCreationInputTokens,
+				};
+			}
+		} catch {
+			// Ignore parsing errors
+			return null;
+		}
+	}
+
+	/**
+	 * Calculate cost based on model and token usage
+	 */
+	protected calculateCost(
+		model?: string,
+		promptTokens: number = 0,
+		completionTokens: number = 0,
+	): number {
+		if (!model) return 0;
+
+		// Basic OpenAI-compatible pricing (can be enhanced based on provider)
+		const pricing: Record<string, { input: number; output: number }> = {
+			"gpt-3.5-turbo": { input: 0.0005, output: 0.0015 },
+			"gpt-4": { input: 0.03, output: 0.06 },
+			"gpt-4-turbo": { input: 0.01, output: 0.03 },
+			"gpt-4o": { input: 0.005, output: 0.015 },
+			"gpt-4o-mini": { input: 0.00015, output: 0.0006 },
+			// Default pricing for unknown models
+			default: { input: 0.001, output: 0.002 },
+		};
+
+		// Find matching pricing (use exact match or default)
+		let modelPricing = pricing[model];
+		if (!modelPricing) {
+			// Try to match prefix (e.g., "gpt-4o-*" models)
+			const prefix = Object.keys(pricing).find((key) =>
+				model.includes(key.split("*")[0]),
+			);
+			modelPricing = pricing[prefix || "default"];
+		}
+
+		const inputCost = (promptTokens / 1000) * modelPricing.input;
+		const outputCost = (completionTokens / 1000) * modelPricing.output;
+
+		return Number((inputCost + outputCost).toFixed(6));
+	}
+
 	/**
 	 * Check if this provider supports OAuth
 	 */

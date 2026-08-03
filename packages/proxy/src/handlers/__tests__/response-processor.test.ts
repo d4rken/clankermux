@@ -82,6 +82,8 @@ function makeCtx(opts: {
 				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
 				remaining: undefined,
 			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: async (
@@ -164,6 +166,8 @@ function makeCtxWithReason(opts: {
 				statusHeader: opts.rateLimited ? "rate_limited" : undefined,
 				remaining: undefined,
 			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: async (
@@ -445,7 +449,7 @@ describe("processProxyResponse — 529 overload reason", () => {
 			headers: new Headers({ "x-clankermux-keepalive": "true" }),
 		};
 
-		await processProxyResponse(response, account, ctx, requestMeta);
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 
 		// Keepalive requests skip cooldown marking
 		expect(calls.markRateLimited).toHaveLength(0);
@@ -470,7 +474,7 @@ describe("processProxyResponse — 529 overload reason", () => {
 			headers: new Headers({ "x-clankermux-keepalive": "true" }),
 		};
 
-		await processProxyResponse(response, account, ctx, requestMeta);
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 
 		expect(calls.markRateLimited).toHaveLength(1);
 	});
@@ -581,7 +585,7 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 			headers: new Headers({ "x-clankermux-bypass-session": "true" }),
 		};
 
-		await processProxyResponse(response, account, ctx, requestMeta);
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 
 		expect(calls.updateAccountUsage).toBe(1);
 		expect(calls.manualUsageRun).toBe(0);
@@ -602,7 +606,7 @@ describe("processProxyResponse — in-memory cooldown mutation", () => {
 			headers: new Headers({ "x-clankermux-bypass-session": "true" }),
 		};
 
-		await processProxyResponse(response, account, ctx, requestMeta);
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 
 		expect(calls.updateAccountUsage).toBe(0);
 		expect(calls.manualUsageRun).toBe(1);
@@ -628,6 +632,8 @@ function makeCodexCtx() {
 				statusHeader: undefined,
 				remaining: undefined,
 			}),
+			parseUsage: undefined,
+			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			updateAccountUsage: () => {},
@@ -892,7 +898,7 @@ describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 			headers: new Headers({ "x-clankermux-keepalive": "true" }),
 		};
 
-		await processProxyResponse(response, account, ctx, requestMeta);
+		await processProxyResponse(response, account, ctx, undefined, requestMeta);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		usageCache.delete(account.id);
 	});

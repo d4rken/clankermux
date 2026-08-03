@@ -641,10 +641,11 @@ export async function finalizeUsage(
 		finalOutput;
 
 	const model = state.model;
-	// The ONLY pricing call on the request path, and the only one that opts into
-	// pricing-gap reporting. It owns the `cost_usd` that is actually persisted (a
-	// failure here is what stores NULL) and runs exactly once per recorded
-	// request, with the real account provider attached.
+	// This is the ONE call site that opts into pricing-gap reporting. It owns the
+	// `cost_usd` that is actually persisted (a failure here is what stores NULL),
+	// and it runs exactly once per recorded request — unlike the provider-level
+	// estimator calls, which price the same response a second time and carry no
+	// account attribution.
 	const costUsd =
 		model !== undefined
 			? await estimateCostUSD(

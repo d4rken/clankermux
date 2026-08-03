@@ -101,6 +101,129 @@ describe("AnthropicProvider", () => {
 		});
 	});
 
+	describe("extractUsageInfo", () => {
+		it("extracts usage from non-streaming JSON response", async () => {
+			const body = JSON.stringify({
+				model: "claude-opus-4-5",
+				usage: {
+					input_tokens: 100,
+					output_tokens: 50,
+					cache_creation_input_tokens: 10,
+					cache_read_input_tokens: 5,
+				},
+			});
+			const response = new Response(body, {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).not.toBeNull();
+			expect(usage?.model).toBe("claude-opus-4-5");
+			expect(usage?.inputTokens).toBe(100);
+			expect(usage?.outputTokens).toBe(50);
+			expect(usage?.cacheCreationInputTokens).toBe(10);
+			expect(usage?.cacheReadInputTokens).toBe(5);
+			// promptTokens = input + cache_creation + cache_read
+			expect(usage?.promptTokens).toBe(115);
+			expect(usage?.completionTokens).toBe(50);
+			expect(usage?.totalTokens).toBe(165);
+		});
+
+		it("extracts billing cost from anthropic-billing-cost header", async () => {
+			const body = JSON.stringify({
+				model: "claude-opus-4-5",
+				usage: { input_tokens: 10, output_tokens: 5 },
+			});
+			const response = new Response(body, {
+				headers: {
+					"content-type": "application/json",
+					"anthropic-billing-cost": "0.0025",
+				},
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage?.costUsd).toBeCloseTo(0.0025);
+		});
+
+		it("returns null when usage field is absent in JSON response", async () => {
+			const body = JSON.stringify({
+				model: "claude-opus-4-5",
+				type: "message",
+			});
+			const response = new Response(body, {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).toBeNull();
+		});
+
+		it("returns null for non-JSON body", async () => {
+			const response = new Response("not json at all", {
+				headers: { "content-type": "application/json" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).toBeNull();
+		});
+
+		it("extracts usage from streaming SSE with message_start event", async () => {
+			const messageStartData = JSON.stringify({
+				type: "message_start",
+				message: {
+					model: "claude-opus-4-5",
+					usage: {
+						input_tokens: 20,
+						output_tokens: 0,
+						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: 0,
+					},
+				},
+			});
+			const sseBody = [
+				"event: message_start",
+				`data: ${messageStartData}`,
+				"",
+				"event: content_block_start",
+				'data: {"type":"content_block_start","index":0}',
+				"",
+			].join("\n");
+
+			const response = new Response(sseBody, {
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).not.toBeNull();
+			expect(usage?.model).toBe("claude-opus-4-5");
+			expect(usage?.inputTokens).toBe(20);
+			expect(usage?.outputTokens).toBe(0);
+			expect(usage?.promptTokens).toBe(20);
+			expect(usage?.totalTokens).toBe(20);
+		});
+
+		it("returns null for streaming response without message_start", async () => {
+			const sseBody = [
+				"event: content_block_delta",
+				'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}',
+				"",
+			].join("\n");
+
+			const response = new Response(sseBody, {
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const usage = await provider.extractUsageInfo(response);
+
+			expect(usage).toBeNull();
+		});
+	});
+
 	describe("transformRequestBody", () => {
 		function makeRequest(model: string): Request {
 			return new Request("https://api.anthropic.com/v1/messages", {
