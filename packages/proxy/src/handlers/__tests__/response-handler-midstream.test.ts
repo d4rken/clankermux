@@ -88,8 +88,6 @@ function makeCtxWithReason() {
 				statusHeader: undefined,
 				remaining: undefined,
 			}),
-			parseUsage: undefined,
-			extractUsageInfo: undefined,
 		},
 		dbOps: {
 			markAccountRateLimited: (
