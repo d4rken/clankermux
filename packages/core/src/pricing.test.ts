@@ -785,15 +785,14 @@ describe("pricing-miss registry", () => {
 		]);
 	});
 
-	it("warns once per model across both pricing paths", async () => {
+	it("warns once per model across every caller and every request", async () => {
 		// Only the miss warnings matter here; the catalogue also warns about the
 		// deliberately-disabled network fetch.
 		const warnings = captureMissWarnings();
 
-		// The provider's usage extractor prices the response first, with no
-		// account attribution, then the proxy's usage collector prices the SAME
-		// response with the real provider and opts into reporting. That is one
-		// unpriced model, so it is one log line.
+		// The cache is keyed by model alone, so an unattributed price lookup and
+		// any number of attributed, reporting ones collapse to a SINGLE log line:
+		// one unpriced model is one operator-visible warning, not one per request.
 		await estimateCostUSD("double-priced-model", io);
 		await estimateCostUSD("double-priced-model", io, {
 			provider: "claude-console-api",
