@@ -12,6 +12,7 @@ import {
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import {
+	type DrainReport,
 	discardTeeBranch,
 	discardUpstreamBody,
 } from "@clankermux/core/response-body-disposal";
@@ -77,6 +78,76 @@ import {
 } from "./transparent-retry";
 
 const log = new Logger("ProxyOperations");
+
+/**
+ * Size above which an abandoned body with NO recognised completion signature is
+ * still worth a line. Everything this path discards should be a small error
+ * envelope (a 429/529 JSON error is a few hundred bytes); kilobytes of
+ * unrecognised content means we are throwing away something we do not
+ * understand, which is the shape a future regression would take.
+ *
+ * A size threshold alone would be the WRONG guard on its own, which is why the
+ * marker check below is the primary signal: a perfectly valid short completion
+ * (`{"type":"message","usage":{…}}`) is ~70 bytes and sits far below any
+ * error-payload threshold.
+ */
+const ABANDONED_BODY_SIZE_ALARM_BYTES = 8 * 1024;
+
+/** Stable event id — a completed/usage-bearing body was discarded on failover. */
+export const EVENT_ABANDONED_BODY_COMPLETION_MARKER =
+	"abandoned_body_completion_marker";
+
+/** Stable event id — an unexpectedly large abandoned body with no marker. */
+export const EVENT_ABANDONED_BODY_OVERSIZE_NO_MARKER =
+	"abandoned_body_oversize_no_marker";
+
+/**
+ * Log-only observer for the body thrown away by the rate-limited failover.
+ *
+ * The inline usage collector only sees bodies that are FORWARDED, so a body
+ * abandoned here is usage that is never accounted for. Production measurement
+ * says this path carries error envelopes exclusively — this exists to prove
+ * that stays true, and to say so loudly if it does not.
+ *
+ * Emits STABLE event identifiers so post-deploy occurrences can be counted by
+ * field rather than by matching log prose. Purely observational: it is invoked
+ * from the drain, long after `fail()` returned, and changes no control flow.
+ */
+export function reportAbandonedRateLimitedBody(
+	drain: DrainReport,
+	ctx: {
+		requestId: string;
+		accountName: string;
+		accountId: string;
+		provider: string;
+		status: number;
+	},
+): void {
+	const where =
+		`requestId=${ctx.requestId} account=${ctx.accountName} ` +
+		`accountId=${ctx.accountId} provider=${ctx.provider} status=${ctx.status} ` +
+		`bytes=${drain.bytesRead} stopReason=${drain.stopReason} ` +
+		`reachedEof=${drain.reachedEof}`;
+
+	if (drain.marker !== null) {
+		log.warn(
+			`event=${EVENT_ABANDONED_BODY_COMPLETION_MARKER} ` +
+				`marker=${drain.marker} ${where} — rate-limited failover discarded a ` +
+				`body carrying a completion/usage signature; its tokens were never ` +
+				`accounted for`,
+		);
+		return;
+	}
+
+	if (drain.bytesRead > ABANDONED_BODY_SIZE_ALARM_BYTES) {
+		log.warn(
+			`event=${EVENT_ABANDONED_BODY_OVERSIZE_NO_MARKER} ` +
+				`threshold=${ABANDONED_BODY_SIZE_ALARM_BYTES} ${where} — rate-limited ` +
+				`failover discarded an unexpectedly large body with no recognised ` +
+				`completion signature`,
+		);
+	}
+}
 
 /**
  * Categorical outcome of a single `proxyWithAccount` attempt that returned
@@ -759,13 +830,19 @@ export async function proxyWithAccount(
 	// when updateAccountMetadata cloned the response for usage extraction; usage
 	// is now collected inline off the bytes already being forwarded, so no such
 	// clone exists and there is no tee variant here any more.
+	//
+	// `onDrained` is a pure OBSERVER handed to the drain (see
+	// discardUpstreamBody): it is invoked after this function has already
+	// returned, so it can never add latency to a failover. It exists only so a
+	// site can report on what it threw away.
 	const fail = async (
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
+		onDrained?: (report: DrainReport) => void,
 	): Promise<null> => {
 		settleOverloadProbe("abandoned");
 		options?.onOutcome?.(outcome);
-		discardUpstreamBody(response);
+		discardUpstreamBody(response, onDrained);
 		return null;
 	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
@@ -2308,6 +2385,14 @@ export async function proxyWithAccount(
 					? { kind: "overload_529" }
 					: { kind: "hard_429" },
 				response,
+				(drain) =>
+					reportAbandonedRateLimitedBody(drain, {
+						requestId: requestMeta.id,
+						accountName: account.name,
+						accountId: account.id,
+						provider: account.provider,
+						status: response.status,
+					}),
 			);
 		}
 

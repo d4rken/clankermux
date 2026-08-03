@@ -55,6 +55,118 @@ const DRAIN_TIME_BUDGET_MS = 5_000;
 const DRAIN_BYTE_BUDGET = 8 * 1024 * 1024;
 
 /**
+ * How many bytes of an abandoned body the marker scan looks at before giving
+ * up. Every signature we look for appears in the FIRST frames of a response
+ * (SSE `message_start`, a short non-streaming completion, Codex's terminal
+ * event), so a small window catches them all while keeping the scan O(1) for a
+ * multi-megabyte body.
+ */
+const MARKER_SCAN_BYTES = 64 * 1024;
+
+/**
+ * Characters of the previous chunk carried into the next one so a signature
+ * split across a chunk boundary is still seen. Comfortably longer than the
+ * longest literal we match.
+ */
+const MARKER_CARRY_CHARS = 64;
+
+/** Why {@link discardUpstreamBody} stopped reading. */
+export type DrainStopReason =
+	/** The body ended — everything was released. */
+	| "eof"
+	/** {@link DRAIN_TIME_BUDGET_MS} expired; the rest was cancelled. */
+	| "time-budget"
+	/** {@link DRAIN_BYTE_BUDGET} was hit; the rest was cancelled. */
+	| "byte-budget"
+	/** The stream errored or was cancelled from elsewhere mid-drain. */
+	| "stream-error"
+	/** Another reader already owned the body, so no drain ran at all. */
+	| "locked";
+
+/**
+ * A completion/usage signature spotted in an abandoned body. Its presence means
+ * the upstream had already produced (part of) a real answer that is being
+ * thrown away — the case worth an operator's attention, and one a size
+ * threshold alone cannot catch (a valid short completion is ~70 bytes).
+ */
+export type DrainMarker =
+	/** Non-streaming Anthropic completion: `"type":"message"` plus a `"usage"`. */
+	| "anthropic-message-usage"
+	/** Anthropic SSE opening frame. */
+	| "sse-message-start"
+	/** Anthropic SSE frame carrying the final usage. */
+	| "sse-message-delta"
+	/** Codex Responses API terminal event. */
+	| "codex-response-completed";
+
+/** What a drain observed, handed to the optional completion callback. */
+export interface DrainReport {
+	/** Bytes actually pulled off the wire (0 when `stopReason` is "locked"). */
+	bytesRead: number;
+	/** True only when the body ended on its own. */
+	reachedEof: boolean;
+	stopReason: DrainStopReason;
+	/** The first completion/usage signature seen, or null if none matched. */
+	marker: DrainMarker | null;
+}
+
+const ANTHROPIC_MESSAGE_TYPE_RE = /"type"\s*:\s*"message"/;
+const USAGE_PROPERTY_RE = /"usage"\s*:/;
+
+/**
+ * Bounded, allocation-light scan for completion/usage signatures over bytes the
+ * drain is already reading. Deliberately NOT a JSON/SSE parser: it never
+ * materialises the body, never buffers past {@link MARKER_SCAN_BYTES}, and stops
+ * dead once something matches.
+ */
+function createMarkerScanner(): {
+	feed(chunk: Uint8Array): void;
+	marker(): DrainMarker | null;
+} {
+	const decoder = new TextDecoder("utf-8", { fatal: false });
+	let carry = "";
+	let scanned = 0;
+	let marker: DrainMarker | null = null;
+	// The two halves of the non-streaming signature can be far apart in a long
+	// body, so they latch independently across chunks.
+	let sawMessageType = false;
+	let sawUsage = false;
+
+	return {
+		feed(chunk: Uint8Array): void {
+			if (marker !== null || scanned >= MARKER_SCAN_BYTES) return;
+			scanned += chunk.byteLength;
+			const text = carry + decoder.decode(chunk, { stream: true });
+
+			if (text.includes("message_start")) {
+				marker = "sse-message-start";
+				return;
+			}
+			if (text.includes("message_delta")) {
+				marker = "sse-message-delta";
+				return;
+			}
+			if (text.includes("response.completed")) {
+				marker = "codex-response-completed";
+				return;
+			}
+			if (!sawMessageType)
+				sawMessageType = ANTHROPIC_MESSAGE_TYPE_RE.test(text);
+			if (!sawUsage) sawUsage = USAGE_PROPERTY_RE.test(text);
+			if (sawMessageType && sawUsage) {
+				marker = "anthropic-message-usage";
+				return;
+			}
+
+			carry = text.slice(-MARKER_CARRY_CHARS);
+		},
+		marker(): DrainMarker | null {
+			return marker;
+		},
+	};
+}
+
+/**
  * Release a NATIVE `fetch()` response body that will never be forwarded.
  *
  * Drains the body to EOF (bounded by {@link DRAIN_TIME_BUDGET_MS} and
@@ -67,21 +179,61 @@ const DRAIN_BYTE_BUDGET = 8 * 1024 * 1024;
  * locked body is skipped (locked means some other reader already owns it — it
  * will be drained or was cloned), and every error is swallowed because a body
  * that is already cancelled or errored has nothing left to release.
+ *
+ * @param onDrained - Optional OBSERVER, invoked at most once when the drain
+ *   finishes, with what it saw ({@link DrainReport}). It exists so callers can
+ *   report on abandoned bodies (e.g. "this failover threw away a completed
+ *   answer") WITHOUT changing control flow: the return type stays `void`, so
+ *   failover never waits on a dead account's body, and the callback therefore
+ *   runs long after the caller has moved on. Anything it throws is swallowed.
+ *   Not invoked when there is no body at all (nothing was disposed); invoked
+ *   with `stopReason: "locked"` when a body existed but someone else owned it.
  */
 export function discardUpstreamBody(
 	response: Response | null | undefined,
+	onDrained?: (report: DrainReport) => void,
 ): void {
 	const body = response?.body;
-	if (!body || body.locked) return;
-	void drainToRelease(body);
+	if (!body) return;
+	if (body.locked) {
+		report(onDrained, {
+			bytesRead: 0,
+			reachedEof: false,
+			stopReason: "locked",
+			marker: null,
+		});
+		return;
+	}
+	void drainToRelease(body, onDrained);
 }
 
-async function drainToRelease(body: ReadableStream<Uint8Array>): Promise<void> {
+function report(
+	onDrained: ((report: DrainReport) => void) | undefined,
+	value: DrainReport,
+): void {
+	if (!onDrained) return;
+	try {
+		onDrained(value);
+	} catch {
+		// An observer must never be able to break disposal.
+	}
+}
+
+async function drainToRelease(
+	body: ReadableStream<Uint8Array>,
+	onDrained?: (report: DrainReport) => void,
+): Promise<void> {
 	let reader: ReadableStreamDefaultReader<Uint8Array>;
 	try {
 		reader = body.getReader();
 	} catch {
 		// Locked between the guard above and here — someone else owns it now.
+		report(onDrained, {
+			bytesRead: 0,
+			reachedEof: false,
+			stopReason: "locked",
+			marker: null,
+		});
 		return;
 	}
 
@@ -95,19 +247,38 @@ async function drainToRelease(body: ReadableStream<Uint8Array>): Promise<void> {
 		reader.cancel().catch(() => {});
 	}, DRAIN_TIME_BUDGET_MS);
 
+	// Only built when someone is listening — an unobserved drain stays exactly as
+	// cheap as it was.
+	const scanner = onDrained ? createMarkerScanner() : null;
+	let drained = 0;
+	let reachedEof = false;
+	let stopReason: DrainStopReason = "byte-budget";
+
 	try {
-		let drained = 0;
 		while (!expired && drained < DRAIN_BYTE_BUDGET) {
 			const { value, done } = await reader.read();
-			if (done) return;
+			if (done) {
+				reachedEof = true;
+				stopReason = "eof";
+				return;
+			}
 			drained += value?.byteLength ?? 0;
+			if (scanner && value) scanner.feed(value);
 		}
+		stopReason = expired ? "time-budget" : "byte-budget";
 	} catch {
 		// Stream errored or was cancelled mid-drain — nothing left to release.
+		stopReason = expired ? "time-budget" : "stream-error";
 	} finally {
 		clearTimeout(deadline);
 		// No-op after a clean EOF; the real release when a budget expired.
 		reader.cancel().catch(() => {});
+		report(onDrained, {
+			bytesRead: drained,
+			reachedEof,
+			stopReason,
+			marker: scanner?.marker() ?? null,
+		});
 	}
 }
 

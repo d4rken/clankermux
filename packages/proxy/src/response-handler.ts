@@ -75,6 +75,15 @@ const log = new Logger("ResponseHandler");
 const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
 /**
+ * Stable event id — the non-streaming analytics read stopped at its 256 KiB cap
+ * without ever seeing EOF, so the body fed to the usage collector is truncated.
+ * A stable identifier (rather than log prose) so post-deploy occurrences can be
+ * counted by field.
+ */
+export const EVENT_ANALYTICS_BODY_CAP_WITHOUT_EOF =
+	"analytics_body_cap_without_eof";
+
+/**
  * In-flight usage-finalize promises. The worker used to compute usage off the
  * hot path; now `finalizeUsage` runs on the main thread as a tracked promise
  * AFTER `recorder.finishTransport`. Each promise is added here on launch and
@@ -770,9 +779,17 @@ async function forwardToClientInner(
 			} else {
 				const chunks: Uint8Array[] = [];
 				let bytesRead = 0;
+				// Tracked EXPLICITLY rather than inferred from `bytesRead`: a body
+				// whose chunks sum to exactly the cap leaves the loop through the
+				// `while` condition, without EOF and without ever entering the
+				// oversize branch below. Warning only from that branch would miss it.
+				let observedEof = false;
 				while (bytesRead < MAX_NON_STREAM_BODY_BYTES) {
 					const { value, done } = await reader.read();
-					if (done) break;
+					if (done) {
+						observedEof = true;
+						break;
+					}
 					const remaining = MAX_NON_STREAM_BODY_BYTES - bytesRead;
 					if (value.length <= remaining) {
 						chunks.push(value);
@@ -783,6 +800,22 @@ async function forwardToClientInner(
 						await reader.cancel();
 						break;
 					}
+				}
+				if (!observedEof) {
+					// The usage collector is fed `cappedBuf`, so a truncated body means
+					// the tail — where a non-streaming response carries its `usage`
+					// object — was never seen, and this request's tokens are estimated
+					// rather than reported. Production says non-streaming bodies are far
+					// below 256 KiB; this proves it, and names the request if not.
+					log.warn(
+						`event=${EVENT_ANALYTICS_BODY_CAP_WITHOUT_EOF} ` +
+							`requestId=${requestId} capBytes=${MAX_NON_STREAM_BODY_BYTES} ` +
+							`bytesRead=${bytesRead} status=${response.status} ` +
+							`provider=${ctx.provider.name} accountProvider=${
+								accountProvider ?? "unknown"
+							} — non-streaming analytics body hit the cap before EOF; ` +
+							`usage was parsed from a truncated body`,
+					);
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}
