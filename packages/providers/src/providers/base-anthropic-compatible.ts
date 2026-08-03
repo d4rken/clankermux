@@ -246,6 +246,15 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 		return null;
 	}
 
+	/**
+	 * DISPOSABLE-RESPONSE CONTRACT (see Provider.extractUsageInfo): `response` is
+	 * ours to consume — it is already a dedicated clone made by the caller. We do
+	 * NOT clone it again; a second clone tees the caller's branch and orphans the
+	 * inner half, which the caller cannot reach to release.
+	 *
+	 * `response.headers` is captured before/read after body consumption, which is
+	 * valid — only the body is spent.
+	 */
 	async extractUsageInfo(response: Response): Promise<{
 		model?: string;
 		promptTokens?: number;
@@ -258,7 +267,6 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 		outputTokens?: number;
 	} | null> {
 		try {
-			const clone = response.clone();
 			const contentType = response.headers.get("content-type");
 
 			// Handle streaming responses if supported
@@ -266,11 +274,11 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 				this.config.supportsStreaming &&
 				contentType?.includes("text/event-stream")
 			) {
-				return this.extractStreamingUsage(clone, response.headers);
+				return this.extractStreamingUsage(response, response.headers);
 			}
 
 			// Handle non-streaming JSON responses
-			const json = await clone.json();
+			const json = await response.json();
 
 			if (!json.usage) return null;
 
@@ -320,9 +328,14 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 	/**
 	 * Extract usage information from streaming responses
 	 * Uses sophisticated SSE parsing for message_start and message_delta events
+	 *
+	 * Consumes `response`'s body (the caller's disposable clone — no longer an
+	 * extra tee branch of it). The reader is released in a `finally` so every
+	 * path, `throw` included, leaves nothing locked for a caller that cannot
+	 * dispose it.
 	 */
 	protected async extractStreamingUsage(
-		clone: Response,
+		response: Response,
 		_originalHeaders: Headers,
 	): Promise<{
 		model?: string;
@@ -335,7 +348,7 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 		cacheCreationInputTokens?: number;
 		outputTokens?: number;
 	} | null> {
-		const reader = clone.body?.getReader();
+		const reader = response.body?.getReader();
 		if (!reader) return null;
 
 		let buffered = "";
