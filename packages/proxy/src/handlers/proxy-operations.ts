@@ -11,6 +11,10 @@ import {
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
+import {
+	discardTeeBranch,
+	discardUpstreamBody,
+} from "@clankermux/core/response-body-disposal";
 import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
@@ -554,34 +558,6 @@ export async function isModelUnavailableError(
 }
 
 /**
- * Cancel an abandoned upstream response body so Bun releases its socket and the
- * ~512 KB native read buffer immediately.
- *
- * A `fetch()` Response body that is neither read to EOF nor cancelled keeps that
- * memory committed indefinitely (Bun 1.3.x). On the proxy's failover/retry paths
- * we obtain an upstream Response and then discard it — return `null` to try the
- * next account, or overwrite `rawResponse` with a retry — without ever consuming
- * its body. Each dropped body is a ~512 KB off-heap leak that ratchets up with
- * every 429/401/529 failover under load (observed live: ~1.6 GB/h). Calling this
- * before every such drop releases the buffer.
- *
- * Safe to call with any Response/null: skips a `null`/locked body (locked means
- * a reader already owns it — it will be drained or was cloned) and swallows the
- * harmless error from a body that is already cancelled/errored.
- */
-async function discardUpstreamBody(
-	response: Response | null | undefined,
-): Promise<void> {
-	const body = response?.body;
-	if (!body || body.locked) return;
-	try {
-		await body.cancel();
-	} catch {
-		// Body already cancelled/errored — nothing left to release.
-	}
-}
-
-/**
  * Validate the native Responses body and apply a combo model override to it
  * (native Responses passthrough, Stage A). The body is ALWAYS parsed — even
  * with no override — so a corrupt nativeBody can never enter the native path.
@@ -760,18 +736,38 @@ export async function proxyWithAccount(
 	};
 
 	// Single helper that records a categorical outcome into the optional sink AND
-	// cancels the upstream body, so the many failover (`return null`) paths can't
-	// let recording and body-cancel drift apart (Codex's anti-drift requirement).
+	// disposes the upstream body, so the many failover (`return null`) paths can't
+	// let recording and body-disposal drift apart (Codex's anti-drift requirement).
 	// Returns `null` so call sites can `return fail(...)` directly. Also releases
 	// a still-held overload-probe lease as "abandoned" — a failover means the
 	// probe never reached a verdict on this attempt.
+	//
+	// The disposal is deliberately NOT awaited: `discardUpstreamBody` drains the
+	// abandoned body in the background so this attempt can fail over to the next
+	// candidate immediately. Awaiting it would make every failover wait for the
+	// dead account's body — the exact stall this helper exists to avoid.
+	//
+	// `dispose` selects the disposal PRIMITIVE, because the two are not
+	// interchangeable (see response-body-disposal):
+	//   - "native" (default): a native fetch() body, which must be DRAINED so Bun
+	//     releases the socket + ~512 KB native read buffer. Every call site that
+	//     disposes a body nothing else has cloned uses this.
+	//   - "tee": the body has already been cloned by something still reading it
+	//     (updateAccountMetadata's usage-extraction clone), so `response` is a tee
+	//     branch. Draining a branch makes the tee pull and buffer the WHOLE body
+	//     for the live twin; cancel it instead.
 	const fail = async (
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
+		dispose: "native" | "tee" = "native",
 	): Promise<null> => {
 		settleOverloadProbe("abandoned");
 		options?.onOutcome?.(outcome);
-		await discardUpstreamBody(response);
+		if (dispose === "tee") {
+			discardTeeBranch(response);
+		} else {
+			discardUpstreamBody(response);
+		}
 		return null;
 	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
@@ -1086,10 +1082,10 @@ export async function proxyWithAccount(
 					? await provider.transformRequestBody(retryProviderRequest, account)
 					: retryProviderRequest;
 
-				// Acquire the retry FIRST, then cancel the original body so its
+				// Acquire the retry FIRST, then discard the original body so its
 				// socket + ~512 KB read buffer is released. Acquiring first means a
 				// throw here leaves the original intact for the outer catch/failover
-				// instead of proceeding with an already-cancelled body.
+				// instead of proceeding with an already-discarded body.
 				const retryResponse = await makeProxyRequest(
 					retryTransformedRequest,
 					undefined,
@@ -1098,7 +1094,7 @@ export async function proxyWithAccount(
 					undefined,
 					options?.signal,
 				);
-				await discardUpstreamBody(rawResponse);
+				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} else {
@@ -1132,7 +1128,7 @@ export async function proxyWithAccount(
 				});
 				// Acquire the retry FIRST: if makeProxyRequest throws, the local
 				// catch below continues with the original 400 still intact (its body
-				// not yet cancelled), preserving the "forward the original 400 on
+				// not yet discarded), preserving the "forward the original 400 on
 				// retry failure" contract.
 				const retryResponse = await makeProxyRequest(
 					retryRequest,
@@ -1142,7 +1138,7 @@ export async function proxyWithAccount(
 					undefined,
 					options?.signal,
 				);
-				await discardUpstreamBody(rawResponse);
+				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} catch (err) {
@@ -1926,7 +1922,7 @@ export async function proxyWithAccount(
 					activeUpstreamModel = nextModel;
 					overloadAttributionModel = computeOverloadAttributionModel();
 
-					// Acquire the retry first, then cancel the previous attempt's
+					// Acquire the retry first, then discard the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
 					const retryResponse = await makeProxyRequest(
 						retryTransformedRequest,
@@ -1936,7 +1932,7 @@ export async function proxyWithAccount(
 						undefined,
 						options?.signal,
 					);
-					await discardUpstreamBody(rawResponse);
+					discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
 					liveUpstream = rawResponse;
 
@@ -2113,7 +2109,7 @@ export async function proxyWithAccount(
 				// deduped refresh can't pin the socket + ~512 KB native read buffer.
 				// discardUpstreamBody is idempotent, so the failover path below can
 				// safely discard again.
-				await discardUpstreamBody(response);
+				discardUpstreamBody(response);
 				liveUpstream = null;
 				lastStaleTokenRefreshAt.set(account.id, now);
 				const tokenBefore = account.access_token;
@@ -2247,10 +2243,18 @@ export async function proxyWithAccount(
 		);
 		// processProxyResponse only needed the rate-limit view (headers, or a
 		// provider body-parse that consumes it). When it was a distinct clone
-		// (final-529 path), release its possibly tee-buffered branch now — the
-		// original `response` is what gets forwarded/returned below.
+		// (final-529 path), release its tee branch now — the original `response`
+		// is what gets forwarded/returned below.
+		//
+		// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
+		// above), so `!== response` implies it is a `response.clone()` on every
+		// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
+		// drained: draining it would make the tee keep pulling and buffering for
+		// the twin that is about to be streamed to the client. And it must never
+		// be awaited — a tee branch's cancel does not settle until BOTH branches
+		// cancel, and the twin here is the live response.
 		if (responseForRateLimitCheck !== response) {
-			await discardUpstreamBody(responseForRateLimitCheck);
+			discardTeeBranch(responseForRateLimitCheck);
 		}
 		if (isRateLimited) {
 			if (response.status === 529 && isTerminalAttempt()) {
@@ -2294,11 +2298,20 @@ export async function proxyWithAccount(
 			// 429 — those are intercepted in the isModelUnavailableError branch
 			// above — but a 529/other rate-limit signal): record as hard_429-class
 			// so the proxy never treats it as hold-eligible.
+			//
+			// Disposed as a TEE branch, not a native body: processProxyResponse →
+			// updateAccountMetadata has already run above and, since requestId is
+			// always set here, handed a `response.clone()` to a floating usage-
+			// extraction IIFE. `response` is therefore a tee branch whose twin may
+			// still be reading, and draining a branch forces the tee to buffer the
+			// entire body for that twin. This is the one fail() site where drain is
+			// the wrong primitive — every other site disposes an un-cloned body.
 			return await fail(
 				response.status === 529
 					? { kind: "overload_529" }
 					: { kind: "hard_429" },
 				response,
+				"tee",
 			);
 		}
 

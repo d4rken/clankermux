@@ -636,10 +636,18 @@ export class AnthropicProvider extends BaseProvider {
 		);
 	}
 
+	/**
+	 * DISPOSABLE-RESPONSE CONTRACT (see Provider.extractTierInfo): `response` is
+	 * ours to consume — read it directly, never `clone()` it. A clone here would
+	 * tee the caller's branch in two and orphan the inner one, which the caller
+	 * cannot reach to release.
+	 *
+	 * (No production caller today — declared on the Provider interface and
+	 * exercised only by tests — so this is contract consistency, not a live leak.)
+	 */
 	async extractTierInfo(response: Response): Promise<number | null> {
 		try {
-			const clone = response.clone();
-			const json = (await clone.json()) as {
+			const json = (await response.json()) as {
 				type?: string;
 				usage?: {
 					rate_limit_tokens?: number;
@@ -660,6 +668,15 @@ export class AnthropicProvider extends BaseProvider {
 		return null;
 	}
 
+	/**
+	 * DISPOSABLE-RESPONSE CONTRACT (see Provider.extractUsageInfo): `response` is
+	 * ours to consume. It is already a dedicated clone made by the caller, so
+	 * cloning it AGAIN would tee that branch in two and orphan the inner one —
+	 * the caller holds only the outer branch and cancelling it cannot release the
+	 * inner. That orphan was the leak; read the supplied response directly.
+	 *
+	 * `response.headers` reads below stay valid after the body is consumed.
+	 */
 	async extractUsageInfo(response: Response): Promise<{
 		model?: string;
 		promptTokens?: number;
@@ -672,13 +689,12 @@ export class AnthropicProvider extends BaseProvider {
 		outputTokens?: number;
 	} | null> {
 		try {
-			const clone = response.clone();
 			const contentType = response.headers.get("content-type");
 
 			// Handle streaming responses (SSE)
 			if (contentType?.includes("text/event-stream")) {
 				// Use bounded reader to avoid consuming entire stream
-				const reader = clone.body?.getReader();
+				const reader = response.body?.getReader();
 				if (!reader) return null;
 
 				let buffered = "";
@@ -746,7 +762,12 @@ export class AnthropicProvider extends BaseProvider {
 						}
 					}
 				} finally {
-					// Cancel the reader to prevent hanging
+					// Release on EVERY path, including the read-timeout `throw` above
+					// and any throw from the loop: under the disposable-response
+					// contract the caller cannot dispose a body we left locked, so
+					// this `finally` is the only release. It is also what now frees
+					// the branch that used to leak, since we no longer clone.
+					// Deliberately not awaited (see the contract note).
 					reader.cancel().catch(() => {});
 				}
 
@@ -823,7 +844,7 @@ export class AnthropicProvider extends BaseProvider {
 				return null;
 			} else {
 				// Handle non-streaming JSON responses
-				const json = (await clone.json()) as {
+				const json = (await response.json()) as {
 					model?: string;
 					usage?: {
 						input_tokens?: number;

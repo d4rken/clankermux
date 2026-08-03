@@ -134,10 +134,19 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		const contentType = response.headers.get("content-type");
 
 		if (contentType?.includes("application/json")) {
+			// Consume the ORIGINAL body rather than a clone. This is NOT an
+			// extractor: it builds an INDEPENDENT Response from the parsed JSON and
+			// never forwards `response` itself, so a clone teed the body and then
+			// abandoned the original branch with nobody able to release it.
+			//
+			// The body is read ONCE into text so the conversion-failure path can
+			// still forward the upstream bytes verbatim (the "surface the real
+			// upstream error" contract) — falling through to `response.body` would
+			// forward an empty body once the original has been consumed.
+			let raw: string | null = null;
 			try {
-				const clone = response.clone();
-				const data = await clone.json();
-				const anthropicData = convertOpenAIResponseToAnthropic(data);
+				raw = await response.text();
+				const anthropicData = convertOpenAIResponseToAnthropic(JSON.parse(raw));
 
 				return new Response(JSON.stringify(anthropicData), {
 					status: response.status,
@@ -149,7 +158,15 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					"Failed to convert OpenAI response to Anthropic format:",
 					error,
 				);
-				// If conversion fails, return original response
+				// If conversion fails, return the original body unchanged.
+				if (raw !== null) {
+					return new Response(raw, {
+						status: response.status,
+						statusText: response.statusText,
+						headers: sanitizeHeaders(response.headers),
+					});
+				}
+				// The body itself could not be read — nothing left to forward.
 			}
 		}
 
@@ -212,6 +229,13 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		}
 	}
 
+	/**
+	 * DISPOSABLE-RESPONSE CONTRACT (see Provider.extractUsageInfo): `response` is
+	 * ours to consume — read it directly, never `clone()` it.
+	 *
+	 * The streaming branch below previously cloned and then immediately returned
+	 * null, orphaning the branch it had just created for nobody to read.
+	 */
 	async extractUsageInfo(response: Response): Promise<{
 		model?: string;
 		promptTokens?: number;
@@ -224,7 +248,6 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		outputTokens?: number;
 	} | null> {
 		try {
-			const clone = response.clone();
 			const contentType = response.headers.get("content-type");
 
 			// Handle streaming responses (SSE)
@@ -235,7 +258,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 				return null;
 			} else {
 				// Handle non-streaming JSON responses
-				const json = (await clone.json()) as {
+				const json = (await response.json()) as {
 					model?: string;
 					usage?: {
 						prompt_tokens?: number;
