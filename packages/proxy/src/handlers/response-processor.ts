@@ -69,18 +69,24 @@ export function persistRateLimitStatusMeta(
 }
 
 /**
- * Updates account metadata in the background
+ * Updates account metadata in the background.
+ *
+ * Reads HEADERS ONLY — never the response body. Per-request token usage is
+ * owned exclusively by the inline usage collector on the forwarding path
+ * (response-handler.ts → usage-collector.ts → RequestRecorder), which sees the
+ * bytes already being streamed to the client. This function must never clone or
+ * consume `response`: the callers that fail over depend on owning an intact,
+ * un-teed body they can drain.
+ *
  * @param account - The account to update
- * @param response - The response to extract metadata from
+ * @param response - The response to read metadata headers from
  * @param ctx - The proxy context
- * @param requestId - The request ID for usage tracking
  * @param bypassSession - Whether to bypass session tracking (for auto-refresh)
  */
 export function updateAccountMetadata(
 	account: Account,
 	response: Response,
 	ctx: ProxyContext,
-	requestId?: string,
 	bypassSession = false,
 ): void {
 	// Codex responses are observed through the single shared applicator, which
@@ -132,67 +138,6 @@ export function updateAccountMetadata(
 	}
 	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
 	// successful response. No need to duplicate that logic here.
-
-	// Extract usage info if supported
-	if (requestId) {
-		// For streaming responses, prefer parseUsage (handles SSE final events)
-		// For non-streaming, use extractUsageInfo (handles JSON responses)
-		const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
-
-		if (isStream && ctx.provider.parseUsage) {
-			const parseUsage = ctx.provider.parseUsage.bind(ctx.provider);
-			(async () => {
-				try {
-					const usageInfo = await parseUsage(response.clone() as Response);
-					if (usageInfo) {
-						log.debug(
-							`Extracted streaming usage for account ${account.name}: ${JSON.stringify(usageInfo)}`,
-						);
-						// Store usage info in database
-						try {
-							await ctx.asyncWriter.enqueue(() =>
-								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
-							);
-						} catch (error) {
-							log.warn(`Failed to save usage for request ${requestId}:`, error);
-						}
-					}
-				} catch (error) {
-					log.warn(
-						`Failed to extract streaming usage for account ${account.name}:`,
-						error,
-					);
-				}
-			})();
-		} else if (ctx.provider.extractUsageInfo) {
-			const extractUsageInfo = ctx.provider.extractUsageInfo.bind(ctx.provider);
-			(async () => {
-				try {
-					const usageInfo = await extractUsageInfo(
-						response.clone() as Response,
-					);
-					if (usageInfo) {
-						log.debug(
-							`Extracted usage info for account ${account.name}: ${JSON.stringify(usageInfo)}`,
-						);
-						// Store usage info in database
-						try {
-							await ctx.asyncWriter.enqueue(() =>
-								ctx.dbOps.updateRequestUsage(requestId, usageInfo),
-							);
-						} catch (error) {
-							log.warn(`Failed to save usage for request ${requestId}:`, error);
-						}
-					}
-				} catch (error) {
-					log.warn(
-						`Failed to extract usage info for account ${account.name}:`,
-						error,
-					);
-				}
-			})();
-		}
-	}
 }
 
 /**
@@ -200,14 +145,12 @@ export function updateAccountMetadata(
  * @param response - The provider response
  * @param account - The account used
  * @param ctx - The proxy context
- * @param requestId - The request ID for usage tracking
  * @returns Promise resolving to whether the response is rate-limited
  */
 export async function processProxyResponse(
 	response: Response,
 	account: Account,
 	ctx: ProxyContext,
-	requestId?: string,
 	requestMeta?: Pick<RequestMeta, "headers" | "internal">,
 ): Promise<boolean> {
 	let rateLimitInfo = ctx.provider.parseRateLimit(response);
@@ -330,7 +273,7 @@ export async function processProxyResponse(
 		const bypassSession =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
-		updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+		updateAccountMetadata(account, response, ctx, bypassSession);
 		return true; // Signal rate limit
 	}
 
@@ -338,7 +281,7 @@ export async function processProxyResponse(
 	const bypassSession =
 		requestMeta?.internal === true &&
 		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
-	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
+	updateAccountMetadata(account, response, ctx, bypassSession);
 
 	// On any successful upstream response, run the two side-effects independently:
 	//   (a) Stability reset: if the most recent 429 is older than the stability
