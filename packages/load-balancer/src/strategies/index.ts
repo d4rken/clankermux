@@ -298,10 +298,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
+		// The map is maintained in least-recently-used order: recordAffinity()
+		// deletes the key before re-setting it, which moves a touched entry to
+		// the back. Iteration order is therefore ascending `lastUsedAt`, so the
+		// stale entries are a prefix and the first live entry ends the sweep.
+		// Without the break this scans every entry on EVERY affinity write,
+		// which is O(n) per request and O(n^2) to fill the map.
 		for (const [key, entry] of this.affinityByKey) {
-			if (entry.lastUsedAt < staleBefore) {
-				this.affinityByKey.delete(key);
-			}
+			if (entry.lastUsedAt >= staleBefore) break;
+			this.affinityByKey.delete(key);
 		}
 
 		if (this.affinityByKey.size <= MAX_AFFINITY_ENTRIES) return;

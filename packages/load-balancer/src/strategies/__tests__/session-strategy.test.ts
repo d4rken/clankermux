@@ -1646,6 +1646,58 @@ describe("SessionStrategy", () => {
 			).affinityByKey;
 			expect(affinityByKey.size).toBeLessThanOrEqual(10_000);
 		});
+
+		// pruneAffinity() runs on EVERY affinity write, so it must not scan the
+		// whole map. It relies on the map being in least-recently-used order —
+		// recordAffinity() deletes a key before re-setting it, moving a touched
+		// entry to the back — which makes the stale entries a prefix, so the
+		// sweep can stop at the first live one. These pin both halves of that:
+		// the ordering invariant the early stop depends on, and the eviction
+		// behaviour it must still deliver.
+		it("keeps the affinity map in least-recently-used order", () => {
+			const account = makeAccount({ id: "lru-account", name: "lru-account" });
+
+			for (const project of ["first", "second", "third"]) {
+				strategy.select([account], { ...meta, id: `r-${project}`, project });
+			}
+			// Touching "first" again must move it to the back.
+			strategy.select([account], { ...meta, id: "r-again", project: "first" });
+
+			const affinityByKey = (
+				strategy as unknown as {
+					affinityByKey: Map<string, { lastUsedAt: number }>;
+				}
+			).affinityByKey;
+
+			const order = [...affinityByKey.values()].map((e) => e.lastUsedAt);
+			const ascending = [...order].sort((a, b) => a - b);
+			expect(order).toEqual(ascending);
+			expect([...affinityByKey.keys()].at(-1)).toContain("first");
+		});
+
+		it("evicts entries older than the session duration", () => {
+			const sessionMs = 5 * 60 * 60 * 1000;
+			const account = makeAccount({ id: "age-account", name: "age-account" });
+
+			strategy.select([account], { ...meta, id: "r-old", project: "old" });
+
+			const affinityByKey = (
+				strategy as unknown as {
+					affinityByKey: Map<string, { lastUsedAt: number }>;
+				}
+			).affinityByKey;
+
+			// Backdate the only entry past the staleness window, then write a new
+			// one so the sweep runs. The stale entry is at the front, so an early
+			// stop still reaches it.
+			for (const entry of affinityByKey.values()) {
+				entry.lastUsedAt = Date.now() - sessionMs - 60_000;
+			}
+			strategy.select([account], { ...meta, id: "r-new", project: "new" });
+
+			expect([...affinityByKey.keys()]).not.toContain("old");
+			expect(affinityByKey.size).toBe(1);
+		});
 	});
 
 	describe("peek auto-unpause parity with select", () => {
