@@ -164,6 +164,27 @@ export class AutoRefreshScheduler {
 	private lastWeeklyPrimeTime: Map<string, number> = new Map();
 	// Minimum gap between weekly-dormant primes for the same account.
 	private readonly WEEKLY_PRIME_COOLDOWN_MS = 15 * 60 * 1000;
+	// Track the last time we primed an account for the FIVE-HOUR reason.
+	private lastFiveHourPrimeTime: Map<string, number> = new Map();
+	// Minimum gap between 5h primes for the same account.
+	//
+	// The 5h reason is level-triggered on `rate_limit_reset <= now`, and the prime
+	// is what REWRITES rate_limit_reset — so any provider that answers with an
+	// already-elapsed reset closes the loop and re-primes on every 60s tick
+	// forever. An idle Codex 5h window does exactly that (its `resets_at` tracks
+	// the wall clock): measured at 764 primes in 12.7h on one account, each also
+	// re-observing usage and, before the isGenuineWindowRoll fix, wiping
+	// session_start. An account whose prime yields no reset at all loops the same
+	// way via shouldRefreshAccount's first-time branch.
+	//
+	// This cannot defer a legitimate prime: a real 5h window cannot roll twice
+	// inside the cooldown, so when the next reset genuinely arrives the last prime
+	// is hours old. It throttles rather than silences deliberately — a Codex
+	// account is not covered by the UsageFetcher poller, so the slow prime stays
+	// its usage-freshness heartbeat. Same value and same rationale as
+	// WEEKLY_PRIME_COOLDOWN_MS (no retry-storm), kept separate because the two
+	// windows are independent.
+	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS = 15 * 60 * 1000;
 	// Maximum age of a cached usage datum we will trust when classifying a weekly
 	// window as dormant. Older than this → treat as unknown and skip (no prime).
 	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
@@ -228,6 +249,7 @@ export class AutoRefreshScheduler {
 		this.lastRefreshResetTime.clear();
 		this.consecutiveFailures.clear();
 		this.lastWeeklyPrimeTime.clear();
+		this.lastFiveHourPrimeTime.clear();
 	}
 
 	/**
@@ -378,7 +400,14 @@ export class AutoRefreshScheduler {
 			// (which updates lastRefreshResetTime with the NEW rate_limit_reset from
 			// the API).
 			for (const accountRow of accountsToRefresh) {
-				await this.primeAccount(accountRow);
+				try {
+					await this.primeAccount(accountRow);
+				} finally {
+					// Record the attempt even on failure, matching the weekly path: the
+					// cooldown exists to bound the re-prime RATE, and a prime that throws
+					// must not be retried every 60s either.
+					this.lastFiveHourPrimeTime.set(accountRow.id, now);
+				}
 			}
 
 			// WEEKLY-DORMANT priming: prime at most ONE account per cycle whose weekly
@@ -1556,6 +1585,16 @@ export class AutoRefreshScheduler {
 					);
 				}
 			}
+
+			// Same for the 5h-prime cooldown map.
+			for (const accountId of this.lastFiveHourPrimeTime.keys()) {
+				if (!activeAccountIdSet.has(accountId)) {
+					this.lastFiveHourPrimeTime.delete(accountId);
+					log.debug(
+						`Removed five-hour-prime tracking for account ${accountId} (no longer exists or auto-refresh disabled)`,
+					);
+				}
+			}
 		} catch (error) {
 			if (error instanceof Error) {
 				const errorMessage = `Error cleaning up tracking map: ${error.name}: ${error.message}`;
@@ -1635,9 +1674,16 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * True when an account is due for a FIVE-HOUR prime: it passes the window gate
-	 * AND shouldRefreshAccount's new-window detection. Composing the two reproduces
-	 * the old behaviour (SQL pre-filter + shouldRefreshAccount) exactly.
+	 * True when an account is due for a FIVE-HOUR prime: it is outside the
+	 * per-account prime cooldown, passes the window gate, AND satisfies
+	 * shouldRefreshAccount's new-window detection. The latter two reproduce the
+	 * old behaviour (SQL pre-filter + shouldRefreshAccount) exactly; the cooldown
+	 * bounds the re-prime rate when a provider keeps reporting an already-elapsed
+	 * reset (see FIVE_HOUR_PRIME_COOLDOWN_MS).
+	 *
+	 * The cooldown is checked FIRST so a throttled account never reaches
+	 * shouldRefreshAccount, whose "new window detected" log line would otherwise
+	 * claim a prime that is not going to happen.
 	 */
 	private fiveHourDue(
 		account: {
@@ -1652,6 +1698,13 @@ export class AutoRefreshScheduler {
 		},
 		now: number,
 	): boolean {
+		const lastPrime = this.lastFiveHourPrimeTime.get(account.id);
+		if (
+			lastPrime !== undefined &&
+			now - lastPrime < this.FIVE_HOUR_PRIME_COOLDOWN_MS
+		) {
+			return false;
+		}
 		return (
 			this.fiveHourWindowGate(account, now) &&
 			this.shouldRefreshAccount(account, now)

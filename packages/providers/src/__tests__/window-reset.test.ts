@@ -60,4 +60,32 @@ describe("isGenuineWindowRoll", () => {
 			false,
 		);
 	});
+
+	/**
+	 * The idle-window walk: an idle Codex 5h window reports `resets_at` tracking
+	 * the wall clock, so each poll sees a reset a minute later than the last but
+	 * STILL in the past. Both legacy conditions hold (prev has arrived, new is
+	 * later), yet nothing rolled — production logged 843 of these in 12.7h, each
+	 * one wiping session_start. A genuine roll always leaves the NEW reset in the
+	 * future.
+	 */
+	it("returns false when both resets are already in the past (idle-window walk)", () => {
+		expect(isGenuineWindowRoll(now - 60_000, now - 1, now)).toBe(false);
+	});
+
+	it("returns false when the new reset is exactly now", () => {
+		expect(isGenuineWindowRoll(now - 60_000, now, now)).toBe(false);
+	});
+
+	/**
+	 * A missed roll must self-correct: once the provider reports the real future
+	 * reset, prev (the stale near-now value) has arrived and new is future, so the
+	 * roll is detected on the very next observation. This is why the strict guard
+	 * is safe — a false negative costs one poll, a false positive never ends.
+	 */
+	it("still detects the roll on the next observation after a rejected walk", () => {
+		expect(isGenuineWindowRoll(now - 1, now + 5 * 60 * 60 * 1000, now)).toBe(
+			true,
+		);
+	});
 });
