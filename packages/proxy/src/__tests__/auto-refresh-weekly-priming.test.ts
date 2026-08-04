@@ -548,6 +548,30 @@ describe("AutoRefreshScheduler — selectWeeklyPrimeCandidate", () => {
 		).toBeNull();
 	});
 
+	/**
+	 * Deferral to the 5h reason is expressed ONLY through fiveHourDueIds, which
+	 * checkAndRefresh builds from 5h OWNERSHIP (before the prime cooldown is
+	 * applied). Re-deriving "is 5h active?" from the row here instead would starve
+	 * a legitimate candidate: response-processor persists a NULL rate_limit_reset
+	 * whenever a unified status carries no reset header, and a null reset is
+	 * neither "active" nor 5h-due once the account has been refreshed before. Such
+	 * an account would then be primed by neither reason, indefinitely.
+	 */
+	it("still selects a weekly-dormant account whose 5h reset is null", async () => {
+		const scheduler = await makeScheduler();
+		const id = track("acc-5h-null");
+		const now = Date.now();
+		seedWeekly(id, { utilization: 0, resets_at: null });
+		// Refreshed before (so the 5h first-time branch will not fire) but the DB
+		// reset is unknown — the 5h reason cannot act on it.
+		scheduler.lastWeeklyPrimeTime.delete(id);
+		const row = makeRow({ id, rate_limit_reset: null });
+
+		expect(
+			scheduler.selectWeeklyPrimeCandidate([row], new Set(), now)?.id,
+		).toBe(id);
+	});
+
 	it("excludes anthropic accounts with no refresh_token and non-anthropic providers", async () => {
 		const scheduler = await makeScheduler();
 		const now = Date.now();

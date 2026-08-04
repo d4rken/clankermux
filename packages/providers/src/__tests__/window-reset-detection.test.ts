@@ -117,6 +117,12 @@ describe("extractWindowResetTime", () => {
 // ── onWindowReset callback via usageCache.set ─────────────────────────────────
 
 describe("usageCache window-reset callback", () => {
+	// Fixed reference so the reset timestamps below sit at a known position
+	// relative to "now" — a genuine roll requires the OLD reset to have arrived
+	// and the NEW one to still be in the future, which nominal small integers
+	// (both decades in the past) cannot express.
+	const NOW = 1_000_000_000_000;
+
 	it("fires onWindowReset when zai resetAt advances to a later value", () => {
 		const accountId = "zai-window-reset-test";
 		const callback = mock(() => {});
@@ -127,7 +133,7 @@ describe("usageCache window-reset callback", () => {
 				used: 80,
 				remaining: 20,
 				percentage: 80,
-				resetAt: 1000000,
+				resetAt: NOW - 1_000, // the old window's reset has just arrived
 				type: "tokens_limit",
 			},
 		};
@@ -137,17 +143,49 @@ describe("usageCache window-reset callback", () => {
 				used: 2,
 				remaining: 98,
 				percentage: 2,
-				resetAt: 2000000,
+				resetAt: NOW + 5 * 60 * 60 * 1000, // the new window resets later
 				type: "tokens_limit",
 			},
 		};
 
 		// Seed the cache with old data, then simulate a poll delivering new data
 		usageCache.set(accountId, oldData);
-		usageCache.notifyWindowReset(accountId, newData, "zai", callback);
+		usageCache.notifyWindowReset(accountId, newData, "zai", callback, NOW);
 
 		expect(callback).toHaveBeenCalledTimes(1);
 		expect(callback).toHaveBeenCalledWith(accountId);
+
+		usageCache.delete(accountId);
+	});
+
+	it("does NOT fire when both zai resets are already in the past (idle-window walk)", () => {
+		// The Codex idle-window failure mode, pinned on the zai dispatcher too: a
+		// reset that merely tracks the wall clock advances on every poll while
+		// never entering the future. Nothing has rolled.
+		const accountId = "zai-idle-walk-test";
+		const callback = mock(() => {});
+
+		const makeData = (resetAt: number): ZaiUsageData => ({
+			time_limit: null,
+			tokens_limit: {
+				used: 0,
+				remaining: 100,
+				percentage: 0,
+				resetAt,
+				type: "tokens_limit",
+			},
+		});
+
+		usageCache.set(accountId, makeData(NOW - 60_000));
+		usageCache.notifyWindowReset(
+			accountId,
+			makeData(NOW - 1),
+			"zai",
+			callback,
+			NOW,
+		);
+
+		expect(callback).not.toHaveBeenCalled();
 
 		usageCache.delete(accountId);
 	});
