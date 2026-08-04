@@ -131,6 +131,38 @@ describe("withRetryingMethods", () => {
 		expect(await wrapped.add(2, 3)).toBe(5);
 	});
 
+	it("leaves Object.prototype members unwrapped", () => {
+		// Wrapping these would make String(repo) a promise and detach
+		// repo.constructor from the repository class.
+		class Repo {
+			async find(): Promise<string> {
+				return "ok";
+			}
+		}
+		const repo = new Repo();
+
+		const w = withRetryingMethods(repo, () => FAST, "repo");
+
+		expect(typeof w.toString()).toBe("string");
+		expect(w.constructor).toBe(Repo);
+		expect(w instanceof Repo).toBe(true);
+	});
+
+	it("re-wraps a method that is replaced after its first read", async () => {
+		const repo = {
+			async find(): Promise<string> {
+				return "original";
+			},
+		};
+
+		const w = withRetryingMethods(repo, () => FAST, "repo");
+		expect(await w.find()).toBe("original");
+
+		repo.find = async () => "replaced";
+
+		expect(await w.find()).toBe("replaced");
+	});
+
 	it("leaves non-function properties untouched", () => {
 		const repo = { label: "accounts", count: 7 };
 

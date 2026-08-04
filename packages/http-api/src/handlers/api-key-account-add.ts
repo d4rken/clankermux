@@ -254,15 +254,28 @@ export function createApiKeyAccountAddHandler(
 			if (spec.apiKey.from === "fixed") {
 				apiKey = spec.apiKey.value;
 			} else {
+				// Trimmed for every provider. Only the Ollama Cloud handler did this
+				// originally, but a key is mirrored into refresh_token/access_token,
+				// so surrounding whitespace from a paste authenticates as garbage.
 				const provided = validateString(body.apiKey, "apiKey", {
 					required: true,
 					minLength: 1,
+					transform: sanitizers.trim,
 				});
 				if (!provided) {
 					return errorResponse(BadRequest("API key is required"));
 				}
 				apiKey = provided;
 			}
+
+			// Priority is validated before the endpoint and mappings so the first
+			// error a caller sees matches what the per-provider handlers reported.
+			const priority =
+				validateNumber(body.priority, "priority", {
+					min: 0,
+					max: 100,
+					integer: true,
+				}) || 0;
 
 			const customEndpoint = readEndpoint(body, spec);
 			if (spec.endpoint.from === "body" && spec.endpoint.required) {
@@ -273,13 +286,6 @@ export function createApiKeyAccountAddHandler(
 
 			const mappings = readModelMappings(body, spec);
 			if ("error" in mappings) return mappings.error;
-
-			const priority =
-				validateNumber(body.priority, "priority", {
-					min: 0,
-					max: 100,
-					integer: true,
-				}) || 0;
 
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
@@ -311,7 +317,9 @@ export function createApiKeyAccountAddHandler(
 			);
 
 			log.info(
-				`Successfully added ${spec.label} account: ${name} (Priority ${priority})`,
+				customEndpoint
+					? `Successfully added ${spec.label} account: ${name} (Endpoint: ${customEndpoint}, Priority ${priority})`
+					: `Successfully added ${spec.label} account: ${name} (Priority ${priority})`,
 			);
 
 			const account = await db.get<{
@@ -354,6 +362,10 @@ export function createApiKeyAccountAddHandler(
 					created: new Date(account.created_at).toISOString(),
 					paused: account.paused === 1,
 					priority: priority,
+					// The OpenAI-compatible handler returned this; the others did not.
+					// Reported for every provider (null when there is no endpoint)
+					// rather than dropped, so no caller loses a field it had.
+					customEndpoint,
 					tokenStatus: "valid" as const,
 					tokenExpiresAt: new Date(account.expires_at).toISOString(),
 					rateLimitStatus: "OK",

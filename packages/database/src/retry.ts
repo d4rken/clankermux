@@ -166,16 +166,25 @@ export function withRetryingMethods<T extends object>(
 ): T {
 	// Wrapped functions are memoized so repeated property access returns a
 	// stable identity (`repo.foo === repo.foo`), which spies and equality
-	// checks in tests rely on.
-	const wrapped = new Map<PropertyKey, unknown>();
+	// checks in tests rely on. The underlying function is stored alongside so a
+	// method replaced after its first read (a spy, a stub) is re-wrapped instead
+	// of being shadowed by a wrapper still bound to the original.
+	const wrapped = new Map<PropertyKey, { fn: unknown; retrying: unknown }>();
 
 	return new Proxy(target, {
 		get(obj, prop) {
 			const value = Reflect.get(obj, prop) as unknown;
 			if (typeof value !== "function") return value;
 
+			// Only repository methods get an envelope. Object.prototype members
+			// (`toString`, `valueOf`, `constructor`, …) are returned untouched:
+			// wrapping them would make `String(repo)` a promise and break
+			// `repo.constructor`. Symbol-keyed members are protocol hooks
+			// (Symbol.iterator, Symbol.toPrimitive) and are left alone too.
+			if (typeof prop === "symbol" || prop in Object.prototype) return value;
+
 			const memoized = wrapped.get(prop);
-			if (memoized) return memoized;
+			if (memoized && memoized.fn === value) return memoized.retrying;
 
 			const fn = value as (...args: unknown[]) => unknown;
 			const retrying = (...args: unknown[]) =>
@@ -185,7 +194,7 @@ export function withRetryingMethods<T extends object>(
 					`${label}.${String(prop)}`,
 				);
 
-			wrapped.set(prop, retrying);
+			wrapped.set(prop, { fn: value, retrying });
 			return retrying;
 		},
 	});

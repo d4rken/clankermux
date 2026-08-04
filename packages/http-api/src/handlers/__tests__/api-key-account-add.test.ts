@@ -71,6 +71,42 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(row("acct")?.provider).toBe("openai-compatible");
 		});
 
+		it("returns customEndpoint in the response account", async () => {
+			// The OpenAI-compatible handler reported this; dropping it would change
+			// the HTTP contract for any client not re-fetching the account list.
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.openai,
+			);
+
+			const res = await handler(
+				post({
+					name: "acct",
+					apiKey: "k",
+					customEndpoint: "https://example.test/v1",
+				}),
+			);
+			const data = (await res.json()) as {
+				account: { customEndpoint: string | null };
+			};
+
+			expect(data.account.customEndpoint).toBe("https://example.test/v1");
+		});
+
+		it("reports a null customEndpoint for providers without one", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.kilo,
+			);
+
+			const res = await handler(post({ name: "acct", apiKey: "k" }));
+			const data = (await res.json()) as {
+				account: { customEndpoint: string | null };
+			};
+
+			expect(data.account.customEndpoint).toBeNull();
+		});
+
 		it("uses the spec's label in the success message", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
@@ -96,6 +132,21 @@ describe("createApiKeyAccountAddHandler", () => {
 
 			expect(res.status).toBe(400);
 			expect(data.error).toContain("apiKey is required");
+		});
+
+		it("trims surrounding whitespace from the key", async () => {
+			// The key is mirrored into refresh_token/access_token, so a pasted key
+			// with stray whitespace would authenticate as garbage.
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.ollamaCloud,
+			);
+
+			await handler(post({ name: "acct", apiKey: "  secret\n" }));
+
+			const stored = row("acct");
+			expect(stored?.api_key).toBe("secret");
+			expect(stored?.refresh_token).toBe("secret");
 		});
 
 		it("substitutes the fixed key without requiring one in the body", async () => {
