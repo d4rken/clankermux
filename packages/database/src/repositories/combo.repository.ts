@@ -17,17 +17,21 @@ import { BaseRepository } from "./base.repository";
 export class ComboRepository extends BaseRepository<Combo> {
 	// ── Combo CRUD ──────────────────────────────────────────────────────────
 
+	/**
+	 * One statement, not INSERT-then-SELECT, because repository calls are retried
+	 * as a whole (see withRetryingMethods). A retryable error raised on a
+	 * trailing SELECT would re-run the INSERT, and since the id is generated
+	 * inside this method the re-run would insert a SECOND row under a new id.
+	 * RETURNING keeps the write and the read-back atomic.
+	 */
 	async create(name: string, description?: string | null): Promise<Combo> {
 		const id = randomUUID();
 		const now = Date.now();
-		await this.run(
-			`INSERT INTO combos (id, name, description, enabled, created_at, updated_at)
-       VALUES (?, ?, ?, 1, ?, ?)`,
-			[id, name, description ?? null, now, now],
-		);
 		const row = await this.get<ComboRow>(
-			`SELECT id, name, description, enabled, created_at, updated_at FROM combos WHERE id = ?`,
-			[id],
+			`INSERT INTO combos (id, name, description, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, 1, ?, ?)
+       RETURNING id, name, description, enabled, created_at, updated_at`,
+			[id, name, description ?? null, now, now],
 		);
 		if (!row) throw new Error(`Failed to create combo: ${name}`);
 		return toCombo(row);
@@ -101,14 +105,13 @@ export class ComboRepository extends BaseRepository<Combo> {
 		priority: number,
 	): Promise<ComboSlot> {
 		const id = randomUUID();
-		await this.run(
-			`INSERT INTO combo_slots (id, combo_id, account_id, model, priority, enabled)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-			[id, comboId, accountId, model, priority],
-		);
+		// Single statement for the same reason as create() above: a retry of this
+		// method must not be able to insert a second slot under a fresh id.
 		const row = await this.get<ComboSlotRow>(
-			`SELECT id, combo_id, account_id, model, priority, enabled FROM combo_slots WHERE id = ?`,
-			[id],
+			`INSERT INTO combo_slots (id, combo_id, account_id, model, priority, enabled)
+       VALUES (?, ?, ?, ?, ?, 1)
+       RETURNING id, combo_id, account_id, model, priority, enabled`,
+			[id, comboId, accountId, model, priority],
 		);
 		if (!row) throw new Error(`Failed to create combo slot`);
 		return toComboSlot(row);

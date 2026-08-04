@@ -149,6 +149,15 @@ export async function withDatabaseRetry<T>(
  *
  * Every repository method is `async`, so wrapping cannot change a synchronous
  * return into a promise.
+ *
+ * CONTRACT FOR REPOSITORY METHODS: a method must be safe to re-run in full.
+ * Retry replays the whole method, not the individual statement that failed, so
+ * a method that issues several writes can re-apply earlier ones. The dangerous
+ * shape is generating an id inside the method and then reading the row back in
+ * a second statement — a retryable failure on the read re-runs the insert under
+ * a fresh id and leaves a duplicate. Use a single `INSERT ... RETURNING`
+ * instead (see `ComboRepository.create`). Absolute-value `UPDATE`s and
+ * single-statement methods are already safe.
  */
 export function withRetryingMethods<T extends object>(
 	target: T,
