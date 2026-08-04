@@ -14,6 +14,7 @@ import {
 	getProvider,
 	isCodexOnCredits,
 	toEpochMs,
+	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "@clankermux/providers";
 import type {
@@ -164,7 +165,7 @@ export class AutoRefreshScheduler {
 	private lastWeeklyPrimeTime: Map<string, number> = new Map();
 	// Minimum gap between weekly-dormant primes for the same account.
 	private readonly WEEKLY_PRIME_COOLDOWN_MS = 15 * 60 * 1000;
-	// Track the last time we primed an account for the FIVE-HOUR reason.
+	// Track the last time we ATTEMPTED a prime for the FIVE-HOUR reason.
 	private lastFiveHourPrimeTime: Map<string, number> = new Map();
 	// Minimum gap between 5h primes for the same account.
 	//
@@ -177,14 +178,23 @@ export class AutoRefreshScheduler {
 	// session_start. An account whose prime yields no reset at all loops the same
 	// way via shouldRefreshAccount's first-time branch.
 	//
-	// This cannot defer a legitimate prime: a real 5h window cannot roll twice
+	// It cannot defer a legitimate prime: a real 5h window cannot roll twice
 	// inside the cooldown, so when the next reset genuinely arrives the last prime
 	// is hours old. It throttles rather than silences deliberately — a Codex
-	// account is not covered by the UsageFetcher poller, so the slow prime stays
-	// its usage-freshness heartbeat. Same value and same rationale as
-	// WEEKLY_PRIME_COOLDOWN_MS (no retry-storm), kept separate because the two
-	// windows are independent.
-	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS = 15 * 60 * 1000;
+	// account is not covered by the UsageFetcher poller (server.ts starts polling
+	// for `provider === "anthropic"` only), so the slow prime stays its
+	// usage-freshness heartbeat.
+	//
+	// MUST stay under USAGE_CACHE_TTL_MS, which is why it is derived from it
+	// rather than written as a literal. The codex observation reads its baseline
+	// through the EVICTING `usageCache.get()` (handlers/codex-observation.ts), so a
+	// gap longer than the TTL destroys two things at once: the credits
+	// carry-forward that keeps an overage-paused account paused, and the
+	// previous-reset baseline that window-roll detection compares against. Before
+	// this cooldown existed the 60s loop kept that entry warm by accident; the
+	// margin is what replaces that accident with a guarantee.
+	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS =
+		USAGE_CACHE_TTL_MS - 3 * 60 * 1000;
 	// Maximum age of a cached usage datum we will trust when classifying a weekly
 	// window as dormant. Older than this → treat as unknown and skip (no prime).
 	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
@@ -400,13 +410,20 @@ export class AutoRefreshScheduler {
 			// (which updates lastRefreshResetTime with the NEW rate_limit_reset from
 			// the API).
 			for (const accountRow of accountsToRefresh) {
+				// Initialised true so a THROW still starts the cooldown: something went
+				// wrong mid-attempt, and retrying that every 60s is the storm this
+				// guards against. Only an explicit "nothing was sent" clears it.
+				let attempted = true;
 				try {
-					await this.primeAccount(accountRow);
+					attempted = await this.primeAccount(accountRow);
 				} finally {
-					// Record the attempt even on failure, matching the weekly path: the
-					// cooldown exists to bound the re-prime RATE, and a prime that throws
-					// must not be retried every 60s either.
-					this.lastFiveHourPrimeTime.set(accountRow.id, now);
+					if (attempted) {
+						// Date.now(), not the cycle's `now`: `now` was captured before the
+						// cleanup pass, the token refreshes, the account query and every
+						// preceding prime in this batch, so in a large batch a late account
+						// would get a cooldown that had already partly elapsed.
+						this.lastFiveHourPrimeTime.set(accountRow.id, Date.now());
+					}
 				}
 			}
 
@@ -429,8 +446,9 @@ export class AutoRefreshScheduler {
 					await this.primeAccount(weeklyAccount);
 				} finally {
 					// Set the cooldown timestamp even on failure so a failing prime does
-					// not retry-storm every cycle (no retry-storm).
-					this.lastWeeklyPrimeTime.set(weeklyAccount.id, now);
+					// not retry-storm every cycle (no retry-storm). Date.now() rather than
+					// the cycle's `now` for the same reason as the 5h cooldown above.
+					this.lastWeeklyPrimeTime.set(weeklyAccount.id, Date.now());
 				}
 			}
 		} catch (error) {
@@ -465,12 +483,24 @@ export class AutoRefreshScheduler {
 	 * translated Haiku sendTranslatedClaudePrime path (including its own race-guard).
 	 * Both the 5h loop and the weekly-dormant prime route through here.
 	 */
-	private async primeAccount(accountRow: AutoRefreshAccountRow): Promise<void> {
+	/**
+	 * @returns whether a prime was actually ATTEMPTED against the provider. False
+	 * only when the codex coordinator declined to send anything at all (see
+	 * {@link handleCodexPrimeOutcome}'s `skipped`). Callers use this to decide
+	 * whether to start the 5h prime cooldown: throttling a request that was never
+	 * made would delay the first real prime after the reason for skipping (a
+	 * missing token, auto-refresh switched back on) has gone away.
+	 */
+	private async primeAccount(
+		accountRow: AutoRefreshAccountRow,
+	): Promise<boolean> {
 		if (accountRow.provider === "codex") {
-			await this.primeCodexViaCoordinator(accountRow);
-			return;
+			return await this.primeCodexViaCoordinator(accountRow);
 		}
+		// The translated path dispatches unconditionally; its boolean is
+		// success/failure, and a FAILED send is still an attempt to throttle.
 		await this.sendTranslatedClaudePrime(accountRow);
+		return true;
 	}
 
 	/**
@@ -483,12 +513,13 @@ export class AutoRefreshScheduler {
 	 */
 	private async primeCodexViaCoordinator(
 		accountRow: AutoRefreshAccountRow,
-	): Promise<void> {
+	): Promise<boolean> {
 		const result = await this.coordinator.observe(
 			accountRow.id,
 			"scheduled-prime",
 		);
 		await this.handleCodexPrimeOutcome(accountRow, result);
+		return result.status !== "skipped";
 	}
 
 	/**
@@ -1766,9 +1797,17 @@ export class AutoRefreshScheduler {
 	 * Pick at most ONE account to prime for the WEEKLY-dormant reason this cycle.
 	 * Candidates must:
 	 *  - NOT already be due for a 5h prime (5h reason takes precedence),
+	 *  - have a 5h window that is still ACTIVE (reset known and in the future),
 	 *  - be anthropic-OAuth (provider==='anthropic' && refresh_token present),
 	 *  - have a dormant weekly window (isWeeklyDormant), and
 	 *  - be outside the per-account WEEKLY_PRIME_COOLDOWN_MS.
+	 *
+	 * The active-5h requirement is what the `fiveHourDueIds` check alone cannot
+	 * express. That set contains only accounts that passed the 5h prime cooldown,
+	 * so an account whose 5h reset has ARRIVED but which is being throttled is
+	 * absent from it — and would otherwise be physically primed here on the very
+	 * next cycle under the weekly reason, defeating the 5h cooldown and priming an
+	 * account whose 5h window this path is documented not to touch.
 	 * Survivors are sorted OLDEST-weekly-prime-first (a never-primed account, whose
 	 * lastWeeklyPrimeTime is absent → treated as 0, sorts ahead of any previously
 	 * primed account), tie-broken by id ascending for determinism. The first is
@@ -1786,6 +1825,8 @@ export class AutoRefreshScheduler {
 		const eligible = candidates.filter(
 			(c) =>
 				!fiveHourDueIds.has(c.id) &&
+				// 5h window still active: reset known AND still in the future.
+				!this.fiveHourWindowGate(c, now) &&
 				c.provider === "anthropic" &&
 				!!c.refresh_token &&
 				this.isWeeklyDormant(c.id, now) &&

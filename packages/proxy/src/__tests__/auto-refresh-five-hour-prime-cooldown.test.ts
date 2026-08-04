@@ -20,6 +20,7 @@
  * unrelated token-refresh / peak-hours queries against the mock db.
  */
 import { describe, expect, it, mock } from "bun:test";
+import { USAGE_CACHE_TTL_MS } from "@clankermux/providers";
 import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 function makeDb() {
@@ -49,16 +50,41 @@ type Row = {
 
 type SchedulerInternals = AutoRefreshScheduler & {
 	fiveHourDue(account: Row, now: number): boolean;
+	primeAccount(account: Row): Promise<boolean>;
 	lastRefreshResetTime: Map<string, number>;
 	lastFiveHourPrimeTime: Map<string, number>;
 	FIVE_HOUR_PRIME_COOLDOWN_MS: number;
 };
 
-async function makeScheduler(): Promise<SchedulerInternals> {
+/** Minimal coordinator fake: `observe` resolves to the given canned result. */
+function makeCoordinator(status: "skipped" | "completed" | "failed") {
+	return {
+		observe: mock(async () => ({
+			status,
+			reason: "test",
+			responseOk: true,
+			responseStatus: 200,
+			accountName: "codex-main",
+			observation: {
+				usage: null,
+				effectiveCredits: null,
+				earliestResetMs: null,
+				windowRolledOver: false,
+				isRateLimited: false,
+				responseStatus: 200,
+			},
+		})),
+	};
+}
+
+async function makeScheduler(
+	coordinator?: ReturnType<typeof makeCoordinator>,
+): Promise<SchedulerInternals> {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		makeDb() as never,
 		makeProxyContext() as never,
+		coordinator as never,
 	) as never as SchedulerInternals;
 }
 
@@ -171,5 +197,59 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		expect(
 			scheduler.fiveHourDue(row, NOW + scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS),
 		).toBe(true);
+	});
+
+	/**
+	 * Load-bearing coupling, not a coincidence of values.
+	 *
+	 * The codex observation reads its previous usage entry through the EVICTING
+	 * usageCache.get(). If two consecutive scheduled primes were further apart
+	 * than USAGE_CACHE_TTL_MS, that read returns null and two separate things
+	 * break: the credits carry-forward that keeps an overage-paused account
+	 * paused (a lost carry-forward reads as "no longer on credits" and RESUMES the
+	 * account into paid-credit spend), and the previous-reset baseline that
+	 * window-roll detection needs.
+	 *
+	 * Before the cooldown existed the 60s loop kept that entry warm by accident.
+	 * This asserts the margin that replaces the accident.
+	 */
+	it("keeps the prime cadence strictly inside the usage-cache TTL", async () => {
+		const scheduler = await makeScheduler();
+
+		expect(scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS).toBeLessThan(
+			USAGE_CACHE_TTL_MS,
+		);
+		// Enough headroom for a scheduler tick plus the prime's own round trip.
+		expect(
+			USAGE_CACHE_TTL_MS - scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS,
+		).toBeGreaterThanOrEqual(2 * 60 * 1000);
+	});
+
+	/**
+	 * The cooldown throttles REQUESTS, so it must only start when one was made.
+	 * A coordinator `skipped` means nothing reached the provider (no tokens,
+	 * auto-refresh switched off, account deleted); starting a cooldown for that
+	 * would delay the first real prime after the cause is fixed.
+	 */
+	it("reports a codex 'skipped' prime as not attempted", async () => {
+		const scheduler = await makeScheduler(makeCoordinator("skipped"));
+
+		expect(await scheduler.primeAccount(makeRow())).toBe(false);
+	});
+
+	it("reports a codex prime that reached the provider as attempted", async () => {
+		const scheduler = await makeScheduler(makeCoordinator("completed"));
+
+		expect(await scheduler.primeAccount(makeRow())).toBe(true);
+	});
+
+	/**
+	 * A FAILED prime is still an attempt — it is exactly the case the cooldown
+	 * exists for, and the weekly path treats failure the same way.
+	 */
+	it("reports a failed codex prime as attempted", async () => {
+		const scheduler = await makeScheduler(makeCoordinator("failed"));
+
+		expect(await scheduler.primeAccount(makeRow())).toBe(true);
 	});
 });

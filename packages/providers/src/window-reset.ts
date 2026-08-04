@@ -32,10 +32,25 @@ export function toEpochMs(
  *    always has its next reset in the FUTURE.
  *
  * The second bound is deliberately strict (no skew tolerance) because the two
- * error directions are not symmetric: a false negative from clock skew costs one
- * poll — the next observation sees the stale near-now value as `prev` and the
- * real future reset as `new`, and detects the roll — whereas a false positive
- * repeats forever.
+ * error directions are not symmetric: a false positive repeats forever, while a
+ * false negative is at worst a single missed roll. For the polling caller
+ * (`UsageFetcher.notifyWindowReset`) it is not even that — it compares against
+ * the cached baseline BEFORE overwriting it, so the next poll sees the stale
+ * near-now value as `prev` and the real future reset as `new` and detects the
+ * roll one cycle late.
+ *
+ * Callers whose baseline can EXPIRE between observations do not get that
+ * recovery: if the baseline is gone the next comparison starts from null and the
+ * roll is simply missed. The codex observation path is one such caller (its
+ * baseline is the evicting `usageCache.get()`), which is why the scheduler keeps
+ * its prime cadence inside USAGE_CACHE_TTL_MS. A caller that cannot hold that
+ * invariant should persist the last observed reset itself rather than widen this
+ * bound.
+ *
+ * Note the strictness costs nothing against real provider behaviour: Anthropic
+ * and Codex report a window END, zai a `resetAt`, MiniMax an `end_time` — none
+ * reports a window START — and ordinary clock skew cannot move a newly opened
+ * window's end behind local `now`.
  */
 export function isGenuineWindowRoll(
 	prevResetAt: number | null,
