@@ -65,7 +65,7 @@ import {
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
-import { withDatabaseRetry } from "./retry";
+import { withRetryingMethods } from "./retry";
 
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
@@ -438,22 +438,39 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 		this.adapter = new BunSqlAdapter(this.sqliteDb);
 
-		// Initialize repositories
-		this.accounts = new AccountRepository(this.adapter);
-		this.requests = new RequestRepository(this.adapter);
-		this.oauth = new OAuthRepository(this.adapter);
-		this.strategy = new StrategyRepository(this.adapter);
-		this.stats = new StatsRepository(this.adapter);
-		this.apiKeys = new ApiKeyRepository(this.adapter);
-		this.combo = new ComboRepository(this.adapter);
-		this.usageSnapshots = new UsageSnapshotRepository(this.adapter);
-		this.memorySnapshots = new MemorySnapshotRepository(this.adapter);
-		this.cacheKeepaliveSnapshots = new CacheKeepaliveSnapshotRepository(
-			this.adapter,
+		// Initialize repositories. Each is wrapped so every call through it
+		// retries on SQLITE_BUSY/SQLITE_LOCKED without the caller opting in —
+		// see withRetryingMethods(). `retryConfig` is read through a thunk
+		// because setRuntimeConfig() replaces it after construction.
+		const retrying = <T extends object>(repo: T, label: string): T =>
+			withRetryingMethods(repo, () => this.retryConfig, label);
+
+		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
+		this.requests = retrying(new RequestRepository(this.adapter), "requests");
+		this.oauth = retrying(new OAuthRepository(this.adapter), "oauth");
+		this.strategy = retrying(new StrategyRepository(this.adapter), "strategy");
+		this.stats = retrying(new StatsRepository(this.adapter), "stats");
+		this.apiKeys = retrying(new ApiKeyRepository(this.adapter), "apiKeys");
+		this.combo = retrying(new ComboRepository(this.adapter), "combo");
+		this.usageSnapshots = retrying(
+			new UsageSnapshotRepository(this.adapter),
+			"usageSnapshots",
 		);
-		this.accountPayments = new AccountPaymentRepository(this.adapter);
-		this.codexResetCreditEvents = new CodexResetCreditEventRepository(
-			this.adapter,
+		this.memorySnapshots = retrying(
+			new MemorySnapshotRepository(this.adapter),
+			"memorySnapshots",
+		);
+		this.cacheKeepaliveSnapshots = retrying(
+			new CacheKeepaliveSnapshotRepository(this.adapter),
+			"cacheKeepaliveSnapshots",
+		);
+		this.accountPayments = retrying(
+			new AccountPaymentRepository(this.adapter),
+			"accountPayments",
+		);
+		this.codexResetCreditEvents = retrying(
+			new CodexResetCreditEventRepository(this.adapter),
+			"codexResetCreditEvents",
 		);
 	}
 
@@ -886,21 +903,15 @@ OAuth tokens will need to be re-authenticated.
 		return this.retryConfig;
 	}
 
-	// Account operations delegated to repository with retry logic
+	// Account operations delegated to the repository. Retry on lock contention
+	// is applied by the repository wrapper installed in the constructor, so
+	// these delegations must NOT add their own — see withRetryingMethods().
 	async getAllAccounts(): Promise<Account[]> {
-		return withDatabaseRetry(
-			() => this.accounts.findAll(),
-			this.retryConfig,
-			"getAllAccounts",
-		);
+		return this.accounts.findAll();
 	}
 
 	async getAccount(accountId: string): Promise<Account | null> {
-		return withDatabaseRetry(
-			() => this.accounts.findById(accountId),
-			this.retryConfig,
-			"getAccount",
-		);
+		return this.accounts.findById(accountId);
 	}
 
 	async updateAccountTokens(
@@ -911,18 +922,13 @@ OAuth tokens will need to be re-authenticated.
 		identity?: AccountIdentity | null,
 		expectedRefreshToken?: string | null,
 	): Promise<boolean> {
-		return withDatabaseRetry(
-			() =>
-				this.accounts.updateTokens(
-					accountId,
-					accessToken,
-					expiresAt,
-					refreshToken,
-					identity,
-					expectedRefreshToken,
-				),
-			this.retryConfig,
-			"updateAccountTokens",
+		return this.accounts.updateTokens(
+			accountId,
+			accessToken,
+			expiresAt,
+			refreshToken,
+			identity,
+			expectedRefreshToken,
 		);
 	}
 
@@ -935,11 +941,7 @@ OAuth tokens will need to be re-authenticated.
 		accountId: string,
 		identity: AccountIdentity,
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.accounts.setAccountIdentityFromProfile(accountId, identity),
-			this.retryConfig,
-			"setAccountIdentityFromProfile",
-		);
+		await this.accounts.setAccountIdentityFromProfile(accountId, identity);
 	}
 
 	/**
@@ -952,21 +954,13 @@ OAuth tokens will need to be re-authenticated.
 		accountId: string,
 		identity: AccountIdentity,
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.accounts.setAccountIdentity(accountId, identity),
-			this.retryConfig,
-			"setAccountIdentity",
-		);
+		await this.accounts.setAccountIdentity(accountId, identity);
 	}
 
 	async updateAccountUsage(accountId: string): Promise<void> {
 		const sessionDuration =
 			this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
-		await withDatabaseRetry(
-			() => this.accounts.incrementUsage(accountId, sessionDuration),
-			this.retryConfig,
-			"updateAccountUsage",
-		);
+		await this.accounts.incrementUsage(accountId, sessionDuration);
 	}
 
 	async markAccountRateLimited(
@@ -974,11 +968,7 @@ OAuth tokens will need to be re-authenticated.
 		until: number,
 		reason: RateLimitReason,
 	): Promise<number> {
-		return withDatabaseRetry(
-			() => this.accounts.setRateLimited(accountId, until, reason),
-			this.retryConfig,
-			"markAccountRateLimited",
-		);
+		return this.accounts.setRateLimited(accountId, until, reason);
 	}
 
 	async markAccountRateLimitedDeadlineOnly(
@@ -986,19 +976,11 @@ OAuth tokens will need to be re-authenticated.
 		until: number,
 		reason: RateLimitReason,
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.accounts.setRateLimitedDeadlineOnly(accountId, until, reason),
-			this.retryConfig,
-			"markAccountRateLimitedDeadlineOnly",
-		);
+		await this.accounts.setRateLimitedDeadlineOnly(accountId, until, reason);
 	}
 
 	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
-		await withDatabaseRetry(
-			() => this.accounts.resetConsecutiveRateLimits(accountId),
-			this.retryConfig,
-			"resetConsecutiveRateLimits",
-		);
+		await this.accounts.resetConsecutiveRateLimits(accountId);
 	}
 
 	/**
@@ -1007,11 +989,7 @@ OAuth tokens will need to be re-authenticated.
 	 * @returns Number of accounts that had their rate_limited_until cleared
 	 */
 	async clearExpiredRateLimits(now: number): Promise<number> {
-		return withDatabaseRetry(
-			() => this.accounts.clearExpiredRateLimits(now),
-			this.retryConfig,
-			"clearExpiredRateLimits",
-		);
+		return this.accounts.clearExpiredRateLimits(now);
 	}
 
 	async updateAccountRateLimitMeta(
@@ -1029,14 +1007,8 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
-		return withDatabaseRetry(
-			async () => {
-				const changes = await this.accounts.clearRateLimitState(accountId);
-				return changes >= 0;
-			},
-			this.retryConfig,
-			"forceResetAccountRateLimit",
-		);
+		const changes = await this.accounts.clearRateLimitState(accountId);
+		return changes >= 0;
 	}
 
 	/**
@@ -1055,17 +1027,12 @@ OAuth tokens will need to be re-authenticated.
 		expectedRateLimitedReason: string,
 		evidenceFetchStartedAt: number,
 	): Promise<boolean> {
-		return withDatabaseRetry(
-			async () =>
-				this.accounts.clearRateLimitOnCapacityRestore(
-					accountId,
-					expectedRateLimitedUntil,
-					expectedRateLimitedAt,
-					expectedRateLimitedReason,
-					evidenceFetchStartedAt,
-				),
-			this.retryConfig,
-			"clearRateLimitOnCapacityRestore",
+		return this.accounts.clearRateLimitOnCapacityRestore(
+			accountId,
+			expectedRateLimitedUntil,
+			expectedRateLimitedAt,
+			expectedRateLimitedReason,
+			evidenceFetchStartedAt,
 		);
 	}
 
@@ -1130,11 +1097,7 @@ OAuth tokens will need to be re-authenticated.
 	 * Returns the number of rows changed.
 	 */
 	async clearAccountSessionAnchor(accountId: string): Promise<number> {
-		return withDatabaseRetry(
-			() => this.accounts.clearSessionAnchor(accountId),
-			this.retryConfig,
-			"clearAccountSessionAnchor",
-		);
+		return this.accounts.clearSessionAnchor(accountId);
 	}
 
 	async setAccountBillingType(
@@ -1255,41 +1218,25 @@ OAuth tokens will need to be re-authenticated.
 	 * is named and a required field is a compile error.
 	 */
 	async saveRequest(data: RequestData): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.save(data),
-			this.retryConfig,
-			"saveRequest",
-		);
+		await this.requests.save(data);
 	}
 
 	async saveRequestRouting(data: RequestRoutingData): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.saveRouting(data),
-			this.retryConfig,
-			"saveRequestRouting",
-		);
+		await this.requests.saveRouting(data);
 	}
 
 	async saveRequestToolCalls(
 		requestId: string,
 		stats: ToolCallStat[],
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.saveToolCalls(requestId, stats),
-			this.retryConfig,
-			"saveRequestToolCalls",
-		);
+		await this.requests.saveToolCalls(requestId, stats);
 	}
 
 	async updateRequestUsage(
 		requestId: string,
 		usage: RequestData["usage"],
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.updateUsage(requestId, usage),
-			this.retryConfig,
-			"updateRequestUsage",
-		);
+		await this.requests.updateUsage(requestId, usage);
 	}
 
 	/**
@@ -1983,51 +1930,27 @@ OAuth tokens will need to be re-authenticated.
 
 	// API Key operations delegated to repository
 	async getApiKeys() {
-		return withDatabaseRetry(
-			() => this.apiKeys.findAll(),
-			this.retryConfig,
-			"getApiKeys",
-		);
+		return this.apiKeys.findAll();
 	}
 
 	async getActiveApiKeys() {
-		return withDatabaseRetry(
-			() => this.apiKeys.findActive(),
-			this.retryConfig,
-			"getActiveApiKeys",
-		);
+		return this.apiKeys.findActive();
 	}
 
 	async getApiKey(id: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findById(id),
-			this.retryConfig,
-			"getApiKey",
-		);
+		return this.apiKeys.findById(id);
 	}
 
 	async getApiKeyByHashedKey(hashedKey: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findByHashedKey(hashedKey),
-			this.retryConfig,
-			"getApiKeyByHashedKey",
-		);
+		return this.apiKeys.findByHashedKey(hashedKey);
 	}
 
 	async getApiKeyByName(name: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findByName(name),
-			this.retryConfig,
-			"getApiKeyByName",
-		);
+		return this.apiKeys.findByName(name);
 	}
 
 	async apiKeyNameExists(name: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.nameExists(name),
-			this.retryConfig,
-			"apiKeyNameExists",
-		);
+		return this.apiKeys.nameExists(name);
 	}
 
 	async createApiKey(apiKey: {
@@ -2039,28 +1962,19 @@ OAuth tokens will need to be re-authenticated.
 		lastUsed?: number | null;
 		isActive: boolean;
 	}): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.apiKeys.create({
-					id: apiKey.id,
-					name: apiKey.name,
-					hashed_key: apiKey.hashedKey,
-					prefix_last_8: apiKey.prefixLast8,
-					created_at: apiKey.createdAt,
-					last_used: apiKey.lastUsed || null,
-					is_active: apiKey.isActive ? 1 : 0,
-				}),
-			this.retryConfig,
-			"createApiKey",
-		);
+		await this.apiKeys.create({
+			id: apiKey.id,
+			name: apiKey.name,
+			hashed_key: apiKey.hashedKey,
+			prefix_last_8: apiKey.prefixLast8,
+			created_at: apiKey.createdAt,
+			last_used: apiKey.lastUsed || null,
+			is_active: apiKey.isActive ? 1 : 0,
+		});
 	}
 
 	async updateApiKeyUsage(id: string, timestamp: number): Promise<void> {
-		await withDatabaseRetry(
-			() => this.apiKeys.updateUsage(id, timestamp),
-			this.retryConfig,
-			"updateApiKeyUsage",
-		);
+		await this.apiKeys.updateUsage(id, timestamp);
 	}
 
 	/**
@@ -2080,11 +1994,7 @@ OAuth tokens will need to be re-authenticated.
 		 */
 		malformed: boolean;
 	} | null> {
-		const raw = await withDatabaseRetry(
-			() => this.apiKeys.findRawPinById(id),
-			this.retryConfig,
-			"getApiKeyPin",
-		);
+		const raw = await this.apiKeys.findRawPinById(id);
 		if (!raw) {
 			return null;
 		}
@@ -2117,43 +2027,23 @@ OAuth tokens will need to be re-authenticated.
 			pinnedProviders && pinnedProviders.length > 0
 				? JSON.stringify(pinnedProviders)
 				: null;
-		return withDatabaseRetry(
-			() => this.apiKeys.updatePin(id, pinnedAccountId, serialized),
-			this.retryConfig,
-			"updateApiKeyPin",
-		);
+		return this.apiKeys.updatePin(id, pinnedAccountId, serialized);
 	}
 
 	async disableApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.disable(id),
-			this.retryConfig,
-			"disableApiKey",
-		);
+		return this.apiKeys.disable(id);
 	}
 
 	async enableApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.enable(id),
-			this.retryConfig,
-			"enableApiKey",
-		);
+		return this.apiKeys.enable(id);
 	}
 
 	async renameApiKey(id: string, newName: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.rename(id, newName),
-			this.retryConfig,
-			"renameApiKey",
-		);
+		return this.apiKeys.rename(id, newName);
 	}
 
 	async deleteApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.delete(id),
-			this.retryConfig,
-			"deleteApiKey",
-		);
+		return this.apiKeys.delete(id);
 	}
 
 	async rotateApiKeySecret(
@@ -2162,44 +2052,27 @@ OAuth tokens will need to be re-authenticated.
 		newHashedKey: string,
 		newPrefixLast8: string,
 	): Promise<boolean> {
-		return withDatabaseRetry(
-			() =>
-				this.apiKeys.rotateSecret(
-					id,
-					expectedHashedKey,
-					newHashedKey,
-					newPrefixLast8,
-				),
-			this.retryConfig,
-			"rotateApiKeySecret",
+		return this.apiKeys.rotateSecret(
+			id,
+			expectedHashedKey,
+			newHashedKey,
+			newPrefixLast8,
 		);
 	}
 
 	async countActiveApiKeys(): Promise<number> {
-		return withDatabaseRetry(
-			() => this.apiKeys.countActive(),
-			this.retryConfig,
-			"countActiveApiKeys",
-		);
+		return this.apiKeys.countActive();
 	}
 
 	async countAllApiKeys(): Promise<number> {
-		return withDatabaseRetry(
-			() => this.apiKeys.countAll(),
-			this.retryConfig,
-			"countAllApiKeys",
-		);
+		return this.apiKeys.countAll();
 	}
 
 	/**
 	 * Clear all API keys (for testing purposes)
 	 */
 	async clearApiKeys(): Promise<void> {
-		await withDatabaseRetry(
-			() => this.apiKeys.clearAll(),
-			this.retryConfig,
-			"clearApiKeys",
-		);
+		await this.apiKeys.clearAll();
 	}
 
 	/**
@@ -2294,81 +2167,51 @@ OAuth tokens will need to be re-authenticated.
 	// ── Usage snapshot operations delegated to repository ─────────────────────
 
 	async insertUsageSnapshots(rows: UsageSnapshotRow[]): Promise<void> {
-		await withDatabaseRetry(
-			() => this.usageSnapshots.insertSnapshots(rows),
-			this.retryConfig,
-			"insertUsageSnapshots",
-		);
+		await this.usageSnapshots.insertSnapshots(rows);
 	}
 
 	async getUsageSnapshots(opts: {
 		sinceMs: number;
 		bucketMs: number;
 	}): Promise<RankedSnapshot[]> {
-		return withDatabaseRetry(
-			() => this.usageSnapshots.getSnapshots(opts),
-			this.retryConfig,
-			"getUsageSnapshots",
-		);
+		return this.usageSnapshots.getSnapshots(opts);
 	}
 
 	async getLatestUsageSnapshots(
 		accountIds: string[],
 	): Promise<RankedSnapshot[]> {
-		return withDatabaseRetry(
-			() => this.usageSnapshots.getLatestSnapshots(accountIds),
-			this.retryConfig,
-			"getLatestUsageSnapshots",
-		);
+		return this.usageSnapshots.getLatestSnapshots(accountIds);
 	}
 
 	async getRecentUsageSnapshotsForAccounts(
 		accountIds: string[],
 		sinceMs: number,
 	): Promise<UsageSnapshotSample[]> {
-		return withDatabaseRetry(
-			() =>
-				this.usageSnapshots.getRecentSnapshotsForAccounts(accountIds, sinceMs),
-			this.retryConfig,
-			"getRecentUsageSnapshotsForAccounts",
+		return this.usageSnapshots.getRecentSnapshotsForAccounts(
+			accountIds,
+			sinceMs,
 		);
 	}
 
 	async deleteUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
-		return withDatabaseRetry(
-			() => this.usageSnapshots.deleteOlderThan(cutoffMs),
-			this.retryConfig,
-			"deleteUsageSnapshotsOlderThan",
-		);
+		return this.usageSnapshots.deleteOlderThan(cutoffMs);
 	}
 
 	// ── Memory snapshot operations delegated to repository ─────────────────────
 
 	async insertMemorySnapshot(row: MemorySnapshotRow): Promise<void> {
-		await withDatabaseRetry(
-			() => this.memorySnapshots.insert(row),
-			this.retryConfig,
-			"insertMemorySnapshot",
-		);
+		await this.memorySnapshots.insert(row);
 	}
 
 	async getMemorySnapshots(opts: {
 		sinceMs: number;
 		bucketMs: number;
 	}): Promise<MemoryHistoryPoint[]> {
-		return withDatabaseRetry(
-			() => this.memorySnapshots.getSnapshots(opts),
-			this.retryConfig,
-			"getMemorySnapshots",
-		);
+		return this.memorySnapshots.getSnapshots(opts);
 	}
 
 	async deleteMemorySnapshotsOlderThan(cutoffMs: number): Promise<number> {
-		return withDatabaseRetry(
-			() => this.memorySnapshots.deleteOlderThan(cutoffMs),
-			this.retryConfig,
-			"deleteMemorySnapshotsOlderThan",
-		);
+		return this.memorySnapshots.deleteOlderThan(cutoffMs);
 	}
 
 	// ── Cache-keepalive snapshot operations delegated to repository ────────────
@@ -2376,41 +2219,25 @@ OAuth tokens will need to be re-authenticated.
 	async insertCacheKeepaliveSnapshot(
 		row: CacheKeepaliveSnapshotRow,
 	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.cacheKeepaliveSnapshots.insertSnapshot(row),
-			this.retryConfig,
-			"insertCacheKeepaliveSnapshot",
-		);
+		await this.cacheKeepaliveSnapshots.insertSnapshot(row);
 	}
 
 	async getCacheKeepaliveSnapshots(opts: {
 		sinceMs: number;
 		bucketMs: number;
 	}): Promise<CacheKeepaliveHistoryPoint[]> {
-		return withDatabaseRetry(
-			() => this.cacheKeepaliveSnapshots.getSnapshots(opts),
-			this.retryConfig,
-			"getCacheKeepaliveSnapshots",
-		);
+		return this.cacheKeepaliveSnapshots.getSnapshots(opts);
 	}
 
 	async deleteCacheKeepaliveSnapshotsOlderThan(
 		cutoffMs: number,
 	): Promise<number> {
-		return withDatabaseRetry(
-			() => this.cacheKeepaliveSnapshots.deleteOlderThan(cutoffMs),
-			this.retryConfig,
-			"deleteCacheKeepaliveSnapshotsOlderThan",
-		);
+		return this.cacheKeepaliveSnapshots.deleteOlderThan(cutoffMs);
 	}
 
 	/** Most-recent cache-keepalive snapshot (for seeding bridgeStats at boot), or null. */
 	async getLatestCacheKeepaliveSnapshot(): Promise<CacheKeepaliveSnapshotRow | null> {
-		return withDatabaseRetry(
-			() => this.cacheKeepaliveSnapshots.getLatestSnapshot(),
-			this.retryConfig,
-			"getLatestCacheKeepaliveSnapshot",
-		);
+		return this.cacheKeepaliveSnapshots.getLatestSnapshot();
 	}
 
 	// ── Account payment (ledger) operations delegated to repository ───────────
@@ -2422,17 +2249,12 @@ OAuth tokens will need to be re-authenticated.
 		amountUsdMicros: number,
 		now: number = Date.now(),
 	): Promise<boolean> {
-		return withDatabaseRetry(
-			() =>
-				this.accountPayments.recordAuto(
-					accountId,
-					accountName,
-					dueDate,
-					amountUsdMicros,
-					now,
-				),
-			this.retryConfig,
-			"recordAutoPayment",
+		return this.accountPayments.recordAuto(
+			accountId,
+			accountName,
+			dueDate,
+			amountUsdMicros,
+			now,
 		);
 	}
 
@@ -2445,19 +2267,14 @@ OAuth tokens will need to be re-authenticated.
 		notes: string | null,
 		now: number = Date.now(),
 	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.accountPayments.upsertSubscription(
-					accountId,
-					accountName,
-					paidDate,
-					amountUsdMicros,
-					source,
-					notes,
-					now,
-				),
-			this.retryConfig,
-			"upsertSubscriptionPayment",
+		await this.accountPayments.upsertSubscription(
+			accountId,
+			accountName,
+			paidDate,
+			amountUsdMicros,
+			source,
+			notes,
+			now,
 		);
 	}
 
@@ -2471,80 +2288,51 @@ OAuth tokens will need to be re-authenticated.
 		importKey: string | null,
 		now: number = Date.now(),
 	): Promise<boolean> {
-		return withDatabaseRetry(
-			() =>
-				this.accountPayments.insertCredit(
-					accountId,
-					accountName,
-					paidDate,
-					amountUsdMicros,
-					source,
-					notes,
-					importKey,
-					now,
-				),
-			this.retryConfig,
-			"insertCreditPayment",
+		return this.accountPayments.insertCredit(
+			accountId,
+			accountName,
+			paidDate,
+			amountUsdMicros,
+			source,
+			notes,
+			importKey,
+			now,
 		);
 	}
 
 	async softDeletePayment(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.accountPayments.softDelete(id),
-			this.retryConfig,
-			"softDeletePayment",
-		);
+		return this.accountPayments.softDelete(id);
 	}
 
 	async getRecentPayments(limit: number): Promise<AccountPaymentRow[]> {
-		return withDatabaseRetry(
-			() => this.accountPayments.findRecent(limit),
-			this.retryConfig,
-			"getRecentPayments",
-		);
+		return this.accountPayments.findRecent(limit);
 	}
 
 	async getPaymentsInRange(
 		fromMs: number,
 		toMs: number,
 	): Promise<AccountPaymentRow[]> {
-		return withDatabaseRetry(
-			() => this.accountPayments.findInRange(fromMs, toMs),
-			this.retryConfig,
-			"getPaymentsInRange",
-		);
+		return this.accountPayments.findInRange(fromMs, toMs);
 	}
 
 	async sumPaymentsByKindInRange(
 		fromMs: number,
 		toMs: number,
 	): Promise<{ kind: string; total_micros: number }[]> {
-		return withDatabaseRetry(
-			() => this.accountPayments.sumByKindInRange(fromMs, toMs),
-			this.retryConfig,
-			"sumPaymentsByKindInRange",
-		);
+		return this.accountPayments.sumByKindInRange(fromMs, toMs);
 	}
 
 	async sumPaymentsByAccountInRange(
 		fromMs: number,
 		toMs: number,
 	): Promise<{ account_id: string; total_micros: number }[]> {
-		return withDatabaseRetry(
-			() => this.accountPayments.sumByAccountInRange(fromMs, toMs),
-			this.retryConfig,
-			"sumPaymentsByAccountInRange",
-		);
+		return this.accountPayments.sumByAccountInRange(fromMs, toMs);
 	}
 
 	async latestSubscriptionPaymentDueDate(
 		accountId: string,
 	): Promise<string | null> {
-		return withDatabaseRetry(
-			() => this.accountPayments.latestSubscriptionDueDate(accountId),
-			this.retryConfig,
-			"latestSubscriptionPaymentDueDate",
-		);
+		return this.accountPayments.latestSubscriptionDueDate(accountId);
 	}
 
 	// ── Codex reset-credit ledger operations delegated to repository ──────────
@@ -2557,15 +2345,10 @@ OAuth tokens will need to be re-authenticated.
 		cause: "expiry" | "weekly-limit";
 		now?: number;
 	}): Promise<CodexResetCreditAutoClaim | null> {
-		return withDatabaseRetry(
-			() =>
-				this.codexResetCreditEvents.claimAutoAttempt({
-					...input,
-					now: input.now ?? Date.now(),
-				}),
-			this.retryConfig,
-			"claimCodexResetCreditAutoAttempt",
-		);
+		return this.codexResetCreditEvents.claimAutoAttempt({
+			...input,
+			now: input.now ?? Date.now(),
+		});
 	}
 
 	async resolveCodexResetCreditAttempt(
@@ -2575,17 +2358,12 @@ OAuth tokens will need to be re-authenticated.
 		errorMessage: string | null,
 		now: number = Date.now(),
 	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.codexResetCreditEvents.resolveAttempt(
-					id,
-					status,
-					windowsReset,
-					errorMessage,
-					now,
-				),
-			this.retryConfig,
-			"resolveCodexResetCreditAttempt",
+		await this.codexResetCreditEvents.resolveAttempt(
+			id,
+			status,
+			windowsReset,
+			errorMessage,
+			now,
 		);
 	}
 
@@ -2599,38 +2377,25 @@ OAuth tokens will need to be re-authenticated.
 		errorMessage: string | null;
 		now?: number;
 	}): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.codexResetCreditEvents.recordManual({
-					...input,
-					now: input.now ?? Date.now(),
-				}),
-			this.retryConfig,
-			"recordManualCodexResetCreditEvent",
-		);
+		await this.codexResetCreditEvents.recordManual({
+			...input,
+			now: input.now ?? Date.now(),
+		});
 	}
 
 	async getTerminallyResolvedCodexResetCreditIds(
 		accountId: string,
 	): Promise<Set<string>> {
-		return withDatabaseRetry(
-			() =>
-				this.codexResetCreditEvents.getTerminallyResolvedCreditIds(accountId),
-			this.retryConfig,
-			"getTerminallyResolvedCodexResetCreditIds",
+		return this.codexResetCreditEvents.getTerminallyResolvedCreditIds(
+			accountId,
 		);
 	}
 
 	async getCodexResetCreditAutoApplyCooldownAnchorAt(
 		accountId: string,
 	): Promise<number | null> {
-		return withDatabaseRetry(
-			() =>
-				this.codexResetCreditEvents.getLatestAutoApplyCooldownAnchorAt(
-					accountId,
-				),
-			this.retryConfig,
-			"getCodexResetCreditAutoApplyCooldownAnchorAt",
+		return this.codexResetCreditEvents.getLatestAutoApplyCooldownAnchorAt(
+			accountId,
 		);
 	}
 
@@ -2638,10 +2403,6 @@ OAuth tokens will need to be re-authenticated.
 		accountId: string,
 		limit: number,
 	): Promise<CodexResetCreditEventRow[]> {
-		return withDatabaseRetry(
-			() => this.codexResetCreditEvents.findRecentForAccount(accountId, limit),
-			this.retryConfig,
-			"getRecentCodexResetCreditEvents",
-		);
+		return this.codexResetCreditEvents.findRecentForAccount(accountId, limit);
 	}
 }

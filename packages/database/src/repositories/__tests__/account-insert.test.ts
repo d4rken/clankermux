@@ -169,7 +169,11 @@ describe("insertAccountUnique", () => {
 describe("all production INSERT INTO accounts sites are guarded", () => {
 	const repoRoot = join(import.meta.dir, "..", "..", "..", "..", "..");
 	const files = [
-		["packages/http-api/src/handlers/accounts.ts", 10],
+		// The nine API-key providers previously had one hand-written INSERT each
+		// in accounts.ts; they now share the single parameterised INSERT in
+		// api-key-account-add.ts. Only the OAuth insert remains in accounts.ts.
+		["packages/http-api/src/handlers/accounts.ts", 1],
+		["packages/http-api/src/handlers/api-key-account-add.ts", 1],
 		["packages/http-api/src/handlers/oauth.ts", 2],
 		["packages/oauth-flow/src/index.ts", 2],
 	] as const;

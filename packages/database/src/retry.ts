@@ -126,3 +126,76 @@ export async function withDatabaseRetry<T>(
 
 	return executeWithRetryAsync(operation, retryConfig, operationName);
 }
+
+/**
+ * Wrap a repository so that every method call made *through the returned
+ * object* runs inside {@link withDatabaseRetry}.
+ *
+ * This exists so retry is a property of the repository rather than something
+ * each delegating method on `DatabaseOperations` has to remember to opt into.
+ * Before this, a new repository method reached callers unprotected until
+ * someone hand-wrote the `withDatabaseRetry(...)` wrapper around it, and a
+ * `SQLITE_BUSY` under write contention surfaced as a hard failure.
+ *
+ * Two details make this safe:
+ *
+ * - Methods are invoked with `this` bound to the **raw** target, not the proxy.
+ *   A repository method that calls a sibling (or the `BaseRepository.query`
+ *   helpers) therefore stays inside the single retry envelope opened by the
+ *   outbound call, instead of opening a nested one per internal statement.
+ * - `getConfig` is a thunk, read once per call. `DatabaseOperations.
+ *   setRuntimeConfig()` replaces `retryConfig` after construction, so capturing
+ *   the object here would pin every repository to the pre-runtime defaults.
+ *
+ * Every repository method is `async`, so wrapping cannot change a synchronous
+ * return into a promise.
+ *
+ * CONTRACT FOR REPOSITORY METHODS: a method must be safe to re-run in full.
+ * Retry replays the whole method, not the individual statement that failed, so
+ * a method that issues several writes can re-apply earlier ones. The dangerous
+ * shape is generating an id inside the method and then reading the row back in
+ * a second statement — a retryable failure on the read re-runs the insert under
+ * a fresh id and leaves a duplicate. Use a single `INSERT ... RETURNING`
+ * instead (see `ComboRepository.create`). Absolute-value `UPDATE`s and
+ * single-statement methods are already safe.
+ */
+export function withRetryingMethods<T extends object>(
+	target: T,
+	getConfig: () => DatabaseRetryConfig,
+	label: string,
+): T {
+	// Wrapped functions are memoized so repeated property access returns a
+	// stable identity (`repo.foo === repo.foo`), which spies and equality
+	// checks in tests rely on. The underlying function is stored alongside so a
+	// method replaced after its first read (a spy, a stub) is re-wrapped instead
+	// of being shadowed by a wrapper still bound to the original.
+	const wrapped = new Map<PropertyKey, { fn: unknown; retrying: unknown }>();
+
+	return new Proxy(target, {
+		get(obj, prop) {
+			const value = Reflect.get(obj, prop) as unknown;
+			if (typeof value !== "function") return value;
+
+			// Only repository methods get an envelope. Object.prototype members
+			// (`toString`, `valueOf`, `constructor`, …) are returned untouched:
+			// wrapping them would make `String(repo)` a promise and break
+			// `repo.constructor`. Symbol-keyed members are protocol hooks
+			// (Symbol.iterator, Symbol.toPrimitive) and are left alone too.
+			if (typeof prop === "symbol" || prop in Object.prototype) return value;
+
+			const memoized = wrapped.get(prop);
+			if (memoized && memoized.fn === value) return memoized.retrying;
+
+			const fn = value as (...args: unknown[]) => unknown;
+			const retrying = (...args: unknown[]) =>
+				withDatabaseRetry(
+					() => fn.apply(obj, args),
+					getConfig(),
+					`${label}.${String(prop)}`,
+				);
+
+			wrapped.set(prop, { fn: value, retrying });
+			return retrying;
+		},
+	});
+}
