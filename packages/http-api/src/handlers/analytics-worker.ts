@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { BunSqlAdapter } from "@clankermux/database";
-import type { APIContext } from "@clankermux/types";
+import type { APIContext } from "../types";
 import { createAnalyticsHandler } from "./analytics-direct";
 import { createCacheEffectivenessHandler } from "./cache-effectiveness-direct";
 import { createCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";

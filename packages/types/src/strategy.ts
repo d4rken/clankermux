@@ -1,4 +1,5 @@
 import type { Account } from "./account";
+import type { RequestMeta } from "./api";
 
 export enum StrategyName {
 	Session = "session",
@@ -93,4 +94,43 @@ export interface StrategyStore {
 		provider: string,
 		now: number,
 	): CapacitySignal | null;
+}
+
+// Load balancing strategy interface
+export interface LoadBalancingStrategy {
+	/**
+	 * Return a filtered & ordered list of candidate accounts.
+	 * Accounts that are rate-limited should be filtered out.
+	 * The first account in the list should be tried first.
+	 */
+	select(accounts: Account[], meta: RequestMeta): Account[];
+
+	/**
+	 * Side-effect-free preview: the filtered & ordered accounts a fresh,
+	 * no-affinity request would consider, BEFORE proxy-level gates (provider
+	 * overload, usage throttling, context-window, burst). MUST NOT mutate
+	 * routing state. `peek` returns peekRanked()[0]?.id ?? null.
+	 */
+	peekRanked(accounts: Account[]): Account[];
+
+	/**
+	 * Side-effect-free preview: return the ID of the account that would
+	 * be picked first by select() given the current state, or null if
+	 * no account is available. MUST NOT mutate any state (no DB writes,
+	 * no resumeAccount, no resetSession, no internal counters).
+	 */
+	peek(accounts: Account[]): string | null;
+
+	/**
+	 * Optional initialization method to inject dependencies
+	 * Used for strategies that need access to a StrategyStore
+	 */
+	initialize?(store: StrategyStore): void;
+
+	/**
+	 * Optional: clear all session-affinity pins pointing at the given account,
+	 * so its stuck sessions re-pick on their next request. Returns the number
+	 * of pins removed. Strategies without affinity (e.g. LeastUsed) omit this.
+	 */
+	clearAffinityForAccount?(accountId: string): number;
 }
