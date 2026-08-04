@@ -1156,21 +1156,6 @@ export class AutoRefreshScheduler {
 	 * depend on the x-codex-* headers surviving the multiple response rebuilds
 	 * (model-mapping transform, codex processResponse, streaming transform) between
 	 * upstream and the client-facing Response we hold here.
-	 *
-	 * UNKNOWN credits FAIL CLOSED — the account stays paused. This reverses the
-	 * original rule, which resumed on absent credits on the grounds that "a stale
-	 * pause is worse than an extra probe that re-pauses if needed". The two
-	 * outcomes are not symmetric: resuming wrongly spends real money until an
-	 * informative observation arrives, while staying paused wrongly costs only
-	 * latency on ONE account, and not for long — the scheduler's eligibility query
-	 * keeps selecting overage-paused accounts, so the next prime that carries
-	 * credits resumes it a cooldown later.
-	 *
-	 * Absent credits is a reachable state, not a hypothetical: the read below is
-	 * the EVICTING usageCache.get(), so any gap wider than USAGE_CACHE_TTL_MS
-	 * between informative observations empties it, and a codex response that
-	 * carries no credits headers cannot refill it (codex-observation carries the
-	 * previous value forward, and there is nothing to carry).
 	 */
 	private shouldResumeFromOverage(account: {
 		id: string;
@@ -1182,15 +1167,11 @@ export class AutoRefreshScheduler {
 		const cached = usageCache.get(account.id) as {
 			codexCredits?: CodexCreditsInfo | null;
 		} | null;
-		const credits = cached?.codexCredits ?? null;
-		if (credits === null) {
-			log.info(
-				`Not resuming ${account.id} from overage: no credits evidence available (staying paused until an observation proves the weekly window has room)`,
-			);
-			return false;
-		}
-		// Credits are known: resume only when no longer on them (weekly has room).
-		return !isCodexOnCredits(credits);
+		// Resume only when no longer on credits (weekly has room again). If the
+		// cache lacks credits info (null/undefined → isCodexOnCredits(null) is
+		// false), we resume — we have no evidence the account is still on credits,
+		// and a stale pause is worse than an extra probe that re-pauses if needed.
+		return !isCodexOnCredits(cached?.codexCredits ?? null);
 	}
 
 	/**
