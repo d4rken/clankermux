@@ -74,7 +74,22 @@ describe("AutoRefreshScheduler — codex credits resume guard", () => {
 		).toBe(true);
 	});
 
-	it("allows resume for codex when not on credits (no cache entry)", async () => {
+	/**
+	 * FAIL CLOSED on unknown credits. This reverses the original rule, which
+	 * resumed on an absent cache entry reasoning that "a stale pause is worse than
+	 * an extra probe that re-pauses if needed".
+	 *
+	 * The outcomes are not symmetric. Resuming without evidence spends real money
+	 * until an informative observation arrives; staying paused without evidence
+	 * costs latency on one account, and only until the next prime that carries
+	 * credits (the scheduler's eligibility query keeps selecting overage-paused
+	 * accounts, so one is always coming).
+	 *
+	 * "No cache entry" is a REACHABLE state, not a hypothetical: the guard reads
+	 * through the evicting usageCache.get(), so any gap wider than
+	 * USAGE_CACHE_TTL_MS between informative observations empties it.
+	 */
+	it("BLOCKS resume for codex when credits are unknown (no cache entry)", async () => {
 		const s = await makeScheduler();
 		expect(
 			s.shouldResumeFromOverage({
@@ -82,7 +97,21 @@ describe("AutoRefreshScheduler — codex credits resume guard", () => {
 				provider: "codex",
 				pause_reason: "overage",
 			}),
-		).toBe(true);
+		).toBe(false);
+	});
+
+	it("BLOCKS resume for codex when a cache entry exists but carries no credits", async () => {
+		const s = await makeScheduler();
+		// A codex response that carried no credits headers, with nothing cached to
+		// carry forward — usage is known, credits are not.
+		seedCredits("no-credits", null);
+		expect(
+			s.shouldResumeFromOverage({
+				id: "no-credits",
+				provider: "codex",
+				pause_reason: "overage",
+			}),
+		).toBe(false);
 	});
 
 	it("allows resume for codex when credits info is present but below weekly limit", async () => {
