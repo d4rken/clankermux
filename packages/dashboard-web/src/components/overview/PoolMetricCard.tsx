@@ -1,10 +1,12 @@
 import { formatPercentage } from "@clankermux/ui-common";
 import { Info } from "lucide-react";
-import type {
-	ExcludedReason,
-	FamilyWeeklyUsage,
-	PoolUsageResult,
-	PoolWindow,
+import {
+	type ExcludedReason,
+	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+	type FamilyWeeklyAccountUsage,
+	type FamilyWeeklyUsage,
+	type PoolUsageResult,
+	type PoolWindow,
 } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
@@ -120,6 +122,28 @@ function atRiskBadge(
 	};
 }
 
+/**
+ * Percent for display. Floors rather than rounds: every threshold here (100
+ * exhausted, {@link FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT} elevated) is tested on
+ * the raw value, and `toFixed(0)` rounds 99.6 up to a "100%" the logic did not
+ * treat as exhausted — a label claiming a threshold no count agrees with.
+ * Flooring makes the shown number cross a threshold exactly when the raw one
+ * does. Percents are fractional in the wire payload, so this is reachable.
+ */
+function displayPct(pct: number): string {
+	return `${Math.floor(pct)}%`;
+}
+
+/**
+ * One-line summary of the per-family weekly limits for the 7d tile.
+ *
+ * `worstPct` is the single most-spent account, NOT a pool aggregate, so every
+ * label states the scope it covers: one account at 100% out of six with
+ * headroom must not read as "the pool is out of Fable". The denominator is the
+ * accounts that actually report that family's window (already filtered to ones
+ * the tile counts as available); the numerator is how many of them crossed the
+ * line being reported.
+ */
 export function familyWeeklyBadge(familyWeekly: FamilyWeeklyUsage[]): {
 	label: string | null;
 	colorClass: string | null;
@@ -130,13 +154,60 @@ export function familyWeeklyBadge(familyWeekly: FamilyWeeklyUsage[]): {
 	const colorClass = anyExhausted ? "text-destructive" : "text-warning";
 	if (elevated.length === 1) {
 		const f = elevated[0];
+		const total = f.accounts.length;
+		const noun = total === 1 ? "account" : "accounts";
+		// Report the count for the condition actually named: exhausted accounts
+		// for "exhausted", merely-elevated ones for the percentage form.
 		const label =
 			f.worstPct >= 100
-				? `${f.label} weekly limit exhausted`
-				: `${f.label} weekly limit at ${f.worstPct.toFixed(0)}%`;
+				? `${f.label} weekly exhausted on ${f.exhaustedCount} of ${total} ${noun}`
+				: `${f.label} weekly at ${displayPct(f.worstPct)} on ${f.elevatedCount} of ${total} ${noun}`;
 		return { label, colorClass };
 	}
-	return { label: `${elevated.length} model limits elevated`, colorClass };
+	// Several families elevated: no room for per-account scope on one line, so
+	// scope against the tracked families instead. The unit word is spelled out
+	// so this count can't be read as an account count.
+	return {
+		label: `${elevated.length} of ${familyWeekly.length} model limits elevated`,
+		colorClass,
+	};
+}
+
+/**
+ * Meta line for a family in the popover: who the `max` figure above covers, and
+ * when that same set recovers.
+ *
+ * The reset is scoped to the accounts the prefix names, NOT the family-wide
+ * earliest. "1 of 6 exhausted · resets Tue" alongside a Tuesday belonging to a
+ * healthy account would read as the exhausted account recovering Tuesday, which
+ * is a claim nothing here checked.
+ */
+export function familyScopeSummary(f: FamilyWeeklyUsage): {
+	prefix: string;
+	resetMs: number;
+} {
+	const total = f.accounts.length;
+	const earliestOf = (rows: FamilyWeeklyAccountUsage[]) =>
+		Math.min(...rows.map((a) => a.resetMs));
+
+	if (total === 1) {
+		return { prefix: `${f.worstAccountName} · `, resetMs: f.earliestResetMs };
+	}
+	if (f.exhaustedCount > 0) {
+		return {
+			prefix: `${f.exhaustedCount} of ${total} exhausted · `,
+			resetMs: earliestOf(f.accounts.filter((a) => a.pct >= 100)),
+		};
+	}
+	if (f.elevatedCount > 0) {
+		return {
+			prefix: `${f.elevatedCount} of ${total} elevated · `,
+			resetMs: earliestOf(
+				f.accounts.filter((a) => a.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT),
+			),
+		};
+	}
+	return { prefix: `${total} accounts · `, resetMs: f.earliestResetMs };
 }
 
 function PoolDetailSection({
@@ -214,48 +285,57 @@ function PoolDetailSection({
 						healthy.
 					</div>
 					<ul className="space-y-0.5">
-						{familyWeekly.map((f) => (
-							<li key={f.family}>
-								<div className="flex items-center justify-between gap-2">
-									<span className="truncate" title={f.label}>
-										{f.label}
-									</span>
-									<span
-										className={cn(
-											"tabular-nums",
-											f.worstPct >= 100
-												? "text-destructive"
-												: f.elevated
-													? "text-warning"
-													: undefined,
-										)}
-									>
-										{f.worstPct.toFixed(0)}%
-									</span>
-								</div>
-								<div className="text-muted-foreground">
-									{f.accounts.length === 1 && `${f.worstAccountName} · `}
-									resets {nextQuotaTimeLabel(f.earliestResetMs, "seven_day")}
-								</div>
-								{f.accounts.length > 1 && (
-									<ul className="ml-2 space-y-0.5">
-										{f.accounts.map((a) => (
-											<li
-												key={a.name}
-												className="flex items-center justify-between gap-2"
-											>
-												<span className="truncate" title={a.name}>
-													{a.name}
-												</span>
-												<span className="tabular-nums">
-													{a.pct.toFixed(0)}%
-												</span>
-											</li>
-										))}
-									</ul>
-								)}
-							</li>
-						))}
+						{familyWeekly.map((f) => {
+							const scope = familyScopeSummary(f);
+							return (
+								<li key={f.family}>
+									<div className="flex items-center justify-between gap-2">
+										<span className="truncate" title={f.label}>
+											{f.label}
+										</span>
+										<span
+											className={cn(
+												"tabular-nums",
+												f.worstPct >= 100
+													? "text-destructive"
+													: f.elevated
+														? "text-warning"
+														: undefined,
+											)}
+											title={
+												f.accounts.length > 1
+													? `Highest single account (${f.worstAccountName})`
+													: undefined
+											}
+										>
+											{f.accounts.length > 1 && "max "}
+											{displayPct(f.worstPct)}
+										</span>
+									</div>
+									<div className="text-muted-foreground">
+										{scope.prefix}
+										resets {nextQuotaTimeLabel(scope.resetMs, "seven_day")}
+									</div>
+									{f.accounts.length > 1 && (
+										<ul className="ml-2 space-y-0.5">
+											{f.accounts.map((a) => (
+												<li
+													key={a.name}
+													className="flex items-center justify-between gap-2"
+												>
+													<span className="truncate" title={a.name}>
+														{a.name}
+													</span>
+													<span className="tabular-nums">
+														{displayPct(a.pct)}
+													</span>
+												</li>
+											))}
+										</ul>
+									)}
+								</li>
+							);
+						})}
 					</ul>
 				</div>
 			)}

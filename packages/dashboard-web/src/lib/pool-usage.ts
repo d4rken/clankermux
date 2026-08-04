@@ -62,14 +62,20 @@ export interface FamilyWeeklyAccountUsage {
 
 /**
  * Aggregated per-model-family weekly usage across the pool. A family limit is
- * independent, actionable info even when the account-wide weekly window is
- * healthy (or exhausted), so this is computed separately from the pool average.
+ * independent, actionable info even when the account-wide weekly window reads
+ * healthy, so this is computed separately from the pool average. Accounts whose
+ * own account-wide window is spent are excluded — see
+ * {@link computeFamilyWeeklyUsage}. Exactly one row per account per family.
  */
 export interface FamilyWeeklyUsage {
 	family: ModelFamily;
 	/** Anthropic display name for the family, e.g. "Fable". */
 	label: string;
-	/** Max pct across contributing accounts for this family. */
+	/**
+	 * Max pct across contributing accounts for this family. This is ONE
+	 * account's number, not a pool aggregate — pair it with `exhaustedCount` /
+	 * `elevatedCount` over `accounts.length` before stating anything pool-wide.
+	 */
 	worstPct: number;
 	/** The account driving worstPct. */
 	worstAccountName: string;
@@ -77,6 +83,10 @@ export interface FamilyWeeklyUsage {
 	earliestResetMs: number;
 	/** worstPct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT. */
 	elevated: boolean;
+	/** Accounts of `accounts` at/above 100% — i.e. actually out of this family. */
+	exhaustedCount: number;
+	/** Accounts of `accounts` at/above FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT. */
+	elevatedCount: number;
 	/** Per-account rows, sorted desc by pct. */
 	accounts: FamilyWeeklyAccountUsage[];
 }
@@ -285,11 +295,21 @@ function classifyQuotaExhaustion(
 
 /**
  * Aggregate per-model-family weekly usage across the pool. A family's weekly
- * quota is independent of the account-wide 5h/7d windows, so this is NOT gated
- * on quota exhaustion — it's still actionable info when an account-wide window
- * is also spent. Accounts unavailable for structural reasons (paused /
- * rate-limited / token-expired / usage-429-with-no-data) are excluded via
- * {@link classifyExclusion}. Only Anthropic-style payloads carry scoped windows.
+ * quota is independent of the account-wide 5h/7d windows, so a family can be
+ * spent while the pool headline reads healthy — that is the case this exists to
+ * surface.
+ *
+ * Accounts are excluded on the same terms the pool tile itself uses: structural
+ * unavailability via {@link classifyExclusion} (paused / rate-limited /
+ * token-expired / usage-429-with-no-data) AND account-wide quota exhaustion via
+ * {@link classifyQuotaExhaustion}. The quota filter is deliberate: an account
+ * whose own 5h/7d window is spent cannot serve ANY family, so folding its
+ * per-family number in here inflated `worstPct` with an account the tile had
+ * already moved to its "Exhausted" section — the badge then cited an account
+ * the same card listed as unavailable. Those accounts are not hidden, they are
+ * reported where they belong (`exhausted`), so do not "restore" them here.
+ *
+ * Only Anthropic-style payloads carry scoped windows.
  *
  * The per-family scoped windows come from {@link normalizeAnthropicUsage}, which
  * already filters to finite percent, resolvable family, and finite FUTURE reset
@@ -299,14 +319,22 @@ export function computeFamilyWeeklyUsage(
 	accounts: AccountResponse[],
 	now: number,
 ): FamilyWeeklyUsage[] {
+	// Rows are keyed by account id, not pushed: ONE account can report several
+	// scoped windows that collapse onto the same family — getModelFamily() maps
+	// Mythos-class display names onto "fable". Left as a plain push, that account
+	// would occupy two rows and inflate `accounts.length`, which is the
+	// denominator of a user-visible "N of M accounts" claim (and would collide as
+	// a React key in the per-account popover list). Keyed by id rather than name
+	// because names are user-set and need not be unique.
 	const buckets = new Map<
 		ModelFamily,
-		{ label: string; accounts: FamilyWeeklyAccountUsage[] }
+		{ label: string; accounts: Map<string, FamilyWeeklyAccountUsage> }
 	>();
 
 	for (const account of accounts) {
 		if (classifyExclusion(account, now) !== null) continue;
 		if (!account.usageData) continue;
+		if (classifyQuotaExhaustion(account) !== null) continue;
 		if (!isAnthropicStyleShape(account.usageData)) continue;
 
 		const scoped = normalizeAnthropicUsage(
@@ -317,22 +345,32 @@ export function computeFamilyWeeklyUsage(
 		for (const limit of scoped) {
 			let bucket = buckets.get(limit.family);
 			if (bucket === undefined) {
-				bucket = { label: limit.displayName, accounts: [] };
+				bucket = { label: limit.displayName, accounts: new Map() };
 				buckets.set(limit.family, bucket);
 			}
-			bucket.accounts.push({
-				name: account.name,
-				pct: limit.percent,
-				resetMs: limit.resetsAtMs,
-			});
+			const previous = bucket.accounts.get(account.id);
+			// Keep the binding window for this account: highest percent, and on a
+			// tie the one that clears first.
+			const supersedes =
+				previous === undefined ||
+				limit.percent > previous.pct ||
+				(limit.percent === previous.pct && limit.resetsAtMs < previous.resetMs);
+			if (supersedes) {
+				bucket.accounts.set(account.id, {
+					name: account.name,
+					pct: limit.percent,
+					resetMs: limit.resetsAtMs,
+				});
+			}
 		}
 	}
 
 	const result: FamilyWeeklyUsage[] = [];
 	for (const [family, bucket] of buckets) {
-		const sortedAccounts = [...bucket.accounts].sort((a, b) => b.pct - a.pct);
+		const rows = [...bucket.accounts.values()];
+		const sortedAccounts = rows.sort((a, b) => b.pct - a.pct);
 		const worst = sortedAccounts[0];
-		const earliestResetMs = Math.min(...bucket.accounts.map((a) => a.resetMs));
+		const earliestResetMs = Math.min(...rows.map((a) => a.resetMs));
 		result.push({
 			family,
 			label: bucket.label,
@@ -340,6 +378,10 @@ export function computeFamilyWeeklyUsage(
 			worstAccountName: worst.name,
 			earliestResetMs,
 			elevated: worst.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+			exhaustedCount: sortedAccounts.filter((a) => a.pct >= 100).length,
+			elevatedCount: sortedAccounts.filter(
+				(a) => a.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+			).length,
 			accounts: sortedAccounts,
 		});
 	}
