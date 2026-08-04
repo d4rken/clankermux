@@ -73,6 +73,13 @@ export {
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
 } from "./handlers";
+// Re-exported for apps/server, which must answer a departed client with the same
+// 499 terminal the proxy uses. Imported from the leaf module because the
+// ./handlers barrel does not export it at all — the leaf sits outside that
+// barrel on purpose, so that proxy.ts and proxy-operations.ts can both use it
+// without an import cycle. Safe for the browser bundle: dashboard-web does not
+// depend on this package.
+export { createClientAbortResponse } from "./handlers/client-abort-response";
 export {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,

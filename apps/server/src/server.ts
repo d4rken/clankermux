@@ -94,6 +94,7 @@ import {
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
+import { terminalForRequestError } from "./request-error-terminal";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
@@ -1268,30 +1269,46 @@ export default async function startServer(options?: {
 					);
 				}
 
-				// All other paths go to proxy
-				// Authenticate the proxy request with error handling to prevent bypass
+				// All other paths go to proxy.
+				//
+				// Authenticate inside its OWN error boundary. A throw from THIS call is
+				// an auth-service failure, and answering 401 preserves the contract this
+				// endpoint has always had for that case. What changed is the SCOPE: the
+				// boundary now covers this call alone. Everything downstream of a
+				// successful authentication gets the separate boundary further down,
+				// because a failure there says nothing about the caller's credentials.
+				let authResult: Awaited<ReturnType<AuthService["authenticateRequest"]>>;
 				try {
-					const authResult = await authService.authenticateRequest(
+					authResult = await authService.authenticateRequest(
 						req,
 						url.pathname,
 						req.method,
 					);
-					if (!authResult.isAuthenticated) {
-						return new Response(
-							JSON.stringify({
-								type: "error",
-								error: {
-									type: "authentication_error",
-									message: authResult.error || "Authentication failed",
-								},
-							}),
-							{
-								status: 401,
-								headers: { "Content-Type": "application/json" },
-							},
-						);
-					}
+				} catch (authError) {
+					return terminalForRequestError(req, authError, "auth");
+				}
 
+				if (!authResult.isAuthenticated) {
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: {
+								type: "authentication_error",
+								message: authResult.error || "Authentication failed",
+							},
+						}),
+						{
+							status: 401,
+							headers: { "Content-Type": "application/json" },
+						},
+					);
+				}
+
+				// Everything past this point runs on an AUTHENTICATED request, so a
+				// failure here is a departed client or our own fault — never the
+				// caller's credentials. Its own boundary keeps it from being reported
+				// as an auth error, which is what this whole block used to do.
+				try {
 					// Codex CLI first tries WebSocket transport for /v1/responses.
 					// We only support HTTP — reject the upgrade cleanly so Codex
 					// falls back to HTTPS without hitting the proxy with an empty body.
@@ -1350,22 +1367,8 @@ export default async function startServer(options?: {
 						authResult.apiKeyId,
 						authResult.apiKeyName,
 					);
-				} catch (authError) {
-					// Log authentication errors for security monitoring
-					log.error("Authentication service error:", authError);
-					return new Response(
-						JSON.stringify({
-							type: "error",
-							error: {
-								type: "authentication_error",
-								message: "Authentication service error",
-							},
-						}),
-						{
-							status: 401,
-							headers: { "Content-Type": "application/json" },
-						},
-					);
+				} catch (dispatchError) {
+					return terminalForRequestError(req, dispatchError, "dispatch");
 				}
 			},
 		};
