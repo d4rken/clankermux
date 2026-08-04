@@ -9,7 +9,6 @@
 	"dependencies": {
 		"@clankermux/config": "workspace:*",
 		"@clankermux/database": "workspace:*",
-		"@clankermux/providers": "workspace:*",
-		"@clankermux/types": "workspace:*"
+		"@clankermux/providers": "workspace:*"
 	}
 }

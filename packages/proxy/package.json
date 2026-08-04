@@ -15,7 +15,6 @@
 		"@clankermux/database": "workspace:*",
 		"@clankermux/logger": "workspace:*",
 		"@clankermux/providers": "workspace:*",
-		"@clankermux/types": "workspace:*",
-		"@clankermux/ui-common": "workspace:*"
+		"@clankermux/types": "workspace:*"
 	}
 }
