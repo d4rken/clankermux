@@ -193,8 +193,15 @@ export class AutoRefreshScheduler {
 	// previous-reset baseline that window-roll detection compares against. Before
 	// this cooldown existed the 60s loop kept that entry warm by accident; the
 	// margin is what replaces that accident with a guarantee.
-	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS =
-		USAGE_CACHE_TTL_MS - 3 * 60 * 1000;
+	//
+	// HALF the TTL, not "TTL minus a few minutes": the real gap between two primes
+	// is the cooldown PLUS however long this account waits for its turn, and that
+	// wait is not bounded tightly. Primes run SEQUENTIALLY over the due batch,
+	// after the cleanup pass and the token-refresh queries, so a few slow or
+	// hanging round trips ahead of an account can add minutes. At half the TTL the
+	// gap can double before the invariant breaks; a three-minute margin would
+	// already be a third spent by a single scheduler tick.
+	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS = USAGE_CACHE_TTL_MS / 2;
 	// Maximum age of a cached usage datum we will trust when classifying a weekly
 	// window as dormant. Older than this → treat as unknown and skip (no prime).
 	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
@@ -381,15 +388,23 @@ export class AutoRefreshScheduler {
 				);
 			});
 
-			// Filter accounts for the FIVE-HOUR reason: only refresh if this is a NEW
-			// 5h window. The fiveHourWindowGate reproduces the predicate the base SQL
-			// used to enforce (we removed it from the query so the weekly pass can see
-			// all accounts). It is REQUIRED: without it, a never-refreshed account whose
+			// Accounts the FIVE-HOUR reason OWNS this cycle: this is a NEW 5h window.
+			// The fiveHourWindowGate reproduces the predicate the base SQL used to
+			// enforce (we removed it from the query so the weekly pass can see all
+			// accounts). It is REQUIRED: without it, a never-refreshed account whose
 			// 5h reset is still in the FUTURE would hit shouldRefreshAccount's first-time
 			// `return true` branch and be primed on first sight — a regression. The gate
 			// gives shouldRefreshAccount exactly the rows the old SQL would have surfaced.
-			const accountsToRefresh = accounts.filter((account) =>
+			const fiveHourOwned = accounts.filter((account) =>
 				this.fiveHourDue(account, now),
+			);
+
+			// Of those, the ones not currently throttled — the sends we actually make.
+			// OWNERSHIP and DUE-NOW are deliberately separate: the weekly pass defers to
+			// ownership, so a throttled account is not simply re-primed under the other
+			// reason on the next cycle (which would defeat the cooldown entirely).
+			const accountsToRefresh = fiveHourOwned.filter(
+				(account) => !this.isFiveHourPrimeCoolingDown(account.id, now),
 			);
 
 			if (accountsToRefresh.length > 0) {
@@ -397,12 +412,18 @@ export class AutoRefreshScheduler {
 					`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
 				);
 			}
+			const throttled = fiveHourOwned.length - accountsToRefresh.length;
+			if (throttled > 0) {
+				log.debug(
+					`${throttled} account(s) due for a 5h prime are inside the prime cooldown; deferring`,
+				);
+			}
 
-			// Snapshot which accounts are due for a 5h prime BEFORE we send anything.
-			// The weekly pass uses this set to defer to the 5h reason — building it
+			// Snapshot which accounts the 5h reason owns BEFORE we send anything. The
+			// weekly pass uses this set to defer to the 5h reason — building it
 			// pre-send guarantees "5h wins" even if a 5h send fails (a failed send must
 			// not reclassify the account as weekly-only and prime it twice).
-			const fiveHourDueIds = new Set(accountsToRefresh.map((a) => a.id));
+			const fiveHourDueIds = new Set(fiveHourOwned.map((a) => a.id));
 
 			// Prime each due account. primeAccount dispatches on provider: codex
 			// accounts flow through the CodexSpendCoordinator's native ping;
@@ -484,12 +505,21 @@ export class AutoRefreshScheduler {
 	 * Both the 5h loop and the weekly-dormant prime route through here.
 	 */
 	/**
-	 * @returns whether a prime was actually ATTEMPTED against the provider. False
-	 * only when the codex coordinator declined to send anything at all (see
-	 * {@link handleCodexPrimeOutcome}'s `skipped`). Callers use this to decide
-	 * whether to start the 5h prime cooldown: throttling a request that was never
-	 * made would delay the first real prime after the reason for skipping (a
-	 * missing token, auto-refresh switched back on) has gone away.
+	 * @returns whether this account should start its 5h prime cooldown.
+	 *
+	 * False ONLY for the codex coordinator's `skipped` — the one no-send outcome
+	 * that is both common and self-resolving (a missing token, auto-refresh
+	 * switched back on), where throttling a request that was never made would
+	 * delay the first real prime after the cause is fixed.
+	 *
+	 * It is deliberately NOT a general "reached the provider" flag. The translated
+	 * path also returns early without dispatching (auto-refresh toggled off
+	 * mid-cycle, no provider registered, a codex row reaching it by mistake), and
+	 * codex reports `failed` when token acquisition fails before the native
+	 * request. All of those return true here, so those accounts wait a cooldown
+	 * rather than a tick. That is accepted: each is either a state we do not want
+	 * to prime from anyway or one the consecutive-failure counter already owns,
+	 * and none is worth threading a discriminated outcome through every path.
 	 */
 	private async primeAccount(
 		accountRow: AutoRefreshAccountRow,
@@ -1705,16 +1735,14 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * True when an account is due for a FIVE-HOUR prime: it is outside the
-	 * per-account prime cooldown, passes the window gate, AND satisfies
-	 * shouldRefreshAccount's new-window detection. The latter two reproduce the
-	 * old behaviour (SQL pre-filter + shouldRefreshAccount) exactly; the cooldown
-	 * bounds the re-prime rate when a provider keeps reporting an already-elapsed
-	 * reset (see FIVE_HOUR_PRIME_COOLDOWN_MS).
+	 * True when the FIVE-HOUR reason OWNS this account this cycle: it passes the
+	 * window gate AND shouldRefreshAccount's new-window detection. Composing the
+	 * two reproduces the old behaviour (SQL pre-filter + shouldRefreshAccount)
+	 * exactly.
 	 *
-	 * The cooldown is checked FIRST so a throttled account never reaches
-	 * shouldRefreshAccount, whose "new window detected" log line would otherwise
-	 * claim a prime that is not going to happen.
+	 * Ownership deliberately ignores the prime cooldown — see
+	 * {@link isFiveHourPrimeCoolingDown}. A throttled account is still the 5h
+	 * reason's, and the weekly pass must keep deferring to it.
 	 */
 	private fiveHourDue(
 		account: {
@@ -1729,16 +1757,21 @@ export class AutoRefreshScheduler {
 		},
 		now: number,
 	): boolean {
-		const lastPrime = this.lastFiveHourPrimeTime.get(account.id);
-		if (
-			lastPrime !== undefined &&
-			now - lastPrime < this.FIVE_HOUR_PRIME_COOLDOWN_MS
-		) {
-			return false;
-		}
 		return (
 			this.fiveHourWindowGate(account, now) &&
 			this.shouldRefreshAccount(account, now)
+		);
+	}
+
+	/**
+	 * True while an account is inside {@link FIVE_HOUR_PRIME_COOLDOWN_MS} of its
+	 * last 5h prime ATTEMPT, i.e. the 5h reason owns it but must not send now.
+	 */
+	private isFiveHourPrimeCoolingDown(accountId: string, now: number): boolean {
+		const lastPrime = this.lastFiveHourPrimeTime.get(accountId);
+		return (
+			lastPrime !== undefined &&
+			now - lastPrime < this.FIVE_HOUR_PRIME_COOLDOWN_MS
 		);
 	}
 
@@ -1796,18 +1829,20 @@ export class AutoRefreshScheduler {
 	/**
 	 * Pick at most ONE account to prime for the WEEKLY-dormant reason this cycle.
 	 * Candidates must:
-	 *  - NOT already be due for a 5h prime (5h reason takes precedence),
-	 *  - have a 5h window that is still ACTIVE (reset known and in the future),
+	 *  - NOT be OWNED by the 5h reason this cycle (5h takes precedence),
 	 *  - be anthropic-OAuth (provider==='anthropic' && refresh_token present),
 	 *  - have a dormant weekly window (isWeeklyDormant), and
 	 *  - be outside the per-account WEEKLY_PRIME_COOLDOWN_MS.
 	 *
-	 * The active-5h requirement is what the `fiveHourDueIds` check alone cannot
-	 * express. That set contains only accounts that passed the 5h prime cooldown,
-	 * so an account whose 5h reset has ARRIVED but which is being throttled is
-	 * absent from it — and would otherwise be physically primed here on the very
-	 * next cycle under the weekly reason, defeating the 5h cooldown and priming an
-	 * account whose 5h window this path is documented not to touch.
+	 * `fiveHourDueIds` must therefore be the set of accounts the 5h reason OWNS,
+	 * not the set it is about to prime — the two differ once the 5h prime cooldown
+	 * can suppress a send. Deferring on the narrower set would let a throttled
+	 * account be physically primed here on the very next cycle, defeating that
+	 * cooldown. Testing the row's own 5h state instead is NOT a substitute: a null
+	 * `rate_limit_reset` (which response-processor persists whenever a unified
+	 * status carries no reset header) is neither "active" nor 5h-due once the
+	 * account has been refreshed before, so an idle backup in that state would be
+	 * starved by both reasons indefinitely.
 	 * Survivors are sorted OLDEST-weekly-prime-first (a never-primed account, whose
 	 * lastWeeklyPrimeTime is absent → treated as 0, sorts ahead of any previously
 	 * primed account), tie-broken by id ascending for determinism. The first is
@@ -1825,8 +1860,6 @@ export class AutoRefreshScheduler {
 		const eligible = candidates.filter(
 			(c) =>
 				!fiveHourDueIds.has(c.id) &&
-				// 5h window still active: reset known AND still in the future.
-				!this.fiveHourWindowGate(c, now) &&
 				c.provider === "anthropic" &&
 				!!c.refresh_token &&
 				this.isWeeklyDormant(c.id, now) &&

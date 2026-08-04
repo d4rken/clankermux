@@ -15,9 +15,14 @@
  * prime — a 5h window cannot roll twice inside the cooldown, so in the healthy
  * case the last prime is hours old and the gate is already open.
  *
- * These exercise the decision method directly (fiveHourDue), matching the
- * convention in auto-refresh-weekly-priming.test.ts — checkAndRefresh runs
- * unrelated token-refresh / peak-hours queries against the mock db.
+ * OWNERSHIP and DUE-NOW are separate predicates, and the split is load-bearing:
+ * `fiveHourDue` says the 5h reason owns the account, `isFiveHourPrimeCoolingDown`
+ * says whether it may send. The weekly pass defers to OWNERSHIP, so a throttled
+ * account is not simply re-primed under the weekly reason on the next cycle.
+ *
+ * These exercise the decision methods directly, matching the convention in
+ * auto-refresh-weekly-priming.test.ts — checkAndRefresh runs unrelated
+ * token-refresh / peak-hours queries against the mock db.
  */
 import { describe, expect, it, mock } from "bun:test";
 import { USAGE_CACHE_TTL_MS } from "@clankermux/providers";
@@ -50,11 +55,27 @@ type Row = {
 
 type SchedulerInternals = AutoRefreshScheduler & {
 	fiveHourDue(account: Row, now: number): boolean;
+	isFiveHourPrimeCoolingDown(accountId: string, now: number): boolean;
 	primeAccount(account: Row): Promise<boolean>;
 	lastRefreshResetTime: Map<string, number>;
 	lastFiveHourPrimeTime: Map<string, number>;
 	FIVE_HOUR_PRIME_COOLDOWN_MS: number;
 };
+
+/**
+ * What the scheduler actually sends: owned by the 5h reason AND not throttled.
+ * Mirrors the two-step filter in checkAndRefresh.
+ */
+function willPrime(
+	scheduler: SchedulerInternals,
+	row: Row,
+	now: number,
+): boolean {
+	return (
+		scheduler.fiveHourDue(row, now) &&
+		!scheduler.isFiveHourPrimeCoolingDown(row.id, now)
+	);
+}
 
 /** Minimal coordinator fake: `observe` resolves to the given canned result. */
 function makeCoordinator(status: "skipped" | "completed" | "failed") {
@@ -110,7 +131,7 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		const row = makeRow({ rate_limit_reset: NOW - 60_000 });
 		scheduler.lastRefreshResetTime.set(row.id, NOW - 60_000);
 
-		expect(scheduler.fiveHourDue(row, NOW)).toBe(true);
+		expect(willPrime(scheduler, row, NOW)).toBe(true);
 	});
 
 	/**
@@ -124,7 +145,7 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		scheduler.lastRefreshResetTime.set(row.id, NOW - 1_000);
 		scheduler.lastFiveHourPrimeTime.set(row.id, NOW - 1_000);
 
-		expect(scheduler.fiveHourDue(row, NOW)).toBe(false);
+		expect(willPrime(scheduler, row, NOW)).toBe(false);
 	});
 
 	it("stays undue for every tick inside the cooldown", async () => {
@@ -140,7 +161,7 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		) {
 			const row = makeRow({ rate_limit_reset: t - 1_000 });
 			scheduler.lastRefreshResetTime.set(row.id, t - 1_000);
-			expect(scheduler.fiveHourDue(row, t)).toBe(false);
+			expect(willPrime(scheduler, row, t)).toBe(false);
 		}
 	});
 
@@ -159,7 +180,7 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		const row = makeRow({ rate_limit_reset: later - 1_000 });
 		scheduler.lastRefreshResetTime.set(row.id, later - 1_000);
 
-		expect(scheduler.fiveHourDue(row, later)).toBe(true);
+		expect(willPrime(scheduler, row, later)).toBe(true);
 	});
 
 	/**
@@ -176,8 +197,8 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		scheduler.lastRefreshResetTime.set("acc-1", nextReset);
 
 		const row = makeRow({ rate_limit_reset: nextReset });
-		expect(scheduler.fiveHourDue(row, nextReset - 1)).toBe(false);
-		expect(scheduler.fiveHourDue(row, nextReset)).toBe(true);
+		expect(willPrime(scheduler, row, nextReset - 1)).toBe(false);
+		expect(willPrime(scheduler, row, nextReset)).toBe(true);
 	});
 
 	/**
@@ -190,12 +211,12 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		const scheduler = await makeScheduler();
 		const row = makeRow({ rate_limit_reset: null });
 
-		expect(scheduler.fiveHourDue(row, NOW)).toBe(true);
+		expect(willPrime(scheduler, row, NOW)).toBe(true);
 
 		scheduler.lastFiveHourPrimeTime.set(row.id, NOW);
-		expect(scheduler.fiveHourDue(row, NOW + 60_000)).toBe(false);
+		expect(willPrime(scheduler, row, NOW + 60_000)).toBe(false);
 		expect(
-			scheduler.fiveHourDue(row, NOW + scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS),
+			willPrime(scheduler, row, NOW + scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS),
 		).toBe(true);
 	});
 
@@ -219,10 +240,33 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		expect(scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS).toBeLessThan(
 			USAGE_CACHE_TTL_MS,
 		);
-		// Enough headroom for a scheduler tick plus the prime's own round trip.
-		expect(
-			USAGE_CACHE_TTL_MS - scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS,
-		).toBeGreaterThanOrEqual(2 * 60 * 1000);
+		// The gap between two primes is the cooldown PLUS this account's wait for
+		// its turn (primes run sequentially over the due batch). Requiring the
+		// cooldown to be at most half the TTL means that wait has to exceed the
+		// entire cooldown again before the invariant is at risk.
+		expect(scheduler.FIVE_HOUR_PRIME_COOLDOWN_MS).toBeLessThanOrEqual(
+			USAGE_CACHE_TTL_MS / 2,
+		);
+	});
+
+	/**
+	 * The throttled account must stay OWNED by the 5h reason.
+	 *
+	 * checkAndRefresh builds `fiveHourDueIds` from ownership, and the weekly pass
+	 * skips anything in that set. If throttling removed the account from ownership
+	 * instead, the weekly-dormant pass could pick it up and physically prime it on
+	 * the very next cycle — sending exactly the request the cooldown just
+	 * suppressed.
+	 */
+	it("keeps a throttled account owned by the 5h reason", async () => {
+		const scheduler = await makeScheduler();
+		const row = makeRow({ rate_limit_reset: NOW - 1_000 });
+		scheduler.lastRefreshResetTime.set(row.id, NOW - 1_000);
+		scheduler.lastFiveHourPrimeTime.set(row.id, NOW - 1_000);
+
+		expect(scheduler.fiveHourDue(row, NOW)).toBe(true);
+		expect(scheduler.isFiveHourPrimeCoolingDown(row.id, NOW)).toBe(true);
+		expect(willPrime(scheduler, row, NOW)).toBe(false);
 	});
 
 	/**

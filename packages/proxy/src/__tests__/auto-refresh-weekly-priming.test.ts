@@ -549,41 +549,27 @@ describe("AutoRefreshScheduler — selectWeeklyPrimeCandidate", () => {
 	});
 
 	/**
-	 * fiveHourDueIds is built only from accounts that PASSED the 5h prime
-	 * cooldown, so an account whose 5h reset has arrived but which is currently
-	 * throttled is absent from that set. Membership alone would therefore let the
-	 * weekly reason physically prime it on the very next cycle — defeating the 5h
-	 * cooldown and priming a 5h window this path is documented not to touch. The
-	 * selector requires an ACTIVE 5h window (reset known and still in the future),
-	 * which is a property of the row rather than of the snapshot.
+	 * Deferral to the 5h reason is expressed ONLY through fiveHourDueIds, which
+	 * checkAndRefresh builds from 5h OWNERSHIP (before the prime cooldown is
+	 * applied). Re-deriving "is 5h active?" from the row here instead would starve
+	 * a legitimate candidate: response-processor persists a NULL rate_limit_reset
+	 * whenever a unified status carries no reset header, and a null reset is
+	 * neither "active" nor 5h-due once the account has been refreshed before. Such
+	 * an account would then be primed by neither reason, indefinitely.
 	 */
-	it("excludes an account whose 5h reset has already arrived (5h cooldown must not be bypassed)", async () => {
-		const scheduler = await makeScheduler();
-		const id = track("acc-5h-elapsed");
-		const now = Date.now();
-		seedWeekly(id, { utilization: 0, resets_at: null });
-
-		// 5h reset in the PAST and absent from fiveHourDueIds — exactly the state a
-		// cooldown-suppressed account is in.
-		const row = makeRow({ id, rate_limit_reset: now - 60_000 });
-
-		expect(
-			scheduler.selectWeeklyPrimeCandidate([row], new Set(), now),
-		).toBeNull();
-	});
-
-	it("excludes an account with an unknown (null) 5h reset", async () => {
+	it("still selects a weekly-dormant account whose 5h reset is null", async () => {
 		const scheduler = await makeScheduler();
 		const id = track("acc-5h-null");
 		const now = Date.now();
 		seedWeekly(id, { utilization: 0, resets_at: null });
-
-		// A null reset is 5h-DUE (fiveHourWindowGate admits it), not weekly-only.
+		// Refreshed before (so the 5h first-time branch will not fire) but the DB
+		// reset is unknown — the 5h reason cannot act on it.
+		scheduler.lastWeeklyPrimeTime.delete(id);
 		const row = makeRow({ id, rate_limit_reset: null });
 
 		expect(
-			scheduler.selectWeeklyPrimeCandidate([row], new Set(), now),
-		).toBeNull();
+			scheduler.selectWeeklyPrimeCandidate([row], new Set(), now)?.id,
+		).toBe(id);
 	});
 
 	it("excludes anthropic accounts with no refresh_token and non-anthropic providers", async () => {
