@@ -35,6 +35,30 @@ function makeDb() {
 	};
 }
 
+/**
+ * A db mock good enough to drive a whole `checkAndRefresh` cycle.
+ *
+ * The cycle issues several unrelated queries before the priming pass (tracking
+ * cleanup, peak-hours, qwen/codex token refresh); everything except the two we
+ * care about resolves to []. Both matter:
+ *
+ *  - the ELIGIBILITY select supplies the account to consider;
+ *  - the tracking-CLEANUP select must list that account too, or cleanupTracking
+ *    prunes it from lastFiveHourPrimeTime at the top of the NEXT cycle and the
+ *    cooldown silently evaporates.
+ */
+function makeCycleDb(row: Row) {
+	return {
+		run: mock(async () => {}),
+		runWithChanges: mock(async () => 1),
+		query: mock(async (sql: string) => {
+			if (sql.includes("SELECT id FROM accounts")) return [{ id: row.id }];
+			if (sql.includes("rate_limited_until")) return [row];
+			return [];
+		}),
+	};
+}
+
 function makeProxyContext() {
 	return {
 		runtime: { port: 8080, clientId: "test-client" },
@@ -57,6 +81,7 @@ type SchedulerInternals = AutoRefreshScheduler & {
 	fiveHourDue(account: Row, now: number): boolean;
 	isFiveHourPrimeCoolingDown(accountId: string, now: number): boolean;
 	primeAccount(account: Row): Promise<boolean>;
+	checkAndRefresh(): Promise<void>;
 	lastRefreshResetTime: Map<string, number>;
 	lastFiveHourPrimeTime: Map<string, number>;
 	FIVE_HOUR_PRIME_COOLDOWN_MS: number;
@@ -267,6 +292,57 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 		expect(scheduler.fiveHourDue(row, NOW)).toBe(true);
 		expect(scheduler.isFiveHourPrimeCoolingDown(row.id, NOW)).toBe(true);
 		expect(willPrime(scheduler, row, NOW)).toBe(false);
+	});
+
+	/**
+	 * END-TO-END: the production loop, driven through the real cycle.
+	 *
+	 * The predicate tests above reconstruct checkAndRefresh's two-step filter, so
+	 * they would keep passing if someone deleted the cooldown filter or the
+	 * timestamp write from the cycle itself. This one would not: it runs
+	 * checkAndRefresh twice against an account in the exact degenerate state
+	 * (rate_limit_reset ~now, so the has-passed branch is true on BOTH cycles) and
+	 * asserts the provider is contacted once.
+	 *
+	 * Before the fix this was the production behaviour once per 60s tick forever.
+	 */
+	it("primes only once when two consecutive cycles both see an elapsed reset", async () => {
+		const row = makeRow({ rate_limit_reset: Date.now() - 1_000 });
+		const coordinator = makeCoordinator("completed");
+		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
+		const scheduler = new AutoRefreshScheduler(
+			makeCycleDb(row) as never,
+			makeProxyContext() as never,
+			coordinator as never,
+		) as never as SchedulerInternals;
+
+		await scheduler.checkAndRefresh();
+		await scheduler.checkAndRefresh();
+
+		expect(coordinator.observe).toHaveBeenCalledTimes(1);
+	});
+
+	/**
+	 * Guards the above against a vacuous pass: the cycle really does reach the
+	 * coordinator for this account, so "called once" means throttled, not broken.
+	 */
+	it("does prime on the first cycle (the once-only assertion is not vacuous)", async () => {
+		const row = makeRow({ rate_limit_reset: Date.now() - 1_000 });
+		const coordinator = makeCoordinator("completed");
+		const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
+		const scheduler = new AutoRefreshScheduler(
+			makeCycleDb(row) as never,
+			makeProxyContext() as never,
+			coordinator as never,
+		) as never as SchedulerInternals;
+
+		await scheduler.checkAndRefresh();
+
+		expect(coordinator.observe).toHaveBeenCalledTimes(1);
+		expect(coordinator.observe.mock.calls[0]).toEqual([
+			row.id,
+			"scheduled-prime",
+		]);
 	});
 
 	/**
