@@ -14,7 +14,9 @@ const NOW = 1_700_000_000_000;
 
 function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 	return {
-		id: partial.id ?? "id",
+		// Default the id off the name so distinct fixture accounts get distinct
+		// ids, as they have in production — per-account dedup keys on id.
+		id: partial.id ?? partial.name ?? "id",
 		name: partial.name ?? "acc",
 		provider: partial.provider ?? "anthropic",
 		requestCount: 0,
@@ -983,6 +985,132 @@ describe("computeFamilyWeeklyUsage", () => {
 			]),
 		];
 		expect(computeFamilyWeeklyUsage(accounts, NOW)).toEqual([]);
+	});
+
+	it("counts exhausted and elevated accounts separately from worstPct", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("out", [scopedEntry("Fable", 100)]),
+			mkScopedAccount("high", [scopedEntry("Fable", 88)]),
+			mkScopedAccount("fine-a", [scopedEntry("Fable", 12)]),
+			mkScopedAccount("fine-b", [scopedEntry("Fable", 5)]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result).toHaveLength(1);
+		// worstPct is ONE account; the counts are what make it a pool statement.
+		expect(result[0].worstPct).toBe(100);
+		expect(result[0].accounts).toHaveLength(4);
+		expect(result[0].exhaustedCount).toBe(1);
+		expect(result[0].elevatedCount).toBe(2);
+	});
+
+	it("exhaustedCount is 0 while the family is merely elevated", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("high", [scopedEntry("Fable", 99)]),
+			mkScopedAccount("fine", [scopedEntry("Fable", 10)]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result[0].exhaustedCount).toBe(0);
+		expect(result[0].elevatedCount).toBe(1);
+		expect(result[0].elevated).toBe(true);
+	});
+
+	it("excludes accounts whose account-wide weekly window is exhausted", () => {
+		const spentAccountWide = mkAccount({
+			name: "acct-wide-spent",
+			provider: "anthropic",
+			usageData: {
+				limits: [
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 100,
+						resets_at: new Date(FUTURE_RESET).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+					scopedEntry("Fable", 100),
+				],
+			} as never,
+		});
+		const healthy = mkScopedAccount("healthy", [scopedEntry("Fable", 20)]);
+
+		const result = computeFamilyWeeklyUsage([spentAccountWide, healthy], NOW);
+		// The spent account cannot serve ANY family, so it must not drive the
+		// family headline — the tile already reports it under `exhausted`.
+		expect(result).toHaveLength(1);
+		expect(result[0].worstPct).toBe(20);
+		expect(result[0].accounts.map((a) => a.name)).toEqual(["healthy"]);
+		expect(result[0].exhaustedCount).toBe(0);
+		expect(result[0].elevated).toBe(false);
+
+		const seven = computePoolUsage(
+			[spentAccountWide, healthy],
+			"seven_day",
+			NOW,
+		);
+		expect(seven.exhausted.map((e) => e.name)).toContain("acct-wide-spent");
+		expect(seven.familyWeekly).toEqual(result);
+	});
+
+	it("excludes accounts whose account-wide 5h window is exhausted", () => {
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "five-spent",
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 100, resets_at: null },
+					seven_day: { utilization: 30, resets_at: null },
+					limits: [scopedEntry("Fable", 100)],
+				} as never,
+			}),
+		];
+		expect(computeFamilyWeeklyUsage(accounts, NOW)).toEqual([]);
+	});
+
+	it("collapses one account's Mythos + Fable windows into a single row", () => {
+		// getModelFamily() maps Mythos-class display names onto "fable", so ONE
+		// account can report two scoped windows for the same family. Two rows would
+		// make `accounts.length` read as two accounts in the badge denominator.
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("solo", [
+				scopedEntry("Fable", 100),
+				scopedEntry("Mythos 5", 20),
+			]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result).toHaveLength(1);
+		expect(result[0].family).toBe("fable");
+		expect(result[0].accounts).toHaveLength(1);
+		expect(result[0].accounts[0].name).toBe("solo");
+		// The binding (highest) window wins.
+		expect(result[0].accounts[0].pct).toBe(100);
+		expect(result[0].worstPct).toBe(100);
+		expect(result[0].exhaustedCount).toBe(1);
+		expect(result[0].elevatedCount).toBe(1);
+	});
+
+	it("dedupes by account id, so same-named distinct accounts stay separate rows", () => {
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("dupe-name", [scopedEntry("Fable", 90)], { id: "id-1" }),
+			mkScopedAccount("dupe-name", [scopedEntry("Fable", 20)], { id: "id-2" }),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result[0].accounts).toHaveLength(2);
+		expect(result[0].accounts.map((a) => a.pct)).toEqual([90, 20]);
+	});
+
+	it("keeps the sooner-clearing window when an account's two rows tie on pct", () => {
+		const early = NOW + 1 * 86_400_000;
+		const late = NOW + 5 * 86_400_000;
+		const accounts: AccountResponse[] = [
+			mkScopedAccount("solo", [
+				scopedEntry("Fable", 88, late),
+				scopedEntry("Mythos 5", 88, early),
+			]),
+		];
+		const result = computeFamilyWeeklyUsage(accounts, NOW);
+		expect(result[0].accounts).toHaveLength(1);
+		expect(result[0].accounts[0].resetMs).toBe(early);
 	});
 
 	it("computePoolUsage familyWeekly is [] for five_hour even when seven_day is non-empty", () => {
