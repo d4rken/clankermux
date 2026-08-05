@@ -1,17 +1,10 @@
 import {
-	codexAccountFitsRequest,
 	codexAccountFitsRequestUnmargined,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	getModelFamily,
-	isAccountAvailable,
 	isDebugEnabled,
-	isProtectedFamily,
-	mapModelName,
 	NETWORK,
-	PROTECTED_FAMILY,
-	resolveCodexTargetModel,
-	resolveModelContextWindow,
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@clankermux/core";
@@ -24,13 +17,16 @@ import {
 	getNativeResponsesRequestContext,
 	setNativeResponsesMetaContext,
 } from "@clankermux/types";
+import {
+	createAdmissionGates,
+	type ProviderOverloadedAccount,
+} from "./admission-gates";
 import { cacheBodyStore } from "./cache-body-store";
 import { injectCacheTtl1h } from "./cache-ttl-injector";
 import { computeContextAndToolStats } from "./context-composition";
 import {
 	abortableSleep,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
-	type ContextWindowExcludedBackend,
 	createContextWindowExceededResponse,
 	createFamilyWeeklyExhaustedResponse,
 	createPinnedTargetUnavailableResponse,
@@ -38,14 +34,10 @@ import {
 	createRequestMetadata,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
-	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-	type FamilyWeeklyExcludedAccount,
 	getComboSlotInfo,
 	getForcedAccount,
-	getUsageThrottleUntil,
 	HOLD_OVERFLOW,
 	holdAndRetryCacheAccount,
-	isAbsorbablePeer,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
@@ -58,8 +50,6 @@ import {
 	type ReprobeOutcome,
 	RequestBodyContext,
 	resolveFamilyWeeklyExclusion,
-	resolveLivenessReserveThreshold,
-	resolvePoolLivenessDemotion,
 	resolveTransientlyCooledFamilySibling,
 	selectAccountsForRequest,
 	setForcedAccount,
@@ -68,12 +58,9 @@ import {
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
 import { createClientAbortResponse } from "./handlers/client-abort-response";
-import { resolveReservationDemotion } from "./handlers/family-reservation-gate";
 import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
-	hasCapacityRestoredProbePending,
-	wouldSuppressProbe,
 } from "./handlers/rate-limit-cooldown";
 import {
 	getOverloadHoldBudgetMs,
@@ -81,7 +68,6 @@ import {
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
 import { isAnchoredSource, resolveProject } from "./project-extraction";
-import { getLastProtectedFamilyDemand } from "./protected-family-demand";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getOverloadHoldSlotKey,
@@ -89,7 +75,6 @@ import {
 	getProviderOverloadUntil,
 	inspectProviderOverload,
 	isOfficialAnthropicProvider,
-	isProviderOverloaded,
 } from "./provider-overload-cooldown";
 import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
@@ -98,7 +83,6 @@ import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { sessionProjectCache } from "./session-project-cache";
 import { sessionPromotionTracker } from "./session-promotion";
 import { shouldRecordRequest } from "./should-record-request";
-import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
 export type { ProxyContext } from "./handlers";
 
@@ -690,33 +674,32 @@ export async function handleProxy(
 	// honor a combo slot's model override.
 	const initialComboInfo = getComboSlotInfo(requestMeta);
 
-	// Effective model for per-account overload reads: the combo slot's model
-	// override when an ACTIVE combo targets this account, else the request
-	// model — then resolved through the account's model mapping so the gate
-	// sees the model the account will actually send upstream. mapModelName is
-	// a pure, cheap lookup over the account's mapping columns (no body
-	// parsing), so it is safe on the pre-selection hot path. When the mapped
-	// model resolves to NO family (e.g. "qwen/..."), fall back to the logical
-	// model — the same family-resolvability fallback the authoritative
-	// admission inside proxyWithAccount applies, so gate and admission can
-	// never target different buckets. Routing optimization only —
-	// authoritative per-attempt enforcement is the admission chokepoint. The
-	// comboName check keeps a cleared combo (fallback path) from resurrecting
-	// stale overrides.
-	const modelForAccount = (account: Account): string | null => {
-		let logical = effectiveRequestModel ?? null;
-		if (requestMeta.comboName && initialComboInfo) {
-			const slot = initialComboInfo.slots.find(
-				(s) => s.accountId === account.id,
-			);
-			if (slot?.modelOverride) logical = slot.modelOverride;
-		}
-		if (!logical) return null;
-		const mapped = mapModelName(logical, account);
-		return mapped !== logical && getModelFamily(mapped) ? mapped : logical;
-	};
+	// Synthetic auto-refresh / keepalive probes must reach their force-routed
+	// account even when it is usage-throttled: throttling them yields a synthetic
+	// 529 that the scheduler would miscount as a broken-endpoint failure and
+	// eventually false-auto-pause the account. Gate on requestMeta.internal (the
+	// trusted in-process dispatch flag, set from isInternal at the entry point) AND
+	// the probe header — the header alone is client-spoofable, so an external
+	// request cannot use it to dodge operator-configured usage throttling.
+	const isSyntheticProbeRequest = isTrustedSyntheticProbe(
+		req.headers,
+		requestMeta.internal === true,
+		"any",
+	);
 
-	type ProviderOverloadedAccount = { account: Account; until: number };
+	// Per-request admission gates (provider-overload / usage-throttle /
+	// context-window / family-weekly / soft-demotion reorder) plus the
+	// per-account model resolution they share. Built ONCE per request because
+	// two of them accumulate exclusion state that the zero-accounts terminals
+	// read after every pass (main, both hold wakes, combo fallback) has run.
+	const gates = createAdmissionGates({
+		requestMeta,
+		initialComboInfo,
+		effectiveRequestModel: effectiveRequestModel ?? null,
+		gateTokenEstimate,
+		isSyntheticProbeRequest,
+		config: ctx.config,
+	});
 
 	const providerOverloadResponseLabel = (overloadKey: string): string =>
 		overloadKey === ANTHROPIC_UPSTREAM_OVERLOAD_KEY ? "anthropic" : overloadKey;
@@ -853,467 +836,20 @@ export async function handleProxy(
 		return response;
 	};
 
-	const applyProviderOverloadGate = (accounts: Account[]) => {
-		const now = Date.now();
-		const available: Account[] = [];
-		const overloaded: ProviderOverloadedAccount[] = [];
-
-		for (const account of accounts) {
-			// Family-scoped read: only buckets relevant to this account's effective
-			// model (combo override or request model) gate it — a Haiku-only
-			// incident no longer sidelines Sonnet/Opus traffic.
-			const overloadedUntil = getProviderOverloadUntil(
-				account.provider,
-				now,
-				modelForAccount(account),
-			);
-			if (overloadedUntil) {
-				overloaded.push({ account, until: overloadedUntil });
-				continue;
-			}
-			available.push(account);
-		}
-
-		if (overloaded.length > 0) {
-			const providers = Array.from(
-				new Set(
-					overloaded.map(
-						({ account, until }) =>
-							`${getProviderOverloadKey(account.provider)} until ${new Date(until).toISOString()}`,
-					),
-				),
-			);
-			log.debug(
-				`Provider-overload gate excluded ${overloaded.length} account(s): ${providers.join(", ")}`,
-			);
-		}
-
-		return { available, overloaded };
-	};
-
-	const shouldForwardProviderOverloadIfNoCrossProviderFallback = (
-		candidates: Account[],
-		index: number,
-	): boolean => {
-		const current = candidates[index];
-		if (
-			!current ||
-			getProviderOverloadKey(current.provider) !==
-				ANTHROPIC_UPSTREAM_OVERLOAD_KEY
-		) {
-			return false;
-		}
-		const currentOverloadKey = getProviderOverloadKey(current.provider);
-		const now = Date.now();
-		return !candidates
-			.slice(index + 1)
-			.some(
-				(account) =>
-					getProviderOverloadKey(account.provider) !== currentOverloadKey &&
-					!isProviderOverloaded(
-						account.provider,
-						now,
-						modelForAccount(account),
-					),
-			);
-	};
-
-	/**
-	 * True when every candidate AFTER `index` would be refused before it could
-	 * ever reach upstream — by the account's own cooldown, by the single-flight
-	 * recovery-probe gate, or by the provider-overload gate — so this attempt is
-	 * the request's last realistic one and its real 529 body must be FORWARDED,
-	 * not discarded.
-	 *
-	 * Scope: the same-provider case is already covered by
-	 * {@link shouldForwardProviderOverloadIfNoCrossProviderFallback}. The residual
-	 * gap this closes is a MIXED-provider pool — e.g. [A(anthropic), B(codex)]
-	 * with B probe-suppressed — where A's genuine `overloaded_error` was thrown
-	 * away and the client got a generic 503 instead.
-	 *
-	 * The COOLDOWN term is not redundant with selection. This predicate is
-	 * evaluated when the 529 ARRIVES, against a candidate list that was gated
-	 * before the attempt started: a tail whose own recovery probe 429'd in the
-	 * meantime has a fresh future cooldown AND a released lease, so probe
-	 * suppression alone reads it as attemptable. Attempting it would put an
-	 * upstream request inside a live cooldown (deepening the throttle) and replace
-	 * the head's genuine 529 with a later generic error.
-	 */
-	const everyRemainingCandidateUnattemptable = (
-		candidates: Account[],
-		index: number,
-	): boolean => {
-		const now = Date.now();
-		return candidates
-			.slice(index + 1)
-			.every(
-				(account) =>
-					!isAccountAvailable(account, now) ||
-					wouldSuppressProbe(account, now) ||
-					isProviderOverloaded(account.provider, now, modelForAccount(account)),
-			);
-	};
-
 	const {
 		available: providerAvailableAccounts,
 		overloaded: providerOverloadedAccounts,
-	} = applyProviderOverloadGate(selectedAccounts);
-
-	// Synthetic auto-refresh / keepalive probes must reach their force-routed
-	// account even when it is usage-throttled: throttling them yields a synthetic
-	// 529 that the scheduler would miscount as a broken-endpoint failure and
-	// eventually false-auto-pause the account. Gate on requestMeta.internal (the
-	// trusted in-process dispatch flag, set from isInternal at the entry point) AND
-	// the probe header — the header alone is client-spoofable, so an external
-	// request cannot use it to dodge operator-configured usage throttling.
-	const isSyntheticProbeRequest = isTrustedSyntheticProbe(
-		req.headers,
-		requestMeta.internal === true,
-		"any",
-	);
-
-	const applyUsageThrottling = (accounts: Account[]) => {
-		if (isSyntheticProbeRequest) {
-			return { available: accounts, throttled: [] as Account[] };
-		}
-		const settings = {
-			fiveHourEnabled: ctx.config.getUsageThrottlingFiveHourEnabled(),
-			weeklyEnabled: ctx.config.getUsageThrottlingWeeklyEnabled(),
-		};
-		if (!settings.fiveHourEnabled && !settings.weeklyEnabled) {
-			return { available: accounts, throttled: [] as Account[] };
-		}
-
-		const now = Date.now();
-		const available: Account[] = [];
-		const throttled: Account[] = [];
-
-		for (const account of accounts) {
-			const throttleUntil = getUsageThrottleUntil(
-				usageCache.get(account.id),
-				settings,
-				now,
-			);
-			if (throttleUntil && throttleUntil > now) {
-				throttled.push(account);
-				continue;
-			}
-			available.push(account);
-		}
-
-		if (throttled.length > 0) {
-			log.info(
-				`Usage-throttled ${throttled.length} account(s): ${throttled.map((account) => account.name).join(", ")}`,
-			);
-		}
-
-		return { available, throttled };
-	};
+	} = gates.applyProviderOverloadGate(selectedAccounts);
 
 	const { available: postThrottleAccounts, throttled: throttledAccounts } =
-		applyUsageThrottling(providerAvailableAccounts);
+		gates.applyUsageThrottling(providerAvailableAccounts);
 
-	// 6b. Context-window gate — exclude Codex accounts whose mapped model
-	// can't fit the request (B3). Non-codex accounts always pass. When a combo
-	// slot is active for the account, the gate evaluates against the slot's
-	// model override instead of the request's family model (review C3). Force-
-	// routed requests are gated too — force-route bypasses account *selection*,
-	// not the size safety check.
-	const contextExcludedAccounts: ContextWindowExcludedBackend[] = [];
-
-	/**
-	 * Apply context-window gate to a list of accounts.
-	 * @param candidates Candidate accounts to filter
-	 * @param comboInfo  Optional combo slot info for model override lookup
-	 * @returns Accounts that pass the gate
-	 */
-	const applyContextWindowGate = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
-		const passed: Account[] = [];
-		for (const account of candidates) {
-			if (account.provider !== "codex") {
-				passed.push(account);
-				continue;
-			}
-
-			// Determine the effective model for this account: combo slot
-			// override if available, otherwise the request model.
-			let modelForGate =
-				effectiveRequestModel ??
-				"claude-sonnet-4-5"; /* safe fallback — family match */
-			if (comboInfo) {
-				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
-				if (slot?.modelOverride) {
-					modelForGate = slot.modelOverride;
-				}
-			}
-
-			if (!codexAccountFitsRequest(account, modelForGate, gateTokenEstimate)) {
-				const target = resolveCodexTargetModel(modelForGate, account);
-				const window = resolveModelContextWindow(target);
-				log.info(
-					`Context-window gate: excluding Codex account "${account.name}" ` +
-						`(model=${modelForGate}, target=${target}, window=${window ?? "unknown"}, ` +
-						`estimate=${gateTokenEstimate})`,
-				);
-				// Track for error-response purposes (deduplicate by id)
-				if (
-					!contextExcludedAccounts.some(
-						(excluded) => excluded.account.id === account.id,
-					)
-				) {
-					contextExcludedAccounts.push({ account, model: modelForGate });
-				}
-				continue;
-			}
-			passed.push(account);
-		}
-		return passed;
-	};
-
-	// 6c. Family-weekly gate — exclude an Anthropic account for the REQUESTED
-	// model family when that family's weekly quota is exhausted (limits[]) while
-	// the account still has unified 5h/7d headroom for other families. This is
-	// the proactive half of family-scoped rate limiting: a Fable-weekly-exhausted
-	// account stays fully eligible for Opus/Sonnet instead of being sidelined
-	// account-wide. Non-Anthropic accounts always pass. Combo-slot model
-	// overrides are honored, mirroring the context-window gate.
-	const familyWeeklyExcludedAccounts: FamilyWeeklyExcludedAccount[] = [];
-	const applyFamilyWeeklyGate = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
-		const now = Date.now();
-		const passed: Account[] = [];
-		for (const account of candidates) {
-			if (account.provider !== "anthropic") {
-				passed.push(account);
-				continue;
-			}
-			let modelForGate = effectiveRequestModel ?? null;
-			if (comboInfo) {
-				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
-				if (slot?.modelOverride) {
-					modelForGate = slot.modelOverride;
-				}
-			}
-			const exclusion = resolveFamilyWeeklyExclusion(
-				account,
-				modelForGate,
-				usageCache.get(account.id),
-				getFreshCapacity(
-					usageCache,
-					account.id,
-					account.provider,
-					now,
-					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-				),
-				now,
-			);
-			if (exclusion) {
-				if (
-					!familyWeeklyExcludedAccounts.some(
-						(excluded) => excluded.account.id === account.id,
-					)
-				) {
-					familyWeeklyExcludedAccounts.push(exclusion);
-				}
-				log.debug(
-					`Family-weekly gate: excluding "${account.name}" for family=${exclusion.family} ` +
-						`(weekly quota exhausted, unified headroom present; ` +
-						`reset ${new Date(exclusion.resetAt).toISOString()})`,
-				);
-				continue;
-			}
-			passed.push(account);
-		}
-		return passed;
-	};
-
-	// Why each demoted account was demoted, for the pre-attempt-loop DEBUG line.
-	// Rebuilt on every applySoftDemotionReorder() call so it always describes the
-	// order the attempt loop is actually about to follow (the strategy's own
-	// logSelection runs BEFORE these gates and therefore cannot show it).
-	let softDemotionReasons = new Map<string, string>();
-
-	// 6d. Composite soft-demotion reorder — SOFT demotions (never exclusions).
-	// Two independent reasons move an account to the BACK of the candidate list:
-	//
-	//  - Shared-window reservation: a NON-protected request against an Anthropic
-	//    account whose shared 5h/7d window is near its limit, reserving the tail
-	//    of the shared window for the protected family (Fable).
-	//  - Pool liveness: an account inside the weekly-quota tail its TIER reserves,
-	//    while some peer can still absorb the traffic and the binding weekly reset
-	//    is still beyond the (burn-aware) release horizon — keeping it alive as
-	//    failover capacity instead of draining it to a multi-day weekly wall. The
-	//    tier is per-request: traffic this account would serve as the protected
-	//    family (Fable) may spend down to
-	//    LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT, everything else stops at
-	//    LIVENESS_RESERVE_HEADROOM_PCT, so the band between them is
-	//    Fable-plus-emergencies-only.
-	//
-	// They MUST be applied as ONE partition, not two sequential ones: two stable
-	// partitions do not compose. Family produces [K, F]; a second liveness
-	// partition over that result can produce [F, K], promoting an account the
-	// family gate had just reserved. One partition over the UNION of both reasons
-	// is the only ordering that respects both.
-	//
-	// This only reorders — it never drops an account, so it can't empty the pool;
-	// if every candidate is demoted the original order is preserved. Combo
-	// requests are skipped entirely (the attempt loop matches accounts[i] to
-	// slots[i] POSITIONALLY, so reordering would desync that mapping); for the
-	// non-combo path each account is classified by its EFFECTIVE (mapped) model
-	// via modelForAccount, matching the demand-recording site and the overload gate.
-	const applySoftDemotionReorder = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
-		// Combos pin each slot to a specific account POSITIONALLY (the attempt loop
-		// matches accounts[i] to slots[i]); reordering would desync that mapping and
-		// null out slot model overrides. Both demotions are fan-out routing
-		// concerns, so skip combos entirely.
-		if (comboInfo) return candidates;
-		const now = Date.now();
-
-		// Snapshot capacity ONCE up front so every peer count sees a consistent
-		// view of the pool and the whole evaluation stays O(n) rather than O(n²)
-		// cache reads.
-		const capacityById = new Map(
-			candidates.map((account) => [
-				account.id,
-				getFreshCapacity(
-					usageCache,
-					account.id,
-					account.provider,
-					now,
-					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-				),
-			]),
-		);
-
-		// Pass 1 — family reservation + the liveness TIER, per account.
-		const familyDemote = new Map<string, boolean>();
-		// Per-account liveness reserve threshold. The tier follows the LOGICAL
-		// request family: modelForAccount deliberately falls back to the logical
-		// Claude model when the mapped model resolves to no known family, so a Codex
-		// account serving a fable-logical request (explicit or default `fable →
-		// gpt-*` mapping) classifies as PROTECTED. That is intended — the tier
-		// privileges the user's protected-family traffic pool-wide, so an Anthropic
-		// outage that fails Fable over to Codex may spend deeper there too.
-		const livenessThreshold = new Map<string, number>();
-		for (const account of candidates) {
-			// Classify by the account's EFFECTIVE (mapped) model — the family it will
-			// actually serve — via modelForAccount, matching demand recording below and
-			// the provider-overload gate. Non-combo path only, so modelForAccount's
-			// initialComboInfo dependency is inert (null).
-			const modelForGate = modelForAccount(account);
-			familyDemote.set(
-				account.id,
-				resolveReservationDemotion(
-					account,
-					modelForGate,
-					usageCache.get(account.id),
-					capacityById.get(account.id) ?? null,
-					getLastProtectedFamilyDemand(account.id),
-					now,
-				),
-			);
-			livenessThreshold.set(
-				account.id,
-				resolveLivenessReserveThreshold(
-					isProtectedFamily(getModelFamily(modelForGate ?? "")),
-				),
-			);
-		}
-
-		const reasons = new Map<string, string>();
-		const kept: Account[] = [];
-		const demoted: Account[] = [];
-		for (const account of candidates) {
-			// Pass 2 — how many OTHER candidates could absorb this account's traffic.
-			// A family-reserved peer is being held for Fable and a peer that owes a
-			// capacity-restored probe admits only that one probe, so neither counts.
-			// Peers are judged at the DECIDING account's tier threshold, which is what
-			// keeps "reserved" and "absorbing" exactly complementary.
-			const threshold =
-				livenessThreshold.get(account.id) ??
-				resolveLivenessReserveThreshold(false);
-			let absorbablePeerCount = 0;
-			for (const peer of candidates) {
-				if (peer.id === account.id) continue;
-				if (
-					isAbsorbablePeer(
-						capacityById.get(peer.id) ?? null,
-						familyDemote.get(peer.id) === true,
-						hasCapacityRestoredProbePending(peer.id),
-						threshold,
-					)
-				) {
-					absorbablePeerCount++;
-				}
-			}
-			// Pass 3 — the liveness decision for this account, at its tier and with
-			// its observed weekly burn (validated against the BINDING weekly window;
-			// null whenever there is no usable evidence, which yields the static
-			// tier-scaled horizon).
-			const accountCapacity = capacityById.get(account.id) ?? null;
-			const livenessDemote = resolvePoolLivenessDemotion(
-				accountCapacity,
-				absorbablePeerCount,
-				now,
-				{
-					reserveThresholdPct: threshold,
-					weeklySlopePctPerHour: resolveEffectiveWeeklySlope(
-						account.id,
-						accountCapacity,
-						now,
-					),
-				},
-			);
-			const family = familyDemote.get(account.id) === true;
-			if (family || livenessDemote) {
-				const reason =
-					family && livenessDemote
-						? "both"
-						: family
-							? "family reservation"
-							: "pool liveness";
-				reasons.set(account.id, reason);
-				demoted.push(account);
-				log.debug(
-					`Soft-demotion gate: demoting "${account.name}" (${reason}) — ` +
-						(family
-							? `non-protected request, shared window near limit, reserving for ${PROTECTED_FAMILY}`
-							: "") +
-						(family && livenessDemote ? "; " : "") +
-						(livenessDemote
-							? `weekly tail held as failover capacity (${absorbablePeerCount} absorbable peer(s))`
-							: ""),
-				);
-			} else {
-				kept.push(account);
-			}
-		}
-		softDemotionReasons = reasons;
-		// ONE stable partition over the union of both reasons — never drops an
-		// account, only reorders.
-		return [...kept, ...demoted];
-	};
-
-	const postFamilyGateAccounts = applyFamilyWeeklyGate(
+	const postFamilyGateAccounts = gates.applyFamilyWeeklyGate(
 		postThrottleAccounts,
 		initialComboInfo,
 	);
-	const accounts = applySoftDemotionReorder(
-		applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
+	const accounts = gates.applySoftDemotionReorder(
+		gates.applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
 		initialComboInfo,
 	);
 	if (requestMeta.routing) {
@@ -1360,7 +896,7 @@ export async function handleProxy(
 		finalOrderLogged = true;
 		const order = accounts
 			.map((a) => {
-				const reason = softDemotionReasons.get(a.id);
+				const reason = gates.softDemotionReasons.get(a.id);
 				return reason ? `${a.name}(demoted:${reason})` : a.name;
 			})
 			.join(" > ");
@@ -1393,7 +929,7 @@ export async function handleProxy(
 	): Array<{ provider: string; model: string | null }> => {
 		const pairs = new Map<string, { provider: string; model: string | null }>();
 		for (const { account } of gated) {
-			const model = modelForAccount(account);
+			const model = gates.modelForAccount(account);
 			pairs.set(
 				`${getProviderOverloadKey(account.provider)}\u0000${model ?? ""}`,
 				{
@@ -1419,7 +955,7 @@ export async function handleProxy(
 				getProviderOverloadUntil(
 					account.provider,
 					now,
-					modelForAccount(account),
+					gates.modelForAccount(account),
 				) ?? now + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
 		}));
 	};
@@ -1688,17 +1224,18 @@ export async function handleProxy(
 					effectiveRequestModel ?? undefined,
 				);
 				const { available: reAvailable } =
-					applyProviderOverloadGate(reSelected);
-				const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
+					gates.applyProviderOverloadGate(reSelected);
+				const { available: rePostThrottle } =
+					gates.applyUsageThrottling(reAvailable);
 				// Wake-time gates honor the CURRENT combo info (re-selection just
 				// re-populated it; a cleared combo reads null) so a combo slot's
 				// model override is gated exactly like the initial pipeline.
 				const wakeComboInfo = requestMeta.comboName
 					? getComboSlotInfo(requestMeta)
 					: null;
-				const candidates = applySoftDemotionReorder(
-					applyContextWindowGate(
-						applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+				const candidates = gates.applySoftDemotionReorder(
+					gates.applyContextWindowGate(
+						gates.applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
 						wakeComboInfo,
 					),
 					wakeComboInfo,
@@ -2370,8 +1907,9 @@ export async function handleProxy(
 					effectiveRequestModel ?? undefined,
 				);
 				const { available: reAvailable } =
-					applyProviderOverloadGate(reSelected);
-				const { available: rePostThrottle } = applyUsageThrottling(reAvailable);
+					gates.applyProviderOverloadGate(reSelected);
+				const { available: rePostThrottle } =
+					gates.applyUsageThrottling(reAvailable);
 				// Eligible accounts always pass the context-window gate; still apply
 				// the family-weekly gate so we don't retry an account whose requested
 				// family is weekly-exhausted (it would only 429 again). The gate
@@ -2382,7 +1920,7 @@ export async function handleProxy(
 				// path. For pool liveness this is largely self-enforcing anyway: rule 4
 				// requires an absorbable peer, and on a degraded path there is none, so
 				// the reserve fails open regardless.)
-				const candidates = applyFamilyWeeklyGate(
+				const candidates = gates.applyFamilyWeeklyGate(
 					rePostThrottle.filter((a) => isEligible(a)),
 					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 				);
@@ -2437,11 +1975,14 @@ export async function handleProxy(
 		// surfaced below. We only reach the CW hold / last-resort path when the
 		// large-context accounts are unavailable for non-throttle reasons (paused,
 		// rate-limited) — which is the incident this path was built for.
-		if (contextExcludedAccounts.length > 0 && throttledAccounts.length === 0) {
+		if (
+			gates.contextExcludedAccounts.length > 0 &&
+			throttledAccounts.length === 0
+		) {
 			// Pre-compute the last-resort relaxation candidates (Codex accounts that
 			// fit the FULL/unmargined window) so we can both (a) pick the hold budget
 			// and (b) reuse them in the relaxation block below without re-filtering.
-			const relaxCandidates = contextExcludedAccounts.filter(
+			const relaxCandidates = gates.contextExcludedAccounts.filter(
 				({ account, model }) =>
 					codexAccountFitsRequestUnmargined(account, model, gateTokenEstimate),
 			);
@@ -2552,7 +2093,7 @@ export async function handleProxy(
 				if (relaxCandidates.length === 0) {
 					return createContextWindowExceededResponse(
 						gateTokenEstimate,
-						contextExcludedAccounts,
+						[...gates.contextExcludedAccounts],
 						effectiveRequestModel ?? "unknown",
 					);
 				}
@@ -2582,11 +2123,11 @@ export async function handleProxy(
 		// Retry-After from the soonest family reset rather than routing to an
 		// account that will just 429.
 		if (
-			familyWeeklyExcludedAccounts.length > 0 &&
-			contextExcludedAccounts.length === 0 &&
+			gates.familyWeeklyExcludedAccounts.length > 0 &&
+			gates.contextExcludedAccounts.length === 0 &&
 			throttledAccounts.length === 0
 		) {
-			const family = familyWeeklyExcludedAccounts[0].family;
+			const family = gates.familyWeeklyExcludedAccounts[0].family;
 
 			// The pool emptied because the requested family is weekly-exhausted on
 			// the reachable account(s). But a DIFFERENT Anthropic account that still
@@ -2657,7 +2198,7 @@ export async function handleProxy(
 				// cooldown reset (~seconds/minutes), NOT the multi-day family window,
 				// so the client retries when the sibling actually recovers.
 				const familyResponse = createFamilyWeeklyExhaustedResponse(
-					familyWeeklyExcludedAccounts,
+					[...gates.familyWeeklyExcludedAccounts],
 					family,
 					effectiveRequestModel,
 					Date.now(),
@@ -2676,7 +2217,7 @@ export async function handleProxy(
 			// No transiently-cooled family-capable sibling — the pool is genuinely
 			// exhausted for this family. Original behavior.
 			const familyResponse = createFamilyWeeklyExhaustedResponse(
-				familyWeeklyExcludedAccounts,
+				[...gates.familyWeeklyExcludedAccounts],
 				family,
 				effectiveRequestModel,
 				Date.now(),
@@ -3141,8 +2682,11 @@ export async function handleProxy(
 					() =>
 						!comboInfo?.comboName &&
 						(i === list.length - 1 ||
-							shouldForwardProviderOverloadIfNoCrossProviderFallback(list, i) ||
-							everyRemainingCandidateUnattemptable(list, i)),
+							gates.shouldForwardProviderOverloadIfNoCrossProviderFallback(
+								list,
+								i,
+							) ||
+							gates.everyRemainingCandidateUnattemptable(list, i)),
 					{
 						// Thread the CLIENT's signal into the upstream fetch, mirroring
 						// the burst-hold loop. Without it `options?.signal` was undefined
@@ -3215,18 +2759,18 @@ export async function handleProxy(
 		const {
 			available: providerFallbackAccounts,
 			overloaded: providerFallbackOverloadedAccounts,
-		} = applyProviderOverloadGate(selectedFallbackAccounts);
+		} = gates.applyProviderOverloadGate(selectedFallbackAccounts);
 		const {
 			available: filteredFallbackAccounts,
 			throttled: throttledFallbackAccounts,
-		} = applyUsageThrottling(providerFallbackAccounts);
+		} = gates.applyUsageThrottling(providerFallbackAccounts);
 		// (soft-demotion reorder — family reservation AND pool liveness —
 		// intentionally omitted on the failover/fallback tail: already-degraded
 		// path. For pool liveness this is largely self-enforcing anyway: rule 4
 		// requires an absorbable peer, and on a degraded path there is none, so
 		// the reserve fails open regardless.)
-		fallbackAccounts = applyContextWindowGate(
-			applyFamilyWeeklyGate(filteredFallbackAccounts),
+		fallbackAccounts = gates.applyContextWindowGate(
+			gates.applyFamilyWeeklyGate(filteredFallbackAccounts),
 		);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =
