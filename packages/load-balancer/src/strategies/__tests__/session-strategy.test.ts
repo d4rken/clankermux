@@ -1224,6 +1224,49 @@ describe("SessionStrategy", () => {
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
 		});
 
+		it("holds affinity through a short model_fallback_429 cooldown (scoped-429 residual cap)", () => {
+			// A claim-scoped 429 that slips past the family rung now writes a ~90s
+			// capped cooldown under reason model_fallback_429 — a reason OUTSIDE
+			// TRANSIENT_RATE_LIMIT_REASONS. The duration fallback (remaining
+			// cooldown < AFFINITY_REASSIGN_MIN_COOLDOWN_MS) is what keeps the
+			// warmed prompt cache pinned; this test pins that behavior so a
+			// refactor of the reassign threshold logic can't silently regress the
+			// scoped-cap path into cache-losing reassigns.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "scoped-cap-project",
+			};
+			const affined = makeAccount({
+				id: "affined-scoped-cap",
+				name: "affined-scoped-cap",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-scoped-cap",
+				name: "healthy-scoped-cap",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// ~90s remaining (the scoped residual cap) — well under the 15-min
+			// reassign threshold: serve a sibling THIS request, keep the pin.
+			affined.rate_limited_until = now + 89_500;
+			affined.rate_limited_reason = "model_fallback_429";
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
+
+			// Cooldown lifts → snap back to the warmed account (never reassigned).
+			affined.rate_limited_until = null;
+			affined.rate_limited_reason = null;
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+		});
+
 		it("keeps affinity for non-session-tracking providers until TTL expiry", () => {
 			const projectMeta: RequestMeta = {
 				...meta,

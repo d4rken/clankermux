@@ -1,10 +1,11 @@
 import {
+	getAccountWideClaimHeadroom,
 	getExhaustedFamilies,
 	getModelFamily,
+	getScopedClaimRejection,
+	hasAccountWideUnifiedRejection as hasAccountWideUnifiedRejectionHeaders,
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ModelFamily,
-	REJECTING_STATUSES,
-	SOFT_WARNING_STATUSES,
 } from "@clankermux/core";
 import type { AnyUsageData } from "@clankermux/providers";
 import type {
@@ -105,27 +106,10 @@ export function resolveFamilyWeeklyExclusion(
  * `rejected`, BOTH account-wide windows must be present, non-rejecting AND
  * parse to utilization < 1 (a contradictory pair bails), and at least one
  * scoped-window token (`5h_*`/`7d_*`, e.g. `7d_oi`) must report `rejected`.
+ * The per-claim parsing itself lives in `@clankermux/core`
+ * (`unified-claim-headers.ts`) so the provider/proxy layers share one
+ * scope-derivation; this module keeps the trust gate and the family verdict.
  */
-const UNIFIED_STATUS_HEADER_RE = /^anthropic-ratelimit-unified-(.+)-status$/;
-const SCOPED_WINDOW_TOKEN_RE = /^(?:5h|7d)_[a-z0-9_]+$/;
-/** Full-string non-negative decimal — parseFloat's prefix tolerance ("0.94x",
- *  "0x1", comma-combined duplicates) must not manufacture headroom. */
-const STRICT_DECIMAL_RE = /^\d+(?:\.\d+)?$/;
-/**
- * Account-wide window statuses that positively assert HEADROOM. Whitelist, not
- * a `!== "rejected"` check: a hard status (`rate_limited`, `blocked`, …), an
- * empty value, or an unknown future status must all fail the predicate — only
- * an explicit non-blocking vocabulary entry counts as evidence of headroom.
- */
-const HEADROOM_STATUSES: ReadonlySet<string> = new Set([
-	"allowed",
-	...SOFT_WARNING_STATUSES,
-]);
-
-function parseStrictDecimal(value: string | null): number | null {
-	if (value === null || !STRICT_DECIMAL_RE.test(value)) return null;
-	return Number.parseFloat(value);
-}
 
 /**
  * True when the live 429's unified headers report the ACCOUNT-WIDE `5h` or
@@ -136,13 +120,7 @@ function parseStrictDecimal(value: string | null): number | null {
  * at all, so this is false for it.
  */
 export function hasAccountWideUnifiedRejection(response: Response): boolean {
-	for (const win of ["5h", "7d"]) {
-		const status = response.headers.get(
-			`anthropic-ratelimit-unified-${win}-status`,
-		);
-		if (status !== null && REJECTING_STATUSES.has(status)) return true;
-	}
-	return false;
+	return hasAccountWideUnifiedRejectionHeaders(response.headers);
 }
 
 export function resolveFamilyWeeklyExclusionFromHeaders(
@@ -164,38 +142,14 @@ export function resolveFamilyWeeklyExclusionFromHeaders(
 
 	// Account-wide pair: present, POSITIVELY non-blocking, and strictly under 1
 	// on a full-string numeric parse. Any contradiction or unknown value bails.
-	for (const win of ["5h", "7d"]) {
-		const status = h.get(`anthropic-ratelimit-unified-${win}-status`);
-		if (status === null || !HEADROOM_STATUSES.has(status)) return null;
-		const utilization = parseStrictDecimal(
-			h.get(`anthropic-ratelimit-unified-${win}-utilization`),
-		);
-		if (utilization === null || utilization >= 1) return null;
-	}
+	if (getAccountWideClaimHeadroom(h) === null) return null;
 
 	// At least one REJECTING scoped-window claim (e.g. `7d_oi`). Soonest finite
 	// future reset among them becomes the exclusion's resetAt.
-	let sawScopedRejection = false;
-	let soonestResetMs = Number.POSITIVE_INFINITY;
-	h.forEach((value, name) => {
-		const token = UNIFIED_STATUS_HEADER_RE.exec(name)?.[1];
-		if (!token || !SCOPED_WINDOW_TOKEN_RE.test(token)) return;
-		if (value !== "rejected") return;
-		sawScopedRejection = true;
-		const resetSec = parseStrictDecimal(
-			h.get(`anthropic-ratelimit-unified-${token}-reset`),
-		);
-		if (resetSec !== null && resetSec * 1000 > now) {
-			soonestResetMs = Math.min(soonestResetMs, resetSec * 1000);
-		}
-	});
-	if (!sawScopedRejection) return null;
+	const scoped = getScopedClaimRejection(h, now);
+	if (scoped === null) return null;
 
-	return {
-		account,
-		family,
-		resetAt: Number.isFinite(soonestResetMs) ? soonestResetMs : now,
-	};
+	return { account, family, resetAt: scoped.soonestResetMs ?? now };
 }
 
 /**
