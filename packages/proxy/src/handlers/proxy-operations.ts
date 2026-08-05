@@ -4,6 +4,7 @@ import {
 	getModelList,
 	isDebugEnabled,
 	isProtectedFamily,
+	isScopedOnlyUnifiedRejection,
 	logError,
 	NETWORK,
 	ProviderError,
@@ -289,6 +290,56 @@ export function extractCooldownUntil(
 
 	// 3. Last resort: 1 hour
 	return now + DEFAULT_COOLDOWN_MS;
+}
+
+/**
+ * Flat ceiling on the RESIDUAL 429 rungs' cooldowns (`model_fallback_429`,
+ * `all_models_exhausted_429`). Parity with the provider parser's 24h reset
+ * clamp: an honest minutes-to-hours retry-after passes through verbatim; a
+ * multi-day or headerless pathology is bounded and re-probed daily.
+ */
+export const RESIDUAL_429_COOLDOWN_CAP_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Cap the cooldown deadline the two residual 429 rungs write.
+ *
+ * These rungs are by construction the residue after every evidence-gated rung
+ * declined — they possess NO corroborating account-wide evidence, so an
+ * unbounded account-wide lock is never justified from them. Uncapped, they
+ * copied the 429's `retry-after` verbatim: on a claim-scoped 429 that slipped
+ * past the family rung (unresolvable model family, untrusted endpoint, or
+ * unparseable claim headers) that value is the SCOPED claim's reset —
+ * observed 4.5 days — under a reason outside QUOTA_DERIVED_RATE_LIMIT_REASONS,
+ * which the poller's capacity-restored release is forbidden to clear
+ * (the 2026-08-02 incident).
+ *
+ * Two arms:
+ *  - a PROVABLY scoped-only rejection on a trusted official-Anthropic account
+ *    gets the same ~90s cap the re-probe (:re-probe rung) and burst-intercept
+ *    rungs already apply to this exact `7d_oi` shape;
+ *  - everything else gets the flat 24h ceiling. The asymmetry is deliberate:
+ *    an over-capped genuine exhaustion self-corrects on the next 429 (which
+ *    lands on an evidence rung once the usage cache recovers), whereas an
+ *    uncapped scoped 429 writes a multi-day lock nothing can release.
+ *
+ * The evidence-gated account-wide exhaustion rung is NOT routed through this
+ * helper — its uncapped server-directed deadline is backed by fresh usage
+ * data and stays that way by design.
+ */
+export function capResidualRung429Cooldown(
+	account: Account,
+	response: Response,
+	uncappedUntil: number,
+	now: number,
+): number {
+	if (
+		account.provider === "anthropic" &&
+		!account.custom_endpoint &&
+		isScopedOnlyUnifiedRejection(response.headers)
+	) {
+		return Math.min(uncappedUntil, now + BURST_RETRY_COOLDOWN_CAP_MS);
+	}
+	return Math.min(uncappedUntil, now + RESIDUAL_429_COOLDOWN_CAP_MS);
 }
 
 /**
@@ -1730,16 +1781,26 @@ export async function proxyWithAccount(
 						log.warn(
 							`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
 						);
-						const cooldownUntil = extractCooldownUntil(
+						// Residual rung: no corroborating evidence, so the deadline is
+						// capped (see capResidualRung429Cooldown) — a claim-scoped 429
+						// that slipped past the family rung must not become a multi-day
+						// account-wide lock under a non-releasable reason.
+						const cooldownUntil = capResidualRung429Cooldown(
+							account,
 							rawResponse,
-							account.id,
-							usageCache.getRateLimitedUntil.bind(usageCache),
+							extractCooldownUntil(
+								rawResponse,
+								account.id,
+								usageCache.getRateLimitedUntil.bind(usageCache),
+							),
+							Date.now(),
 						);
 						const reason: RateLimitReason = "model_fallback_429";
 						// Route through shared helper so the consecutive_rate_limits
-						// counter and exponential backoff are applied uniformly across
-						// all 429 paths. Pass cooldownUntil as resetTime — the helper
-						// caps via min(resetTime, now + backoff). The audit reason is
+						// counter and the audit reason are applied uniformly across all
+						// 429 paths. A future cooldownUntil is written as a
+						// server-directed deadline (Lever B) — bounded by the cap above,
+						// never the raw multi-day retry-after. The audit reason is
 						// preserved so saveRequest + DB rate_limited_reason both record
 						// the failure-mode-specific tag.
 						//
@@ -1973,16 +2034,24 @@ export async function proxyWithAccount(
 							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
 						);
 					} else {
-						const cooldownUntil = extractCooldownUntil(
+						// Residual rung: capped like the no-fallback site above — no
+						// corroborating evidence justifies an unbounded deadline here.
+						const cooldownUntil = capResidualRung429Cooldown(
+							account,
 							rawResponse,
-							account.id,
-							usageCache.getRateLimitedUntil.bind(usageCache),
+							extractCooldownUntil(
+								rawResponse,
+								account.id,
+								usageCache.getRateLimitedUntil.bind(usageCache),
+							),
+							Date.now(),
 						);
 						const reason: RateLimitReason = "all_models_exhausted_429";
 						// Route through shared helper so the consecutive_rate_limits
-						// counter and exponential backoff are applied uniformly across
-						// all 429 paths. Pass cooldownUntil as resetTime — the helper
-						// caps via min(resetTime, now + backoff). The audit reason is
+						// counter and the audit reason are applied uniformly across all
+						// 429 paths. A future cooldownUntil is written as a
+						// server-directed deadline (Lever B) — bounded by the cap above,
+						// never the raw multi-day retry-after. The audit reason is
 						// preserved so saveRequest + DB rate_limited_reason both record
 						// the failure-mode-specific tag.
 						//
