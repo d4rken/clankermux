@@ -1,3 +1,4 @@
+import { HttpError } from "@clankermux/http-common";
 import type { AnalyticsSection, RetentionSetRequest } from "@clankermux/types";
 import {
 	useInfiniteQuery,
@@ -55,6 +56,24 @@ export function toDetailsMap<T extends { id: string }>(
 ): Map<string, T> {
 	if (raw instanceof Map) return raw;
 	return new Map((raw ?? []).map((s) => [s.id, s] as [string, T]));
+}
+
+/**
+ * Retry policy for the worker-backed dashboard reads (analytics, stats, the
+ * history endpoints, payments summary, filter options).
+ *
+ * Do NOT retry when the server ANSWERED — an HttpError means the request
+ * reached the handler and it decided. Retrying a 503 soft timeout is actively
+ * harmful: each attempt re-queues a full query behind the same slow read that
+ * caused the timeout, so a 3-retry default turns one slow query into four.
+ * A genuine network failure (no response at all) gets exactly one retry.
+ */
+export function shouldRetryDashboardQuery(
+	failureCount: number,
+	error: unknown,
+): boolean {
+	if (error instanceof HttpError) return false;
+	return failureCount < 1;
 }
 
 export const useStorageInfo = (refetchInterval?: number) => {
@@ -200,6 +219,7 @@ export const useStats = (
 		refetchInterval: refetchInterval ?? 30000, // Default to 30 seconds instead of 10
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -291,12 +311,13 @@ export const useAnalytics = (
 		gcTime: 15 * 60 * 1000,
 		enabled: !!timeRange && (options?.enabled ?? true),
 		retry: (failureCount, error) => {
+			const willRetry = shouldRetryDashboardQuery(failureCount, error);
 			logger.debug(`Analytics query retry attempt ${failureCount + 1}`, {
 				error: error instanceof Error ? error.message : String(error),
-				willRetry: failureCount < 3, // Retry up to 3 times
+				willRetry,
 				timestamp: new Date().toISOString(),
 			});
-			return failureCount < 3;
+			return willRetry;
 		},
 	});
 };
@@ -317,6 +338,7 @@ export const useAnalyticsFilterOptions = () => {
 		queryKey: queryKeys.analyticsFilterOptions(),
 		queryFn: () => api.getAnalyticsFilterOptions(),
 		staleTime: 5 * 60_000,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -332,6 +354,7 @@ export const useUsageHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -350,6 +373,7 @@ export const useMemoryHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -366,6 +390,7 @@ export const usePaymentsSummary = (range: string) => {
 		staleTime: 60_000,
 		refetchInterval: 120_000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -600,6 +625,7 @@ export const useCacheKeepaliveHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -615,6 +641,7 @@ export const useCacheEffectiveness = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
