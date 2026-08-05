@@ -148,19 +148,24 @@ function makeDbOps(
 	} as unknown as DatabaseOperations;
 }
 
-const config = {
-	getUsageThrottlingFiveHourEnabled: () => false,
-	getUsageThrottlingWeeklyEnabled: () => false,
-} as unknown as Config;
+function makeConfig(usageThrottling = false): Config {
+	return {
+		getUsageThrottlingFiveHourEnabled: () => usageThrottling,
+		getUsageThrottlingWeeklyEnabled: () => usageThrottling,
+	} as unknown as Config;
+}
+
+const config = makeConfig();
 
 async function run(
 	row: Partial<AccountRow>,
 	payloads: Array<{ json: string; timestamp: number }> = [],
+	handlerConfig: Config = config,
 ): Promise<{ account: AccountResponse | undefined; payloadQueries: string[] }> {
 	const payloadQueries: string[] = [];
 	const handler = createAccountsListHandler(
 		makeDbOps([makeAccountRow(row)], payloads, payloadQueries),
-		config,
+		handlerConfig,
 	);
 	const response = await handler();
 	const body = (await response.json()) as AccountResponse[];
@@ -308,5 +313,83 @@ describe("accounts list — Codex persisted-usage recovery", () => {
 		]);
 
 		expect(usageCache.peekAge(ACCOUNT_ID)).not.toBeNull();
+	});
+
+	it("keeps the column's credits when the snapshot has no live windows left", async () => {
+		const now = Date.now();
+		// Every window in the snapshot has already reset (and there are no
+		// `limits[]`), so the normalizer yields nothing displayable — but the
+		// account is still on credits, and that state only survives in this column
+		// after a restart.
+		const spent = JSON.stringify({
+			five_hour: {
+				utilization: 12,
+				resets_at: new Date(now - 2 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 88,
+				resets_at: new Date(now - HOUR_MS).toISOString(),
+			},
+			codexCredits: {
+				hasCredits: true,
+				balance: 12.5,
+				unlimited: false,
+				planType: "pro",
+				weeklyUsedPct: 88,
+			},
+		});
+
+		const { account } = await run({
+			last_used: null,
+			codex_usage_json: spent,
+			codex_usage_observed_at: now,
+		});
+
+		expect(account?.usageData ?? null).toBeNull();
+		expect(account?.codexCredits?.hasCredits).toBe(true);
+		expect(account?.codexCredits?.balance).toBe(12.5);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// "Requests are being delayed" is a claim about what the PROXY is doing, and the
+// proxy gates throttling on the live usage cache. Column-served data is NOT
+// written back into that cache, so it must never produce a throttle display —
+// otherwise a days-old snapshot announces a delay that is not happening.
+// ---------------------------------------------------------------------------
+
+describe("accounts list — throttle display vs the persisted column", () => {
+	/** A 7d window far ahead of its pro-rata pace: throttling material. */
+	const NEAR_LIMIT_PCT = 99;
+
+	it("never reports a throttle for column-served usage", async () => {
+		const now = Date.now();
+		const { account } = await run(
+			{
+				last_used: null,
+				codex_usage_json: persistedSnapshot(NEAR_LIMIT_PCT),
+				codex_usage_observed_at: now,
+			},
+			[],
+			makeConfig(true),
+		);
+
+		// The reading is served (the bars are honest, annotated with their age)…
+		expect(account?.usageData?.seven_day?.utilization).toBe(NEAR_LIMIT_PCT);
+		// …but the delay claim is not made.
+		expect(account?.usageThrottledUntil ?? null).toBeNull();
+		expect(account?.usageThrottledWindows ?? []).toEqual([]);
+	});
+
+	it("still reports a throttle for payload-served usage (cache re-warmed)", async () => {
+		const now = Date.now();
+		const { account } = await run(
+			{ last_used: now - 5 * 60 * 1000 },
+			[payloadRow(now - 5 * 60 * 1000, NEAR_LIMIT_PCT)],
+			makeConfig(true),
+		);
+
+		expect(account?.usageThrottledUntil).not.toBeNull();
+		expect(account?.usageThrottledWindows).toContain("seven_day");
 	});
 });

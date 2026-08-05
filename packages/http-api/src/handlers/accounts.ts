@@ -31,6 +31,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
+	type CodexCreditsInfo,
 	codexRateLimitResetCreditsCache,
 	fetchUsageData,
 	getRepresentativeMinimaxUtilization,
@@ -491,28 +492,36 @@ async function scanCodexUsageFromPayloads(
 }
 
 /**
- * The persisted `accounts.codex_usage_json` snapshot, normalized for display, or
- * null when the column is empty, unparseable, or contains nothing still live.
+ * The persisted `accounts.codex_usage_json` snapshot, split into the part that
+ * expires and the part that does not.
+ *
+ * `data` is the snapshot normalized for display — null when the column is empty,
+ * unparseable, or contains nothing still live. `codexCredits` is the credits
+ * state the same JSON carries, and it is retained EVEN WHEN `data` is null: an
+ * account being on credits is not a window that lapses when its reset passes, so
+ * dropping it with the spent windows would blank the credits chip for every idle
+ * account after a restart.
  */
 function readPersistedCodexUsageColumn(
 	persistedJson: string | null,
 	accountName: string,
-): FullUsageData | null {
-	if (!persistedJson) return null;
+): { data: FullUsageData | null; codexCredits: CodexCreditsInfo | null } {
+	if (!persistedJson) return { data: null, codexCredits: null };
 	try {
 		const parsed = JSON.parse(persistedJson) as UsageData;
+		const credits = parsed.codexCredits ?? null;
 		const normalized = normalizeCodexUsageData(parsed);
-		if (!normalized) return null;
+		if (!normalized) return { data: null, codexCredits: credits };
 		// normalizeCodexUsageData only carries the windows; reattach the credits
 		// state the same way the live-cache branch does.
-		if (parsed.codexCredits) normalized.codexCredits = parsed.codexCredits;
-		return normalized as FullUsageData;
+		if (credits) normalized.codexCredits = credits;
+		return { data: normalized as FullUsageData, codexCredits: credits };
 	} catch (error) {
 		log.warn(
 			`Failed to parse the persisted Codex usage snapshot for ${accountName}:`,
 			error instanceof Error ? error.message : String(error),
 		);
-		return null;
+		return { data: null, codexCredits: null };
 	}
 }
 
@@ -520,13 +529,19 @@ function readPersistedCodexUsageColumn(
  * Resolve a Codex account's usage, reporting WHERE it came from and (for the
  * persisted column) WHEN it was observed.
  *
- * Three channels, newest wins:
- *   1. the live usage cache — the only `"cache"` source, and the only one the
- *      response may label with the cache entry's own sample time;
- *   2. `accounts.codex_usage_json`, written by every Codex observation and
- *      stamped with `codex_usage_observed_at`;
- *   3. the legacy scan over stored request payloads, whose headers may predate
- *      the account's current window by hours.
+ * Three channels, newest wins, each reported under its own `source` so callers
+ * can tell them apart:
+ *   1. `"cache"` — the live usage cache, the only source the response may label
+ *      with the cache entry's own sample time;
+ *   2. `"column"` — `accounts.codex_usage_json`, written by every Codex
+ *      observation and stamped with `codex_usage_observed_at`;
+ *   3. `"payload"` — the legacy scan over stored request payloads, whose headers
+ *      may predate the account's current window by hours.
+ *
+ * The distinction matters beyond labelling: only `"cache"` and `"payload"` are
+ * reflected in the live usage cache (the payload scan re-seeds it), so only they
+ * describe a reading the PROXY can also see. A `"column"` reading is
+ * display-only.
  *
  * The column is compared against `last_used` because that is the only cheap
  * upper bound on how new a payload candidate could possibly be: when the column
@@ -545,9 +560,16 @@ async function getCachedOrPersistedCodexUsage(
 	lastUsed: number | null,
 ): Promise<{
 	data: FullUsageData | null;
-	source: "cache" | "persisted" | null;
+	source: "cache" | "column" | "payload" | null;
 	observedAtMs: number | null;
+	persistedCredits: CodexCreditsInfo | null;
 }> {
+	// Read the column FIRST, whichever source ends up winning: its credits state
+	// is reported unconditionally so a caller can fall back to it when the served
+	// reading carries none.
+	const column = readPersistedCodexUsageColumn(persistedJson, accountName);
+	const persistedCredits = column.codexCredits;
+
 	if (cacheData) {
 		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
 		if (normalizedCache) {
@@ -559,18 +581,20 @@ async function getCachedOrPersistedCodexUsage(
 				data: normalizedCache as FullUsageData,
 				source: "cache",
 				observedAtMs: null,
+				persistedCredits,
 			};
 		}
 	}
 
-	const columnData = readPersistedCodexUsageColumn(persistedJson, accountName);
+	const columnData = column.data;
 	const columnObservedAt = columnData ? persistedObservedAt : null;
 	const serveColumn = () => {
 		log.debug(`Served the persisted Codex usage snapshot for ${accountName}`);
 		return {
 			data: columnData,
-			source: "persisted" as const,
+			source: "column" as const,
 			observedAtMs: columnObservedAt,
+			persistedCredits,
 		};
 	};
 
@@ -603,12 +627,13 @@ async function getCachedOrPersistedCodexUsage(
 		log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
 		return {
 			data: payloadCandidate.data as FullUsageData,
-			source: "persisted",
+			source: "payload",
 			observedAtMs: null,
+			persistedCredits,
 		};
 	}
 
-	return { data: null, source: null, observedAtMs: null };
+	return { data: null, source: null, observedAtMs: null, persistedCredits };
 }
 
 /**
@@ -987,6 +1012,15 @@ export function createAccountsListHandler(
 				// account column — the one non-cache source that knows honestly WHEN it
 				// was sampled. Null for every other source.
 				let usageObservedAtMs: number | null = null;
+				// True only for a Codex reading served from `accounts.codex_usage_json`.
+				// That path deliberately does NOT re-seed the usage cache, so the proxy
+				// cannot see this reading — anything that describes proxy BEHAVIOUR
+				// (the throttle status below) must sit this one out.
+				let usageServedFromCodexColumn = false;
+				// Credits state stored on the account column, used as the last fallback
+				// for the credits chip. Kept even when the column's windows have all
+				// lapsed (see readPersistedCodexUsageColumn).
+				let persistedCodexCredits: CodexCreditsInfo | null = null;
 				if (account.provider === "codex") {
 					const resolved = await getCachedOrPersistedCodexUsage(
 						db,
@@ -1001,7 +1035,11 @@ export function createAccountsListHandler(
 					);
 					usageData = resolved.data;
 					usageIsLiveCacheEntry = resolved.source === "cache";
-					usageObservedAtMs = resolved.observedAtMs;
+					usageServedFromCodexColumn = resolved.source === "column";
+					// Only the column source carries an honest observation time.
+					usageObservedAtMs =
+						resolved.source === "column" ? resolved.observedAtMs : null;
+					persistedCodexCredits = resolved.persistedCredits;
 				}
 
 				// Account-wide exhaustion (anthropic/codex only): the weeklyAll window,
@@ -1055,10 +1093,14 @@ export function createAccountsListHandler(
 				// already-read `cachedUsageData` (the single per-account cache read
 				// from `liveUsageByAccount`) rather than reading the cache again, so
 				// the whole response describes one consistent snapshot per account.
+				// Last resort is the persisted column's credits: after a restart the
+				// cache is cold, and an idle account's snapshot may hold nothing but
+				// spent windows — the credits state is still true.
 				const codexCredits =
 					account.provider === "codex"
 						? ((usageData as UsageData | null)?.codexCredits ??
 							(cachedUsageData as UsageData | null)?.codexCredits ??
+							persistedCodexCredits ??
 							null)
 						: null;
 				const resetCreditsEntry =
@@ -1247,10 +1289,16 @@ export function createAccountsListHandler(
 				const usageDataAgeMs = usageIsLiveCacheEntry
 					? (liveUsageEntry?.ageMs ?? 0)
 					: 0;
+				// The one reading with no cache counterpart at all: a Codex snapshot
+				// restored from `accounts.codex_usage_json`, which is deliberately NOT
+				// written back into the usage cache. Its age is unknown to the age
+				// heuristic above (it would read as 0), and the proxy's throttle gate
+				// sees an EMPTY cache for this account — so it is throttling nothing.
 				if (
 					(usageThrottleSettings.fiveHourEnabled ||
 						usageThrottleSettings.weeklyEnabled) &&
 					fullUsageData &&
+					!usageServedFromCodexColumn &&
 					usageDataAgeMs <= USAGE_CACHE_TTL_MS
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
