@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { RequestResponse } from "@clankermux/types";
+import { MAX_LIVE_EVENTS } from "../live-activity";
 import { LiveActivityStore, PUBLISH_INTERVAL_MS } from "../live-activity-store";
 
 const WINDOW = 180_000;
@@ -133,31 +134,77 @@ describe("LiveActivityStore priming and the history edge", () => {
 });
 
 describe("LiveActivityStore outage bookkeeping", () => {
-	it("remembers when the connection dropped, across the reconnect", async () => {
-		// The reader needs to know WHICH stretch of the timeline is unknown
-		// after the connection comes back — otherwise the gap reads as a quiet
-		// period rather than as missing history.
+	it("closes the outage at the moment service resumed", async () => {
+		// The gap has an END. Leaving it open would hatch every healthy request
+		// after the reconnect as "unknown" for as long as the drop stayed in the
+		// window — the same lie as hiding the gap, in the other direction.
 		let now = T0;
 		const store = makeStore(() => now);
 
 		store.setConnected(true);
-		await settle();
 		now = T0 + 10_000;
 		store.setConnected(false);
-		await settle();
-
-		expect(store.getSnapshot().disconnectedSince).toBe(T0 + 10_000);
-
 		now = T0 + 20_000;
 		store.setConnected(true);
 		await settle();
 
 		expect(store.getSnapshot().connected).toBe(true);
-		expect(store.getSnapshot().disconnectedSince).toBe(T0 + 10_000);
+		expect(store.getSnapshot().outages).toEqual([
+			{ from: T0 + 10_000, to: T0 + 20_000 },
+		]);
 		store.dispose();
 	});
 
-	it("forgets the outage once it scrolls out of the window", async () => {
+	it("leaves an ongoing outage open", async () => {
+		let now = T0;
+		const store = makeStore(() => now);
+
+		store.setConnected(true);
+		now = T0 + 5_000;
+		store.setConnected(false);
+		await settle();
+
+		expect(store.getSnapshot().outages).toEqual([
+			{ from: T0 + 5_000, to: null },
+		]);
+		store.dispose();
+	});
+
+	it("keeps successive outages apart instead of merging them", async () => {
+		let now = T0;
+		const store = makeStore(() => now);
+
+		store.setConnected(true);
+		now = T0 + 1_000;
+		store.setConnected(false);
+		now = T0 + 2_000;
+		store.setConnected(true);
+		now = T0 + 3_000;
+		store.setConnected(false);
+		now = T0 + 4_000;
+		store.setConnected(true);
+		await settle();
+
+		expect(store.getSnapshot().outages).toEqual([
+			{ from: T0 + 1_000, to: T0 + 2_000 },
+			{ from: T0 + 3_000, to: T0 + 4_000 },
+		]);
+		store.dispose();
+	});
+
+	it("records no outage before the stream has ever connected", async () => {
+		// The pre-connect period is covered by the history backfill, not by the
+		// live stream; hatching it would double-count the gap the history edge
+		// already discloses.
+		const store = makeStore();
+		store.setConnected(false);
+		await settle();
+
+		expect(store.getSnapshot().outages).toEqual([]);
+		store.dispose();
+	});
+
+	it("forgets an outage once it scrolls out of the window", async () => {
 		let now = T0;
 		const store = makeStore(() => now);
 
@@ -166,13 +213,13 @@ describe("LiveActivityStore outage bookkeeping", () => {
 		now = T0 + 1000;
 		store.setConnected(true);
 		await settle();
-		expect(store.getSnapshot().disconnectedSince).toBe(T0);
+		expect(store.getSnapshot().outages).toHaveLength(1);
 
 		now = T0 + WINDOW + 5000;
 		store.tick();
 		await settle();
 
-		expect(store.getSnapshot().disconnectedSince).toBeNull();
+		expect(store.getSnapshot().outages).toEqual([]);
 		store.dispose();
 	});
 
@@ -206,6 +253,22 @@ describe("LiveActivityStore housekeeping", () => {
 		await settle();
 
 		expect(store.getSnapshot().events).toHaveLength(0);
+		store.dispose();
+	});
+
+	it("bounds the published snapshot even when a burst outruns the tick", async () => {
+		// The 1 Hz tick is not fast enough to be the only cap: a burst larger
+		// than the ceiling arriving inside one second would otherwise publish
+		// thousands of marks, exactly when the dashboard is already loaded.
+		const store = makeStore(() => T0 + WINDOW * 4);
+		for (let i = 0; i < MAX_LIVE_EVENTS + 500; i++) {
+			store.applyHistory([row({ id: `r${i}` })], false);
+		}
+		await settle();
+
+		expect(store.getSnapshot().events.length).toBeLessThanOrEqual(
+			MAX_LIVE_EVENTS,
+		);
 		store.dispose();
 	});
 

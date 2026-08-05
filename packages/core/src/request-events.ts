@@ -32,7 +32,9 @@ export type RequestIngressEvt = {
 export type RequestIngressEndEvt = {
 	type: "ingress-end";
 	id: string;
-	statusCode: number;
+	/** `null` when the request threw and no response was ever produced — the
+	 *  bus is untyped, so this has to be honest rather than invent a status. */
+	statusCode: number | null;
 };
 
 export type RequestStartEvt = {
@@ -97,8 +99,12 @@ export type RequestStreamEvt = RequestEvt | RequestSnapshotEvt;
 export const ACTIVE_REQUEST_MAX_ENTRIES = 500;
 /** Age past which an unsettled request is presumed dead and dropped. */
 export const ACTIVE_REQUEST_TTL_MS = 15 * 60 * 1000;
-/** Ids remembered for {@link hasRequestStarted} after they settle. */
-const STARTED_ID_MAX_ENTRIES = 1000;
+/**
+ * Memory backstop on start markers. Far above any real concurrency: markers are
+ * consumed by the one caller that asks, so the live size tracks the number of
+ * requests currently inside `handleProxy`, not the request RATE.
+ */
+const STARTED_ID_MAX_ENTRIES = 10_000;
 
 class RequestEventBus extends EventEmitter {}
 export const requestEvents = new RequestEventBus();
@@ -131,14 +137,18 @@ const active = new Map<string, TrackedRequest>();
  * Ids that reached `forwardToClient`, kept SEPARATELY from `active` and
  * deliberately NOT cleared when a request settles.
  *
- * `handleProxy`'s `finally` asks "did this ever start?" to decide whether to
- * emit a synthetic terminal. For a non-streaming response the summary can land
- * before that `finally` runs, so reading the answer out of `active` would say
- * "never started" for a request that completed normally and emit a spurious
- * `ingress-end`. FIFO-capped rather than TTL'd: the question is only ever asked
- * within the lifetime of the request that started it.
+ * `handleProxy` asks "did this ever start?" to decide whether to emit a
+ * synthetic terminal. For a non-streaming response the summary can land before
+ * it gets to ask, so reading the answer out of `active` would say "never
+ * started" for a request that completed normally and retract it.
+ *
+ * Aged out by TTL rather than by count. A FIFO cap would make the answer for
+ * ONE request depend on how many UNRELATED requests started in between: under a
+ * burst larger than the cap, a long-running stream's marker could be evicted
+ * before its own invocation asked, and the retraction would erase a live
+ * request from the dashboard. Time cannot be raced that way.
  */
-const startedIds = new Set<string>();
+const startedIds = new Map<string, number>();
 
 let clock: () => number = Date.now;
 
@@ -159,10 +169,21 @@ function evict(): void {
 }
 
 function markStarted(id: string): void {
-	startedIds.add(id);
-	if (startedIds.size > STARTED_ID_MAX_ENTRIES) {
-		const oldest = startedIds.values().next();
-		if (!oldest.done) startedIds.delete(oldest.value);
+	const now = clock();
+	startedIds.set(id, now);
+
+	// TTL sweep; insertion order is age order, so stop at the first young one.
+	const cutoff = now - ACTIVE_REQUEST_TTL_MS;
+	for (const [markedId, at] of startedIds) {
+		if (at > cutoff) break;
+		startedIds.delete(markedId);
+	}
+
+	// Pure memory backstop, only reachable if something is leaking markers.
+	while (startedIds.size > STARTED_ID_MAX_ENTRIES) {
+		const oldest = startedIds.keys().next();
+		if (oldest.done) break;
+		startedIds.delete(oldest.value);
 	}
 }
 
@@ -235,6 +256,19 @@ export function getActiveRequests(): ActiveRequestEntry[] {
 /** Whether `id` ever reached `forwardToClient` (and so will be summarized). */
 export function hasRequestStarted(id: string): boolean {
 	return startedIds.has(id);
+}
+
+/**
+ * Read the start marker for `id` and drop it.
+ *
+ * The question is asked exactly once per request, at the end of `handleProxy`,
+ * so consuming keeps the marker table sized by in-flight concurrency rather
+ * than by cumulative request count.
+ */
+export function consumeRequestStarted(id: string): boolean {
+	const started = startedIds.has(id);
+	startedIds.delete(id);
+	return started;
 }
 
 /**

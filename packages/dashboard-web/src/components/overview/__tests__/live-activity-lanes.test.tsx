@@ -39,7 +39,7 @@ function render(
 			windowMs={WINDOW}
 			plotWidth={PLOT_WIDTH}
 			connected={true}
-			disconnectedSince={null}
+			outages={[]}
 			historyEdge={null}
 			primed={true}
 			{...props}
@@ -142,8 +142,7 @@ describe("unknownRegions", () => {
 			now: T0,
 			windowMs: WINDOW,
 			historyEdge: T0 - 60_000,
-			disconnectedSince: null,
-			connected: true,
+			outages: [],
 		});
 
 		expect(regions).toHaveLength(1);
@@ -157,8 +156,7 @@ describe("unknownRegions", () => {
 				now: T0,
 				windowMs: WINDOW,
 				historyEdge: T0 - WINDOW - 1000,
-				disconnectedSince: null,
-				connected: true,
+				outages: [],
 			}),
 		).toHaveLength(0);
 	});
@@ -170,13 +168,43 @@ describe("unknownRegions", () => {
 			now: T0,
 			windowMs: WINDOW,
 			historyEdge: null,
-			disconnectedSince: T0 - 30_000,
-			connected: true,
+			outages: [{ from: T0 - 30_000, to: null }],
 		});
 
 		expect(regions).toHaveLength(1);
-		expect(regions[0].key).toBe("outage");
 		expect(regions[0].label).toContain("disconnected");
+	});
+
+	it("stops a closed outage where it ended, not at the present", () => {
+		// The regression this guards: extending a finished outage to `now`
+		// hatches every healthy request since the reconnect as unknown.
+		const [region] = unknownRegions({
+			now: T0,
+			windowMs: WINDOW,
+			historyEdge: null,
+			outages: [{ from: T0 - 60_000, to: T0 - 50_000 }],
+		});
+
+		expect(region.from).toBe(T0 - 60_000);
+		expect(region.to).toBe(T0 - 50_000);
+	});
+
+	it("hatches each outage separately", () => {
+		const regions = unknownRegions({
+			now: T0,
+			windowMs: WINDOW,
+			historyEdge: null,
+			outages: [
+				{ from: T0 - 90_000, to: T0 - 80_000 },
+				{ from: T0 - 40_000, to: T0 - 30_000 },
+			],
+		});
+
+		expect(regions).toHaveLength(2);
+		expect(regions.map((r) => r.key)).toEqual([
+			`outage-${T0 - 90_000}`,
+			`outage-${T0 - 30_000 - 10_000}`,
+		]);
 	});
 
 	it("clips an outage that started before the window to the window", () => {
@@ -184,11 +212,23 @@ describe("unknownRegions", () => {
 			now: T0,
 			windowMs: WINDOW,
 			historyEdge: null,
-			disconnectedSince: T0 - WINDOW * 5,
-			connected: false,
+			outages: [{ from: T0 - WINDOW * 5, to: null }],
 		});
 
 		expect(region.from).toBe(T0 - WINDOW);
+		// Still down, so it genuinely does run to the present.
+		expect(region.to).toBe(T0);
+	});
+
+	it("drops an outage that has scrolled entirely out of the window", () => {
+		expect(
+			unknownRegions({
+				now: T0,
+				windowMs: WINDOW,
+				historyEdge: null,
+				outages: [{ from: T0 - WINDOW * 3, to: T0 - WINDOW * 2 }],
+			}),
+		).toHaveLength(0);
 	});
 });
 

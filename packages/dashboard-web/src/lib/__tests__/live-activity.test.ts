@@ -584,6 +584,39 @@ describe("buildLanes", () => {
 		expect(lanes).toHaveLength(1);
 		expect(lanes[0].active).toBe(1);
 	});
+
+	it("does not count a pinned long-runner as an arrival in the window", () => {
+		// It is drawn because it is still happening, but counting it would make
+		// the card report requests — and a request RATE — for a window in which
+		// nothing actually arrived.
+		const { lanes } = buildLanes(
+			[
+				completed("long", "clankermux", T0 - WINDOW * 2, {
+					status: "streaming",
+					tokens: 9_000,
+				}),
+			],
+			T0,
+			WINDOW,
+			6,
+		);
+
+		expect(lanes[0].active).toBe(1);
+		expect(lanes[0].requests).toBe(0);
+		expect(lanes[0].tokens).toBe(0);
+	});
+
+	it("counts an in-window active request as both", () => {
+		const { lanes } = buildLanes(
+			[completed("now", "clankermux", T0 - 1_000, { status: "streaming" })],
+			T0,
+			WINDOW,
+			6,
+		);
+
+		expect(lanes[0].active).toBe(1);
+		expect(lanes[0].requests).toBe(1);
+	});
 });
 
 describe("markRadius", () => {

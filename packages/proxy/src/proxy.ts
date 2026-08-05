@@ -1,7 +1,7 @@
 import {
 	codexAccountFitsRequestUnmargined,
+	consumeRequestStarted,
 	getModelFamily,
-	hasRequestStarted,
 	isDebugEnabled,
 	NETWORK,
 	requestEvents,
@@ -303,7 +303,7 @@ export async function handleProxy(
 	 */
 	const retractIfNeverStarted = (statusCode: number | null): void => {
 		if (!announced) return;
-		if (hasRequestStarted(requestMeta.id)) return;
+		if (consumeRequestStarted(requestMeta.id)) return;
 		requestEvents.emit("event", {
 			type: "ingress-end",
 			id: requestMeta.id,

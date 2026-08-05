@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import {
 	ACTIVE_REQUEST_MAX_ENTRIES,
 	ACTIVE_REQUEST_TTL_MS,
+	consumeRequestStarted,
 	getActiveRequests,
 	hasRequestStarted,
 	requestEvents,
@@ -146,6 +147,26 @@ describe("active-request registry", () => {
 
 		expect(getActiveRequests()).toEqual([]);
 		expect(hasRequestStarted("req-1")).toBe(true);
+	});
+
+	it("consumes the start marker so it is answered exactly once", () => {
+		start("req-1");
+
+		expect(consumeRequestStarted("req-1")).toBe(true);
+		// Consumed, so the marker table stays sized by in-flight concurrency
+		// rather than by cumulative request count.
+		expect(hasRequestStarted("req-1")).toBe(false);
+	});
+
+	it("does not let unrelated traffic evict a live request's start marker", () => {
+		// The regression this guards: with a count-based cap, whether a
+		// long-running stream was known to have started depended on how many
+		// OTHER requests started while it was still running. Losing that answer
+		// retracts the request and erases a live mark from the dashboard.
+		start("long-runner");
+		for (let i = 0; i < 5_000; i++) start(`burst-${i}`);
+
+		expect(consumeRequestStarted("long-runner")).toBe(true);
 	});
 
 	it("evicts the oldest entries past the cap so a burst cannot grow unbounded", () => {

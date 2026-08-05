@@ -221,7 +221,7 @@ export function useRequestEvents(
 const DETACHED_SNAPSHOT: LiveActivitySnapshot = {
 	events: [],
 	connected: false,
-	disconnectedSince: null,
+	outages: [],
 	primed: false,
 	historyEdge: null,
 };

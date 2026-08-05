@@ -381,13 +381,22 @@ export function laneKeyOf(project: string | null): string {
 export interface Lane {
 	key: string;
 	label: string;
-	/** Events in this lane, ascending by time. */
+	/** Events in this lane, ascending by time. Includes long-running requests
+	 *  that started before the window and are pinned at its left edge. */
 	events: LiveEvent[];
+	/**
+	 * Requests that ARRIVED inside the window.
+	 *
+	 * Deliberately excludes the pinned long-runners: they are drawn because
+	 * they are still happening, but counting them as arrivals would report a
+	 * positive request rate for a window in which nothing actually arrived.
+	 */
 	requests: number;
+	/** Tokens from the in-window requests, on the same basis as `requests`. */
 	tokens: number;
 	rateLimited: number;
 	errors: number;
-	/** How many of this lane's requests are still running. */
+	/** How many of this lane's requests are still running, pinned included. */
 	active: number;
 }
 
@@ -464,6 +473,7 @@ export function buildLanes(
 			key,
 			bucket.project ?? NO_PROJECT_LABEL,
 			sortByTime(bucket.events),
+			cutoff,
 		);
 	});
 
@@ -474,6 +484,7 @@ export function buildLanes(
 				OTHER_LANE_KEY,
 				`Other (${overflow.length} project${overflow.length === 1 ? "" : "s"})`,
 				sortByTime(merged),
+				cutoff,
 			),
 		);
 	}
@@ -485,29 +496,31 @@ function sortByTime(events: LiveEvent[]): LiveEvent[] {
 	return [...events].sort((a, b) => a.ts - b.ts);
 }
 
-function toLane(key: string, label: string, events: LiveEvent[]): Lane {
+function toLane(
+	key: string,
+	label: string,
+	events: LiveEvent[],
+	cutoff: number,
+): Lane {
+	let requests = 0;
 	let tokens = 0;
 	let rateLimited = 0;
 	let errors = 0;
 	let active = 0;
 
 	for (const event of events) {
-		tokens += event.tokens ?? 0;
-		if (event.status === "rate_limited") rateLimited++;
-		else if (event.status === "error") errors++;
+		// Pinned long-runners are drawn but not counted as arrivals — see the
+		// `requests` field doc.
+		if (event.ts >= cutoff) {
+			requests++;
+			tokens += event.tokens ?? 0;
+			if (event.status === "rate_limited") rateLimited++;
+			else if (event.status === "error") errors++;
+		}
 		if (isActiveStatus(event.status)) active++;
 	}
 
-	return {
-		key,
-		label,
-		events,
-		requests: events.length,
-		tokens,
-		rateLimited,
-		errors,
-		active,
-	};
+	return { key, label, events, requests, tokens, rateLimited, errors, active };
 }
 
 // ---------------------------------------------------------------------------

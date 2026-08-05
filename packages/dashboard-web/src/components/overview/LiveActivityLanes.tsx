@@ -9,6 +9,7 @@ import {
 	type LiveStatus,
 	markRadius,
 } from "../../lib/live-activity";
+import type { Outage } from "../../lib/live-activity-store";
 import { LIVE_WINDOW_MS, useLiveActivity } from "../RequestEventProvider";
 import {
 	Card,
@@ -73,7 +74,7 @@ export interface LiveActivityLanesViewProps {
 	windowMs: number;
 	plotWidth: number;
 	connected: boolean;
-	disconnectedSince: number | null;
+	outages: readonly Outage[];
 	historyEdge: number | null;
 	primed: boolean;
 	/** Currently highlighted event, if any. */
@@ -91,6 +92,14 @@ export interface LiveActivityLanesViewProps {
 		 * and tick leftwards.
 		 */
 		areaRef?: React.Ref<HTMLDivElement>;
+		/**
+		 * The group holding everything anchored to an absolute moment — the
+		 * marks and the unknown-history hatching, and nothing else. The scroll
+		 * transform goes here, NOT on the card: translating the card would slide
+		 * the labels and axis with it and move the marks in lockstep with their
+		 * own gridlines, which is visually no movement at all.
+		 */
+		scrollRef?: React.Ref<SVGGElement>;
 		onPointerMove?: React.PointerEventHandler<SVGSVGElement>;
 		onPointerLeave?: React.PointerEventHandler<SVGSVGElement>;
 		onKeyDown?: React.KeyboardEventHandler<SVGSVGElement>;
@@ -105,7 +114,7 @@ export function LiveActivityLanesView({
 	windowMs,
 	plotWidth,
 	connected,
-	disconnectedSince,
+	outages,
 	historyEdge,
 	primed,
 	selected = null,
@@ -222,32 +231,10 @@ export function LiveActivityLanesView({
 								</defs>
 
 								<g clipPath="url(#live-activity-plot)">
-									{/* Regions we cannot speak for. Rendered UNDER the marks
-									    so a hatch can never hide a real request. */}
-									{unknownRegions({
-										now,
-										windowMs,
-										historyEdge,
-										disconnectedSince,
-										connected,
-									}).map((region) => (
-										<rect
-											key={region.key}
-											x={Math.max(xOf(region.from), 0)}
-											y={0}
-											width={Math.max(
-												xOf(region.to) - Math.max(xOf(region.from), 0),
-												0,
-											)}
-											height={lanes.length * LANE_HEIGHT}
-											fill="url(#live-activity-unknown)"
-										>
-											<title>{region.label}</title>
-										</rect>
-									))}
-
-									{/* Minute gridlines: solid hairlines, one shade off the
-									    surface. Never dashed — dashing reads as a threshold. */}
+									{/* Minute gridlines. NOT part of the scrolling group: they
+									    mark offsets FROM now (-1m, -2m, …), so they belong to
+									    the axis and must stay put while time passes. Solid
+									    hairlines — dashing would read as a threshold. */}
 									{minuteTicks(windowMs).map((offset) => (
 										<line
 											key={offset}
@@ -260,20 +247,52 @@ export function LiveActivityLanesView({
 										/>
 									))}
 
-									{lanes.map((lane, laneIndex) => (
-										<g key={lane.key}>
-											{lane.events.map((event) => (
-												<Mark
-													key={event.id}
-													event={event}
-													cx={clampToPlot(xOf(event.ts))}
-													cy={laneIndex * LANE_HEIGHT + LANE_HEIGHT / 2}
-													opacity={ageOpacity(event.ts, now, windowMs)}
-													selected={selected?.id === event.id}
-												/>
-											))}
-										</g>
-									))}
+									{/* Everything anchored to an ABSOLUTE moment, and only
+									    that: the marks and the regions we cannot speak for.
+									    This is the group the animation frame translates, so it
+									    must not contain the axis, the labels or the card
+									    chrome — translating those would slide the whole card
+									    sideways and move the marks WITH their own axis, which
+									    is no movement at all. */}
+									<g ref={plot?.scrollRef}>
+										{/* Rendered UNDER the marks so a hatch can never hide a
+										    real request. */}
+										{unknownRegions({
+											now,
+											windowMs,
+											historyEdge,
+											outages,
+										}).map((region) => (
+											<rect
+												key={region.key}
+												x={Math.max(xOf(region.from), 0)}
+												y={0}
+												width={Math.max(
+													xOf(region.to) - Math.max(xOf(region.from), 0),
+													0,
+												)}
+												height={lanes.length * LANE_HEIGHT}
+												fill="url(#live-activity-unknown)"
+											>
+												<title>{region.label}</title>
+											</rect>
+										))}
+
+										{lanes.map((lane, laneIndex) => (
+											<g key={lane.key}>
+												{lane.events.map((event) => (
+													<Mark
+														key={event.id}
+														event={event}
+														cx={clampToPlot(xOf(event.ts))}
+														cy={laneIndex * LANE_HEIGHT + LANE_HEIGHT / 2}
+														opacity={ageOpacity(event.ts, now, windowMs)}
+														selected={selected?.id === event.id}
+													/>
+												))}
+											</g>
+										))}
+									</g>
 								</g>
 
 								{/* "Now" rule, drawn last so it sits above the marks. */}
@@ -521,14 +540,12 @@ export function unknownRegions({
 	now,
 	windowMs,
 	historyEdge,
-	disconnectedSince,
-	connected,
+	outages,
 }: {
 	now: number;
 	windowMs: number;
 	historyEdge: number | null;
-	disconnectedSince: number | null;
-	connected: boolean;
+	outages: readonly Outage[];
 }): UnknownRegion[] {
 	const regions: UnknownRegion[] = [];
 	const windowStart = now - windowMs;
@@ -544,14 +561,20 @@ export function unknownRegions({
 		});
 	}
 
-	if (disconnectedSince !== null) {
+	for (const outage of outages) {
+		// `to: null` means still down, so the gap genuinely does run to now.
+		// A CLOSED outage must stop where it stopped — extending it to the
+		// present would hatch healthy post-reconnect traffic as unknown.
+		const to = outage.to ?? now;
+		if (to < windowStart) continue;
 		regions.push({
-			key: "outage",
-			from: Math.max(disconnectedSince, windowStart),
-			to: connected ? now : now,
-			label: connected
-				? `Stream was disconnected from ${new Date(disconnectedSince).toLocaleTimeString()} — requests in this period may be missing`
-				: "Stream disconnected — requests are not being recorded here right now",
+			key: `outage-${outage.from}`,
+			from: Math.max(outage.from, windowStart),
+			to,
+			label:
+				outage.to === null
+					? "Stream disconnected — requests are not being shown here right now"
+					: `Stream was disconnected ${new Date(outage.from).toLocaleTimeString()}–${new Date(outage.to).toLocaleTimeString()} — requests in this period may be missing`,
 		});
 	}
 
@@ -574,8 +597,7 @@ function describeLanes(lanes: Lane[], windowMs: number): string {
  * between renders, and resolves pointer position to an event.
  */
 export function LiveActivityLanes() {
-	const { events, connected, disconnectedSince, historyEdge, primed } =
-		useLiveActivity();
+	const { events, connected, outages, historyEdge, primed } = useLiveActivity();
 
 	const plotAreaRef = useRef<HTMLDivElement>(null);
 	const [plotWidth, setPlotWidth] = useState(DEFAULT_PLOT_WIDTH);
@@ -603,7 +625,13 @@ export function LiveActivityLanes() {
 	const orderRef = useRef<string[]>([]);
 	const { lanes, order } = useMemo(
 		() =>
-			buildLanes(events, renderNow, LIVE_WINDOW_MS, MAX_LANES, orderRef.current),
+			buildLanes(
+				events,
+				renderNow,
+				LIVE_WINDOW_MS,
+				MAX_LANES,
+				orderRef.current,
+			),
 		[events, renderNow],
 	);
 	orderRef.current = order;
@@ -640,7 +668,7 @@ export function LiveActivityLanes() {
 				renderNow={renderNow}
 				plotWidth={plotWidth}
 				connected={connected}
-				disconnectedSince={disconnectedSince}
+				outages={outages}
 				historyEdge={historyEdge}
 				primed={primed}
 				reducedMotion={reducedMotion}
@@ -664,7 +692,7 @@ function ScrollingLanes({
 	renderNow,
 	plotWidth,
 	connected,
-	disconnectedSince,
+	outages,
 	historyEdge,
 	primed,
 	reducedMotion,
@@ -674,12 +702,12 @@ function ScrollingLanes({
 	renderNow: number;
 	plotWidth: number;
 	connected: boolean;
-	disconnectedSince: number | null;
+	outages: readonly Outage[];
 	historyEdge: number | null;
 	primed: boolean;
 	reducedMotion: boolean;
 }) {
-	const wrapperRef = useRef<HTMLDivElement>(null);
+	const scrollRef = useRef<SVGGElement>(null);
 	const svgRef = useRef<SVGSVGElement>(null);
 	const pxPerMs = Math.max(plotWidth - NOW_INSET, 1) / LIVE_WINDOW_MS;
 	const [cursor, setCursor] = useState<{
@@ -750,10 +778,13 @@ function ScrollingLanes({
 	const clearCursor = useCallback(() => setCursor(null), []);
 
 	useEffect(() => {
-		const element = wrapperRef.current;
+		const element = scrollRef.current;
 		if (!element) return;
+		// Reduced motion: no continuous scroll at all. The marks are already
+		// positioned against `renderNow`, so clearing the transform leaves them
+		// correct — they simply step once a second with the relayout.
 		if (reducedMotion) {
-			element.style.transform = "";
+			element.removeAttribute("transform");
 			return;
 		}
 
@@ -766,7 +797,14 @@ function ScrollingLanes({
 			// critical path on a busy dashboard.
 			if (now - last < 100) return;
 			last = now;
-			element.style.transform = `translateX(${-(now - renderNow) * pxPerMs}px)`;
+			// Offset from the ABSOLUTE render origin rather than accumulated per
+			// frame, so the 1 Hz relayout and this loop cannot double-advance:
+			// at each relayout `renderNow` catches up and the offset returns to
+			// ~0 with the marks already redrawn in the same place.
+			element.setAttribute(
+				"transform",
+				`translate(${-(now - renderNow) * pxPerMs} 0)`,
+			);
 		};
 
 		const start = () => {
@@ -788,23 +826,21 @@ function ScrollingLanes({
 
 	return (
 		<div className="relative">
-			<div
-				ref={wrapperRef}
-				style={{ willChange: reducedMotion ? undefined : "transform" }}
-			>
+			<div>
 				<LiveActivityLanesView
 					lanes={lanes}
 					now={renderNow}
 					windowMs={LIVE_WINDOW_MS}
 					plotWidth={plotWidth}
 					connected={connected}
-					disconnectedSince={disconnectedSince}
+					outages={outages}
 					historyEdge={historyEdge}
 					primed={primed}
 					selected={selected}
 					plot={{
 						ref: svgRef,
 						areaRef: plotAreaRef,
+						scrollRef,
 						onPointerMove,
 						onPointerLeave: clearCursor,
 						onBlur: clearCursor,

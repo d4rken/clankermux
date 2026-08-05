@@ -5,6 +5,7 @@ import {
 	applyStreamEvent,
 	type LiveEvent,
 	type LiveStore,
+	MAX_LIVE_EVENTS,
 	type NormalizeContext,
 	pruneLiveStore,
 	sweepLostEvents,
@@ -20,6 +21,12 @@ import {
  * React binding on top, via `useSyncExternalStore`.
  */
 
+/** One period during which the stream was down. `to: null` means still down. */
+export interface Outage {
+	from: number;
+	to: number | null;
+}
+
 /** Immutable view handed to React. Identity changes only when data changes. */
 export interface LiveActivitySnapshot {
 	/** All retained events, ascending by arrival time. */
@@ -27,11 +34,15 @@ export interface LiveActivitySnapshot {
 	/** Whether the SSE connection is currently up. */
 	connected: boolean;
 	/**
-	 * When the connection dropped, if it is currently down or was down and the
-	 * gap has not yet aged out of the window. Drives the "history unavailable"
-	 * hatching — an outage must not be silently rendered as a quiet period.
+	 * Periods during which the stream was down, oldest first, clipped to the
+	 * window. `to: null` means still down.
+	 *
+	 * Bounded intervals rather than a single "disconnected since" marker: a
+	 * one-minute outage must hatch one minute, not everything from the drop to
+	 * the present. Extending an outage to `now` after reconnecting would paint
+	 * healthy traffic as unknown, which is the same lie in the other direction.
 	 */
-	disconnectedSince: number | null;
+	outages: Outage[];
 	/** True once the first connect-time snapshot or backfill has landed. */
 	primed: boolean;
 	/**
@@ -45,7 +56,7 @@ export interface LiveActivitySnapshot {
 const EMPTY_SNAPSHOT: LiveActivitySnapshot = {
 	events: [],
 	connected: false,
-	disconnectedSince: null,
+	outages: [],
 	primed: false,
 	historyEdge: null,
 };
@@ -53,13 +64,23 @@ const EMPTY_SNAPSHOT: LiveActivitySnapshot = {
 /** Publishes are coalesced to this interval so a burst cannot thrash React. */
 export const PUBLISH_INTERVAL_MS = 250;
 
+/** More outages than this in one window is noise, not information. */
+const MAX_TRACKED_OUTAGES = 8;
+
 export class LiveActivityStore {
 	private readonly store: LiveStore = new Map();
 	private readonly listeners = new Set<() => void>();
 	private snapshot: LiveActivitySnapshot = EMPTY_SNAPSHOT;
 
 	private connected = false;
-	private disconnectedSince: number | null = null;
+	private outages: Outage[] = [];
+	/**
+	 * Whether the stream has ever been up. Before the first successful connect
+	 * there is no outage to report: that period is covered by the history
+	 * backfill, not by the live stream, and hatching it would double-count the
+	 * one gap the history edge already discloses.
+	 */
+	private everConnected = false;
 	private primed = false;
 	private historyEdge: number | null = null;
 
@@ -121,10 +142,21 @@ export class LiveActivityStore {
 	setConnected(connected: boolean): void {
 		if (this.connected === connected) return;
 		this.connected = connected;
-		// Record when the gap STARTED and keep it across the reconnect: the
-		// reader still needs to see which stretch of the timeline is unknown
-		// after the connection comes back.
-		this.disconnectedSince = connected ? this.disconnectedSince : this.now();
+		const now = this.now();
+
+		if (connected) {
+			this.everConnected = true;
+			// Close the open outage at the moment service resumed. Leaving it
+			// open would keep hatching healthy traffic for as long as the drop
+			// stayed in the window.
+			const open = this.outages.at(-1);
+			if (open && open.to === null) open.to = now;
+		} else if (this.everConnected) {
+			this.outages.push({ from: now, to: null });
+			// The window can only show so many; keep the most recent.
+			if (this.outages.length > MAX_TRACKED_OUTAGES) this.outages.shift();
+		}
+
 		this.markDirty();
 	}
 
@@ -134,14 +166,14 @@ export class LiveActivityStore {
 		let changed = pruneLiveStore(this.store, now, this.windowMs);
 		changed = sweepLostEvents(this.store, now) || changed;
 
-		// Once the gap has scrolled off the left edge there is nothing left to
-		// disclose, so stop reserving it.
-		if (
-			this.connected &&
-			this.disconnectedSince !== null &&
-			this.disconnectedSince < now - this.windowMs
-		) {
-			this.disconnectedSince = null;
+		// Drop outages that have scrolled entirely off the left edge — an open
+		// one never has, since it still reaches the present.
+		const cutoff = now - this.windowMs;
+		const kept = this.outages.filter(
+			(outage) => outage.to === null || outage.to >= cutoff,
+		);
+		if (kept.length !== this.outages.length) {
+			this.outages = kept;
 			changed = true;
 		}
 
@@ -170,10 +202,18 @@ export class LiveActivityStore {
 	private flush(): void {
 		if (!this.dirty) return;
 		this.dirty = false;
+		// Enforce the retained-event ceiling HERE rather than leaving it to the
+		// 1 Hz tick: a burst larger than the cap arriving inside one second
+		// would otherwise publish snapshots of many thousands of marks, at
+		// exactly the moment the dashboard is already under load.
+		if (this.store.size > MAX_LIVE_EVENTS) {
+			pruneLiveStore(this.store, this.now(), this.windowMs);
+		}
+
 		this.snapshot = {
 			events: Array.from(this.store.values()).sort((a, b) => a.ts - b.ts),
 			connected: this.connected,
-			disconnectedSince: this.disconnectedSince,
+			outages: this.outages.map((outage) => ({ ...outage })),
 			primed: this.primed,
 			historyEdge: this.historyEdge,
 		};
