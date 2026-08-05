@@ -3,6 +3,7 @@ import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
 	ContextCompositionPanel,
+	MissingSectionsNotice,
 	ModelAnalytics,
 	TokenSpeedAnalytics,
 } from "..";
@@ -71,6 +72,11 @@ export function ModelsTab(props: ModelsTabProps) {
 				setFilterOpen={setFilterOpen}
 				loading={loading}
 				onRefresh={refetch}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={MODELS_SECTIONS}
 			/>
 
 			{/* Enhanced Model Analytics */}

@@ -38,8 +38,11 @@ interface SystemHealthStripViewProps {
 	/**
 	 * Visible (non-dismissed) recent-error groups. Must be filtered the same way
 	 * as the list below the strip, or the pill claims errors that aren't shown.
+	 *
+	 * `null` means UNKNOWN — the error source (/api/stats) could not be read.
+	 * Deliberately not 0: an unread source must not be reported as "no errors".
 	 */
-	errorGroupCount: number;
+	errorGroupCount: number | null;
 }
 
 /**
@@ -152,7 +155,12 @@ export function SystemHealthStripView({
 						</>
 					) : null}
 
-					{errorGroupCount > 0 ? (
+					{errorGroupCount === null ? (
+						<Badge variant="outline" className="gap-1 whitespace-nowrap">
+							<AlertTriangle className="h-3 w-3" aria-hidden="true" />
+							errors unknown
+						</Badge>
+					) : errorGroupCount > 0 ? (
 						<Badge variant="destructive" className="gap-1 whitespace-nowrap">
 							<AlertTriangle className="h-3 w-3" aria-hidden="true" />
 							{errorGroupCount} error{errorGroupCount === 1 ? "" : "s"}
@@ -233,8 +241,9 @@ function integrityLabel(
 }
 
 interface SystemHealthStripProps {
-	/** Non-dismissed recent-error groups, shared with the list below. */
-	errorGroupCount: number;
+	/** Non-dismissed recent-error groups, shared with the list below, or `null`
+	 *  when the stats read that supplies them failed. */
+	errorGroupCount: number | null;
 }
 
 /**

@@ -9,6 +9,7 @@ import {
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
 	MainMetricsChart,
+	MissingSectionsNotice,
 	PerformanceIndicatorsChart,
 	TokenUsageBreakdown,
 } from "..";
@@ -176,6 +177,11 @@ export function TrafficTab(props: TrafficTabProps) {
 					void refetch();
 					if (modelBreakdown) void refetchPerModel();
 				}}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={TRAFFIC_SECTIONS}
 			/>
 
 			{/* Main Metrics Chart */}

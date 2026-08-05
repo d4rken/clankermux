@@ -12,6 +12,7 @@ export { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
 export { CacheFlowPanel } from "./CacheFlowPanel";
 export { CacheKeepaliveSection } from "./CacheKeepaliveSection";
 export { ContextCompositionPanel } from "./ContextCompositionPanel";
+export { MissingSectionsNotice } from "./MissingSectionsNotice";
 export { ModelAnalytics } from "./ModelAnalytics";
 export { ProjectAnalytics } from "./ProjectAnalytics";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";

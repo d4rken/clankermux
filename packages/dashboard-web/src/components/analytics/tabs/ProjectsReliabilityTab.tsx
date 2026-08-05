@@ -2,6 +2,7 @@ import type { AnalyticsSection } from "@clankermux/types";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
+	MissingSectionsNotice,
 	ProjectAnalytics,
 	RoutingAnalyticsPanel,
 	ToolErrorsPanel,
@@ -61,6 +62,11 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				setFilterOpen={setFilterOpen}
 				loading={loading}
 				onRefresh={refetch}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={PROJECTS_SECTIONS}
 			/>
 
 			{/* Project Breakdown */}

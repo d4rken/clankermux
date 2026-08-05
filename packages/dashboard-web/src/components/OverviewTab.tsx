@@ -6,8 +6,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
 import { SESSION_SCOPE_SHORT_LABELS } from "../lib/active-sessions";
+import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
+import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
@@ -45,10 +47,16 @@ export const OverviewTab = React.memo(() => {
 	// compact list below the health strip; nothing else on this page reads
 	// `recentErrors`, and the parameter only scopes that field server-side. The
 	// full, range-selectable list lives on /system.
-	const { data: stats, isLoading: statsLoading } = useStats(
+	const statsQuery = useStats(
 		REFRESH_INTERVALS.default,
 		OVERVIEW_ERROR_WINDOW_HOURS,
 	);
+	const { data: stats, isLoading: statsLoading } = statsQuery;
+	// A failed /api/stats read used to be invisible: every consumer below
+	// rendered `?? 0`, which is indistinguishable from a real zero. Resolve the
+	// three cases once here and hand the verdict to each stats-backed widget.
+	const statsAvailability = dataAvailability(statsQuery, statsLoading);
+	const statsUnavailable = statsAvailability.state === "unavailable";
 	const [timeRange, setTimeRange] = useState("6h");
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
 		timeRange,
@@ -65,6 +73,13 @@ export const OverviewTab = React.memo(() => {
 		useVisibleRecentErrors(stats?.recentErrors);
 
 	const [now, setNow] = useState(() => Date.now());
+	// Recomputed against `now` so the age keeps ticking with the 30s refresh
+	// below rather than freezing at the moment the read first failed.
+	const statsStaleNote =
+		statsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(statsAvailability.lastUpdatedAt, now)}`
+			: undefined;
+
 	useEffect(() => {
 		return registerUIRefresh({
 			id: "pool-metric-card-update",
@@ -178,6 +193,11 @@ export const OverviewTab = React.memo(() => {
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
 
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={OVERVIEW_SECTIONS}
+			/>
+
 			{/* Metrics Grid */}
 			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 				<MetricCard
@@ -204,6 +224,13 @@ export const OverviewTab = React.memo(() => {
 					title="Active Sessions"
 					caption={`· last ${Math.round((stats?.activeSessions?.windowMs ?? TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS) / 60000)}m`}
 					value={formatNumber(stats?.activeSessions?.total ?? 0)}
+					// Without these the tile shows "0" for a failed read — exactly the
+					// "not all results are correct" symptom the lane split addresses,
+					// but which a DB-busy error or a worker crash can still produce.
+					unavailableReason={
+						statsUnavailable ? "Session data unavailable" : undefined
+					}
+					staleNote={statsStaleNote}
 					icon={Users}
 					subRows={[
 						{
@@ -252,13 +279,19 @@ export const OverviewTab = React.memo(() => {
 				loading={loading}
 			/>
 
-			{/* Glance-level health; the full diagnostics live on /system. */}
-			<SystemHealthStrip errorGroupCount={visibleErrors.length} />
+			{/* Glance-level health; the full diagnostics live on /system.
+			    `null` means the error count is UNKNOWN (the stats read failed) —
+			    passing 0 would claim "no errors". */}
+			<SystemHealthStrip
+				errorGroupCount={statsUnavailable ? null : visibleErrors.length}
+			/>
 
 			<CompactRecentErrors
 				errors={visibleErrors}
 				accounts={accounts}
 				onDismiss={dismissError}
+				unavailable={statsUnavailable}
+				staleNote={statsStaleNote}
 			/>
 
 			{accounts && <RateLimitInfo accounts={accounts} />}

@@ -1,5 +1,11 @@
 import { formatPercentage } from "@clankermux/ui-common";
-import { Info, TrendingDown, TrendingUp } from "lucide-react";
+import {
+	AlertCircle,
+	Clock,
+	Info,
+	TrendingDown,
+	TrendingUp,
+} from "lucide-react";
 import { Card, CardContent } from "../ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 
@@ -19,6 +25,17 @@ export interface MetricCardProps {
 	trendPeriod?: string;
 	subRows?: MetricCardSubRow[];
 	caption?: string;
+	/**
+	 * Set when the backing read FAILED and nothing is cached. Renders an
+	 * explicit "unavailable" state in place of the value and sub-rows — a metric
+	 * card must never present a fallback zero as a measurement.
+	 */
+	unavailableReason?: string;
+	/**
+	 * Set when the value is real but the most recent refresh failed. The numbers
+	 * still render; the card says how old they are.
+	 */
+	staleNote?: string;
 }
 
 export function MetricCard({
@@ -30,6 +47,8 @@ export function MetricCard({
 	trendPeriod,
 	subRows,
 	caption,
+	unavailableReason,
+	staleNote,
 }: MetricCardProps) {
 	const trendElement = trend !== "flat" && change !== undefined && (
 		<div
@@ -75,8 +94,24 @@ export function MetricCard({
 						trendElement
 					)}
 				</div>
-				<p className="text-2xl font-bold">{value}</p>
-				{subRows && subRows.length > 0 && (
+				{unavailableReason ? (
+					<>
+						<p className="text-2xl font-bold text-muted-foreground/60">—</p>
+						<p className="mt-1 flex items-center gap-1.5 text-xs text-warning">
+							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+							{unavailableReason}
+						</p>
+					</>
+				) : (
+					<p className="text-2xl font-bold">{value}</p>
+				)}
+				{!unavailableReason && staleNote && (
+					<p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+						<Clock className="h-3.5 w-3.5 shrink-0" />
+						{staleNote}
+					</p>
+				)}
+				{!unavailableReason && subRows && subRows.length > 0 && (
 					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
 						{subRows.map((row) => {
 							if (row.inlineExplainer) {

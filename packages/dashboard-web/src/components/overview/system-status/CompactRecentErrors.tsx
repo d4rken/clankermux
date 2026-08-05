@@ -1,5 +1,6 @@
 import type { RecentErrorGroup } from "@clankermux/types";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
+import { AlertCircle, Clock } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { Card } from "../../ui/card";
@@ -21,6 +22,14 @@ interface CompactRecentErrorsProps {
 	errors: RecentErrorGroup[];
 	accounts: AccountForFailoverCheck[] | undefined;
 	onDismiss: (group: RecentErrorGroup) => void;
+	/**
+	 * The read that supplies these groups failed with nothing cached. Without
+	 * this the component renders NOTHING for a failed read — visually identical
+	 * to "no recent errors", which is the opposite conclusion.
+	 */
+	unavailable?: boolean;
+	/** Set when the groups are real but the latest refresh failed. */
+	staleNote?: string;
 }
 
 /**
@@ -36,10 +45,21 @@ export function CompactRecentErrors({
 	errors,
 	accounts,
 	onDismiss,
+	unavailable = false,
+	staleNote,
 }: CompactRecentErrorsProps) {
 	const [selectedError, setSelectedError] = useState<RecentErrorGroup | null>(
 		null,
 	);
+
+	if (unavailable) {
+		return (
+			<Card className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
+				<AlertCircle className="h-4 w-4 shrink-0 text-warning" />
+				Recent errors unavailable — the stats endpoint could not be read.
+			</Card>
+		);
+	}
 
 	if (errors.length === 0) return null;
 
@@ -54,7 +74,16 @@ export function CompactRecentErrors({
 			<div className="flex items-center justify-between gap-4">
 				<div>
 					<p className="text-sm font-medium">Recent Errors</p>
-					<p className="text-xs text-muted-foreground">Last hour</p>
+					{staleNote ? (
+						// The groups are real but the latest poll failed — say how old
+						// they are rather than presenting them as current.
+						<p className="flex items-center gap-1 text-xs text-muted-foreground">
+							<Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
+							Last hour · {staleNote}
+						</p>
+					) : (
+						<p className="text-xs text-muted-foreground">Last hour</p>
+					)}
 				</div>
 				<Link
 					to="/system"

@@ -1,4 +1,5 @@
 import {
+	AlertCircle,
 	AlertTriangle,
 	CheckCircle,
 	Loader2,
@@ -224,9 +225,30 @@ export function StorageIntegritySection() {
  * Banner shown at the top of the Overview when DB corruption is detected.
  * Returns `null` when status is anything other than `corrupt` so the banner
  * doesn't take vertical space in the healthy case.
+ *
+ * A FAILED read is not the healthy case: `data` is undefined, which the
+ * corrupt-check silently treats as "not corrupt". That renders an unknown
+ * integrity state exactly like a verified-good one, so it gets its own
+ * (quieter) banner instead.
  */
 export function StorageIntegrityBanner() {
-	const { data } = useStorageInfo();
+	const { data, isError } = useStorageInfo();
+
+	if (isError && data === undefined) {
+		return (
+			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
+				<AlertCircle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+				<div className="text-sm">
+					<p className="font-medium">Database integrity status unavailable</p>
+					<p className="text-muted-foreground">
+						The storage endpoint could not be read, so corruption can neither be
+						confirmed nor ruled out.
+					</p>
+				</div>
+			</div>
+		);
+	}
+
 	if (data?.integrity_status !== "corrupt") return null;
 	return (
 		<div

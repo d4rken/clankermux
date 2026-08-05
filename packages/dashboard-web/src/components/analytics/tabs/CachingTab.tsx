@@ -2,7 +2,11 @@ import type { AnalyticsSection } from "@clankermux/types";
 import type { TimeRange } from "../../../constants";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { TimeRangeSelector } from "../../overview/TimeRangeSelector";
-import { CacheFlowPanel, CacheKeepaliveSection } from "..";
+import {
+	CacheFlowPanel,
+	CacheKeepaliveSection,
+	MissingSectionsNotice,
+} from "..";
 import { EMPTY_FILTERS } from "../AnalyticsFilters";
 import type { CachingTabProps } from "./types";
 
@@ -33,6 +37,11 @@ export function CachingTab({ range, onRangeChange }: CachingTabProps) {
 					/>
 				</div>
 			</div>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={CACHING_SECTIONS}
+			/>
 
 			{/* Cache Flow */}
 			<CacheFlowPanel cacheFlow={analytics?.cacheFlow} loading={loading} />
