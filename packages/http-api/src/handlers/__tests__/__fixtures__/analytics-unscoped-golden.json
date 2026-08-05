@@ -145,19 +145,19 @@
 	],
 	"apiKeyPerformance": [
 		{
-			"id": "live-key",
+			"id": "key-live-1",
 			"name": "live-key",
 			"requests": 6,
 			"successRate": 83.33333333333333
 		},
 		{
-			"id": "retired-key-older",
+			"id": "key-deleted-3",
 			"name": "retired-key-older",
 			"requests": 2,
 			"successRate": 100
 		},
 		{
-			"id": "new-name",
+			"id": "key-renamed-2",
 			"name": "new-name",
 			"requests": 2,
 			"successRate": 50

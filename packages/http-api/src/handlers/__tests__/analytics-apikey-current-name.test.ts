@@ -12,6 +12,10 @@
  *    stamped on the row, so it survives both a rename and a hard delete — which
  *    is what the COALESCE(current name, snapshot name) predicate it replaced was
  *    only approximating.
+ *  - `apiKeyPerformance[].id` carries that same api_key_id, so a row the
+ *    dropdown was built from can be fed straight back as `apiKeys=<id>`. It
+ *    used to carry the display NAME, which the id-based filter matches zero
+ *    rows for.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -54,7 +58,7 @@ function insertRequest(
 
 type AnalyticsBody = {
 	totals: { requests: number };
-	apiKeyPerformance: Array<{ name: string; requests: number }>;
+	apiKeyPerformance: Array<{ id: string; name: string; requests: number }>;
 };
 
 async function fetchAnalytics(
@@ -93,6 +97,8 @@ describe("analytics api_key_performance — current name with snapshot fallback"
 		expect(body.apiKeyPerformance).toHaveLength(1);
 		expect(body.apiKeyPerformance[0].name).toBe("new-name");
 		expect(body.apiKeyPerformance[0].requests).toBe(3);
+		// The row's own id must be the value the apiKeys filter accepts.
+		expect(body.apiKeyPerformance[0].id).toBe("k1");
 	});
 
 	it("falls back to the snapshot name for deleted keys, one row per key", async () => {
@@ -105,6 +111,9 @@ describe("analytics api_key_performance — current name with snapshot fallback"
 		// MAX() over the snapshots picks one deterministic name.
 		expect(body.apiKeyPerformance[0].name).toBe("legacy-b");
 		expect(body.apiKeyPerformance[0].requests).toBe(2);
+		// A hard-deleted key still reports the id, which is the only value that
+		// can round-trip back through the filter.
+		expect(body.apiKeyPerformance[0].id).toBe("gone");
 	});
 
 	it("apiKeys filter matches by id, spanning a rename", async () => {

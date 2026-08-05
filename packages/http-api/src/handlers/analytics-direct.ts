@@ -290,7 +290,10 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					-- mid-history still collapses to ONE row; MAX() picks a single
 					-- deterministic name when deleted-key snapshots vary.
 					MAX(COALESCE(k.name, r.api_key_name)) as name,
-					CAST(NULL AS TEXT) as secondary_name,
+					-- The stable identity the apiKeys filter matches on, so a row
+					-- from this branch can be fed straight back as a filter value.
+					-- Free: the branch already groups by it.
+					r.api_key_id as secondary_name,
 					CAST(NULL AS BIGINT) as count,
 					COUNT(*) as requests,
 					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
@@ -804,9 +807,20 @@ export function createAnalyticsHandler(context: APIContext) {
 			const apiKeyPerformance = !want("apiKeyPerformance")
 				? undefined
 				: additionalData
-						.filter((row) => row.data_type === "api_key_performance")
+						.filter(
+							// q4 selects r.api_key_id into secondary_name and its WHERE
+							// excludes NULL ids, so this narrowing drops nothing — it keeps
+							// `id` a string without inventing a value for a row the SQL
+							// cannot produce.
+							(row): row is AdditionalDataRow & { secondary_name: string } =>
+								row.data_type === "api_key_performance" &&
+								row.secondary_name !== null,
+						)
 						.map((row) => ({
-							id: row.name, // API key name used as id for now
+							// The id is what the `apiKeys` filter matches on, and it
+							// survives both a rename and a hard delete. `name` is the
+							// display label only — it is NOT an identity.
+							id: row.secondary_name,
 							name: row.name,
 							requests: Number(row.requests) || 0,
 							successRate: Number(row.success_rate) || 0,
