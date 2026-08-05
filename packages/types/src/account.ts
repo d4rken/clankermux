@@ -950,7 +950,10 @@ export function computeDuplicateAccountFlags(
 
 	for (const acc of accounts) {
 		if (acc.identityExternalId != null) {
-			addToGroup(`${acc.provider}\u0000external:${acc.identityExternalId}`, acc.id);
+			addToGroup(
+				`${acc.provider}\u0000external:${acc.identityExternalId}`,
+				acc.id,
+			);
 		}
 		if (acc.identityEmail != null) {
 			addToGroup(
