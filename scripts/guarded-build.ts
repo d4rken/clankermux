@@ -91,6 +91,10 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 			"packages/database/src/**/*.ts",
 			"!packages/database/src/inline-*.ts",
 			"packages/database/scripts/build-workers.ts",
+			// The manifest decides which sources get bundled into which inline
+			// output; editing it alone can change the blobs while every source
+			// and output hash stays put, so it has to be hashed too.
+			"packages/database/scripts/workers-manifest.ts",
 			"packages/database/package.json",
 		],
 		outputGlobs: DB_WORKER_INLINE_FILES,
