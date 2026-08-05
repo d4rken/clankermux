@@ -1,0 +1,898 @@
+{
+	"meta": {
+		"range": "all",
+		"bucket": "1d",
+		"cumulative": false
+	},
+	"totals": {
+		"requests": 12,
+		"successRate": 83.33333333333333,
+		"activeAccounts": 4,
+		"avgResponseTime": 987.5,
+		"totalTokens": 11000,
+		"totalCostUsd": 0.534,
+		"planCostUsd": 0.47000000000000003,
+		"apiCostUsd": 0.064,
+		"cacheHitRate": 55.55555555555556,
+		"avgTokensPerSecond": 60.45454545454545,
+		"medianTokensPerSecond": 55,
+		"p95TokensPerSecond": 120,
+		"avgDailyPlanCostUsd": 0.030000000000000002,
+		"avgWeeklyPlanCostUsd": 0.18666666666666668,
+		"avgDailyApiCostUsd": 0.064,
+		"avgWeeklyApiCostUsd": 0.448
+	},
+	"timeSeries": [
+		{
+			"ts": 1768348800000,
+			"requests": 1,
+			"tokens": 1000,
+			"costUsd": 0.02,
+			"planCostUsd": 0.02,
+			"apiCostUsd": 0,
+			"successRate": 100,
+			"errorRate": 0,
+			"cacheHitRate": 55.55555555555556,
+			"avgResponseTime": 1200,
+			"avgTokensPerSecond": 15
+		},
+		{
+			"ts": 1769644800000,
+			"requests": 1,
+			"tokens": 1000,
+			"costUsd": 0.13,
+			"planCostUsd": 0.13,
+			"apiCostUsd": 0,
+			"successRate": 100,
+			"errorRate": 0,
+			"cacheHitRate": 55.55555555555556,
+			"avgResponseTime": 1200,
+			"avgTokensPerSecond": 45
+		},
+		{
+			"ts": 1772496000000,
+			"requests": 1,
+			"tokens": 1000,
+			"costUsd": 0.11,
+			"planCostUsd": 0.11,
+			"apiCostUsd": 0,
+			"successRate": 100,
+			"errorRate": 0,
+			"cacheHitRate": 55.55555555555556,
+			"avgResponseTime": 1200,
+			"avgTokensPerSecond": 60
+		},
+		{
+			"ts": 1773273600000,
+			"requests": 1,
+			"tokens": 1000,
+			"costUsd": 0.09,
+			"planCostUsd": 0.09,
+			"apiCostUsd": 0,
+			"successRate": 100,
+			"errorRate": 0,
+			"cacheHitRate": 55.55555555555556,
+			"avgResponseTime": 1200,
+			"avgTokensPerSecond": 35
+		},
+		{
+			"ts": 1773532800000,
+			"requests": 8,
+			"tokens": 7000,
+			"costUsd": 0.184,
+			"planCostUsd": 0.12000000000000001,
+			"apiCostUsd": 0.064,
+			"successRate": 75,
+			"errorRate": 25,
+			"cacheHitRate": 55.55555555555556,
+			"avgResponseTime": 881.25,
+			"avgTokensPerSecond": 72.85714285714286
+		}
+	],
+	"tokenBreakdown": {
+		"inputTokens": 3600,
+		"cacheReadInputTokens": 6000,
+		"cacheCreationInputTokens": 1200,
+		"outputTokens": 1200
+	},
+	"modelDistribution": [
+		{
+			"model": "claude-opus-4-8",
+			"count": 6
+		},
+		{
+			"model": "claude-sonnet-5",
+			"count": 3
+		},
+		{
+			"model": "gpt-5-codex",
+			"count": 2
+		}
+	],
+	"accountPerformance": [
+		{
+			"name": "primary-account",
+			"requests": 5,
+			"successRate": 80,
+			"planCostUsd": 0.34,
+			"apiCostUsd": 0,
+			"totalCostUsd": 0.34
+		},
+		{
+			"name": "secondary-account",
+			"requests": 3,
+			"successRate": 66.66666666666667,
+			"planCostUsd": 0.11,
+			"apiCostUsd": 0.05,
+			"totalCostUsd": 0.16
+		},
+		{
+			"name": "no_account",
+			"requests": 2,
+			"successRate": 100,
+			"planCostUsd": 0,
+			"apiCostUsd": 0.004,
+			"totalCostUsd": 0.004
+		},
+		{
+			"name": "acct-cccc-3333",
+			"requests": 2,
+			"successRate": 100,
+			"planCostUsd": 0.02,
+			"apiCostUsd": 0.01,
+			"totalCostUsd": 0.03
+		}
+	],
+	"apiKeyPerformance": [
+		{
+			"id": "live-key",
+			"name": "live-key",
+			"requests": 6,
+			"successRate": 83.33333333333333
+		},
+		{
+			"id": "retired-key-older",
+			"name": "retired-key-older",
+			"requests": 2,
+			"successRate": 100
+		},
+		{
+			"id": "new-name",
+			"name": "new-name",
+			"requests": 2,
+			"successRate": 50
+		}
+	],
+	"costByModel": [
+		{
+			"model": "claude-opus-4-8",
+			"costUsd": 0.36,
+			"requests": 5,
+			"totalTokens": 5000
+		},
+		{
+			"model": "claude-sonnet-5",
+			"costUsd": 0.16,
+			"requests": 3,
+			"totalTokens": 3000
+		},
+		{
+			"model": "gpt-5-codex",
+			"costUsd": 0.014,
+			"requests": 2,
+			"totalTokens": 2000
+		}
+	],
+	"accountModelUsage": [
+		{
+			"account": "primary-account",
+			"model": "claude-opus-4-8",
+			"count": 5
+		},
+		{
+			"account": "secondary-account",
+			"model": "claude-sonnet-5",
+			"count": 3
+		},
+		{
+			"account": "Unknown",
+			"model": "gpt-5-codex",
+			"count": 2
+		},
+		{
+			"account": "Unknown",
+			"model": "claude-opus-4-8",
+			"count": 1
+		}
+	],
+	"modelPerformance": [
+		{
+			"model": "claude-opus-4-8",
+			"avgResponseTime": 1350,
+			"p95ResponseTime": 2400,
+			"errorRate": 16.666666666666668,
+			"medianTokensPerSecond": 40,
+			"p95TokensPerSecond": 55,
+			"speedSampleCount": 6
+		},
+		{
+			"model": "claude-sonnet-5",
+			"avgResponseTime": 833.3333333333334,
+			"p95ResponseTime": 1200,
+			"errorRate": 33.333333333333336,
+			"medianTokensPerSecond": 70,
+			"p95TokensPerSecond": 90,
+			"speedSampleCount": 3
+		},
+		{
+			"model": "gpt-5-codex",
+			"avgResponseTime": 475,
+			"p95ResponseTime": 500,
+			"errorRate": 0,
+			"medianTokensPerSecond": 120,
+			"p95TokensPerSecond": 120,
+			"speedSampleCount": 2
+		}
+	],
+	"speedTimeSeries": [
+		{
+			"ts": 1773532800000,
+			"model": "claude-opus-4-8",
+			"medianTps": 40
+		}
+	],
+	"routing": {
+		"totalRequests": 12,
+		"flow": [
+			{
+				"strategy": "session",
+				"decision": "affinity_hit",
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"outcome": "success",
+				"requests": 3,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "untracked",
+				"decision": "untracked",
+				"accountId": "no_account",
+				"accountName": "no_account",
+				"outcome": "success",
+				"requests": 2,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "untracked",
+				"decision": "untracked",
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"outcome": "success",
+				"requests": 1,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "untracked",
+				"decision": "untracked",
+				"accountId": "acct-cccc-3333",
+				"accountName": "acct-cccc-3333",
+				"outcome": "success",
+				"requests": 1,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "round-robin",
+				"decision": "ordered",
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"outcome": "error",
+				"requests": 1,
+				"successRate": 0,
+				"failoverAttempts": 1
+			},
+			{
+				"strategy": "round-robin",
+				"decision": "ordered",
+				"accountId": "acct-cccc-3333",
+				"accountName": "acct-cccc-3333",
+				"outcome": "success",
+				"requests": 1,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "session",
+				"decision": "affinity_hit",
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"outcome": "success",
+				"requests": 1,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "session",
+				"decision": "affinity_new",
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"outcome": "success",
+				"requests": 1,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "session",
+				"decision": "failover",
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"outcome": "rate_limited",
+				"requests": 1,
+				"successRate": 0,
+				"failoverAttempts": 2
+			}
+		],
+		"timeline": [
+			{
+				"ts": 1768348800000,
+				"accountId": "acct-cccc-3333",
+				"accountName": "acct-cccc-3333",
+				"decision": "untracked",
+				"requests": 1,
+				"successRate": 100
+			},
+			{
+				"ts": 1769644800000,
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"decision": "untracked",
+				"requests": 1,
+				"successRate": 100
+			},
+			{
+				"ts": 1772496000000,
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"decision": "affinity_hit",
+				"requests": 1,
+				"successRate": 100
+			},
+			{
+				"ts": 1773273600000,
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"decision": "affinity_hit",
+				"requests": 1,
+				"successRate": 100
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"decision": "affinity_hit",
+				"requests": 2,
+				"successRate": 100
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "no_account",
+				"accountName": "no_account",
+				"decision": "untracked",
+				"requests": 2,
+				"successRate": 100
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"decision": "failover",
+				"requests": 1,
+				"successRate": 0
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"decision": "affinity_new",
+				"requests": 1,
+				"successRate": 100
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"decision": "ordered",
+				"requests": 1,
+				"successRate": 0
+			},
+			{
+				"ts": 1773532800000,
+				"accountId": "acct-cccc-3333",
+				"accountName": "acct-cccc-3333",
+				"decision": "ordered",
+				"requests": 1,
+				"successRate": 100
+			}
+		],
+		"decisionBreakdown": [
+			{
+				"strategy": "untracked",
+				"decision": "untracked",
+				"requests": 4,
+				"percentage": 33.33333333333333,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "session",
+				"decision": "affinity_hit",
+				"requests": 4,
+				"percentage": 33.33333333333333,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "round-robin",
+				"decision": "ordered",
+				"requests": 2,
+				"percentage": 16.666666666666664,
+				"successRate": 50,
+				"failoverAttempts": 1
+			},
+			{
+				"strategy": "session",
+				"decision": "affinity_new",
+				"requests": 1,
+				"percentage": 8.333333333333332,
+				"successRate": 100,
+				"failoverAttempts": 0
+			},
+			{
+				"strategy": "session",
+				"decision": "failover",
+				"requests": 1,
+				"percentage": 8.333333333333332,
+				"successRate": 0,
+				"failoverAttempts": 2
+			}
+		],
+		"accountSplit": [
+			{
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"requests": 5,
+				"percentage": 41.66666666666667,
+				"successRate": 80,
+				"failoverAttempts": 2,
+				"topDecision": "affinity_hit"
+			},
+			{
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"requests": 3,
+				"percentage": 25,
+				"successRate": 66.66666666666667,
+				"failoverAttempts": 1,
+				"topDecision": "ordered"
+			},
+			{
+				"accountId": "acct-cccc-3333",
+				"accountName": "acct-cccc-3333",
+				"requests": 2,
+				"percentage": 16.666666666666664,
+				"successRate": 100,
+				"failoverAttempts": 0,
+				"topDecision": "untracked"
+			},
+			{
+				"accountId": "no_account",
+				"accountName": "no_account",
+				"requests": 2,
+				"percentage": 16.666666666666664,
+				"successRate": 100,
+				"failoverAttempts": 0,
+				"topDecision": "untracked"
+			}
+		]
+	},
+	"cacheFlow": [
+		{
+			"model": "claude-opus-4-8",
+			"accountName": "primary-account",
+			"cacheReadTokens": 2500,
+			"cacheWriteTokens": 500,
+			"uncachedTokens": 1500
+		},
+		{
+			"model": "claude-sonnet-5",
+			"accountName": "secondary-account",
+			"cacheReadTokens": 1500,
+			"cacheWriteTokens": 300,
+			"uncachedTokens": 900
+		},
+		{
+			"model": "claude-opus-4-8",
+			"accountName": "acct-cccc-3333",
+			"cacheReadTokens": 500,
+			"cacheWriteTokens": 100,
+			"uncachedTokens": 300
+		},
+		{
+			"model": "gpt-5-codex",
+			"accountName": "acct-cccc-3333",
+			"cacheReadTokens": 500,
+			"cacheWriteTokens": 100,
+			"uncachedTokens": 300
+		},
+		{
+			"model": "gpt-5-codex",
+			"accountName": "no_account",
+			"cacheReadTokens": 500,
+			"cacheWriteTokens": 100,
+			"uncachedTokens": 300
+		},
+		{
+			"model": "unknown",
+			"accountName": "no_account",
+			"cacheReadTokens": 500,
+			"cacheWriteTokens": 100,
+			"uncachedTokens": 300
+		}
+	],
+	"projectBreakdown": [
+		{
+			"project": "alpha",
+			"requests": 5,
+			"successRate": 80,
+			"planCostUsd": 0.34,
+			"apiCostUsd": 0,
+			"totalCostUsd": 0.34,
+			"totalTokens": 5000,
+			"measuredRequests": 4,
+			"inferredRequests": 0,
+			"ambiguousRequests": 0
+		},
+		{
+			"project": "beta",
+			"requests": 3,
+			"successRate": 66.66666666666667,
+			"planCostUsd": 0.11,
+			"apiCostUsd": 0.05,
+			"totalCostUsd": 0.16,
+			"totalTokens": 3000,
+			"measuredRequests": 3,
+			"inferredRequests": 0,
+			"ambiguousRequests": 0
+		},
+		{
+			"project": null,
+			"requests": 4,
+			"successRate": 100,
+			"planCostUsd": 0.02,
+			"apiCostUsd": 0.014,
+			"totalCostUsd": 0.034,
+			"totalTokens": 3000,
+			"measuredRequests": 3,
+			"inferredRequests": 1,
+			"ambiguousRequests": 1
+		}
+	],
+	"projectAttributionCoverage": {
+		"total": 12,
+		"measured": 10,
+		"none": 1,
+		"inherited": 1,
+		"ambiguous": 1
+	},
+	"contextComposition": {
+		"coverage": {
+			"withComposition": 11,
+			"totalRequests": 12
+		},
+		"totals": {
+			"systemChars": 21000,
+			"toolsChars": 52500,
+			"messagesChars": 209000,
+			"toolResultChars": 81500,
+			"contextTokens": 9900,
+			"avgContextTokens": 900
+		},
+		"avgPerRequest": {
+			"systemChars": 1909.090909090909,
+			"toolsChars": 4772.727272727273,
+			"messagesChars": 19000,
+			"messageCount": 11.363636363636363
+		},
+		"byProject": [
+			{
+				"project": "alpha",
+				"requests": 5,
+				"avgContextTokens": 900,
+				"avgSystemChars": 2000,
+				"avgToolsChars": 5000,
+				"avgMessagesChars": 20000
+			},
+			{
+				"project": "beta",
+				"requests": 3,
+				"avgContextTokens": 900,
+				"avgSystemChars": 1666.6666666666667,
+				"avgToolsChars": 4166.666666666667,
+				"avgMessagesChars": 16333.333333333334
+			},
+			{
+				"project": null,
+				"requests": 3,
+				"avgContextTokens": 900,
+				"avgSystemChars": 2000,
+				"avgToolsChars": 5000,
+				"avgMessagesChars": 20000
+			}
+		],
+		"growthCurve": [
+			{
+				"ts": 1768348800000,
+				"project": null,
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 1
+			},
+			{
+				"ts": 1769644800000,
+				"project": "alpha",
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 1
+			},
+			{
+				"ts": 1772496000000,
+				"project": "beta",
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 1
+			},
+			{
+				"ts": 1773273600000,
+				"project": "alpha",
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 1
+			},
+			{
+				"ts": 1773532800000,
+				"project": null,
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 3
+			},
+			{
+				"ts": 1773532800000,
+				"project": "alpha",
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 3
+			},
+			{
+				"ts": 1773532800000,
+				"project": "beta",
+				"avgContextTokens": 900,
+				"maxContextTokens": 900,
+				"requests": 2
+			}
+		],
+		"topToolContributors": [
+			{
+				"requestId": "r-01",
+				"ts": 1773572400000,
+				"project": "alpha",
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-02",
+				"ts": 1773568800000,
+				"project": "alpha",
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-03",
+				"ts": 1773565200000,
+				"project": "alpha",
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-05",
+				"ts": 1773554400000,
+				"project": "beta",
+				"model": "claude-sonnet-5",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-07",
+				"ts": 1773543600000,
+				"project": null,
+				"model": "gpt-5-codex",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-08",
+				"ts": 1773540000000,
+				"project": null,
+				"model": null,
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-09",
+				"ts": 1773316800000,
+				"project": "alpha",
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-10",
+				"ts": 1772539200000,
+				"project": "beta",
+				"model": "claude-sonnet-5",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-11",
+				"ts": 1769688000000,
+				"project": "alpha",
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			},
+			{
+				"requestId": "r-12",
+				"ts": 1768392000000,
+				"project": null,
+				"model": "claude-opus-4-8",
+				"toolName": "Read",
+				"chars": 4000
+			}
+		]
+	},
+	"toolCallErrors": {
+		"byTool": [
+			{
+				"toolName": "Bash",
+				"totalCalls": 9,
+				"totalErrors": 3,
+				"errorRatePct": 33.333333333333336
+			},
+			{
+				"toolName": "Read",
+				"totalCalls": 11,
+				"totalErrors": 2,
+				"errorRatePct": 18.181818181818183
+			},
+			{
+				"toolName": "Edit",
+				"totalCalls": 2,
+				"totalErrors": 2,
+				"errorRatePct": 100
+			},
+			{
+				"toolName": "Grep",
+				"totalCalls": 1,
+				"totalErrors": 0,
+				"errorRatePct": 0
+			}
+		],
+		"timeSeries": [
+			{
+				"ts": 1772496000000,
+				"toolName": "Read",
+				"calls": 2,
+				"errors": 1
+			},
+			{
+				"ts": 1773273600000,
+				"toolName": "Grep",
+				"calls": 1,
+				"errors": 0
+			},
+			{
+				"ts": 1773532800000,
+				"toolName": "Bash",
+				"calls": 9,
+				"errors": 3
+			},
+			{
+				"ts": 1773532800000,
+				"toolName": "Edit",
+				"calls": 2,
+				"errors": 2
+			},
+			{
+				"ts": 1773532800000,
+				"toolName": "Read",
+				"calls": 9,
+				"errors": 1
+			}
+		],
+		"topMessages": [
+			{
+				"toolName": "Bash",
+				"errorText": "exit code 1",
+				"occurrences": 2
+			},
+			{
+				"toolName": "Read",
+				"errorText": "File not found",
+				"occurrences": 2
+			},
+			{
+				"toolName": "Bash",
+				"errorText": "exit code 2",
+				"occurrences": 1
+			},
+			{
+				"toolName": "Edit",
+				"errorText": "String not found",
+				"occurrences": 1
+			}
+		]
+	},
+	"activeSessions": {
+		"totalDistinctSessions": 6,
+		"timeSeries": [
+			{
+				"ts": 1772496000000,
+				"scope": "codex",
+				"sessions": 1
+			},
+			{
+				"ts": 1773273600000,
+				"scope": "claude",
+				"sessions": 1
+			},
+			{
+				"ts": 1773532800000,
+				"scope": "claude",
+				"sessions": 2
+			},
+			{
+				"ts": 1773532800000,
+				"scope": "codex",
+				"sessions": 1
+			},
+			{
+				"ts": 1773532800000,
+				"scope": "other",
+				"sessions": 1
+			}
+		],
+		"perAccount": [
+			{
+				"accountId": "acct-aaaa-1111",
+				"accountName": "primary-account",
+				"sessions": 3
+			},
+			{
+				"accountId": "acct-bbbb-2222",
+				"accountName": "secondary-account",
+				"sessions": 2
+			},
+			{
+				"accountId": "no_account",
+				"accountName": "no_account",
+				"sessions": 1
+			}
+		]
+	}
+}
