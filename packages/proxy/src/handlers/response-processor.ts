@@ -1,6 +1,5 @@
 import {
 	getAccountWideClaimHeadroom,
-	getRateLimitResetStabilityMs,
 	isScopedOnlyUnifiedRejection,
 	logError,
 } from "@clankermux/core";
@@ -17,6 +16,7 @@ import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
+	applySuccessRateLimitClear,
 	completeRateLimitProbe,
 } from "./rate-limit-cooldown";
 import {
@@ -198,8 +198,9 @@ export function updateAccountMetadata(
 		// metadata when actual rate limit headers are present (shared helper).
 		persistRateLimitStatusMeta(account, response, ctx);
 	}
-	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
-	// successful response. No need to duplicate that logic here.
+	// Note: rate_limited_until/rate_limited_reason are cleared in
+	// processProxyResponse on a REAL success (response.ok, stale-response
+	// guarded — see applySuccessRateLimitClear). No need to duplicate here.
 
 	// Extract usage info if supported
 	if (requestId) {
@@ -276,7 +277,8 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestId?: string,
-	requestMeta?: Pick<RequestMeta, "headers" | "internal">,
+	requestMeta?: Pick<RequestMeta, "headers" | "internal"> &
+		Partial<Pick<RequestMeta, "timestamp">>,
 ): Promise<boolean> {
 	// Scoped projection BEFORE any consumer: both the cooldown applied below
 	// and the status-meta persisted via updateAccountMetadata must see the
@@ -417,20 +419,16 @@ export async function processProxyResponse(
 		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 
-	// On any successful upstream response, run the two side-effects independently:
-	//   (a) Stability reset: if the most recent 429 is older than the stability
-	//       window, the streak counter resets to 0. Critically, this is gated on
-	//       `rate_limited_at` ALONE — NOT on `rate_limited_until`. The periodic
-	//       `clearExpiredRateLimits` job nulls `rate_limited_until` without
-	//       touching `rate_limited_at`; if we required `rate_limited_until` to
-	//       still be set, API-key accounts whose cooldown expired naturally
-	//       would never get the counter reset and the next 429 would land at an
-	//       inflated backoff tier.
-	//   (b) Clearing `rate_limited_until`: only fires when the in-memory value
-	//       is non-null (avoids a no-op DB write on the happy path). We clear
-	//       unconditionally because a successful response proves the account is
-	//       usable — e.g. after a seat reassignment resets usage mid-window
-	//       before the stored expiry fires.
+	// On a non-rate-limited upstream response, resolve the probe lease and —
+	// when the response POSITIVELY proves the account serves (`response.ok`) —
+	// run the shared success recovery (stability reset + guarded clear of
+	// `rate_limited_until` AND `rate_limited_reason`; see
+	// applySuccessRateLimitClear). A non-ok non-429 (400/500) proves nothing
+	// and clears nothing: it is the "abandoned" shape below, and letting it
+	// clear would allow a generic upstream 500 to erase an `out_of_credits`
+	// floor without evidence of recovery. The request's start time is the
+	// stale-response guard bound: a delayed 200 issued before a NEWER 429
+	// landed must not erase that newer state.
 	if (!rateLimitInfo.isRateLimited) {
 		// Single-flight recovery probe terminal outcome: this attempt got a
 		// non-rate-limited response, so any in-flight probe lease for this account
@@ -441,31 +439,12 @@ export async function processProxyResponse(
 		// for exceptions/skips.
 		completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned");
 
-		// (a) Stability reset — gated only on rate_limited_at.
-		if (
-			account.rate_limited_at &&
-			Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
-		) {
-			account.consecutive_rate_limits = 0;
-			account.rate_limited_at = null;
-			ctx.asyncWriter.enqueue(() =>
-				ctx.dbOps.resetConsecutiveRateLimits(account.id),
+		if (response.ok) {
+			applySuccessRateLimitClear(
+				account,
+				ctx,
+				requestMeta?.timestamp ?? Date.now(),
 			);
-		}
-
-		// (b) Clear rate_limited_until (only if still set in-memory).
-		if (account.rate_limited_until) {
-			account.rate_limited_until = null;
-			ctx.asyncWriter.enqueue(async () => {
-				const db = ctx.dbOps.getAdapter();
-				await db.run(
-					"UPDATE accounts SET rate_limited_until = NULL WHERE id = ? AND rate_limited_until IS NOT NULL",
-					[account.id],
-				);
-				log.debug(
-					`Cleared rate_limited_until for account ${account.name} on successful response`,
-				);
-			});
 		}
 	}
 

@@ -1016,3 +1016,164 @@ describe("processProxyResponse — Codex credits carry-forward", () => {
 		usageCache.delete(account.id);
 	});
 });
+
+describe("processProxyResponse — guarded success-path rate-limit clear", () => {
+	// A REAL success (response.ok) clears both the lock and its reason label;
+	// a 400/500 (the "abandoned" shape) clears neither; and a delayed success
+	// from a request that started BEFORE a newer 429 landed must not erase the
+	// newer state (stale-response guard on rate_limited_at).
+	function makeClearCtx() {
+		const runCalls: Array<{ sql: string; params: unknown[] }> = [];
+		const ctx = {
+			provider: {
+				name: "anthropic",
+				isStreamingResponse: () => false,
+				parseRateLimit: () => ({
+					isRateLimited: false,
+					resetTime: undefined,
+					statusHeader: undefined,
+					remaining: undefined,
+				}),
+				parseUsage: undefined,
+				extractUsageInfo: undefined,
+			},
+			dbOps: {
+				markAccountRateLimited: async () => 1,
+				markAccountRateLimitedDeadlineOnly: async () => {},
+				resetConsecutiveRateLimits: async () => {},
+				updateAccountUsage: () => {},
+				updateAccountRateLimitMeta: () => {},
+				getAdapter: () => ({
+					get: async () => ({ rate_limited_until: null }),
+					run: async (sql: string, params: unknown[]) => {
+						runCalls.push({ sql, params });
+					},
+				}),
+				updateRequestUsage: async () => {},
+			},
+			asyncWriter: {
+				enqueue: (job: () => void | Promise<void>) => {
+					void job();
+				},
+			},
+		} as unknown as ProxyContext;
+		const clearCalls = () =>
+			runCalls.filter((c) => c.sql.includes("rate_limited_reason = NULL"));
+		return { ctx, runCalls, clearCalls };
+	}
+
+	function ok200() {
+		return new Response('{"id":"msg_1"}', {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	}
+
+	it("clears rate_limited_until AND rate_limited_reason on an ok success", async () => {
+		const account = makeAccount({
+			rate_limited_until: Date.now() + 60_000,
+			rate_limited_reason: "model_fallback_429",
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx);
+
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		expect(clearCalls()).toHaveLength(1);
+	});
+
+	it("clears a stale reason left behind after the cooldown sweep nulled until (the lingering-label shape)", async () => {
+		const account = makeAccount({
+			rate_limited_until: null,
+			rate_limited_reason: "model_fallback_429",
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx);
+
+		expect(account.rate_limited_reason).toBeNull();
+		expect(clearCalls()).toHaveLength(1);
+	});
+
+	it("clears an out_of_credits floor on a real success (the sanctioned clear)", async () => {
+		const account = makeAccount({
+			rate_limited_until: Date.now() + 6 * 60 * 60 * 1000,
+			rate_limited_reason: "out_of_credits",
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx);
+
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		expect(clearCalls()).toHaveLength(1);
+	});
+
+	it("does NOT clear anything on a non-ok non-429 response (400 = abandoned, not recovered)", async () => {
+		const until = Date.now() + 60_000;
+		const account = makeAccount({
+			rate_limited_until: until,
+			rate_limited_reason: "out_of_credits",
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+		const bad400 = new Response('{"type":"error"}', {
+			status: 400,
+			headers: { "content-type": "application/json" },
+		});
+
+		await processProxyResponse(bad400, account, ctx);
+
+		expect(account.rate_limited_until).toBe(until);
+		expect(account.rate_limited_reason).toBe("out_of_credits");
+		expect(clearCalls()).toHaveLength(0);
+	});
+
+	it("does NOT clear state written by a 429 NEWER than this request's start (stale-response guard)", async () => {
+		const now = Date.now();
+		const until = now + 60_000;
+		// The newer 429 landed 5s ago; this (slow) request started 60s ago.
+		const account = makeAccount({
+			rate_limited_until: until,
+			rate_limited_reason: "out_of_credits",
+			rate_limited_at: now - 5_000,
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx, undefined, {
+			headers: new Headers(),
+			internal: false,
+			timestamp: now - 60_000,
+		});
+
+		expect(account.rate_limited_until).toBe(until);
+		expect(account.rate_limited_reason).toBe("out_of_credits");
+		expect(clearCalls()).toHaveLength(0);
+	});
+
+	it("clears when the limit predates this request's start (guard passes)", async () => {
+		const now = Date.now();
+		const account = makeAccount({
+			rate_limited_until: now + 60_000,
+			rate_limited_reason: "upstream_429_with_reset",
+			rate_limited_at: now - 120_000,
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx, undefined, {
+			headers: new Headers(),
+			internal: false,
+			timestamp: now - 60_000,
+		});
+
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		const calls = clearCalls();
+		expect(calls).toHaveLength(1);
+		// The SQL carries the same guard: params are [id, requestStartMs].
+		expect(calls[0].sql).toContain(
+			"rate_limited_at IS NULL OR rate_limited_at <",
+		);
+		expect(calls[0].params[1]).toBe(now - 60_000);
+	});
+});

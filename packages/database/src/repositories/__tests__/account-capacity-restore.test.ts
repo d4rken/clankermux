@@ -91,6 +91,25 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 		expect(readUntil(db, "acc-1")).toBeNull();
 	});
 
+	it("fails CLOSED after the success-path clear already nulled the reason (CAS cannot match NULL)", async () => {
+		// The success-path clear (response-processor) nulls until+reason but
+		// leaves rate_limited_at for the stability window. A capacity-restore
+		// poll that read the OLD state must then miss: its `rate_limited_reason
+		// = ?` term cannot match NULL, so the row is left untouched instead of
+		// being re-cleared with stale expectations.
+		seedLock(db, "acc-1", { until: null, at: AT, reason: null });
+
+		const changed = await repo.clearRateLimitOnCapacityRestore(
+			"acc-1",
+			UNTIL,
+			AT,
+			REASON,
+			FETCH_STARTED_AT,
+		);
+
+		expect(changed).toBe(false);
+	});
+
 	it("does NOT clear when rate_limited_until changed between read and clear (TOCTOU)", async () => {
 		const NEW_UNTIL = UNTIL + 60_000;
 		// Current state carries the NEW deadline; caller clears with the STALE one.
@@ -198,6 +217,29 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 
 		expect(changed).toBe(false);
 		expect(readUntil(db, "acc-1")).toBe(UNTIL);
+	});
+
+	it("clearExpiredRateLimits nulls ONLY rate_limited_until (sweep must never touch the reason)", async () => {
+		// The periodic sweep is polling-shaped: wiping the reason there would
+		// let it erase an out_of_credits floor's label without a real success.
+		// The reason is cleared only by the success path or a confirmed
+		// capacity restore.
+		const expired = Date.now() - 60_000;
+		seedLock(db, "acc-expired", {
+			until: expired,
+			at: AT,
+			reason: "out_of_credits",
+		});
+
+		await repo.clearExpiredRateLimits(Date.now());
+
+		expect(readUntil(db, "acc-expired")).toBeNull();
+		const row = db
+			.query<{ rate_limited_reason: string | null }, [string]>(
+				"SELECT rate_limited_reason FROM accounts WHERE id = ?",
+			)
+			.get("acc-expired");
+		expect(row?.rate_limited_reason).toBe("out_of_credits");
 	});
 
 	it("returns false for an unknown account", async () => {

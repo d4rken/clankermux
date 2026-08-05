@@ -1,4 +1,3 @@
-import { getRateLimitResetStabilityMs } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	type CodexCreditsInfo,
@@ -13,7 +12,10 @@ import {
 } from "@clankermux/providers";
 import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
-import { applyRateLimitCooldown } from "./rate-limit-cooldown";
+import {
+	applyRateLimitCooldown,
+	applySuccessRateLimitClear,
+} from "./rate-limit-cooldown";
 
 const log = new Logger("CodexObservation");
 
@@ -265,42 +267,21 @@ function applyCodexUsageBookkeeping(
 }
 
 /**
- * Success-cooldown recovery for a standalone (non-real-traffic) observation of a
- * healthy account: clear the consecutive-limit stability counter and the
- * `rate_limited_until` lock. Factored out so both the header path and the free-
- * GET JSON path share it. Callers gate WHEN to run this — the JSON path in
- * particular must only call it on a POSITIVE recovery signal (never for a 200
- * that still reports the account as exhausted).
+ * Success-cooldown recovery for a standalone (non-real-traffic) observation of
+ * a healthy account. Delegates to the shared applySuccessRateLimitClear
+ * (stability reset + clearing BOTH `rate_limited_until` and
+ * `rate_limited_reason` — a positively-confirmed recovery must not leave a
+ * stale failure label behind). Callers gate WHEN to run this — the JSON path
+ * in particular must only call it on a POSITIVE recovery signal (never for a
+ * 200 that still reports the account as exhausted). The observation instant is
+ * the stale-guard bound: state written by a 429 arriving at/after this
+ * observation is left intact.
  */
 function applyCodexSuccessRecovery(
 	account: Account,
 	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
 ): void {
-	// (a) Stability reset — gated only on rate_limited_at.
-	if (
-		account.rate_limited_at &&
-		Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
-	) {
-		account.consecutive_rate_limits = 0;
-		account.rate_limited_at = null;
-		ctx.asyncWriter.enqueue(() =>
-			ctx.dbOps.resetConsecutiveRateLimits(account.id),
-		);
-	}
-	// (b) Clear rate_limited_until (only if still set in-memory).
-	if (account.rate_limited_until) {
-		account.rate_limited_until = null;
-		ctx.asyncWriter.enqueue(async () => {
-			const db = ctx.dbOps.getAdapter();
-			await db.run(
-				"UPDATE accounts SET rate_limited_until = NULL WHERE id = ? AND rate_limited_until IS NOT NULL",
-				[account.id],
-			);
-			log.debug(
-				`Cleared rate_limited_until for account ${account.name} on successful response`,
-			);
-		});
-	}
+	applySuccessRateLimitClear(account, ctx, Date.now());
 }
 
 /**

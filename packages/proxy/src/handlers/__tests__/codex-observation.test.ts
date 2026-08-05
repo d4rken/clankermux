@@ -596,6 +596,32 @@ describe("applyCodexObservation — success recovery", () => {
 			calls.runSql.filter((c) => c.sql.includes("rate_limited_until = NULL")),
 		).toHaveLength(1);
 	});
+
+	it("non-real-traffic recovery also clears the stale rate_limited_reason label", () => {
+		// A positively-confirmed recovery must not leave the reason behind: a
+		// stale `model_fallback_429` on a healthy account reads as an active
+		// failure cause in the dashboard and the /health status.
+		const account = makeCodexAccount({
+			id: track("acct-prime-recovery-reason"),
+			rate_limited_until: Date.now() + 60_000,
+			rate_limited_reason: "all_models_exhausted_429",
+		});
+		const { ctx, calls } = makeCtx();
+		const resetMs = Date.now() + 4 * 60 * 60 * 1000;
+
+		applyCodexObservation(
+			account,
+			codexResponse(resetMs),
+			ctx,
+			baseOpts({ source: "scheduled-prime" }),
+		);
+
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		expect(
+			calls.runSql.filter((c) => c.sql.includes("rate_limited_reason = NULL")),
+		).toHaveLength(1);
+	});
 });
 
 describe("applyCodexObservation — body safety", () => {
