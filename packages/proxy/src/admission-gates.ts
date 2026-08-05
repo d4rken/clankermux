@@ -36,7 +36,7 @@ import {
 } from "./provider-overload-cooldown";
 import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
-const log = new Logger("AdmissionGates");
+const log = new Logger("Proxy");
 
 /** An account the provider-overload gate excluded, with its block deadline. */
 export type ProviderOverloadedAccount = { account: Account; until: number };
