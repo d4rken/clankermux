@@ -20,6 +20,98 @@ import {
 const log = new Logger("CodexObservation");
 
 /**
+ * Last snapshot JSON persisted per account, so an unchanged observation does not
+ * re-enqueue an identical UPDATE. Purely a write-amplification guard: it is
+ * cleared for an account whenever the enqueue was REFUSED, whenever the write
+ * itself was VOIDED by the credential CAS (both leave the columns without the
+ * snapshot the memo claims), and on re-authentication (which NULLs the columns
+ * underneath it) — in each case so the next observation retries rather than
+ * being deduped against a write that never happened.
+ */
+const codexUsagePersistMemo = new Map<string, string>();
+
+/**
+ * Forget the persistence memo — for one account, or all of them when no id is
+ * given. Required wherever the stored columns change behind this module's back;
+ * otherwise the next identical observation is deduped away and the columns stay
+ * as whoever changed them left them.
+ */
+export function clearCodexUsagePersistMemo(accountId?: string): void {
+	if (accountId === undefined) codexUsagePersistMemo.clear();
+	else codexUsagePersistMemo.delete(accountId);
+}
+
+/**
+ * Persist the snapshot, carrying forward the STORED credits when this
+ * observation carries none.
+ *
+ * The carry-forward has to happen in SQL: the in-memory equivalent in
+ * {@link applyCodexUsageBookkeeping} reads the usage CACHE, which is empty right
+ * after a restart — exactly when the column is the only surviving record that
+ * the account is on credits. `?1` (the new JSON) is referenced three times, so
+ * the statement uses numbered parameters.
+ *
+ * `?4` is a compare-and-swap on the credential generation the snapshot was
+ * observed under: re-authentication rotates the refresh token and NULLs these
+ * columns, and a job still queued in the async writer would otherwise flush
+ * afterwards and restore the pre-reauth snapshot. `IS` (not `=`) so a NULL
+ * refresh token compares as a value rather than yielding NULL.
+ */
+const PERSIST_CODEX_USAGE_SQL = `UPDATE accounts
+	 SET codex_usage_json = CASE
+	       WHEN json_extract(?1,'$.codexCredits') IS NULL
+	            AND codex_usage_json IS NOT NULL
+	            AND json_extract(codex_usage_json,'$.codexCredits') IS NOT NULL
+	       THEN json_set(?1,'$.codexCredits', json(json_extract(codex_usage_json,'$.codexCredits')))
+	       ELSE ?1
+	     END,
+	     codex_usage_observed_at = ?2
+	 WHERE id = ?3 AND refresh_token IS ?4`;
+
+function persistCodexUsageSnapshot(
+	account: Account,
+	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
+	codexUsage: UsageData,
+): void {
+	const json = JSON.stringify(codexUsage);
+	if (codexUsagePersistMemo.get(account.id) === json) return;
+	codexUsagePersistMemo.set(account.id, json);
+
+	const observedAt = Date.now();
+	const refreshTokenAtEnqueue = account.refresh_token ?? null;
+	const accepted = ctx.asyncWriter.enqueue(async () => {
+		const changed = await ctx.dbOps
+			.getAdapter()
+			.runWithChanges(PERSIST_CODEX_USAGE_SQL, [
+				json,
+				observedAt,
+				account.id,
+				refreshTokenAtEnqueue,
+			]);
+		if (changed !== 0) return;
+		// The CAS voided this write: the account's refresh token moved on between
+		// the enqueue and the flush (a re-auth, or a routine token rotation). Forget
+		// the memo so the NEXT observation persists instead of being deduped against
+		// a snapshot that never landed — but only while it still describes THIS job,
+		// so a newer snapshot enqueued in the meantime keeps its own dedup entry.
+		if (codexUsagePersistMemo.get(account.id) === json) {
+			codexUsagePersistMemo.delete(account.id);
+		}
+		log.debug(
+			`Voided the persisted Codex usage snapshot for ${account.name}: the account's credentials rotated before the write ran`,
+		);
+	});
+	if (accepted === false) {
+		// The bounded metadata queue dropped the job: the columns still hold the
+		// PREVIOUS snapshot, so the memo must not claim this one was written.
+		codexUsagePersistMemo.delete(account.id);
+		log.warn(
+			`Dropped the persisted Codex usage snapshot for ${account.name}: the async writer queue is full`,
+		);
+	}
+}
+
+/**
  * Where the Codex response being observed came from. Discriminates the two
  * ownership regimes:
  *
@@ -219,6 +311,10 @@ function applyCodexUsageBookkeeping(
 	log.debug(
 		`Updated Codex usage cache for ${account.name}: 5h=${codexUsage.five_hour?.utilization ?? "n/a"}%, 7d=${codexUsage.seven_day.utilization}%`,
 	);
+	// Mirror the snapshot onto the account row so a restart / cache eviction can
+	// restore THIS reading instead of reconstructing one from an old stored
+	// request payload.
+	persistCodexUsageSnapshot(account, ctx, codexUsage);
 
 	// Persist rate_limit_reset from usage windows (earliest of 5h/7d) so
 	// auto-refresh can track windows.

@@ -5,6 +5,11 @@ import {
 	DatabaseFactory,
 	DatabaseOperations as DirectDbOps,
 } from "@clankermux/database";
+import { usageCache } from "@clankermux/providers";
+import {
+	registerCodexUsageRefresher,
+	unregisterCodexUsageRefresher,
+} from "@clankermux/proxy";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -227,6 +232,9 @@ mock.module("@clankermux/providers/codex", () => ({
 		refresh_token: "rt",
 		expires_in: 3600,
 	})),
+	// The handler calls this on the success path before writing the tokens;
+	// without it the whole post-token block throws and never runs.
+	extractCodexIdentity: () => null,
 }));
 
 const CODEX_REAUTH_DB_PATH = "/tmp/test-codex-reauth-handler.db";
@@ -357,6 +365,110 @@ describe("createCodexReauthHandler", () => {
 		expect(data.sessionId.length).toBeGreaterThan(0);
 		expect(data.verificationUrl).toBe("https://auth.openai.com/codex/device");
 		expect(data.userCode).toBe("TEST-CODE");
+	});
+
+	// A reauth normally follows a plan change or a revoked grant, so every usage
+	// observation made under the OLD credentials is suspect. Leaving it in place
+	// meant the dashboard kept serving pre-reauth limits until something else
+	// happened to overwrite them.
+	describe("post-reauth usage invalidation", () => {
+		async function insertCodexAccount(accountId: string): Promise<void> {
+			const now = Date.now();
+			await dbOps.getAdapter().run(
+				`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
+				expires_at, created_at, request_count, total_requests, priority,
+				custom_endpoint, model_mappings, model_fallbacks,
+				codex_usage_json, codex_usage_observed_at)
+				VALUES (?, ?, 'codex', NULL, 'old-rt', 'old-at', ?, ?, 0, 0, 0, NULL, NULL, NULL, ?, ?)`,
+				[
+					accountId,
+					`codex-${accountId}`,
+					now + 3600000,
+					now,
+					JSON.stringify({
+						five_hour: null,
+						seven_day: { utilization: 99, resets_at: null },
+					}),
+					now - 60_000,
+				],
+			);
+		}
+
+		async function reauth(accountId: string): Promise<void> {
+			const res = await handler(
+				new Request("http://localhost/api/oauth/reauth/codex", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ accountId }),
+				}),
+			);
+			expect(res.status).toBe(200);
+			// The device-flow polling runs detached from the response; give the
+			// background task its turns.
+			for (let i = 0; i < 10; i++) {
+				await new Promise<void>((r) => setTimeout(r, 0));
+			}
+		}
+
+		function readUsageColumns(accountId: string) {
+			return dbOps.getAdapter().get<{
+				codex_usage_json: string | null;
+				codex_usage_observed_at: number | null;
+			}>(
+				"SELECT codex_usage_json, codex_usage_observed_at FROM accounts WHERE id = ?",
+				[accountId],
+			);
+		}
+
+		it("NULLs the persisted snapshot, drops the cache entry, and triggers one free read", async () => {
+			const accountId = "dddddddd-0000-0000-0000-000000000010";
+			await insertCodexAccount(accountId);
+			usageCache.set(accountId, {
+				five_hour: { utilization: 99, resets_at: null },
+				seven_day: { utilization: 99, resets_at: null },
+			});
+
+			const refreshed: string[] = [];
+			registerCodexUsageRefresher("oauth-test-refresher", async (id) => {
+				refreshed.push(id);
+				return { success: true, message: "ok" };
+			});
+			try {
+				await reauth(accountId);
+			} finally {
+				unregisterCodexUsageRefresher("oauth-test-refresher");
+			}
+
+			const row = await readUsageColumns(accountId);
+			expect(row?.codex_usage_json ?? null).toBeNull();
+			expect(row?.codex_usage_observed_at ?? null).toBeNull();
+			expect(usageCache.peekAge(accountId)).toBeNull();
+			expect(refreshed).toEqual([accountId]);
+		});
+
+		it("still completes the reauth when the triggered refresh fails", async () => {
+			const accountId = "dddddddd-0000-0000-0000-000000000011";
+			await insertCodexAccount(accountId);
+
+			const rejections: unknown[] = [];
+			const onRejection = (reason: unknown) => rejections.push(reason);
+			process.on("unhandledRejection", onRejection);
+			registerCodexUsageRefresher("oauth-test-refresher-fail", async () => {
+				throw new Error("refresher exploded");
+			});
+			try {
+				await reauth(accountId);
+			} finally {
+				unregisterCodexUsageRefresher("oauth-test-refresher-fail");
+				process.off("unhandledRejection", onRejection);
+			}
+
+			// The invalidation still happened and nothing escaped as an unhandled
+			// rejection.
+			const row = await readUsageColumns(accountId);
+			expect(row?.codex_usage_json ?? null).toBeNull();
+			expect(rejections).toHaveLength(0);
+		});
 	});
 });
 

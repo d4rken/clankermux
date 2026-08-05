@@ -122,6 +122,12 @@ function makeCtx() {
 				run: async (sql: string, params: unknown[]) => {
 					calls.runSql.push({ sql, params });
 				},
+				// The usage-snapshot persist is credential-CAS'd, so it needs the
+				// changed-row count. This double has no rows: report a match.
+				runWithChanges: async (sql: string, params: unknown[]) => {
+					calls.runSql.push({ sql, params });
+					return 1;
+				},
 			}),
 		},
 		asyncWriter: {

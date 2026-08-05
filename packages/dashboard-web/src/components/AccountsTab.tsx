@@ -9,6 +9,7 @@ import {
 } from "../hooks/queries";
 import { useApiError } from "../hooks/useApiError";
 import { queryKeys } from "../lib/query-keys";
+import { resolveRefreshUsageError } from "../lib/refresh-usage";
 import {
 	AccountAddForm,
 	AccountCustomEndpointDialog,
@@ -429,9 +430,12 @@ export function AccountsTab() {
 
 	const handleRefreshUsage = async (account: Account) => {
 		try {
-			await api.refreshUsage(account.id);
+			// The endpoint answers 200 with `success: false` when the upstream usage
+			// read failed (e.g. a 401 from the free Codex usage endpoint). Surface
+			// that body — the transport catch below never sees it.
+			const res = await api.refreshUsage(account.id);
 			await loadAccounts();
-			setActionError(null);
+			setActionError(resolveRefreshUsageError(res));
 		} catch (err) {
 			setActionError(formatError(err));
 		}
