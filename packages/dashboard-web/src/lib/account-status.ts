@@ -8,6 +8,7 @@ import { HARD_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isZaiPeakHour } from "../utils/provider-utils";
 import { computeRenewal, type RenewalUrgency } from "./renewal";
+import { getExhaustedScopedFamilies } from "./secondary-limits";
 
 /**
  * Only these hard-limit statuses mean the account is actually blocked; soft
@@ -90,6 +91,20 @@ export interface AccountStatus {
 	overloadedFamilies: Array<{ family: string; until: number; minutes: number }>;
 	/** Family-scoped half-open buckets: cooldown elapsed, recovery probe pending/running. */
 	probingFamilies: string[];
+	/**
+	 * Model families whose SCOPED weekly quota is exhausted (e.g. Fable at 100%)
+	 * while the account itself stays routable for other families — a warning
+	 * chip, never a blocking state and never a Force Reset offer. Suppressed
+	 * while the ACCOUNT-WIDE weekly-exhaustion chip already shows (no double
+	 * chip); kept during a 5h session exhaustion, which is different
+	 * information. Soonest reset first; `familyKey` is the stable dedup key.
+	 */
+	exhaustedScopedFamilies: Array<{
+		familyKey: string;
+		label: string;
+		resetsAtMs: number;
+		hoursLeft: number;
+	}>;
 	/** Provider has peak / off-peak windows (zai only). */
 	showPeakChip: boolean;
 	/** Currently within the provider's peak window. */
@@ -234,6 +249,21 @@ export function deriveAccountStatus(
 		? Math.max(1, Math.ceil((providerOverloadedUntil - now) / 60000))
 		: null;
 
+	// Family-weekly exhaustion chips. Suppressed while the account-wide
+	// weekly-exhaustion chip is showing (binding "weekly", or legacy payloads
+	// with no binding) — one exhaustion story at a time; a SESSION (5h) binding
+	// is different information, so the scoped chips stay.
+	const suppressScopedFamilies =
+		isUsageExhausted && account.rateLimitCauseBinding !== "session";
+	const exhaustedScopedFamilies = suppressScopedFamilies
+		? []
+		: getExhaustedScopedFamilies(account.usageData, now).map((entry) => ({
+				familyKey: entry.familyKey,
+				label: entry.label,
+				resetsAtMs: entry.resetsAtMs,
+				hoursLeft: Math.max(1, Math.ceil((entry.resetsAtMs - now) / 3_600_000)),
+			}));
+
 	// Peak / off-peak status. Only zai has a peak-hour window. Anthropic briefly
 	// drained 5h sessions faster on weekdays 5–11am PT (announced ~2026-03-27),
 	// but removed that reduction on 2026-05-06 alongside doubling the Claude Code
@@ -319,6 +349,7 @@ export function deriveAccountStatus(
 		isProviderProbing,
 		overloadedFamilies,
 		probingFamilies,
+		exhaustedScopedFamilies,
 		showPeakChip,
 		isPeak,
 		peakChipLabel,
