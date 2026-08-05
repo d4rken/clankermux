@@ -29,16 +29,25 @@ function makeError(
 	};
 }
 
-function render(errors: RecentErrorGroup[]): string {
+function render(
+	errors: RecentErrorGroup[],
+	extra: { staleNote?: string; unavailable?: boolean } = {},
+): string {
 	return renderToStaticMarkup(
 		<MemoryRouter>
-			<CompactRecentErrors errors={errors} accounts={[]} onDismiss={() => {}} />
+			<CompactRecentErrors
+				errors={errors}
+				accounts={[]}
+				onDismiss={() => {}}
+				staleNote={extra.staleNote}
+				unavailable={extra.unavailable}
+			/>
 		</MemoryRouter>,
 	);
 }
 
 describe("CompactRecentErrors", () => {
-	it("renders nothing when there are no visible errors", () => {
+	it("renders nothing when a successful read reported no visible errors", () => {
 		expect(render([])).toBe("");
 	});
 
@@ -85,5 +94,35 @@ describe("CompactRecentErrors", () => {
 
 	it("omits the overflow line when everything fits", () => {
 		expect(render([makeError()])).not.toContain("more error");
+	});
+
+	it("labels a non-empty list whose latest refresh failed", () => {
+		const html = render([makeError()], { staleNote: "Last updated 4m ago" });
+
+		expect(html).toContain("Last updated 4m ago");
+		expect(html).toContain("acct-one");
+	});
+
+	/**
+	 * An empty list rendered as nothing is read as "no errors right now". That is
+	 * only true when the read that produced it SUCCEEDED — otherwise the page is
+	 * asserting a confirmed-clean state it cannot see.
+	 */
+	it("still reports the stale read when the cached list is empty", () => {
+		const html = render([], { staleNote: "Last updated 12m ago" });
+
+		expect(html).not.toBe("");
+		expect(html).toContain("No errors in the last successful update");
+		expect(html).toContain("Last updated 12m ago");
+	});
+
+	it("prefers the unavailable card over the stale note", () => {
+		const html = render([], {
+			unavailable: true,
+			staleNote: "Last updated 12m ago",
+		});
+
+		expect(html).toContain("Recent errors unavailable");
+		expect(html).not.toContain("No errors in the last successful update");
 	});
 });

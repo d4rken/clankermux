@@ -28,7 +28,11 @@ interface CompactRecentErrorsProps {
 	 * to "no recent errors", which is the opposite conclusion.
 	 */
 	unavailable?: boolean;
-	/** Set when the groups are real but the latest refresh failed. */
+	/**
+	 * Set when the groups are real but the latest refresh failed. It also
+	 * applies to an EMPTY list: "no errors as of a read that is now stale" is a
+	 * different claim from "no errors right now".
+	 */
 	staleNote?: string;
 }
 
@@ -61,7 +65,29 @@ export function CompactRecentErrors({
 		);
 	}
 
-	if (errors.length === 0) return null;
+	// An empty list is only silence-worthy when it is CONFIRMED empty. With a
+	// stale note the same empty array means "the last response we got carried no
+	// errors, and the newest poll failed" — rendering nothing would make that
+	// indistinguishable from a live zero-error state.
+	if (errors.length === 0 && !staleNote) return null;
+
+	if (errors.length === 0) {
+		return (
+			<Card className="flex items-start gap-2 px-4 py-3 text-sm">
+				<Clock
+					className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+					aria-hidden="true"
+				/>
+				<div>
+					<p className="font-medium">No errors in the last successful update</p>
+					<p className="text-xs text-muted-foreground">
+						The latest refresh failed, so newer errors may not be shown ·{" "}
+						{staleNote}
+					</p>
+				</div>
+			</Card>
+		);
+	}
 
 	const rows = errors.slice(0, MAX_ROWS);
 	const overflow = errors.length - rows.length;
