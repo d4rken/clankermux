@@ -5,9 +5,9 @@ import {
 	applyHistoryRows,
 	applyStreamEvent,
 	buildLanes,
-	laneKeyOf,
 	type LiveStore,
 	LOST_AFTER_MS,
+	laneKeyOf,
 	markRadius,
 	pruneLiveStore,
 	sweepLostEvents,
@@ -197,7 +197,10 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 			],
 		});
 
-		expect(s.get("r9")).toMatchObject({ status: "streaming", project: "herdr" });
+		expect(s.get("r9")).toMatchObject({
+			status: "streaming",
+			project: "herdr",
+		});
 	});
 
 	it("marks locally-active requests the server no longer knows about as lost", () => {
@@ -342,7 +345,10 @@ describe("pruneLiveStore", () => {
 		const s = store();
 		applyStreamEvent(s, {
 			type: "summary",
-			payload: summaryPayload({ id: "old", timestamp: new Date(T0).toISOString() }),
+			payload: summaryPayload({
+				id: "old",
+				timestamp: new Date(T0).toISOString(),
+			}),
 		});
 
 		pruneLiveStore(s, T0 + WINDOW + 1, WINDOW);
@@ -429,7 +435,12 @@ describe("laneKeyOf", () => {
 });
 
 describe("buildLanes", () => {
-	function completed(id: string, project: string | null, ts: number, over = {}) {
+	function completed(
+		id: string,
+		project: string | null,
+		ts: number,
+		over = {},
+	) {
 		return {
 			id,
 			ts,
@@ -493,12 +504,11 @@ describe("buildLanes", () => {
 	});
 
 	it("folds the tail into a single Other lane with aggregated totals", () => {
-		const events = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].flatMap(
-			(p, i) =>
-				// Descending volume so the fold order is unambiguous.
-				Array.from({ length: 10 - i }, (_, n) =>
-					completed(`${p}-${n}`, p, T0 + n),
-				),
+		const events = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].flatMap((p, i) =>
+			// Descending volume so the fold order is unambiguous.
+			Array.from({ length: 10 - i }, (_, n) =>
+				completed(`${p}-${n}`, p, T0 + n),
+			),
 		);
 
 		const { lanes } = buildLanes(events, T0 + 1000, WINDOW, 6);
@@ -507,8 +517,8 @@ describe("buildLanes", () => {
 		const other = lanes[lanes.length - 1];
 		expect(other.key).toBe("other");
 		expect(other.label).toBe("Other (2 projects)");
-		// p6 (4 requests) + p7 (3 requests)
-		expect(other.requests).toBe(7);
+		// Volumes run 10, 9, 8, 7, 6, 5, 4; the two smallest fold in.
+		expect(other.requests).toBe(5 + 4);
 	});
 
 	it("keeps lane order stable as volumes change", () => {

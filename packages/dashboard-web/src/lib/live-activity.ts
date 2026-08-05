@@ -49,7 +49,10 @@ export const LOST_AFTER_MS = 15 * 60 * 1000;
 /** Default ceiling on retained events. */
 export const MAX_LIVE_EVENTS = 1500;
 
-const ACTIVE_STATUSES: ReadonlySet<LiveStatus> = new Set(["pending", "streaming"]);
+const ACTIVE_STATUSES: ReadonlySet<LiveStatus> = new Set([
+	"pending",
+	"streaming",
+]);
 
 export function isActiveStatus(status: LiveStatus): boolean {
 	return ACTIVE_STATUSES.has(status);
@@ -419,7 +422,10 @@ export function buildLanes(
 	previousOrder: readonly string[] = [],
 ): BuildLanesResult {
 	const cutoff = now - windowMs;
-	const byKey = new Map<string, { project: string | null; events: LiveEvent[] }>();
+	const byKey = new Map<
+		string,
+		{ project: string | null; events: LiveEvent[] }
+	>();
 
 	for (const event of events) {
 		if (event.ts < cutoff && !isActiveStatus(event.status)) continue;
@@ -450,7 +456,10 @@ export function buildLanes(
 	const overflow = order.slice(directCount);
 
 	const lanes: Lane[] = direct.map((key) => {
-		const bucket = byKey.get(key) as { project: string | null; events: LiveEvent[] };
+		const bucket = byKey.get(key) as {
+			project: string | null;
+			events: LiveEvent[];
+		};
 		return toLane(
 			key,
 			bucket.project ?? NO_PROJECT_LABEL,
@@ -459,9 +468,7 @@ export function buildLanes(
 	});
 
 	if (overflow.length > 0) {
-		const merged = overflow.flatMap(
-			(key) => byKey.get(key)?.events ?? [],
-		);
+		const merged = overflow.flatMap((key) => byKey.get(key)?.events ?? []);
 		lanes.push(
 			toLane(
 				OTHER_LANE_KEY,
@@ -525,7 +532,9 @@ export function markRadius(tokens: number | null): number {
 	if (tokens == null || !Number.isFinite(tokens) || tokens <= 0) {
 		return UNKNOWN_RADIUS;
 	}
-	const scaled = Math.sqrt(Math.min(tokens, RADIUS_REFERENCE_TOKENS) / RADIUS_REFERENCE_TOKENS);
+	const scaled = Math.sqrt(
+		Math.min(tokens, RADIUS_REFERENCE_TOKENS) / RADIUS_REFERENCE_TOKENS,
+	);
 	return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * scaled;
 }
 

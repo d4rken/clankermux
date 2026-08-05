@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { requestEvents, resetRequestEventRegistry } from "@clankermux/core";
 import { closeAllSseStreams } from "../../sse-registry";
 import { createRequestsStreamHandler } from "../requests-stream";
@@ -60,12 +60,24 @@ function openStream(handler: (req: Request) => Response, req?: Request) {
 	return reader;
 }
 
+/**
+ * The active-request registry is a module global shared by every suite in the
+ * process, and any test elsewhere that emits a `start` without a matching
+ * `summary` leaves a live entry behind — which this handler then faithfully
+ * replays into every stream opened here. Reset around each test so the
+ * snapshot assertions below describe only what this file put there.
+ */
+beforeEach(() => {
+	resetRequestEventRegistry();
+});
+
 afterEach(async () => {
 	for (const reader of activeReaders.splice(0)) {
 		try {
 			await reader.cancel();
 		} catch {}
 	}
+	resetRequestEventRegistry();
 });
 
 describe("createRequestsStreamHandler", () => {
@@ -88,7 +100,6 @@ describe("createRequestsStreamHandler", () => {
 		// yet — the recorder only writes on completion — so without this replay
 		// it stays invisible until it finishes, which is the whole window the
 		// live view exists to show.
-		resetRequestEventRegistry();
 		requestEvents.emit("event", {
 			type: "ingress",
 			id: "in-flight-1",
@@ -115,12 +126,9 @@ describe("createRequestsStreamHandler", () => {
 			project: "clankermux",
 			phase: "pending",
 		});
-
-		resetRequestEventRegistry();
 	});
 
 	it("sends an empty snapshot when nothing is in flight", async () => {
-		resetRequestEventRegistry();
 		const handler = createRequestsStreamHandler();
 		const reader = openStream(handler);
 

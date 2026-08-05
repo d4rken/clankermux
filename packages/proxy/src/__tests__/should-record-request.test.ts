@@ -14,8 +14,8 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
-	isIngressRecordable,
 	type IsIngressRecordableInput,
+	isIngressRecordable,
 	type ShouldRecordRequestInput,
 	shouldRecordRequest,
 } from "../should-record-request";
@@ -369,9 +369,9 @@ describe("isIngressRecordable", () => {
 		// status. At ingress there is no status yet, so the prefix is skipped
 		// wholesale rather than emitting marks that almost always turn out to be
 		// 404s and then have to be retracted.
-		expect(isIngressRecordable(ingressInput({ path: "/.well-known/foo" }))).toBe(
-			false,
-		);
+		expect(
+			isIngressRecordable(ingressInput({ path: "/.well-known/foo" })),
+		).toBe(false);
 	});
 
 	it("still records a .well-known 200 in shouldRecordRequest", () => {

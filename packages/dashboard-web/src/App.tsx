@@ -8,6 +8,7 @@ import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
+import { RequestEventProvider } from "./components/RequestEventProvider";
 import { RequestsTab } from "./components/RequestsTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { SystemTab } from "./components/SystemTab";
@@ -146,44 +147,50 @@ export function App() {
 
 	return (
 		<QueryClientProvider client={queryClient}>
-			<ThemeProvider>
-				<div className="min-h-screen bg-background">
-					<Navigation />
+			{/* Owns the single request-stream connection. Mounted ABOVE <Routes>
+			    so it survives navigation: Overview and Requests are mutually
+			    exclusive routes, and a per-page connection would leave a hole in
+			    the live view on every page change. */}
+			<RequestEventProvider>
+				<ThemeProvider>
+					<div className="min-h-screen bg-background">
+						<Navigation />
 
-					{/* Main Content */}
-					<main className="lg:pl-64">
-						{/* Mobile spacer */}
-						<div className="h-16 lg:hidden" />
+						{/* Main Content */}
+						<main className="lg:pl-64">
+							{/* Mobile spacer */}
+							<div className="h-16 lg:hidden" />
 
-						{/* Page Content */}
-						<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
-							{/* Page Header */}
-							<div className="mb-8">
-								<h1 className="text-3xl font-bold gradient-text">
-									{currentRoute.title}
-								</h1>
-								<p className="text-muted-foreground mt-2">
-									{currentRoute.subtitle}
-								</p>
+							{/* Page Content */}
+							<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
+								{/* Page Header */}
+								<div className="mb-8">
+									<h1 className="text-3xl font-bold gradient-text">
+										{currentRoute.title}
+									</h1>
+									<p className="text-muted-foreground mt-2">
+										{currentRoute.subtitle}
+									</p>
+								</div>
+
+								<div className="animate-in fade-in-0 duration-200">
+									<Routes>
+										{routes.map((route) => (
+											<Route
+												key={route.path}
+												path={route.path}
+												element={route.element}
+											/>
+										))}
+										<Route path="*" element={<Navigate to="/" replace />} />
+									</Routes>
+								</div>
 							</div>
-
-							<div className="animate-in fade-in-0 duration-200">
-								<Routes>
-									{routes.map((route) => (
-										<Route
-											key={route.path}
-											path={route.path}
-											element={route.element}
-										/>
-									))}
-									<Route path="*" element={<Navigate to="/" replace />} />
-								</Routes>
-							</div>
-						</div>
-					</main>
-				</div>
-				<DebugPanel />
-			</ThemeProvider>
+						</main>
+					</div>
+					<DebugPanel />
+				</ThemeProvider>
+			</RequestEventProvider>
 		</QueryClientProvider>
 	);
 }
