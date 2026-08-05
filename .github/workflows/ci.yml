@@ -40,9 +40,9 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      # The 5 gitignored inline worker files are absent on a fresh checkout;
-      # write empty placeholders so tsc can resolve their imports.
-      - run: bash .github/scripts/gen-autogen-placeholders.sh
+      # No inline-worker placeholder step here on purpose: the committed
+      # `inline-*-worker.d.ts` stubs already resolve those imports for tsc.
+      # Writing .ts placeholders would only mask a stub someone forgot to add.
       # apps/server imports the gitignored dashboard build artifacts
       # (dist/embedded.ts, dist/manifest.json); generate them (~1s).
       - run: bun run build:dashboard
@@ -57,7 +57,12 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - run: bun install --frozen-lockfile
-      - run: bash .github/scripts/gen-autogen-placeholders.sh
+      # Unlike tsc, `bun test` loads the real modules, so the gitignored inline
+      # worker files must exist or whole test files fail to collect. Empty
+      # placeholders suffice (no test executes a worker bundle) and skip the
+      # bundling. The list comes from the worker manifest, so a newly added
+      # worker cannot be missed here.
+      - run: bun packages/database/scripts/build-workers.ts --placeholders-only
       # The --serve CLI test boots the server, which imports the dashboard
       # build artifacts; without them that test hangs to timeout.
       - run: bun run build:dashboard
