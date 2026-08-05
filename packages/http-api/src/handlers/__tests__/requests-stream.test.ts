@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { requestEvents } from "@clankermux/core";
+import { requestEvents, resetRequestEventRegistry } from "@clankermux/core";
 import { closeAllSseStreams } from "../../sse-registry";
 import { createRequestsStreamHandler } from "../requests-stream";
 
@@ -81,6 +81,59 @@ describe("createRequestsStreamHandler", () => {
 		expect(text).toContain(
 			`data: ${JSON.stringify({ type: "start", id: "req-1" })}\n\n`,
 		);
+	});
+
+	it("replays in-flight requests to a newly-connected client", async () => {
+		// A request already streaming when the dashboard connects has no DB row
+		// yet — the recorder only writes on completion — so without this replay
+		// it stays invisible until it finishes, which is the whole window the
+		// live view exists to show.
+		resetRequestEventRegistry();
+		requestEvents.emit("event", {
+			type: "ingress",
+			id: "in-flight-1",
+			timestamp: 1234,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+		});
+
+		const handler = createRequestsStreamHandler();
+		const reader = openStream(handler);
+
+		const text = await readUntil(reader, (t) => t.includes("in-flight-1"));
+		const line = text
+			.split("\n")
+			.find((l) => l.startsWith("data: ") && l.includes("snapshot"));
+		expect(line).toBeDefined();
+		const snapshot = JSON.parse((line as string).slice("data: ".length));
+		expect(snapshot.type).toBe("snapshot");
+		expect(snapshot.active).toHaveLength(1);
+		expect(snapshot.active[0]).toMatchObject({
+			id: "in-flight-1",
+			project: "clankermux",
+			phase: "pending",
+		});
+
+		resetRequestEventRegistry();
+	});
+
+	it("sends an empty snapshot when nothing is in flight", async () => {
+		resetRequestEventRegistry();
+		const handler = createRequestsStreamHandler();
+		const reader = openStream(handler);
+
+		// Always sent, even when empty: the client uses its arrival to know the
+		// replay is complete and it may start trusting the live stream.
+		const text = await readUntil(reader, (t) => t.includes("snapshot"));
+		const line = text
+			.split("\n")
+			.find((l) => l.startsWith("data: ") && l.includes("snapshot"));
+		expect(JSON.parse((line as string).slice("data: ".length))).toEqual({
+			type: "snapshot",
+			active: [],
+		});
 	});
 
 	it("emits periodic heartbeat comments to keep the connection alive", async () => {

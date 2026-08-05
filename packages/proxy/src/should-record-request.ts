@@ -101,28 +101,75 @@ export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 		return false;
 	}
 
-	// (2) Synthetic auto-refresh probes — internal scheduler activity that must
-	//     not pollute user-visible dashboard metrics. Trust-gated on `internal`:
-	//     the marker is a plain header, so without the gate any client could
-	//     suppress its own Request-History rows.
-	if (internal && getHeader("x-clankermux-auto-refresh") === "true") {
-		return false;
-	}
-
-	// (2b) Synthetic cache-keepalive replays — same rationale as auto-refresh
-	//      probes: internal scheduler traffic that would otherwise inflate request
-	//      counts, cost, and the cache-effectiveness "real work" volume. Keepalive
-	//      activity is tracked separately in bridgeStats, not the requests table.
-	//      The kinds are kept SEPARATE (rather than folded into one "any probe"
-	//      check) so neither marker can borrow the other's suppression.
-	if (internal && getHeader("x-clankermux-keepalive") === "true") {
-		return false;
-	}
+	if (isInternalProbe(getHeader, internal)) return false;
 
 	// (3) Worker-side ignored paths: `.well-known` 404s.
 	if (path.startsWith("/.well-known/") && responseStatus === 404) {
 		return false;
 	}
+
+	return true;
+}
+
+/**
+ * Rules (2)/(2b): synthetic internal probes.
+ *
+ * - auto-refresh probes are internal scheduler activity that must not pollute
+ *   user-visible dashboard metrics;
+ * - cache-keepalive replays would otherwise inflate request counts, cost, and
+ *   the cache-effectiveness "real work" volume (they are tracked separately in
+ *   bridgeStats, not the requests table).
+ *
+ * Both are trust-gated on `internal`: the markers are plain headers, so without
+ * the gate any client could suppress its own Request-History rows. The two
+ * kinds stay SEPARATE checks (rather than one "any probe" check) so neither
+ * marker can borrow the other's suppression.
+ */
+function isInternalProbe(
+	getHeader: ShouldRecordRequestInput["getHeader"],
+	internal: boolean,
+): boolean {
+	if (!internal) return false;
+	return (
+		getHeader("x-clankermux-auto-refresh") === "true" ||
+		getHeader("x-clankermux-keepalive") === "true"
+	);
+}
+
+/**
+ * Input for {@link isIngressRecordable} — {@link ShouldRecordRequestInput}
+ * minus the two fields that do not exist yet at ingress time.
+ */
+export type IsIngressRecordableInput = Omit<
+	ShouldRecordRequestInput,
+	"providerName" | "responseStatus"
+>;
+
+/**
+ * Ingress-time recordability: "is this request worth telling the live dashboard
+ * about?", asked the moment ingestion finishes.
+ *
+ * This runs BEFORE account selection, so there is no provider and no response
+ * status, which makes it a strict subset of {@link shouldRecordRequest} with
+ * one deliberate divergence:
+ *
+ * - **`.well-known` is skipped by PREFIX here, but only at status 404 there.**
+ *   The recording gate knows the status and must keep recording a `.well-known`
+ *   200; the ingress gate does not, and emitting a mark for every `.well-known`
+ *   probe only to retract nearly all of them is worse than never drawing them.
+ *   The rules are therefore duplicated rather than shared — they genuinely
+ *   differ, and collapsing them would drop `.well-known` 200s from Request
+ *   History.
+ * - **The count_tokens rule cannot run at all**, because it keys on the
+ *   provider. Such a request is admitted here, never reaches the recorder, and
+ *   is retracted by the `ingress-end` terminal.
+ */
+export function isIngressRecordable(input: IsIngressRecordableInput): boolean {
+	const { path, getHeader, internal = false } = input;
+
+	if (isInternalProbe(getHeader, internal)) return false;
+
+	if (path.startsWith("/.well-known/")) return false;
 
 	return true;
 }
