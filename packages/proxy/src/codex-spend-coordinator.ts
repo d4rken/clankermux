@@ -755,9 +755,12 @@ export class CodexSpendCoordinator {
 		// guard below to reject a result that outlived its own credentials. The
 		// PRE-call token belongs in the set too: a rotation updates the live account
 		// object immediately but persists fire-and-forget, so the stored row may
-		// still hold this value long after the rotation.
-		const tokenGenerations = new Set<string>();
-		if (account.access_token) tokenGenerations.add(account.access_token);
+		// still hold this value long after the rotation. It is seeded
+		// UNCONDITIONALLY — for a refresh-token-only account (accepted above) the
+		// pre-call generation IS the absence of a stored token, and dropping it
+		// would make that account's own lagging row look like a foreign change.
+		const tokenGenerations = new Set<string | null>();
+		tokenGenerations.add(account.access_token ?? null);
 
 		let accessToken: string;
 		try {
@@ -869,19 +872,20 @@ export class CodexSpendCoordinator {
 		// the persisted columns — and a delete drives `usageCacheWrittenAt` to
 		// -Infinity, which never reads as "advanced". Applying now would repopulate
 		// exactly the state the reauth cleared, from a read issued under credentials
-		// that no longer exist. The row's ACCESS token is the generation marker, and
-		// it is matched against EVERY generation this read legitimately spanned —
-		// not just the latest one: the durable write of a rotation is enqueued
-		// fire-and-forget (see refreshAccessTokenSafe in token-manager), so the row
-		// lags the in-memory account by design and a lagging row is NOT a credential
-		// change. Only a token this read never saw may void it — re-authentication
+		// that no longer exist. The row's ACCESS token is the generation marker,
+		// NULL included: for a refresh-token-only account an absent stored token is
+		// itself a valid pre-rotation generation, not a missing one. It is matched
+		// against EVERY generation this read legitimately spanned — not just the
+		// latest one: the durable write of a rotation is enqueued fire-and-forget
+		// (see refreshAccessTokenSafe in token-manager), so the row lags the
+		// in-memory account by design and a lagging row is NOT a credential change. Only a token this read never saw may void it — re-authentication
 		// writes its credentials to the DB synchronously, so a reauthed row can
 		// never carry one of ours. A row that vanished (account deleted mid-read) is
 		// treated the same way.
 		const currentAccount = await this.ctx.dbOps.getAccount(accountId);
 		if (
-			!currentAccount?.access_token ||
-			!tokenGenerations.has(currentAccount.access_token)
+			!currentAccount ||
+			!tokenGenerations.has(currentAccount.access_token ?? null)
 		) {
 			return {
 				success: true,

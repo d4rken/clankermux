@@ -2104,6 +2104,36 @@ describe("CodexSpendCoordinator.readUsageStatus — credential supersession", ()
 		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
 	});
 
+	it("APPLIES the read for a refresh-token-only account whose rotation has not been persisted", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("cred-null-token-lag");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				// Refresh-token-only account: the row carries NO access token at all,
+				// which the entry check explicitly accepts.
+				access_token: null,
+				refresh_token: "rt-pre",
+			}),
+		);
+
+		// The rotation mints the first access token on the LIVE account only; the
+		// stored row still reads NULL when the guard re-reads it.
+		tokenImpl = async (account: Account) => {
+			account.access_token = "at-rotated";
+			return "at-rotated";
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		// NULL is itself a legitimate pre-rotation generation for such an account,
+		// so a lagging row must not void the read.
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-cred'");
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
 	it("APPLIES the retry result when the read's OWN 401 rotation has not been persisted yet", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
 		const id = seedId("cred-401-lag");
