@@ -762,6 +762,11 @@ export class CodexSpendCoordinator {
 			};
 		}
 
+		// The credential GENERATION this read is issued under, used below to reject
+		// a result that outlived its own credentials. Captured AFTER
+		// getValidAccessToken, which may itself have rotated an expired token.
+		let expectedRefreshToken = account.refresh_token;
+
 		const reauthPaused = this.needsReauth(account);
 		let chatgptAccountId = this.readChatgptAccountId(accessToken);
 		// Reserve this read's application sequence at the moment its network call is
@@ -790,6 +795,10 @@ export class CodexSpendCoordinator {
 			);
 			refreshFailureReason = refresh.failureReason;
 			if (refresh.token) {
+				// This read's OWN rotation is not a foreign credential change:
+				// refreshAccessTokenSafe writes the new refresh token onto the account
+				// object, so adopt it as the generation the result is measured against.
+				expectedRefreshToken = account.refresh_token;
 				chatgptAccountId = this.readChatgptAccountId(refresh.token);
 				status = await this.fetchCodexUsageStatus({
 					accessToken: refresh.token,
@@ -847,6 +856,24 @@ export class CodexSpendCoordinator {
 			return {
 				success: true,
 				message: `Usage read for '${account.name}' superseded by a newer observation; kept the fresher state.`,
+			};
+		}
+
+		// A THIRD channel that neither check above can see: re-authentication. It
+		// installs new credentials and deliberately DELETES the usage cache entry and
+		// the persisted columns — and a delete drives `usageCacheWrittenAt` to
+		// -Infinity, which never reads as "advanced". Applying now would repopulate
+		// exactly the state the reauth cleared, from a read issued under credentials
+		// that no longer exist. The stored refresh token is the generation marker; a
+		// row that vanished (account deleted mid-read) is treated the same way.
+		const currentAccount = await this.ctx.dbOps.getAccount(accountId);
+		if (
+			!currentAccount ||
+			currentAccount.refresh_token !== expectedRefreshToken
+		) {
+			return {
+				success: true,
+				message: `Usage read for '${account.name}' superseded by a credential change; kept the fresher state.`,
 			};
 		}
 
