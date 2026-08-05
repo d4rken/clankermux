@@ -988,3 +988,77 @@ describe("deriveAccountStatus — reset-credit urgency", () => {
 		expect(status.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(false);
 	});
 });
+
+describe("deriveAccountStatus — exhausted scoped families (family-weekly chip)", () => {
+	const RESET_ISO = "2024-01-05T12:00:00.000Z"; // two days after NOW
+	const RESET_MS = Date.parse(RESET_ISO);
+
+	function fableExhaustedUsage() {
+		return {
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 100,
+					resets_at: RESET_ISO,
+					scope: { model: { id: null, display_name: "Fable" }, surface: null },
+					is_active: true,
+				},
+			],
+		} as unknown as AccountResponse["usageData"];
+	}
+
+	it("surfaces an exhausted scoped family from usageData", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ usageData: fableExhaustedUsage() }),
+			NOW,
+		);
+		expect(status.exhaustedScopedFamilies).toEqual([
+			{
+				familyKey: "fable",
+				label: "Fable",
+				resetsAtMs: RESET_MS,
+				hoursLeft: 48,
+			},
+		]);
+	});
+
+	it("never enables Force Reset by itself (the account is routable)", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ usageData: fableExhaustedUsage() }),
+			NOW,
+		);
+		expect(status.showForceReset).toBe(false);
+		expect(status.isHardLimited).toBe(false);
+	});
+
+	it("is suppressed while the ACCOUNT-WIDE weekly-exhaustion chip already shows", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				usageData: fableExhaustedUsage(),
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseBinding: "weekly",
+			} as Partial<AccountResponse>),
+			NOW,
+		);
+		expect(status.isUsageExhausted).toBe(true);
+		expect(status.exhaustedScopedFamilies).toEqual([]);
+	});
+
+	it("stays visible during a SESSION (5h) exhaustion — different information", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				usageData: fableExhaustedUsage(),
+				rateLimitCause: "usage_exhausted",
+				rateLimitCauseBinding: "session",
+			} as Partial<AccountResponse>),
+			NOW,
+		);
+		expect(status.exhaustedScopedFamilies).toHaveLength(1);
+	});
+
+	it("is empty when no scoped window is exhausted", () => {
+		const status = deriveAccountStatus(makeAccount(), NOW);
+		expect(status.exhaustedScopedFamilies).toEqual([]);
+	});
+});

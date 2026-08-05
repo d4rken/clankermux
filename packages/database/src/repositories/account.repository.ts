@@ -305,10 +305,29 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
-	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
+	/**
+	 * Zero the 429 streak and null its timestamp. With `notAfterMs` the write is
+	 * guarded: it only applies when the CURRENT `rate_limited_at` predates that
+	 * bound (or is already NULL) — a stability reset driven by a stale success
+	 * must not erase the timestamp of a 429 that landed after the request
+	 * started, because the success-path clear's own stale guard keys on that
+	 * very timestamp (nulling it would let the stale clear through).
+	 */
+	async resetConsecutiveRateLimits(
+		accountId: string,
+		notAfterMs?: number,
+	): Promise<void> {
+		if (notAfterMs === undefined) {
+			await this.run(
+				`UPDATE accounts SET consecutive_rate_limits = 0, rate_limited_at = NULL WHERE id = ?`,
+				[accountId],
+			);
+			return;
+		}
 		await this.run(
-			`UPDATE accounts SET consecutive_rate_limits = 0, rate_limited_at = NULL WHERE id = ?`,
-			[accountId],
+			`UPDATE accounts SET consecutive_rate_limits = 0, rate_limited_at = NULL
+			 WHERE id = ? AND (rate_limited_at IS NULL OR rate_limited_at < ?)`,
+			[accountId, notAfterMs],
 		);
 	}
 

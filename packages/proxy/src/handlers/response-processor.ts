@@ -1,8 +1,13 @@
-import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
+import {
+	getAccountWideClaimHeadroom,
+	isScopedOnlyUnifiedRejection,
+	logError,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	getFreshCapacity,
 	type Provider,
+	type RateLimitInfo,
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
@@ -11,6 +16,7 @@ import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
+	applySuccessRateLimitClear,
 	completeRateLimitProbe,
 } from "./rate-limit-cooldown";
 import {
@@ -20,6 +26,71 @@ import {
 } from "./transparent-retry";
 
 const log = new Logger("ResponseProcessor");
+
+/**
+ * Defensive ceiling on a projected 5h-claim reset. The claim's own reset is
+ * ≤ ~5h out by construction; anything beyond this is a garbled header and the
+ * projection degrades to no reset (persisted NULL — which the auto-refresh
+ * scheduler treats as "due", triggering the prime that rewrites honest values).
+ */
+const SCOPED_PROJECTION_MAX_RESET_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Scope-aware projection of a 429's parsed rate-limit info.
+ *
+ * On a CLAIM-SCOPED rejection (`7d_oi` rejected while the account-wide 5h/7d
+ * pair proves headroom) the summary headers assert account-wide rejection
+ * until the SCOPED claim's reset — observed 4.5 days out. Persisting or
+ * cooling on those values turns one family's exhaustion into an account-wide
+ * verdict. This projection substitutes the 5h claim's OWN status and reset (a
+ * coherent single-claim pair — the persisted reset's dominant consumer is the
+ * scheduler's 5-hour window anchor). `isRateLimited` is left untouched: the
+ * request itself WAS rejected and must still fail over.
+ *
+ * Trust boundary: header reinterpretation is only safe for the official
+ * Anthropic OAuth upstream — a custom endpoint could emit these headers with
+ * different or adversarial semantics — so the predicate mirrors the family
+ * gate's (`resolveFamilyWeeklyExclusionFromHeaders`). The parse itself lives
+ * in `@clankermux/core` (`unified-claim-headers.ts`); this wrapper adds the
+ * account context the provider-layer parser deliberately does not have.
+ */
+export function projectScopedRateLimitInfo(
+	account: Account,
+	response: Response,
+	rateLimitInfo: RateLimitInfo,
+): RateLimitInfo {
+	if (response.status !== 429) return rateLimitInfo;
+	if (account.provider !== "anthropic" || account.custom_endpoint) {
+		return rateLimitInfo;
+	}
+	if (!isScopedOnlyUnifiedRejection(response.headers)) return rateLimitInfo;
+	const headroom = getAccountWideClaimHeadroom(response.headers);
+	// isScopedOnlyUnifiedRejection implies headroom; bail defensively anyway.
+	if (!headroom) return rateLimitInfo;
+	const now = Date.now();
+	const resetMs = headroom.fiveHour.resetMs;
+	// REJECT (don't clamp) a reset outside (now, now+24h]: a "5h claim reset"
+	// a day out is garbled evidence, and manufacturing a 24h value from it
+	// would freeze the status refresh — or, via the generic cooldown path,
+	// lock the account — for a day on malformed input. Degrading to none
+	// persists NULL, which the scheduler treats as "due" (self-repairing).
+	const projectedReset =
+		resetMs !== null &&
+		resetMs > now &&
+		resetMs <= now + SCOPED_PROJECTION_MAX_RESET_MS
+			? resetMs
+			: undefined;
+	log.debug(
+		`Scoped 429 on ${account.name}: projecting account-wide meta from the 5h claim ` +
+			`(status=${headroom.fiveHour.status} reset=${projectedReset ? new Date(projectedReset).toISOString() : "none"}) ` +
+			`instead of the summary (status=${rateLimitInfo.statusHeader} reset=${rateLimitInfo.resetTime ? new Date(rateLimitInfo.resetTime).toISOString() : "none"})`,
+	);
+	return {
+		...rateLimitInfo,
+		statusHeader: headroom.fiveHour.status,
+		resetTime: projectedReset,
+	};
+}
 
 /**
  * Parses the provider rate-limit headers off `response` and, when the
@@ -55,7 +126,11 @@ export function persistRateLimitStatusMeta(
 	ctx: ProxyContext,
 	provider: Pick<Provider, "parseRateLimit"> = ctx.provider,
 ): void {
-	const rateLimitInfo = provider.parseRateLimit(response);
+	const rateLimitInfo = projectScopedRateLimitInfo(
+		account,
+		response,
+		provider.parseRateLimit(response),
+	);
 	if (!rateLimitInfo.statusHeader) return;
 	const status = rateLimitInfo.statusHeader;
 	ctx.asyncWriter.enqueue(() =>
@@ -130,8 +205,9 @@ export function updateAccountMetadata(
 		// metadata when actual rate limit headers are present (shared helper).
 		persistRateLimitStatusMeta(account, response, ctx);
 	}
-	// Note: rate_limited_until is cleared unconditionally in processProxyResponse on any
-	// successful response. No need to duplicate that logic here.
+	// Note: rate_limited_until/rate_limited_reason are cleared in
+	// processProxyResponse on a REAL success (response.ok, stale-response
+	// guarded — see applySuccessRateLimitClear). No need to duplicate here.
 
 	// Extract usage info if supported
 	if (requestId) {
@@ -208,9 +284,19 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestId?: string,
-	requestMeta?: Pick<RequestMeta, "headers" | "internal">,
+	requestMeta?: Pick<RequestMeta, "headers" | "internal"> &
+		Partial<Pick<RequestMeta, "timestamp">>,
 ): Promise<boolean> {
-	let rateLimitInfo = ctx.provider.parseRateLimit(response);
+	// Scoped projection BEFORE any consumer: both the cooldown applied below
+	// and the status-meta persisted via updateAccountMetadata must see the
+	// account-wide truth of a claim-scoped 429, never the summary's multi-day
+	// verdict. This is the generic (rung 8) path — streamed-content-type 429s
+	// and any 429 not intercepted by the proxy-operations ladder land here.
+	let rateLimitInfo = projectScopedRateLimitInfo(
+		account,
+		response,
+		ctx.provider.parseRateLimit(response),
+	);
 
 	// For Zai provider, if we got a 429 without resetTime, try parsing the body
 	if (
@@ -340,20 +426,16 @@ export async function processProxyResponse(
 		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
 	updateAccountMetadata(account, response, ctx, requestId, bypassSession);
 
-	// On any successful upstream response, run the two side-effects independently:
-	//   (a) Stability reset: if the most recent 429 is older than the stability
-	//       window, the streak counter resets to 0. Critically, this is gated on
-	//       `rate_limited_at` ALONE — NOT on `rate_limited_until`. The periodic
-	//       `clearExpiredRateLimits` job nulls `rate_limited_until` without
-	//       touching `rate_limited_at`; if we required `rate_limited_until` to
-	//       still be set, API-key accounts whose cooldown expired naturally
-	//       would never get the counter reset and the next 429 would land at an
-	//       inflated backoff tier.
-	//   (b) Clearing `rate_limited_until`: only fires when the in-memory value
-	//       is non-null (avoids a no-op DB write on the happy path). We clear
-	//       unconditionally because a successful response proves the account is
-	//       usable — e.g. after a seat reassignment resets usage mid-window
-	//       before the stored expiry fires.
+	// On a non-rate-limited upstream response, resolve the probe lease and —
+	// when the response POSITIVELY proves the account serves (`response.ok`) —
+	// run the shared success recovery (stability reset + guarded clear of
+	// `rate_limited_until` AND `rate_limited_reason`; see
+	// applySuccessRateLimitClear). A non-ok non-429 (400/500) proves nothing
+	// and clears nothing: it is the "abandoned" shape below, and letting it
+	// clear would allow a generic upstream 500 to erase an `out_of_credits`
+	// floor without evidence of recovery. The request's start time is the
+	// stale-response guard bound: a delayed 200 issued before a NEWER 429
+	// landed must not erase that newer state.
 	if (!rateLimitInfo.isRateLimited) {
 		// Single-flight recovery probe terminal outcome: this attempt got a
 		// non-rate-limited response, so any in-flight probe lease for this account
@@ -364,31 +446,12 @@ export async function processProxyResponse(
 		// for exceptions/skips.
 		completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned");
 
-		// (a) Stability reset — gated only on rate_limited_at.
-		if (
-			account.rate_limited_at &&
-			Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
-		) {
-			account.consecutive_rate_limits = 0;
-			account.rate_limited_at = null;
-			ctx.asyncWriter.enqueue(() =>
-				ctx.dbOps.resetConsecutiveRateLimits(account.id),
+		if (response.ok) {
+			applySuccessRateLimitClear(
+				account,
+				ctx,
+				requestMeta?.timestamp ?? Date.now(),
 			);
-		}
-
-		// (b) Clear rate_limited_until (only if still set in-memory).
-		if (account.rate_limited_until) {
-			account.rate_limited_until = null;
-			ctx.asyncWriter.enqueue(async () => {
-				const db = ctx.dbOps.getAdapter();
-				await db.run(
-					"UPDATE accounts SET rate_limited_until = NULL WHERE id = ? AND rate_limited_until IS NOT NULL",
-					[account.id],
-				);
-				log.debug(
-					`Cleared rate_limited_until for account ${account.name} on successful response`,
-				);
-			});
 		}
 	}
 

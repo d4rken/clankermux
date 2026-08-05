@@ -1,4 +1,8 @@
-import { isAnthropicUsageShape } from "@clankermux/core";
+import {
+	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
+	getModelFamily,
+	isAnthropicUsageShape,
+} from "@clankermux/core";
 import type { AnthropicUsageData, FullUsageData } from "@clankermux/types";
 
 export interface ScopedWeeklyLimit {
@@ -43,4 +47,58 @@ export function getScopedWeeklyLimits(
 		});
 	}
 	return results;
+}
+
+/** One model family whose scoped weekly window is currently exhausted. */
+export interface ExhaustedScopedFamily {
+	/**
+	 * Stable grouping key: the resolved model family (e.g. "fable" — duplicate
+	 * scoped entries like Mythos + Fable collapse to one), or the entry's own
+	 * key when no family resolves (e.g. Codex's synthetic per-model windows).
+	 */
+	familyKey: string;
+	/** Display label of the entry that won the group (highest percent). */
+	label: string;
+	/** Parsed reset, epoch ms (finite and in the future). */
+	resetsAtMs: number;
+	/** The winning entry's reported percent (>= the exhaustion threshold). */
+	percent: number;
+}
+
+/**
+ * The scoped weekly windows currently EXHAUSTED (at/above the same threshold
+ * routing's family gate uses), deduplicated by model family. Built on
+ * {@link getScopedWeeklyLimits} rather than core's family-resolved
+ * normalization so provider-agnostic entries (Codex's synthetic per-model
+ * windows, whose display names resolve to no Claude family) still surface —
+ * they keep their own key. Within one family the highest-percent entry wins;
+ * a percent tie goes to the sooner reset. Sorted soonest-reset first.
+ */
+export function getExhaustedScopedFamilies(
+	usageData: FullUsageData | null | undefined,
+	now: number,
+): ExhaustedScopedFamily[] {
+	const byFamily = new Map<string, ExhaustedScopedFamily>();
+	for (const limit of getScopedWeeklyLimits(usageData)) {
+		if (limit.utilization < FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT) continue;
+		const resetsAtMs = Date.parse(limit.resetsAt);
+		if (!Number.isFinite(resetsAtMs) || resetsAtMs <= now) continue;
+		const familyKey = getModelFamily(limit.label) ?? limit.key;
+		const candidate: ExhaustedScopedFamily = {
+			familyKey,
+			label: limit.label,
+			resetsAtMs,
+			percent: limit.utilization,
+		};
+		const existing = byFamily.get(familyKey);
+		if (
+			!existing ||
+			candidate.percent > existing.percent ||
+			(candidate.percent === existing.percent &&
+				candidate.resetsAtMs < existing.resetsAtMs)
+		) {
+			byFamily.set(familyKey, candidate);
+		}
+	}
+	return [...byFamily.values()].sort((a, b) => a.resetsAtMs - b.resetsAtMs);
 }

@@ -851,3 +851,44 @@ describe("resolveRateLimitPresentation — session-class exhaustion", () => {
 		}
 	});
 });
+
+describe("resolveRateLimitPresentation — scoped-429 projected meta (post-projection shape)", () => {
+	// After the scoped projection, a claim-scoped 429 (Fable weekly at 100%,
+	// account-wide headroom) persists the 5h claim's own status+reset instead of
+	// the summary `rejected` + weekly reset. The account has NO lock and its
+	// account-wide windows are not exhausted (accountWideExhaustion excludes
+	// weekly_scoped). The presentation must read OK-ish — never the old
+	// "rate_limited (6517m)" red-chip regression.
+	it("stored `allowed` + future 5h reset, no lock ⇒ benign `allowed` cause (chip: Healthy)", () => {
+		const fiveHourReset = NOW + 90 * MIN;
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed",
+				rate_limit_reset: fiveHourReset,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			null, // scoped exhaustion is NOT account-wide exhaustion
+		);
+		expect(presentation.cause).toBe("allowed");
+		expect(presentation.status).toBe("allowed (90m)");
+	});
+
+	it("stored `allowed_warning` + future 5h reset, no lock ⇒ soft warning, never rate_limited", () => {
+		const fiveHourReset = NOW + 90 * MIN;
+		const presentation = resolveRateLimitPresentation(
+			{
+				rate_limit_status: "allowed_warning",
+				rate_limit_reset: fiveHourReset,
+				rate_limited: 0,
+				rate_limited_until: null,
+			},
+			NOW,
+			null,
+		);
+		expect(presentation.cause).not.toBe("rate_limited");
+		expect(presentation.status).not.toContain("rate_limited");
+		expect(presentation.status).not.toContain("rejected");
+	});
+});
