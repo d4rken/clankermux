@@ -203,12 +203,27 @@ function createResetCreditsHeaders(accessToken: string): Headers {
 }
 
 /**
+ * Outcome of one reset-credit metadata read. `status` is the HTTP status of the
+ * response that was actually received (200/401/500/…), or `null` when no
+ * response arrived at all (network error, timeout/abort). A response whose body
+ * then failed to parse still reports ITS status — the transport did answer.
+ *
+ * The status is reported SEPARATELY from the summary so callers can tell WHY a
+ * read produced nothing: a 401 means the access token was rejected and is worth
+ * one forced refresh + retry, while any other failure is not.
+ */
+export interface CodexRateLimitResetCreditsFetchResult {
+	summary: CodexRateLimitResetCreditsSummary | null;
+	status: number | null;
+}
+
+/**
  * Read earned reset metadata. This function is non-mutating and only performs
  * the backend's GET request.
  */
 export async function fetchCodexRateLimitResetCredits(
 	accessToken: string,
-): Promise<CodexRateLimitResetCreditsSummary | null> {
+): Promise<CodexRateLimitResetCreditsFetchResult> {
 	if (!accessToken || accessToken.trim() === "") {
 		throw new Error(
 			"fetchCodexRateLimitResetCredits requires a non-empty access token",
@@ -217,31 +232,33 @@ export async function fetchCodexRateLimitResetCredits(
 
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+	let status: number | null = null;
 	try {
 		const response = await fetch(CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT, {
 			method: "GET",
 			signal: controller.signal,
 			headers: createResetCreditsHeaders(accessToken),
 		});
+		status = response.status;
 
 		if (!response.ok) {
 			log.warn(
 				`Reset-credit endpoint returned ${response.status} ${response.statusText}`,
 			);
-			return null;
+			return { summary: null, status };
 		}
 
 		const parsed = parseCodexRateLimitResetCredits(await response.json());
 		if (!parsed) {
 			log.warn("Reset-credit endpoint returned an unrecognized payload");
 		}
-		return parsed;
+		return { summary: parsed, status };
 	} catch (error) {
 		log.warn(
 			"Failed to fetch Codex reset-credit metadata:",
 			error instanceof Error ? error.message : String(error),
 		);
-		return null;
+		return { summary: null, status };
 	} finally {
 		clearTimeout(timeoutId);
 	}

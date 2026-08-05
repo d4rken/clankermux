@@ -1,3 +1,4 @@
+import { PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	CODEX_DEFAULT_ENDPOINT,
@@ -29,6 +30,7 @@ import {
 	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	getValidAccessToken,
+	refreshAccessTokenSafe,
 } from "./handlers/token-manager";
 
 const log = new Logger("CodexSpendCoordinator");
@@ -103,6 +105,7 @@ interface InflightSpend {
  */
 export interface CodexSpendCoordinatorDeps {
 	getValidAccessToken?: typeof getValidAccessToken;
+	refreshAccessTokenSafe?: typeof refreshAccessTokenSafe;
 	applyCodexObservation?: typeof applyCodexObservation;
 	applyCodexUsageStatus?: typeof applyCodexUsageStatus;
 	sendCodexNativePing?: typeof sendCodexNativePing;
@@ -137,6 +140,7 @@ export class CodexSpendCoordinator {
 	private readonly ctx: ProxyContext;
 	private readonly inflight = new Map<string, InflightSpend>();
 	private readonly getValidAccessToken: typeof getValidAccessToken;
+	private readonly refreshAccessTokenSafe: typeof refreshAccessTokenSafe;
 	private readonly applyCodexObservation: typeof applyCodexObservation;
 	private readonly applyCodexUsageStatus: typeof applyCodexUsageStatus;
 	private readonly sendCodexNativePing: typeof sendCodexNativePing;
@@ -182,6 +186,8 @@ export class CodexSpendCoordinator {
 	constructor(ctx: ProxyContext, deps: CodexSpendCoordinatorDeps = {}) {
 		this.ctx = ctx;
 		this.getValidAccessToken = deps.getValidAccessToken ?? getValidAccessToken;
+		this.refreshAccessTokenSafe =
+			deps.refreshAccessTokenSafe ?? refreshAccessTokenSafe;
 		this.applyCodexObservation =
 			deps.applyCodexObservation ?? applyCodexObservation;
 		this.applyCodexUsageStatus =
@@ -238,6 +244,65 @@ export class CodexSpendCoordinator {
 		if (seq <= lastApplied) return false;
 		this.lastAppliedSeq.set(accountId, seq);
 		return true;
+	}
+
+	/**
+	 * True when the account is paused specifically because its OAuth refresh token
+	 * was rejected. Such an account cannot produce a working token: forcing a
+	 * refresh after a 401 would only replay the same invalid_grant against the
+	 * provider. The 401 recovery below is suppressed for it, and the operator is
+	 * told what actually has to happen (re-authentication).
+	 */
+	private needsReauth(account: Account): boolean {
+		return (
+			Boolean(account.paused) &&
+			account.pause_reason === PAUSE_REASON_NEEDS_REAUTH
+		);
+	}
+
+	/**
+	 * Force ONE token rotation after a free read was answered 401.
+	 *
+	 * `getValidAccessToken` only refreshes an EXPIRED token, so an unexpired token
+	 * the provider has begun rejecting (observed after a ChatGPT plan upgrade)
+	 * would be handed out unchanged forever. `refreshAccessTokenSafe` performs the
+	 * rotation with the shared single-flight/backoff handling.
+	 *
+	 * `token` is returned ONLY when the refresh produced a token that DIFFERS from
+	 * the rejected one — retrying with the same token would just 401 again (the
+	 * refresh may legitimately serve a coalesced cached value). `failureReason`
+	 * carries the sanitized Error.message (never token material) so the caller can
+	 * tell the operator WHY recovery failed.
+	 */
+	private async forceTokenRefreshAfter401(
+		account: Account,
+		rejectedToken: string,
+	): Promise<{ token: string | null; failureReason: string | null }> {
+		try {
+			const refreshed = await this.refreshAccessTokenSafe(account, this.ctx);
+			return {
+				token: refreshed && refreshed !== rejectedToken ? refreshed : null,
+				failureReason: null,
+			};
+		} catch (error) {
+			const failureReason =
+				error instanceof Error ? error.message : String(error);
+			log.warn(
+				`Forced token refresh after a 401 failed for '${account.name}': ${failureReason}`,
+			);
+			return { token: null, failureReason };
+		}
+	}
+
+	/**
+	 * Absolute write time (epoch ms) of the account's usage-cache entry, or
+	 * -Infinity when there is none. Read through the non-evicting `peekAge()` so
+	 * this observation never mutates cache state.
+	 */
+	private usageCacheWrittenAt(accountId: string): number {
+		return (
+			Date.now() - (usageCache.peekAge(accountId) ?? Number.POSITIVE_INFINITY)
+		);
 	}
 
 	/**
@@ -409,7 +474,8 @@ export class CodexSpendCoordinator {
 		let availableResetCount: number | null = null;
 		try {
 			codexRateLimitResetCreditsCache.markAttempt(accountId);
-			const summary = await this.fetchCodexRateLimitResetCredits(accessToken);
+			const { summary } =
+				await this.fetchCodexRateLimitResetCredits(accessToken);
 			if (summary) {
 				codexRateLimitResetCreditsCache.set(accountId, summary);
 				resetMetadataRefreshed = true;
@@ -488,6 +554,14 @@ export class CodexSpendCoordinator {
 				message: `Account '${account.name}' has no tokens — please re-authenticate`,
 			};
 		}
+		// Before ANY network call: a reauth-paused account's refresh token is known
+		// rejected, so both the read and its 401 recovery would be wasted traffic.
+		if (this.needsReauth(account)) {
+			return {
+				success: false,
+				message: `Codex reset-credit metadata refresh skipped for '${account.name}': the account needs re-authentication.`,
+			};
+		}
 
 		let accessToken: string;
 		try {
@@ -501,11 +575,32 @@ export class CodexSpendCoordinator {
 		}
 
 		codexRateLimitResetCreditsCache.markAttempt(accountId);
-		const summary = await this.fetchCodexRateLimitResetCredits(accessToken);
+		let { summary, status } =
+			await this.fetchCodexRateLimitResetCredits(accessToken);
+
+		// A 401 means THIS token was rejected (not that the account has no
+		// metadata): force one rotation and retry exactly once.
+		let refreshFailureReason: string | null = null;
+		if (!summary && status === 401) {
+			const refresh = await this.forceTokenRefreshAfter401(
+				account,
+				accessToken,
+			);
+			refreshFailureReason = refresh.failureReason;
+			if (refresh.token) {
+				({ summary } = await this.fetchCodexRateLimitResetCredits(
+					refresh.token,
+				));
+			}
+		}
+
 		if (!summary) {
+			const base = `Codex returned no reset-credit metadata for '${account.name}'`;
 			return {
 				success: false,
-				message: `Codex returned no reset-credit metadata for '${account.name}'`,
+				message: refreshFailureReason
+					? `${base}; token refresh failed: ${refreshFailureReason}`
+					: base,
 			};
 		}
 
@@ -585,18 +680,35 @@ export class CodexSpendCoordinator {
 	 * NEVER falls back to one on failure. On a read failure the prior usage cache
 	 * is left untouched and the failure is reported to the caller.
 	 *
-	 * The two free reads run concurrently; the usage read drives the returned
+	 * The two free reads run concurrently; the usage read LEADS the returned
 	 * {@link CodexUsageRefreshOutcome} (matching the dashboard contract), while the
 	 * reset-credit read keeps its own detailed metadata cache warm (its per-credit
 	 * expiries are needed for auto-apply and are NOT derivable from the usage
 	 * summary count).
+	 *
+	 * BOTH halves determine `success`: a discarded reset-credit failure used to be
+	 * reported to the operator as a clean refresh, hiding exactly the 401 this
+	 * method now recovers from.
 	 */
 	async refreshManual(accountId: string): Promise<CodexUsageRefreshOutcome> {
-		const [result] = await Promise.all([
+		const [usage, credits] = await Promise.all([
 			this.readUsageStatus(accountId),
 			this.refreshResetCredits(accountId, true),
 		]);
-		return result;
+
+		if (usage.success && credits.success) return usage;
+		if (usage.success) {
+			return {
+				success: false,
+				message: `${usage.message} — reset-credit metadata refresh failed: ${credits.message}`,
+			};
+		}
+		return {
+			success: false,
+			message: credits.success
+				? usage.message
+				: `${usage.message} — reset-credit metadata refresh also failed: ${credits.message}`,
+		};
 	}
 
 	/**
@@ -650,25 +762,60 @@ export class CodexSpendCoordinator {
 			};
 		}
 
-		const chatgptAccountId = this.readChatgptAccountId(accessToken);
+		const reauthPaused = this.needsReauth(account);
+		let chatgptAccountId = this.readChatgptAccountId(accessToken);
 		// Reserve this read's application sequence at the moment its network call is
 		// ISSUED — pairs with the native-ping spend's reservation so a read that
-		// BEGAN before a later spend APPLIED cannot overwrite the newer state.
+		// BEGAN before a later spend APPLIED cannot overwrite the newer state. The
+		// ORIGINAL reservation is kept across a 401 retry: the retry is the same
+		// logical read, and re-reserving would let it jump ahead of an observation
+		// issued while the first attempt was in flight.
 		const applicationSeq = this.reserveApplicationSeq(accountId);
-		const status = await this.fetchCodexUsageStatus({
+		// Absolute write time of the cache entry this read is about to supersede.
+		const writtenAtBefore = this.usageCacheWrittenAt(accountId);
+		let status = await this.fetchCodexUsageStatus({
 			accessToken,
 			chatgptAccountId,
 		});
+
+		// A 401 on a token that has not expired means the token itself was rejected
+		// (observed after a ChatGPT plan upgrade). Force ONE rotation and retry
+		// exactly once — but never for an account already paused for reauth, whose
+		// refresh token the provider has itself rejected.
+		let refreshFailureReason: string | null = null;
+		if (!status.ok && status.status === 401 && !reauthPaused) {
+			const refresh = await this.forceTokenRefreshAfter401(
+				account,
+				accessToken,
+			);
+			refreshFailureReason = refresh.failureReason;
+			if (refresh.token) {
+				chatgptAccountId = this.readChatgptAccountId(refresh.token);
+				status = await this.fetchCodexUsageStatus({
+					accessToken: refresh.token,
+					chatgptAccountId,
+				});
+			}
+		}
 
 		// Fail-clean: any non-200 / parse error / network throw keeps the prior
 		// cache untouched and reports failure. NO native-ping fallback (that would
 		// spend quota and defeat the point of the free read).
 		if (!status.ok) {
+			const base = `Codex usage read failed for '${account.name}' (status ${
+				status.status ?? "network error"
+			})`;
+			if (status.status === 401 && reauthPaused) {
+				return {
+					success: false,
+					message: `${base}; the account needs re-authentication.`,
+				};
+			}
 			return {
 				success: false,
-				message: `Codex usage read failed for '${account.name}' (status ${
-					status.status ?? "network error"
-				}).`,
+				message: refreshFailureReason
+					? `${base}; token refresh failed: ${refreshFailureReason}`
+					: `${base}.`,
 			};
 		}
 		if (!status.usage) {
@@ -678,13 +825,25 @@ export class CodexSpendCoordinator {
 			};
 		}
 
-		// Cross-transport ordering guard (SF1): if a newer observation for this
-		// account already applied while this GET was in flight (e.g. a scheduled
-		// prime opened a NEW 5h window), applying this now-stale old-window snapshot
-		// would clobber the fresher cache + persisted rate_limit_reset and could
-		// clear a cooldown the newer spend just set. Skip the application but still
-		// report a successful read (the GET itself succeeded).
-		if (!this.claimApplication(accountId, applicationSeq)) {
+		// Supersession guards. Two independent channels can have written fresher
+		// state while this GET (and its 401 retry) was in flight:
+		//
+		//  - Another COORDINATOR observation (SF1): a scheduled prime that opened a
+		//    NEW 5h window reserves a higher sequence; claimApplication rejects this
+		//    older read.
+		//  - A REAL-TRAFFIC response: applyCodexObservation on the request pipeline
+		//    deliberately does NOT participate in the sequence guard, so it is only
+		//    visible as a newer cache write time.
+		//
+		// Either way, applying this now-stale snapshot would clobber the fresher
+		// cache + persisted rate_limit_reset and could clear a cooldown the newer
+		// observation just set. Skip the application but still report a successful
+		// read (the GET itself succeeded). The cache check runs FIRST because it has
+		// no side effects, whereas claimApplication records the claim.
+		if (
+			this.usageCacheWrittenAt(accountId) > writtenAtBefore ||
+			!this.claimApplication(accountId, applicationSeq)
+		) {
 			return {
 				success: true,
 				message: `Usage read for '${account.name}' superseded by a newer observation; kept the fresher state.`,

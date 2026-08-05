@@ -17,6 +17,7 @@ export type {
 	CodexRateLimitResetCredit,
 	CodexRateLimitResetCreditStatus,
 	CodexRateLimitResetCreditsCacheEntry,
+	CodexRateLimitResetCreditsFetchResult,
 	CodexRateLimitResetCreditsSummary,
 	CodexRateLimitResetType,
 } from "./rate-limit-reset-credits";

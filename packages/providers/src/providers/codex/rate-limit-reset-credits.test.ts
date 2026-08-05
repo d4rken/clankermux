@@ -122,7 +122,10 @@ describe("fetchCodexRateLimitResetCredits", () => {
 
 		const result = await fetchCodexRateLimitResetCredits("secret-token");
 
-		expect(result).toEqual({ availableCount: 1, credits: [] });
+		expect(result).toEqual({
+			summary: { availableCount: 1, credits: [] },
+			status: 200,
+		});
 		expect(seenUrl).toBe(CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT);
 		expect(seenInit?.method).toBe("GET");
 		expect(new Headers(seenInit?.headers).get("authorization")).toBe(
@@ -150,11 +153,57 @@ describe("fetchCodexRateLimitResetCredits", () => {
 		expect(seenHeaders.get("chatgpt-account-id")).toBe("workspace-123");
 	});
 
-	it("returns null on a non-success response", async () => {
+	it("returns a null summary on a non-success response but preserves its status", async () => {
 		globalThis.fetch = (async () =>
 			new Response("nope", { status: 404 })) as typeof fetch;
 
-		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toBeNull();
+		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+			summary: null,
+			status: 404,
+		});
+	});
+
+	// The 401 status is what lets the coordinator distinguish "this token was
+	// rejected" (force one refresh + retry) from any other failure.
+	it("preserves a 401 status so the caller can force a token refresh", async () => {
+		globalThis.fetch = (async () =>
+			new Response("unauthorized", { status: 401 })) as typeof fetch;
+
+		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+			summary: null,
+			status: 401,
+		});
+	});
+
+	it("preserves a 500 status", async () => {
+		globalThis.fetch = (async () =>
+			new Response("boom", { status: 500 })) as typeof fetch;
+
+		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+			summary: null,
+			status: 500,
+		});
+	});
+
+	it("reports a null status when no response was received at all", async () => {
+		globalThis.fetch = (async () => {
+			throw new Error("network down");
+		}) as typeof fetch;
+
+		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+			summary: null,
+			status: null,
+		});
+	});
+
+	it("keeps the status when a 200 carries an unrecognized payload", async () => {
+		globalThis.fetch = (async () =>
+			Response.json({ nonsense: true })) as typeof fetch;
+
+		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+			summary: null,
+			status: 200,
+		});
 	});
 });
 
