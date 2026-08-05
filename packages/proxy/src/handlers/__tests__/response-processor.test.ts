@@ -1024,6 +1024,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 	// newer state (stale-response guard on rate_limited_at).
 	function makeClearCtx() {
 		const runCalls: Array<{ sql: string; params: unknown[] }> = [];
+		const resetCalls: Array<{ accountId: string; notAfterMs?: number }> = [];
 		const ctx = {
 			provider: {
 				name: "anthropic",
@@ -1040,7 +1041,12 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 			dbOps: {
 				markAccountRateLimited: async () => 1,
 				markAccountRateLimitedDeadlineOnly: async () => {},
-				resetConsecutiveRateLimits: async () => {},
+				resetConsecutiveRateLimits: async (
+					accountId: string,
+					notAfterMs?: number,
+				) => {
+					resetCalls.push({ accountId, notAfterMs });
+				},
 				updateAccountUsage: () => {},
 				updateAccountRateLimitMeta: () => {},
 				getAdapter: () => ({
@@ -1059,7 +1065,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		} as unknown as ProxyContext;
 		const clearCalls = () =>
 			runCalls.filter((c) => c.sql.includes("rate_limited_reason = NULL"));
-		return { ctx, runCalls, clearCalls };
+		return { ctx, runCalls, clearCalls, resetCalls };
 	}
 
 	function ok200() {
@@ -1149,6 +1155,60 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		expect(account.rate_limited_until).toBe(until);
 		expect(account.rate_limited_reason).toBe("out_of_credits");
 		expect(clearCalls()).toHaveLength(0);
+	});
+
+	it("skips the STABILITY RESET too when the 429 is newer than the request (no guard laundering)", async () => {
+		// The 429 is older than the 5-min stability window (so the reset branch
+		// WOULD fire) but NEWER than this slow request's start. If the reset ran,
+		// it would null rate_limited_at — the very timestamp the clear's SQL
+		// guard keys on — laundering the stale clear through a NULL. Neither
+		// side-effect may run.
+		const now = Date.now();
+		const until = now + 60_000;
+		const account = makeAccount({
+			rate_limited_until: until,
+			rate_limited_reason: "out_of_credits",
+			rate_limited_at: now - 6 * 60_000, // > stability window
+			consecutive_rate_limits: 3,
+		});
+		const { ctx, clearCalls, resetCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx, undefined, {
+			headers: new Headers(),
+			internal: false,
+			timestamp: now - 10 * 60_000, // request started before the 429
+		});
+
+		expect(account.rate_limited_until).toBe(until);
+		expect(account.rate_limited_reason).toBe("out_of_credits");
+		expect(account.rate_limited_at).toBe(now - 6 * 60_000);
+		expect(account.consecutive_rate_limits).toBe(3);
+		expect(resetCalls).toHaveLength(0);
+		expect(clearCalls()).toHaveLength(0);
+	});
+
+	it("passes the request-start bound through to the guarded DB stability reset", async () => {
+		// A snapshot's in-memory rate_limited_at can lag a concurrent 429's
+		// newer persisted timestamp — so the DB write itself must carry the
+		// bound and be a no-op against newer rows.
+		const now = Date.now();
+		const account = makeAccount({
+			rate_limited_at: now - 6 * 60_000, // > stability window, < bound
+			consecutive_rate_limits: 2,
+		});
+		const { ctx, resetCalls } = makeClearCtx();
+
+		await processProxyResponse(ok200(), account, ctx, undefined, {
+			headers: new Headers(),
+			internal: false,
+			timestamp: now - 60_000,
+		});
+
+		expect(account.consecutive_rate_limits).toBe(0);
+		expect(account.rate_limited_at).toBeNull();
+		expect(resetCalls).toEqual([
+			{ accountId: account.id, notAfterMs: now - 60_000 },
+		]);
 	});
 
 	it("clears when the limit predates this request's start (guard passes)", async () => {

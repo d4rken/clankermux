@@ -69,9 +69,16 @@ export function projectScopedRateLimitInfo(
 	if (!headroom) return rateLimitInfo;
 	const now = Date.now();
 	const resetMs = headroom.fiveHour.resetMs;
+	// REJECT (don't clamp) a reset outside (now, now+24h]: a "5h claim reset"
+	// a day out is garbled evidence, and manufacturing a 24h value from it
+	// would freeze the status refresh — or, via the generic cooldown path,
+	// lock the account — for a day on malformed input. Degrading to none
+	// persists NULL, which the scheduler treats as "due" (self-repairing).
 	const projectedReset =
-		resetMs !== null && resetMs > now
-			? Math.min(resetMs, now + SCOPED_PROJECTION_MAX_RESET_MS)
+		resetMs !== null &&
+		resetMs > now &&
+		resetMs <= now + SCOPED_PROJECTION_MAX_RESET_MS
+			? resetMs
 			: undefined;
 	log.debug(
 		`Scoped 429 on ${account.name}: projecting account-wide meta from the 5h claim ` +

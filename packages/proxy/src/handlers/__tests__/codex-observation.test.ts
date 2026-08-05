@@ -597,6 +597,65 @@ describe("applyCodexObservation — success recovery", () => {
 		).toHaveLength(1);
 	});
 
+	it("non-real-traffic 500 clears NOTHING — an upstream error proves no recovery", () => {
+		// The Codex parser reports every non-429 as not-rate-limited, so without
+		// the response.ok gate a scheduled ping's 500 would clear the lock and
+		// its reason (including an out_of_credits floor).
+		const until = Date.now() + 60_000;
+		const account = makeCodexAccount({
+			id: track("acct-prime-500"),
+			rate_limited_until: until,
+			rate_limited_reason: "out_of_credits",
+		});
+		const { ctx, calls } = makeCtx();
+		const resetMs = Date.now() + 4 * 60 * 60 * 1000;
+
+		applyCodexObservation(
+			account,
+			codexResponse(resetMs, {}, 500),
+			ctx,
+			baseOpts({ source: "scheduled-prime" }),
+		);
+
+		expect(account.rate_limited_until).toBe(until);
+		expect(account.rate_limited_reason).toBe("out_of_credits");
+		expect(
+			calls.runSql.filter((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toHaveLength(0);
+	});
+
+	it("recovery honors the observation's ISSUE time: a 429 that landed mid-flight survives", () => {
+		// The scheduled ping was issued BEFORE a real-traffic 429 wrote this
+		// state; its 200 must not clear it. The bound is the issue instant, not
+		// the (later) application instant.
+		const now = Date.now();
+		const until = now + 60_000;
+		const account = makeCodexAccount({
+			id: track("acct-prime-midflight"),
+			rate_limited_until: until,
+			rate_limited_reason: "model_fallback_429",
+			rate_limited_at: now - 1_000, // the 429 landed 1s ago…
+		});
+		const { ctx, calls } = makeCtx();
+		const resetMs = now + 4 * 60 * 60 * 1000;
+
+		applyCodexObservation(
+			account,
+			codexResponse(resetMs),
+			ctx,
+			baseOpts({
+				source: "scheduled-prime",
+				observationStartedAtMs: now - 5_000, // …after the ping was issued
+			}),
+		);
+
+		expect(account.rate_limited_until).toBe(until);
+		expect(account.rate_limited_reason).toBe("model_fallback_429");
+		expect(
+			calls.runSql.filter((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toHaveLength(0);
+	});
+
 	it("non-real-traffic recovery also clears the stale rate_limited_reason label", () => {
 		// A positively-confirmed recovery must not leave the reason behind: a
 		// stale `model_fallback_429` on a healthy account reads as an active

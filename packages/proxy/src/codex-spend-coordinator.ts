@@ -655,6 +655,10 @@ export class CodexSpendCoordinator {
 		// ISSUED — pairs with the native-ping spend's reservation so a read that
 		// BEGAN before a later spend APPLIED cannot overwrite the newer state.
 		const applicationSeq = this.reserveApplicationSeq(accountId);
+		// Issue instant, captured BEFORE the network round-trip: the recovery
+		// stale-guard bound. A real-traffic 429 landing while this GET is in
+		// flight must never be cleared by this (older) observation.
+		const issuedAtMs = Date.now();
 		const status = await this.fetchCodexUsageStatus({
 			accessToken,
 			chatgptAccountId,
@@ -693,6 +697,7 @@ export class CodexSpendCoordinator {
 
 		const observation = this.applyCodexUsageStatus(account, status, this.ctx, {
 			requestAccounting: "none",
+			observationStartedAtMs: issuedAtMs,
 		});
 		const fiveHour = observation.usage?.five_hour?.utilization ?? 0;
 		const sevenDay = observation.usage?.seven_day?.utilization ?? 0;
@@ -749,6 +754,9 @@ export class CodexSpendCoordinator {
 		// is ISSUED — pairs with the free-GET read's reservation so whichever
 		// observation was issued LATER wins the cache/DB (see claimApplication).
 		const applicationSeq = this.reserveApplicationSeq(accountId);
+		// Issue instant, captured BEFORE the network round-trip: the recovery
+		// stale-guard bound (see the free-GET path above).
+		const issuedAtMs = Date.now();
 		let response: Response;
 		try {
 			response = await this.sendCodexNativePing(accessToken, endpoint);
@@ -825,6 +833,7 @@ export class CodexSpendCoordinator {
 				requestAccounting,
 				rateLimitAction,
 				successRecovery: "scheduled-prime",
+				observationStartedAtMs: issuedAtMs,
 			},
 		);
 

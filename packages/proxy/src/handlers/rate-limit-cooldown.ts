@@ -45,7 +45,20 @@ export function applySuccessRateLimitClear(
 	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
 	clearBoundMs: number,
 ): void {
-	// (a) Stability reset — gated only on rate_limited_at.
+	// Stale guard FIRST, covering BOTH side-effects: when a 429 landed at/after
+	// the bound, neither the stability reset nor the clear may run — the
+	// stability reset nulls `rate_limited_at`, which is exactly the timestamp
+	// the clear's own SQL guard keys on, so letting it run first would launder
+	// the stale clear through a NULL. (The streak being live under a newer 429
+	// makes skipping the reset correct on its own terms too.)
+	const newerLimitExists =
+		account.rate_limited_at != null && account.rate_limited_at >= clearBoundMs;
+	if (newerLimitExists) return;
+
+	// (a) Stability reset — gated only on rate_limited_at. The DB write carries
+	// the same bound: this snapshot's in-memory `rate_limited_at` may lag a
+	// concurrent 429's newer persisted timestamp, and an unguarded reset would
+	// null it (see above).
 	if (
 		account.rate_limited_at &&
 		Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
@@ -53,16 +66,13 @@ export function applySuccessRateLimitClear(
 		account.consecutive_rate_limits = 0;
 		account.rate_limited_at = null;
 		ctx.asyncWriter.enqueue(() =>
-			ctx.dbOps.resetConsecutiveRateLimits(account.id),
+			ctx.dbOps.resetConsecutiveRateLimits(account.id, clearBoundMs),
 		);
 	}
 
 	// (b) Guarded lock+reason clear (only when something is set in-memory,
 	// avoiding a no-op DB write on the happy path).
 	if (!account.rate_limited_until && !account.rate_limited_reason) return;
-	const newerLimitExists =
-		account.rate_limited_at != null && account.rate_limited_at >= clearBoundMs;
-	if (newerLimitExists) return;
 	account.rate_limited_until = null;
 	account.rate_limited_reason = null;
 	ctx.asyncWriter.enqueue(async () => {

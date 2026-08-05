@@ -287,6 +287,21 @@ describe("persistRateLimitStatusMeta scoped projection", () => {
 		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
 	});
 
+	it("REJECTS (not clamps) a finite far-future 5h claim reset — garbled evidence must not manufacture 24h", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const headers = incidentHeaders();
+		// "5h claim reset" 30 days out — impossible for a 5h window.
+		headers["anthropic-ratelimit-unified-5h-reset"] = String(
+			Math.floor((INCIDENT_NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
+		);
+
+		persistRateLimitStatusMeta(makeAccount(), make429(headers), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("allowed");
+		expect(metaCalls[0].resetTime).toBeNull();
+	});
+
 	it("degrades to a NULL reset when the 5h claim reset is unparseable (scheduler treats NULL as due)", () => {
 		const { ctx, metaCalls } = makeCtx();
 		const headers = incidentHeaders();

@@ -96,6 +96,16 @@ export interface ApplyCodexObservationOptions {
 	 * processProxyResponse there).
 	 */
 	successRecovery: "standard" | "scheduled-prime";
+	/**
+	 * Epoch ms at which the observed request was ISSUED (before the network
+	 * round-trip) — the stale-guard bound for success recovery: rate-limit
+	 * state written by a 429 that landed at/after this instant is never
+	 * cleared by this observation. Callers that hold the fetch start time
+	 * should pass it; defaults to the application instant, which is later and
+	 * therefore weaker (it cannot see a real-traffic 429 that arrived while
+	 * this observation's response was in flight).
+	 */
+	observationStartedAtMs?: number;
 }
 
 export interface CodexObservationResult {
@@ -280,8 +290,9 @@ function applyCodexUsageBookkeeping(
 function applyCodexSuccessRecovery(
 	account: Account,
 	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
+	observationStartedAtMs: number,
 ): void {
-	applySuccessRateLimitClear(account, ctx, Date.now());
+	applySuccessRateLimitClear(account, ctx, observationStartedAtMs);
 }
 
 /**
@@ -373,9 +384,16 @@ export function applyCodexObservation(
 	// For real-traffic, processProxyResponse still owns this (see
 	// CodexObservationSource docs) — performing it here too would double-handle
 	// the shared cross-provider success path. `standard` and `scheduled-prime`
-	// are identical for now.
-	if (!isRateLimited && opts.source !== "real-traffic") {
-		applyCodexSuccessRecovery(account, ctx);
+	// are identical for now. Gated on `response.ok`, not merely non-429: the
+	// Codex parser reports every non-429 as not-rate-limited, so without the
+	// gate a scheduled ping's 400/500 — which proves nothing about recovery —
+	// would clear the lock and its reason (including an out_of_credits floor).
+	if (response.ok && !isRateLimited && opts.source !== "real-traffic") {
+		applyCodexSuccessRecovery(
+			account,
+			ctx,
+			opts.observationStartedAtMs ?? Date.now(),
+		);
 	}
 
 	return {
@@ -395,6 +413,12 @@ export interface ApplyCodexUsageStatusOptions {
 	 * later periodic/on-demand free-status caller can choose its own accounting.
 	 */
 	requestAccounting: CodexRequestAccounting;
+	/**
+	 * Epoch ms at which the free GET was ISSUED — the stale-guard bound for
+	 * success recovery (see {@link ApplyCodexObservationOptions}'s field of the
+	 * same name). Defaults to the application instant (weaker).
+	 */
+	observationStartedAtMs?: number;
 }
 
 /**
@@ -465,7 +489,11 @@ export function applyCodexUsageStatus(
 
 	// ── 3. Success-cooldown recovery (positive recovery signal ONLY) ───────
 	if (confirmedRecovered) {
-		applyCodexSuccessRecovery(account, ctx);
+		applyCodexSuccessRecovery(
+			account,
+			ctx,
+			opts.observationStartedAtMs ?? Date.now(),
+		);
 	}
 
 	return {

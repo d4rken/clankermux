@@ -219,6 +219,35 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 		expect(readUntil(db, "acc-1")).toBe(UNTIL);
 	});
 
+	it("resetConsecutiveRateLimits with a bound is a no-op against a NEWER rate_limited_at", async () => {
+		// The success path's stability reset carries the request-start bound: a
+		// 429 that landed after the request started must keep its timestamp
+		// (the clear's own SQL guard keys on it).
+		seedLock(db, "acc-guarded", { until: UNTIL, at: AT, reason: REASON });
+
+		await repo.resetConsecutiveRateLimits("acc-guarded", AT - 1_000);
+
+		const row = db
+			.query<{ rate_limited_at: number | null }, [string]>(
+				"SELECT rate_limited_at FROM accounts WHERE id = ?",
+			)
+			.get("acc-guarded");
+		expect(row?.rate_limited_at).toBe(AT);
+	});
+
+	it("resetConsecutiveRateLimits with a bound clears an OLDER rate_limited_at", async () => {
+		seedLock(db, "acc-guarded-2", { until: UNTIL, at: AT, reason: REASON });
+
+		await repo.resetConsecutiveRateLimits("acc-guarded-2", AT + 1_000);
+
+		const row = db
+			.query<{ rate_limited_at: number | null }, [string]>(
+				"SELECT rate_limited_at FROM accounts WHERE id = ?",
+			)
+			.get("acc-guarded-2");
+		expect(row?.rate_limited_at).toBeNull();
+	});
+
 	it("clearExpiredRateLimits nulls ONLY rate_limited_until (sweep must never touch the reason)", async () => {
 		// The periodic sweep is polling-shaped: wiping the reason there would
 		// let it erase an out_of_credits floor's label without a real success.

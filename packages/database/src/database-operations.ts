@@ -979,8 +979,11 @@ OAuth tokens will need to be re-authenticated.
 		await this.accounts.setRateLimitedDeadlineOnly(accountId, until, reason);
 	}
 
-	async resetConsecutiveRateLimits(accountId: string): Promise<void> {
-		await this.accounts.resetConsecutiveRateLimits(accountId);
+	async resetConsecutiveRateLimits(
+		accountId: string,
+		notAfterMs?: number,
+	): Promise<void> {
+		await this.accounts.resetConsecutiveRateLimits(accountId, notAfterMs);
 	}
 
 	/**
