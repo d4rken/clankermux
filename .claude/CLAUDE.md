@@ -53,15 +53,24 @@ Exclude from all reads, edits, searches, and commits:
 
 - `packages/database/src/inline-{vacuum,integrity-check,incremental-vacuum,payload-write}-worker.ts`
 
+Which workers exist is decided by **one** list,
+`packages/database/scripts/workers-manifest.ts`. Everything that needs to know —
+the real build, the CI placeholder step, and the systemd staleness guard in
+`scripts/guarded-build.ts` — derives from it, and `workers-manifest.test.ts`
+fails if a `*-worker.ts` source has no entry. Adding a worker is a one-line edit
+there; never hand-maintain a second copy of the list.
+
 Committed ambient `.d.ts` stubs satisfy `bun run typecheck` on a clean checkout,
 so fresh worktrees need no hand-created placeholders. `bun test` is a different
-story — it loads the real modules, not the stubs — so a fresh worktree must run
-`bun run build:db-workers` before its first test run. Skip it and seven test
-files fail to load with
-`Cannot find module './inline-incremental-vacuum-worker'` — 65 reported
-failures, plus ~600 tests in those files that never register at all (3922 pass
-instead of 4588). A suite that is merely *smaller* than expected is the tell.
-Never commit the generated `.ts` files.
+story — it loads the real modules, not the stubs — so a fresh worktree must
+first run either `bun run build:db-workers` (~5s, real bundles) or
+`bun packages/database/scripts/build-workers.ts --placeholders-only` (instant,
+empty stubs; what CI uses). Skip it and whole test files fail to load with
+`Cannot find module './inline-<name>-worker'`, taking hundreds of tests that
+never register at all with them. **A suite that is merely *smaller* than
+expected is the tell** — this never reports a missing file, only fewer tests, so
+compare the file and test counts, not just pass/fail. Never commit the generated
+`.ts` files.
 
 `packages/proxy/src/{inline-worker,embedded-tiktoken-wasm}.ts` are **retired** —
 no longer generated or imported. Stale gitignored copies may linger in the live
