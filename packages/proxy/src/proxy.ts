@@ -17,7 +17,6 @@ import {
 } from "./admission-gates";
 import { cacheBodyStore } from "./cache-body-store";
 import {
-	abortableSleep,
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	createContextWindowExceededResponse,
 	createFamilyWeeklyExhaustedResponse,
@@ -27,8 +26,6 @@ import {
 	ERROR_MESSAGES,
 	getComboSlotInfo,
 	getForcedAccount,
-	HOLD_OVERFLOW,
-	holdAndRetryCacheAccount,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
@@ -37,7 +34,6 @@ import {
 	type ProxyContext,
 	proxyForcedAccount,
 	proxyWithAccount,
-	type ReprobeOutcome,
 	resolveFamilyWeeklyExclusion,
 	resolveTransientlyCooledFamilySibling,
 	selectAccountsForRequest,
@@ -51,18 +47,18 @@ import {
 	getRateLimitProbeAdmission,
 } from "./handlers/rate-limit-cooldown";
 import {
-	getOverloadHoldBudgetMs,
-	releaseOverloadHoldSlot,
-	tryAcquireOverloadHoldSlot,
-} from "./overload-hold";
-import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
-	getOverloadHoldSlotKey,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
-	inspectProviderOverload,
 	isOfficialAnthropicProvider,
 } from "./provider-overload-cooldown";
+import {
+	CW_HOLD_MAX_MS,
+	CW_HOLD_MAX_MS_NO_CODEX_FALLBACK,
+	createRecoveryHolds,
+	FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS,
+	PIN_HOLD_MAX_MS,
+} from "./recovery-holds";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
@@ -74,51 +70,6 @@ import {
 export type { ProxyContext } from "./handlers";
 
 const log = new Logger("Proxy");
-
-// Max time (ms) the proxy will hold an open connection waiting for a
-// rate-limited large-context (non-Codex) account to become available before
-// falling back to a 400 context_window_exceeded. Matches BURST_RETRY_MAX_HOLD_MS
-// (120s) — both are bounds on how long we hold a live client connection.
-const CW_HOLD_MAX_MS = 120_000;
-// Extended CW-hold budget used when NO Codex account can serve the request even
-// against its full (unmargined) window — i.e. the only backends that can hold
-// the request are the rate-limited large-context (Anthropic) accounts, so a 400
-// is the only alternative to waiting. 330s covers one full 300s 429 backoff
-// ceiling cooldown plus a re-probe, and stays under the Anthropic SDK's ~600s
-// client request timeout. When Codex *can* fall back, the shorter
-// CW_HOLD_MAX_MS (120s) is used and behavior is unchanged.
-const CW_HOLD_MAX_MS_NO_CODEX_FALLBACK = 330_000;
-// Small jitter (ms) added to each CW hold sleep to avoid thundering herd.
-const CW_HOLD_JITTER_MS = 500;
-// Max time (ms) to hold a live client connection for a family-weekly request when
-// the ONLY reason the pool emptied is that a family-capable sibling is on a short
-// transient cooldown (per-account 429 or provider 529 overload). Kept modest
-// (120s, matching CW_HOLD_MAX_MS — NOT the 330s no-Codex variant) because the
-// trigger is an upstream overload storm where many family requests pile into the
-// hold at once; a client disconnect releases it promptly via abortableSleep.
-const FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS = 120_000;
-// Max time (ms) to hold a live client connection for an API-key→account/class
-// PINNED request when the pin strict-failed selection ONLY because every
-// pin-allowed account is on a short transient cooldown (per-account 429 or a
-// provider-wide 529 overload) that will clear within budget. Re-selection during
-// the hold re-enforces the pin, so a disallowed account is never served; a long
-// 5h/7d wall (recovery beyond budget) is not held and still fast-fails. 120s
-// matches CW_HOLD_MAX_MS / BURST_RETRY_MAX_HOLD_MS.
-const PIN_HOLD_MAX_MS = 120_000;
-// Retry-After horizon for the suppressed-only overload terminal: every
-// remaining candidate was skipped because a half-open bucket's probe is already
-// in flight, so recovery (or a re-trip) is expected within seconds — not a
-// full cooldown window. Used when the admission refusal carried no deadline.
-const OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS = 5_000;
-// The overload-hold budget (OVERLOAD_HOLD_MAX_MS, 120s — matching every other
-// bound on holding a live client connection) and the per-bucket holder cap
-// both live in overload-hold.ts; the hold reads the budget via
-// getOverloadHoldBudgetMs().
-// Short-poll interval (ms) while a half-open probe is in flight: holders must
-// not sleep past a probe completion, so they re-check (and re-attempt — the
-// admission chokepoint keeps all but one suppressed) on this cadence rather
-// than waiting out a cooldown deadline that no longer exists.
-const OVERLOAD_HOLD_PROBE_POLL_MS = 1_500;
 
 // ===== REQUEST RECORDER WIRING =====
 
@@ -796,616 +747,29 @@ async function handleIngestedProxy(
 		);
 	};
 
-	// Transparent overload hold. When EVERY candidate is overload-gated (the
-	// zero-available terminal) or every attempt was suppressed behind an
-	// in-flight half-open probe (the suppressed-exhaustion terminal), a
-	// synthetic 529 bounced to the client forces a client-side retry loop for a
-	// condition that typically clears in seconds. Instead, hold the live
-	// connection and serve the request when the family recovers — bounded by
-	// the OVERLOAD_HOLD_MAX_MS budget (overload-hold.ts) and capped per
-	// overload bucket; overflow, a recovery beyond budget, and budget expiry
-	// all fall back to the existing synthetic 529. The budget bounds the whole
-	// hold, wake attempts included: an in-flight wake fetch is aborted at the
-	// remaining budget (mirroring the burst-retry probe) so a hung upstream
-	// can't pin the connection + hold slot for the 30-minute request timeout.
-	// These terminals only fire when NO cross-provider candidate exists, so
-	// the hold can never steal a request that would have failed over.
-
-	// Unique (provider, effective model) pairs behind an overload terminal —
-	// the breaker buckets the hold waits on.
-	const overloadHoldPairs = (
-		gated: ProviderOverloadedAccount[],
-	): Array<{ provider: string; model: string | null }> => {
-		const pairs = new Map<string, { provider: string; model: string | null }>();
-		for (const { account } of gated) {
-			const model = gates.modelForAccount(account);
-			pairs.set(
-				`${getProviderOverloadKey(account.provider)}\u0000${model ?? ""}`,
-				{
-					provider: account.provider,
-					model,
-				},
-			);
-		}
-		return [...pairs.values()];
-	};
-
-	// Re-read the gated accounts' block deadlines for the terminal 529 so its
-	// Retry-After reflects a re-trip that happened while holding, not the stale
-	// pre-hold snapshot. A bucket that went half-open/closed mid-hold reads as
-	// the short probe horizon.
-	const refreshOverloadUntils = (
-		gated: ProviderOverloadedAccount[],
-	): ProviderOverloadedAccount[] => {
-		const now = Date.now();
-		return gated.map(({ account }) => ({
-			account,
-			until:
-				getProviderOverloadUntil(
-					account.provider,
-					now,
-					gates.modelForAccount(account),
-				) ?? now + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
-		}));
-	};
-
-	// Current combo slot override for an account, resolved by ACCOUNT ID at
-	// attempt time (not selection time): a hold wake re-runs selection, which
-	// re-populates the combo slot info, and a combo fallback clears comboName —
-	// so the override must be read fresh per attempt or a recovered combo slot
-	// would be served with the wrong (non-overridden) model.
-	const currentComboOverrideForAccount = (account: Account): string | null => {
-		const combo = requestMeta.comboName ? getComboSlotInfo(requestMeta) : null;
-		const slot = combo?.slots.find((s) => s.accountId === account.id);
-		return slot?.modelOverride ?? null;
-	};
-
-	// Result of one re-attempt round over re-selected hold candidates.
-	// `sawOverloadSuppression` / `sawRetrip` are derived from the per-attempt
-	// outcome sink (the same mechanism the failover loops use for
-	// `overload_suppressed`) so the overload hold can tell overload-related
-	// failures (keep polling — a probe verdict is what it waits on) from
-	// ordinary failures (auth / network / 429 / model — break out rather than
-	// hammering a broken candidate on every 1.5s poll). `budgetAborted` marks
-	// a caller-supplied signal that fired for a NON-client reason (the hold
-	// budget deadline) — it must fall through to the synthetic 529, never be
-	// mislabeled as a client abort.
-	type AttemptRound = {
-		response: Response | null;
-		sawOverloadSuppression: boolean;
-		sawRetrip: boolean;
-		/**
-		 * Candidates skipped by the single-flight recovery-probe gate: NOTHING was
-		 * attempted against them because another request is probing them right now.
-		 * Like `sawOverloadSuppression`, this is an AVAILABILITY condition with a
-		 * verdict already in flight — never a failure of the candidate — so the
-		 * hold loops keep waiting for it within their budget instead of treating
-		 * the round as "everything failed for ordinary reasons".
-		 *
-		 * Account IDs rather than a flag: a round can MIX a suppressed candidate
-		 * with one that failed ordinarily, and the loops must be able to re-attempt
-		 * exactly the former while leaving the latter alone.
-		 */
-		probeSuppressedAccountIds: Set<string>;
-		/**
-		 * Candidates that WERE attempted and failed for an ordinary reason (auth /
-		 * network / 429 / model). Nothing is in flight for them, so a short poll
-		 * that re-attempts them is pure hammering — worse than wasted work for a
-		 * 429, which it can deepen. Replaces the old write-only `ordinaryFailures`
-		 * counter, whose information the hold loops could not act on.
-		 */
-		ordinaryFailedAccountIds: Set<string>;
-		budgetAborted: boolean;
-	};
-
-	// Shared re-attempt loop for the hold paths (holdForOverloadRecovery and
-	// holdForNonCodexRecovery): try each re-selected candidate in order and
-	// return the first served Response in `response`, or a fully-classified
-	// round when every candidate failed (the caller's hold loop decides
-	// whether to keep waiting). Terminal forwarding is always suppressed — a
-	// hold must never surface a wake attempt's rate-limit/terminal response.
-	// When `options.signal` is given it is threaded into the attempt and
-	// checked between candidates; a CLIENT abort returns the client-abort
-	// Response, while a budget-only abort sets `budgetAborted`.
-	const attemptCandidates = async (
-		candidates: Account[],
-		options?: { signal: AbortSignal },
-	): Promise<AttemptRound> => {
-		const round: AttemptRound = {
-			response: null,
-			sawOverloadSuppression: false,
-			sawRetrip: false,
-			probeSuppressedAccountIds: new Set<string>(),
-			ordinaryFailedAccountIds: new Set<string>(),
-			budgetAborted: false,
-		};
-		for (let i = 0; i < candidates.length; i++) {
-			const candidate = candidates[i];
-			// Same single-flight probe gate as every other upstream attempt: a hold
-			// wake must not stampede a freshly-recovered account either.
-			const gated = await attemptThroughProbeGate(candidate, () => {
-				logFinalOrderOnce(candidate.id);
-				return proxyWithAccount(
-					req,
-					url,
-					candidate,
-					requestMeta,
-					finalBodyBuffer,
-					finalCreateBodyStream,
-					i,
-					ctx,
-					// HIGH: a recovered combo slot must be served with ITS model, not
-					// the request's — resolve the current slot override by account id.
-					currentComboOverrideForAccount(candidate),
-					apiKeyId,
-					apiKeyName,
-					requestBodyContext,
-					false,
-					{
-						...(options?.signal ? { signal: options.signal } : {}),
-						onOutcome: (o) => {
-							if (o.kind === "overload_suppressed") {
-								round.sawOverloadSuppression = true;
-							} else if (o.kind === "overload_529") {
-								round.sawRetrip = true;
-							} else {
-								// Attributed to the candidate, so a later poll can skip
-								// exactly this account rather than the whole round.
-								round.ordinaryFailedAccountIds.add(candidate.id);
-							}
-						},
-					},
-				);
-			});
-			// Suppressed: another request is probing this candidate and NOTHING was
-			// attempted. Record the ACCOUNT — it is neither a failure nor a served
-			// round; the hold loops wait for this candidate's in-flight verdict and
-			// re-attempt exactly it.
-			if (gated.suppressed) {
-				round.probeSuppressedAccountIds.add(candidate.id);
-				continue;
-			}
-			const r = gated.response;
-			if (r) {
-				round.response = r;
-				return round;
-			}
-			// Client abort wins over budget abort: a disconnect must surface as
-			// the 499 marker, never as the synthetic 529 (and vice versa).
-			if (req.signal.aborted) {
-				round.response = createClientAbortResponse();
-				return round;
-			}
-			if (options?.signal?.aborted) {
-				round.budgetAborted = true;
-				return round;
-			}
-		}
-		return round;
-	};
-
-	// Returns the served (or client-abort) Response, or null when the caller
-	// must fall through to the synthetic 529 (hold not entered, holder-cap
-	// overflow, recovery beyond budget, or budget expiry).
-	const holdForOverloadRecovery = async (
-		gated: ProviderOverloadedAccount[],
-	): Promise<Response | null> => {
-		if (gated.length === 0) return null;
-		// Synthetic scheduler traffic and advisory probes need a fast verdict,
-		// not a held connection: internal requests, auto-refresh probes,
-		// keepalive replays, and count_tokens (answered locally/quickly — same
-		// rationale as the pin hold's count_tokens skip).
-		//
-		// The probe-marker arm is trust-gated: the markers are client-settable, so
-		// on their own they would let any external caller opt out of the overload
-		// hold and get a synthetic 529 instead of a recovered response. Gating them
-		// makes them a strict SUBSET of the `requestMeta.internal` arm below — kept
-		// explicit so the intent survives, and ordered first so the compiler does
-		// not narrow `requestMeta.internal` out from under it.
-		if (
-			isTrustedSyntheticProbe(
-				req.headers,
-				requestMeta.internal === true,
-				"any",
-			) ||
-			requestMeta.internal ||
-			url.pathname === "/v1/messages/count_tokens"
-		) {
-			return null;
-		}
-		if (req.signal.aborted) return createClientAbortResponse();
-
-		const pairs = overloadHoldPairs(gated);
-		const holdBudgetMs = getOverloadHoldBudgetMs();
-		const entryNow = Date.now();
-		// Hold only when recovery can land within budget: a half-open bucket's
-		// probe may report a verdict any moment; an open bucket must expire
-		// within the hold budget. A cooldown wholly beyond budget keeps the
-		// immediate 529 + Retry-After.
-		const holdable = pairs
-			.map(({ provider, model }) =>
-				inspectProviderOverload(provider, model, entryNow),
-			)
-			.some(
-				(s) =>
-					s.state !== "open" ||
-					(s.until !== null && s.until - entryNow <= holdBudgetMs),
-			);
-		if (!holdable) return null;
-
-		// Acquire a hold slot for EVERY unique slot key among the gated pairs,
-		// all-or-nothing: when a live provider-wide bucket coexists with
-		// lingering family entries the pairs can map to different slot keys, and
-		// counting the holder against only the first pair's key would let the
-		// other keys' caps be exceeded invisibly. Any refusal releases what was
-		// already acquired and overflows to the immediate synthetic 529.
-		const slotKeys: string[] = [];
-		for (const { provider, model } of pairs) {
-			const key = getOverloadHoldSlotKey(provider, model);
-			if (!slotKeys.includes(key)) slotKeys.push(key);
-		}
-		const acquiredSlotKeys: string[] = [];
-		for (const key of slotKeys) {
-			if (!tryAcquireOverloadHoldSlot(key)) {
-				for (const held of acquiredSlotKeys) {
-					releaseOverloadHoldSlot(held);
-				}
-				log.warn(
-					`Overload hold overflow for ${key} — returning the immediate synthetic 529`,
-				);
-				return null;
-			}
-			acquiredSlotKeys.push(key);
-		}
-		log.info(`Overload hold entered for ${slotKeys.join(", ")}`);
-		// Re-arm the connection's idle timer while we hold (the base 180s
-		// timeout would otherwise reap a silently-held connection).
-		bumpIdleTimeout();
-		const holdRearm = setInterval(
-			bumpIdleTimeout,
-			NETWORK.IDLE_REARM_INTERVAL_MS,
-		);
-		const holdStart = Date.now();
-		// Accounts that were ATTEMPTED in an earlier round of this hold and failed
-		// for an ordinary reason (auth / network / 429 / model). Nothing is in
-		// flight for them, so re-attempting them on every ~1.5s poll is exactly the
-		// hammering this loop's classification exists to prevent — and for a 429 it
-		// can deepen a real rate limit. They stay excluded for the rest of the hold;
-		// the hold itself still ends (below) when a round has no verdict to wait on.
-		const ordinaryFailedIds = new Set<string>();
-		try {
-			while (true) {
-				const nowMs = Date.now();
-				const elapsed = nowMs - holdStart;
-				if (elapsed >= holdBudgetMs) break;
-				const remaining = holdBudgetMs - elapsed;
-
-				const statuses = pairs.map(({ provider, model }) =>
-					inspectProviderOverload(provider, model, nowMs),
-				);
-				const attemptable = statuses.some((s) => s.state !== "open");
-				if (!attemptable) {
-					// Every relevant bucket is open — sleep to the soonest deadline.
-					const untils = statuses
-						.map((s) => s.until)
-						.filter((u): u is number => u !== null);
-					const soonest = Math.min(...untils);
-					const waitMs =
-						Math.max(0, soonest - nowMs) +
-						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-					if (waitMs > remaining) break; // recovery beyond budget
-					if (!(await abortableSleep(waitMs, req.signal))) {
-						return createClientAbortResponse();
-					}
-					continue;
-				}
-
-				// A relevant bucket is half-open (admission decides — one holder
-				// becomes the probe, the rest stay suppressed) or closed
-				// (recovered): re-run full selection + gates and attempt. Clear a
-				// residual pin strict-fail marker first so a pinned re-selection
-				// doesn't short-circuit on it (mirrors the pin hold); the pin is
-				// re-enforced by selection, so a disallowed account is never served.
-				requestMeta.pinFailure = null;
-				const reSelected = await selectAccountsForRequest(
-					requestMeta,
-					ctx,
-					effectiveRequestModel ?? undefined,
-				);
-				const { available: reAvailable } =
-					gates.applyProviderOverloadGate(reSelected);
-				const { available: rePostThrottle } =
-					gates.applyUsageThrottling(reAvailable);
-				// Wake-time gates honor the CURRENT combo info (re-selection just
-				// re-populated it; a cleared combo reads null) so a combo slot's
-				// model override is gated exactly like the initial pipeline.
-				const wakeComboInfo = requestMeta.comboName
-					? getComboSlotInfo(requestMeta)
-					: null;
-				const candidates = gates.applySoftDemotionReorder(
-					gates.applyContextWindowGate(
-						gates.applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
-						wakeComboInfo,
-					),
-					wakeComboInfo,
-				);
-				if (requestMeta.routing) {
-					// The wake re-selection replaces the candidate list, so the post-gate
-					// first attempt moves with it (see the initial pipeline).
-					requestMeta.routing.primaryAttemptAccountId =
-						candidates[0]?.id ?? null;
-				}
-				// Drop candidates a previous round already proved broken for THIS
-				// request (see `ordinaryFailedIds`). `candidates` itself is kept intact
-				// below: the "pool is empty" branch asks whether the GATES left
-				// anything, which is a different question from "is anything left worth
-				// attempting".
-				const attemptableCandidates = candidates.filter(
-					(a) => !ordinaryFailedIds.has(a.id),
-				);
-				if (attemptableCandidates.length < candidates.length) {
-					log.debug(
-						`Overload hold: skipping ${candidates.length - attemptableCandidates.length} candidate(s) that already failed for an ordinary reason this hold`,
-					);
-				}
-				// Bound the wake attempt by the REMAINING hold budget (mirrors the
-				// burst-retry probe in transparent-retry.ts): makeProxyRequest's
-				// internal timeout is 30 minutes, so a wake near the budget's edge
-				// against a hung upstream would otherwise pin the connection + the
-				// hold slot(s) far past the budget and expiry would never reach the
-				// synthetic-529 fallback. Composed with the client signal so EITHER
-				// a disconnect OR the budget elapsing aborts the in-flight attempt;
-				// attemptCandidates tells the two apart (client → 499 marker,
-				// budget → fall through to the synthetic 529).
-				const attemptRemaining = holdBudgetMs - (Date.now() - holdStart);
-				if (attemptRemaining <= 0) break;
-				const budgetController = new AbortController();
-				const budgetTimer = setTimeout(
-					() => budgetController.abort(),
-					attemptRemaining,
-				);
-				const wakeSignal = req.signal.aborted
-					? req.signal
-					: AbortSignal.any([req.signal, budgetController.signal]);
-				let round: AttemptRound;
-				try {
-					round = await attemptCandidates(attemptableCandidates, {
-						signal: wakeSignal,
-					});
-				} finally {
-					// Disarm the budget timer on every path; the composed signal's
-					// listeners are released with the per-wake controller itself.
-					clearTimeout(budgetTimer);
-				}
-				for (const id of round.ordinaryFailedAccountIds) {
-					ordinaryFailedIds.add(id);
-				}
-				if (round.response) return round.response;
-				if (req.signal.aborted) return createClientAbortResponse();
-				if (round.budgetAborted) break; // budget expiry → synthetic 529
-				if (candidates.length === 0) {
-					if (statuses.every((s) => s.state === "closed")) {
-						// The breaker recovered but the pool is empty for a non-overload
-						// reason — nothing left for THIS hold to wait on.
-						break;
-					}
-					// No candidates while a bucket is still open/half-open (the gate
-					// re-excluded them) — keep polling for the probe verdict.
-				} else if (
-					!round.sawOverloadSuppression &&
-					!round.sawRetrip &&
-					round.probeSuppressedAccountIds.size === 0
-				) {
-					// Nothing this round has a verdict in flight: every candidate either
-					// failed ORDINARILY (auth / network / 429 / model-not-found) or was
-					// already excluded as broken. There is nothing to wait for, and
-					// re-attempting on the short probe poll would hammer a broken
-					// candidate dozens of times over the budget. Break out to the
-					// normal terminal / synthetic path.
-					//
-					// A recovery-probe suppression is explicitly NOT that: a probe IS
-					// in flight for a candidate that may serve us, so we keep polling
-					// within budget rather than returning a synthetic 529 immediately —
-					// while the ordinary-failure exclusion above keeps that polling off
-					// the siblings that already failed.
-					break;
-				}
-				// Suppressed behind the in-flight overload probe or the single-flight
-				// recovery probe, or re-tripped mid-attempt:
-				// short-poll so a probe verdict wakes us promptly (holders must not
-				// sleep past a probe completion). Recompute the remaining budget —
-				// the wake attempt above may have consumed a meaningful slice of it.
-				const pollMs =
-					OVERLOAD_HOLD_PROBE_POLL_MS +
-					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-				const postAttemptRemaining = holdBudgetMs - (Date.now() - holdStart);
-				if (pollMs > postAttemptRemaining) break;
-				if (!(await abortableSleep(pollMs, req.signal))) {
-					return createClientAbortResponse();
-				}
-			}
-			return null;
-		} finally {
-			clearInterval(holdRearm);
-			for (const held of acquiredSlotKeys) {
-				releaseOverloadHoldSlot(held);
-			}
-		}
-	};
-
-	// Transparent burst-retry hold state + orchestration (OAuth-Anthropic). These
-	// are declared HERE — before the no-accounts terminal — because the
-	// zero-accounts storm-degrade hold (Finding 1) runs inside that terminal, and
-	// the normal decide-before-loop (section 9a below) runs after account
-	// selection. Both reuse the SAME orchestration so it is defined exactly once.
-	//
-	// When the burst-retry first attempt tries the held account and it fails
-	// non-retryably (e.g. a hard 429 / 401), we fall through to the normal loop
-	// below — but the held account has already been attempted, so the loop must
-	// skip it to avoid a wasteful duplicate request. Null when no first attempt
-	// was made (marker-active path).
-	let burstAttemptedAccountId: string | null = null;
-	// Set when a burst hold was entered then declined/gave-up/overflowed. The
-	// request then falls through to the normal failover loop (healthy siblings
-	// first, then Codex-if-fits); if that loop ALSO produces no response, the
-	// terminal error is the constructed burst-retry give-up 429 (built from
-	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
-	let burstHoldDeclined = false;
-	let burstHeldAccountForGiveUp: Account | null = null;
-	// Attempts refused by half-open overload-probe admission (another request is
-	// probing, or an open bucket won a race against the gate). When the loops
-	// exhaust with at least one suppression recorded, the terminal must be the
-	// provider-overloaded 529 (retry in seconds — a probe is in flight), NOT the
-	// generic ALL_ACCOUNTS_FAILED / pool_exhausted error.
-	const overloadSuppressedAttempts: ProviderOverloadedAccount[] = [];
-	const noteOverloadSuppression = (
-		account: Account,
-		outcome: ProxyAttemptOutcome,
-	): void => {
-		if (outcome.kind === "overload_suppressed") {
-			overloadSuppressedAttempts.push({
-				account,
-				until:
-					outcome.until ??
-					Date.now() + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
-			});
-		}
-	};
-	// The cache-affinity-pinned account id recorded by the routing strategy (set
-	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
-	// The burst-hold only ever serves an OAuth-Anthropic account, so for a
-	// Codex-CLI (excludeOfficialAnthropic) request it MUST be disabled — otherwise
-	// the hold could serve a Claude account that selection deliberately excluded.
-	const burstHeldId = requestMeta.excludeOfficialAnthropic
-		? null
-		: (requestMeta.routing?.heldAccountId ?? null);
-
-	// Shared reprobe closure: re-attempt the given (held) account in reprobe mode
-	// (cooldown gate bypassed, no re-staging, no streak escalation) with a supplied
-	// AbortSignal so a client disconnect releases the hold promptly.
-	// `holdAndRetryCacheAccount` always invokes this with the held account, so the
-	// closure is generic over the account it is handed. Shared by the normal
-	// decide-before-loop and the zero-accounts storm-degrade hold (Finding 1) so
-	// both re-probe identically.
-	//
-	// Routed through the single-flight probe gate like every other upstream
-	// attempt: a re-probe IS an upstream request, so concurrent holds must not all
-	// probe a freshly-recovered account. Suppression is reported AS SUCH (never
-	// collapsed into "still throttled"): nothing was sent upstream, so the hold
-	// must not spend one of its attempts on it — it short-polls instead.
-	const reprobe = async (
-		probeAccount: Account,
-		signal: AbortSignal,
-	): Promise<ReprobeOutcome> => {
-		const gated = await attemptThroughProbeGate(probeAccount, () => {
-			logFinalOrderOnce(probeAccount.id);
-			return proxyWithAccount(
-				req,
-				url,
-				probeAccount,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				0,
-				ctx,
-				null,
-				apiKeyId,
-				apiKeyName,
-				requestBodyContext,
-				false,
-				{ reprobe: true, signal },
-			);
-		});
-		if (gated.suppressed) return { kind: "suppressed" };
-		return gated.response
-			? { kind: "response", response: gated.response }
-			: { kind: "throttled" };
-	};
-
-	// Outcome of a burst hold once it has run. `served` carries the real upstream
-	// Response; `aborted` means the client disconnected mid-hold (Finding 2) and
-	// the caller must NOT fall through to more upstream requests; `gave-up` means
-	// the hold declined/exhausted/overflowed and the caller may fall through to
-	// its normal failover (when siblings exist) or degrade to the constructed
-	// give-up terminal (storm).
-	type BurstHoldOutcome =
-		| { kind: "served"; response: Response }
-		| { kind: "aborted" }
-		| { kind: "gave-up" };
-
-	// Run the hold on `heldAccount` and apply the shared give-up machinery
-	// (staged-body discard, double-attempt guard, give-up bookkeeping). Reused by
-	// BOTH the normal decide-before-loop (siblings present) and the zero-accounts
-	// storm-degrade path (Finding 1) so the orchestration is defined once.
-	const runBurstHold = async (
-		heldAccount: Account,
-		confidence: "fresh_headroom" | "stale_should_retry",
-	): Promise<BurstHoldOutcome> => {
-		// Provider-overload precedence: an open family/provider breaker means the
-		// upstream itself is sick — holding and re-probing the held account would
-		// only feed more requests into the incident. Skip the hold entirely (no
-		// give-up bookkeeping — nothing was attempted) and fall through to normal
-		// failover, whose overload gate/terminal handles it.
-		const heldOverloadedUntil = getProviderOverloadUntil(
-			heldAccount.provider,
-			Date.now(),
-			effectiveRequestModel ?? null,
-		);
-		if (heldOverloadedUntil !== null) {
-			log.warn(
-				`Burst-retry hold skipped for ${heldAccount.name}: provider-overload breaker open until ${new Date(heldOverloadedUntil).toISOString()} — deferring to normal failover`,
-			);
-			return { kind: "gave-up" };
-		}
-
-		const holdResult = await holdAndRetryCacheAccount({
-			account: heldAccount,
-			confidence,
-			signal: req.signal,
-			reprobe,
-			// Family-scoped overload precedence inside the hold's reprobe loop
-			// (defense in depth for a breaker that opens mid-hold).
-			model: effectiveRequestModel ?? null,
-			// Deterministic-timing overrides (maxHoldMs/now/jitterMs). Undefined in
-			// production — the hold falls back to its fixed source-level defaults.
-			...(burstHoldTimingOverride ?? {}),
-		});
-
-		if (holdResult instanceof Response) {
-			return { kind: "served", response: holdResult };
-		}
-
-		// Hold declined/gave up (null) or overflowed (HOLD_OVERFLOW). Discard the
-		// held account's staged body so a later success on a sibling/Codex can't
-		// promote cache bookkeeping under the wrong account.
-		cacheBodyStore.discardStaged(requestMeta.id);
-		burstHoldDeclined = true;
-		burstHeldAccountForGiveUp = heldAccount;
-		// Double-attempt guard: the held account was just re-probed by the hold. If
-		// its cooldown lapsed it may now be back in `accounts`, so mark it attempted
-		// to make the normal loop skip it (no wasteful duplicate request at the same
-		// throttled per-IP window).
-		burstAttemptedAccountId = heldAccount.id;
-		const overflow = holdResult === HOLD_OVERFLOW;
-
-		// Finding 2: if the give-up was caused by a CLIENT ABORT (the client
-		// disconnected mid-hold), do NOT fall through to the normal failover loop /
-		// last-resort — issuing sibling/Codex upstream requests for a disconnected
-		// client is wasteful. Signal `aborted` so the caller stops here. A
-		// non-abort give-up (budget/attempts/overflow) keeps the intended
-		// fall-through.
-		if (req.signal.aborted) {
-			log.info(
-				`Burst-retry hold gave up due to client abort for ${heldAccount.name} — not falling through to siblings/Codex`,
-			);
-			return { kind: "aborted" };
-		}
-
-		log.warn(
-			`Burst-retry ${overflow ? "overflow" : "give-up"} for held account ${heldAccount.name} — falling through to normal failover (healthy siblings first, then Codex-if-fits)`,
-		);
-		return { kind: "gave-up" };
-	};
+	// Every hold that parks a live client connection and re-attempts is built ONCE
+	// per request here (see recovery-holds.ts): the overload hold, the shared
+	// non-Codex wait+retry hold behind the context-window / family-weekly / pin
+	// terminals, and the transparent burst-retry hold. The burst give-up
+	// bookkeeping it accumulates is read back by the failover loop and by the
+	// give-up terminal, so it must outlive every individual pass.
+	const holds = createRecoveryHolds({
+		req,
+		url,
+		ctx,
+		apiKeyId,
+		apiKeyName,
+		requestMeta,
+		requestBodyContext,
+		finalBodyBuffer,
+		finalCreateBodyStream,
+		effectiveRequestModel,
+		gates,
+		bumpIdleTimeout,
+		burstHoldTimingOverride,
+		logFinalOrderOnce,
+		attemptThroughProbeGate,
+	});
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
@@ -1470,7 +834,7 @@ async function handleIngestedProxy(
 					NETWORK.IDLE_REARM_INTERVAL_MS,
 				);
 				try {
-					const held = await holdForNonCodexRecovery(
+					const held = await holds.holdForNonCodexRecovery(
 						PIN_HOLD_MAX_MS,
 						"Pin hold",
 						{
@@ -1588,7 +952,7 @@ async function handleIngestedProxy(
 		// request's own comboName (filteredComboInfo isn't built until section 9).
 		if (
 			!requestMeta.comboName &&
-			burstHeldId &&
+			holds.burstHeldId &&
 			// Codex High finding: never hold an account that was gated out by the
 			// usage-throttle / context-window gate. `accounts` is empty here, so the
 			// held account is NOT available — it must be a genuine cooldown
@@ -1598,8 +962,8 @@ async function handleIngestedProxy(
 			isBurstHoldEligible(requestMeta.routing?.decision, false)
 		) {
 			const heldAccount =
-				selectedAccounts.find((a) => a.id === burstHeldId) ??
-				(await ctx.dbOps.getAccount(burstHeldId));
+				selectedAccounts.find((a) => a.id === holds.burstHeldId) ??
+				(await ctx.dbOps.getAccount(holds.burstHeldId));
 			if (
 				heldAccount &&
 				!heldAccount.paused &&
@@ -1641,7 +1005,7 @@ async function handleIngestedProxy(
 					log.warn(
 						`Storm-degrade: all accounts cooled — holding the cache account ${heldAccount.name} (confidence=${holdConfidence}) instead of immediate pool_exhausted`,
 					);
-					const outcome = await runBurstHold(heldAccount, holdConfidence);
+					const outcome = await holds.runBurstHold(heldAccount, holdConfidence);
 					if (outcome.kind === "served") {
 						return outcome.response;
 					}
@@ -1663,194 +1027,16 @@ async function handleIngestedProxy(
 		// `x-clankermux-burst-retry: exhausted`) rather than the generic
 		// pool_exhausted 503. There are no siblings in this zero-accounts case, so
 		// there is no normal failover loop to run first.
-		if (burstHoldDeclined && burstHeldAccountForGiveUp) {
+		if (holds.burstHoldDeclined && holds.burstHeldAccountForGiveUp) {
 			cacheBodyStore.discardStaged(requestMeta.id);
 			const giveUpResponse = createBurstRetryGiveUpResponse(
-				burstHeldAccountForGiveUp,
+				holds.burstHeldAccountForGiveUp,
 			);
 			await recordSyntheticErrorResponse(
 				giveUpResponse,
 				"burst_retry_exhausted",
 			);
 			return giveUpResponse;
-		}
-
-		// Shared wait+retry hold used by BOTH the context-window terminal and the
-		// family-weekly terminal below. While non-Codex sibling accounts are on a
-		// transient cooldown — a per-account 429 (`rate_limited_until`) OR a
-		// provider-wide 529 overload (`getProviderOverloadUntil`, e.g. the shared
-		// `anthropic-upstream` cooldown) — sleep until the soonest recovery (the MAX
-		// of the two deadlines, since an account is serveable only once BOTH clear),
-		// bounded by `budgetMs`, then re-run full account selection with the same
-		// gates and retry any now-available non-Codex candidate. Waiting on the 429
-		// signal alone missed the 529-overload case entirely (all Anthropic accounts
-		// share one overload cooldown, with `rate_limited_until` null).
-		//
-		// Returns the upstream Response on success, a client-abort Response if the
-		// client disconnects mid-wait, or null when the budget/soonest-expiry is
-		// exhausted with nothing served (the caller then runs its own fall-through
-		// terminal). The CALLER arms/clears the idle-timeout re-arm interval around
-		// this — the base 180s timeout would otherwise reap a connection held
-		// silently while we wait.
-		// Hoisted (function declaration) so the pin-transient hold near the top of
-		// this block can call it before its lexical position. `opts.eligible`
-		// narrows BOTH the wait-set and the re-probe candidates to a caller-supplied
-		// predicate (the pin's allow-list); it defaults to "any non-Codex account"
-		// (the original CW / family-weekly behavior). `opts.clearPinFailure` clears
-		// the residual pin strict-fail marker before each re-selection so
-		// selectCandidates doesn't short-circuit on it (pin hold only).
-		async function holdForNonCodexRecovery(
-			budgetMs: number,
-			label: string,
-			opts?: { eligible?: (a: Account) => boolean; clearPinFailure?: boolean },
-		): Promise<Response | null> {
-			const isEligible = (a: Account): boolean =>
-				opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
-			const holdStart = Date.now();
-			// The candidates the PREVIOUS round skipped via the single-flight
-			// recovery-probe gate. Such a candidate has no cooldown deadline to wait
-			// on (that is exactly why it was selectable), so without this the loop
-			// would see "nothing to wait for" and exit while the probe was still in
-			// flight — handing the caller its terminal (a size 400, a family 429 or a
-			// pin 503) although a candidate was about to become usable.
-			//
-			// Account IDs, not a flag: a round can mix a suppressed candidate with a
-			// sibling that failed for an ordinary reason, and a probe-verdict poll
-			// must re-attempt ONLY the former. Retrying the failed sibling every
-			// ~1.5s for the rest of the budget (up to 330s here) is the hammering
-			// this loop's classification exists to prevent. Deliberately NOT sticky:
-			// refreshed from each round, so an ordinary failure restores the original
-			// exit behaviour on the next pass.
-			let probeSuppressedIds = new Set<string>();
-			while (true) {
-				const nowMs = Date.now();
-				const elapsed = nowMs - holdStart;
-				if (elapsed >= budgetMs) break;
-				const remaining = budgetMs - elapsed;
-
-				const allAccs = await ctx.dbOps.getAllAccounts();
-				const unavailable = allAccs
-					.filter((a) => !a.paused && isEligible(a))
-					.map((a) => {
-						const rl =
-							a.rate_limited_until && a.rate_limited_until > nowMs
-								? a.rate_limited_until
-								: 0;
-						// Family-scoped read: only wait out buckets relevant to THIS
-						// request's model — an unrelated family's breaker must not
-						// extend (or create) the wait.
-						const ov =
-							getProviderOverloadUntil(
-								a.provider,
-								nowMs,
-								effectiveRequestModel ?? null,
-							) ?? 0;
-						return { account: a, availableAt: Math.max(rl, ov) };
-					})
-					.filter((x) => x.availableAt > nowMs);
-
-				let waitMs: number;
-				// True when this pass exists ONLY to wait for an in-flight recovery
-				// probe (no cooldown deadline drove it). Such a pass must re-attempt
-				// exactly the suppressed candidates — see `probeSuppressedIds`.
-				const pollingForProbeVerdict = unavailable.length === 0;
-				if (pollingForProbeVerdict) {
-					// Nothing is cooling down. Normally that means there is nothing to
-					// wait for — unless the last round was recovery-probe suppressed, in
-					// which case an upstream probe IS in flight for a candidate that may
-					// serve this request; short-poll for its verdict instead.
-					if (probeSuppressedIds.size === 0) break;
-					waitMs =
-						OVERLOAD_HOLD_PROBE_POLL_MS +
-						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-					log.info(
-						`${label}: waiting ${waitMs}ms for an in-flight recovery probe`,
-					);
-				} else {
-					const soonest = Math.min(...unavailable.map((x) => x.availableAt));
-					waitMs =
-						Math.max(0, soonest - nowMs) +
-						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-					log.info(
-						`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
-					);
-				}
-
-				if (waitMs > remaining) break; // soonest expiry is beyond budget
-
-				const completed = await abortableSleep(waitMs, req.signal);
-				if (!completed) {
-					log.info(`${label}: client disconnected during wait`);
-					return createClientAbortResponse();
-				}
-
-				// Re-run full account selection with the same gates. For a pin hold,
-				// clear the residual strict-fail marker first — otherwise
-				// selectCandidates short-circuits on it and never re-selects.
-				if (opts?.clearPinFailure) {
-					requestMeta.pinFailure = null;
-				}
-				const reSelected = await selectAccountsForRequest(
-					requestMeta,
-					ctx,
-					effectiveRequestModel ?? undefined,
-				);
-				const { available: reAvailable } =
-					gates.applyProviderOverloadGate(reSelected);
-				const { available: rePostThrottle } =
-					gates.applyUsageThrottling(reAvailable);
-				// Eligible accounts always pass the context-window gate; still apply
-				// the family-weekly gate so we don't retry an account whose requested
-				// family is weekly-exhausted (it would only 429 again). The gate
-				// honors the CURRENT combo info (re-selection re-populates it) so a
-				// combo slot's model override is evaluated, not the request model.
-				// (soft-demotion reorder — family reservation AND pool liveness —
-				// intentionally omitted on the failover/fallback tail: already-degraded
-				// path. For pool liveness this is largely self-enforcing anyway: rule 4
-				// requires an absorbable peer, and on a degraded path there is none, so
-				// the reserve fails open regardless.)
-				const candidates = gates.applyFamilyWeeklyGate(
-					rePostThrottle.filter((a) => isEligible(a)),
-					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
-				);
-
-				// A probe-verdict poll re-attempts ONLY the candidates that were
-				// suppressed — the whole reason this pass exists. A sibling that
-				// already failed for an ordinary reason has no verdict pending, so
-				// re-attempting it every poll would just hammer it (and deepen a real
-				// 429). A cooldown-driven pass is unchanged: it re-attempts every
-				// candidate, because waiting out a refreshed cooldown and re-probing
-				// is exactly this hold's job.
-				const attemptList = pollingForProbeVerdict
-					? candidates.filter((a) => probeSuppressedIds.has(a.id))
-					: candidates;
-
-				if (attemptList.length === 0) {
-					// Nothing was attempted this pass: either the gates left no
-					// candidate, or the suppressed one is no longer selectable (it
-					// picked up a cooldown, which the next pass will wait out).
-					probeSuppressedIds = new Set();
-					continue;
-				}
-
-				log.info(
-					`${label}: ${attemptList.length} account(s) now available, retrying`,
-				);
-
-				// This hold deliberately ignores the round's overload/ordinary
-				// classification — its loop-back semantics predate the overload hold
-				// and are unchanged (it waits on account cooldowns, not probe
-				// verdicts). The ONE exception is recovery-probe suppression, which
-				// means a candidate was not attempted at all: carry those accounts to
-				// the next pass so the "nothing to wait for" exit above waits for the
-				// probe's verdict instead of giving up on a candidate that may serve
-				// us — and so that pass targets exactly them.
-				const round = await attemptCandidates(attemptList);
-				if (round.response) return round.response;
-				probeSuppressedIds = round.probeSuppressedAccountIds;
-				// All candidates returned null — loop back to recheck.
-			}
-			return null;
 		}
 
 		// If the pool was emptied specifically by the context-window gate
@@ -1892,7 +1078,10 @@ async function handleIngestedProxy(
 				NETWORK.IDLE_REARM_INTERVAL_MS,
 			);
 			try {
-				const held = await holdForNonCodexRecovery(cwHoldBudget, "CW hold");
+				const held = await holds.holdForNonCodexRecovery(
+					cwHoldBudget,
+					"CW hold",
+				);
 				if (held) return held;
 
 				// Last-resort relaxation (E): the CW hold found no large-context
@@ -2072,7 +1261,7 @@ async function handleIngestedProxy(
 						NETWORK.IDLE_REARM_INTERVAL_MS,
 					);
 					try {
-						const held = await holdForNonCodexRecovery(
+						const held = await holds.holdForNonCodexRecovery(
 							FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS,
 							"Family-weekly hold",
 						);
@@ -2129,10 +1318,12 @@ async function handleIngestedProxy(
 		) {
 			// Hold (bounded, capped) for the family to recover instead of bouncing
 			// the synthetic 529 — see holdForOverloadRecovery above.
-			const held = await holdForOverloadRecovery(providerOverloadedAccounts);
+			const held = await holds.holdForOverloadRecovery(
+				providerOverloadedAccounts,
+			);
 			if (held) return held;
 			return await createProviderOverloadedResponse(
-				refreshOverloadUntils(providerOverloadedAccounts),
+				holds.refreshOverloadUntils(providerOverloadedAccounts),
 			);
 		}
 
@@ -2222,12 +1413,12 @@ async function handleIngestedProxy(
 	// available but then removed by the usage-throttle / context-window gate),
 	// holding+probing it would bypass the configured pacing throttle / context
 	// safety — so do NOT hold; fall through to today's normal-loop behavior.
-	const heldInGatedAccounts = burstHeldId
-		? accounts.some((a) => a.id === burstHeldId)
+	const heldInGatedAccounts = holds.burstHeldId
+		? accounts.some((a) => a.id === holds.burstHeldId)
 		: false;
 	if (
 		!filteredComboInfo?.comboName &&
-		burstHeldId &&
+		holds.burstHeldId &&
 		isBurstHoldEligible(requestMeta.routing?.decision, heldInGatedAccounts)
 	) {
 		// Resolve the held (cache) account object. It may not be in `accounts`
@@ -2235,9 +1426,9 @@ async function handleIngestedProxy(
 		// so fall back to the DB. We re-probe it directly, bypassing the
 		// availability gate, re-checking only paused/existence below.
 		const heldAccount =
-			accounts.find((a) => a.id === burstHeldId) ??
-			selectedAccounts.find((a) => a.id === burstHeldId) ??
-			(await ctx.dbOps.getAccount(burstHeldId));
+			accounts.find((a) => a.id === holds.burstHeldId) ??
+			selectedAccounts.find((a) => a.id === holds.burstHeldId) ??
+			(await ctx.dbOps.getAccount(holds.burstHeldId));
 
 		if (
 			heldAccount &&
@@ -2333,7 +1524,7 @@ async function handleIngestedProxy(
 					logFinalOrderOnce(heldAccount.id);
 					// Record the attempt (only when it actually happens) so the normal
 					// loop below skips a duplicate if we fall through.
-					burstAttemptedAccountId = heldAccount.id;
+					holds.noteBurstAttempt(heldAccount.id);
 					return proxyWithAccount(
 						req,
 						url,
@@ -2354,7 +1545,7 @@ async function handleIngestedProxy(
 								firstOutcome = o;
 								// The normal loop below skips the held account (attempted-id
 								// guard), so its suppression must be recorded here.
-								noteOverloadSuppression(heldAccount, o);
+								holds.noteOverloadSuppression(heldAccount, o);
 							},
 						},
 					);
@@ -2408,7 +1599,7 @@ async function handleIngestedProxy(
 			};
 
 			if (enterHold) {
-				const outcome = await runBurstHold(heldAccount, holdConfidence);
+				const outcome = await holds.runBurstHold(heldAccount, holdConfidence);
 
 				if (outcome.kind === "served") {
 					logBurstDecision("entered-hold");
@@ -2584,7 +1775,7 @@ async function handleIngestedProxy(
 						// running to completion. This loop serves both the main pass and
 						// the combo-fallback pass.
 						signal: req.signal,
-						onOutcome: (o) => noteOverloadSuppression(list[i], o),
+						onOutcome: (o) => holds.noteOverloadSuppression(list[i], o),
 					},
 				);
 			});
@@ -2608,7 +1799,7 @@ async function handleIngestedProxy(
 	// The burst preflight attempts `heldAccount` OUTSIDE this loop; the loop then
 	// skips it via `skipAccountId`.
 	const mainResponse = await runCandidateLoop(accounts, filteredComboInfo, {
-		skipAccountId: burstAttemptedAccountId,
+		skipAccountId: holds.burstAttemptedAccountId,
 	});
 	if (mainResponse) return mainResponse;
 
@@ -2622,10 +1813,10 @@ async function handleIngestedProxy(
 	// change. The normal loop re-stages requestMeta.id on every attempt (no
 	// reprobe mode); discard once more so the last attempt's staged body doesn't
 	// leak (idempotent if nothing re-staged).
-	if (burstHoldDeclined && burstHeldAccountForGiveUp) {
+	if (holds.burstHoldDeclined && holds.burstHeldAccountForGiveUp) {
 		cacheBodyStore.discardStaged(requestMeta.id);
 		const giveUpResponse = createBurstRetryGiveUpResponse(
-			burstHeldAccountForGiveUp,
+			holds.burstHeldAccountForGiveUp,
 		);
 		await recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
 		return giveUpResponse;
@@ -2696,7 +1887,7 @@ async function handleIngestedProxy(
 			// 529 — same treatment as the other two overload terminals. The combo
 			// was already cleared above, so the hold's re-selection runs plain
 			// SessionStrategy routing.
-			const held = await holdForOverloadRecovery(
+			const held = await holds.holdForOverloadRecovery(
 				providerFallbackOverloadedAccounts,
 			);
 			if (held) return held;
@@ -2704,7 +1895,7 @@ async function handleIngestedProxy(
 			// (mirrors the all-accounts-failed cleanup).
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return await createProviderOverloadedResponse(
-				refreshOverloadUntils(providerFallbackOverloadedAccounts),
+				holds.refreshOverloadUntils(providerFallbackOverloadedAccounts),
 			);
 		}
 	}
@@ -2714,14 +1905,16 @@ async function handleIngestedProxy(
 	// bucket won a race against the gate) and nothing else served the request.
 	// Surface the provider-overloaded 529 with a short Retry-After — the probe
 	// resolves within seconds — instead of the misleading ALL_ACCOUNTS_FAILED.
-	if (overloadSuppressedAttempts.length > 0) {
+	if (holds.overloadSuppressedAttempts.length > 0) {
 		// Hold (bounded, capped) behind the in-flight probe instead of bouncing
 		// the short-Retry-After 529; overflow and budget expiry fall back to it.
-		const held = await holdForOverloadRecovery(overloadSuppressedAttempts);
+		const held = await holds.holdForOverloadRecovery(
+			holds.overloadSuppressedAttempts,
+		);
 		if (held) return held;
 		cacheBodyStore.discardStaged(requestMeta.id);
 		return await createProviderOverloadedResponse(
-			refreshOverloadUntils(overloadSuppressedAttempts),
+			holds.refreshOverloadUntils(holds.overloadSuppressedAttempts),
 		);
 	}
 
