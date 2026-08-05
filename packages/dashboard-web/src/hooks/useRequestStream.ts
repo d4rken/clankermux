@@ -1,379 +1,172 @@
+import type { RequestStreamEvt } from "@clankermux/core";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 import type { Account, RequestPayload, RequestResponse } from "../api";
+import { useRequestEvents } from "../components/RequestEventProvider";
 import { queryKeys } from "../lib/query-keys";
-import { handleStreamError, MAX_RETRIES } from "../lib/stream-error";
 import { toDetailsMap } from "./queries";
 
-// Connection pool management
-const CONNECTION_POOL = new Map<
-	string,
-	{
-		connection: EventSource;
-		refCount: number;
-		lastUsed: number;
-		heartbeat: NodeJS.Timeout;
-	}
->();
-
-// Cleanup inactive connections periodically
-const CLEANUP_INTERVAL = 30000; // 30 seconds
-const CONNECTION_TIMEOUT = 60000; // 1 minute
-const HEARTBEAT_INTERVAL = 15000; // 15 seconds
-
-// Global cleanup for connection pool
-let globalCleanupInterval: Timer | null = null;
-
-const startCleanupInterval = () => {
-	if (!globalCleanupInterval) {
-		globalCleanupInterval = setInterval(() => {
-			const now = Date.now();
-			for (const [key, conn] of CONNECTION_POOL.entries()) {
-				if (now - conn.lastUsed > CONNECTION_TIMEOUT && conn.refCount === 0) {
-					console.log(`Cleaning up inactive SSE connection: ${key}`);
-					conn.connection.close();
-					clearInterval(conn.heartbeat);
-					CONNECTION_POOL.delete(key);
-				}
-			}
-		}, CLEANUP_INTERVAL);
-	}
-};
-
-const stopCleanupInterval = () => {
-	if (globalCleanupInterval) {
-		clearInterval(globalCleanupInterval);
-		globalCleanupInterval = null;
-	}
-};
-
-// Start cleanup interval when first connection is created
-const getOrCreateCleanupInterval = () => {
-	if (!globalCleanupInterval) {
-		startCleanupInterval();
-	}
-	return globalCleanupInterval;
-};
-
+/**
+ * Keeps the Requests tab's live tail in sync with the request stream.
+ *
+ * This used to own a module-level `EventSource` pool as well. The connection
+ * now belongs to `RequestEventProvider` at the app root, and this hook is
+ * purely the React Query cache patcher on top of it — which also fixes a
+ * latent bug in the pool: it returned an already-open pooled connection before
+ * attaching the caller's `message` listener, so a second consumer silently
+ * received nothing.
+ *
+ * `enabled` therefore now suppresses the PATCHING, not the connection: the
+ * stream stays open so the Overview's activity lanes keep filling while the
+ * Requests tab has server-side filters applied and its list must stay a stable
+ * snapshot. Nothing is lost by that — `useRequests` is `staleTime: Infinity`,
+ * so re-enabling never refetched what the pause missed under the old behaviour
+ * either.
+ */
 export function useRequestStream(limit = 200, enabled = true) {
 	const queryClient = useQueryClient();
-	const connectionKey = `requests-stream-${limit}`;
-	const isMountedRef = useRef(true);
-	// Retry attempts for the current connection generation; reset to 0 on a
-	// successful `open` so intermittent disconnects over a long session don't
-	// permanently exhaust MAX_RETRIES.
-	const retryCountRef = useRef(0);
 
-	// Watchdog that sweeps leftover dead pool entries.
-	//
-	// Invariant: connections die either via a network/server error — which
-	// fires our `error` handler, and that handler closes the EventSource,
-	// removes the pool entry, clears this watchdog, and schedules the
-	// reconnect itself — or via our own close() calls (pool eviction, app
-	// shutdown), which also remove the entry. The only way a CLOSED connection
-	// can linger in the pool is the unmounted-before-open path, where no
-	// reconnect is wanted. So this watchdog is pure cleanup.
-	//
-	// CONNECTING is deliberately NOT treated as dead: with fully-manual
-	// reconnects (we always close() on error) the only CONNECTING state left
-	// is a slow initial connect, which must not be killed.
-	const setupHeartbeat = useCallback((es: EventSource, key: string) => {
-		return setInterval(() => {
-			const pooled = CONNECTION_POOL.get(key);
-			if (pooled?.connection === es && es.readyState === EventSource.CLOSED) {
-				console.log(`Connection ${key} is closed, cleaning up pool entry`);
-				clearInterval(pooled.heartbeat);
-				CONNECTION_POOL.delete(key);
-			}
-		}, HEARTBEAT_INTERVAL);
-	}, []);
+	const handleEvent = useCallback(
+		(evt: RequestStreamEvt) => {
+			// `ingress`, `ingress-end` and `snapshot` describe work that has no
+			// Request History row yet; the tail only shows recorded requests.
+			if (evt.type !== "start" && evt.type !== "summary") return;
 
-	// Safe message handler with try-catch that directly updates React Query cache
-	const handleMessage = useCallback(
-		(ev: MessageEvent) => {
-			if (!isMountedRef.current) return;
+			queryClient.setQueryData(
+				queryKeys.requests(limit),
+				(
+					current:
+						| {
+								requests: RequestPayload[];
+								detailsMap: Map<string, RequestResponse> | RequestResponse[];
+						  }
+						| undefined,
+				) => {
+					if (!current) return current;
 
-			try {
-				const evt = JSON.parse(ev.data) as
-					| {
-							type: "start";
-							id: string;
-							method: string;
-							path: string;
-							timestamp: number;
-							accountId: string | null;
-							statusCode: number;
-					  }
-					| { type: "summary"; payload: RequestResponse };
+					// Ensure detailsMap is a Map
+					const currentDetailsMap = toDetailsMap<RequestResponse>(
+						current.detailsMap,
+					);
 
-				queryClient.setQueryData(
-					queryKeys.requests(limit),
-					(
-						current:
-							| {
-									requests: RequestPayload[];
-									detailsMap: Map<string, RequestResponse> | RequestResponse[];
-							  }
-							| undefined,
-					) => {
-						if (!current) return current;
-
-						// Ensure detailsMap is a Map
-						const currentDetailsMap = toDetailsMap<RequestResponse>(
-							current.detailsMap,
+					if (evt.type === "start") {
+						// Look up account name from cache
+						const accounts = queryClient.getQueryData<Account[]>(
+							queryKeys.accounts(),
 						);
+						const account = accounts?.find((a) => a.id === evt.accountId);
 
-						if (evt.type === "start") {
-							// Look up account name from cache
-							const accounts = queryClient.getQueryData<Account[]>(
-								queryKeys.accounts(),
-							);
-							const account = accounts?.find((a) => a.id === evt.accountId);
+						// Create a lightweight placeholder payload.
+						// `bodiesOmitted: true` is required so that opening the
+						// details modal or pressing Copy-as-JSON triggers the
+						// lazy /api/requests/payload/:id fetch — without it the
+						// modal shows empty headers/body and the copy returns
+						// nulled-out bodies.
+						//
+						// `response: null` when no status is known yet so the
+						// status chip (guarded by `statusCode != null`) does NOT
+						// render a "0" before the response lands. The summary
+						// handler below patches response.status from
+						// `evt.payload.statusCode` once the request completes.
+						const hasStatus = evt.statusCode > 0;
+						const placeholder: RequestPayload = {
+							id: evt.id,
+							request: { headers: {}, body: null },
+							response: hasStatus
+								? {
+										status: evt.statusCode,
+										headers: {},
+										body: null,
+									}
+								: null,
+							meta: {
+								timestamp: evt.timestamp,
+								path: evt.path,
+								method: evt.method,
+								accountId: evt.accountId || undefined,
+								accountName: account?.name,
+								success: false,
+								pending: true,
+								rateLimited: evt.statusCode === 429,
+								bodiesOmitted: true,
+							},
+						};
 
-							// Create a lightweight placeholder payload.
-							// `bodiesOmitted: true` is required so that opening the
-							// details modal or pressing Copy-as-JSON triggers the
-							// lazy /api/requests/payload/:id fetch — without it the
-							// modal shows empty headers/body and the copy returns
-							// nulled-out bodies.
-							//
-							// `response: null` when no status is known yet so the
-							// status chip (guarded by `statusCode != null`) does NOT
-							// render a "0" before the response lands. The summary
-							// handler below patches response.status from
-							// `evt.payload.statusCode` once the request completes.
-							const hasStatus = evt.statusCode > 0;
-							const placeholder: RequestPayload = {
-								id: evt.id,
-								request: { headers: {}, body: null },
-								response: hasStatus
-									? {
-											status: evt.statusCode,
-											headers: {},
-											body: null,
-										}
-									: null,
-								meta: {
-									timestamp: evt.timestamp,
-									path: evt.path,
-									method: evt.method,
-									accountId: evt.accountId || undefined,
-									accountName: account?.name,
-									success: false,
-									pending: true,
-									rateLimited: evt.statusCode === 429,
-									bodiesOmitted: true,
-								},
-							};
-
-							// Check if this request already exists
-							const existingIndex = current.requests.findIndex(
-								(r) => r.id === evt.id,
-							);
-							if (existingIndex >= 0) {
-								// Update existing placeholder
-								const newRequests = [...current.requests];
-								newRequests[existingIndex] = placeholder;
-								return {
-									...current,
-									requests: newRequests,
-									detailsMap: currentDetailsMap,
-								};
-							}
-
-							// Add new placeholder at the beginning
+						// Check if this request already exists
+						const existingIndex = current.requests.findIndex(
+							(r) => r.id === evt.id,
+						);
+						if (existingIndex >= 0) {
+							// Update existing placeholder
+							const newRequests = [...current.requests];
+							newRequests[existingIndex] = placeholder;
 							return {
 								...current,
-								requests: [placeholder, ...current.requests].slice(0, limit),
+								requests: newRequests,
 								detailsMap: currentDetailsMap,
 							};
 						}
-						// Update details map with summary
-						const map = new Map(currentDetailsMap);
-						map.set(evt.payload.id, evt.payload);
 
-						// Update the request if it exists
-						const requestIndex = current.requests.findIndex(
-							(r) => r.id === evt.payload.id,
-						);
-						if (requestIndex >= 0) {
-							const newRequests = [...current.requests];
-							// Update meta to remove pending status. Preserve
-							// `bodiesOmitted: true` so consumers continue to lazy-
-							// load bodies, and refresh `rateLimited` from the final
-							// statusCode (the placeholder set it from `evt.statusCode`
-							// which is 0 until the response lands).
-							if (newRequests[requestIndex].meta) {
-								newRequests[requestIndex] = {
-									...newRequests[requestIndex],
-									// Refresh response.status from the final summary —
-									// the start placeholder set it to 0 before the HTTP
-									// response landed, and the new header-row chip uses
-									// a `statusCode != null` guard (0 is not null), so
-									// without this every SSE-completed request would
-									// permanently display a grey "0" chip.
-									response:
-										evt.payload.statusCode != null
-											? {
-													...(newRequests[requestIndex].response ?? {
-														headers: {},
-														body: null,
-													}),
-													status: evt.payload.statusCode,
-												}
-											: null,
-									meta: {
-										...newRequests[requestIndex].meta,
-										pending: false,
-										success: evt.payload.success,
-										rateLimited: evt.payload.rateLimited,
-										bodiesOmitted: true,
-									},
-								};
-							}
-							return { ...current, requests: newRequests, detailsMap: map };
+						// Add new placeholder at the beginning
+						return {
+							...current,
+							requests: [placeholder, ...current.requests].slice(0, limit),
+							detailsMap: currentDetailsMap,
+						};
+					}
+
+					// Update details map with summary
+					const map = new Map(currentDetailsMap);
+					map.set(evt.payload.id, evt.payload);
+
+					// Update the request if it exists
+					const requestIndex = current.requests.findIndex(
+						(r) => r.id === evt.payload.id,
+					);
+					if (requestIndex >= 0) {
+						const newRequests = [...current.requests];
+						// Update meta to remove pending status. Preserve
+						// `bodiesOmitted: true` so consumers continue to lazy-
+						// load bodies, and refresh `rateLimited` from the final
+						// statusCode (the placeholder set it from `evt.statusCode`
+						// which is 0 until the response lands).
+						if (newRequests[requestIndex].meta) {
+							newRequests[requestIndex] = {
+								...newRequests[requestIndex],
+								// Refresh response.status from the final summary —
+								// the start placeholder set it to 0 before the HTTP
+								// response landed, and the new header-row chip uses
+								// a `statusCode != null` guard (0 is not null), so
+								// without this every SSE-completed request would
+								// permanently display a grey "0" chip.
+								response:
+									evt.payload.statusCode != null
+										? {
+												...(newRequests[requestIndex].response ?? {
+													headers: {},
+													body: null,
+												}),
+												status: evt.payload.statusCode,
+											}
+										: null,
+								meta: {
+									...newRequests[requestIndex].meta,
+									pending: false,
+									success: evt.payload.success,
+									rateLimited: evt.payload.rateLimited,
+									bodiesOmitted: true,
+								},
+							};
 						}
+						return { ...current, requests: newRequests, detailsMap: map };
+					}
 
-						return { ...current, detailsMap: map };
-					},
-				);
-			} catch (error) {
-				console.error("Error parsing SSE message:", error);
-			}
+					return { ...current, detailsMap: map };
+				},
+			);
 		},
 		[queryClient, limit],
 	);
 
-	// Connect with connection pooling
-	const connect = useCallback(
-		(retryCount = 0): EventSource => {
-			// Ensure cleanup interval is running
-			getOrCreateCleanupInterval();
-
-			// Check if we have a healthy connection in the pool
-			const pooled = CONNECTION_POOL.get(connectionKey);
-			if (pooled && pooled.connection.readyState === EventSource.OPEN) {
-				pooled.refCount++;
-				pooled.lastUsed = Date.now();
-				console.log(
-					`Reusing pooled SSE connection: ${connectionKey} (refCount: ${pooled.refCount})`,
-				);
-				return pooled.connection;
-			}
-
-			// Close any existing connection for this key
-			if (pooled) {
-				pooled.connection.close();
-				clearInterval(pooled.heartbeat);
-				CONNECTION_POOL.delete(connectionKey);
-			}
-
-			console.log(`Creating new SSE connection: ${connectionKey}`);
-			retryCountRef.current = retryCount;
-			const es = new EventSource("/api/requests/stream");
-
-			// Setup event handlers
-			es.addEventListener("open", () => {
-				if (!isMountedRef.current) {
-					es.close();
-					return;
-				}
-				// A successful open resets the backoff for future disconnects.
-				retryCountRef.current = 0;
-				console.log(`SSE connection established: ${connectionKey}`);
-			});
-
-			es.addEventListener("message", handleMessage);
-
-			es.addEventListener("error", (error) => {
-				console.error(`SSE connection error (${connectionKey}):`, error);
-
-				const outcome = handleStreamError(es, CONNECTION_POOL, connectionKey, {
-					mounted: isMountedRef.current,
-					retryCount: retryCountRef.current,
-					scheduleReconnect: (nextRetryCount, delay) => {
-						console.log(
-							`Reconnecting ${connectionKey} in ${delay}ms (attempt ${nextRetryCount}/${MAX_RETRIES})`,
-						);
-						setTimeout(() => {
-							if (isMountedRef.current) {
-								connect(nextRetryCount);
-							}
-						}, delay);
-					},
-				});
-
-				if (outcome === "gave-up") {
-					console.error(`Max retries reached for ${connectionKey}, giving up`);
-				}
-			});
-
-			// Add to pool with heartbeat
-			const heartbeat = setupHeartbeat(es, connectionKey);
-			CONNECTION_POOL.set(connectionKey, {
-				connection: es,
-				refCount: 1,
-				lastUsed: Date.now(),
-				heartbeat,
-			});
-
-			return es;
-		},
-		[connectionKey, handleMessage, setupHeartbeat],
-	);
-
-	useEffect(() => {
-		// Don't open (or hold) a live connection while the filtered explorer owns
-		// the view — its results are a server query snapshot, not a live tail.
-		if (!enabled) return;
-
-		isMountedRef.current = true;
-		const es = connect();
-
-		// Cleanup function
-		return () => {
-			isMountedRef.current = false;
-
-			const pooled = CONNECTION_POOL.get(connectionKey);
-			if (pooled) {
-				pooled.refCount--;
-				pooled.lastUsed = Date.now();
-
-				// Close connection immediately if no more references
-				if (pooled.refCount <= 0) {
-					console.log(
-						`No more references for ${connectionKey}, scheduling cleanup`,
-					);
-				}
-			} else if (es) {
-				es.close();
-			}
-		};
-	}, [connect, connectionKey, enabled]);
-
-	// Global cleanup on unmount
-	useEffect(() => {
-		return () => {
-			isMountedRef.current = false;
-
-			// Stop global cleanup interval if no more connections
-			if (CONNECTION_POOL.size === 0) {
-				stopCleanupInterval();
-			}
-		};
-	}, []);
+	useRequestEvents(handleEvent, enabled);
 }
-
-// Export global cleanup function for app shutdown
-export const cleanupRequestStream = () => {
-	// Stop the global cleanup interval
-	stopCleanupInterval();
-
-	// Close all pooled connections
-	for (const [key, conn] of CONNECTION_POOL.entries()) {
-		console.log(`Cleaning up SSE connection on shutdown: ${key}`);
-		conn.connection.close();
-		clearInterval(conn.heartbeat);
-	}
-	CONNECTION_POOL.clear();
-};

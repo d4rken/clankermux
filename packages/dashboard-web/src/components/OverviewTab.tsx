@@ -11,6 +11,7 @@ import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
+import { LiveActivityLanes } from "./overview/LiveActivityLanes";
 import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
@@ -266,6 +267,10 @@ export const OverviewTab = React.memo(() => {
 					window="seven_day"
 				/>
 			</div>
+
+			{/* Rolling per-project request activity. Fed by the app-level request
+			    stream, so it needs no props and no query of its own. */}
+			<LiveActivityLanes />
 
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />
