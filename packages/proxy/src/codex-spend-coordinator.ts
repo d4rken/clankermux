@@ -751,6 +751,14 @@ export class CodexSpendCoordinator {
 			};
 		}
 
+		// Every access-token GENERATION this read legitimately spans, used by the
+		// guard below to reject a result that outlived its own credentials. The
+		// PRE-call token belongs in the set too: a rotation updates the live account
+		// object immediately but persists fire-and-forget, so the stored row may
+		// still hold this value long after the rotation.
+		const tokenGenerations = new Set<string>();
+		if (account.access_token) tokenGenerations.add(account.access_token);
+
 		let accessToken: string;
 		try {
 			accessToken = await this.getValidAccessToken(account, this.ctx);
@@ -761,11 +769,7 @@ export class CodexSpendCoordinator {
 				message: `Could not refresh access token for '${account.name}': ${message}`,
 			};
 		}
-
-		// The credential GENERATION this read is issued under, used below to reject
-		// a result that outlived its own credentials. Captured AFTER
-		// getValidAccessToken, which may itself have rotated an expired token.
-		let expectedRefreshToken = account.refresh_token;
+		tokenGenerations.add(accessToken);
 
 		const reauthPaused = this.needsReauth(account);
 		let chatgptAccountId = this.readChatgptAccountId(accessToken);
@@ -795,10 +799,11 @@ export class CodexSpendCoordinator {
 			);
 			refreshFailureReason = refresh.failureReason;
 			if (refresh.token) {
-				// This read's OWN rotation is not a foreign credential change:
-				// refreshAccessTokenSafe writes the new refresh token onto the account
-				// object, so adopt it as the generation the result is measured against.
-				expectedRefreshToken = account.refresh_token;
+				// This read's OWN rotation is not a foreign credential change: record
+				// the new token as one more generation the result may be measured
+				// against (the previous ones stay valid — this rotation's durable write
+				// is also fire-and-forget).
+				tokenGenerations.add(refresh.token);
 				chatgptAccountId = this.readChatgptAccountId(refresh.token);
 				status = await this.fetchCodexUsageStatus({
 					accessToken: refresh.token,
@@ -864,12 +869,19 @@ export class CodexSpendCoordinator {
 		// the persisted columns — and a delete drives `usageCacheWrittenAt` to
 		// -Infinity, which never reads as "advanced". Applying now would repopulate
 		// exactly the state the reauth cleared, from a read issued under credentials
-		// that no longer exist. The stored refresh token is the generation marker; a
-		// row that vanished (account deleted mid-read) is treated the same way.
+		// that no longer exist. The row's ACCESS token is the generation marker, and
+		// it is matched against EVERY generation this read legitimately spanned —
+		// not just the latest one: the durable write of a rotation is enqueued
+		// fire-and-forget (see refreshAccessTokenSafe in token-manager), so the row
+		// lags the in-memory account by design and a lagging row is NOT a credential
+		// change. Only a token this read never saw may void it — re-authentication
+		// writes its credentials to the DB synchronously, so a reauthed row can
+		// never carry one of ours. A row that vanished (account deleted mid-read) is
+		// treated the same way.
 		const currentAccount = await this.ctx.dbOps.getAccount(accountId);
 		if (
-			!currentAccount ||
-			currentAccount.refresh_token !== expectedRefreshToken
+			!currentAccount?.access_token ||
+			!tokenGenerations.has(currentAccount.access_token)
 		) {
 			return {
 				success: true,
