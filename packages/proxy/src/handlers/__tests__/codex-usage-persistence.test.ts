@@ -69,11 +69,16 @@ function makeCodexAccount(overrides: Partial<Account> = {}): Account {
 
 /**
  * ctx backed by a REAL in-memory accounts table, so the JSON1 statement itself
- * is under test. `enqueue` runs its job synchronously and its return value is
- * switchable (the bounded metadata queue really does refuse jobs).
+ * is under test. `enqueue` runs its job synchronously by default and its return
+ * value is switchable (the bounded metadata queue really does refuse jobs).
+ * Flipping `defer` parks jobs in a queue instead, which is how the real bounded
+ * writer behaves — and the only way to let the world change between the enqueue
+ * and the flush.
  */
 function makeDbCtx(db: Database) {
 	const accept = { value: true };
+	const defer = { value: false };
+	const pending: Array<() => void | Promise<void>> = [];
 	const runSql: Array<{ sql: string; params: unknown[] }> = [];
 	const ctx = {
 		dbOps: {
@@ -87,25 +92,40 @@ function makeDbCtx(db: Database) {
 					runSql.push({ sql, params });
 					db.run(sql, params as never[]);
 				},
+				runWithChanges: async (sql: string, params: unknown[]) => {
+					runSql.push({ sql, params });
+					return db.run(sql, params as never[]).changes;
+				},
 			}),
 		},
 		asyncWriter: {
 			enqueue: (job: () => void | Promise<void>) => {
 				if (!accept.value) return false;
-				void job();
+				if (defer.value) pending.push(job);
+				else void job();
 				return true;
 			},
 		},
 	} as unknown as Pick<ProxyContext, "asyncWriter" | "dbOps">;
 	const persistWrites = () =>
 		runSql.filter((c) => c.sql.includes("codex_usage_json")).length;
-	return { ctx, accept, runSql, persistWrites };
+	/** Flush every parked job in enqueue order. */
+	const runPending = async (): Promise<void> => {
+		while (pending.length > 0) {
+			const job = pending.shift();
+			await job?.();
+		}
+	};
+	return { ctx, accept, defer, runPending, runSql, persistWrites };
 }
+
+/** The refresh token every seeded row and account fixture starts on. */
+const REFRESH_TOKEN = "rt";
 
 function seedAccountRow(db: Database, id: string): void {
 	db.run(
-		"INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, 'codex', ?)",
-		[id, id, Date.now()],
+		"INSERT INTO accounts (id, name, provider, created_at, refresh_token) VALUES (?, ?, 'codex', ?, ?)",
+		[id, id, Date.now(), REFRESH_TOKEN],
 	);
 }
 
@@ -299,5 +319,98 @@ describe("Codex usage snapshot persistence", () => {
 		// …and the previously-learned credits survived.
 		expect(after.codexCredits?.hasCredits).toBe(true);
 		expect(after.codexCredits?.balance).toBe(7.25);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Credential CAS. The persist job sits in a BOUNDED queue and only knows the
+// account id, so a job enqueued before a re-authentication would flush after it
+// and restore the very snapshot the reauth NULLed. Clearing the memo cannot
+// cancel a queued closure — the WHERE clause has to.
+// ---------------------------------------------------------------------------
+
+describe("Codex usage snapshot persistence — credential rotation", () => {
+	it("voids a queued snapshot whose account credentials rotated first", async () => {
+		const id = track("persist-rotated");
+		seedAccountRow(db, id);
+		const { ctx, defer, runPending, persistWrites } = makeDbCtx(db);
+		defer.value = true;
+
+		applyCodexObservation(
+			makeCodexAccount({ id }),
+			codexResponse(Date.now() + 4 * 3600_000, 42),
+			ctx,
+			baseOpts(),
+		);
+		// Re-authentication lands while the job is still queued: new refresh token,
+		// columns cleared.
+		db.run(
+			"UPDATE accounts SET refresh_token = 'rt-reauthed', codex_usage_json = NULL, codex_usage_observed_at = NULL WHERE id = ?",
+			[id],
+		);
+
+		await runPending();
+
+		// The write ran and matched nothing — the cleared columns stayed cleared.
+		expect(persistWrites()).toBe(1);
+		const row = readUsageColumns(db, id);
+		expect(row.codex_usage_json).toBeNull();
+		expect(row.codex_usage_observed_at).toBeNull();
+	});
+
+	it("writes normally when the row still carries the enqueued refresh token", async () => {
+		const id = track("persist-same-token");
+		seedAccountRow(db, id);
+		const { ctx, defer, runPending } = makeDbCtx(db);
+		defer.value = true;
+
+		applyCodexObservation(
+			makeCodexAccount({ id }),
+			codexResponse(Date.now() + 4 * 3600_000, 42),
+			ctx,
+			baseOpts(),
+		);
+		await runPending();
+
+		const parsed = JSON.parse(
+			readUsageColumns(db, id).codex_usage_json as string,
+		) as { five_hour: { utilization: number } };
+		expect(parsed.five_hour.utilization).toBe(42);
+	});
+
+	it("re-persists an identical observation after a voided write (memo cleared)", async () => {
+		const id = track("persist-rotated-retry");
+		seedAccountRow(db, id);
+		const { ctx, defer, runPending } = makeDbCtx(db);
+		const resetMs = Date.now() + 4 * 3600_000;
+		defer.value = true;
+
+		// 1. Enqueued under the old credentials, then voided by the rotation.
+		applyCodexObservation(
+			makeCodexAccount({ id }),
+			codexResponse(resetMs, 42),
+			ctx,
+			baseOpts(),
+		);
+		db.run("UPDATE accounts SET refresh_token = 'rt-reauthed' WHERE id = ?", [
+			id,
+		]);
+		await runPending();
+		expect(readUsageColumns(db, id).codex_usage_json).toBeNull();
+
+		// 2. The very next observation carries a BYTE-IDENTICAL snapshot. It must
+		//    not be deduped against the write that never landed.
+		applyCodexObservation(
+			makeCodexAccount({ id, refresh_token: "rt-reauthed" }),
+			codexResponse(resetMs, 42),
+			ctx,
+			baseOpts(),
+		);
+		await runPending();
+
+		const parsed = JSON.parse(
+			readUsageColumns(db, id).codex_usage_json as string,
+		) as { five_hour: { utilization: number } };
+		expect(parsed.five_hour.utilization).toBe(42);
 	});
 });
