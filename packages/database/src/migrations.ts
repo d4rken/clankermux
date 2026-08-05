@@ -74,7 +74,9 @@ export function ensureSchema(db: Database): void {
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
 			identity_captured_at INTEGER,
-			identity_profile_fetched_at INTEGER
+			identity_profile_fetched_at INTEGER,
+			codex_usage_json TEXT,
+			codex_usage_observed_at INTEGER
 		)
 	`);
 
@@ -728,6 +730,22 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "request_payloads",
 		column: "bytes",
 		ddl: "ALTER TABLE request_payloads ADD COLUMN bytes INTEGER",
+	},
+	// Last Codex usage snapshot observed for the account (the normalized
+	// UsageData JSON) plus its ms-epoch observation time. Written by the
+	// observation bookkeeping so a restart / cache eviction can restore the real
+	// last-known usage instead of resurrecting the newest stored request payload,
+	// whose headers may predate the account's current window by hours. NULL =
+	// nothing observed yet for this account.
+	{
+		table: "accounts",
+		column: "codex_usage_json",
+		ddl: "ALTER TABLE accounts ADD COLUMN codex_usage_json TEXT",
+	},
+	{
+		table: "accounts",
+		column: "codex_usage_observed_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN codex_usage_observed_at INTEGER",
 	},
 ];
 
