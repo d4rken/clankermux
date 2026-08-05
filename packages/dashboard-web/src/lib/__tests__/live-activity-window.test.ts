@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
 	backfillLimitFor,
+	backfillScope,
 	DEFAULT_LIVE_WINDOW_MS,
 	eventCapFor,
 	LIVE_WINDOW_OPTIONS,
 	loadLiveWindow,
 	MAX_BACKFILL_ROWS,
 	MAX_EVENT_CAP,
+	RECONNECT_OVERLAP_MS,
 	saveLiveWindow,
 } from "../live-activity-window";
 
@@ -108,6 +110,55 @@ describe("backfillLimitFor", () => {
 			const expected = (option.ms / 60_000) * 40;
 			expect(backfillLimitFor(option.ms)).toBeGreaterThan(expected);
 		}
+	});
+});
+
+describe("backfillScope", () => {
+	const NOW = 1_700_000_000_000;
+
+	it("covers the whole window on a first connect", () => {
+		const { from } = backfillScope({ windowMs: 300_000, now: NOW });
+		expect(from).toBe(NOW - 300_000);
+	});
+
+	it("covers only the gap on a reconnect", () => {
+		// Refetching the whole window on every brief blip would pull hundreds of
+		// rows to learn about the few seconds actually missed.
+		const { from } = backfillScope({
+			since: NOW - 10_000,
+			windowMs: 1_800_000,
+			now: NOW,
+		});
+		expect(from).toBe(NOW - 10_000 - RECONNECT_OVERLAP_MS);
+	});
+
+	it("reaches back before the detected drop", () => {
+		// The drop time is when the browser NOTICED. A stalled connection looks
+		// alive for a while, and requests completing in that interval reach
+		// neither the stream nor a fetch starting at the detection moment.
+		const { from } = backfillScope({
+			since: NOW - 5_000,
+			windowMs: 1_800_000,
+			now: NOW,
+		});
+		expect(from).toBeLessThan(NOW - 5_000);
+	});
+
+	it("never reaches further back than the window", () => {
+		// Nothing older is rendered, so fetching it is pure waste — and on a
+		// long outage the overlap would otherwise push past the window start.
+		const { from } = backfillScope({
+			since: NOW - 10 * 60_000,
+			windowMs: 180_000,
+			now: NOW,
+		});
+		expect(from).toBe(NOW - 180_000);
+	});
+
+	it("takes its row cap from the window", () => {
+		expect(backfillScope({ windowMs: 600_000, now: NOW }).limit).toBe(
+			backfillLimitFor(600_000),
+		);
 	});
 });
 

@@ -109,3 +109,51 @@ export function eventCapFor(windowMs: number): number {
 	const minutes = windowMs / 60_000;
 	return Math.min(MAX_EVENT_CAP, Math.max(1500, Math.ceil(minutes * 150)));
 }
+
+/**
+ * How far BEFORE a detected stream drop to refetch.
+ *
+ * The drop time is when the browser NOTICED, not when delivery stopped. A
+ * stalled or partitioned connection looks alive for a while, and requests
+ * completing in that interval reach neither the stream nor a gap fetch that
+ * starts at the detection moment. Re-fetching already-covered time is free —
+ * the reducer is idempotent — whereas missing it loses requests silently.
+ */
+export const RECONNECT_OVERLAP_MS = 60_000;
+
+export interface BackfillScope {
+	/** Lower bound to request, as an epoch timestamp. */
+	from: number;
+	/** Row cap for the request. */
+	limit: number;
+}
+
+/**
+ * Work out what a history fetch should ask for.
+ *
+ * Split out from the provider because this arithmetic is where the coverage
+ * bugs live, and the React wiring around it needs a DOM to exercise while this
+ * needs nothing.
+ *
+ * With no `since` (first connect, or a widened window) it covers the whole
+ * window. With one (a reconnect) it covers just the gap, less the overlap
+ * above — but never reaches further back than the window, since nothing older
+ * would be rendered anyway.
+ */
+export function backfillScope({
+	since,
+	windowMs,
+	now,
+}: {
+	since?: number;
+	windowMs: number;
+	now: number;
+}): BackfillScope {
+	const windowStart = now - windowMs;
+	const gapStart =
+		since === undefined ? windowStart : since - RECONNECT_OVERLAP_MS;
+	return {
+		from: Math.max(gapStart, windowStart),
+		limit: backfillLimitFor(windowMs),
+	};
+}

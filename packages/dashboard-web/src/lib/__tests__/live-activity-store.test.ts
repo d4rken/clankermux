@@ -72,7 +72,10 @@ describe("LiveActivityStore publishing", () => {
 
 	it("keeps snapshot identity stable when nothing changed", async () => {
 		const store = makeStore();
-		store.applyHistory([row()], false);
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
 
 		const first = store.getSnapshot();
@@ -88,7 +91,7 @@ describe("LiveActivityStore publishing", () => {
 				row({ id: "late", timestamp: new Date(T0 + 5000).toISOString() }),
 				row({ id: "early", timestamp: new Date(T0).toISOString() }),
 			],
-			false,
+			{ requestedFrom: T0 - WINDOW, saturated: false },
 		);
 		await settle();
 
@@ -110,26 +113,75 @@ describe("LiveActivityStore priming and the history edge", () => {
 		store.dispose();
 	});
 
-	it("records a history edge only when the backfill came back saturated", async () => {
-		// A short page means the history really IS complete; hatching the left
-		// edge then would claim missing data that does not exist.
-		const short = makeStore();
-		short.applyHistory([row()], false);
+	it("claims coverage back to what a complete fetch asked for", async () => {
+		// A short page means the fetch reached its lower bound, so everything
+		// from there on is genuinely held.
+		const store = makeStore();
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
-		expect(short.getSnapshot().historyEdge).toBeNull();
-		short.dispose();
 
-		const saturated = makeStore();
-		saturated.applyHistory(
+		expect(store.getSnapshot().coverageFrom).toBe(T0 - WINDOW);
+		store.dispose();
+	});
+
+	it("claims only as far as a TRUNCATED fetch actually reached", async () => {
+		const store = makeStore();
+		store.applyHistory(
 			[
 				row({ id: "a", timestamp: new Date(T0 + 10).toISOString() }),
 				row({ id: "b" }),
 			],
-			true,
+			{ requestedFrom: T0 - WINDOW, saturated: true },
 		);
 		await settle();
-		expect(saturated.getSnapshot().historyEdge).toBe(T0);
-		saturated.dispose();
+
+		// It asked for the whole window but was cut off at the oldest row.
+		expect(store.getSnapshot().coverageFrom).toBe(T0);
+		store.dispose();
+	});
+
+	it("claims nothing before anything has been fetched or connected", async () => {
+		// The renderer hatches the whole window on null. Reporting a coverage
+		// floor here would assert history the view does not have.
+		expect(makeStore().getSnapshot().coverageFrom).toBeNull();
+	});
+
+	it("counts the live stream itself as coverage from when it came up", async () => {
+		// This is what stops a failed backfill rendering as a quiet period: the
+		// stream still covers everything since connect, and only the stretch
+		// before it is hatched.
+		const now = T0;
+		const store = makeStore(() => now);
+		store.setConnected(true);
+		await settle();
+
+		expect(store.getSnapshot().coverageFrom).toBe(T0);
+		store.dispose();
+	});
+
+	it("does not let a narrow gap fetch retract a wider claim", async () => {
+		// The reconnect fetch is scoped to the outage. Treating its reach as the
+		// whole coverage story would erase a full-window fetch's claim and make
+		// the unfetched left side look like inactivity.
+		const store = makeStore();
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
+		await settle();
+		expect(store.getSnapshot().coverageFrom).toBe(T0 - WINDOW);
+
+		store.applyHistory([row({ id: "gap" })], {
+			requestedFrom: T0 - 5_000,
+			saturated: false,
+		});
+		await settle();
+
+		expect(store.getSnapshot().coverageFrom).toBe(T0 - WINDOW);
+		store.dispose();
 	});
 });
 
@@ -265,7 +317,10 @@ describe("LiveActivityStore window changes", () => {
 
 	it("keeps what it already holds when the window widens", async () => {
 		const store = makeStore();
-		store.applyHistory([row()], false);
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
 
 		store.setWindow(600_000);
@@ -275,24 +330,29 @@ describe("LiveActivityStore window changes", () => {
 		store.dispose();
 	});
 
-	it("clears the history edge, which described the previous window", async () => {
-		// The edge says how far one fetch reached. Carried across a resize it
-		// would either hatch a covered stretch or hide an uncovered one.
+	it("keeps its coverage claim across a resize", async () => {
+		// Coverage is an absolute timestamp, not a fact about the old window.
+		// Clearing it made narrowing — which deliberately does not refetch —
+		// silently drop a shortfall still inside the smaller window.
 		const store = makeStore();
-		store.applyHistory([row()], true);
+		store.applyHistory([row()], { requestedFrom: T0, saturated: true });
 		await settle();
-		expect(store.getSnapshot().historyEdge).not.toBeNull();
+		const before = store.getSnapshot().coverageFrom;
+		expect(before).not.toBeNull();
 
-		store.setWindow(600_000);
+		store.setWindow(120_000);
 		await settle();
 
-		expect(store.getSnapshot().historyEdge).toBeNull();
+		expect(store.getSnapshot().coverageFrom).toBe(before);
 		store.dispose();
 	});
 
 	it("ignores a no-op resize", async () => {
 		const store = makeStore();
-		store.applyHistory([row()], false);
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
 
 		let notifications = 0;
@@ -311,7 +371,10 @@ describe("LiveActivityStore housekeeping", () => {
 	it("ages completed work out of the window on tick", async () => {
 		let now = T0;
 		const store = makeStore(() => now);
-		store.applyHistory([row()], false);
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
 		expect(store.getSnapshot().events).toHaveLength(1);
 
@@ -329,7 +392,10 @@ describe("LiveActivityStore housekeeping", () => {
 		// thousands of marks, exactly when the dashboard is already loaded.
 		const store = makeStore(() => T0 + WINDOW * 4);
 		for (let i = 0; i < MAX_LIVE_EVENTS + 500; i++) {
-			store.applyHistory([row({ id: `r${i}` })], false);
+			store.applyHistory([row({ id: `r${i}` })], {
+				requestedFrom: T0 - WINDOW,
+				saturated: false,
+			});
 		}
 		await settle();
 
@@ -347,7 +413,10 @@ describe("LiveActivityStore housekeeping", () => {
 		});
 		store.dispose();
 
-		store.applyHistory([row()], false);
+		store.applyHistory([row()], {
+			requestedFrom: T0 - WINDOW,
+			saturated: false,
+		});
 		await settle();
 
 		expect(notifications).toBe(0);

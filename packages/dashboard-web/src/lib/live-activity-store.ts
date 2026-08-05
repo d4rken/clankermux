@@ -46,11 +46,18 @@ export interface LiveActivitySnapshot {
 	/** True once the first connect-time snapshot or backfill has landed. */
 	primed: boolean;
 	/**
-	 * Oldest arrival time the history backfill could see, but ONLY when it came
-	 * back saturated (as many rows as were asked for). A short result means the
-	 * history really is complete and there is nothing to disclose.
+	 * Earliest moment from which this view can honestly claim to hold every
+	 * request. `null` means it can claim none — nothing has been fetched and the
+	 * stream has never connected.
+	 *
+	 * Deliberately a COVERAGE FLOOR rather than "where the last fetch stopped".
+	 * Fetches are scoped differently — a full window on first connect, only the
+	 * gap on reconnect — so the reach of the most recent one says nothing about
+	 * what is held overall. Deriving the hatch from the last fetch let a short
+	 * gap page erase a genuine full-window shortfall, and a truncated gap page
+	 * hatch healthy history either side of it.
 	 */
-	historyEdge: number | null;
+	coverageFrom: number | null;
 }
 
 const EMPTY_SNAPSHOT: LiveActivitySnapshot = {
@@ -58,14 +65,21 @@ const EMPTY_SNAPSHOT: LiveActivitySnapshot = {
 	connected: false,
 	outages: [],
 	primed: false,
-	historyEdge: null,
+	coverageFrom: null,
 };
 
 /** Publishes are coalesced to this interval so a burst cannot thrash React. */
 export const PUBLISH_INTERVAL_MS = 250;
 
-/** More outages than this in one window is noise, not information. */
-const MAX_TRACKED_OUTAGES = 8;
+/**
+ * Retained outage intervals.
+ *
+ * Sized for the longest offered window rather than a handful: dropping an
+ * outage that is still visible on the axis removes its hatch and makes that
+ * stretch look observed. Old ones age out by window anyway; this is only the
+ * backstop against a pathological flap.
+ */
+const MAX_TRACKED_OUTAGES = 50;
 
 export class LiveActivityStore {
 	private readonly store: LiveStore = new Map();
@@ -82,7 +96,10 @@ export class LiveActivityStore {
 	 */
 	private everConnected = false;
 	private primed = false;
-	private historyEdge: number | null = null;
+	/** Earliest point history fetches have reached. */
+	private coveredSince: number | null = null;
+	/** When the live stream first came up; everything after it arrived live. */
+	private streamSince: number | null = null;
 
 	private dirty = false;
 	private publishTimer: ReturnType<typeof setTimeout> | null = null;
@@ -114,29 +131,52 @@ export class LiveActivityStore {
 	/**
 	 * Fold in rows from the history endpoint.
 	 *
-	 * `saturated` means the server returned as many rows as were requested, so
-	 * older in-window history may exist that we cannot see. Only then is a
-	 * history edge recorded — otherwise an empty left half is genuinely empty.
+	 * `requestedFrom` is the lower bound the fetch asked for; `saturated` means
+	 * the server returned as many rows as were allowed, so it did NOT reach that
+	 * bound. Coverage therefore extends to `requestedFrom` on a complete answer,
+	 * and only to the oldest row actually returned on a truncated one.
+	 *
+	 * Coverage only ever improves here. A gap-scoped reconnect fetch reaching
+	 * back a few seconds must not retract a full-window fetch that reached back
+	 * minutes.
 	 */
-	applyHistory(rows: readonly RequestResponse[], saturated: boolean): void {
+	applyHistory(
+		rows: readonly RequestResponse[],
+		{ requestedFrom, saturated }: { requestedFrom: number; saturated: boolean },
+	): void {
 		if (applyHistoryRows(this.store, rows, this.normalize)) this.markDirty();
 
-		const edge = saturated
-			? rows.reduce<number | null>((oldest, row) => {
-					const ts = Date.parse(row.timestamp);
-					if (!Number.isFinite(ts)) return oldest;
-					return oldest === null || ts < oldest ? ts : oldest;
-				}, null)
-			: null;
+		const oldestRow = rows.reduce<number | null>((oldest, row) => {
+			const ts = Date.parse(row.timestamp);
+			if (!Number.isFinite(ts)) return oldest;
+			return oldest === null || ts < oldest ? ts : oldest;
+		}, null);
 
-		if (edge !== this.historyEdge) {
-			this.historyEdge = edge;
-			this.markDirty();
-		}
+		const reached = saturated ? (oldestRow ?? requestedFrom) : requestedFrom;
+		this.extendCoverage(reached);
+
 		if (!this.primed) {
 			this.primed = true;
 			this.markDirty();
 		}
+	}
+
+	/** Claim coverage back to `from`, if that is further back than the current claim. */
+	private extendCoverage(from: number): void {
+		if (this.coveredSince !== null && this.coveredSince <= from) return;
+		this.coveredSince = from;
+		this.markDirty();
+	}
+
+	/**
+	 * The honest coverage floor: the earlier of what history has reached and
+	 * when the live stream came up. Absent both, nothing can be claimed.
+	 */
+	private computeCoverageFrom(): number | null {
+		const { coveredSince, streamSince } = this;
+		if (coveredSince === null) return streamSince;
+		if (streamSince === null) return coveredSince;
+		return Math.min(coveredSince, streamSince);
 	}
 
 	/**
@@ -147,15 +187,14 @@ export class LiveActivityStore {
 	 * stretch. Narrowing prunes immediately so the card cannot briefly render
 	 * marks outside its own axis.
 	 *
-	 * The history edge is CLEARED on any change: it describes how far a
-	 * previous fetch reached, which says nothing about the new window, and
-	 * leaving it would either hatch a region that is actually covered or hide
-	 * one that is not.
+	 * Coverage is NOT reset. It is an absolute timestamp, not a fact about the
+	 * old window, and the renderer clips it to whatever window is current.
+	 * Clearing it here made narrowing — which deliberately does not refetch —
+	 * silently drop a shortfall that was still inside the smaller window.
 	 */
 	setWindow(windowMs: number): void {
 		if (this.windowMs === windowMs) return;
 		this.windowMs = windowMs;
-		this.historyEdge = null;
 		pruneLiveStore(this.store, this.now(), windowMs, eventCapFor(windowMs));
 		this.markDirty();
 	}
@@ -166,6 +205,10 @@ export class LiveActivityStore {
 		const now = this.now();
 
 		if (connected) {
+			// Everything from the first successful connect onwards arrived live,
+			// so the stream itself is a coverage source — and the only one left
+			// standing when a backfill fails outright.
+			if (!this.everConnected) this.streamSince = now;
 			this.everConnected = true;
 			// Close the open outage at the moment service resumed. Leaving it
 			// open would keep hatching healthy traffic for as long as the drop
@@ -237,12 +280,27 @@ export class LiveActivityStore {
 			pruneLiveStore(this.store, this.now(), this.windowMs, cap);
 		}
 
+		const events = Array.from(this.store.values()).sort((a, b) => a.ts - b.ts);
+
+		// At the ceiling, the cap — not the window — decides how far back the
+		// card actually reaches: completed events still inside the window get
+		// evicted. Coverage has to retreat with them, or the stretch they used
+		// to occupy renders as a quiet period.
+		let coverageFrom = this.computeCoverageFrom();
+		if (this.store.size >= cap && events.length > 0) {
+			const oldestRetained = events[0].ts;
+			coverageFrom =
+				coverageFrom === null
+					? oldestRetained
+					: Math.max(coverageFrom, oldestRetained);
+		}
+
 		this.snapshot = {
-			events: Array.from(this.store.values()).sort((a, b) => a.ts - b.ts),
+			events,
 			connected: this.connected,
 			outages: this.outages.map((outage) => ({ ...outage })),
 			primed: this.primed,
-			historyEdge: this.historyEdge,
+			coverageFrom,
 		};
 		for (const listener of this.listeners) listener();
 	}

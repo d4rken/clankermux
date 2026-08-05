@@ -76,7 +76,7 @@ export interface LiveActivityLanesViewProps {
 	plotWidth: number;
 	connected: boolean;
 	outages: readonly Outage[];
-	historyEdge: number | null;
+	coverageFrom: number | null;
 	primed: boolean;
 	/** Currently highlighted event, if any. */
 	selected?: LiveEvent | null;
@@ -124,7 +124,7 @@ export function LiveActivityLanesView({
 	plotWidth,
 	connected,
 	outages,
-	historyEdge,
+	coverageFrom,
 	primed,
 	selected = null,
 	plot,
@@ -143,15 +143,18 @@ export function LiveActivityLanesView({
 	return (
 		<Card>
 			<CardHeader className="p-4 pb-2">
-				<div className="flex items-baseline justify-between gap-4">
-					<div>
+				{/* Wraps rather than overflowing: the status/rate readouts plus a
+				    four-option selector are wider than a phone-width card interior,
+				    and a non-wrapping row would clip them or push the page sideways. */}
+				<div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+					<div className="min-w-0">
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
 							Every request in the last {Math.round(windowMs / 60_000)} minutes,
 							by project. Mark size follows token count.
 						</CardDescription>
 					</div>
-					<div className="flex shrink-0 items-center gap-3 text-sm">
+					<div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
 						<span className="flex items-center gap-1.5">
 							<span
 								className="inline-block h-2 w-2 rounded-full"
@@ -276,7 +279,7 @@ export function LiveActivityLanesView({
 										{unknownRegions({
 											now,
 											windowMs,
-											historyEdge,
+											coverageFrom,
 											outages,
 										}).map((region) => (
 											<rect
@@ -609,25 +612,28 @@ interface UnknownRegion {
 export function unknownRegions({
 	now,
 	windowMs,
-	historyEdge,
+	coverageFrom,
 	outages,
 }: {
 	now: number;
 	windowMs: number;
-	historyEdge: number | null;
+	coverageFrom: number | null;
 	outages: readonly Outage[];
 }): UnknownRegion[] {
 	const regions: UnknownRegion[] = [];
 	const windowStart = now - windowMs;
 
-	// Only when the backfill came back saturated: a short page means the
-	// history really is complete and there is nothing to disclose.
-	if (historyEdge !== null && historyEdge > windowStart) {
+	// `null` means nothing is covered — no history fetched and the stream has
+	// never connected — so the whole window is unknown. Treating absence as
+	// "fully covered" is how a failed backfill turns into a confident, wrong
+	// claim that nothing happened.
+	const covered = coverageFrom ?? now;
+	if (covered > windowStart) {
 		regions.push({
 			key: "history",
 			from: windowStart,
-			to: historyEdge,
-			label: `No history loaded before ${new Date(historyEdge).toLocaleTimeString()}`,
+			to: covered,
+			label: `No history loaded before ${new Date(covered).toLocaleTimeString()}`,
 		});
 	}
 
@@ -667,7 +673,8 @@ function describeLanes(lanes: Lane[], windowMs: number): string {
  * between renders, and resolves pointer position to an event.
  */
 export function LiveActivityLanes() {
-	const { events, connected, outages, historyEdge, primed } = useLiveActivity();
+	const { events, connected, outages, coverageFrom, primed } =
+		useLiveActivity();
 	const { windowMs, setWindowMs } = useLiveWindow();
 
 	const plotAreaRef = useRef<HTMLDivElement>(null);
@@ -735,7 +742,7 @@ export function LiveActivityLanes() {
 				plotWidth={plotWidth}
 				connected={connected}
 				outages={outages}
-				historyEdge={historyEdge}
+				coverageFrom={coverageFrom}
 				primed={primed}
 				reducedMotion={reducedMotion}
 			/>
@@ -761,7 +768,7 @@ function ScrollingLanes({
 	plotWidth,
 	connected,
 	outages,
-	historyEdge,
+	coverageFrom,
 	primed,
 	reducedMotion,
 }: {
@@ -773,7 +780,7 @@ function ScrollingLanes({
 	plotWidth: number;
 	connected: boolean;
 	outages: readonly Outage[];
-	historyEdge: number | null;
+	coverageFrom: number | null;
 	primed: boolean;
 	reducedMotion: boolean;
 }) {
@@ -904,7 +911,7 @@ function ScrollingLanes({
 					plotWidth={plotWidth}
 					connected={connected}
 					outages={outages}
-					historyEdge={historyEdge}
+					coverageFrom={coverageFrom}
 					primed={primed}
 					selected={selected}
 					windowControl={{ value: windowMs, onChange: setWindowMs }}

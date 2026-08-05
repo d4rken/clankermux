@@ -40,7 +40,7 @@ function render(
 			plotWidth={PLOT_WIDTH}
 			connected={true}
 			outages={[]}
-			historyEdge={null}
+			coverageFrom={T0 - WINDOW}
 			primed={true}
 			{...props}
 		/>,
@@ -175,7 +175,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: T0 - 60_000,
+			coverageFrom: T0 - 60_000,
 			outages: [],
 		});
 
@@ -189,10 +189,25 @@ describe("unknownRegions", () => {
 			unknownRegions({
 				now: T0,
 				windowMs: WINDOW,
-				historyEdge: T0 - WINDOW - 1000,
+				coverageFrom: T0 - WINDOW - 1000,
 				outages: [],
 			}),
 		).toHaveLength(0);
+	});
+
+	it("hatches the WHOLE window when nothing is covered", () => {
+		// `null` means no history fetched and the stream never up. Treating that
+		// as full coverage is how a failed backfill becomes a confident, wrong
+		// claim that nothing happened.
+		const [region] = unknownRegions({
+			now: T0,
+			windowMs: WINDOW,
+			coverageFrom: null,
+			outages: [],
+		});
+
+		expect(region.from).toBe(T0 - WINDOW);
+		expect(region.to).toBe(T0);
 	});
 
 	it("hatches a connection outage so the gap cannot read as idle", () => {
@@ -201,7 +216,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - 30_000, to: null }],
 		});
 
@@ -215,7 +230,7 @@ describe("unknownRegions", () => {
 		const [region] = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - 60_000, to: T0 - 50_000 }],
 		});
 
@@ -227,7 +242,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [
 				{ from: T0 - 90_000, to: T0 - 80_000 },
 				{ from: T0 - 40_000, to: T0 - 30_000 },
@@ -245,7 +260,7 @@ describe("unknownRegions", () => {
 		const [region] = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - WINDOW * 5, to: null }],
 		});
 
@@ -259,7 +274,7 @@ describe("unknownRegions", () => {
 			unknownRegions({
 				now: T0,
 				windowMs: WINDOW,
-				historyEdge: null,
+				coverageFrom: T0 - WINDOW,
 				outages: [{ from: T0 - WINDOW * 3, to: T0 - WINDOW * 2 }],
 			}),
 		).toHaveLength(0);

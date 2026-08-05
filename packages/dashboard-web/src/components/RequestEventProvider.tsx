@@ -17,7 +17,7 @@ import {
 	LiveActivityStore,
 } from "../lib/live-activity-store";
 import {
-	backfillLimitFor,
+	backfillScope,
 	DEFAULT_LIVE_WINDOW_MS,
 	loadLiveWindow,
 	saveLiveWindow,
@@ -42,6 +42,9 @@ import { handleStreamError, MAX_RETRIES } from "../lib/stream-error";
 
 /** Housekeeping cadence: prune the window, settle stale in-flight entries. */
 const TICK_INTERVAL_MS = 1000;
+
+/** Settle time before a widened window triggers its history fetch. */
+const WINDOW_CHANGE_DEBOUNCE_MS = 300;
 
 /**
  * The connection's public surface: the reconciled live-activity store, plus a
@@ -98,9 +101,10 @@ export function RequestEventProvider({ children }: { children: ReactNode }) {
 	const windowRef = useRef(windowMs);
 	windowRef.current = windowMs;
 
-	// Set by the connection effect; lets the window-change effect below reuse
-	// the same fetch (and the same generation guard) without duplicating it.
+	// Set by the connection effect; lets the window setter below reuse the same
+	// fetch (and the same generation guard) without duplicating it.
 	const backfillRef = useRef<((since?: number) => void) | null>(null);
+	const widenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const feed = useMemo(
 		() =>
@@ -143,20 +147,25 @@ export function RequestEventProvider({ children }: { children: ReactNode }) {
 		const backfill = async (since?: number) => {
 			generation++;
 			const mine = generation;
-			const currentWindow = windowRef.current;
-			const limit = backfillLimitFor(currentWindow);
-			const from = Math.max(since ?? 0, Date.now() - currentWindow);
+			const { from, limit } = backfillScope({
+				since,
+				windowMs: windowRef.current,
+				now: Date.now(),
+			});
 			try {
 				const rows = await api.getRequestsSummary(limit, { from });
 				if (!mounted || mine !== generation) return;
 				// A full page means older history exists inside the window that
 				// we could not reach; a short page means it really is complete.
-				store.applyHistory(rows, rows.length >= limit);
+				store.applyHistory(rows, {
+					requestedFrom: from,
+					saturated: rows.length >= limit,
+				});
 			} catch {
-				// A failed backfill is not fatal — the live stream still works,
-				// and the next reconnect tries again. Leaving `primed` unset
-				// keeps the lanes in their loading state rather than asserting
-				// an empty history.
+				// Not fatal, and deliberately not a claim of coverage: the store
+				// only ever extends its coverage floor on a SUCCESSFUL fetch, so
+				// a failure leaves the unreached stretch hatched rather than
+				// rendered as a quiet period. The stream keeps working meanwhile.
 			}
 		};
 		backfillRef.current = backfill;
@@ -185,7 +194,8 @@ export function RequestEventProvider({ children }: { children: ReactNode }) {
 				retryCount = 0;
 				store.setConnected(true);
 				// First connect has no gap to scope to and must fetch the whole
-				// window; a reconnect only needs what it missed.
+				// window; a reconnect only needs what it missed (plus the
+				// detection overlap backfillScope applies).
 				void backfill(droppedAt ?? undefined);
 				droppedAt = null;
 			});
@@ -240,13 +250,33 @@ export function RequestEventProvider({ children }: { children: ReactNode }) {
 			saveLiveWindow(next);
 			windowRef.current = next;
 			feed.store.setWindow(next);
+
 			// Only widening needs a fetch: it exposes a stretch of timeline
 			// nothing has been fetched for. Narrowing can only ever remove marks
 			// already held, so refetching there would just re-download what is
 			// about to be pruned.
-			if (widening) backfillRef.current?.();
+			if (!widening) return;
+
+			// Debounced because these are BUTTONS. Clicking 3→5→10→30 to see
+			// what each looks like would otherwise fire three overlapping
+			// fetches of up to a thousand rows each; the generation guard
+			// discards the stale results but the queries still hit the database
+			// the proxy is using. Only the settled choice is fetched.
+			if (widenTimerRef.current !== null) clearTimeout(widenTimerRef.current);
+			widenTimerRef.current = setTimeout(() => {
+				widenTimerRef.current = null;
+				backfillRef.current?.();
+			}, WINDOW_CHANGE_DEBOUNCE_MS);
 		},
 		[feed],
+	);
+
+	// The debounce timer outlives any single call, so it needs its own teardown.
+	useEffect(
+		() => () => {
+			if (widenTimerRef.current !== null) clearTimeout(widenTimerRef.current);
+		},
+		[],
 	);
 
 	const value = useMemo(
@@ -303,7 +333,7 @@ const DETACHED_SNAPSHOT: LiveActivitySnapshot = {
 	connected: false,
 	outages: [],
 	primed: false,
-	historyEdge: null,
+	coverageFrom: null,
 };
 
 /** Current live-activity view. Empty and unprimed when no provider is mounted. */
