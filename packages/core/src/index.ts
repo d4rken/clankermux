@@ -127,6 +127,16 @@ export {
 } from "./throttle-utils";
 export { TtlCache } from "./ttl-cache";
 export {
+	type AccountWideClaimHeadroom,
+	getAccountWideClaimHeadroom,
+	getScopedClaimRejection,
+	hasAccountWideUnifiedRejection,
+	isScopedOnlyUnifiedRejection,
+	parseStrictDecimal,
+	type ScopedClaimRejection,
+	type UnifiedClaimReading,
+} from "./unified-claim-headers";
+export {
 	getRepresentativeUtilization as getNormalizedRepresentativeUtilization,
 	isAnthropicUsageShape,
 	type NormalizedAnthropicUsage,
