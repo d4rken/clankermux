@@ -5,11 +5,11 @@ import {
 	applyStreamEvent,
 	type LiveEvent,
 	type LiveStore,
-	MAX_LIVE_EVENTS,
 	type NormalizeContext,
 	pruneLiveStore,
 	sweepLostEvents,
 } from "./live-activity";
+import { eventCapFor } from "./live-activity-window";
 
 /**
  * Framework-free store behind the Live Activity lanes.
@@ -88,7 +88,7 @@ export class LiveActivityStore {
 	private publishTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
-		private readonly windowMs: number,
+		private windowMs: number,
 		private readonly normalize: NormalizeContext = {},
 		private readonly now: () => number = Date.now,
 	) {}
@@ -139,6 +139,27 @@ export class LiveActivityStore {
 		}
 	}
 
+	/**
+	 * Change the rolling window.
+	 *
+	 * Widening keeps everything already held and simply shows more of it — the
+	 * caller is expected to follow up with a backfill for the newly-exposed
+	 * stretch. Narrowing prunes immediately so the card cannot briefly render
+	 * marks outside its own axis.
+	 *
+	 * The history edge is CLEARED on any change: it describes how far a
+	 * previous fetch reached, which says nothing about the new window, and
+	 * leaving it would either hatch a region that is actually covered or hide
+	 * one that is not.
+	 */
+	setWindow(windowMs: number): void {
+		if (this.windowMs === windowMs) return;
+		this.windowMs = windowMs;
+		this.historyEdge = null;
+		pruneLiveStore(this.store, this.now(), windowMs, eventCapFor(windowMs));
+		this.markDirty();
+	}
+
 	setConnected(connected: boolean): void {
 		if (this.connected === connected) return;
 		this.connected = connected;
@@ -163,7 +184,12 @@ export class LiveActivityStore {
 	/** Periodic housekeeping: age out completed work and settle stale actives. */
 	tick(): void {
 		const now = this.now();
-		let changed = pruneLiveStore(this.store, now, this.windowMs);
+		let changed = pruneLiveStore(
+			this.store,
+			now,
+			this.windowMs,
+			eventCapFor(this.windowMs),
+		);
 		changed = sweepLostEvents(this.store, now) || changed;
 
 		// Drop outages that have scrolled entirely off the left edge — an open
@@ -206,8 +232,9 @@ export class LiveActivityStore {
 		// 1 Hz tick: a burst larger than the cap arriving inside one second
 		// would otherwise publish snapshots of many thousands of marks, at
 		// exactly the moment the dashboard is already under load.
-		if (this.store.size > MAX_LIVE_EVENTS) {
-			pruneLiveStore(this.store, this.now(), this.windowMs);
+		const cap = eventCapFor(this.windowMs);
+		if (this.store.size > cap) {
+			pruneLiveStore(this.store, this.now(), this.windowMs, cap);
 		}
 
 		this.snapshot = {

@@ -240,6 +240,73 @@ describe("LiveActivityStore outage bookkeeping", () => {
 	});
 });
 
+describe("LiveActivityStore window changes", () => {
+	it("prunes immediately when the window narrows", async () => {
+		// Otherwise the card would briefly render marks that sit outside its own
+		// axis, until the next housekeeping tick caught up.
+		let now = T0;
+		const store = makeStore(() => now);
+		store.applyHistory(
+			[row({ id: "old", timestamp: new Date(T0).toISOString() })],
+			false,
+		);
+		await settle();
+
+		now = T0 + 240_000; // 4 minutes on
+		store.setWindow(600_000); // 10m window still covers it
+		await settle();
+		expect(store.getSnapshot().events).toHaveLength(1);
+
+		store.setWindow(120_000); // 2m window does not
+		await settle();
+		expect(store.getSnapshot().events).toHaveLength(0);
+		store.dispose();
+	});
+
+	it("keeps what it already holds when the window widens", async () => {
+		const store = makeStore();
+		store.applyHistory([row()], false);
+		await settle();
+
+		store.setWindow(600_000);
+		await settle();
+
+		expect(store.getSnapshot().events).toHaveLength(1);
+		store.dispose();
+	});
+
+	it("clears the history edge, which described the previous window", async () => {
+		// The edge says how far one fetch reached. Carried across a resize it
+		// would either hatch a covered stretch or hide an uncovered one.
+		const store = makeStore();
+		store.applyHistory([row()], true);
+		await settle();
+		expect(store.getSnapshot().historyEdge).not.toBeNull();
+
+		store.setWindow(600_000);
+		await settle();
+
+		expect(store.getSnapshot().historyEdge).toBeNull();
+		store.dispose();
+	});
+
+	it("ignores a no-op resize", async () => {
+		const store = makeStore();
+		store.applyHistory([row()], false);
+		await settle();
+
+		let notifications = 0;
+		store.subscribe(() => {
+			notifications++;
+		});
+		store.setWindow(WINDOW);
+		await settle();
+
+		expect(notifications).toBe(0);
+		store.dispose();
+	});
+});
+
 describe("LiveActivityStore housekeeping", () => {
 	it("ages completed work out of the window on tick", async () => {
 		let now = T0;

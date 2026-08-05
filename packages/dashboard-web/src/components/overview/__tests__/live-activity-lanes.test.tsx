@@ -134,6 +134,40 @@ describe("LiveActivityLanesView", () => {
 		// The container passes handlers; the view must not require them.
 		expect(() => render({ plot: undefined })).not.toThrow();
 	});
+
+	it("states the window length it is actually showing", () => {
+		expect(render({ windowMs: 10 * 60_000 })).toContain("last 10 minutes");
+	});
+
+	it("offers the window selector only when wired", () => {
+		expect(
+			render({ windowControl: { value: 5 * 60_000, onChange: () => {} } }),
+		).toContain("Live activity time range");
+		expect(render()).not.toContain("Live activity time range");
+	});
+
+	it("marks the selected window as pressed", () => {
+		const html = render({
+			windowMs: 10 * 60_000,
+			windowControl: { value: 10 * 60_000, onChange: () => {} },
+		});
+		// Identity is not colour-only: the active option is exposed to
+		// assistive tech via aria-pressed, not just tinted.
+		expect(html).toMatch(/aria-pressed="true"[^>]*>10m|10m<\/button>/);
+		expect(html).toContain('aria-pressed="true"');
+	});
+});
+
+describe("axis ticks", () => {
+	it("keeps the tick count readable as the window grows", () => {
+		// One tick per minute puts 31 labelled ticks on a half-hour axis, which
+		// overlaps its own text and reads as noise.
+		const ticksFor = (windowMs: number) =>
+			(render({ windowMs }).match(/-\d+m</g) ?? []).length;
+
+		expect(ticksFor(3 * 60_000)).toBeLessThanOrEqual(6);
+		expect(ticksFor(30 * 60_000)).toBeLessThanOrEqual(8);
+	});
 });
 
 describe("unknownRegions", () => {

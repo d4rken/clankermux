@@ -188,7 +188,14 @@ export const OverviewTab = React.memo(() => {
 			{/* Only renders when /api/system/status reports unpriced models */}
 			<PricingGapBanner />
 
-			{/* Header with Time Range Selector */}
+			{/* Deliberately ABOVE the header below, and therefore above the range
+			    selector: this card is live and carries its own minutes-scale
+			    window, which has nothing to do with the hours-to-days range that
+			    scopes everything after it. Placed below, it would read as a second
+			    control competing to scope the same content. */}
+			<LiveActivityLanes />
+
+			{/* Header with Time Range Selector — scopes everything below it */}
 			<div className="flex justify-between items-center">
 				<h2 className="text-2xl font-semibold">Overview</h2>
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
@@ -267,10 +274,6 @@ export const OverviewTab = React.memo(() => {
 					window="seven_day"
 				/>
 			</div>
-
-			{/* Rolling per-project request activity. Fed by the app-level request
-			    stream, so it needs no props and no query of its own. */}
-			<LiveActivityLanes />
 
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />

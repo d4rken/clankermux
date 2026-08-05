@@ -10,7 +10,8 @@ import {
 	markRadius,
 } from "../../lib/live-activity";
 import type { Outage } from "../../lib/live-activity-store";
-import { LIVE_WINDOW_MS, useLiveActivity } from "../RequestEventProvider";
+import { LIVE_WINDOW_OPTIONS } from "../../lib/live-activity-window";
+import { useLiveActivity, useLiveWindow } from "../RequestEventProvider";
 import {
 	Card,
 	CardContent,
@@ -80,6 +81,14 @@ export interface LiveActivityLanesViewProps {
 	/** Currently highlighted event, if any. */
 	selected?: LiveEvent | null;
 	/**
+	 * Window selector wiring. Optional so the view stays renderable without a
+	 * provider; omitted, the window is simply fixed at whatever `windowMs` says.
+	 */
+	windowControl?: {
+		value: number;
+		onChange: (ms: number) => void;
+	};
+	/**
 	 * Interaction wiring. Optional so the view stays a pure function of props
 	 * and can be rendered on the server.
 	 */
@@ -119,6 +128,7 @@ export function LiveActivityLanesView({
 	primed,
 	selected = null,
 	plot,
+	windowControl,
 }: LiveActivityLanesViewProps) {
 	const usable = Math.max(plotWidth - NOW_INSET, 1);
 	const pxPerMs = usable / windowMs;
@@ -160,6 +170,12 @@ export function LiveActivityLanesView({
 						<span className="text-muted-foreground tabular-nums">
 							{formatNumber(Math.round(perMinute))} req/min
 						</span>
+						{windowControl && (
+							<WindowSelector
+								value={windowControl.value}
+								onChange={windowControl.onChange}
+							/>
+						)}
 					</div>
 				</div>
 			</CardHeader>
@@ -354,6 +370,52 @@ export function LiveActivityLanesView({
 	);
 }
 
+/**
+ * Time-scale selector for the card.
+ *
+ * Sits on the card rather than in the page's filter row because it scopes only
+ * this card, and its scale (minutes) has nothing to do with the Overview's
+ * range picker (hours to days) — feeding one from the other would be nonsense.
+ * The card is mounted ABOVE that picker for the same reason: so it reads as
+ * outside its scope rather than as a second control competing with it.
+ */
+function WindowSelector({
+	value,
+	onChange,
+}: {
+	value: number;
+	onChange: (ms: number) => void;
+}) {
+	return (
+		<fieldset
+			// A fieldset rather than role="group": same semantics, native
+			// element. `min-w-0` undoes the UA's min-inline-size, which would
+			// otherwise stop it shrinking inside the flex header.
+			className="flex min-w-0 items-center gap-0.5 rounded-md border p-0.5"
+			aria-label="Live activity time range"
+		>
+			{LIVE_WINDOW_OPTIONS.map((option) => {
+				const active = option.ms === value;
+				return (
+					<button
+						key={option.ms}
+						type="button"
+						onClick={() => onChange(option.ms)}
+						aria-pressed={active}
+						className={`rounded px-1.5 py-0.5 text-xs tabular-nums transition-colors ${
+							active
+								? "bg-primary text-primary-foreground"
+								: "text-muted-foreground hover:bg-muted"
+						}`}
+					>
+						{option.label}
+					</button>
+				);
+			})}
+		</fieldset>
+	);
+}
+
 /** One request. Shape carries the status alongside colour. */
 function Mark({
 	event,
@@ -516,9 +578,17 @@ export function hitTest(
 	return { event: lane.events[bestIndex], laneIndex, eventIndex: bestIndex };
 }
 
+/**
+ * Gridline offsets from `now`, spaced so the axis stays readable at any window.
+ *
+ * A fixed one-minute spacing puts 31 labelled ticks on a half-hour window,
+ * which reads as noise and overlaps its own text. Aim for a handful instead.
+ */
 function minuteTicks(windowMs: number): number[] {
+	const minutes = windowMs / 60_000;
+	const step = (minutes <= 6 ? 1 : minutes <= 12 ? 2 : 5) * 60_000;
 	const ticks: number[] = [];
-	for (let offset = 0; offset <= windowMs; offset += 60_000) ticks.push(offset);
+	for (let offset = 0; offset <= windowMs; offset += step) ticks.push(offset);
 	return ticks;
 }
 
@@ -598,6 +668,7 @@ function describeLanes(lanes: Lane[], windowMs: number): string {
  */
 export function LiveActivityLanes() {
 	const { events, connected, outages, historyEdge, primed } = useLiveActivity();
+	const { windowMs, setWindowMs } = useLiveWindow();
 
 	const plotAreaRef = useRef<HTMLDivElement>(null);
 	const [plotWidth, setPlotWidth] = useState(DEFAULT_PLOT_WIDTH);
@@ -624,15 +695,8 @@ export function LiveActivityLanes() {
 	 */
 	const orderRef = useRef<string[]>([]);
 	const { lanes, order } = useMemo(
-		() =>
-			buildLanes(
-				events,
-				renderNow,
-				LIVE_WINDOW_MS,
-				MAX_LANES,
-				orderRef.current,
-			),
-		[events, renderNow],
+		() => buildLanes(events, renderNow, windowMs, MAX_LANES, orderRef.current),
+		[events, renderNow, windowMs],
 	);
 	orderRef.current = order;
 
@@ -666,6 +730,8 @@ export function LiveActivityLanes() {
 				plotAreaRef={plotAreaRef}
 				lanes={lanes}
 				renderNow={renderNow}
+				windowMs={windowMs}
+				setWindowMs={setWindowMs}
 				plotWidth={plotWidth}
 				connected={connected}
 				outages={outages}
@@ -690,6 +756,8 @@ function ScrollingLanes({
 	plotAreaRef,
 	lanes,
 	renderNow,
+	windowMs,
+	setWindowMs,
 	plotWidth,
 	connected,
 	outages,
@@ -700,6 +768,8 @@ function ScrollingLanes({
 	plotAreaRef: React.Ref<HTMLDivElement>;
 	lanes: Lane[];
 	renderNow: number;
+	windowMs: number;
+	setWindowMs: (ms: number) => void;
 	plotWidth: number;
 	connected: boolean;
 	outages: readonly Outage[];
@@ -709,7 +779,7 @@ function ScrollingLanes({
 }) {
 	const scrollRef = useRef<SVGGElement>(null);
 	const svgRef = useRef<SVGSVGElement>(null);
-	const pxPerMs = Math.max(plotWidth - NOW_INSET, 1) / LIVE_WINDOW_MS;
+	const pxPerMs = Math.max(plotWidth - NOW_INSET, 1) / windowMs;
 	const [cursor, setCursor] = useState<{
 		laneIndex: number;
 		eventIndex: number;
@@ -734,14 +804,14 @@ function ScrollingLanes({
 				(pointerEvent.clientX - rect.left) * scale,
 				pointerEvent.clientY - rect.top,
 				renderNow,
-				LIVE_WINDOW_MS,
+				windowMs,
 				plotWidth,
 			);
 			setCursor(
 				hit ? { laneIndex: hit.laneIndex, eventIndex: hit.eventIndex } : null,
 			);
 		},
-		[lanes, plotWidth, renderNow],
+		[lanes, plotWidth, renderNow, windowMs],
 	);
 
 	const onKeyDown = useCallback(
@@ -830,13 +900,14 @@ function ScrollingLanes({
 				<LiveActivityLanesView
 					lanes={lanes}
 					now={renderNow}
-					windowMs={LIVE_WINDOW_MS}
+					windowMs={windowMs}
 					plotWidth={plotWidth}
 					connected={connected}
 					outages={outages}
 					historyEdge={historyEdge}
 					primed={primed}
 					selected={selected}
+					windowControl={{ value: windowMs, onChange: setWindowMs }}
 					plot={{
 						ref: svgRef,
 						areaRef: plotAreaRef,
