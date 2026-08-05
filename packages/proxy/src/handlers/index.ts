@@ -11,6 +11,7 @@ export {
 	getAnthropicBurstThrottleUntil,
 	isAnthropicBurstThrottleActive,
 } from "./burst-cooldown";
+export { clearCodexUsagePersistMemo } from "./codex-observation";
 export {
 	createFamilyWeeklyExhaustedResponse,
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,

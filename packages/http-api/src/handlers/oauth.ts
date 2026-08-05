@@ -20,6 +20,7 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { createOAuthFlow } from "@clankermux/oauth-flow";
+import { usageCache } from "@clankermux/providers";
 import {
 	extractCodexIdentity,
 	initiateCodexDeviceFlow,
@@ -29,7 +30,11 @@ import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
 } from "@clankermux/providers/qwen";
-import { clearAccountRefreshCache } from "@clankermux/proxy";
+import {
+	clearAccountRefreshCache,
+	clearCodexUsagePersistMemo,
+	refreshCodexUsageForAccount,
+} from "@clankermux/proxy";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 
 const log = new Logger("OAuthHandler");
@@ -563,6 +568,37 @@ export function createCodexReauthHandler(dbOps: DatabaseOperations) {
 						);
 					}
 					clearAccountRefreshCache(account.id);
+
+					// Everything observed under the OLD credentials is now suspect: a
+					// reauth typically follows a plan change or a revoked grant, so the
+					// stored snapshot can describe limits the account no longer has.
+					// Drop the persisted columns, the live cache entry, and the
+					// persistence memo (which would otherwise dedupe the first
+					// post-reauth observation away against the pre-reauth snapshot and
+					// leave the NULLed columns empty), then ask for a fresh free read.
+					// All best-effort: the tokens are already written, so none of this
+					// may fail the reauth.
+					try {
+						await dbOps
+							.getAdapter()
+							.run(
+								"UPDATE accounts SET codex_usage_json = NULL, codex_usage_observed_at = NULL WHERE id = ?",
+								[account.id],
+							);
+					} catch (clearErr) {
+						log.error(
+							`Failed to clear the persisted Codex usage snapshot for '${account.name}':`,
+							clearErr,
+						);
+					}
+					usageCache.delete(account.id);
+					clearCodexUsagePersistMemo(account.id);
+					void refreshCodexUsageForAccount(account.id).catch((refreshErr) => {
+						log.warn(
+							`Post-reauth Codex usage refresh failed for '${account.name}':`,
+							refreshErr,
+						);
+					});
 
 					codexSessions.set(sessionId, {
 						status: "complete",

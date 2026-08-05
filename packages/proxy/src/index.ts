@@ -43,6 +43,7 @@ export {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearCapacityRestoredProbePending,
+	clearCodexUsagePersistMemo,
 	consumeCodexResetCreditForAccount,
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
