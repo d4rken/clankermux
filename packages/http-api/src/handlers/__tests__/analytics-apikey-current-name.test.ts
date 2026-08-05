@@ -8,9 +8,10 @@
  *  - api_key_performance returns the NEW name and exactly one row per key id
  *    after a rename (historical rows carry mixed snapshots).
  *  - Deleted keys fall back to the snapshot name, still one row per key id.
- *  - The apiKeys filter matches by CURRENT name, so filtering on the new name
- *    includes requests recorded under the old name (and the old name no longer
- *    matches anything for a live key).
+ *  - The apiKeys FILTER matches by api_key_id, not by any name. The id is
+ *    stamped on the row, so it survives both a rename and a hard delete — which
+ *    is what the COALESCE(current name, snapshot name) predicate it replaced was
+ *    only approximating.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -106,7 +107,7 @@ describe("analytics api_key_performance — current name with snapshot fallback"
 		expect(body.apiKeyPerformance[0].requests).toBe(2);
 	});
 
-	it("apiKeys filter matches the CURRENT name, including pre-rename requests", async () => {
+	it("apiKeys filter matches by id, spanning a rename", async () => {
 		insertApiKey(db, "k1", "old-name");
 		insertRequest(db, "k1", "old-name");
 		insertRequest(db, "k1", "old-name");
@@ -115,20 +116,24 @@ describe("analytics api_key_performance — current name with snapshot fallback"
 		// Unrelated keyless request must not be matched by the filter.
 		insertRequest(db, null, null);
 
-		const filteredNew = await fetchAnalytics(context, "apiKeys=new-name");
-		expect(filteredNew.totals.requests).toBe(3);
+		const byId = await fetchAnalytics(context, "apiKeys=k1");
+		expect(byId.totals.requests).toBe(3);
 
-		// The old name no longer identifies the live key.
-		const filteredOld = await fetchAnalytics(context, "apiKeys=old-name");
-		expect(filteredOld.totals.requests).toBe(0);
+		// Neither name is an identity any more — the dropdown submits ids.
+		expect(
+			(await fetchAnalytics(context, "apiKeys=new-name")).totals.requests,
+		).toBe(0);
+		expect(
+			(await fetchAnalytics(context, "apiKeys=old-name")).totals.requests,
+		).toBe(0);
 	});
 
-	it("apiKeys filter falls back to the snapshot name for deleted keys", async () => {
+	it("apiKeys filter still matches a hard-deleted key by id", async () => {
 		insertRequest(db, "gone", "legacy-a");
 		insertRequest(db, "gone", "legacy-b");
 		insertRequest(db, null, null);
 
-		const filtered = await fetchAnalytics(context, "apiKeys=legacy-a");
-		expect(filtered.totals.requests).toBe(1);
+		const filtered = await fetchAnalytics(context, "apiKeys=gone");
+		expect(filtered.totals.requests).toBe(2);
 	});
 });

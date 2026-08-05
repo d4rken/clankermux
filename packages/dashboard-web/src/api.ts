@@ -1,6 +1,7 @@
 import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
+	AnalyticsFilterOptionsResponse,
 	AnalyticsResponse,
 	AnalyticsSection,
 	CacheEffectivenessResponse,
@@ -745,6 +746,19 @@ class API extends HttpClient {
 	}
 
 	/**
+	 * Options for the analytics filter dropdowns.
+	 *
+	 * A dedicated endpoint rather than whatever the analytics breakdowns happen
+	 * to return: those are truncated to the top N and only cover the tabs the
+	 * user has opened, so the long tail was silently unselectable.
+	 */
+	async getAnalyticsFilterOptions(): Promise<AnalyticsFilterOptionsResponse> {
+		return this.get<AnalyticsFilterOptionsResponse>(
+			"/api/analytics/filter-options",
+		);
+	}
+
+	/**
 	 * Distinct project names stamped on past requests (sorted server-side).
 	 * Feeds the Project filter dropdown in the request explorer.
 	 */
@@ -764,10 +778,13 @@ class API extends HttpClient {
 	async getAnalytics(
 		range = "24h",
 		filters?: {
+			/** Account IDs, not display names. */
 			accounts?: string[];
 			models?: string[];
+			/** api_key_id values, not display names. */
 			apiKeys?: string[];
 			projects?: string[];
+			noAccount?: boolean;
 			noProject?: boolean;
 			status?: "all" | "success" | "error";
 		},
@@ -796,6 +813,9 @@ class API extends HttpClient {
 		}
 		if (filters?.projects?.length) {
 			params.append("projects", filters.projects.join(","));
+		}
+		if (filters?.noAccount) {
+			params.append("accountsNone", "true");
 		}
 		if (filters?.noProject) {
 			params.append("projectsNone", "true");

@@ -581,6 +581,39 @@ export type FullAnalyticsResponse = Required<AnalyticsResponse> & {
 	totals: Required<AnalyticsTotals>;
 };
 
+/** One selectable value in an analytics filter dropdown. */
+export interface AnalyticsFilterOption {
+	/** The stable identity submitted back as a filter value. */
+	value: string;
+	/** What the dropdown shows. */
+	label: string;
+}
+
+/**
+ * Options for the analytics filter dropdowns, from
+ * `GET /api/analytics/filter-options`.
+ *
+ * Sourced from a dedicated endpoint rather than accumulated from whatever the
+ * analytics breakdowns happened to return: those are truncated to the top N
+ * models / projects and only cover the tabs the user has visited, so the
+ * dropdowns silently omitted the long tail.
+ *
+ * Accounts and API keys carry `{value: id, label: name}` — the id is what the
+ * request row stores, so a filter keeps working across a rename and a hard
+ * delete (where `label` falls back to the record-time snapshot, then the id).
+ * Models and projects ARE their own identity and stay bare strings.
+ */
+export interface AnalyticsFilterOptionsResponse {
+	accounts: AnalyticsFilterOption[];
+	apiKeys: AnalyticsFilterOption[];
+	models: string[];
+	projects: string[];
+	/** Some requests have a SQL-NULL account — drives the "(no account)" option. */
+	hasNoAccount: boolean;
+	/** Some requests have a SQL-NULL project — drives the "(no project)" option. */
+	hasNoProject: boolean;
+}
+
 // Usage-history (Limits-tab sawtooth chart) types.
 //
 // Per-account utilization series + a pool aggregate, sampled at a regular

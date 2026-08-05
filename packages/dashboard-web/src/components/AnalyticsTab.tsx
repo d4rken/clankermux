@@ -1,13 +1,13 @@
-import type { AnalyticsResponse } from "@clankermux/types";
 import React, { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { TimeRange } from "../constants";
+import { useAnalyticsFilterOptions } from "../hooks/queries";
 import {
 	type AnalyticsTabId,
 	DEFAULT_RANGES,
 	sanitizeTab,
 } from "../lib/analytics-tabs";
-import type { FilterState } from "./analytics/AnalyticsFilters";
+import { EMPTY_FILTERS, type FilterState } from "./analytics/AnalyticsFilters";
 import { CachingTab } from "./analytics/tabs/CachingTab";
 import { ModelsTab } from "./analytics/tabs/ModelsTab";
 import { ProjectsReliabilityTab } from "./analytics/tabs/ProjectsReliabilityTab";
@@ -42,107 +42,15 @@ export const AnalyticsTab = React.memo(() => {
 	);
 
 	// ── Global filter state (shared across the request tabs) ──────────────────
-	const [filters, setFilters] = useState<FilterState>({
-		accounts: [],
-		models: [],
-		apiKeys: [],
-		projects: [],
-		noProject: false,
-		status: "all",
-	});
+	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
 	const [filterOpen, setFilterOpen] = useState(false);
 
-	// Accumulate all seen accounts/models/apiKeys/projects to maintain a full
-	// list for the filter dropdowns across every tab's queries.
-	const [allSeenAccounts, setAllSeenAccounts] = useState<Set<string>>(
-		new Set(),
-	);
-	const [allSeenModels, setAllSeenModels] = useState<Set<string>>(new Set());
-	const [allSeenApiKeys, setAllSeenApiKeys] = useState<Set<string>>(new Set());
-	const [allSeenProjects, setAllSeenProjects] = useState<Set<string>>(
-		new Set(),
-	);
-	// Whether any breakdown row in this session had project === null. Accumulated
-	// like the seen-sets (latched true, never reset) so the "(no project)"
-	// checkbox doesn't flicker away when the current range happens to have no
-	// NULL-project rows.
-	const [hasNoProjectBucket, setHasNoProjectBucket] = useState(false);
-
-	// Latch a tab's query payload into the global seen-sets. Called by each tab
-	// whenever its analytics data changes (replaces the old useEffect on the
-	// single shared query, now that every tab drives its own).
-	const mergeSeen = useCallback((analytics: AnalyticsResponse) => {
-		// Add new accounts
-		const accountPerformance = analytics.accountPerformance;
-		if (accountPerformance) {
-			setAllSeenAccounts((prev) => {
-				const updated = new Set(prev);
-				for (const account of accountPerformance) {
-					updated.add(account.name);
-				}
-				return updated;
-			});
-		}
-
-		// Add new models
-		const modelDistribution = analytics.modelDistribution;
-		if (modelDistribution) {
-			setAllSeenModels((prev) => {
-				const updated = new Set(prev);
-				for (const model of modelDistribution) {
-					updated.add(model.model);
-				}
-				return updated;
-			});
-		}
-
-		// Add new API keys
-		const apiKeyPerformance = analytics.apiKeyPerformance;
-		if (apiKeyPerformance) {
-			setAllSeenApiKeys((prev) => {
-				const updated = new Set(prev);
-				for (const apiKey of apiKeyPerformance) {
-					updated.add(apiKey.name);
-				}
-				return updated;
-			});
-		}
-
-		// Add new projects — named projects only; the NULL bucket is handled by
-		// the dedicated "(no project)" checkbox, never as a name.
-		if (analytics.projectBreakdown) {
-			setAllSeenProjects((prev) => {
-				const updated = new Set(prev);
-				for (const row of analytics.projectBreakdown ?? []) {
-					if (row.project != null) {
-						updated.add(row.project);
-					}
-				}
-				return updated;
-			});
-			if (analytics.projectBreakdown.some((row) => row.project == null)) {
-				setHasNoProjectBucket(true);
-			}
-		}
-	}, []);
-
-	// Convert sets to sorted arrays for filter dropdowns
-	const availableAccounts = useMemo(
-		() => Array.from(allSeenAccounts).sort(),
-		[allSeenAccounts],
-	);
-	const availableModels = useMemo(
-		() => Array.from(allSeenModels).sort(),
-		[allSeenModels],
-	);
-	const availableApiKeys = useMemo(
-		() => Array.from(allSeenApiKeys).sort(),
-		[allSeenApiKeys],
-	);
-	const availableProjects = useMemo(
-		() => Array.from(allSeenProjects).sort(),
-		[allSeenProjects],
-	);
+	// Dropdown options come from a dedicated endpoint rather than being latched
+	// out of each tab's analytics payload. Those payloads are truncated to the
+	// server's top-N models/projects and only arrive for tabs the user has
+	// actually opened, so the old accumulate-as-you-browse approach made the
+	// dropdown contents depend on browsing history and hid the long tail.
+	const { data: filterOptions } = useAnalyticsFilterOptions();
 
 	// Count active filters
 	const activeFilterCount =
@@ -150,6 +58,7 @@ export const AnalyticsTab = React.memo(() => {
 		filters.models.length +
 		filters.apiKeys.length +
 		filters.projects.length +
+		(filters.noAccount ? 1 : 0) +
 		(filters.noProject ? 1 : 0) +
 		(filters.status !== "all" ? 1 : 0);
 
@@ -157,19 +66,22 @@ export const AnalyticsTab = React.memo(() => {
 	const [selectedMetric, setSelectedMetric] = useState("requests");
 	const [modelBreakdown, setModelBreakdown] = useState(false);
 
-	const sharedFilterProps: SharedFilterProps = {
-		filters,
-		setFilters,
-		availableAccounts,
-		availableModels,
-		availableApiKeys,
-		availableProjects,
-		hasNoProjectBucket,
-		activeFilterCount,
-		filterOpen,
-		setFilterOpen,
-		mergeSeen,
-	};
+	const sharedFilterProps: SharedFilterProps = useMemo(
+		() => ({
+			filters,
+			setFilters,
+			availableAccounts: filterOptions?.accounts ?? [],
+			availableModels: filterOptions?.models ?? [],
+			availableApiKeys: filterOptions?.apiKeys ?? [],
+			availableProjects: filterOptions?.projects ?? [],
+			hasNoAccountBucket: filterOptions?.hasNoAccount ?? false,
+			hasNoProjectBucket: filterOptions?.hasNoProject ?? false,
+			activeFilterCount,
+			filterOpen,
+			setFilterOpen,
+		}),
+		[filters, filterOptions, activeFilterCount, filterOpen],
+	);
 
 	return (
 		<div className="space-y-6">

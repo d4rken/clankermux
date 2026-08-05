@@ -3,31 +3,22 @@ import type { TimeRange } from "../../../constants";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { TimeRangeSelector } from "../../overview/TimeRangeSelector";
 import { CacheFlowPanel, CacheKeepaliveSection } from "..";
-import type { FilterState } from "../AnalyticsFilters";
+import { EMPTY_FILTERS } from "../AnalyticsFilters";
 import type { CachingTabProps } from "./types";
 
 // The Cache Keep-Alive card below is backed by its own endpoints, so the only
 // analytics phase this tab renders is the cache-flow sankey.
 const CACHING_SECTIONS: readonly AnalyticsSection[] = ["cacheFlow"];
 
-// Caching view has no per-request filters — both cards are driven by a single
-// window picker. An empty, stable filter object keeps the shared analytics query
-// aligned with the other tabs without exposing any filter controls here.
-const NO_FILTERS: FilterState = {
-	accounts: [],
-	models: [],
-	apiKeys: [],
-	projects: [],
-	noProject: false,
-	status: "all",
-};
-
 /**
  * Caching view. Owns the cache-flow sankey and the grouped Cache Keep-Alive
  * section, both driven by one shared window selector (no per-request filters).
  */
 export function CachingTab({ range, onRangeChange }: CachingTabProps) {
-	const { analytics, loading } = useAnalyticsData(range, NO_FILTERS, {
+	// This view has no per-request filters — both cards are driven by a single
+	// window picker. The shared empty selection keeps its analytics query aligned
+	// with the other tabs without exposing any filter controls here.
+	const { analytics, loading } = useAnalyticsData(range, EMPTY_FILTERS, {
 		sections: CACHING_SECTIONS,
 	});
 

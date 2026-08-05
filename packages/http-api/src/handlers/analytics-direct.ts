@@ -438,9 +438,17 @@ export function createAnalyticsHandler(context: APIContext) {
 		const mode = params.get("mode") ?? "normal";
 		const isCumulative = mode === "cumulative";
 
-		// Extract filters
+		// Extract filters.
+		//
+		// `accounts` and `apiKeys` carry stable IDs, not display names. Names are
+		// not identity: they change under a rename and disappear under a hard
+		// delete, and matching on them left the SQL-NULL-account rows unfilterable
+		// while the dropdown still offered a "(no account)" option. IDs are what
+		// the row actually stores. `models` and `projects` ARE their own identity,
+		// so they are unchanged.
 		const accountsFilter =
 			params.get("accounts")?.split(",").filter(Boolean) || [];
+		const accountsNone = params.get("accountsNone") === "true";
 		const modelsFilter = params.get("models")?.split(",").filter(Boolean) || [];
 		const apiKeysFilter =
 			params.get("apiKeys")?.split(",").filter(Boolean) || [];
@@ -462,19 +470,22 @@ export function createAnalyticsHandler(context: APIContext) {
 			queryParams.push(startMs);
 		}
 
-		if (accountsFilter.length > 0) {
-			// Handle account filter - map account names to IDs via join
-			const placeholders = accountsFilter.map(() => "?").join(",");
-			conditions.push(`(
-				r.account_used IN (SELECT id FROM accounts WHERE name IN (${placeholders}))
-				OR (r.account_used = ? AND ? IN (${placeholders}))
-			)`);
-			queryParams.push(
-				...accountsFilter,
-				NO_ACCOUNT_ID,
-				NO_ACCOUNT_ID,
-				...accountsFilter,
-			);
+		// Named accounts plus a dedicated flag for the NULL bucket, mirroring the
+		// project filter below. The NO_ACCOUNT_ID sentinel is never STORED on a
+		// request row (account_used is either an id or SQL NULL), so the old
+		// `r.account_used = 'no_account'` disjunct matched nothing and the
+		// no-account requests could not be filtered at all.
+		if (accountsFilter.length > 0 || accountsNone) {
+			const parts: string[] = [];
+			if (accountsFilter.length > 0) {
+				const placeholders = accountsFilter.map(() => "?").join(",");
+				parts.push(`r.account_used IN (${placeholders})`);
+				queryParams.push(...accountsFilter);
+			}
+			if (accountsNone) {
+				parts.push("r.account_used IS NULL");
+			}
+			conditions.push(`(${parts.join(" OR ")})`);
 		}
 
 		if (modelsFilter.length > 0) {
@@ -484,16 +495,13 @@ export function createAnalyticsHandler(context: APIContext) {
 		}
 
 		if (apiKeysFilter.length > 0) {
-			// Match the key's CURRENT name (api_keys.name) so a filter on the
-			// post-rename name finds requests stamped under the old one; the
-			// record-time snapshot remains the fallback for hard-deleted keys.
-			// A correlated subquery keeps the shared whereClause self-contained —
-			// it's interpolated into many sub-selects whose requests alias is `r`,
-			// so it must not depend on any particular JOIN being present.
+			// Match on api_key_id, which is stamped on the row and survives both a
+			// rename and a hard delete — exactly what the previous
+			// COALESCE(current name, snapshot name) predicate was approximating,
+			// but exactly rather than approximately, and without a correlated
+			// subquery per row.
 			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(
-				`COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) IN (${placeholders})`,
-			);
+			conditions.push(`r.api_key_id IN (${placeholders})`);
 			queryParams.push(...apiKeysFilter);
 		}
 

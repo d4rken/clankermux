@@ -265,8 +265,10 @@ describe("analytics activeSessions", () => {
 			selectedAccountId: "acc-B",
 		});
 
-		// Filtering to Beta must exclude the account-A session entirely.
-		const data = await fetchAnalytics({ accounts: "Beta" });
+		// Filtering to account B's ID must exclude the account-A session entirely.
+		// The filter matches `requests.account_used`, so it reaches this panel via
+		// the JOIN back to requests.
+		const data = await fetchAnalytics({ accounts: "acc-B" });
 		const as = data.activeSessions;
 
 		expect(as.timeSeries).toEqual([

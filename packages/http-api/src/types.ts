@@ -44,6 +44,8 @@ export type {
 	AccountResponse,
 	ActiveSessionsAnalytics,
 	ActiveSessionsTimePoint,
+	AnalyticsFilterOption,
+	AnalyticsFilterOptionsResponse,
 	AnalyticsResponse,
 	AnalyticsSection,
 	AnalyticsTotals,

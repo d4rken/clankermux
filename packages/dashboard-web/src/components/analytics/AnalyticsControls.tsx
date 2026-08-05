@@ -1,3 +1,4 @@
+import type { AnalyticsFilterOption } from "@clankermux/types";
 import { CalendarDays, RefreshCw } from "lucide-react";
 import type { TimeRange } from "../../constants";
 import { Button } from "../ui/button";
@@ -15,10 +16,11 @@ interface AnalyticsControlsProps {
 	setTimeRange: (range: TimeRange) => void;
 	filters: FilterState;
 	setFilters: (filters: FilterState) => void;
-	availableAccounts: string[];
+	availableAccounts: AnalyticsFilterOption[];
 	availableModels: string[];
-	availableApiKeys: string[];
+	availableApiKeys: AnalyticsFilterOption[];
 	availableProjects: string[];
+	hasNoAccountBucket: boolean;
 	hasNoProjectBucket: boolean;
 	activeFilterCount: number;
 	filterOpen: boolean;
@@ -36,6 +38,7 @@ export function AnalyticsControls({
 	availableModels,
 	availableApiKeys,
 	availableProjects,
+	hasNoAccountBucket,
 	hasNoProjectBucket,
 	activeFilterCount,
 	filterOpen,
@@ -71,6 +74,7 @@ export function AnalyticsControls({
 					availableModels={availableModels}
 					availableApiKeys={availableApiKeys}
 					availableProjects={availableProjects}
+					hasNoAccountBucket={hasNoAccountBucket}
 					hasNoProjectBucket={hasNoProjectBucket}
 					activeFilterCount={activeFilterCount}
 					filterOpen={filterOpen}

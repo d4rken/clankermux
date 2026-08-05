@@ -30,10 +30,10 @@ import { createAnalyticsHandler } from "../analytics-direct";
 import { createIsolatedAnalyticsHandler } from "../analytics-runner";
 import GOLDEN from "./__fixtures__/analytics-unscoped-golden.json";
 import {
-	ACCOUNT_A_NAME,
-	ACCOUNT_B_NAME,
-	API_KEY_LIVE_NAME,
-	API_KEY_RENAMED_NAME,
+	ACCOUNT_A,
+	ACCOUNT_B,
+	API_KEY_LIVE,
+	API_KEY_RENAMED,
 	FIXED_NOW,
 	PROJECT_ALPHA,
 	PROJECT_BETA,
@@ -233,9 +233,9 @@ describe("sections validation", () => {
  */
 const FILTERED_QUERY =
 	`range=30d` +
-	`&accounts=${ACCOUNT_A_NAME},${ACCOUNT_B_NAME}` +
+	`&accounts=${ACCOUNT_A},${ACCOUNT_B}` +
 	`&models=claude-opus-4-8,claude-sonnet-5` +
-	`&apiKeys=${API_KEY_LIVE_NAME},${API_KEY_RENAMED_NAME}` +
+	`&apiKeys=${API_KEY_LIVE},${API_KEY_RENAMED}` +
 	`&projects=${PROJECT_ALPHA},${PROJECT_BETA}`;
 
 const UNION_SECTIONS: AnalyticsSection[] = [

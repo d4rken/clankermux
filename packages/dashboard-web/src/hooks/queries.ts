@@ -218,6 +218,7 @@ export const useAnalytics = (
 		models?: string[];
 		apiKeys?: string[];
 		projects?: string[];
+		noAccount?: boolean;
 		noProject?: boolean;
 		status?: "all" | "success" | "error";
 	},
@@ -297,6 +298,25 @@ export const useAnalytics = (
 			});
 			return failureCount < 3;
 		},
+	});
+};
+
+/**
+ * Options for the analytics filter dropdowns.
+ *
+ * Replaces accumulating them from whatever the analytics breakdowns returned:
+ * those are truncated to the top N models/projects and only cover the sub-tabs
+ * the user has opened, so the long tail was silently unselectable and the
+ * dropdown contents depended on browsing history.
+ *
+ * Slow-moving (a new model or project appears rarely), and the server caches it
+ * for 5 minutes, so this mirrors that with a long staleTime and no polling.
+ */
+export const useAnalyticsFilterOptions = () => {
+	return useQuery({
+		queryKey: queryKeys.analyticsFilterOptions(),
+		queryFn: () => api.getAnalyticsFilterOptions(),
+		staleTime: 5 * 60_000,
 	});
 };
 

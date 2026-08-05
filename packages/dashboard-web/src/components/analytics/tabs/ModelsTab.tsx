@@ -1,5 +1,4 @@
 import type { AnalyticsSection } from "@clankermux/types";
-import { useEffect } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
@@ -32,11 +31,11 @@ export function ModelsTab(props: ModelsTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 	} = props;
@@ -44,10 +43,6 @@ export function ModelsTab(props: ModelsTabProps) {
 	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
 		sections: MODELS_SECTIONS,
 	});
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
 
 	// Use real cost by model data with filters. No slice cap: ModelAnalytics
 	// joins this per model against the (up to 10) modelPerformance rows, so
@@ -69,6 +64,7 @@ export function ModelsTab(props: ModelsTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}

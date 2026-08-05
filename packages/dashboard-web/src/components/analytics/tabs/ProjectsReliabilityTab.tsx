@@ -1,5 +1,4 @@
 import type { AnalyticsSection } from "@clankermux/types";
-import { useEffect } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
@@ -31,11 +30,11 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 	} = props;
@@ -43,10 +42,6 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
 		sections: PROJECTS_SECTIONS,
 	});
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
 
 	return (
 		<div className="space-y-6">
@@ -59,6 +54,7 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}

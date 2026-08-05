@@ -46,6 +46,11 @@ export const queryKeys = {
 	requestsCount: (params: unknown) =>
 		[...queryKeys.all, "requests", "count", params] as const,
 	requestProjects: () => [...queryKeys.all, "requests", "projects"] as const,
+	// Options for the analytics filter dropdowns. Unkeyed: the lists are global
+	// by design, so scoping them to the active filters would make a filter
+	// un-clearable once it excluded its own option.
+	analyticsFilterOptions: () =>
+		[...queryKeys.all, "analytics", "filter-options"] as const,
 	logs: () => [...queryKeys.all, "logs"] as const,
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
 	combos: () => [...queryKeys.all, "combos"] as const,

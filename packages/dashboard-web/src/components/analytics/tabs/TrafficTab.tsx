@@ -1,5 +1,5 @@
 import type { AnalyticsSection } from "@clankermux/types";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { toCumulativeSeries } from "../../../lib/cumulative";
 import { formatAxisTime } from "../../../lib/time-format";
@@ -41,11 +41,11 @@ export function TrafficTab(props: TrafficTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 		selectedMetric,
@@ -66,10 +66,6 @@ export function TrafficTab(props: TrafficTabProps) {
 		sections: TRAFFIC_SECTIONS,
 		perModelSections: TRAFFIC_PER_MODEL_SECTIONS,
 	});
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
 
 	// Memoize filter function
 	const filterData = useCallback(
@@ -170,6 +166,7 @@ export function TrafficTab(props: TrafficTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}

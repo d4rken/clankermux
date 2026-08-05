@@ -7,6 +7,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import type { APIContext } from "../types";
 import { createAnalyticsHandler as createDirectAnalyticsHandler } from "./analytics-direct";
+import { createAnalyticsFilterOptionsHandler as createDirectAnalyticsFilterOptionsHandler } from "./analytics-filter-options-direct";
 import {
 	canonicalizeSectionsParam,
 	parseSectionsParam,
@@ -53,7 +54,22 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"cache-keepalive-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
 	"payments-summary": DEFAULT_WORKER_TIMEOUT_MS,
+	"filter-options": DEFAULT_WORKER_TIMEOUT_MS,
 };
+
+// Per-kind response-cache TTL. The filter-options lists change only when a new
+// model/project/account/key first appears, so a long TTL is safe and keeps the
+// dropdowns off the DB entirely between tab switches. Everything else keeps the
+// short default, where staleness is immediately visible to the user.
+const FILTER_OPTIONS_CACHE_TTL_MS = 5 * 60_000;
+const CACHE_TTL_MS_BY_KIND: Partial<Record<DashboardWorkerKind, number>> = {
+	"filter-options": FILTER_OPTIONS_CACHE_TTL_MS,
+};
+
+/** Response-cache TTL (ms) for a dashboard worker kind. */
+export function getCacheTtlMs(kind: DashboardWorkerKind): number {
+	return CACHE_TTL_MS_BY_KIND[kind] ?? DEFAULT_CACHE_TTL_MS;
+}
 
 /** Per-request soft timeout (ms) for a dashboard worker kind. */
 export function getWorkerTimeoutMs(kind: DashboardWorkerKind): number {
@@ -181,6 +197,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch payments summary data",
 		tooManyMessage: "Too many payments summary requests",
 	},
+	"filter-options": {
+		timeoutMessage: "Analytics filter options request timed out",
+		failureMessage: "Failed to fetch analytics filter options",
+		tooManyMessage: "Too many analytics filter option requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
@@ -200,6 +221,16 @@ export function createIsolatedAnalyticsHandler(context: APIContext) {
 		if (!parsed.ok) return errorResponse(BadRequest(parsed.message));
 		return inner(canonicalizeSectionsParam(params, parsed.sections));
 	};
+}
+
+export function createIsolatedAnalyticsFilterOptionsHandler(
+	context: APIContext,
+) {
+	return createIsolatedDashboardHandler(
+		context,
+		"filter-options",
+		createDirectAnalyticsFilterOptionsHandler(context),
+	);
 }
 
 export function createIsolatedStatsHandler(context: APIContext) {
@@ -522,7 +553,7 @@ async function cacheIfSuccessful(
 	try {
 		const body = await response.clone().text();
 		responseCache.set(cacheKey, {
-			expiresAt: Date.now() + DEFAULT_CACHE_TTL_MS,
+			expiresAt: Date.now() + getCacheTtlMs(kind),
 			status: response.status,
 			body,
 		});
