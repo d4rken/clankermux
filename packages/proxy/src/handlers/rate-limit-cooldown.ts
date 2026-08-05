@@ -1,5 +1,6 @@
 import {
 	computeRateLimitBackoffMs,
+	getRateLimitResetStabilityMs,
 	logError,
 	RateLimitError,
 } from "@clankermux/core";
@@ -8,6 +9,86 @@ import type { Account, RateLimitReason } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("RateLimitCooldown");
+
+/**
+ * Shared success-recovery side-effects, run when a response POSITIVELY proves
+ * the account serves (a real-traffic `response.ok`, or a standalone Codex
+ * observation's confirmed recovery — callers gate WHEN):
+ *
+ *  (a) Stability reset — when the most recent 429 is older than the stability
+ *      window, the streak counter resets. Gated on `rate_limited_at` ALONE
+ *      (the periodic `clearExpiredRateLimits` sweep nulls `rate_limited_until`
+ *      without touching `rate_limited_at`; requiring the lock would leave
+ *      naturally-expired accounts at an inflated backoff tier forever).
+ *
+ *  (b) Clear `rate_limited_until` AND `rate_limited_reason` together. The
+ *      reason is a cause label: leaving it after recovery makes a healthy
+ *      account read as failing in the dashboard/health projections
+ *      indefinitely (nothing else ever cleared it). `out_of_credits` clearing
+ *      HERE is the invariant's sanctioned path — a real success — as opposed
+ *      to polling, which must never wipe it.
+ *
+ * `clearBoundMs` is the stale-response guard: the clear only applies when the
+ * current limit was written BEFORE the request/observation that proves health
+ * started (`rate_limited_at < clearBoundMs`, enforced in-memory AND in SQL).
+ * Without it, a slow request's delayed 200 — issued before quota depletion —
+ * would erase the newer 429's state. Callers with no meaningful start time
+ * pass `Date.now()`, which preserves the historical clear-on-success shape.
+ *
+ * `rate_limit_status`/`rate_limit_reset` are deliberately NOT touched: the
+ * same response's status-meta persistence refreshes them with live header
+ * values (the honest overwrite), and clearing them would erase the
+ * auto-refresh scheduler's window anchor.
+ */
+export function applySuccessRateLimitClear(
+	account: Account,
+	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
+	clearBoundMs: number,
+): void {
+	// Stale guard FIRST, covering BOTH side-effects: when a 429 landed at/after
+	// the bound, neither the stability reset nor the clear may run — the
+	// stability reset nulls `rate_limited_at`, which is exactly the timestamp
+	// the clear's own SQL guard keys on, so letting it run first would launder
+	// the stale clear through a NULL. (The streak being live under a newer 429
+	// makes skipping the reset correct on its own terms too.)
+	const newerLimitExists =
+		account.rate_limited_at != null && account.rate_limited_at >= clearBoundMs;
+	if (newerLimitExists) return;
+
+	// (a) Stability reset — gated only on rate_limited_at. The DB write carries
+	// the same bound: this snapshot's in-memory `rate_limited_at` may lag a
+	// concurrent 429's newer persisted timestamp, and an unguarded reset would
+	// null it (see above).
+	if (
+		account.rate_limited_at &&
+		Date.now() - account.rate_limited_at > getRateLimitResetStabilityMs()
+	) {
+		account.consecutive_rate_limits = 0;
+		account.rate_limited_at = null;
+		ctx.asyncWriter.enqueue(() =>
+			ctx.dbOps.resetConsecutiveRateLimits(account.id, clearBoundMs),
+		);
+	}
+
+	// (b) Guarded lock+reason clear (only when something is set in-memory,
+	// avoiding a no-op DB write on the happy path).
+	if (!account.rate_limited_until && !account.rate_limited_reason) return;
+	account.rate_limited_until = null;
+	account.rate_limited_reason = null;
+	ctx.asyncWriter.enqueue(async () => {
+		const db = ctx.dbOps.getAdapter();
+		await db.run(
+			`UPDATE accounts SET rate_limited_until = NULL, rate_limited_reason = NULL
+			 WHERE id = ?
+			   AND (rate_limited_until IS NOT NULL OR rate_limited_reason IS NOT NULL)
+			   AND (rate_limited_at IS NULL OR rate_limited_at < ?)`,
+			[account.id, clearBoundMs],
+		);
+		log.debug(
+			`Cleared rate-limit lock+reason for account ${account.name} on confirmed success`,
+		);
+	});
+}
 
 // --- Single-flight recovery probe gate (upstream 8197364f) -------------------
 //

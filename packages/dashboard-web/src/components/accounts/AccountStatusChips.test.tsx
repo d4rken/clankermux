@@ -687,3 +687,36 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 		expect(html).toContain("Cancel");
 	});
 });
+
+describe("AccountStatusChips — family-weekly exhausted chip", () => {
+	it("renders an amber warning chip with the family label and countdown", () => {
+		const html = render(
+			makeAccount({
+				usageData: {
+					limits: [
+						{
+							kind: "weekly_scoped",
+							group: "weekly",
+							percent: 100,
+							resets_at: "2024-01-05T12:00:00.000Z", // 48h after NOW
+							scope: {
+								model: { id: null, display_name: "Fable" },
+								surface: null,
+							},
+							is_active: true,
+						},
+					],
+				} as unknown as AccountResponse["usageData"],
+			}),
+		);
+		expect(html).toContain("Fable weekly exhausted (48h)");
+		expect(html).toContain("bg-amber-100");
+		// The account is routable for other families — no Force Reset offer.
+		expect(html).not.toContain("Force reset");
+	});
+
+	it("does not render the chip when no scoped window is exhausted", () => {
+		const html = render(makeAccount());
+		expect(html).not.toContain("weekly exhausted");
+	});
+});

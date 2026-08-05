@@ -201,7 +201,7 @@ export function AccountListItem({
 							}}
 							title={
 								account.provider === "codex"
-									? "Refresh usage data (sends one minimal Codex request — consumes a small slice of quota)"
+									? "Refresh usage data (free usage read — does not consume quota)"
 									: "Refresh usage data (restarts usage polling and refreshes token if expired)"
 							}
 						>

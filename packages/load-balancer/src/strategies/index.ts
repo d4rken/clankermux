@@ -102,6 +102,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		string,
 		{ accountId: string; lastUsedAt: number }
 	>();
+	/**
+	 * Highest `lastUsedAt` ever written to {@link affinityByKey}. Stored stamps
+	 * are clamped to this, so they are non-decreasing in insertion order even if
+	 * the wall clock steps backwards (NTP correction, VM resume). That is what
+	 * lets pruneAffinity() stop its sweep at the first live entry.
+	 */
+	private lastAffinityStamp = 0;
 
 	constructor(
 		sessionDurationMs: number = TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
@@ -268,8 +275,17 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	): void {
 		const key = this.getAffinityKey(meta);
 		if (!key) return;
+		// Clamp the stamp to be non-decreasing. `now` comes from the wall clock,
+		// which can step backwards; without this a later entry could carry an
+		// older stamp than one already in the map, breaking the ordering that
+		// pruneAffinity()'s early stop relies on and leaving an expired pin live
+		// behind a newer one. A backwards step now costs at most some entries
+		// ageing out late — bounded by MAX_AFFINITY_ENTRIES — instead of a stale
+		// pin surviving and producing an affinity hit.
+		const stamp = now > this.lastAffinityStamp ? now : this.lastAffinityStamp;
+		this.lastAffinityStamp = stamp;
 		this.affinityByKey.delete(key);
-		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: now });
+		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: stamp });
 		this.pruneAffinity(now);
 	}
 
@@ -298,10 +314,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
+		// The map is maintained in least-recently-used order: recordAffinity()
+		// deletes the key before re-setting it, which moves a touched entry to
+		// the back. Iteration order is therefore ascending `lastUsedAt`, so the
+		// stale entries are a prefix and the first live entry ends the sweep.
+		// Without the break this scans every entry on EVERY affinity write,
+		// which is O(n) per request and O(n^2) to fill the map.
 		for (const [key, entry] of this.affinityByKey) {
-			if (entry.lastUsedAt < staleBefore) {
-				this.affinityByKey.delete(key);
-			}
+			if (entry.lastUsedAt >= staleBefore) break;
+			this.affinityByKey.delete(key);
 		}
 
 		if (this.affinityByKey.size <= MAX_AFFINITY_ENTRIES) return;

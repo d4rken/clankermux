@@ -584,6 +584,18 @@ export function AccountStatusChips({
 					Probing: {formatFamilyLabel(family)}
 				</StatusChip>
 			))}
+			{status.exhaustedScopedFamilies.map((entry) => (
+				<StatusChip
+					key={entry.familyKey}
+					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					title={`The ${entry.label} model family's weekly quota is exhausted on this account until ${new Date(
+						entry.resetsAtMs,
+					).toLocaleString()}. Other model families keep routing to this account.`}
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					{entry.label} weekly exhausted ({entry.hoursLeft}h)
+				</StatusChip>
+			))}
 			{status.isOnCredits && (
 				<StatusChip
 					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"

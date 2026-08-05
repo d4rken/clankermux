@@ -20,6 +20,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
 	type CodexCreditsInfo,
+	type CodexRateLimitResetCreditsFetchResult,
 	type CodexUsageStatus,
 	codexRateLimitResetCreditsCache,
 	type FetchCodexUsageStatusArgs,
@@ -46,14 +47,31 @@ import type { ProxyContext } from "../handlers/proxy-types";
 // ---------------------------------------------------------------------------
 
 // getValidAccessToken: pluggable impl so a test can gate the token (to let a
-// concurrent caller join) or force a refresh failure.
-let tokenImpl: () => Promise<string> = async () => "token";
-const mockGetValidAccessToken = mock((..._args: unknown[]) => tokenImpl());
-const mockFetchCodexRateLimitResetCredits = mock(
-	async (..._args: unknown[]) => ({
-		availableCount: 2,
-		credits: [],
-	}),
+// concurrent caller join), force a refresh failure, or rotate the LIVE account
+// object the way a real expired-token refresh does (the account is handed to the
+// impl for exactly that).
+let tokenImpl: (account: Account) => Promise<string> = async () => "token";
+const mockGetValidAccessToken = mock((...args: unknown[]) =>
+	tokenImpl(args[0] as Account),
+);
+// refreshAccessTokenSafe: the FORCED refresh the coordinator performs after a
+// 401 from one of the free Codex reads. Pluggable so a test can return a new
+// token, the SAME (already-rejected) token, or throw.
+let forcedRefreshImpl: (account: Account) => Promise<string> = async () =>
+	"fresh-token";
+const mockRefreshAccessTokenSafe = mock((account: Account, _ctx: unknown) =>
+	forcedRefreshImpl(account),
+);
+// The reset-credit read now reports the HTTP status alongside the summary, so a
+// 401 is distinguishable from any other failure.
+let resetCreditsFetchImpl: (
+	token: string,
+) => Promise<CodexRateLimitResetCreditsFetchResult> = async () => ({
+	summary: { availableCount: 2, credits: [] },
+	status: 200,
+});
+const mockFetchCodexRateLimitResetCredits = mock((token: string) =>
+	resetCreditsFetchImpl(token),
 );
 let consumeImpl: (
 	token: string,
@@ -91,10 +109,16 @@ const mockApplyCodexObservation = mock(
 // returns a pluggable CodexUsageStatus. Injected so a test can force ok/failure
 // without any network and assert the fresh token + chatgpt account id flow.
 let usageStatusResult: CodexUsageStatus = makeUsageStatus();
+// Optional per-call override, for tests that need the GET to answer DIFFERENTLY
+// on the first attempt and the post-refresh retry (or to park mid-flight).
+let usageStatusImpl:
+	| ((args: FetchCodexUsageStatusArgs) => Promise<CodexUsageStatus>)
+	| null = null;
 const fetchStatusCalls: FetchCodexUsageStatusArgs[] = [];
 const mockFetchCodexUsageStatus = mock(
 	async (args: FetchCodexUsageStatusArgs) => {
 		fetchStatusCalls.push(args);
+		if (usageStatusImpl) return usageStatusImpl(args);
 		return usageStatusResult;
 	},
 );
@@ -277,6 +301,7 @@ function makeCtx() {
 			const a = accounts.get(id);
 			if (a) Object.assign(a, patch);
 		},
+		deleteAccount: (id: string) => accounts.delete(id),
 	};
 }
 
@@ -293,6 +318,7 @@ function makeCoordinator() {
 		readChatgptAccountId: () => "acct-123",
 		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
 		consumeCodexRateLimitResetCredit: mockConsumeCodexRateLimitResetCredit,
+		refreshAccessTokenSafe: mockRefreshAccessTokenSafe,
 	});
 	return { coordinator, ...harness };
 }
@@ -329,6 +355,12 @@ function makeRealCoordinator() {
 				get: async () => ({ rate_limited_until: null }),
 				run: async (sql: string, params: unknown[]) => {
 					runSql.push({ sql, params });
+				},
+				// The Codex usage-snapshot persist is credential-CAS'd and reads the
+				// changed-row count. This double has no rows: report a match.
+				runWithChanges: async (sql: string, params: unknown[]) => {
+					runSql.push({ sql, params });
+					return 1;
 				},
 			}),
 		},
@@ -417,13 +449,20 @@ beforeEach(() => {
 	mockApplyCodexUsageStatus.mockClear();
 	mockFetchCodexUsageStatus.mockClear();
 	mockGetValidAccessToken.mockClear();
+	mockRefreshAccessTokenSafe.mockClear();
 	mockFetchCodexRateLimitResetCredits.mockClear();
 	mockConsumeCodexRateLimitResetCredit.mockClear();
 	codexRateLimitResetCreditsCache.clear();
 	tokenImpl = async () => "token";
+	forcedRefreshImpl = async () => "fresh-token";
+	resetCreditsFetchImpl = async () => ({
+		summary: { availableCount: 2, credits: [] },
+		status: 200,
+	});
 	consumeImpl = async () => ({ outcome: "reset", windowsReset: 2 });
 	observationResult = makeObservation();
 	usageStatusResult = makeUsageStatus();
+	usageStatusImpl = null;
 	fetchImpl = async () =>
 		new Response("event: ignored\n\n", {
 			status: 200,
@@ -1201,10 +1240,15 @@ describe("CodexSpendCoordinator.refreshManual — GET-only (zero-cost)", () => {
 
 		const outcome = await coordinator.refreshManual("a");
 
-		expect(outcome).toEqual({
-			success: false,
-			message: "Account 'codex-x' is not a Codex account",
-		});
+		expect(outcome.success).toBe(false);
+		// Both halves reject a non-Codex account, so the combined message leads with
+		// the usage half and appends the reset-credit half.
+		expect(
+			outcome.message.startsWith("Account 'codex-x' is not a Codex account"),
+		).toBe(true);
+		expect(outcome.message).toContain(
+			"reset-credit metadata refresh also failed",
+		);
 		expect(mockFetchCodexUsageStatus).not.toHaveBeenCalled();
 	});
 
@@ -1483,6 +1527,12 @@ describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
 					run: async (sql: string, params: unknown[]) => {
 						runSql.push({ sql, params });
 					},
+					// The Codex usage-snapshot persist is credential-CAS'd and reads
+					// the changed-row count. This double has no rows: report a match.
+					runWithChanges: async (sql: string, params: unknown[]) => {
+						runSql.push({ sql, params });
+						return 1;
+					},
 				}),
 			},
 			asyncWriter: {
@@ -1741,5 +1791,541 @@ describe("CodexSpendCoordinator — in-flight cleanup rejection safety", () => {
 		} finally {
 			process.off("unhandledRejection", onRejection);
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 401 recovery on the FREE reads. A stored access token that has not expired can
+// still be rejected by the free usage / reset-credit endpoints (observed after a
+// ChatGPT plan upgrade). getValidAccessToken only refreshes on EXPIRY, so such a
+// token is handed out forever and every read 401s with no recovery path. One
+// forced refresh + exactly one retry closes that hole.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — 401 forced token refresh (free usage read)", () => {
+	it("retries the GET exactly once with the refreshed token and applies the result", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "r401", name: "codex-401" }));
+		let attempt = 0;
+		usageStatusImpl = async () => {
+			attempt += 1;
+			return attempt === 1
+				? makeUsageStatus({ ok: false, status: 401, usage: null })
+				: makeUsageStatus();
+		};
+
+		const outcome = await coordinator.readUsageStatus("r401");
+
+		expect(outcome).toEqual({
+			success: true,
+			message: "Usage refreshed for 'codex-401' (5h: 12%, 7d: 34%).",
+		});
+		// Exactly one forced refresh and exactly one retry (two GETs total).
+		expect(mockRefreshAccessTokenSafe).toHaveBeenCalledTimes(1);
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(2);
+		expect(fetchStatusCalls[0]?.accessToken).toBe("token");
+		expect(fetchStatusCalls[1]?.accessToken).toBe("fresh-token");
+		// The retried result was applied.
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT retry when the refresh returns the same, already-rejected token", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "r401-same", name: "codex-401" }));
+		forcedRefreshImpl = async () => "token";
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 401,
+			usage: null,
+		});
+
+		const outcome = await coordinator.readUsageStatus("r401-same");
+
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("(status 401)");
+		expect(mockRefreshAccessTokenSafe).toHaveBeenCalledTimes(1);
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+	});
+
+	it("never forces a refresh for a non-401 failure", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "r500", name: "codex-401" }));
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 500,
+			usage: null,
+		});
+
+		const outcome = await coordinator.readUsageStatus("r500");
+
+		expect(outcome.success).toBe(false);
+		expect(mockRefreshAccessTokenSafe).not.toHaveBeenCalled();
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports the refresh failure reason and does not retry when the refresh throws", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const { coordinator, setAccount } = makeCoordinator();
+			setAccount(makeCodexAccount({ id: "r401-throw", name: "codex-401" }));
+			forcedRefreshImpl = async () => {
+				throw new Error("invalid_grant: refresh token rejected");
+			};
+			usageStatusResult = makeUsageStatus({
+				ok: false,
+				status: 401,
+				usage: null,
+			});
+
+			const outcome = await coordinator.readUsageStatus("r401-throw");
+
+			expect(outcome.success).toBe(false);
+			expect(outcome.message).toContain("(status 401)");
+			expect(outcome.message).toContain(
+				"invalid_grant: refresh token rejected",
+			);
+			expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+			expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+
+			await flush();
+			await flush();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
+	});
+});
+
+describe("CodexSpendCoordinator — 401 forced token refresh (reset-credit read)", () => {
+	it("retries the reset-credit read once with the refreshed token and caches the summary", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "rc401", name: "codex-rc" }));
+		resetCreditsFetchImpl = async (token: string) =>
+			token === "fresh-token"
+				? { summary: { availableCount: 3, credits: [] }, status: 200 }
+				: { summary: null, status: 401 };
+
+		const outcome = await coordinator.refreshResetCredits("rc401", true);
+
+		expect(outcome.success).toBe(true);
+		expect(mockRefreshAccessTokenSafe).toHaveBeenCalledTimes(1);
+		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledTimes(2);
+		expect(
+			codexRateLimitResetCreditsCache.get("rc401")?.summary.availableCount,
+		).toBe(3);
+	});
+
+	it("fails with the refresh reason when the forced refresh throws", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "rc401-throw", name: "codex-rc" }));
+		resetCreditsFetchImpl = async () => ({ summary: null, status: 401 });
+		forcedRefreshImpl = async () => {
+			throw new Error("invalid_grant: refresh token rejected");
+		};
+
+		const outcome = await coordinator.refreshResetCredits("rc401-throw", true);
+
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("invalid_grant: refresh token rejected");
+		expect(mockFetchCodexRateLimitResetCredits).toHaveBeenCalledTimes(1);
+		expect(codexRateLimitResetCreditsCache.get("rc401-throw")).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// An account already paused for re-authentication has a refresh token the
+// provider rejected. Forcing yet another refresh only produces more
+// invalid_grant traffic, so the 401 recovery must be suppressed for it.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — reauth-paused accounts", () => {
+	const reauthPaused = { paused: true, pause_reason: "oauth_invalid_grant" };
+
+	it("makes NO reset-credit fetch and NO token refresh, however often it is asked", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(
+			makeCodexAccount({ id: "paused-rc", name: "codex-p", ...reauthPaused }),
+		);
+
+		const first = await coordinator.refreshResetCredits("paused-rc", true);
+		const second = await coordinator.refreshResetCredits("paused-rc", true);
+		const third = await coordinator.refreshResetCredits("paused-rc");
+
+		for (const outcome of [first, second, third]) {
+			expect(outcome.success).toBe(false);
+			expect(outcome.message).toContain("re-authentication");
+		}
+		expect(mockFetchCodexRateLimitResetCredits).not.toHaveBeenCalled();
+		expect(mockRefreshAccessTokenSafe).not.toHaveBeenCalled();
+		expect(mockGetValidAccessToken).not.toHaveBeenCalled();
+	});
+
+	it("still performs the free usage GET but never forces a refresh on its 401", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(
+			makeCodexAccount({ id: "paused-read", name: "codex-p", ...reauthPaused }),
+		);
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 401,
+			usage: null,
+		});
+
+		const outcome = await coordinator.readUsageStatus("paused-read");
+
+		expect(mockFetchCodexUsageStatus).toHaveBeenCalledTimes(1);
+		expect(mockRefreshAccessTokenSafe).not.toHaveBeenCalled();
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("re-authentication");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cache supersession. claimApplication only orders COORDINATOR-issued
+// observations; a real-traffic response applied while a read (or its retry) was
+// in flight writes the cache directly. Applying the older read afterwards would
+// relabel that fresher state, so the written-at stamp is re-checked at apply
+// time.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator — usage-cache supersession guard", () => {
+	it("skips the application when the cache was written while the retried GET was pending", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("supersede-retry");
+		setAccount(makeCodexAccount({ id, name: "codex-s" }));
+		// A pre-existing entry with a known age; the mid-flight write below is
+		// strictly newer than it.
+		usageCache.setWithAgeForTests(
+			id,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 6, resets_at: null },
+			},
+			5_000,
+		);
+
+		let releaseRetry!: (s: CodexUsageStatus) => void;
+		const retryGate = new Promise<CodexUsageStatus>((res) => {
+			releaseRetry = res;
+		});
+		let attempt = 0;
+		usageStatusImpl = async () => {
+			attempt += 1;
+			return attempt === 1
+				? makeUsageStatus({ ok: false, status: 401, usage: null })
+				: retryGate;
+		};
+
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+		await flush();
+
+		// A fresher observation lands while the retry is still in flight.
+		usageCache.set(id, {
+			five_hour: { utilization: 91, resets_at: null },
+			seven_day: { utilization: 92, resets_at: null },
+		});
+		releaseRetry(makeUsageStatus());
+		const outcome = await readP;
+
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("superseded by a newer observation");
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+		// The fresher entry survived untouched.
+		expect(
+			(usageCache.get(id) as UsageData | null)?.five_hour?.utilization,
+		).toBe(91);
+	});
+
+	it("applies normally when nothing wrote the cache in the meantime", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("supersede-none");
+		setAccount(makeCodexAccount({ id, name: "codex-s" }));
+		usageCache.setWithAgeForTests(
+			id,
+			{
+				five_hour: { utilization: 5, resets_at: null },
+				seven_day: { utilization: 6, resets_at: null },
+			},
+			5_000,
+		);
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Credential-generation supersession. Re-authentication replaces the account's
+// credentials and DELETES the usage cache entry + the persisted columns. That
+// delete makes the written-at check above read -Infinity, which never registers
+// as "advanced" — so a read issued under the OLD credentials would sail through
+// the newer-observation guard and repopulate exactly the state the reauth
+// cleared.
+//
+// The generation marker is the ACCESS token, matched against EVERY generation
+// the read legitimately spanned (pre-call, post-getValidAccessToken, post-401
+// rotation). A rotation's durable write is enqueued fire-and-forget, so the
+// stored row routinely lags the live account object by design — a lagging row
+// is NOT a credential change, and must not void a good read.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.readUsageStatus — credential supersession", () => {
+	it("APPLIES the read when getValidAccessToken rotated the token and the durable write has not landed", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("cred-rotate-lag");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				access_token: "at-pre",
+				refresh_token: "rt-pre",
+			}),
+		);
+
+		// The expired-token refresh inside getValidAccessToken updates the LIVE
+		// account object immediately and enqueues the DB write fire-and-forget, so
+		// the stored row still carries the PREVIOUS access token at apply time.
+		tokenImpl = async (account: Account) => {
+			account.access_token = "at-rotated";
+			account.refresh_token = "rt-rotated";
+			return "at-rotated";
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-cred'");
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("APPLIES the read for a refresh-token-only account whose rotation has not been persisted", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("cred-null-token-lag");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				// Refresh-token-only account: the row carries NO access token at all,
+				// which the entry check explicitly accepts.
+				access_token: null,
+				refresh_token: "rt-pre",
+			}),
+		);
+
+		// The rotation mints the first access token on the LIVE account only; the
+		// stored row still reads NULL when the guard re-reads it.
+		tokenImpl = async (account: Account) => {
+			account.access_token = "at-rotated";
+			return "at-rotated";
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		// NULL is itself a legitimate pre-rotation generation for such an account,
+		// so a lagging row must not void the read.
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-cred'");
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("APPLIES the retry result when the read's OWN 401 rotation has not been persisted yet", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("cred-401-lag");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				access_token: "at-pre",
+				refresh_token: "rt-pre",
+			}),
+		);
+		tokenImpl = async () => "at-pre";
+		// The forced post-401 refresh mutates ONLY the live account; the row stays
+		// on the pre-retry access token until the async write flushes.
+		forcedRefreshImpl = async (account: Account) => {
+			account.access_token = "at-401-rotated";
+			account.refresh_token = "rt-401-rotated";
+			return "at-401-rotated";
+		};
+		let attempt = 0;
+		usageStatusImpl = async () => {
+			attempt += 1;
+			return attempt === 1
+				? makeUsageStatus({ ok: false, status: 401, usage: null })
+				: makeUsageStatus();
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(mockRefreshAccessTokenSafe).toHaveBeenCalledTimes(1);
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-cred'");
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("APPLIES the retry result when the read's OWN 401 rotation HAS reached the row", async () => {
+		const { coordinator, setAccount, mutateAccount } = makeCoordinator();
+		const id = seedId("cred-401-flushed");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				access_token: "at-pre",
+				refresh_token: "rt-pre",
+			}),
+		);
+		tokenImpl = async () => "at-pre";
+		// Same rotation, but this time the durable write lands before the guard
+		// runs: the row now holds the token this read's OWN retry used.
+		forcedRefreshImpl = async (account: Account) => {
+			account.access_token = "at-401-rotated";
+			account.refresh_token = "rt-401-rotated";
+			mutateAccount(id, {
+				access_token: "at-401-rotated",
+				refresh_token: "rt-401-rotated",
+			});
+			return "at-401-rotated";
+		};
+		let attempt = 0;
+		usageStatusImpl = async () => {
+			attempt += 1;
+			return attempt === 1
+				? makeUsageStatus({ ok: false, status: 401, usage: null })
+				: makeUsageStatus();
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-cred'");
+		expect(mockApplyCodexUsageStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT apply a read when the row holds an access token this read never saw", async () => {
+		const { coordinator, setAccount, mutateAccount } = makeCoordinator();
+		const id = seedId("cred-reauthed");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cred",
+				access_token: "at-pre",
+				refresh_token: "rt-pre",
+			}),
+		);
+		tokenImpl = async () => "at-pre";
+
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		const readGate = new Promise<CodexUsageStatus>((res) => {
+			releaseRead = res;
+		});
+		usageStatusImpl = async () => readGate;
+
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		// Re-authentication lands: credentials this read never used (a reauth
+		// writes them synchronously), usage state wiped.
+		mutateAccount(id, {
+			access_token: "at-reauthed",
+			refresh_token: "rt-reauthed",
+		});
+		usageCache.delete(id);
+
+		releaseRead(makeUsageStatus());
+		const outcome = await readP;
+
+		// The GET itself succeeded, so this is not a failure — but its payload
+		// belongs to a credential generation that no longer exists.
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("superseded by a credential change");
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+	});
+
+	it("does NOT apply a read whose account row vanished while the GET was in flight", async () => {
+		const { coordinator, setAccount, deleteAccount } = makeCoordinator();
+		const id = seedId("cred-deleted");
+		setAccount(makeCodexAccount({ id, name: "codex-cred" }));
+
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		const readGate = new Promise<CodexUsageStatus>((res) => {
+			releaseRead = res;
+		});
+		usageStatusImpl = async () => readGate;
+
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		deleteAccount(id);
+
+		releaseRead(makeUsageStatus());
+		const outcome = await readP;
+
+		expect(outcome.success).toBe(true);
+		expect(outcome.message).toContain("superseded by a credential change");
+		expect(mockApplyCodexUsageStatus).not.toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// refreshManual combines TWO free reads. The reset-credit half used to be
+// discarded, so a failed metadata refresh was reported as a clean success.
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.refreshManual — combined outcome", () => {
+	it("reports a failed reset-credit read even when the usage read succeeded", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "combo-a", name: "codex-c" }));
+		resetCreditsFetchImpl = async () => ({ summary: null, status: 500 });
+
+		const outcome = await coordinator.refreshManual("combo-a");
+
+		expect(outcome.success).toBe(false);
+		expect(outcome.message).toContain("Usage refreshed for 'codex-c'");
+		expect(outcome.message).toContain("reset-credit metadata refresh failed");
+	});
+
+	it("leads with the usage failure when only the usage read failed", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "combo-b", name: "codex-c" }));
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 500,
+			usage: null,
+		});
+
+		const outcome = await coordinator.refreshManual("combo-b");
+
+		expect(outcome.success).toBe(false);
+		expect(
+			outcome.message.startsWith("Codex usage read failed for 'codex-c'"),
+		).toBe(true);
+		expect(outcome.message).not.toContain("reset-credit metadata refresh");
+	});
+
+	it("appends the reset-credit failure when BOTH reads failed", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "combo-c", name: "codex-c" }));
+		usageStatusResult = makeUsageStatus({
+			ok: false,
+			status: 500,
+			usage: null,
+		});
+		resetCreditsFetchImpl = async () => ({ summary: null, status: 500 });
+
+		const outcome = await coordinator.refreshManual("combo-c");
+
+		expect(outcome.success).toBe(false);
+		expect(
+			outcome.message.startsWith("Codex usage read failed for 'codex-c'"),
+		).toBe(true);
+		expect(outcome.message).toContain(
+			"reset-credit metadata refresh also failed",
+		);
 	});
 });

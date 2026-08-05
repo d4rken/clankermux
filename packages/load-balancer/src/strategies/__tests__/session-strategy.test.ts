@@ -1224,6 +1224,49 @@ describe("SessionStrategy", () => {
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
 		});
 
+		it("holds affinity through a short model_fallback_429 cooldown (scoped-429 residual cap)", () => {
+			// A claim-scoped 429 that slips past the family rung now writes a ~90s
+			// capped cooldown under reason model_fallback_429 — a reason OUTSIDE
+			// TRANSIENT_RATE_LIMIT_REASONS. The duration fallback (remaining
+			// cooldown < AFFINITY_REASSIGN_MIN_COOLDOWN_MS) is what keeps the
+			// warmed prompt cache pinned; this test pins that behavior so a
+			// refactor of the reassign threshold logic can't silently regress the
+			// scoped-cap path into cache-losing reassigns.
+			const now = Date.now();
+			const projectMeta: RequestMeta = {
+				...meta,
+				project: "scoped-cap-project",
+			};
+			const affined = makeAccount({
+				id: "affined-scoped-cap",
+				name: "affined-scoped-cap",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 60_000,
+				session_request_count: 4,
+			});
+			const healthy = makeAccount({
+				id: "healthy-scoped-cap",
+				name: "healthy-scoped-cap",
+				created_at: now,
+				expires_at: now + 3600_000,
+			});
+
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+
+			// ~90s remaining (the scoped residual cap) — well under the 15-min
+			// reassign threshold: serve a sibling THIS request, keep the pin.
+			affined.rate_limited_until = now + 89_500;
+			affined.rate_limited_reason = "model_fallback_429";
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(healthy);
+			expect(projectMeta.routing?.decision).toBe("affinity_hold");
+
+			// Cooldown lifts → snap back to the warmed account (never reassigned).
+			affined.rate_limited_until = null;
+			affined.rate_limited_reason = null;
+			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
+		});
+
 		it("keeps affinity for non-session-tracking providers until TTL expiry", () => {
 			const projectMeta: RequestMeta = {
 				...meta,
@@ -1645,6 +1688,136 @@ describe("SessionStrategy", () => {
 				}
 			).affinityByKey;
 			expect(affinityByKey.size).toBeLessThanOrEqual(10_000);
+		});
+
+		// pruneAffinity() runs on EVERY affinity write, so it must not scan the
+		// whole map. It relies on the map being in least-recently-used order —
+		// recordAffinity() deletes a key before re-setting it, moving a touched
+		// entry to the back — which makes the stale entries a prefix, so the
+		// sweep can stop at the first live one. These pin both halves of that:
+		// the ordering invariant the early stop depends on, and the eviction
+		// behaviour it must still deliver.
+		/**
+		 * Pin Date.now() to a value the caller advances between writes. select()
+		 * reads the clock several times per call, so a fixed sequence of return
+		 * values cannot be aligned to individual writes — the caller must step it.
+		 */
+		function withClock<T>(
+			start: number,
+			fn: (set: (t: number) => void) => T,
+		): T {
+			const real = Date.now;
+			let current = start;
+			Date.now = () => current;
+			try {
+				return fn((t) => {
+					current = t;
+				});
+			} finally {
+				Date.now = real;
+			}
+		}
+
+		function affinityOf(s: typeof strategy) {
+			return (
+				s as unknown as {
+					affinityByKey: Map<string, { lastUsedAt: number }>;
+				}
+			).affinityByKey;
+		}
+
+		it("keeps the affinity map in least-recently-used order", () => {
+			const account = makeAccount({ id: "lru-account", name: "lru-account" });
+			const base = Date.now();
+
+			// Distinct, increasing stamps — without a driven clock all four writes
+			// land in the same millisecond and the ordering assertion is vacuous.
+			withClock(base, (setNow) => {
+				let t = base;
+				for (const project of ["first", "second", "third"]) {
+					t += 10;
+					setNow(t);
+					strategy.select([account], { ...meta, id: `r-${project}`, project });
+				}
+				// Touching "first" again must move it to the back.
+				t += 10;
+				setNow(t);
+				strategy.select([account], {
+					...meta,
+					id: "r-again",
+					project: "first",
+				});
+			});
+
+			const affinityByKey = affinityOf(strategy);
+			const order = [...affinityByKey.values()].map((e) => e.lastUsedAt);
+
+			expect(order).toEqual([...order].sort((a, b) => a - b));
+			expect(new Set(order).size).toBeGreaterThan(1); // stamps really differ
+			expect([...affinityByKey.keys()].at(-1)).toContain("first");
+		});
+
+		it("keeps stamps non-decreasing even if the wall clock steps backwards", () => {
+			// A backwards clock would otherwise put a newer entry in front of an
+			// older one, and pruneAffinity()'s early stop would then leave an
+			// expired pin live behind it — which resolveAffinity would serve as a
+			// hit, since it validates the ACCOUNT's session window, not this stamp.
+			const account = makeAccount({ id: "clk-account", name: "clk-account" });
+			const base = Date.now();
+
+			withClock(base, (setNow) => {
+				strategy.select([account], { ...meta, id: "r-a", project: "a" });
+				setNow(base - 60_000); // clock steps backwards
+				strategy.select([account], { ...meta, id: "r-b", project: "b" });
+			});
+
+			const order = [...affinityOf(strategy).values()].map((e) => e.lastUsedAt);
+			expect(order).toEqual([...order].sort((a, b) => a - b));
+			// The second write was clamped up to the first, not stored as base-60s.
+			expect(order[1]).toBe(base);
+		});
+
+		it("stops evicting at the first live entry, keeping later stale-stamped ones", () => {
+			// Pins the early stop itself: a live entry ahead of a stale-stamped one
+			// ends the sweep. With the clamp above this arrangement cannot arise
+			// from real writes, so it is constructed directly.
+			const account = makeAccount({ id: "brk-account", name: "brk-account" });
+			strategy.select([account], { ...meta, id: "r-1", project: "live" });
+			strategy.select([account], { ...meta, id: "r-2", project: "trailing" });
+
+			const affinityByKey = affinityOf(strategy);
+			const entries = [...affinityByKey.values()];
+			entries[1].lastUsedAt = Date.now() - 5 * 60 * 60 * 1000 - 60_000;
+
+			strategy.select([account], { ...meta, id: "r-3", project: "third" });
+
+			expect([...affinityByKey.keys()]).toContain("project:trailing");
+		});
+
+		it("evicts entries older than the session duration", () => {
+			const sessionMs = 5 * 60 * 60 * 1000;
+			const account = makeAccount({ id: "age-account", name: "age-account" });
+
+			strategy.select([account], { ...meta, id: "r-old", project: "old" });
+
+			const affinityByKey = (
+				strategy as unknown as {
+					affinityByKey: Map<string, { lastUsedAt: number }>;
+				}
+			).affinityByKey;
+
+			// Backdate the only entry past the staleness window, then write a new
+			// one so the sweep runs. The stale entry is at the front, so an early
+			// stop still reaches it.
+			for (const entry of affinityByKey.values()) {
+				entry.lastUsedAt = Date.now() - sessionMs - 60_000;
+			}
+			strategy.select([account], { ...meta, id: "r-new", project: "new" });
+
+			// Keys are prefixed ("project:old") — asserting the bare name here
+			// would pass no matter what.
+			expect([...affinityByKey.keys()]).not.toContain("project:old");
+			expect([...affinityByKey.keys()]).toEqual(["project:new"]);
 		});
 	});
 
