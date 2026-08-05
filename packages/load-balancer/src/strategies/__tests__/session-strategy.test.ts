@@ -1659,7 +1659,10 @@ describe("SessionStrategy", () => {
 		 * reads the clock several times per call, so a fixed sequence of return
 		 * values cannot be aligned to individual writes — the caller must step it.
 		 */
-		function withClock<T>(start: number, fn: (set: (t: number) => void) => T): T {
+		function withClock<T>(
+			start: number,
+			fn: (set: (t: number) => void) => T,
+		): T {
 			const real = Date.now;
 			let current = start;
 			Date.now = () => current;
@@ -1689,12 +1692,18 @@ describe("SessionStrategy", () => {
 			withClock(base, (setNow) => {
 				let t = base;
 				for (const project of ["first", "second", "third"]) {
-					setNow((t += 10));
+					t += 10;
+					setNow(t);
 					strategy.select([account], { ...meta, id: `r-${project}`, project });
 				}
 				// Touching "first" again must move it to the back.
-				setNow((t += 10));
-				strategy.select([account], { ...meta, id: "r-again", project: "first" });
+				t += 10;
+				setNow(t);
+				strategy.select([account], {
+					...meta,
+					id: "r-again",
+					project: "first",
+				});
 			});
 
 			const affinityByKey = affinityOf(strategy);
