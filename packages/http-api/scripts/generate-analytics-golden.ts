@@ -16,11 +16,11 @@ import { Database } from "bun:sqlite";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
-import { createAnalyticsHandler } from "../src/handlers/analytics-direct";
 import {
 	FIXED_NOW,
 	seedAnalyticsFixture,
 } from "../src/handlers/__tests__/analytics-section-fixture";
+import { createAnalyticsHandler } from "../src/handlers/analytics-direct";
 import type { APIContext } from "../src/types";
 
 const OUTPUT = join(

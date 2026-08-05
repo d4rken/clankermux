@@ -1,4 +1,5 @@
 import {
+	BadRequest,
 	errorResponse,
 	InternalServerError,
 	ServiceUnavailable,
@@ -6,6 +7,10 @@ import {
 import { Logger } from "@clankermux/logger";
 import type { APIContext } from "../types";
 import { createAnalyticsHandler as createDirectAnalyticsHandler } from "./analytics-direct";
+import {
+	canonicalizeSectionsParam,
+	parseSectionsParam,
+} from "./analytics-sections";
 import type {
 	AnalyticsWorkerRequest,
 	AnalyticsWorkerResponse,
@@ -179,11 +184,22 @@ const KIND_LABELS: Record<
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
-	return createIsolatedDashboardHandler(
+	const inner = createIsolatedDashboardHandler(
 		context,
 		"analytics",
 		createDirectAnalyticsHandler(context),
 	);
+	return async (params: URLSearchParams): Promise<Response> => {
+		// Validate and canonicalize the section list HERE, on the main thread,
+		// before the request is queued for a worker. A typo'd section queued
+		// behind a slow all-time query would otherwise surface as a 503 soft
+		// timeout minutes later instead of an immediate 400. Canonicalizing first
+		// also means `sections=a,b` and `sections=b,a` — and any unstated implied
+		// dependency — collapse onto ONE response-cache entry.
+		const parsed = parseSectionsParam(params.get("sections"));
+		if (!parsed.ok) return errorResponse(BadRequest(parsed.message));
+		return inner(canonicalizeSectionsParam(params, parsed.sections));
+	};
 }
 
 export function createIsolatedStatsHandler(context: APIContext) {

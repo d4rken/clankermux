@@ -73,10 +73,11 @@ export const AnalyticsTab = React.memo(() => {
 	// single shared query, now that every tab drives its own).
 	const mergeSeen = useCallback((analytics: AnalyticsResponse) => {
 		// Add new accounts
-		if (analytics.accountPerformance) {
+		const accountPerformance = analytics.accountPerformance;
+		if (accountPerformance) {
 			setAllSeenAccounts((prev) => {
 				const updated = new Set(prev);
-				for (const account of analytics.accountPerformance) {
+				for (const account of accountPerformance) {
 					updated.add(account.name);
 				}
 				return updated;
@@ -84,10 +85,11 @@ export const AnalyticsTab = React.memo(() => {
 		}
 
 		// Add new models
-		if (analytics.modelDistribution) {
+		const modelDistribution = analytics.modelDistribution;
+		if (modelDistribution) {
 			setAllSeenModels((prev) => {
 				const updated = new Set(prev);
-				for (const model of analytics.modelDistribution) {
+				for (const model of modelDistribution) {
 					updated.add(model.model);
 				}
 				return updated;
@@ -95,10 +97,11 @@ export const AnalyticsTab = React.memo(() => {
 		}
 
 		// Add new API keys
-		if (analytics.apiKeyPerformance) {
+		const apiKeyPerformance = analytics.apiKeyPerformance;
+		if (apiKeyPerformance) {
 			setAllSeenApiKeys((prev) => {
 				const updated = new Set(prev);
-				for (const apiKey of analytics.apiKeyPerformance) {
+				for (const apiKey of apiKeyPerformance) {
 					updated.add(apiKey.name);
 				}
 				return updated;

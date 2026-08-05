@@ -30,11 +30,20 @@ export const ACCOUNT_B = "acct-bbbb-2222";
 /** Referenced by requests but absent from `accounts` — a hard-deleted account. */
 export const ACCOUNT_DELETED = "acct-cccc-3333";
 
+export const ACCOUNT_A_NAME = "primary-account";
+export const ACCOUNT_B_NAME = "secondary-account";
+
 /** API key ids used by the fixture. */
 export const API_KEY_LIVE = "key-live-1";
 export const API_KEY_RENAMED = "key-renamed-2";
 /** Referenced by requests but absent from `api_keys` — a hard-deleted key. */
 export const API_KEY_DELETED = "key-deleted-3";
+
+export const API_KEY_LIVE_NAME = "live-key";
+/** CURRENT name of API_KEY_RENAMED; its request rows carry the old snapshot. */
+export const API_KEY_RENAMED_NAME = "new-name";
+/** Snapshot name on the deleted key's newest request row. */
+export const API_KEY_DELETED_NAME = "retired-key";
 
 export const PROJECT_ALPHA = "alpha";
 export const PROJECT_BETA = "beta";
@@ -377,24 +386,30 @@ const TOOL_ERRORS: Array<{
 export function seedAnalyticsFixture(db: Database): void {
 	db.run(
 		`INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, 'anthropic', ?)`,
-		[ACCOUNT_A, "primary-account", FIXED_NOW - 90 * DAY],
+		[ACCOUNT_A, ACCOUNT_A_NAME, FIXED_NOW - 90 * DAY],
 	);
 	db.run(
 		`INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, 'openai', ?)`,
-		[ACCOUNT_B, "secondary-account", FIXED_NOW - 80 * DAY],
+		[ACCOUNT_B, ACCOUNT_B_NAME, FIXED_NOW - 80 * DAY],
 	);
 
 	db.run(
 		`INSERT INTO api_keys (id, name, hashed_key, prefix_last_8, created_at, last_used, usage_count, is_active)
 		 VALUES (?, ?, ?, ?, ?, NULL, 0, 1)`,
-		[API_KEY_LIVE, "live-key", "hash-live", "aaaabbbb", FIXED_NOW - 70 * DAY],
+		[
+			API_KEY_LIVE,
+			API_KEY_LIVE_NAME,
+			"hash-live",
+			"aaaabbbb",
+			FIXED_NOW - 70 * DAY,
+		],
 	);
 	db.run(
 		`INSERT INTO api_keys (id, name, hashed_key, prefix_last_8, created_at, last_used, usage_count, is_active)
 		 VALUES (?, ?, ?, ?, ?, NULL, 0, 1)`,
 		[
 			API_KEY_RENAMED,
-			"new-name",
+			API_KEY_RENAMED_NAME,
 			"hash-renamed",
 			"ccccdddd",
 			FIXED_NOW - 70 * DAY,

@@ -1,19 +1,22 @@
 import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
 import {
+	BadRequest,
 	errorResponse,
 	InternalServerError,
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import { NO_ACCOUNT_ID } from "@clankermux/types";
+import { type AnalyticsSection, NO_ACCOUNT_ID } from "@clankermux/types";
 import type {
 	ActiveSessionsAnalytics,
 	ActiveSessionsTimePoint,
 	AnalyticsResponse,
 	APIContext,
 	CacheFlowPoint,
+	FullAnalyticsResponse,
 	SpeedTimePoint,
 } from "../types";
+import { allSections, parseSectionsParam } from "./analytics-sections";
 import { getRangeConfig } from "./range-config";
 
 const log = new Logger("AnalyticsHandler");
@@ -90,9 +93,341 @@ export function effectiveBurnRateDays(
 	return Math.min(windowDays, Math.max(1, days));
 }
 
+/**
+ * Every top-level field the UNSCOPED response must carry.
+ *
+ * Typed as a fully-populated Record rather than an array so the compiler
+ * enforces exhaustiveness: adding a section field to FullAnalyticsResponse
+ * without listing it here is a build error, not a field that silently stops
+ * being checked.
+ */
+const FULL_RESPONSE_FIELDS: Record<keyof FullAnalyticsResponse, true> = {
+	meta: true,
+	totals: true,
+	timeSeries: true,
+	tokenBreakdown: true,
+	modelDistribution: true,
+	accountPerformance: true,
+	apiKeyPerformance: true,
+	costByModel: true,
+	accountModelUsage: true,
+	modelPerformance: true,
+	speedTimeSeries: true,
+	routing: true,
+	cacheFlow: true,
+	projectBreakdown: true,
+	projectAttributionCoverage: true,
+	contextComposition: true,
+	toolCallErrors: true,
+	activeSessions: true,
+};
+
+/**
+ * Runtime guard for the backward-compatible (no `sections` param) path: it must
+ * emit every section field. A missing one would reach the dashboard as `0` or
+ * `[]` — indistinguishable from real data — so fail loudly instead.
+ */
+function assertFullResponse(
+	response: AnalyticsResponse,
+): FullAnalyticsResponse {
+	const missing = Object.keys(FULL_RESPONSE_FIELDS).filter(
+		(field) => response[field as keyof AnalyticsResponse] === undefined,
+	);
+	if (missing.length > 0) {
+		throw new Error(
+			`unscoped analytics response is missing section field(s): ${missing.join(", ")}`,
+		);
+	}
+	return response as FullAnalyticsResponse;
+}
+
+/** One row of the additional-data UNION (the 14-column contract below). */
+type AdditionalDataRow = {
+	data_type: string;
+	name: string;
+	secondary_name: string | null;
+	count: number | null;
+	requests: number | null;
+	success_rate: number | null;
+	cost_usd: number | null;
+	plan_cost_usd: number | null;
+	api_cost_usd: number | null;
+	total_cost_usd: number | null;
+	total_tokens: number | null;
+	measured_requests: number | null;
+	inferred_requests: number | null;
+	ambiguous_requests: number | null;
+};
+
+/**
+ * One branch of the additional-data UNION, carrying its SQL AND its own bind
+ * recipe.
+ *
+ * Bind order is branch-LOCAL, which is why this is a descriptor and not a
+ * `queryParams`-per-branch loop: q2 emits the NO_ACCOUNT_ID sentinel in its
+ * SELECT list, i.e. BEFORE the interpolated whereClause, so its sentinel comes
+ * first and the shared filter params follow. Every other branch consumes
+ * exactly one copy of the filter params. Once branches can be skipped, a
+ * generic loop would silently shift q2's sentinel onto a filter placeholder.
+ */
+type AdditionalDataBranch = {
+	/** The section that owns this branch; it runs only when that section is requested. */
+	section: AnalyticsSection;
+	/** Historical q1..q7 name, kept for greppability against the column contract. */
+	label: string;
+	sql: string;
+	binds: (queryParams: readonly (string | number)[]) => (string | number)[];
+};
+
+// The 14-column contract every branch must match, in this exact order:
+//  1. data_type TEXT              8. plan_cost_usd DOUBLE PRECISION
+//  2. name TEXT                   9. api_cost_usd DOUBLE PRECISION
+//  3. secondary_name TEXT        10. total_cost_usd DOUBLE PRECISION
+//  4. count BIGINT               11. total_tokens BIGINT
+//  5. requests BIGINT            12. measured_requests BIGINT  (project_breakdown* only)
+//  6. success_rate DOUBLE PREC.  13. inferred_requests BIGINT  (project_breakdown* only)
+//  7. cost_usd DOUBLE PRECISION  14. ambiguous_requests BIGINT (project_breakdown* only)
+//
+// q6/q7 split: the named-project branch is truncated to the top N by tokens, so
+// the no-project bucket — an ordinary GROUP BY row when the two shared one
+// branch — could be ranked out and vanish from the dashboard. It gets its own
+// untruncated branch instead. Both belong to the `projectBreakdown` section, so
+// requesting it always emits the pair and the NULL bucket can never be ranked
+// out.
+function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
+	return [
+		{
+			section: "modelDistribution",
+			label: "q1",
+			sql: `			SELECT * FROM (
+				SELECT
+					'model_distribution' as data_type,
+					model as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					COUNT(*) as count,
+					CAST(NULL AS BIGINT) as requests,
+					CAST(NULL AS DOUBLE PRECISION) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
+					CAST(NULL AS BIGINT) as total_tokens,
+					CAST(NULL AS BIGINT) as measured_requests,
+					CAST(NULL AS BIGINT) as inferred_requests,
+					CAST(NULL AS BIGINT) as ambiguous_requests
+				FROM requests r
+				WHERE ${whereClause} AND model IS NOT NULL
+				GROUP BY model
+				ORDER BY count DESC
+				LIMIT 10
+			) q1`,
+			binds: (qp) => [...qp],
+		},
+		{
+			section: "accountPerformance",
+			label: "q2",
+			sql: `			SELECT * FROM (
+				SELECT
+					'account_performance' as data_type,
+					COALESCE(a.name, r.account_used, ?) as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					CAST(NULL AS BIGINT) as count,
+					COUNT(r.id) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(r.id), 0) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+					SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+					CAST(NULL AS BIGINT) as total_tokens,
+					CAST(NULL AS BIGINT) as measured_requests,
+					CAST(NULL AS BIGINT) as inferred_requests,
+					CAST(NULL AS BIGINT) as ambiguous_requests
+				FROM requests r
+				LEFT JOIN accounts a ON a.id = r.account_used
+				WHERE ${whereClause}
+				GROUP BY r.account_used, a.name
+				HAVING COUNT(r.id) > 0
+				ORDER BY requests DESC
+				LIMIT 10
+			) q2`,
+			binds: (qp) => [NO_ACCOUNT_ID, ...qp],
+		},
+		{
+			section: "costByModel",
+			label: "q3",
+			sql: `			SELECT * FROM (
+				SELECT
+					'cost_by_model' as data_type,
+					model as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					CAST(NULL AS BIGINT) as count,
+					COUNT(*) as requests,
+					CAST(NULL AS DOUBLE PRECISION) as success_rate,
+					SUM(COALESCE(cost_usd, 0)) as cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
+					SUM(COALESCE(total_tokens, 0)) as total_tokens,
+					CAST(NULL AS BIGINT) as measured_requests,
+					CAST(NULL AS BIGINT) as inferred_requests,
+					CAST(NULL AS BIGINT) as ambiguous_requests
+				FROM requests r
+				WHERE ${whereClause} AND COALESCE(cost_usd, 0) > 0 AND model IS NOT NULL
+				GROUP BY model
+				ORDER BY cost_usd DESC
+				LIMIT 10
+			) q3`,
+			binds: (qp) => [...qp],
+		},
+		{
+			section: "apiKeyPerformance",
+			label: "q4",
+			sql: `			SELECT * FROM (
+				SELECT
+					'api_key_performance' as data_type,
+					-- Current key name with the record-time snapshot as fallback for
+					-- hard-deleted keys. Grouped by key id alone so a key renamed
+					-- mid-history still collapses to ONE row; MAX() picks a single
+					-- deterministic name when deleted-key snapshots vary.
+					MAX(COALESCE(k.name, r.api_key_name)) as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					CAST(NULL AS BIGINT) as count,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
+					CAST(NULL AS BIGINT) as total_tokens,
+					CAST(NULL AS BIGINT) as measured_requests,
+					CAST(NULL AS BIGINT) as inferred_requests,
+					CAST(NULL AS BIGINT) as ambiguous_requests
+				FROM requests r
+				LEFT JOIN api_keys k ON k.id = r.api_key_id
+				WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+				GROUP BY r.api_key_id
+				HAVING COUNT(*) > 0
+				ORDER BY requests DESC
+				LIMIT 10
+			) q4`,
+			binds: (qp) => [...qp],
+		},
+		{
+			section: "accountModelUsage",
+			label: "q5",
+			sql: `			SELECT * FROM (
+				SELECT
+					'account_model_usage' as data_type,
+					COALESCE(a.name, 'Unknown') as name,
+					r.model as secondary_name,
+					COUNT(*) as count,
+					CAST(NULL AS BIGINT) as requests,
+					CAST(NULL AS DOUBLE PRECISION) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
+					CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
+					CAST(NULL AS BIGINT) as total_tokens,
+					CAST(NULL AS BIGINT) as measured_requests,
+					CAST(NULL AS BIGINT) as inferred_requests,
+					CAST(NULL AS BIGINT) as ambiguous_requests
+				FROM requests r
+				LEFT JOIN accounts a ON a.id = r.account_used
+				WHERE ${whereClause} AND r.model IS NOT NULL
+				GROUP BY COALESCE(a.name, 'Unknown'), r.model
+				HAVING COUNT(*) > 0
+				ORDER BY count DESC
+				LIMIT 50
+			) q5`,
+			binds: (qp) => [...qp],
+		},
+		{
+			section: "projectBreakdown",
+			label: "q6",
+			sql: `			SELECT * FROM (
+				SELECT
+					'project_breakdown' as data_type,
+					-- Raw column, no COALESCE: a historical row literally named
+					-- 'no-project' stays a distinct project rather than merging
+					-- into the NULL bucket, which q7 owns.
+					r.project as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					CAST(NULL AS BIGINT) as count,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+					SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+					SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
+					-- Attribution coverage for this bucket. measured_requests is
+					-- the ONLY honest denominator for the inference share: rows
+					-- written before the column existed carry SQL NULL and would
+					-- otherwise dilute every range that spans the deploy.
+					SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
+					SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
+					SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
+				FROM requests r
+				WHERE ${whereClause} AND r.project IS NOT NULL
+				-- Positional: "GROUP BY name" would bind to a source column if
+				-- one existed; 2 pins the grouping to the project label
+				-- (column 1 is the constant data_type).
+				GROUP BY 2
+				ORDER BY total_tokens DESC
+				LIMIT ${PROJECT_BREAKDOWN_LIMIT}
+			) q6`,
+			binds: (qp) => [...qp],
+		},
+		{
+			section: "projectBreakdown",
+			label: "q7",
+			sql: `			SELECT * FROM (
+				SELECT
+					'project_breakdown_none' as data_type,
+					-- The no-project bucket. Ungrouped aggregate over the NULL
+					-- rows, so the branch is never subject to q6's top-N cut;
+					-- HAVING suppresses the single all-NULL row a bare aggregate
+					-- would otherwise return for an empty match.
+					CAST(NULL AS TEXT) as name,
+					CAST(NULL AS TEXT) as secondary_name,
+					CAST(NULL AS BIGINT) as count,
+					COUNT(*) as requests,
+					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
+					SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+					SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+					SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
+					SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
+					SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
+					SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
+				FROM requests r
+				WHERE ${whereClause} AND r.project IS NULL
+				HAVING COUNT(*) > 0
+			) q7`,
+			binds: (qp) => [...qp],
+		},
+	];
+}
+
 export function createAnalyticsHandler(context: APIContext) {
 	return async (params: URLSearchParams): Promise<Response> => {
 		const db = context.dbOps.getAdapter();
+
+		// Section scoping. Parsed here as well as on the main thread (see
+		// analytics-runner) because this handler is also reachable directly —
+		// tests, and the no-db-path fallback that skips the worker entirely.
+		const parsedSections = parseSectionsParam(params.get("sections"));
+		if (!parsedSections.ok) {
+			return errorResponse(BadRequest(parsedSections.message));
+		}
+		const isUnscoped = parsedSections.sections === null;
+		const resolvedSections = parsedSections.sections ?? allSections();
+		const requestedSections = new Set<AnalyticsSection>(resolvedSections);
+		/** Should this query phase run? Absent `sections` param => everything. */
+		const want = (section: AnalyticsSection): boolean =>
+			requestedSections.has(section);
+
 		const range = params.get("range") ?? "24h";
 		// `startMs: null` means "no cutoff" (the all-time range): the timestamp
 		// predicate is omitted from the WHERE clause entirely rather than
@@ -192,29 +527,47 @@ export function createAnalyticsHandler(context: APIContext) {
 			// Check if we need per-model time series
 			const includeModelBreakdown = params.get("modelBreakdown") === "true";
 
+			/**
+			 * Run one gated query phase. A phase whose section was not requested
+			 * is skipped entirely (no query, no timing entry) and yields
+			 * `undefined` — which the response assembly turns into an OMITTED
+			 * field, never a zero-filled one.
+			 */
+			const runPhase = async <T>(
+				phase: string,
+				enabled: boolean,
+				run: () => Promise<T>,
+			): Promise<T | undefined> => {
+				if (!enabled) return undefined;
+				const startedAt = performance.now();
+				const result = await run();
+				recordPhase(phaseTimings, phase, startedAt);
+				return result;
+			};
+
 			// Consolidated query to get all analytics data in a single roundtrip
-			let phaseStartedAt = performance.now();
-			const consolidatedResult = await db.get<{
-				total_requests: number;
-				success_rate: number;
-				avg_response_time: number;
-				total_tokens: number;
-				total_cost_usd: number;
-				plan_cost_usd: number;
-				api_cost_usd: number;
-				cache_hit_rate: number;
-				avg_tokens_per_second: number;
-				active_accounts: number;
-				input_tokens: number;
-				cache_read_input_tokens: number;
-				cache_creation_input_tokens: number;
-				output_tokens: number;
-				attribution_measured: number;
-				attribution_none: number;
-				attribution_inherited: number;
-				attribution_ambiguous: number;
-			}>(
-				`
+			const consolidatedResult = await runPhase("totals", want("totals"), () =>
+				db.get<{
+					total_requests: number;
+					success_rate: number;
+					avg_response_time: number;
+					total_tokens: number;
+					total_cost_usd: number;
+					plan_cost_usd: number;
+					api_cost_usd: number;
+					cache_hit_rate: number;
+					avg_tokens_per_second: number;
+					active_accounts: number;
+					input_tokens: number;
+					cache_read_input_tokens: number;
+					cache_creation_input_tokens: number;
+					output_tokens: number;
+					attribution_measured: number;
+					attribution_none: number;
+					attribution_inherited: number;
+					attribution_ambiguous: number;
+				}>(
+					`
 				WITH filtered_requests AS (
 					SELECT * FROM requests r
 					WHERE ${whereClause}
@@ -246,9 +599,9 @@ export function createAnalyticsHandler(context: APIContext) {
 					(SELECT SUM(CASE WHEN project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_inherited,
 					(SELECT SUM(CASE WHEN project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_ambiguous
 			`,
-				[...queryParams, NO_ACCOUNT_ID],
+					[...queryParams, NO_ACCOUNT_ID],
+				),
 			);
-			recordPhase(phaseTimings, "totals", phaseStartedAt);
 
 			// Fixed-window burn-rate aggregates. Independent of the user's range
 			// or filters so "Avg / day" and "Avg / week" stay stable when the
@@ -259,16 +612,16 @@ export function createAnalyticsHandler(context: APIContext) {
 			const nowMs = Date.now();
 			const sevenDayStart = nowMs - 7 * dayMs;
 			const thirtyDayStart = nowMs - 30 * dayMs;
-			phaseStartedAt = performance.now();
-			const burnRateResult = await db.get<{
-				plan_cost_7d: number;
-				api_cost_7d: number;
-				plan_cost_30d: number;
-				api_cost_30d: number;
-				first_plan_ts: number | null;
-				first_api_ts: number | null;
-			}>(
-				`
+			const burnRateResult = await runPhase("burn_rate", want("totals"), () =>
+				db.get<{
+					plan_cost_7d: number;
+					api_cost_7d: number;
+					plan_cost_30d: number;
+					api_cost_30d: number;
+					first_plan_ts: number | null;
+					first_api_ts: number | null;
+				}>(
+					`
 				SELECT
 					SUM(CASE WHEN timestamp > ? AND billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_7d,
 					SUM(CASE WHEN timestamp > ? AND COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_7d,
@@ -279,9 +632,9 @@ export function createAnalyticsHandler(context: APIContext) {
 				FROM requests
 				WHERE timestamp > ?
 			`,
-				[sevenDayStart, sevenDayStart, thirtyDayStart],
+					[sevenDayStart, sevenDayStart, thirtyDayStart],
+				),
 			);
-			recordPhase(phaseTimings, "burn_rate", phaseStartedAt);
 			const planCost7d = Number(burnRateResult?.plan_cost_7d) || 0;
 			const apiCost7d = Number(burnRateResult?.api_cost_7d) || 0;
 			const planCost30d = Number(burnRateResult?.plan_cost_30d) || 0;
@@ -313,12 +666,15 @@ export function createAnalyticsHandler(context: APIContext) {
 			// artifact-filtered via the sanity ceiling and computed with the same
 			// PERCENT_RANK ranked-CTE pattern used for p95 response time below
 			// (uses a PERCENT_RANK CTE rather than PERCENTILE_CONT).
-			phaseStartedAt = performance.now();
-			const speedTotals = await db.get<{
-				median_tokens_per_second: number | null;
-				p95_tokens_per_second: number | null;
-			}>(
-				`
+			const speedTotals = await runPhase(
+				"speed_totals",
+				want("speedTotals"),
+				() =>
+					db.get<{
+						median_tokens_per_second: number | null;
+						p95_tokens_per_second: number | null;
+					}>(
+						`
 				WITH filtered_speed AS (
 					SELECT output_tokens_per_second AS otps
 					FROM requests r
@@ -334,9 +690,9 @@ export function createAnalyticsHandler(context: APIContext) {
 					MIN(CASE WHEN pr >= 0.95 THEN otps END) as p95_tokens_per_second
 				FROM ranked_speed
 			`,
-				queryParams,
+						queryParams,
+					),
 			);
-			recordPhase(phaseTimings, "speed_totals", phaseStartedAt);
 			const medianTokensPerSecond =
 				speedTotals?.median_tokens_per_second != null
 					? Number(speedTotals.median_tokens_per_second)
@@ -347,22 +703,22 @@ export function createAnalyticsHandler(context: APIContext) {
 					: null;
 
 			// Get time series data
-			phaseStartedAt = performance.now();
-			const timeSeries = await db.query<{
-				ts: number;
-				model?: string;
-				requests: number;
-				tokens: number;
-				cost_usd: number;
-				plan_cost_usd: number;
-				api_cost_usd: number;
-				success_rate: number;
-				error_rate: number;
-				cache_hit_rate: number;
-				avg_response_time: number;
-				avg_tokens_per_second: number | null;
-			}>(
-				`
+			const timeSeries = await runPhase("time_series", want("timeSeries"), () =>
+				db.query<{
+					ts: number;
+					model?: string;
+					requests: number;
+					tokens: number;
+					cost_usd: number;
+					plan_cost_usd: number;
+					api_cost_usd: number;
+					success_rate: number;
+					error_rate: number;
+					cache_hit_rate: number;
+					avg_response_time: number;
+					avg_tokens_per_second: number | null;
+				}>(
+					`
 				SELECT
 					(timestamp / ?) * ? as ts,
 					${includeModelBreakdown ? "model," : ""}
@@ -382,301 +738,81 @@ export function createAnalyticsHandler(context: APIContext) {
 				GROUP BY ts${includeModelBreakdown ? ", model" : ""}
 				ORDER BY ts${includeModelBreakdown ? ", model" : ""}
 			`,
-				[bucket.bucketMs, bucket.bucketMs, ...queryParams],
+					[bucket.bucketMs, bucket.bucketMs, ...queryParams],
+				),
 			);
-			recordPhase(phaseTimings, "time_series", phaseStartedAt);
 
-			// Get additional data (model distribution, account performance, cost by model, api key performance, account model usage)
-			phaseStartedAt = performance.now();
-			const additionalData = await db.query<{
-				data_type: string;
-				name: string;
-				secondary_name: string | null;
-				count: number | null;
-				requests: number | null;
-				success_rate: number | null;
-				cost_usd: number | null;
-				plan_cost_usd: number | null;
-				api_cost_usd: number | null;
-				total_cost_usd: number | null;
-				total_tokens: number | null;
-				measured_requests: number | null;
-				inferred_requests: number | null;
-				ambiguous_requests: number | null;
-			}>(
-				`
-				-- UNION 14-column contract (ALL 7 sub-selects MUST match in this exact column order):
-				-- 1. data_type TEXT
-				-- 2. name TEXT
-				-- 3. secondary_name TEXT
-				-- 4. count BIGINT
-				-- 5. requests BIGINT
-				-- 6. success_rate DOUBLE PRECISION
-				-- 7. cost_usd DOUBLE PRECISION
-				-- 8. plan_cost_usd DOUBLE PRECISION
-				-- 9. api_cost_usd DOUBLE PRECISION
-				-- 10. total_cost_usd DOUBLE PRECISION
-				-- 11. total_tokens BIGINT
-				-- 12. measured_requests BIGINT  (project_breakdown* only)
-				-- 13. inferred_requests BIGINT  (project_breakdown* only)
-				-- 14. ambiguous_requests BIGINT (project_breakdown* only)
-				--
-				-- q6/q7 split: the named-project branch is truncated to the top N by
-				-- tokens, so the no-project bucket — an ordinary GROUP BY row when
-				-- the two shared one branch — could be ranked out and vanish from
-				-- the dashboard. It gets its own untruncated branch instead.
-				SELECT * FROM (
-					SELECT
-						'model_distribution' as data_type,
-						model as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						COUNT(*) as count,
-						CAST(NULL AS BIGINT) as requests,
-						CAST(NULL AS DOUBLE PRECISION) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens,
-						CAST(NULL AS BIGINT) as measured_requests,
-						CAST(NULL AS BIGINT) as inferred_requests,
-						CAST(NULL AS BIGINT) as ambiguous_requests
-					FROM requests r
-					WHERE ${whereClause} AND model IS NOT NULL
-					GROUP BY model
-					ORDER BY count DESC
-					LIMIT 10
-				) q1
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'account_performance' as data_type,
-						COALESCE(a.name, r.account_used, ?) as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						CAST(NULL AS BIGINT) as count,
-						COUNT(r.id) as requests,
-						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(r.id), 0) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
-						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens,
-						CAST(NULL AS BIGINT) as measured_requests,
-						CAST(NULL AS BIGINT) as inferred_requests,
-						CAST(NULL AS BIGINT) as ambiguous_requests
-					FROM requests r
-					LEFT JOIN accounts a ON a.id = r.account_used
-					WHERE ${whereClause}
-					GROUP BY r.account_used, a.name
-					HAVING COUNT(r.id) > 0
-					ORDER BY requests DESC
-					LIMIT 10
-				) q2
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'cost_by_model' as data_type,
-						model as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						CAST(NULL AS BIGINT) as count,
-						COUNT(*) as requests,
-						CAST(NULL AS DOUBLE PRECISION) as success_rate,
-						SUM(COALESCE(cost_usd, 0)) as cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						SUM(COALESCE(total_tokens, 0)) as total_tokens,
-						CAST(NULL AS BIGINT) as measured_requests,
-						CAST(NULL AS BIGINT) as inferred_requests,
-						CAST(NULL AS BIGINT) as ambiguous_requests
-					FROM requests r
-					WHERE ${whereClause} AND COALESCE(cost_usd, 0) > 0 AND model IS NOT NULL
-					GROUP BY model
-					ORDER BY cost_usd DESC
-					LIMIT 10
-				) q3
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'api_key_performance' as data_type,
-						-- Current key name with the record-time snapshot as fallback for
-						-- hard-deleted keys. Grouped by key id alone so a key renamed
-						-- mid-history still collapses to ONE row; MAX() picks a single
-						-- deterministic name when deleted-key snapshots vary.
-						MAX(COALESCE(k.name, r.api_key_name)) as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						CAST(NULL AS BIGINT) as count,
-						COUNT(*) as requests,
-						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens,
-						CAST(NULL AS BIGINT) as measured_requests,
-						CAST(NULL AS BIGINT) as inferred_requests,
-						CAST(NULL AS BIGINT) as ambiguous_requests
-					FROM requests r
-					LEFT JOIN api_keys k ON k.id = r.api_key_id
-					WHERE ${whereClause} AND r.api_key_id IS NOT NULL
-					GROUP BY r.api_key_id
-					HAVING COUNT(*) > 0
-					ORDER BY requests DESC
-					LIMIT 10
-				) q4
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'account_model_usage' as data_type,
-						COALESCE(a.name, 'Unknown') as name,
-						r.model as secondary_name,
-						COUNT(*) as count,
-						CAST(NULL AS BIGINT) as requests,
-						CAST(NULL AS DOUBLE PRECISION) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as plan_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as api_cost_usd,
-						CAST(NULL AS DOUBLE PRECISION) as total_cost_usd,
-						CAST(NULL AS BIGINT) as total_tokens,
-						CAST(NULL AS BIGINT) as measured_requests,
-						CAST(NULL AS BIGINT) as inferred_requests,
-						CAST(NULL AS BIGINT) as ambiguous_requests
-					FROM requests r
-					LEFT JOIN accounts a ON a.id = r.account_used
-					WHERE ${whereClause} AND r.model IS NOT NULL
-					GROUP BY COALESCE(a.name, 'Unknown'), r.model
-					HAVING COUNT(*) > 0
-					ORDER BY count DESC
-					LIMIT 50
-				) q5
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'project_breakdown' as data_type,
-						-- Raw column, no COALESCE: a historical row literally named
-						-- 'no-project' stays a distinct project rather than merging
-						-- into the NULL bucket, which q7 owns.
-						r.project as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						CAST(NULL AS BIGINT) as count,
-						COUNT(*) as requests,
-						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
-						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
-						SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
-						-- Attribution coverage for this bucket. measured_requests is
-						-- the ONLY honest denominator for the inference share: rows
-						-- written before the column existed carry SQL NULL and would
-						-- otherwise dilute every range that spans the deploy.
-						SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
-						SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
-						SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
-					FROM requests r
-					WHERE ${whereClause} AND r.project IS NOT NULL
-					-- Positional: "GROUP BY name" would bind to a source column if
-					-- one existed; 2 pins the grouping to the project label
-					-- (column 1 is the constant data_type).
-					GROUP BY 2
-					ORDER BY total_tokens DESC
-					LIMIT ${PROJECT_BREAKDOWN_LIMIT}
-				) q6
-
-				UNION ALL
-
-				SELECT * FROM (
-					SELECT
-						'project_breakdown_none' as data_type,
-						-- The no-project bucket. Ungrouped aggregate over the NULL
-						-- rows, so the branch is never subject to q6's top-N cut;
-						-- HAVING suppresses the single all-NULL row a bare aggregate
-						-- would otherwise return for an empty match.
-						CAST(NULL AS TEXT) as name,
-						CAST(NULL AS TEXT) as secondary_name,
-						CAST(NULL AS BIGINT) as count,
-						COUNT(*) as requests,
-						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
-						CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
-						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
-						SUM(COALESCE(r.total_tokens, 0)) as total_tokens,
-						SUM(CASE WHEN r.project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as measured_requests,
-						SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
-						SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
-					FROM requests r
-					WHERE ${whereClause} AND r.project IS NULL
-					HAVING COUNT(*) > 0
-				) q7
-			`,
-				[
-					...queryParams,
-					NO_ACCOUNT_ID,
-					...queryParams,
-					...queryParams,
-					...queryParams,
-					...queryParams,
-					...queryParams,
-					...queryParams,
-				],
+			// Additional data (model distribution, account performance, cost by
+			// model, api key performance, account model usage, project breakdown).
+			// Only the requested branches are emitted, and each contributes its own
+			// binds in branch order — see AdditionalDataBranch.
+			const additionalBranches = additionalDataBranches(whereClause).filter(
+				(branch) => want(branch.section),
 			);
-			recordPhase(phaseTimings, "additional_data", phaseStartedAt);
+			const additionalData =
+				(await runPhase("additional_data", additionalBranches.length > 0, () =>
+					db.query<AdditionalDataRow>(
+						additionalBranches
+							.map((branch) => branch.sql)
+							.join("\n\n\t\t\tUNION ALL\n\n"),
+						additionalBranches.flatMap((branch) => branch.binds(queryParams)),
+					),
+				)) ?? [];
 
 			// Parse the combined results
-			const modelDistribution = additionalData
-				.filter((row) => row.data_type === "model_distribution")
-				.map((row) => ({
-					model: row.name,
-					count: Number(row.count) || 0,
-				}));
+			const modelDistribution = !want("modelDistribution")
+				? undefined
+				: additionalData
+						.filter((row) => row.data_type === "model_distribution")
+						.map((row) => ({
+							model: row.name,
+							count: Number(row.count) || 0,
+						}));
 
-			const accountPerformance = additionalData
-				.filter((row) => row.data_type === "account_performance")
-				.map((row) => ({
-					name: row.name,
-					requests: Number(row.requests) || 0,
-					successRate: Number(row.success_rate) || 0,
-					planCostUsd: Number(row.plan_cost_usd) || 0,
-					apiCostUsd: Number(row.api_cost_usd) || 0,
-					totalCostUsd: Number(row.total_cost_usd) || 0,
-				}));
+			const accountPerformance = !want("accountPerformance")
+				? undefined
+				: additionalData
+						.filter((row) => row.data_type === "account_performance")
+						.map((row) => ({
+							name: row.name,
+							requests: Number(row.requests) || 0,
+							successRate: Number(row.success_rate) || 0,
+							planCostUsd: Number(row.plan_cost_usd) || 0,
+							apiCostUsd: Number(row.api_cost_usd) || 0,
+							totalCostUsd: Number(row.total_cost_usd) || 0,
+						}));
 
-			const costByModel = additionalData
-				.filter((row) => row.data_type === "cost_by_model")
-				.map((row) => ({
-					model: row.name,
-					costUsd: Number(row.cost_usd) || 0,
-					requests: Number(row.requests) || 0,
-					totalTokens: Number(row.total_tokens) || 0,
-				}));
+			const costByModel = !want("costByModel")
+				? undefined
+				: additionalData
+						.filter((row) => row.data_type === "cost_by_model")
+						.map((row) => ({
+							model: row.name,
+							costUsd: Number(row.cost_usd) || 0,
+							requests: Number(row.requests) || 0,
+							totalTokens: Number(row.total_tokens) || 0,
+						}));
 
-			const apiKeyPerformance = additionalData
-				.filter((row) => row.data_type === "api_key_performance")
-				.map((row) => ({
-					id: row.name, // API key name used as id for now
-					name: row.name,
-					requests: Number(row.requests) || 0,
-					successRate: Number(row.success_rate) || 0,
-				}));
+			const apiKeyPerformance = !want("apiKeyPerformance")
+				? undefined
+				: additionalData
+						.filter((row) => row.data_type === "api_key_performance")
+						.map((row) => ({
+							id: row.name, // API key name used as id for now
+							name: row.name,
+							requests: Number(row.requests) || 0,
+							successRate: Number(row.success_rate) || 0,
+						}));
 
-			const accountModelUsage = additionalData
-				.filter((row) => row.data_type === "account_model_usage")
-				.map((row) => ({
-					account: row.name,
-					model: row.secondary_name ?? "Unknown",
-					count: Number(row.count) || 0,
-				}));
+			const accountModelUsage = !want("accountModelUsage")
+				? undefined
+				: additionalData
+						.filter((row) => row.data_type === "account_model_usage")
+						.map((row) => ({
+							account: row.name,
+							model: row.secondary_name ?? "Unknown",
+							count: Number(row.count) || 0,
+						}));
 
 			const toProjectRow = (row: (typeof additionalData)[number]) => ({
 				// q6 selects the raw r.project column and q7 selects a literal
@@ -699,46 +835,51 @@ export function createAnalyticsHandler(context: APIContext) {
 			// merged back into the same array the dashboard already renders and
 			// the combined rows are re-sorted, keeping the documented
 			// "ordered by total tokens" contract that a plain append would break.
-			const projectBreakdown = [
-				...additionalData
-					.filter((row) => row.data_type === "project_breakdown")
-					.map(toProjectRow),
-				...additionalData
-					.filter((row) => row.data_type === "project_breakdown_none")
-					.map(toProjectRow),
-			].sort((a, b) => b.totalTokens - a.totalTokens);
+			const projectBreakdown = !want("projectBreakdown")
+				? undefined
+				: [
+						...additionalData
+							.filter((row) => row.data_type === "project_breakdown")
+							.map(toProjectRow),
+						...additionalData
+							.filter((row) => row.data_type === "project_breakdown_none")
+							.map(toProjectRow),
+					].sort((a, b) => b.totalTokens - a.totalTokens);
 
 			// Range-wide attribution coverage. Read from the totals query rather
 			// than summed from projectBreakdown, which only carries the top-N
 			// projects and would claim full coverage for a range whose unmeasured
 			// rows fall outside the cut.
-			const projectAttributionCoverage = {
-				total: Number(consolidatedResult?.total_requests) || 0,
-				measured: Number(consolidatedResult?.attribution_measured) || 0,
-				none: Number(consolidatedResult?.attribution_none) || 0,
-				inherited: Number(consolidatedResult?.attribution_inherited) || 0,
-				ambiguous: Number(consolidatedResult?.attribution_ambiguous) || 0,
-			};
+			const projectAttributionCoverage = !want("totals")
+				? undefined
+				: {
+						total: Number(consolidatedResult?.total_requests) || 0,
+						measured: Number(consolidatedResult?.attribution_measured) || 0,
+						none: Number(consolidatedResult?.attribution_none) || 0,
+						inherited: Number(consolidatedResult?.attribution_inherited) || 0,
+						ambiguous: Number(consolidatedResult?.attribution_ambiguous) || 0,
+					};
 
 			// Get model performance metrics. Speed percentiles (median/p95) are
 			// computed over a separately-filtered row set (plausible speeds only)
 			// from the response-time percentiles, so artifact rows and rows
 			// missing a speed sample never pollute each other's PERCENT_RANK
 			// windows. The two aggregates are joined back per model.
-			phaseStartedAt = performance.now();
-			const modelPerfData = await db.query<{
-				model: string;
-				avg_response_time: number;
-				max_response_time: number;
-				total_requests: number;
-				error_count: number;
-				error_rate: number;
-				p95_response_time: number | null;
-				speed_sample_count: number | null;
-				median_tokens_per_second: number | null;
-				p95_tokens_per_second: number | null;
-			}>(
-				`
+			const modelPerfData =
+				(await runPhase("model_performance", want("modelPerformance"), () =>
+					db.query<{
+						model: string;
+						avg_response_time: number;
+						max_response_time: number;
+						total_requests: number;
+						error_count: number;
+						error_rate: number;
+						p95_response_time: number | null;
+						speed_sample_count: number | null;
+						median_tokens_per_second: number | null;
+						p95_tokens_per_second: number | null;
+					}>(
+						`
 				WITH filtered AS (
 					SELECT
 						model,
@@ -814,42 +955,45 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY ra.total_requests DESC
 				LIMIT 10
 			`,
-				queryParams,
-			);
-			recordPhase(phaseTimings, "model_performance", phaseStartedAt);
+						queryParams,
+					),
+				)) ?? [];
 
-			const modelPerformance = modelPerfData.map((modelData) => ({
-				model: modelData.model,
-				avgResponseTime: Number(modelData.avg_response_time) || 0,
-				p95ResponseTime:
-					Number(modelData.p95_response_time) ||
-					Number(modelData.max_response_time) ||
-					Number(modelData.avg_response_time) ||
-					0,
-				errorRate: Number(modelData.error_rate) || 0,
-				medianTokensPerSecond:
-					modelData.median_tokens_per_second != null
-						? Number(modelData.median_tokens_per_second)
-						: null,
-				p95TokensPerSecond:
-					modelData.p95_tokens_per_second != null
-						? Number(modelData.p95_tokens_per_second)
-						: null,
-				speedSampleCount: Number(modelData.speed_sample_count) || 0,
-			}));
+			const modelPerformance = !want("modelPerformance")
+				? undefined
+				: modelPerfData.map((modelData) => ({
+						model: modelData.model,
+						avgResponseTime: Number(modelData.avg_response_time) || 0,
+						p95ResponseTime:
+							Number(modelData.p95_response_time) ||
+							Number(modelData.max_response_time) ||
+							Number(modelData.avg_response_time) ||
+							0,
+						errorRate: Number(modelData.error_rate) || 0,
+						medianTokensPerSecond:
+							modelData.median_tokens_per_second != null
+								? Number(modelData.median_tokens_per_second)
+								: null,
+						p95TokensPerSecond:
+							modelData.p95_tokens_per_second != null
+								? Number(modelData.p95_tokens_per_second)
+								: null,
+						speedSampleCount: Number(modelData.speed_sample_count) || 0,
+					}));
 
 			// Per-model output-speed-over-time: median (p50) tok/s per time bucket
 			// per model, artifact-filtered. Always per-model and independent of the
 			// main chart's modelBreakdown toggle. HAVING count >= 3 drops buckets
 			// too thin for a meaningful median (a 1-2 sample p50 is just noise).
-			phaseStartedAt = performance.now();
-			const speedTimeSeriesData = await db.query<{
-				ts: number;
-				model: string;
-				median_tps: number | null;
-				sample_count: number;
-			}>(
-				`
+			const speedTimeSeriesData =
+				(await runPhase("speed_time_series", want("speedTimeSeries"), () =>
+					db.query<{
+						ts: number;
+						model: string;
+						median_tps: number | null;
+						sample_count: number;
+					}>(
+						`
 				WITH bucketed AS (
 					SELECT
 						(timestamp / ?) * ? AS ts,
@@ -878,17 +1022,21 @@ export function createAnalyticsHandler(context: APIContext) {
 				HAVING COUNT(*) >= 3
 				ORDER BY ts, model
 			`,
-				[bucket.bucketMs, bucket.bucketMs, ...queryParams],
-			);
-			recordPhase(phaseTimings, "speed_time_series", phaseStartedAt);
+						[bucket.bucketMs, bucket.bucketMs, ...queryParams],
+					),
+				)) ?? [];
 
-			const speedTimeSeries: SpeedTimePoint[] = speedTimeSeriesData
-				.filter((row) => row.median_tps != null)
-				.map((row) => ({
-					ts: Number(row.ts),
-					model: row.model,
-					medianTps: Number(row.median_tps),
-				}));
+			const speedTimeSeries: SpeedTimePoint[] | undefined = !want(
+				"speedTimeSeries",
+			)
+				? undefined
+				: speedTimeSeriesData
+						.filter((row) => row.median_tps != null)
+						.map((row) => ({
+							ts: Number(row.ts),
+							model: row.model,
+							medianTps: Number(row.median_tps),
+						}));
 
 			// Distinct-active-sessions series, bucketed by requests.timestamp and
 			// split by affinity scope.
@@ -921,14 +1069,15 @@ export function createAnalyticsHandler(context: APIContext) {
 			// Param order: queryParams (whereClause lives inside the CTE, which is
 			// emitted first in the SQL string) precede the two bucket placeholders
 			// (the bucket sub-select comes after the CTE).
-			phaseStartedAt = performance.now();
-			const activeSessionRows = await db.query<{
-				row_type: string;
-				ts: number | null;
-				scope: string | null;
-				sessions: number;
-			}>(
-				`
+			const activeSessionRows =
+				(await runPhase("active_sessions", want("activeSessions"), () =>
+					db.query<{
+						row_type: string;
+						ts: number | null;
+						scope: string | null;
+						sessions: number;
+					}>(
+						`
 				WITH session_requests AS (
 					SELECT
 						rr.affinity_key_hash AS hash,
@@ -959,9 +1108,9 @@ export function createAnalyticsHandler(context: APIContext) {
 					ORDER BY ts, scope
 				)
 			`,
-				[...queryParams, bucket.bucketMs, bucket.bucketMs],
-			);
-			recordPhase(phaseTimings, "active_sessions", phaseStartedAt);
+						[...queryParams, bucket.bucketMs, bucket.bucketMs],
+					),
+				)) ?? [];
 
 			// Per-account distinct-session breakdown for the "Active Sessions by
 			// account" bar list, across the WHOLE filtered range.
@@ -981,13 +1130,17 @@ export function createAnalyticsHandler(context: APIContext) {
 			// therefore does NOT sum to totalDistinctSessions — same caveat as
 			// timeSeries. NULL selected_account_id collapses to the NO_ACCOUNT_ID
 			// sentinel for both id and name.
-			phaseStartedAt = performance.now();
-			const activeSessionsByAccountRows = await db.query<{
-				account_id: string;
-				account_name: string;
-				sessions: number;
-			}>(
-				`SELECT
+			const activeSessionsByAccountRows =
+				(await runPhase(
+					"active_sessions_by_account",
+					want("activeSessionsByAccount"),
+					() =>
+						db.query<{
+							account_id: string;
+							account_name: string;
+							sessions: number;
+						}>(
+							`SELECT
 					COALESCE(rr.selected_account_id, ?) AS account_id,
 					COALESCE(a.name, rr.selected_account_id, ?) AS account_name,
 					COUNT(DISTINCT rr.affinity_key_hash) AS sessions
@@ -998,49 +1151,65 @@ export function createAnalyticsHandler(context: APIContext) {
 				GROUP BY rr.selected_account_id, a.name
 				ORDER BY sessions DESC
 				LIMIT ${ACTIVE_SESSIONS_BY_ACCOUNT_LIMIT}`,
-				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
-			);
-			recordPhase(phaseTimings, "active_sessions_by_account", phaseStartedAt);
+							[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+						),
+				)) ?? [];
 
-			const activeSessions: ActiveSessionsAnalytics = {
-				totalDistinctSessions:
-					Number(
-						activeSessionRows.find((row) => row.row_type === "total")?.sessions,
-					) || 0,
-				timeSeries: activeSessionRows
-					.filter(
-						(row) =>
-							row.row_type === "bucket" && row.ts != null && row.scope != null,
-					)
-					.map(
-						(row): ActiveSessionsTimePoint => ({
-							ts: Number(row.ts),
-							scope: row.scope as ActiveSessionsTimePoint["scope"],
-							sessions: Number(row.sessions) || 0,
+			// `activeSessionsByAccount` implies `activeSessions` (see
+			// analytics-sections.ts), so perAccount can only be present when the
+			// enclosing object is — never a perAccount-only object, which the
+			// dashboard's ActiveSessionsPanel would crash on.
+			const activeSessions: ActiveSessionsAnalytics | undefined = !want(
+				"activeSessions",
+			)
+				? undefined
+				: {
+						totalDistinctSessions:
+							Number(
+								activeSessionRows.find((row) => row.row_type === "total")
+									?.sessions,
+							) || 0,
+						timeSeries: activeSessionRows
+							.filter(
+								(row) =>
+									row.row_type === "bucket" &&
+									row.ts != null &&
+									row.scope != null,
+							)
+							.map(
+								(row): ActiveSessionsTimePoint => ({
+									ts: Number(row.ts),
+									scope: row.scope as ActiveSessionsTimePoint["scope"],
+									sessions: Number(row.sessions) || 0,
+								}),
+							),
+						...(want("activeSessionsByAccount") && {
+							perAccount: activeSessionsByAccountRows.map((row) => ({
+								accountId: String(row.account_id),
+								accountName: String(row.account_name),
+								sessions: Number(row.sessions) || 0,
+							})),
 						}),
-					),
-				perAccount: activeSessionsByAccountRows.map((row) => ({
-					accountId: String(row.account_id),
-					accountName: String(row.account_name),
-					sessions: Number(row.sessions) || 0,
-				})),
-			};
+					};
 
 			// Routing analytics: "why did this account get selected?"
 			// Requests without request_routing rows predate telemetry and are
 			// labeled "untracked" so the overview still shows account flow.
-			phaseStartedAt = performance.now();
-			const routingFlowRows = await db.query<{
-				strategy: string;
-				decision: string;
-				account_id: string;
-				account_name: string;
-				outcome: "success" | "rate_limited" | "error";
-				requests: number;
-				success_rate: number;
-				failover_attempts: number;
-			}>(
-				`
+			const routingRows = await runPhase(
+				"routing",
+				want("routing"),
+				async () => {
+					const flow = await db.query<{
+						strategy: string;
+						decision: string;
+						account_id: string;
+						account_name: string;
+						outcome: "success" | "rate_limited" | "error";
+						requests: number;
+						success_rate: number;
+						failover_attempts: number;
+					}>(
+						`
 				SELECT
 					COALESCE(rr.strategy, 'untracked') as strategy,
 					COALESCE(rr.decision, 'untracked') as decision,
@@ -1063,17 +1232,17 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY requests DESC
 				LIMIT 120
 			`,
-				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
-			);
+						[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+					);
 
-			const routingDecisionRows = await db.query<{
-				strategy: string;
-				decision: string;
-				requests: number;
-				success_rate: number;
-				failover_attempts: number;
-			}>(
-				`
+					const decisions = await db.query<{
+						strategy: string;
+						decision: string;
+						requests: number;
+						success_rate: number;
+						failover_attempts: number;
+					}>(
+						`
 				SELECT
 					COALESCE(rr.strategy, 'untracked') as strategy,
 					COALESCE(rr.decision, 'untracked') as decision,
@@ -1087,17 +1256,17 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY requests DESC
 				LIMIT 20
 			`,
-				queryParams,
-			);
+						queryParams,
+					);
 
-			const routingAccountRows = await db.query<{
-				account_id: string;
-				account_name: string;
-				requests: number;
-				success_rate: number;
-				failover_attempts: number;
-			}>(
-				`
+					const accountSplit = await db.query<{
+						account_id: string;
+						account_name: string;
+						requests: number;
+						success_rate: number;
+						failover_attempts: number;
+					}>(
+						`
 				SELECT
 					COALESCE(rr.selected_account_id, r.account_used, ?) as account_id,
 					COALESCE(sa.name, ua.name, rr.selected_account_id, r.account_used, ?) as account_name,
@@ -1113,18 +1282,18 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY requests DESC
 				LIMIT 12
 			`,
-				[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
-			);
+						[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+					);
 
-			const routingTimelineRows = await db.query<{
-				ts: number;
-				account_id: string;
-				account_name: string;
-				decision: string;
-				requests: number;
-				success_rate: number;
-			}>(
-				`
+					const timeline = await db.query<{
+						ts: number;
+						account_id: string;
+						account_name: string;
+						decision: string;
+						requests: number;
+						success_rate: number;
+					}>(
+						`
 				SELECT
 					(r.timestamp / ?) * ? as ts,
 					COALESCE(rr.selected_account_id, r.account_used, ?) as account_id,
@@ -1141,28 +1310,35 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY ts ASC, requests DESC
 				LIMIT 1000
 			`,
-				[
-					bucket.bucketMs,
-					bucket.bucketMs,
-					NO_ACCOUNT_ID,
-					NO_ACCOUNT_ID,
-					...queryParams,
-				],
+						[
+							bucket.bucketMs,
+							bucket.bucketMs,
+							NO_ACCOUNT_ID,
+							NO_ACCOUNT_ID,
+							...queryParams,
+						],
+					);
+					return { flow, decisions, accountSplit, timeline };
+				},
 			);
-			recordPhase(phaseTimings, "routing", phaseStartedAt);
+			const routingFlowRows = routingRows?.flow ?? [];
+			const routingDecisionRows = routingRows?.decisions ?? [];
+			const routingAccountRows = routingRows?.accountSplit ?? [];
+			const routingTimelineRows = routingRows?.timeline ?? [];
 
 			// Cache token flow: per-(model, account) sums of the three disjoint
 			// input buckets (cache reads, cache writes, uncached input). Feeds
 			// the Cache Flow graph on the dashboard.
-			phaseStartedAt = performance.now();
-			const cacheFlowRows = await db.query<{
-				model: string;
-				account_name: string;
-				cache_read_tokens: number;
-				cache_write_tokens: number;
-				uncached_tokens: number;
-			}>(
-				`
+			const cacheFlowRows =
+				(await runPhase("cache_flow", want("cacheFlow"), () =>
+					db.query<{
+						model: string;
+						account_name: string;
+						cache_read_tokens: number;
+						cache_write_tokens: number;
+						uncached_tokens: number;
+					}>(
+						`
 				SELECT
 					COALESCE(r.model, 'unknown') as model,
 					COALESCE(a.name, r.account_used, ?) as account_name,
@@ -1179,40 +1355,43 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY (cache_read_tokens + cache_write_tokens + uncached_tokens) DESC
 				LIMIT 100
 			`,
-				[NO_ACCOUNT_ID, ...queryParams],
-			);
-			recordPhase(phaseTimings, "cache_flow", phaseStartedAt);
+						[NO_ACCOUNT_ID, ...queryParams],
+					),
+				)) ?? [];
 
-			const cacheFlow: CacheFlowPoint[] = cacheFlowRows.map((row) => ({
-				model: row.model,
-				accountName: row.account_name,
-				cacheReadTokens: Number(row.cache_read_tokens) || 0,
-				cacheWriteTokens: Number(row.cache_write_tokens) || 0,
-				uncachedTokens: Number(row.uncached_tokens) || 0,
-			}));
+			const cacheFlow: CacheFlowPoint[] | undefined = !want("cacheFlow")
+				? undefined
+				: cacheFlowRows.map((row) => ({
+						model: row.model,
+						accountName: row.account_name,
+						cacheReadTokens: Number(row.cache_read_tokens) || 0,
+						cacheWriteTokens: Number(row.cache_write_tokens) || 0,
+						uncachedTokens: Number(row.uncached_tokens) || 0,
+					}));
 
 			// Context composition (1/3): char-bucket totals/averages plus the
 			// per-project split, over COVERED rows only (context columns recorded
 			// at ingest; NULL = not recorded). One UNION query with a shared
 			// covered-only CTE — the discriminator column separates the single
 			// totals row from the grouped project rows.
-			phaseStartedAt = performance.now();
-			const compositionRows = await db.query<{
-				row_type: string;
-				project: string | null;
-				requests: number;
-				sum_system_chars: number | null;
-				sum_tools_chars: number | null;
-				sum_messages_chars: number | null;
-				sum_tool_result_chars: number | null;
-				sum_context_tokens: number | null;
-				avg_context_tokens: number | null;
-				avg_system_chars: number | null;
-				avg_tools_chars: number | null;
-				avg_messages_chars: number | null;
-				avg_message_count: number | null;
-			}>(
-				`
+			const compositionRows =
+				(await runPhase("context_composition", want("contextComposition"), () =>
+					db.query<{
+						row_type: string;
+						project: string | null;
+						requests: number;
+						sum_system_chars: number | null;
+						sum_tools_chars: number | null;
+						sum_messages_chars: number | null;
+						sum_tool_result_chars: number | null;
+						sum_context_tokens: number | null;
+						avg_context_tokens: number | null;
+						avg_system_chars: number | null;
+						avg_tools_chars: number | null;
+						avg_messages_chars: number | null;
+						avg_message_count: number | null;
+					}>(
+						`
 				WITH covered AS (
 					SELECT
 						r.project as project,
@@ -1264,24 +1443,28 @@ export function createAnalyticsHandler(context: APIContext) {
 					LIMIT ${CONTEXT_BY_PROJECT_LIMIT}
 				)
 			`,
-				queryParams,
-			);
-			recordPhase(phaseTimings, "context_composition", phaseStartedAt);
+						queryParams,
+					),
+				)) ?? [];
 
 			// Context composition (2/3): growth curve over ALL filtered rows (no
 			// composition predicate — token columns exist for full history),
 			// bucketed like timeSeries, restricted to the top projects by
 			// request count in range. The NULL "project" needs its own branch:
 			// IN (...) never matches SQL NULL.
-			phaseStartedAt = performance.now();
-			const growthCurveRows = await db.query<{
-				ts: number;
-				project: string | null;
-				avg_context_tokens: number | null;
-				max_context_tokens: number | null;
-				requests: number;
-			}>(
-				`
+			const growthCurveRows =
+				(await runPhase(
+					"context_growth_curve",
+					want("contextComposition"),
+					() =>
+						db.query<{
+							ts: number;
+							project: string | null;
+							avg_context_tokens: number | null;
+							max_context_tokens: number | null;
+							requests: number;
+						}>(
+							`
 				WITH top_projects AS (
 					SELECT r.project as project
 					FROM requests r
@@ -1306,23 +1489,29 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY ts
 				LIMIT ${GROWTH_CURVE_POINT_LIMIT}
 			`,
-				[...queryParams, bucket.bucketMs, bucket.bucketMs, ...queryParams],
-			);
-			recordPhase(phaseTimings, "context_growth_curve", phaseStartedAt);
+							[
+								...queryParams,
+								bucket.bucketMs,
+								bucket.bucketMs,
+								...queryParams,
+							],
+						),
+				)) ?? [];
 
 			// Context composition (3/3): biggest single tool results — the
 			// actionable "what to trim" list. > 0 excludes both NULL (not
 			// recorded) and zero (no tool results in the request).
-			phaseStartedAt = performance.now();
-			const topToolRows = await db.query<{
-				id: string;
-				timestamp: number;
-				project: string | null;
-				model: string | null;
-				context_largest_tool_name: string | null;
-				context_largest_tool_chars: number;
-			}>(
-				`
+			const topToolRows =
+				(await runPhase("context_top_tools", want("contextComposition"), () =>
+					db.query<{
+						id: string;
+						timestamp: number;
+						project: string | null;
+						model: string | null;
+						context_largest_tool_name: string | null;
+						context_largest_tool_chars: number;
+					}>(
+						`
 				SELECT
 					r.id,
 					r.timestamp,
@@ -1335,22 +1524,25 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY r.context_largest_tool_chars DESC
 				LIMIT ${TOP_TOOL_CONTRIBUTORS_LIMIT}
 			`,
-				queryParams,
-			);
-			recordPhase(phaseTimings, "context_top_tools", phaseStartedAt);
+						queryParams,
+					),
+				)) ?? [];
 
 			// Tool-call error analytics (1/3): per-tool call/error totals over the
 			// filtered range. Tool rows join back to requests so the shared
 			// whereClause (range + account/model/key/project/status filters)
 			// applies identically to every block.
-			phaseStartedAt = performance.now();
-			const toolErrorByToolRows = await db.query<{
-				tool_name: string;
-				total_calls: number;
-				total_errors: number;
-				error_rate_pct: number | null;
-			}>(
-				`
+			const toolErrorRows = await runPhase(
+				"tool_errors",
+				want("toolCallErrors"),
+				async () => {
+					const byTool = await db.query<{
+						tool_name: string;
+						total_calls: number;
+						total_errors: number;
+						error_rate_pct: number | null;
+					}>(
+						`
 				SELECT
 					tc.tool_name,
 					SUM(tc.call_count) as total_calls,
@@ -1363,21 +1555,21 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY total_errors DESC, total_calls DESC
 				LIMIT ${TOOL_ERROR_BY_TOOL_LIMIT}
 			`,
-				queryParams,
-			);
+						queryParams,
+					);
 
-			// Tool-call error analytics (2/3): bucketed calls/errors over time,
-			// restricted to the top tools by error count within the same filtered
-			// window so the chart stays readable. Params: the CTE consumes one
-			// whereClause pass first, then the bucket pair, then the outer pass —
-			// same ordering convention as growthCurveRows above.
-			const toolErrorTimeSeriesRows = await db.query<{
-				ts: number;
-				tool_name: string;
-				calls: number;
-				errors: number;
-			}>(
-				`
+					// Tool-call error analytics (2/3): bucketed calls/errors over time,
+					// restricted to the top tools by error count within the same filtered
+					// window so the chart stays readable. Params: the CTE consumes one
+					// whereClause pass first, then the bucket pair, then the outer pass —
+					// same ordering convention as growthCurveRows above.
+					const timeSeries = await db.query<{
+						ts: number;
+						tool_name: string;
+						calls: number;
+						errors: number;
+					}>(
+						`
 				WITH top_error_tools AS (
 					SELECT tc.tool_name as tool_name
 					FROM request_tool_calls tc
@@ -1400,21 +1592,21 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY ts, tc.tool_name
 				LIMIT ${TOOL_ERROR_TIME_SERIES_POINT_LIMIT}
 			`,
-				[...queryParams, bucket.bucketMs, bucket.bucketMs, ...queryParams],
-			);
+						[...queryParams, bucket.bucketMs, bucket.bucketMs, ...queryParams],
+					);
 
-			// Tool-call error analytics (3/3): most frequent distinct error texts
-			// per tool. error_text is pre-truncated at ingest (≤500 chars) so
-			// grouping on it is bounded; NULL texts carry no signal and are skipped.
-			// A window function caps each tool at TOOL_ERROR_MESSAGES_PER_TOOL_LIMIT
-			// rows before the global limit so one noisy tool cannot crowd out the
-			// rest of the fleet.
-			const toolErrorMessageRows = await db.query<{
-				tool_name: string;
-				error_text: string;
-				occurrences: number;
-			}>(
-				`
+					// Tool-call error analytics (3/3): most frequent distinct error texts
+					// per tool. error_text is pre-truncated at ingest (≤500 chars) so
+					// grouping on it is bounded; NULL texts carry no signal and are skipped.
+					// A window function caps each tool at TOOL_ERROR_MESSAGES_PER_TOOL_LIMIT
+					// rows before the global limit so one noisy tool cannot crowd out the
+					// rest of the fleet.
+					const topMessages = await db.query<{
+						tool_name: string;
+						error_text: string;
+						occurrences: number;
+					}>(
+						`
 				WITH ranked AS (
 					SELECT
 						te.tool_name,
@@ -1435,82 +1627,92 @@ export function createAnalyticsHandler(context: APIContext) {
 				ORDER BY occurrences DESC
 				LIMIT ${TOOL_ERROR_TOP_MESSAGES_LIMIT}
 			`,
-				queryParams,
+						queryParams,
+					);
+					return { byTool, timeSeries, topMessages };
+				},
 			);
-			recordPhase(phaseTimings, "tool_errors", phaseStartedAt);
 
-			const toolCallErrors = {
-				byTool: toolErrorByToolRows.map((row) => ({
-					toolName: row.tool_name,
-					totalCalls: Number(row.total_calls) || 0,
-					totalErrors: Number(row.total_errors) || 0,
-					errorRatePct: Number(row.error_rate_pct) || 0,
-				})),
-				timeSeries: toolErrorTimeSeriesRows.map((row) => ({
-					ts: Number(row.ts),
-					toolName: row.tool_name,
-					calls: Number(row.calls) || 0,
-					errors: Number(row.errors) || 0,
-				})),
-				topMessages: toolErrorMessageRows.map((row) => ({
-					toolName: row.tool_name,
-					errorText: row.error_text,
-					occurrences: Number(row.occurrences) || 0,
-				})),
-			};
+			const toolCallErrors = !toolErrorRows
+				? undefined
+				: {
+						byTool: toolErrorRows.byTool.map((row) => ({
+							toolName: row.tool_name,
+							totalCalls: Number(row.total_calls) || 0,
+							totalErrors: Number(row.total_errors) || 0,
+							errorRatePct: Number(row.error_rate_pct) || 0,
+						})),
+						timeSeries: toolErrorRows.timeSeries.map((row) => ({
+							ts: Number(row.ts),
+							toolName: row.tool_name,
+							calls: Number(row.calls) || 0,
+							errors: Number(row.errors) || 0,
+						})),
+						topMessages: toolErrorRows.topMessages.map((row) => ({
+							toolName: row.tool_name,
+							errorText: row.error_text,
+							occurrences: Number(row.occurrences) || 0,
+						})),
+					};
 
 			const compositionTotalsRow = compositionRows.find(
 				(row) => row.row_type === "totals",
 			);
-			const contextComposition = {
-				coverage: {
-					withComposition: Number(compositionTotalsRow?.requests) || 0,
-					// Reuse the consolidated all-rows total — same whereClause,
-					// already computed; recounting would just burn a scan.
-					totalRequests: Number(consolidatedResult?.total_requests) || 0,
-				},
-				totals: {
-					systemChars: Number(compositionTotalsRow?.sum_system_chars) || 0,
-					toolsChars: Number(compositionTotalsRow?.sum_tools_chars) || 0,
-					messagesChars: Number(compositionTotalsRow?.sum_messages_chars) || 0,
-					toolResultChars:
-						Number(compositionTotalsRow?.sum_tool_result_chars) || 0,
-					contextTokens: Number(compositionTotalsRow?.sum_context_tokens) || 0,
-					avgContextTokens:
-						Number(compositionTotalsRow?.avg_context_tokens) || 0,
-				},
-				avgPerRequest: {
-					systemChars: Number(compositionTotalsRow?.avg_system_chars) || 0,
-					toolsChars: Number(compositionTotalsRow?.avg_tools_chars) || 0,
-					messagesChars: Number(compositionTotalsRow?.avg_messages_chars) || 0,
-					messageCount: Number(compositionTotalsRow?.avg_message_count) || 0,
-				},
-				byProject: compositionRows
-					.filter((row) => row.row_type === "project")
-					.map((row) => ({
-						project: row.project ?? null,
-						requests: Number(row.requests) || 0,
-						avgContextTokens: Number(row.avg_context_tokens) || 0,
-						avgSystemChars: Number(row.avg_system_chars) || 0,
-						avgToolsChars: Number(row.avg_tools_chars) || 0,
-						avgMessagesChars: Number(row.avg_messages_chars) || 0,
-					})),
-				growthCurve: growthCurveRows.map((row) => ({
-					ts: Number(row.ts),
-					project: row.project ?? null,
-					avgContextTokens: Number(row.avg_context_tokens) || 0,
-					maxContextTokens: Number(row.max_context_tokens) || 0,
-					requests: Number(row.requests) || 0,
-				})),
-				topToolContributors: topToolRows.map((row) => ({
-					requestId: row.id,
-					ts: Number(row.timestamp),
-					project: row.project ?? null,
-					model: row.model ?? null,
-					toolName: row.context_largest_tool_name ?? null,
-					chars: Number(row.context_largest_tool_chars) || 0,
-				})),
-			};
+			const contextComposition = !want("contextComposition")
+				? undefined
+				: {
+						coverage: {
+							withComposition: Number(compositionTotalsRow?.requests) || 0,
+							// Reuse the consolidated all-rows total — same whereClause,
+							// already computed; recounting would just burn a scan.
+							totalRequests: Number(consolidatedResult?.total_requests) || 0,
+						},
+						totals: {
+							systemChars: Number(compositionTotalsRow?.sum_system_chars) || 0,
+							toolsChars: Number(compositionTotalsRow?.sum_tools_chars) || 0,
+							messagesChars:
+								Number(compositionTotalsRow?.sum_messages_chars) || 0,
+							toolResultChars:
+								Number(compositionTotalsRow?.sum_tool_result_chars) || 0,
+							contextTokens:
+								Number(compositionTotalsRow?.sum_context_tokens) || 0,
+							avgContextTokens:
+								Number(compositionTotalsRow?.avg_context_tokens) || 0,
+						},
+						avgPerRequest: {
+							systemChars: Number(compositionTotalsRow?.avg_system_chars) || 0,
+							toolsChars: Number(compositionTotalsRow?.avg_tools_chars) || 0,
+							messagesChars:
+								Number(compositionTotalsRow?.avg_messages_chars) || 0,
+							messageCount:
+								Number(compositionTotalsRow?.avg_message_count) || 0,
+						},
+						byProject: compositionRows
+							.filter((row) => row.row_type === "project")
+							.map((row) => ({
+								project: row.project ?? null,
+								requests: Number(row.requests) || 0,
+								avgContextTokens: Number(row.avg_context_tokens) || 0,
+								avgSystemChars: Number(row.avg_system_chars) || 0,
+								avgToolsChars: Number(row.avg_tools_chars) || 0,
+								avgMessagesChars: Number(row.avg_messages_chars) || 0,
+							})),
+						growthCurve: growthCurveRows.map((row) => ({
+							ts: Number(row.ts),
+							project: row.project ?? null,
+							avgContextTokens: Number(row.avg_context_tokens) || 0,
+							maxContextTokens: Number(row.max_context_tokens) || 0,
+							requests: Number(row.requests) || 0,
+						})),
+						topToolContributors: topToolRows.map((row) => ({
+							requestId: row.id,
+							ts: Number(row.timestamp),
+							project: row.project ?? null,
+							model: row.model ?? null,
+							toolName: row.context_largest_tool_name ?? null,
+							chars: Number(row.context_largest_tool_chars) || 0,
+						})),
+					};
 
 			const routingTotalRequests = routingDecisionRows.reduce(
 				(total, row) => total + (Number(row.requests) || 0),
@@ -1524,59 +1726,63 @@ export function createAnalyticsHandler(context: APIContext) {
 				}
 			}
 
-			const routing = {
-				totalRequests: routingTotalRequests,
-				flow: routingFlowRows.map((row) => ({
-					strategy: row.strategy,
-					decision: row.decision,
-					accountId: row.account_id,
-					accountName: row.account_name,
-					outcome: row.outcome,
-					requests: Number(row.requests) || 0,
-					successRate: Number(row.success_rate) || 0,
-					failoverAttempts: Number(row.failover_attempts) || 0,
-				})),
-				timeline: routingTimelineRows.map((row) => ({
-					ts: Number(row.ts),
-					accountId: row.account_id,
-					accountName: row.account_name,
-					decision: row.decision,
-					requests: Number(row.requests) || 0,
-					successRate: Number(row.success_rate) || 0,
-				})),
-				decisionBreakdown: routingDecisionRows.map((row) => {
-					const requests = Number(row.requests) || 0;
-					return {
-						strategy: row.strategy,
-						decision: row.decision,
-						requests,
-						percentage:
-							routingTotalRequests > 0
-								? (requests / routingTotalRequests) * 100
-								: 0,
-						successRate: Number(row.success_rate) || 0,
-						failoverAttempts: Number(row.failover_attempts) || 0,
+			const routing = !want("routing")
+				? undefined
+				: {
+						totalRequests: routingTotalRequests,
+						flow: routingFlowRows.map((row) => ({
+							strategy: row.strategy,
+							decision: row.decision,
+							accountId: row.account_id,
+							accountName: row.account_name,
+							outcome: row.outcome,
+							requests: Number(row.requests) || 0,
+							successRate: Number(row.success_rate) || 0,
+							failoverAttempts: Number(row.failover_attempts) || 0,
+						})),
+						timeline: routingTimelineRows.map((row) => ({
+							ts: Number(row.ts),
+							accountId: row.account_id,
+							accountName: row.account_name,
+							decision: row.decision,
+							requests: Number(row.requests) || 0,
+							successRate: Number(row.success_rate) || 0,
+						})),
+						decisionBreakdown: routingDecisionRows.map((row) => {
+							const requests = Number(row.requests) || 0;
+							return {
+								strategy: row.strategy,
+								decision: row.decision,
+								requests,
+								percentage:
+									routingTotalRequests > 0
+										? (requests / routingTotalRequests) * 100
+										: 0,
+								successRate: Number(row.success_rate) || 0,
+								failoverAttempts: Number(row.failover_attempts) || 0,
+							};
+						}),
+						accountSplit: routingAccountRows.map((row) => {
+							const requests = Number(row.requests) || 0;
+							return {
+								accountId: row.account_id,
+								accountName: row.account_name,
+								requests,
+								percentage:
+									routingTotalRequests > 0
+										? (requests / routingTotalRequests) * 100
+										: 0,
+								successRate: Number(row.success_rate) || 0,
+								failoverAttempts: Number(row.failover_attempts) || 0,
+								topDecision: topDecisionByAccount.get(row.account_id) ?? null,
+							};
+						}),
 					};
-				}),
-				accountSplit: routingAccountRows.map((row) => {
-					const requests = Number(row.requests) || 0;
-					return {
-						accountId: row.account_id,
-						accountName: row.account_name,
-						requests,
-						percentage:
-							routingTotalRequests > 0
-								? (requests / routingTotalRequests) * 100
-								: 0,
-						successRate: Number(row.success_rate) || 0,
-						failoverAttempts: Number(row.failover_attempts) || 0,
-						topDecision: topDecisionByAccount.get(row.account_id) ?? null,
-					};
-				}),
-			};
 
-			// Transform timeSeries data
-			let transformedTimeSeries = timeSeries.map((point) => ({
+			// Transform timeSeries data. `timeSeries` is undefined when the section
+			// was not requested; the cumulative transform below then runs over an
+			// empty array and the field is omitted from the response entirely.
+			let transformedTimeSeries = (timeSeries ?? []).map((point) => ({
 				ts: Number(point.ts),
 				...(point.model && { model: point.model }),
 				requests: Number(point.requests) || 0,
@@ -1649,37 +1855,51 @@ export function createAnalyticsHandler(context: APIContext) {
 					range,
 					bucket: bucket.displayName,
 					cumulative: isCumulative,
+					// The RESOLVED set (requested sections + implied dependencies), so
+					// a caller can tell "you didn't ask for this" apart from "no data
+					// in range". Always emitted, including on the unscoped path.
+					sections: resolvedSections,
 				},
-				totals: {
-					requests: Number(consolidatedResult?.total_requests) || 0,
-					successRate: Number(consolidatedResult?.success_rate) || 0,
-					activeAccounts: Number(consolidatedResult?.active_accounts) || 0,
-					avgResponseTime: Number(consolidatedResult?.avg_response_time) || 0,
-					totalTokens: Number(consolidatedResult?.total_tokens) || 0,
-					totalCostUsd: Number(consolidatedResult?.total_cost_usd) || 0,
-					planCostUsd: Number(consolidatedResult?.plan_cost_usd) || 0,
-					apiCostUsd: Number(consolidatedResult?.api_cost_usd) || 0,
-					cacheHitRate: Number(consolidatedResult?.cache_hit_rate) || 0,
-					avgTokensPerSecond:
-						consolidatedResult?.avg_tokens_per_second != null
-							? Number(consolidatedResult.avg_tokens_per_second)
-							: null,
-					medianTokensPerSecond,
-					p95TokensPerSecond,
-					avgDailyPlanCostUsd,
-					avgWeeklyPlanCostUsd,
-					avgDailyApiCostUsd,
-					avgWeeklyApiCostUsd,
-				},
-				timeSeries: transformedTimeSeries,
-				tokenBreakdown: {
-					inputTokens: Number(consolidatedResult?.input_tokens) || 0,
-					cacheReadInputTokens:
-						Number(consolidatedResult?.cache_read_input_tokens) || 0,
-					cacheCreationInputTokens:
-						Number(consolidatedResult?.cache_creation_input_tokens) || 0,
-					outputTokens: Number(consolidatedResult?.output_tokens) || 0,
-				},
+				// Section-owned fields are OMITTED, never zero-filled, when their
+				// phase did not run: each is `undefined` here, which JSON.stringify
+				// drops from the wire.
+				...(want("totals") && {
+					totals: {
+						requests: Number(consolidatedResult?.total_requests) || 0,
+						successRate: Number(consolidatedResult?.success_rate) || 0,
+						activeAccounts: Number(consolidatedResult?.active_accounts) || 0,
+						avgResponseTime: Number(consolidatedResult?.avg_response_time) || 0,
+						totalTokens: Number(consolidatedResult?.total_tokens) || 0,
+						totalCostUsd: Number(consolidatedResult?.total_cost_usd) || 0,
+						planCostUsd: Number(consolidatedResult?.plan_cost_usd) || 0,
+						apiCostUsd: Number(consolidatedResult?.api_cost_usd) || 0,
+						cacheHitRate: Number(consolidatedResult?.cache_hit_rate) || 0,
+						avgTokensPerSecond:
+							consolidatedResult?.avg_tokens_per_second != null
+								? Number(consolidatedResult.avg_tokens_per_second)
+								: null,
+						// The two speed percentiles are the `speedTotals` section's ONLY
+						// output; they live inside `totals`, which is why speedTotals
+						// implies totals.
+						...(want("speedTotals") && {
+							medianTokensPerSecond,
+							p95TokensPerSecond,
+						}),
+						avgDailyPlanCostUsd,
+						avgWeeklyPlanCostUsd,
+						avgDailyApiCostUsd,
+						avgWeeklyApiCostUsd,
+					},
+					tokenBreakdown: {
+						inputTokens: Number(consolidatedResult?.input_tokens) || 0,
+						cacheReadInputTokens:
+							Number(consolidatedResult?.cache_read_input_tokens) || 0,
+						cacheCreationInputTokens:
+							Number(consolidatedResult?.cache_creation_input_tokens) || 0,
+						outputTokens: Number(consolidatedResult?.output_tokens) || 0,
+					},
+				}),
+				...(want("timeSeries") && { timeSeries: transformedTimeSeries }),
 				modelDistribution,
 				accountPerformance,
 				apiKeyPerformance,
@@ -1697,7 +1917,10 @@ export function createAnalyticsHandler(context: APIContext) {
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);
-			return jsonResponse(response);
+			// The unscoped path must still emit every field. assertFullResponse
+			// re-checks that at runtime; FULL_RESPONSE_FIELDS makes forgetting a
+			// newly-added section field a compile error.
+			return jsonResponse(isUnscoped ? assertFullResponse(response) : response);
 		} catch (error) {
 			log.error("Analytics error:", error);
 			return errorResponse(

@@ -73,9 +73,9 @@ export function ModelsTab(props: ModelsTabProps) {
 			{/* Token Speed Analytics */}
 			<TokenSpeedAnalytics
 				speedTimeSeries={analytics?.speedTimeSeries ?? []}
-				medianTokensPerSecond={analytics?.totals.medianTokensPerSecond ?? null}
-				p95TokensPerSecond={analytics?.totals.p95TokensPerSecond ?? null}
-				avgResponseTimeMs={analytics?.totals.avgResponseTime ?? 0}
+				medianTokensPerSecond={analytics?.totals?.medianTokensPerSecond ?? null}
+				p95TokensPerSecond={analytics?.totals?.p95TokensPerSecond ?? null}
+				avgResponseTimeMs={analytics?.totals?.avgResponseTime ?? 0}
 				modelPerformance={analytics?.modelPerformance || []}
 				loading={loading}
 				timeRange={range}

@@ -42,7 +42,11 @@ export interface OverviewTimeSeriesRow {
 export function buildOverviewTimeSeries(
 	analytics: AnalyticsResponse | null | undefined,
 ): OverviewTimeSeriesRow[] {
-	if (!analytics) return [];
+	// `timeSeries` is section-scoped: a caller that did not request it gets no
+	// field at all. There are no chart rows to build in that case — this is
+	// deliberately NOT a zero-filled series, which would draw a flat line the
+	// user would read as "no traffic".
+	if (!analytics?.timeSeries) return [];
 
 	const sessions = analytics.activeSessions;
 	// Built once outside the map so the merge stays O(buckets), not O(n²).

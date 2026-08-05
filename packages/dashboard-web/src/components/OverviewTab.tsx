@@ -163,7 +163,7 @@ export const OverviewTab = React.memo(() => {
 			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 				<MetricCard
 					title="Total Requests"
-					value={formatNumber(analytics?.totals.requests || 0)}
+					value={formatNumber(analytics?.totals?.requests || 0)}
 					change={
 						trends.deltaRequests !== null ? trends.deltaRequests : undefined
 					}
@@ -173,11 +173,11 @@ export const OverviewTab = React.memo(() => {
 					subRows={[
 						{
 							label: "Success rate",
-							value: formatPercentage(analytics?.totals.successRate || 0, 0),
+							value: formatPercentage(analytics?.totals?.successRate || 0, 0),
 						},
 						{
 							label: "Cache hit",
-							value: formatPercentage(analytics?.totals.cacheHitRate || 0, 0),
+							value: formatPercentage(analytics?.totals?.cacheHitRate || 0, 0),
 						},
 					]}
 				/>

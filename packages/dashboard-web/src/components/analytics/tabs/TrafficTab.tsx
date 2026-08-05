@@ -109,7 +109,7 @@ export function TrafficTab(props: TrafficTabProps) {
 	const tokenBreakdown = useMemo(() => {
 		if (!analytics?.tokenBreakdown) return [];
 
-		const total = analytics.totals.totalTokens || 1;
+		const total = analytics.totals?.totalTokens || 1;
 		const breakdown = [
 			{
 				type: "Input Tokens",
@@ -137,7 +137,7 @@ export function TrafficTab(props: TrafficTabProps) {
 			...item,
 			percentage: Math.round((item.value / total) * 100),
 		}));
-	}, [analytics?.tokenBreakdown, analytics?.totals.totalTokens]);
+	}, [analytics?.tokenBreakdown, analytics?.totals?.totalTokens]);
 
 	const mainLoading = modelBreakdown ? loading || perModelLoading : loading;
 
