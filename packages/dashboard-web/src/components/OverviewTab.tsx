@@ -188,9 +188,20 @@ export const OverviewTab = React.memo(() => {
 			{/* Only renders when /api/system/status reports unpriced models */}
 			<PricingGapBanner />
 
-			{/* Header with Time Range Selector */}
-			<div className="flex justify-between items-center">
-				<h2 className="text-2xl font-semibold">Overview</h2>
+			{/* The section heading stays FIRST so heading order runs h1 → h2 → the
+			    card's own h3. Putting the card above it inverted that, and screen
+			    reader heading navigation met a level 3 before its level-2 parent. */}
+			<h2 className="text-2xl font-semibold">Overview</h2>
+
+			{/* Above the range selector, not below it: this card is live and
+			    carries its own minutes-scale window, which has nothing to do with
+			    the hours-to-days range that scopes everything after it. Sitting
+			    under that selector it read as a second control competing to scope
+			    the same content. */}
+			<LiveActivityLanes />
+
+			{/* Scopes everything below it, and now sits directly above it. */}
+			<div className="flex justify-end">
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
 
@@ -267,10 +278,6 @@ export const OverviewTab = React.memo(() => {
 					window="seven_day"
 				/>
 			</div>
-
-			{/* Rolling per-project request activity. Fed by the app-level request
-			    stream, so it needs no props and no query of its own. */}
-			<LiveActivityLanes />
 
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />

@@ -40,7 +40,7 @@ function render(
 			plotWidth={PLOT_WIDTH}
 			connected={true}
 			outages={[]}
-			historyEdge={null}
+			coverageFrom={T0 - WINDOW}
 			primed={true}
 			{...props}
 		/>,
@@ -134,6 +134,40 @@ describe("LiveActivityLanesView", () => {
 		// The container passes handlers; the view must not require them.
 		expect(() => render({ plot: undefined })).not.toThrow();
 	});
+
+	it("states the window length it is actually showing", () => {
+		expect(render({ windowMs: 10 * 60_000 })).toContain("last 10 minutes");
+	});
+
+	it("offers the window selector only when wired", () => {
+		expect(
+			render({ windowControl: { value: 5 * 60_000, onChange: () => {} } }),
+		).toContain("Live activity time range");
+		expect(render()).not.toContain("Live activity time range");
+	});
+
+	it("marks the selected window as pressed", () => {
+		const html = render({
+			windowMs: 10 * 60_000,
+			windowControl: { value: 10 * 60_000, onChange: () => {} },
+		});
+		// Identity is not colour-only: the active option is exposed to
+		// assistive tech via aria-pressed, not just tinted.
+		expect(html).toMatch(/aria-pressed="true"[^>]*>10m|10m<\/button>/);
+		expect(html).toContain('aria-pressed="true"');
+	});
+});
+
+describe("axis ticks", () => {
+	it("keeps the tick count readable as the window grows", () => {
+		// One tick per minute puts 31 labelled ticks on a half-hour axis, which
+		// overlaps its own text and reads as noise.
+		const ticksFor = (windowMs: number) =>
+			(render({ windowMs }).match(/-\d+m</g) ?? []).length;
+
+		expect(ticksFor(3 * 60_000)).toBeLessThanOrEqual(6);
+		expect(ticksFor(30 * 60_000)).toBeLessThanOrEqual(8);
+	});
 });
 
 describe("unknownRegions", () => {
@@ -141,7 +175,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: T0 - 60_000,
+			coverageFrom: T0 - 60_000,
 			outages: [],
 		});
 
@@ -155,10 +189,25 @@ describe("unknownRegions", () => {
 			unknownRegions({
 				now: T0,
 				windowMs: WINDOW,
-				historyEdge: T0 - WINDOW - 1000,
+				coverageFrom: T0 - WINDOW - 1000,
 				outages: [],
 			}),
 		).toHaveLength(0);
+	});
+
+	it("hatches the WHOLE window when nothing is covered", () => {
+		// `null` means no history fetched and the stream never up. Treating that
+		// as full coverage is how a failed backfill becomes a confident, wrong
+		// claim that nothing happened.
+		const [region] = unknownRegions({
+			now: T0,
+			windowMs: WINDOW,
+			coverageFrom: null,
+			outages: [],
+		});
+
+		expect(region.from).toBe(T0 - WINDOW);
+		expect(region.to).toBe(T0);
 	});
 
 	it("hatches a connection outage so the gap cannot read as idle", () => {
@@ -167,7 +216,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - 30_000, to: null }],
 		});
 
@@ -181,7 +230,7 @@ describe("unknownRegions", () => {
 		const [region] = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - 60_000, to: T0 - 50_000 }],
 		});
 
@@ -193,7 +242,7 @@ describe("unknownRegions", () => {
 		const regions = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [
 				{ from: T0 - 90_000, to: T0 - 80_000 },
 				{ from: T0 - 40_000, to: T0 - 30_000 },
@@ -211,7 +260,7 @@ describe("unknownRegions", () => {
 		const [region] = unknownRegions({
 			now: T0,
 			windowMs: WINDOW,
-			historyEdge: null,
+			coverageFrom: T0 - WINDOW,
 			outages: [{ from: T0 - WINDOW * 5, to: null }],
 		});
 
@@ -225,7 +274,7 @@ describe("unknownRegions", () => {
 			unknownRegions({
 				now: T0,
 				windowMs: WINDOW,
-				historyEdge: null,
+				coverageFrom: T0 - WINDOW,
 				outages: [{ from: T0 - WINDOW * 3, to: T0 - WINDOW * 2 }],
 			}),
 		).toHaveLength(0);
