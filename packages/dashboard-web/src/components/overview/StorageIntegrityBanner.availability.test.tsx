@@ -52,7 +52,16 @@ function renderBanner(opts: {
 	failed?: boolean;
 }): string {
 	const client = new QueryClient({
-		defaultOptions: { queries: { retry: false, refetchOnMount: false } },
+		defaultOptions: {
+			queries: {
+				retry: false,
+				refetchOnMount: false,
+				// Separate switch from `refetchOnMount`: without it the observer
+				// re-fetches a query that is ALREADY in the error state, so the
+				// render sees an optimistic pending state instead of the error.
+				retryOnMount: false,
+			},
+		},
 	});
 	const key = queryKeys.storage();
 	if (opts.cached) {
