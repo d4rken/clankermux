@@ -14,6 +14,8 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
+	type IsIngressRecordableInput,
+	isIngressRecordable,
 	type ShouldRecordRequestInput,
 	shouldRecordRequest,
 } from "../should-record-request";
@@ -299,5 +301,87 @@ describe("shouldRecordRequest — normal traffic", () => {
 
 	it("records a 429 rate-limited response (real user traffic worth logging)", () => {
 		expect(shouldRecordRequest(makeInput({ responseStatus: 429 }))).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Ingress-time gate
+// ---------------------------------------------------------------------------
+
+/**
+ * `isIngressRecordable` runs BEFORE an account (and therefore a provider) has
+ * been chosen and before any response exists, so it can only apply the
+ * status-independent, provider-independent rules. It gates the dashboard's
+ * ingress event; anything it lets through that `shouldRecordRequest` later
+ * rejects is settled by an `ingress-end` and discarded client-side.
+ */
+describe("isIngressRecordable", () => {
+	const ingressInput = (
+		over: Partial<IsIngressRecordableInput> = {},
+	): IsIngressRecordableInput => ({
+		method: "POST",
+		path: "/v1/messages",
+		getHeader: headersAccessor(),
+		...over,
+	});
+
+	it("admits normal client traffic", () => {
+		expect(isIngressRecordable(ingressInput())).toBe(true);
+	});
+
+	it("rejects internal auto-refresh probes", () => {
+		expect(
+			isIngressRecordable(
+				ingressInput({
+					internal: true,
+					getHeader: headersAccessor({ "x-clankermux-auto-refresh": "true" }),
+				}),
+			),
+		).toBe(false);
+	});
+
+	it("rejects internal cache-keepalive replays", () => {
+		expect(
+			isIngressRecordable(
+				ingressInput({
+					internal: true,
+					getHeader: objectAccessor({ "x-clankermux-keepalive": "true" }),
+				}),
+			),
+		).toBe(false);
+	});
+
+	it("does not honour probe markers from a non-internal caller", () => {
+		// Same trust gate as shouldRecordRequest: the markers are plain headers,
+		// so a client must not be able to hide itself from the dashboard.
+		expect(
+			isIngressRecordable(
+				ingressInput({
+					internal: false,
+					getHeader: headersAccessor({ "x-clankermux-auto-refresh": "true" }),
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("rejects the whole .well-known prefix, not just 404s", () => {
+		// The recording gate can only skip .well-known 404s because it knows the
+		// status. At ingress there is no status yet, so the prefix is skipped
+		// wholesale rather than emitting marks that almost always turn out to be
+		// 404s and then have to be retracted.
+		expect(
+			isIngressRecordable(ingressInput({ path: "/.well-known/foo" })),
+		).toBe(false);
+	});
+
+	it("still records a .well-known 200 in shouldRecordRequest", () => {
+		// Guards the asymmetry above: the ingress gate's broader prefix rule must
+		// NOT leak into the recording gate, which would newly drop these rows
+		// from Request History.
+		expect(
+			shouldRecordRequest(
+				makeInput({ path: "/.well-known/foo", responseStatus: 200 }),
+			),
+		).toBe(true);
 	});
 });

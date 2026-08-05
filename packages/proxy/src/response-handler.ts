@@ -441,7 +441,10 @@ async function forwardToClientInner(
 		ctx.requestRecorder.begin(recordMeta);
 	}
 
-	// Emit request start event for real-time dashboard
+	// Emit request start event for real-time dashboard. `project` and
+	// `requestedModel` ride along so a client that connected after this
+	// request's ingress event — or that never saw one, e.g. an internal
+	// dispatch — can still attribute it to a project lane.
 	if (shouldProcessRequest) {
 		requestEvents.emit("event", {
 			type: "start",
@@ -451,6 +454,8 @@ async function forwardToClientInner(
 			path,
 			accountId: account?.id || null,
 			statusCode: response.status,
+			project: project ?? null,
+			model: requestedModel ?? null,
 		});
 	}
 

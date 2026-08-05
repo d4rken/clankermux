@@ -1,4 +1,8 @@
-import { type RequestEvt, requestEvents } from "@clankermux/core";
+import {
+	getActiveRequests,
+	type RequestStreamEvt,
+	requestEvents,
+} from "@clankermux/core";
 import { registerSseCloser } from "../sse-registry";
 
 // Periodic SSE comment so the socket never sits idle long enough for
@@ -11,7 +15,7 @@ export function createRequestsStreamHandler(
 ) {
 	return (req: Request): Response => {
 		// Store the write handler outside to access it in cancel
-		let writeHandler: ((data: RequestEvt) => void) | null = null;
+		let writeHandler: ((data: RequestStreamEvt) => void) | null = null;
 		let heartbeat: ReturnType<typeof setInterval> | null = null;
 		let isClosed = false;
 		// Set inside start() — the controller is only available there.
@@ -40,7 +44,7 @@ export function createRequestsStreamHandler(
 				const encoder = new TextEncoder();
 
 				// Helper to send SSE formatted data with error handling
-				writeHandler = (data: RequestEvt) => {
+				writeHandler = (data: RequestStreamEvt) => {
 					if (isClosed) return;
 
 					try {
@@ -58,6 +62,24 @@ export function createRequestsStreamHandler(
 
 				// Listen for events
 				requestEvents.on("event", writeHandler);
+
+				// Replay whatever is in flight RIGHT NOW.
+				//
+				// This stream only carries future events, and an in-flight
+				// request has no database row yet — the recorder writes on
+				// completion — so a client that connects (or reconnects after a
+				// dropped connection) mid-request can learn about it from
+				// nowhere else. Sent unconditionally, empty included: its
+				// arrival is how the client knows the replay is complete.
+				//
+				// Subscribe-THEN-snapshot, in that order. The reverse leaves a
+				// gap: a request that settles between the snapshot and the
+				// subscription is in neither, so the client would hold it as
+				// pending until its lost-timeout. This order can only overlap —
+				// a request may appear in both the live stream and the snapshot
+				// — and the client reducer is idempotent, so an overlap costs
+				// nothing while a gap shows a phantom in-flight mark.
+				writeHandler({ type: "snapshot", active: getActiveRequests() });
 
 				// Periodic heartbeat comment to keep the connection alive
 				heartbeat = setInterval(() => {

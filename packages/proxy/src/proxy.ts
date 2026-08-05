@@ -1,8 +1,10 @@
 import {
 	codexAccountFitsRequestUnmargined,
+	consumeRequestStarted,
 	getModelFamily,
 	isDebugEnabled,
 	NETWORK,
+	requestEvents,
 	ServiceUnavailableError,
 } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
@@ -57,10 +59,13 @@ import {
 	FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS,
 	PIN_HOLD_MAX_MS,
 } from "./recovery-holds";
-import { ingestProxyRequest } from "./request-ingress";
+import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
-import { shouldRecordRequest } from "./should-record-request";
+import {
+	isIngressRecordable,
+	shouldRecordRequest,
+} from "./should-record-request";
 
 export type { ProxyContext } from "./handlers";
 
@@ -253,7 +258,101 @@ export async function handleProxy(
 	},
 ): Promise<Response> {
 	const ingress = await ingestProxyRequest(req, url, ctx, apiKeyId, isInternal);
-	if (ingress.kind === "response") return ingress.response;
+	if (ingress.kind === "response") {
+		// Rejected during ingestion (bad path, unparseable body, context-window
+		// gate). Nothing was announced, so there is nothing to retract — and
+		// these requests are never written to Request History either.
+		return ingress.response;
+	}
+
+	const { requestMeta } = ingress.context;
+
+	// Tell the live dashboard the request EXISTS, before an account has been
+	// picked or the upstream called. Without this, a request is invisible until
+	// the upstream returns headers, so the Overview's activity lanes would read
+	// as idle during exactly the wait the operator wants to see.
+	const announced = isIngressRecordable({
+		method: requestMeta.method,
+		path: requestMeta.path,
+		internal: isInternal,
+		getHeader: (name) => req.headers.get(name),
+	});
+	if (announced) {
+		requestEvents.emit("event", {
+			type: "ingress",
+			id: requestMeta.id,
+			timestamp: requestMeta.timestamp,
+			method: requestMeta.method,
+			path: requestMeta.path,
+			project: requestMeta.project ?? null,
+			model: requestMeta.requestedModel ?? null,
+		});
+	}
+
+	/**
+	 * Retract the announcement for a request that never reached
+	 * `forwardToClient` and so will never be summarized: an admission
+	 * rejection, a forced-account failure, a pinned-target refusal, a probe the
+	 * recorder filters out.
+	 *
+	 * The `hasRequestStarted` guard is load-bearing. This runs when the Response
+	 * OBJECT is returned, which for a streaming response is long before its body
+	 * ends — without the guard every stream would be retracted mid-flight. It
+	 * also has to read a marker that OUTLIVES the request, because a
+	 * non-streaming response can be fully summarized before we get here.
+	 */
+	const retractIfNeverStarted = (statusCode: number | null): void => {
+		if (!announced) return;
+		if (consumeRequestStarted(requestMeta.id)) return;
+		requestEvents.emit("event", {
+			type: "ingress-end",
+			id: requestMeta.id,
+			statusCode,
+		});
+	};
+
+	try {
+		const response = await handleIngestedProxy(
+			ingress.context,
+			req,
+			url,
+			ctx,
+			apiKeyId,
+			apiKeyName,
+			isInternal,
+			burstHoldTimingOverride,
+		);
+		retractIfNeverStarted(response.status);
+		return response;
+	} catch (error) {
+		// No response was ever produced; `null` says so rather than inventing a
+		// status the client never saw.
+		retractIfNeverStarted(null);
+		throw error;
+	}
+}
+
+/**
+ * Everything `handleProxy` does after ingestion: account selection, gates,
+ * dispatch, failover and the terminal error paths.
+ *
+ * Split out purely so `handleProxy` can bracket it with the live-dashboard
+ * announce/retract pair above — this function's body is unchanged.
+ */
+async function handleIngestedProxy(
+	ingressContext: IngressContext,
+	req: Request,
+	url: URL,
+	ctx: ProxyContext,
+	apiKeyId: string | null | undefined,
+	apiKeyName: string | null | undefined,
+	isInternal: boolean,
+	burstHoldTimingOverride?: {
+		maxHoldMs?: number;
+		now?: () => number;
+		jitterMs?: number;
+	},
+): Promise<Response> {
 	const {
 		requestBodyContext,
 		finalBodyBuffer,
@@ -264,7 +363,7 @@ export async function handleProxy(
 		projectAttributionSource,
 		requestMeta,
 		bumpIdleTimeout,
-	} = ingress.context;
+	} = ingressContext;
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
 	// set, EVERY non-internal client request goes straight to that account:
