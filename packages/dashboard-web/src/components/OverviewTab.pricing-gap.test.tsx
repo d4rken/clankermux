@@ -3,8 +3,13 @@ import type { PricingGap, SystemStatusResponse } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import { canonicalSections } from "../lib/analytics-sections";
 import { queryKeys } from "../lib/query-keys";
-import { OVERVIEW_ERROR_WINDOW_HOURS, OverviewTab } from "./OverviewTab";
+import {
+	OVERVIEW_ERROR_WINDOW_HOURS,
+	OVERVIEW_SECTIONS,
+	OverviewTab,
+} from "./OverviewTab";
 
 /**
  * Wiring test: a unit test of the banner component proves it renders, not that
@@ -68,12 +73,15 @@ function renderOverview(gaps: PricingGap[]): string {
 		recentErrors: [],
 		topModels: [],
 	});
+	// The analytics key embeds the section list too — same reason as the error
+	// window above: a mismatched key means `undefined` analytics and a skeleton.
 	client.setQueryData(
 		queryKeys.analytics(
 			"6h",
 			{ accounts: [], models: [], status: "all" },
 			"normal",
-			undefined,
+			false,
+			canonicalSections(OVERVIEW_SECTIONS),
 		),
 		{
 			totals: {

@@ -1,3 +1,4 @@
+import type { AnalyticsSection } from "@clankermux/types";
 import { useEffect } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
@@ -7,6 +8,17 @@ import {
 	TokenSpeedAnalytics,
 } from "..";
 import type { ModelsTabProps } from "./types";
+
+// `speedTotals` supplies the two headline speed percentiles inside `totals`;
+// `totals` itself is still needed for avgResponseTime.
+const MODELS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"speedTotals",
+	"costByModel",
+	"modelPerformance",
+	"speedTimeSeries",
+	"contextComposition",
+];
 
 /**
  * Models view. Owns the per-model performance table (with cost-by-model),
@@ -29,7 +41,9 @@ export function ModelsTab(props: ModelsTabProps) {
 		onRangeChange,
 	} = props;
 
-	const { analytics, loading, refetch } = useAnalyticsData(range, filters);
+	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
+		sections: MODELS_SECTIONS,
+	});
 
 	useEffect(() => {
 		if (analytics) mergeSeen(analytics);

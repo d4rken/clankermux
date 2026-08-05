@@ -2,6 +2,7 @@ import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	AnalyticsResponse,
+	AnalyticsSection,
 	CacheEffectivenessResponse,
 	CacheKeepaliveHistoryResponse,
 	CacheKeepaliveLiveResponse,
@@ -25,6 +26,7 @@ import type {
 	UsageHistoryResponse,
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
+import { canonicalSections } from "./lib/analytics-sections";
 import {
 	type RequestQueryParams,
 	requestQueryToSearchParams,
@@ -750,6 +752,15 @@ class API extends HttpClient {
 		return this.get<string[]>("/api/requests/projects");
 	}
 
+	/**
+	 * Fetch analytics.
+	 *
+	 * `sections` scopes the server to the query phases the caller actually
+	 * renders; omit it to compute everything (the pre-sections behaviour). An
+	 * EMPTY array is rejected rather than dropped, because dropping it would
+	 * silently mean "compute every section" — the most expensive possible
+	 * fallback for a caller that meant to ask for nothing.
+	 */
 	async getAnalytics(
 		range = "24h",
 		filters?: {
@@ -762,8 +773,17 @@ class API extends HttpClient {
 		},
 		mode: "normal" | "cumulative" = "normal",
 		modelBreakdown?: boolean,
+		sections?: readonly AnalyticsSection[],
 	): Promise<AnalyticsResponse> {
+		if (sections && sections.length === 0) {
+			throw new Error(
+				"getAnalytics: `sections` was an empty array. Pass undefined to request every section.",
+			);
+		}
 		const params = new URLSearchParams({ range });
+		if (sections) {
+			params.append("sections", canonicalSections(sections).join(","));
+		}
 
 		if (filters?.accounts?.length) {
 			params.append("accounts", filters.accounts.join(","));
@@ -798,6 +818,7 @@ class API extends HttpClient {
 			filters,
 			mode,
 			modelBreakdown,
+			sections,
 			timestamp: new Date().toISOString(),
 		});
 

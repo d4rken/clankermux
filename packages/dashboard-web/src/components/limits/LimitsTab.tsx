@@ -1,4 +1,5 @@
 import { registerUIRefresh } from "@clankermux/core";
+import type { AnalyticsSection } from "@clankermux/types";
 import { BarChart3, Gauge } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -15,6 +16,13 @@ import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { PaymentsHistoryCard } from "./PaymentsHistoryCard";
 import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
+// Account Performance table plus the plan-cost / burn-rate summary band, both
+// of which come from `totals`.
+const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"accountPerformance",
+];
+
 export const LimitsTab = React.memo(() => {
 	// Each time-ranged card owns its own range now (the live pool tiles and
 	// utilization card below are range-independent and get no selector).
@@ -26,6 +34,8 @@ export const LimitsTab = React.memo(() => {
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
 		"normal",
+		false,
+		{ sections: LIMITS_SECTIONS },
 	);
 	const { data: usageHistory, isLoading: usageHistoryLoading } =
 		useUsageHistory(usageRange);

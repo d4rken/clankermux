@@ -1,4 +1,4 @@
-import type { RetentionSetRequest } from "@clankermux/types";
+import type { AnalyticsSection, RetentionSetRequest } from "@clankermux/types";
 import {
 	useInfiniteQuery,
 	useMutation,
@@ -6,6 +6,7 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
+import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
 import { queryKeys } from "../lib/query-keys";
 import type { RequestQueryParams } from "../lib/request-filters";
@@ -202,6 +203,14 @@ export const useStats = (
 	});
 };
 
+/**
+ * Analytics query.
+ *
+ * `sections` scopes the SERVER to the query phases this caller renders — the
+ * dominant cost of the endpoint. Omitting it computes everything, which is only
+ * appropriate for a caller that genuinely reads everything. The list is
+ * canonicalized once so it can key the cache and the request identically.
+ */
 export const useAnalytics = (
 	timeRange: string,
 	filters: {
@@ -214,8 +223,11 @@ export const useAnalytics = (
 	},
 	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
-	options?: { enabled?: boolean },
+	options?: { enabled?: boolean; sections?: readonly AnalyticsSection[] },
 ) => {
+	const sections = options?.sections
+		? canonicalSections(options.sections)
+		: undefined;
 	const logger = {
 		debug: (message: string, ...args: unknown[]) => {
 			console.debug(`[Analytics Query] ${message}`, ...args);
@@ -226,7 +238,13 @@ export const useAnalytics = (
 	};
 
 	return useQuery({
-		queryKey: queryKeys.analytics(timeRange, filters, viewMode, modelBreakdown),
+		queryKey: queryKeys.analytics(
+			timeRange,
+			filters,
+			viewMode,
+			modelBreakdown,
+			sections,
+		),
 		queryFn: async () => {
 			logger.debug(`Starting analytics query`, {
 				timeRange,
@@ -242,6 +260,7 @@ export const useAnalytics = (
 					filters,
 					viewMode,
 					modelBreakdown,
+					sections,
 				);
 				logger.debug(`Analytics query completed successfully`, {
 					timeRange,

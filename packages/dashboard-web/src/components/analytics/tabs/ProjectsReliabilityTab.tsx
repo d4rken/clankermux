@@ -1,3 +1,4 @@
+import type { AnalyticsSection } from "@clankermux/types";
 import { useEffect } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
@@ -7,6 +8,16 @@ import {
 	ToolErrorsPanel,
 } from "..";
 import type { ProjectsReliabilityTabProps } from "./types";
+
+// `totals` is here for projectAttributionCoverage, which it owns — the coverage
+// numbers come from the consolidated totals query, not from summing the
+// top-N-truncated projectBreakdown.
+const PROJECTS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"projectBreakdown",
+	"routing",
+	"toolCallErrors",
+];
 
 /**
  * Projects & reliability view. Owns the per-project breakdown, routing
@@ -29,7 +40,9 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 		onRangeChange,
 	} = props;
 
-	const { analytics, loading, refetch } = useAnalyticsData(range, filters);
+	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
+		sections: PROJECTS_SECTIONS,
+	});
 
 	useEffect(() => {
 		if (analytics) mergeSeen(analytics);

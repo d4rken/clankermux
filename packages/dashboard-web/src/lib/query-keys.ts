@@ -1,3 +1,5 @@
+import type { AnalyticsSection } from "@clankermux/types";
+
 export const queryKeys = {
 	all: ["clankermux"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
@@ -6,16 +8,21 @@ export const queryKeys = {
 		errorsSinceHours !== undefined
 			? ([...queryKeys.all, "stats", { errorsSinceHours }] as const)
 			: ([...queryKeys.all, "stats"] as const),
+	// `sections` is part of the key: two callers asking for different section
+	// sets get different payloads and must not share a cache entry (the smaller
+	// one would leave the larger caller's panels blank). It is canonicalized by
+	// the caller so section ORDER never forks the cache.
 	analytics: (
 		timeRange?: string,
 		filters?: unknown,
 		viewMode?: string,
 		modelBreakdown?: boolean,
+		sections?: readonly AnalyticsSection[],
 	) =>
 		[
 			...queryKeys.all,
 			"analytics",
-			{ timeRange, filters, viewMode, modelBreakdown },
+			{ timeRange, filters, viewMode, modelBreakdown, sections },
 		] as const,
 	usageHistory: (range?: string) =>
 		[...queryKeys.all, "usage-history", { range }] as const,

@@ -1,4 +1,5 @@
 import { registerUIRefresh, TIME_CONSTANTS } from "@clankermux/core";
+import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge, Users } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -23,6 +24,22 @@ import { TimeRangeSelector } from "./overview/TimeRangeSelector";
 /** Error window for the Overview's compact list, in hours. */
 export const OVERVIEW_ERROR_WINDOW_HOURS = 1;
 
+/**
+ * The Overview's metric tiles and charts. `activeSessions` is not optional
+ * here: buildOverviewTimeSeries merges the session series into the chart rows.
+ *
+ * Exported so tests seeding the query cache key on the SAME list — a divergent
+ * list yields `undefined` analytics and the page renders its loading skeleton.
+ */
+export const OVERVIEW_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"timeSeries",
+	"modelDistribution",
+	"accountModelUsage",
+	"projectBreakdown",
+	"activeSessions",
+];
+
 export const OverviewTab = React.memo(() => {
 	// Fetch all data using React Query hooks. The 1-hour error window feeds the
 	// compact list below the health strip; nothing else on this page reads
@@ -37,6 +54,8 @@ export const OverviewTab = React.memo(() => {
 		timeRange,
 		{ accounts: [], models: [], status: "all" },
 		"normal",
+		false,
+		{ sections: OVERVIEW_SECTIONS },
 	);
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
 

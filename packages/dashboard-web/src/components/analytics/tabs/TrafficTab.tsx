@@ -1,3 +1,4 @@
+import type { AnalyticsSection } from "@clankermux/types";
 import { useCallback, useEffect, useMemo } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { toCumulativeSeries } from "../../../lib/cumulative";
@@ -12,6 +13,19 @@ import {
 	TokenUsageBreakdown,
 } from "..";
 import type { TrafficTabProps } from "./types";
+
+// Reads timeSeries + tokenBreakdown/totals for the charts, and activeSessions
+// (both the bucketed series and ActiveSessionsPanel's per-account bar list).
+const TRAFFIC_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"timeSeries",
+	"activeSessions",
+	"activeSessionsByAccount",
+];
+
+// The "Per Model" query REPLACES the aggregate series with per-model rows, so
+// the time series is the only phase it needs.
+const TRAFFIC_PER_MODEL_SECTIONS: readonly AnalyticsSection[] = ["timeSeries"];
 
 /**
  * Traffic / volume view. Owns the main metrics chart, the performance-indicators
@@ -47,7 +61,11 @@ export function TrafficTab(props: TrafficTabProps) {
 		perModelAnalytics,
 		perModelLoading,
 		refetchPerModel,
-	} = useAnalyticsData(range, filters, { perModel: modelBreakdown });
+	} = useAnalyticsData(range, filters, {
+		perModel: modelBreakdown,
+		sections: TRAFFIC_SECTIONS,
+		perModelSections: TRAFFIC_PER_MODEL_SECTIONS,
+	});
 
 	useEffect(() => {
 		if (analytics) mergeSeen(analytics);
