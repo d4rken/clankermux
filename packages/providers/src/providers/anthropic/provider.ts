@@ -23,11 +23,15 @@ import { extractAnthropicIdentity } from "./identity";
  * account-level limit (as opposed to a soft/warning status — see
  * {@link SOFT_WARNING_STATUSES} — or the normal `"allowed"`).
  *
- * Note on `"rate_limited"`: this IS a hard status. Anthropic's per-IP burst
- * 429s do NOT carry this header value; a `"rate_limited"` unified-status means
- * the account itself is rate limited (quota), so callers that want to
- * distinguish a transient burst 429 from a real account limit must treat it as
- * hard. (Confirmed by `parseRateLimit` behaviour and the streaming tests.)
+ * Note on `"rate_limited"`: NEVER observed in production (0 of 1,145 measured
+ * 429s — see the rate-limiting skill's 429-signals reference). What Anthropic
+ * actually sends: a hard 429 carries `"rejected"` WITH a unified reset; a
+ * per-IP burst carries no unified headers at all. The hard-status vocabulary
+ * is kept for completeness, but `"rejected"` is deliberately NOT in it —
+ * a `"rejected"` summary can describe a CLAIM-SCOPED rejection (e.g. `7d_oi`)
+ * on an account whose account-wide windows still have headroom, so it must
+ * never be read as an account-wide verdict by itself (see
+ * `@clankermux/core` `unified-claim-headers.ts` for the per-claim parsing).
  *
  * Alias of `ACCOUNT_WIDE_HARD_STATUSES` in `@clankermux/core`, which is the
  * single source of truth for the whole repo; the name is kept here because both
@@ -409,8 +413,17 @@ export class AnthropicProvider extends BaseProvider {
 					};
 				}
 			} else if (response.status !== 529) {
-				// Non-529: use resetHeader as-is (existing behaviour for 429 / 200).
-				const resetTime = resetHeader ? Number(resetHeader) * 1000 : undefined;
+				// 200s keep the raw header value (window-anchor semantics — the
+				// auto-refresh scheduler reads the persisted reset as the account's
+				// 5h window boundary). 429 resets are clamped like the 529 branch:
+				// on a claim-scoped rejection (`7d_oi`) the summary reset is the
+				// SCOPED claim's — observed 4.5 days out — and unclamped it became
+				// an account-wide deadline/anchor.
+				const rawResetMs = resetHeader ? Number(resetHeader) * 1000 : undefined;
+				const resetTime =
+					rawResetMs !== undefined && response.status === 429
+						? clampResetTime(rawResetMs, now)
+						: rawResetMs;
 				return {
 					isRateLimited,
 					resetTime,

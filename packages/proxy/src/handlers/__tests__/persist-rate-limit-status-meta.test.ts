@@ -1,4 +1,12 @@
-import { describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	setSystemTime,
+} from "bun:test";
 import type { Provider } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
@@ -192,5 +200,116 @@ describe("persistRateLimitStatusMeta", () => {
 			resetTime: null,
 			remaining: 5,
 		});
+	});
+});
+
+/**
+ * Scoped projection: a claim-scoped 429 (`7d_oi` rejected while the
+ * account-wide 5h/7d pair proves headroom) must not persist the summary
+ * `rejected` + multi-day reset as the ACCOUNT's status. On a trusted official
+ * Anthropic account the persisted pair becomes the 5h claim's own
+ * status+reset (a coherent single-claim pair — the column's dominant consumer
+ * is the scheduler's 5-hour anchor). Untrusted (custom-endpoint /
+ * non-anthropic) accounts keep the raw summary: header reinterpretation is a
+ * trust decision, mirroring the family gate.
+ */
+describe("persistRateLimitStatusMeta scoped projection", () => {
+	// Verbatim production headers of 2026-08-02T15:36:28Z.
+	const INCIDENT_NOW = 1_785_684_988_613;
+	const INCIDENT_5H_RESET_MS = 1_785_685_200_000;
+	const INCIDENT_WEEKLY_RESET_MS = 1_785_736_800_000;
+
+	function incidentHeaders(): Record<string, string> {
+		return {
+			"anthropic-ratelimit-unified-5h-reset": "1785685200",
+			"anthropic-ratelimit-unified-5h-status": "allowed",
+			"anthropic-ratelimit-unified-5h-utilization": "0.0",
+			"anthropic-ratelimit-unified-7d-reset": "1785736800",
+			"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+			"anthropic-ratelimit-unified-7d-utilization": "0.94",
+			"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
+			"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+			"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+			"anthropic-ratelimit-unified-reset": "1785736800",
+			"anthropic-ratelimit-unified-status": "rejected",
+			"retry-after": "51811",
+		};
+	}
+
+	beforeEach(() => {
+		setSystemTime(new Date(INCIDENT_NOW));
+	});
+
+	afterEach(() => {
+		setSystemTime();
+	});
+
+	it("persists the 5h claim's status+reset for the incident shape — never rejected + weekly", () => {
+		const { ctx, metaCalls } = makeCtx();
+
+		persistRateLimitStatusMeta(makeAccount(), make429(incidentHeaders()), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("allowed");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_5H_RESET_MS);
+	});
+
+	it("keeps the raw summary for a custom-endpoint account (untrusted headers)", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const account = makeAccount({ custom_endpoint: "https://proxy.example" });
+
+		persistRateLimitStatusMeta(account, make429(incidentHeaders()), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("rejected");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
+	});
+
+	it("keeps the raw summary for a non-anthropic provider", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const account = makeAccount({ provider: "zai" });
+
+		persistRateLimitStatusMeta(account, make429(incidentHeaders()), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("rejected");
+	});
+
+	it("keeps the raw summary when an account-wide claim itself rejects", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const headers = incidentHeaders();
+		headers["anthropic-ratelimit-unified-7d-status"] = "rejected";
+
+		persistRateLimitStatusMeta(makeAccount(), make429(headers), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("rejected");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
+	});
+
+	it("degrades to a NULL reset when the 5h claim reset is unparseable (scheduler treats NULL as due)", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const headers = incidentHeaders();
+		headers["anthropic-ratelimit-unified-5h-reset"] = "soon";
+
+		persistRateLimitStatusMeta(makeAccount(), make429(headers), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("allowed");
+		expect(metaCalls[0].resetTime).toBeNull();
+	});
+
+	it("does not project a non-429 response even with scoped-looking headers", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const response = new Response("{}", {
+			status: 200,
+			headers: incidentHeaders(),
+		});
+
+		persistRateLimitStatusMeta(makeAccount(), response, ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("rejected");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
 	});
 });

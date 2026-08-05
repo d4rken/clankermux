@@ -1,8 +1,14 @@
-import { getRateLimitResetStabilityMs, logError } from "@clankermux/core";
+import {
+	getAccountWideClaimHeadroom,
+	getRateLimitResetStabilityMs,
+	isScopedOnlyUnifiedRejection,
+	logError,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	getFreshCapacity,
 	type Provider,
+	type RateLimitInfo,
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
@@ -20,6 +26,64 @@ import {
 } from "./transparent-retry";
 
 const log = new Logger("ResponseProcessor");
+
+/**
+ * Defensive ceiling on a projected 5h-claim reset. The claim's own reset is
+ * ≤ ~5h out by construction; anything beyond this is a garbled header and the
+ * projection degrades to no reset (persisted NULL — which the auto-refresh
+ * scheduler treats as "due", triggering the prime that rewrites honest values).
+ */
+const SCOPED_PROJECTION_MAX_RESET_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Scope-aware projection of a 429's parsed rate-limit info.
+ *
+ * On a CLAIM-SCOPED rejection (`7d_oi` rejected while the account-wide 5h/7d
+ * pair proves headroom) the summary headers assert account-wide rejection
+ * until the SCOPED claim's reset — observed 4.5 days out. Persisting or
+ * cooling on those values turns one family's exhaustion into an account-wide
+ * verdict. This projection substitutes the 5h claim's OWN status and reset (a
+ * coherent single-claim pair — the persisted reset's dominant consumer is the
+ * scheduler's 5-hour window anchor). `isRateLimited` is left untouched: the
+ * request itself WAS rejected and must still fail over.
+ *
+ * Trust boundary: header reinterpretation is only safe for the official
+ * Anthropic OAuth upstream — a custom endpoint could emit these headers with
+ * different or adversarial semantics — so the predicate mirrors the family
+ * gate's (`resolveFamilyWeeklyExclusionFromHeaders`). The parse itself lives
+ * in `@clankermux/core` (`unified-claim-headers.ts`); this wrapper adds the
+ * account context the provider-layer parser deliberately does not have.
+ */
+export function projectScopedRateLimitInfo(
+	account: Account,
+	response: Response,
+	rateLimitInfo: RateLimitInfo,
+): RateLimitInfo {
+	if (response.status !== 429) return rateLimitInfo;
+	if (account.provider !== "anthropic" || account.custom_endpoint) {
+		return rateLimitInfo;
+	}
+	if (!isScopedOnlyUnifiedRejection(response.headers)) return rateLimitInfo;
+	const headroom = getAccountWideClaimHeadroom(response.headers);
+	// isScopedOnlyUnifiedRejection implies headroom; bail defensively anyway.
+	if (!headroom) return rateLimitInfo;
+	const now = Date.now();
+	const resetMs = headroom.fiveHour.resetMs;
+	const projectedReset =
+		resetMs !== null && resetMs > now
+			? Math.min(resetMs, now + SCOPED_PROJECTION_MAX_RESET_MS)
+			: undefined;
+	log.debug(
+		`Scoped 429 on ${account.name}: projecting account-wide meta from the 5h claim ` +
+			`(status=${headroom.fiveHour.status} reset=${projectedReset ? new Date(projectedReset).toISOString() : "none"}) ` +
+			`instead of the summary (status=${rateLimitInfo.statusHeader} reset=${rateLimitInfo.resetTime ? new Date(rateLimitInfo.resetTime).toISOString() : "none"})`,
+	);
+	return {
+		...rateLimitInfo,
+		statusHeader: headroom.fiveHour.status,
+		resetTime: projectedReset,
+	};
+}
 
 /**
  * Parses the provider rate-limit headers off `response` and, when the
@@ -55,7 +119,11 @@ export function persistRateLimitStatusMeta(
 	ctx: ProxyContext,
 	provider: Pick<Provider, "parseRateLimit"> = ctx.provider,
 ): void {
-	const rateLimitInfo = provider.parseRateLimit(response);
+	const rateLimitInfo = projectScopedRateLimitInfo(
+		account,
+		response,
+		provider.parseRateLimit(response),
+	);
 	if (!rateLimitInfo.statusHeader) return;
 	const status = rateLimitInfo.statusHeader;
 	ctx.asyncWriter.enqueue(() =>
@@ -210,7 +278,16 @@ export async function processProxyResponse(
 	requestId?: string,
 	requestMeta?: Pick<RequestMeta, "headers" | "internal">,
 ): Promise<boolean> {
-	let rateLimitInfo = ctx.provider.parseRateLimit(response);
+	// Scoped projection BEFORE any consumer: both the cooldown applied below
+	// and the status-meta persisted via updateAccountMetadata must see the
+	// account-wide truth of a claim-scoped 429, never the summary's multi-day
+	// verdict. This is the generic (rung 8) path — streamed-content-type 429s
+	// and any 429 not intercepted by the proxy-operations ladder land here.
+	let rateLimitInfo = projectScopedRateLimitInfo(
+		account,
+		response,
+		ctx.provider.parseRateLimit(response),
+	);
 
 	// For Zai provider, if we got a 429 without resetTime, try parsing the body
 	if (
