@@ -8,8 +8,8 @@
 # the build, and the actual restart is just server init (~5s).
 #
 # build:db-workers MUST run too: it regenerates the gitignored embedded DB
-# workers (vacuum / integrity-check / incremental-vacuum) from working-tree
-# source. Skipping it leaves a stale embedded integrity worker whose old
+# workers listed in packages/database/scripts/workers-manifest.ts from
+# working-tree source. Skipping it leaves a stale embedded integrity worker whose old
 # message protocol the scheduler can't classify precisely — the fail-safe
 # then reads its operational errors as `corrupt`. The dashboard-build.conf
 # drop-in runs this on the systemd path; this script must mirror it for the

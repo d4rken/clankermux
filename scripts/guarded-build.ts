@@ -16,6 +16,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { WORKER_INLINE_REPO_PATHS } from "../packages/database/scripts/workers-manifest.ts";
 import { type BuildTarget, runGuardedBuild } from "./build-guard.ts";
 
 // Repo root is the parent of scripts/.
@@ -37,12 +38,10 @@ const DASHBOARD_WORKSPACE_DEPS = [
 // inline file. A file matching this is present but NOT actually built.
 const EMPTY_WORKER_PLACEHOLDER = /EMBEDDED_\w+_CODE\s*=\s*"";/;
 
-const DB_WORKER_INLINE_FILES = [
-	"packages/database/src/inline-vacuum-worker.ts",
-	"packages/database/src/inline-integrity-check-worker.ts",
-	"packages/database/src/inline-incremental-vacuum-worker.ts",
-	"packages/database/src/inline-payload-write-worker.ts",
-];
+// Derived from the worker manifest, never hand-maintained — a copy of this list
+// that missed a newly added worker is what let the db-workers guard and CI
+// disagree about which inline files must exist.
+const DB_WORKER_INLINE_FILES = WORKER_INLINE_REPO_PATHS;
 
 export function buildTargets(repoRoot: string): BuildTarget[] {
 	const dashboardConfigGlobs = [
@@ -92,6 +91,10 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 			"packages/database/src/**/*.ts",
 			"!packages/database/src/inline-*.ts",
 			"packages/database/scripts/build-workers.ts",
+			// The manifest decides which sources get bundled into which inline
+			// output; editing it alone can change the blobs while every source
+			// and output hash stays put, so it has to be hashed too.
+			"packages/database/scripts/workers-manifest.ts",
 			"packages/database/package.json",
 		],
 		outputGlobs: DB_WORKER_INLINE_FILES,
