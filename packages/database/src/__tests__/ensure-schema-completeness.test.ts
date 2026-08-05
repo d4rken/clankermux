@@ -212,6 +212,7 @@ describe("ensureSchema completeness", () => {
 		for (const idx of [
 			"idx_requests_summary_covering",
 			"idx_requests_analytics_covering",
+			"idx_requests_id_timestamp",
 			"idx_accounts_paused",
 			"idx_requests_api_key",
 		]) {
