@@ -329,42 +329,90 @@ export interface ActiveSessionsAnalytics {
 	}>;
 }
 
+/**
+ * One computable slice of the analytics payload — a query phase the caller can
+ * ask for by name via `GET /api/analytics?sections=a,b,c`.
+ *
+ * OMISSION IS MEANINGFUL: a section the caller did not request is absent from
+ * the response entirely, never zero-filled. Read the RESOLVED set back from
+ * `meta.sections` (which includes implied dependencies) to tell "not requested"
+ * apart from "requested but empty in range".
+ *
+ * Absent `sections` param => every section is computed, which is what every
+ * pre-sections client gets.
+ */
+export const ANALYTICS_SECTIONS = [
+	"accountModelUsage",
+	"accountPerformance",
+	"activeSessions",
+	"activeSessionsByAccount",
+	"apiKeyPerformance",
+	"cacheFlow",
+	"contextComposition",
+	"costByModel",
+	"modelDistribution",
+	"modelPerformance",
+	"projectBreakdown",
+	"routing",
+	"speedTimeSeries",
+	"speedTotals",
+	"timeSeries",
+	"toolCallErrors",
+	"totals",
+] as const;
+
+export type AnalyticsSection = (typeof ANALYTICS_SECTIONS)[number];
+
+/** Headline aggregates. `totals` owns all of it except the two speed
+ *  percentiles, which are the `speedTotals` section's only output. */
+export interface AnalyticsTotals {
+	requests: number;
+	successRate: number;
+	cacheHitRate: number;
+	activeAccounts: number;
+	avgResponseTime: number;
+	totalTokens: number;
+	totalCostUsd: number;
+	planCostUsd: number;
+	apiCostUsd: number;
+	avgTokensPerSecond: number | null;
+	// Median (p50) and p95 output speed across all in-range requests,
+	// artifact-filtered. Drive the "Typical Output Speed" / "Peak Output
+	// Speed" tiles. Optional because an older server may not populate them, and
+	// because they belong to the separately-requestable `speedTotals` section —
+	// consumers should treat absence as null.
+	medianTokensPerSecond?: number | null;
+	p95TokensPerSecond?: number | null;
+	// Fixed-window burn-rate KPIs, independent of the active range/filters.
+	// Daily: sum(last 7d) / effectiveDays(≤7). Weekly: sum(last 30d) × 7 / effectiveDays(≤30).
+	// effectiveDays is clamped to the actual age of data so thin history doesn't inflate the average.
+	// Optional because an older server may not populate them — consumers should `?? 0`.
+	avgDailyPlanCostUsd?: number;
+	avgWeeklyPlanCostUsd?: number;
+	avgDailyApiCostUsd?: number;
+	avgWeeklyApiCostUsd?: number;
+}
+
+/**
+ * A possibly section-scoped analytics response: every section-owned field is
+ * optional because the caller may not have asked for it. See
+ * {@link FullAnalyticsResponse} for the shape the unscoped path returns.
+ */
 export interface AnalyticsResponse {
 	meta?: {
 		range: string;
 		bucket: string;
 		cumulative?: boolean;
+		/** The RESOLVED section set the server actually computed (requested
+		 *  sections plus their implied dependencies), sorted. Always emitted by a
+		 *  sections-aware server; absent from a pre-sections server's response. */
+		sections?: AnalyticsSection[];
 	};
-	totals: {
-		requests: number;
-		successRate: number;
-		cacheHitRate: number;
-		activeAccounts: number;
-		avgResponseTime: number;
-		totalTokens: number;
-		totalCostUsd: number;
-		planCostUsd: number;
-		apiCostUsd: number;
-		avgTokensPerSecond: number | null;
-		// Median (p50) and p95 output speed across all in-range requests,
-		// artifact-filtered. Drive the "Typical Output Speed" / "Peak Output
-		// Speed" tiles. Optional because an older server may not populate them —
-		// consumers should treat absence as null.
-		medianTokensPerSecond?: number | null;
-		p95TokensPerSecond?: number | null;
-		// Fixed-window burn-rate KPIs, independent of the active range/filters.
-		// Daily: sum(last 7d) / effectiveDays(≤7). Weekly: sum(last 30d) × 7 / effectiveDays(≤30).
-		// effectiveDays is clamped to the actual age of data so thin history doesn't inflate the average.
-		// Optional because an older server may not populate them — consumers should `?? 0`.
-		avgDailyPlanCostUsd?: number;
-		avgWeeklyPlanCostUsd?: number;
-		avgDailyApiCostUsd?: number;
-		avgWeeklyApiCostUsd?: number;
-	};
-	timeSeries: TimePoint[];
-	tokenBreakdown: TokenBreakdown;
-	modelDistribution: Array<{ model: string; count: number }>;
-	accountPerformance: Array<{
+	totals?: AnalyticsTotals;
+	timeSeries?: TimePoint[];
+	tokenBreakdown?: TokenBreakdown;
+	modelDistribution?: Array<{ model: string; count: number }>;
+	accountPerformance?: Array<{
 		name: string;
 		requests: number;
 		successRate: number;
@@ -372,24 +420,24 @@ export interface AnalyticsResponse {
 		apiCostUsd: number;
 		totalCostUsd: number;
 	}>;
-	apiKeyPerformance: Array<{
+	apiKeyPerformance?: Array<{
 		id: string;
 		name: string;
 		requests: number;
 		successRate: number;
 	}>;
-	costByModel: Array<{
+	costByModel?: Array<{
 		model: string;
 		costUsd: number;
 		requests: number;
 		totalTokens?: number;
 	}>;
-	accountModelUsage: Array<{ account: string; model: string; count: number }>;
-	modelPerformance: ModelPerformance[];
+	accountModelUsage?: Array<{ account: string; model: string; count: number }>;
+	modelPerformance?: ModelPerformance[];
 	// Per-model median output-speed time series (artifact-filtered). Optional
 	// because an older server may not populate it; consumers should `?? []`.
 	speedTimeSeries?: SpeedTimePoint[];
-	routing: RoutingAnalytics;
+	routing?: RoutingAnalytics;
 	// Cache token flow grouped by (model, account). Optional because an older
 	// server may not populate it — consumers should `?? []`.
 	cacheFlow?: CacheFlowPoint[];
@@ -512,6 +560,58 @@ export interface AnalyticsResponse {
 	// because an older server may not populate it — consumers should treat
 	// absence as undefined.
 	activeSessions?: ActiveSessionsAnalytics;
+}
+
+/**
+ * The response the UNSCOPED path (`/api/analytics` with no `sections` param)
+ * returns: every section computed, every field present.
+ *
+ * Kept required — rather than making the whole payload optional and calling it
+ * a day — so the backward-compatible path cannot silently drop a field. Under
+ * an all-optional type a dropped section would compile clean and reach the
+ * dashboard as `0` or `[]`; here it is a build error.
+ */
+export type FullAnalyticsResponse = Required<AnalyticsResponse> & {
+	meta: {
+		range: string;
+		bucket: string;
+		cumulative: boolean;
+		sections: AnalyticsSection[];
+	};
+	totals: Required<AnalyticsTotals>;
+};
+
+/** One selectable value in an analytics filter dropdown. */
+export interface AnalyticsFilterOption {
+	/** The stable identity submitted back as a filter value. */
+	value: string;
+	/** What the dropdown shows. */
+	label: string;
+}
+
+/**
+ * Options for the analytics filter dropdowns, from
+ * `GET /api/analytics/filter-options`.
+ *
+ * Sourced from a dedicated endpoint rather than accumulated from whatever the
+ * analytics breakdowns happened to return: those are truncated to the top N
+ * models / projects and only cover the tabs the user has visited, so the
+ * dropdowns silently omitted the long tail.
+ *
+ * Accounts and API keys carry `{value: id, label: name}` — the id is what the
+ * request row stores, so a filter keeps working across a rename and a hard
+ * delete (where `label` falls back to the record-time snapshot, then the id).
+ * Models and projects ARE their own identity and stay bare strings.
+ */
+export interface AnalyticsFilterOptionsResponse {
+	accounts: AnalyticsFilterOption[];
+	apiKeys: AnalyticsFilterOption[];
+	models: string[];
+	projects: string[];
+	/** Some requests have a SQL-NULL account — drives the "(no account)" option. */
+	hasNoAccount: boolean;
+	/** Some requests have a SQL-NULL project — drives the "(no project)" option. */
+	hasNoProject: boolean;
 }
 
 // Usage-history (Limits-tab sawtooth chart) types.

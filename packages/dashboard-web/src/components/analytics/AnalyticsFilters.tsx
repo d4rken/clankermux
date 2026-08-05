@@ -1,3 +1,4 @@
+import type { AnalyticsFilterOption } from "@clankermux/types";
 import { Filter } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -12,25 +13,53 @@ import {
 } from "../ui/select";
 import { Separator } from "../ui/separator";
 
+/**
+ * Analytics filter selection.
+ *
+ * `accounts` and `apiKeys` hold stable IDs, not display names: a name changes
+ * under a rename and disappears under a hard delete, so a name-keyed filter
+ * silently orphaned that history. `models` and `projects` ARE their own
+ * identity and stay plain values.
+ *
+ * The two NULL buckets have dedicated flags rather than in-band sentinels, so a
+ * project literally named "no-project" stays selectable as a normal name.
+ */
 export interface FilterState {
+	/** Account IDs. */
 	accounts: string[];
 	models: string[];
+	/** api_key_id values. */
 	apiKeys: string[];
-	// Named projects; the NULL bucket is selected via the separate noProject
-	// flag, so a project literally named "no-project" stays a normal name.
 	projects: string[];
+	/** Select requests with no account (SQL NULL account_used). */
+	noAccount: boolean;
 	noProject: boolean;
 	status: "all" | "success" | "error";
 }
 
+/** A cleared filter selection — the single definition of "no filters". */
+export const EMPTY_FILTERS: FilterState = {
+	accounts: [],
+	models: [],
+	apiKeys: [],
+	projects: [],
+	noAccount: false,
+	noProject: false,
+	status: "all",
+};
+
 interface AnalyticsFiltersProps {
 	filters: FilterState;
 	setFilters: (filters: FilterState) => void;
-	availableAccounts: string[];
+	/** Accounts as {value: id, label: current name}. */
+	availableAccounts: AnalyticsFilterOption[];
 	availableModels: string[];
-	availableApiKeys: string[];
+	/** API keys as {value: api_key_id, label: current or snapshot name}. */
+	availableApiKeys: AnalyticsFilterOption[];
 	availableProjects: string[];
-	/** Any breakdown row had project === null — drives the "(no project)" checkbox. */
+	/** Some requests have no account — drives the "(no account)" checkbox. */
+	hasNoAccountBucket: boolean;
+	/** Some requests have no project — drives the "(no project)" checkbox. */
 	hasNoProjectBucket: boolean;
 	activeFilterCount: number;
 	filterOpen: boolean;
@@ -44,6 +73,7 @@ export function AnalyticsFilters({
 	availableModels,
 	availableApiKeys,
 	availableProjects,
+	hasNoAccountBucket,
 	hasNoProjectBucket,
 	activeFilterCount,
 	filterOpen,
@@ -70,16 +100,7 @@ export function AnalyticsFilters({
 							<Button
 								variant="ghost"
 								size="sm"
-								onClick={() =>
-									setFilters({
-										accounts: [],
-										models: [],
-										apiKeys: [],
-										projects: [],
-										noProject: false,
-										status: "all",
-									})
-								}
+								onClick={() => setFilters(EMPTY_FILTERS)}
 							>
 								Clear all
 							</Button>
@@ -111,37 +132,58 @@ export function AnalyticsFilters({
 						</Select>
 					</div>
 
-					{/* Account Filter */}
-					{availableAccounts.length > 0 && (
+					{/* Account Filter — also shown when only the no-account bucket
+					    exists (or noAccount is already applied), so it stays
+					    reachable/clearable with zero named accounts. */}
+					{(availableAccounts.length > 0 ||
+						hasNoAccountBucket ||
+						filters.noAccount) && (
 						<div className="space-y-2">
-							<Label>Accounts ({filters.accounts.length} selected)</Label>
+							<Label>
+								Accounts (
+								{filters.accounts.length + (filters.noAccount ? 1 : 0)}{" "}
+								selected)
+							</Label>
 							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+								{(hasNoAccountBucket || filters.noAccount) && (
+									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
+										<input
+											type="checkbox"
+											className="rounded border-gray-300"
+											checked={filters.noAccount}
+											onChange={(e) =>
+												setFilters({ ...filters, noAccount: e.target.checked })
+											}
+										/>
+										<span className="text-sm italic">(no account)</span>
+									</label>
+								)}
 								{availableAccounts.map((account) => (
 									<label
-										key={account}
+										key={account.value}
 										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"
 											className="rounded border-gray-300"
-											checked={filters.accounts.includes(account)}
+											checked={filters.accounts.includes(account.value)}
 											onChange={(e) => {
 												if (e.target.checked) {
 													setFilters({
 														...filters,
-														accounts: [...filters.accounts, account],
+														accounts: [...filters.accounts, account.value],
 													});
 												} else {
 													setFilters({
 														...filters,
 														accounts: filters.accounts.filter(
-															(a) => a !== account,
+															(a) => a !== account.value,
 														),
 													});
 												}
 											}}
 										/>
-										<span className="text-sm">{account}</span>
+										<span className="text-sm truncate">{account.label}</span>
 									</label>
 								))}
 							</div>
@@ -190,30 +232,30 @@ export function AnalyticsFilters({
 							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
 								{availableApiKeys.map((apiKey) => (
 									<label
-										key={apiKey}
+										key={apiKey.value}
 										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"
 											className="rounded border-gray-300"
-											checked={filters.apiKeys.includes(apiKey)}
+											checked={filters.apiKeys.includes(apiKey.value)}
 											onChange={(e) => {
 												if (e.target.checked) {
 													setFilters({
 														...filters,
-														apiKeys: [...filters.apiKeys, apiKey],
+														apiKeys: [...filters.apiKeys, apiKey.value],
 													});
 												} else {
 													setFilters({
 														...filters,
 														apiKeys: filters.apiKeys.filter(
-															(k) => k !== apiKey,
+															(k) => k !== apiKey.value,
 														),
 													});
 												}
 											}}
 										/>
-										<span className="text-sm truncate">{apiKey}</span>
+										<span className="text-sm truncate">{apiKey.label}</span>
 									</label>
 								))}
 							</div>

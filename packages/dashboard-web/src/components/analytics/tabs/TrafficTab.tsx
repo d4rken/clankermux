@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo } from "react";
+import type { AnalyticsSection } from "@clankermux/types";
+import { useCallback, useMemo } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { toCumulativeSeries } from "../../../lib/cumulative";
 import { formatAxisTime } from "../../../lib/time-format";
@@ -8,10 +9,24 @@ import {
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
 	MainMetricsChart,
+	MissingSectionsNotice,
 	PerformanceIndicatorsChart,
 	TokenUsageBreakdown,
 } from "..";
 import type { TrafficTabProps } from "./types";
+
+// Reads timeSeries + tokenBreakdown/totals for the charts, and activeSessions
+// (both the bucketed series and ActiveSessionsPanel's per-account bar list).
+const TRAFFIC_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"timeSeries",
+	"activeSessions",
+	"activeSessionsByAccount",
+];
+
+// The "Per Model" query REPLACES the aggregate series with per-model rows, so
+// the time series is the only phase it needs.
+const TRAFFIC_PER_MODEL_SECTIONS: readonly AnalyticsSection[] = ["timeSeries"];
 
 /**
  * Traffic / volume view. Owns the main metrics chart, the performance-indicators
@@ -27,11 +42,11 @@ export function TrafficTab(props: TrafficTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 		selectedMetric,
@@ -47,11 +62,11 @@ export function TrafficTab(props: TrafficTabProps) {
 		perModelAnalytics,
 		perModelLoading,
 		refetchPerModel,
-	} = useAnalyticsData(range, filters, { perModel: modelBreakdown });
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
+	} = useAnalyticsData(range, filters, {
+		perModel: modelBreakdown,
+		sections: TRAFFIC_SECTIONS,
+		perModelSections: TRAFFIC_PER_MODEL_SECTIONS,
+	});
 
 	// Memoize filter function
 	const filterData = useCallback(
@@ -109,7 +124,7 @@ export function TrafficTab(props: TrafficTabProps) {
 	const tokenBreakdown = useMemo(() => {
 		if (!analytics?.tokenBreakdown) return [];
 
-		const total = analytics.totals.totalTokens || 1;
+		const total = analytics.totals?.totalTokens || 1;
 		const breakdown = [
 			{
 				type: "Input Tokens",
@@ -137,7 +152,7 @@ export function TrafficTab(props: TrafficTabProps) {
 			...item,
 			percentage: Math.round((item.value / total) * 100),
 		}));
-	}, [analytics?.tokenBreakdown, analytics?.totals.totalTokens]);
+	}, [analytics?.tokenBreakdown, analytics?.totals?.totalTokens]);
 
 	const mainLoading = modelBreakdown ? loading || perModelLoading : loading;
 
@@ -152,6 +167,7 @@ export function TrafficTab(props: TrafficTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
@@ -161,6 +177,11 @@ export function TrafficTab(props: TrafficTabProps) {
 					void refetch();
 					if (modelBreakdown) void refetchPerModel();
 				}}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={TRAFFIC_SECTIONS}
 			/>
 
 			{/* Main Metrics Chart */}

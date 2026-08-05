@@ -1,12 +1,23 @@
-import { useEffect } from "react";
+import type { AnalyticsSection } from "@clankermux/types";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
+	MissingSectionsNotice,
 	ProjectAnalytics,
 	RoutingAnalyticsPanel,
 	ToolErrorsPanel,
 } from "..";
 import type { ProjectsReliabilityTabProps } from "./types";
+
+// `totals` is here for projectAttributionCoverage, which it owns — the coverage
+// numbers come from the consolidated totals query, not from summing the
+// top-N-truncated projectBreakdown.
+const PROJECTS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"projectBreakdown",
+	"routing",
+	"toolCallErrors",
+];
 
 /**
  * Projects & reliability view. Owns the per-project breakdown, routing
@@ -20,20 +31,18 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 	} = props;
 
-	const { analytics, loading, refetch } = useAnalyticsData(range, filters);
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
+	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
+		sections: PROJECTS_SECTIONS,
+	});
 
 	return (
 		<div className="space-y-6">
@@ -46,12 +55,18 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}
 				loading={loading}
 				onRefresh={refetch}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={PROJECTS_SECTIONS}
 			/>
 
 			{/* Project Breakdown */}

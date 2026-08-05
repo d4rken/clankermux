@@ -1,4 +1,5 @@
 import {
+	BadRequest,
 	errorResponse,
 	InternalServerError,
 	ServiceUnavailable,
@@ -6,6 +7,11 @@ import {
 import { Logger } from "@clankermux/logger";
 import type { APIContext } from "../types";
 import { createAnalyticsHandler as createDirectAnalyticsHandler } from "./analytics-direct";
+import { createAnalyticsFilterOptionsHandler as createDirectAnalyticsFilterOptionsHandler } from "./analytics-filter-options-direct";
+import {
+	canonicalizeSectionsParam,
+	parseSectionsParam,
+} from "./analytics-sections";
 import type {
 	AnalyticsWorkerRequest,
 	AnalyticsWorkerResponse,
@@ -48,7 +54,22 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"cache-keepalive-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
 	"payments-summary": DEFAULT_WORKER_TIMEOUT_MS,
+	"filter-options": DEFAULT_WORKER_TIMEOUT_MS,
 };
+
+// Per-kind response-cache TTL. The filter-options lists change only when a new
+// model/project/account/key first appears, so a long TTL is safe and keeps the
+// dropdowns off the DB entirely between tab switches. Everything else keeps the
+// short default, where staleness is immediately visible to the user.
+const FILTER_OPTIONS_CACHE_TTL_MS = 5 * 60_000;
+const CACHE_TTL_MS_BY_KIND: Partial<Record<DashboardWorkerKind, number>> = {
+	"filter-options": FILTER_OPTIONS_CACHE_TTL_MS,
+};
+
+/** Response-cache TTL (ms) for a dashboard worker kind. */
+export function getCacheTtlMs(kind: DashboardWorkerKind): number {
+	return CACHE_TTL_MS_BY_KIND[kind] ?? DEFAULT_CACHE_TTL_MS;
+}
 
 /** Per-request soft timeout (ms) for a dashboard worker kind. */
 export function getWorkerTimeoutMs(kind: DashboardWorkerKind): number {
@@ -119,16 +140,54 @@ export type DashboardWorkerLike = {
 	unref?: () => void;
 };
 
-let dashboardWorker: DashboardWorkerLike | undefined;
-const pendingWorkerRequests = new Map<string, PendingWorkerRequest>();
+/**
+ * Worker lanes.
+ *
+ * bun:sqlite calls are SYNCHRONOUS, so one worker serves requests strictly one
+ * at a time. With a single shared worker an all-time analytics read (46 s
+ * measured on the live DB) head-of-line blocked every light panel behind it:
+ * `stats` issued 1 s later hit its 15 s soft deadline and returned 503, and the
+ * Overview rendered `?? 0` for the Active Sessions tile, System Health strip,
+ * Recent Errors and Storage Integrity banner with no error shown.
+ *
+ * Splitting by cost gives the light reads their own serial queue. Each lane
+ * owns its worker, its pending map, its activity clock and its own reset path,
+ * so a wedged heavy worker cannot tear down the light one.
+ *
+ * The response cache, in-flight dedup and invalidation epochs stay GLOBAL
+ * (keyed by kind) — only worker ownership is per-lane.
+ */
+type WorkerLane = "heavy" | "light";
 
-// Wall-clock of the worker's most recent sign of life: its creation, or any
-// message it posts back (for any request, including ones already timed out).
-// The hard watchdog only tears the worker down if it has stayed silent this
-// entire time — a worker still answering other reads is demonstrably alive, so
-// a merely-slow query aging out never triggers a collateral teardown of
-// healthy sibling requests.
-let lastWorkerActivityAt = 0;
+const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
+	analytics: "heavy",
+	stats: "light",
+	"usage-history": "light",
+	"memory-history": "light",
+	"cache-keepalive-history": "light",
+	"cache-effectiveness": "light",
+	"payments-summary": "light",
+	"filter-options": "light",
+};
+
+const WORKER_LANES: readonly WorkerLane[] = ["heavy", "light"];
+
+type LaneState = {
+	worker: DashboardWorkerLike | undefined;
+	pending: Map<string, PendingWorkerRequest>;
+	// Wall-clock of this lane's worker's most recent sign of life: its creation,
+	// or any message it posts back (for any request, including ones already
+	// timed out). The hard watchdog only tears a worker down if it has stayed
+	// silent this entire time — a worker still answering other reads is
+	// demonstrably alive, so a merely-slow query aging out never triggers a
+	// collateral teardown of healthy sibling requests.
+	lastActivityAt: number;
+};
+
+const lanes: Record<WorkerLane, LaneState> = {
+	heavy: { worker: undefined, pending: new Map(), lastActivityAt: 0 },
+	light: { worker: undefined, pending: new Map(), lastActivityAt: 0 },
+};
 
 // Test seams (see analytics-worker-timeout.test.ts). Both default to null so
 // production behaviour is unchanged.
@@ -176,13 +235,39 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch payments summary data",
 		tooManyMessage: "Too many payments summary requests",
 	},
+	"filter-options": {
+		timeoutMessage: "Analytics filter options request timed out",
+		failureMessage: "Failed to fetch analytics filter options",
+		tooManyMessage: "Too many analytics filter option requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
-	return createIsolatedDashboardHandler(
+	const inner = createIsolatedDashboardHandler(
 		context,
 		"analytics",
 		createDirectAnalyticsHandler(context),
+	);
+	return async (params: URLSearchParams): Promise<Response> => {
+		// Validate and canonicalize the section list HERE, on the main thread,
+		// before the request is queued for a worker. A typo'd section queued
+		// behind a slow all-time query would otherwise surface as a 503 soft
+		// timeout minutes later instead of an immediate 400. Canonicalizing first
+		// also means `sections=a,b` and `sections=b,a` — and any unstated implied
+		// dependency — collapse onto ONE response-cache entry.
+		const parsed = parseSectionsParam(params.get("sections"));
+		if (!parsed.ok) return errorResponse(BadRequest(parsed.message));
+		return inner(canonicalizeSectionsParam(params, parsed.sections));
+	};
+}
+
+export function createIsolatedAnalyticsFilterOptionsHandler(
+	context: APIContext,
+) {
+	return createIsolatedDashboardHandler(
+		context,
+		"filter-options",
+		createDirectAnalyticsFilterOptionsHandler(context),
 	);
 }
 
@@ -326,12 +411,14 @@ function runDashboardWorker(
 	params: URLSearchParams,
 ): Promise<Response> {
 	const id = crypto.randomUUID();
+	const lane = LANE_BY_KIND[kind];
+	const state = lanes[lane];
 	const softMs = workerTimeoutOverrideMs?.soft ?? getWorkerTimeoutMs(kind);
 	const hardMs = workerTimeoutOverrideMs?.hard ?? HARD_WORKER_TIMEOUT_MS;
 
 	return new Promise<Response>((resolve, reject) => {
 		const softTimeoutHandle = setTimeout(() => {
-			const pending = pendingWorkerRequests.get(id);
+			const pending = state.pending.get(id);
 			if (!pending || pending.settled) return;
 			// Reject ONLY this request; leave the shared worker running so
 			// sibling dashboard panels keep their in-flight results. The entry
@@ -342,7 +429,7 @@ function runDashboardWorker(
 		}, softMs);
 
 		const hardTimeoutHandle = setTimeout(() => {
-			const pending = pendingWorkerRequests.get(id);
+			const pending = state.pending.get(id);
 			if (!pending) return;
 			// This request has gone unanswered well past even its soft deadline.
 			// Only tear the worker down if it has been completely silent the whole
@@ -350,20 +437,22 @@ function runDashboardWorker(
 			// (other reads still completing), it's alive and merely slow on this
 			// query, so don't punish healthy siblings: quietly retire this
 			// abandoned entry and let the late result (if any) be dropped.
-			if (Date.now() - lastWorkerActivityAt >= hardMs) {
-				resetDashboardWorker(new DashboardWorkerTimeoutError(hardMs));
+			// Scoped to THIS lane: a wedged heavy worker must not take the light
+			// worker's healthy in-flight reads down with it.
+			if (Date.now() - state.lastActivityAt >= hardMs) {
+				resetLane(lane, new DashboardWorkerTimeoutError(hardMs));
 				return;
 			}
 			clearTimeout(pending.softTimeoutHandle);
 			clearTimeout(pending.hardTimeoutHandle);
-			pendingWorkerRequests.delete(id);
+			state.pending.delete(id);
 			if (!pending.settled) {
 				pending.settled = true;
 				pending.reject(new DashboardWorkerTimeoutError(hardMs));
 			}
 		}, hardMs);
 
-		pendingWorkerRequests.set(id, {
+		state.pending.set(id, {
 			resolve,
 			reject,
 			softTimeoutHandle,
@@ -372,7 +461,7 @@ function runDashboardWorker(
 		});
 
 		try {
-			getDashboardWorker().postMessage({
+			getDashboardWorker(lane).postMessage({
 				id,
 				kind,
 				dbPath,
@@ -380,17 +469,17 @@ function runDashboardWorker(
 				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
 			} satisfies AnalyticsWorkerRequest);
 		} catch (error) {
-			const pending = pendingWorkerRequests.get(id);
+			const pending = state.pending.get(id);
 			if (pending) {
 				clearTimeout(pending.softTimeoutHandle);
 				clearTimeout(pending.hardTimeoutHandle);
-				pendingWorkerRequests.delete(id);
+				state.pending.delete(id);
 			}
 			const err =
 				error instanceof Error
 					? error
 					: new Error(`dashboard worker postMessage failed: ${String(error)}`);
-			resetDashboardWorker(err);
+			resetLane(lane, err);
 			reject(err);
 		}
 	});
@@ -402,25 +491,34 @@ function createRealDashboardWorker(): DashboardWorkerLike {
 	}) as unknown as DashboardWorkerLike;
 }
 
-function getDashboardWorker(): DashboardWorkerLike {
-	if (dashboardWorker) return dashboardWorker;
+function getDashboardWorker(lane: WorkerLane): DashboardWorkerLike {
+	const state = lanes[lane];
+	if (state.worker) return state.worker;
 
 	const worker = (workerFactoryOverride ?? createRealDashboardWorker)();
-	dashboardWorker = worker;
-	lastWorkerActivityAt = Date.now();
+	state.worker = worker;
+	state.lastActivityAt = Date.now();
 
 	if ("unref" in worker && typeof worker.unref === "function") {
 		worker.unref();
 	}
 
+	// Every callback closes over BOTH the lane and this specific worker
+	// INSTANCE. Without the instance capture, a late message or error from an
+	// already-replaced worker would refresh (or reset) whatever successor now
+	// occupies the lane — silently reviving a wedged worker's watchdog, or
+	// killing a healthy replacement's in-flight reads.
 	worker.onmessage = (event: MessageEvent<AnalyticsWorkerResponse>) => {
-		handleDashboardWorkerMessage(event.data);
+		handleDashboardWorkerMessage(lane, worker, event.data);
 	};
 	worker.onerror = (event: ErrorEvent) => {
-		resetDashboardWorker(new Error(event.message || "dashboard worker error"));
+		if (lanes[lane].worker !== worker) return;
+		resetLane(lane, new Error(event.message || "dashboard worker error"));
 	};
 	worker.onmessageerror = () => {
-		resetDashboardWorker(
+		if (lanes[lane].worker !== worker) return;
+		resetLane(
+			lane,
 			new Error("dashboard worker message deserialization failed"),
 		);
 	};
@@ -428,18 +526,28 @@ function getDashboardWorker(): DashboardWorkerLike {
 	return worker;
 }
 
-function handleDashboardWorkerMessage(data: AnalyticsWorkerResponse): void {
+function handleDashboardWorkerMessage(
+	lane: WorkerLane,
+	worker: DashboardWorkerLike,
+	data: AnalyticsWorkerResponse,
+): void {
+	const state = lanes[lane];
+	// A message from a worker this lane has already replaced proves nothing
+	// about the CURRENT worker's health, and its pending entries were all
+	// rejected when the lane was reset. Drop it without touching lane state.
+	if (state.worker !== worker) return;
+
 	// Any message — even one for an already-dropped request — is proof the
 	// worker is alive; record it before anything else so the hard watchdog can
 	// tell "slow" apart from "wedged".
-	lastWorkerActivityAt = Date.now();
+	state.lastActivityAt = Date.now();
 
-	const pending = pendingWorkerRequests.get(data.id);
+	const pending = state.pending.get(data.id);
 	if (!pending) return;
 
 	clearTimeout(pending.softTimeoutHandle);
 	clearTimeout(pending.hardTimeoutHandle);
-	pendingWorkerRequests.delete(data.id);
+	state.pending.delete(data.id);
 
 	// The caller already got a soft-timeout error; the worker answered late but
 	// is healthy. Drop the stale result and keep the worker for the next read.
@@ -466,9 +574,11 @@ function handleDashboardWorkerMessage(data: AnalyticsWorkerResponse): void {
 	);
 }
 
-function resetDashboardWorker(error: Error): void {
-	const worker = dashboardWorker;
-	dashboardWorker = undefined;
+/** Tear down ONE lane's worker and reject only that lane's pending requests. */
+function resetLane(lane: WorkerLane, error: Error): void {
+	const state = lanes[lane];
+	const worker = state.worker;
+	state.worker = undefined;
 
 	if (worker) {
 		try {
@@ -478,10 +588,10 @@ function resetDashboardWorker(error: Error): void {
 		}
 	}
 
-	for (const [id, pending] of pendingWorkerRequests) {
+	for (const [id, pending] of state.pending) {
 		clearTimeout(pending.softTimeoutHandle);
 		clearTimeout(pending.hardTimeoutHandle);
-		pendingWorkerRequests.delete(id);
+		state.pending.delete(id);
 		// A soft-timed-out request has already been answered; don't reject twice.
 		if (pending.settled) continue;
 		pending.settled = true;
@@ -489,8 +599,11 @@ function resetDashboardWorker(error: Error): void {
 	}
 }
 
+/** Shutdown path: tears down EVERY lane. */
 export function terminateAnalyticsWorker(): void {
-	resetDashboardWorker(new Error("dashboard worker terminated"));
+	for (const lane of WORKER_LANES) {
+		resetLane(lane, new Error("dashboard worker terminated"));
+	}
 }
 
 async function cacheIfSuccessful(
@@ -506,7 +619,7 @@ async function cacheIfSuccessful(
 	try {
 		const body = await response.clone().text();
 		responseCache.set(cacheKey, {
-			expiresAt: Date.now() + DEFAULT_CACHE_TTL_MS,
+			expiresAt: Date.now() + getCacheTtlMs(kind),
 			status: response.status,
 			body,
 		});

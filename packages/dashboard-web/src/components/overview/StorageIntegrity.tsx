@@ -1,4 +1,5 @@
 import {
+	AlertCircle,
 	AlertTriangle,
 	CheckCircle,
 	Loader2,
@@ -8,6 +9,7 @@ import {
 import type { ReactElement } from "react";
 import { useState } from "react";
 import { useStorageInfo, useTriggerIntegrityCheck } from "../../hooks/queries";
+import { staleAgeLabel } from "../../lib/data-availability";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 
@@ -224,25 +226,77 @@ export function StorageIntegritySection() {
  * Banner shown at the top of the Overview when DB corruption is detected.
  * Returns `null` when status is anything other than `corrupt` so the banner
  * doesn't take vertical space in the healthy case.
+ *
+ * A FAILED read is not the healthy case: `data` is undefined, which the
+ * corrupt-check silently treats as "not corrupt". That renders an unknown
+ * integrity state exactly like a verified-good one, so it gets its own
+ * (quieter) banner instead.
+ *
+ * A read that failed AFTER a success is the same defect wearing a disguise:
+ * React Query keeps the previous payload, so a stale verdict would otherwise be
+ * presented as the current one. The cached verdict stays on screen — it is real
+ * — but labelled with its age.
  */
 export function StorageIntegrityBanner() {
-	const { data } = useStorageInfo();
-	if (data?.integrity_status !== "corrupt") return null;
-	return (
-		<div
-			role="alert"
-			className="flex items-start gap-3 p-3 rounded-lg bg-destructive/15 border border-destructive/30"
-		>
-			<XCircle className="h-5 w-5 text-destructive mt-0.5 shrink-0" />
-			<div className="text-sm">
-				<p className="font-medium text-destructive">
-					Database integrity check failed
-				</p>
-				<p className="text-muted-foreground">
-					{data?.last_integrity_error ??
-						"Check database integrity from System Health → Storage Integrity and review the server logs for details."}
-				</p>
+	const { data, isError, dataUpdatedAt } = useStorageInfo();
+
+	if (isError && data === undefined) {
+		return (
+			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
+				<AlertCircle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+				<div className="text-sm">
+					<p className="font-medium">Database integrity status unavailable</p>
+					<p className="text-muted-foreground">
+						The storage endpoint could not be read, so corruption can neither be
+						confirmed nor ruled out.
+					</p>
+				</div>
 			</div>
-		</div>
-	);
+		);
+	}
+
+	// Set only when a cached payload is on screen and the latest poll failed.
+	const staleNote =
+		isError && data !== undefined
+			? `Last successful read ${staleAgeLabel(dataUpdatedAt)} — the latest refresh failed, so this verdict may no longer be current.`
+			: null;
+
+	if (data?.integrity_status === "corrupt") {
+		return (
+			<div
+				role="alert"
+				className="flex items-start gap-3 p-3 rounded-lg bg-destructive/15 border border-destructive/30"
+			>
+				<XCircle className="h-5 w-5 text-destructive mt-0.5 shrink-0" />
+				<div className="text-sm">
+					<p className="font-medium text-destructive">
+						Database integrity check failed
+					</p>
+					<p className="text-muted-foreground">
+						{data?.last_integrity_error ??
+							"Check database integrity from System Health → Storage Integrity and review the server logs for details."}
+					</p>
+					{/* A failed refresh never downgrades a corruption report: the note
+					    is APPENDED, so the destructive banner stays as-is. */}
+					{staleNote ? (
+						<p className="text-muted-foreground mt-1">{staleNote}</p>
+					) : null}
+				</div>
+			</div>
+		);
+	}
+
+	if (staleNote) {
+		return (
+			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
+				<AlertCircle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+				<div className="text-sm">
+					<p className="font-medium">Database integrity status stale</p>
+					<p className="text-muted-foreground">{staleNote}</p>
+				</div>
+			</div>
+		);
+	}
+
+	return null;
 }

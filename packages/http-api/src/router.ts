@@ -38,7 +38,10 @@ import {
 	createOpenRouterAccountAddHandler,
 	createZaiAccountAddHandler,
 } from "./handlers/accounts";
-import { createAnalyticsHandler } from "./handlers/analytics";
+import {
+	createAnalyticsFilterOptionsHandler,
+	createAnalyticsHandler,
+} from "./handlers/analytics";
 import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
@@ -195,6 +198,9 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const analyticsFilterOptionsHandler = createAnalyticsFilterOptionsHandler(
+			this.context,
+		);
 		const usageHistoryHandler = createUsageHistoryHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
@@ -415,6 +421,9 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
+		this.handlers.set("GET:/api/analytics/filter-options", () =>
+			analyticsFilterOptionsHandler(new URLSearchParams()),
+		);
 		this.handlers.set("GET:/api/analytics/usage-history", (_req, url) => {
 			return usageHistoryHandler(url.searchParams);
 		});

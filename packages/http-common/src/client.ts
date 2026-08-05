@@ -88,8 +88,14 @@ export class HttpClient {
 
 				lastError = error as Error;
 
-				// Don't retry on client errors (4xx)
-				if (error instanceof HttpError && error.status < 500) {
+				// The server answered — replaying the exact same request cannot
+				// change that answer, and a second round trip is not free: a 503
+				// from the dashboard's worker lanes means the request queued and
+				// burned a soft deadline, so retrying it doubles the load that
+				// produced the 503. Retries here exist for TRANSPORT failures
+				// only (connection reset, DNS, TLS); response-level retry policy
+				// for dashboard reads lives in React Query.
+				if (error instanceof HttpError) {
 					throw error;
 				}
 

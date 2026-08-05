@@ -1,21 +1,24 @@
-import type { AnalyticsResponse } from "@clankermux/types";
+import type { AnalyticsFilterOption } from "@clankermux/types";
 import type { TimeRange } from "../../../constants";
 import type { FilterState } from "../AnalyticsFilters";
 
-/** Global filter/seen props the 3 request tabs receive from the shell (shared across tabs). */
+/**
+ * Global filter props the 3 request tabs receive from the shell (shared across
+ * tabs). The dropdown OPTIONS come from /api/analytics/filter-options, not from
+ * the tabs' own payloads, so they no longer depend on which tabs were visited.
+ */
 export interface SharedFilterProps {
 	filters: FilterState;
 	setFilters: (f: FilterState) => void;
-	availableAccounts: string[];
+	availableAccounts: AnalyticsFilterOption[];
 	availableModels: string[];
-	availableApiKeys: string[];
+	availableApiKeys: AnalyticsFilterOption[];
 	availableProjects: string[];
+	hasNoAccountBucket: boolean;
 	hasNoProjectBucket: boolean;
 	activeFilterCount: number;
 	filterOpen: boolean;
 	setFilterOpen: (open: boolean) => void;
-	/** Latch this tab's query payload into the shell's global seen-sets (filter options). */
-	mergeSeen: (analytics: AnalyticsResponse) => void;
 }
 
 /** Per-tab time window (owned by the shell so it survives tab unmount). */

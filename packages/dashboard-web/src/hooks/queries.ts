@@ -1,4 +1,5 @@
-import type { RetentionSetRequest } from "@clankermux/types";
+import { HttpError } from "@clankermux/http-common";
+import type { AnalyticsSection, RetentionSetRequest } from "@clankermux/types";
 import {
 	useInfiniteQuery,
 	useMutation,
@@ -6,6 +7,7 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
+import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
 import { queryKeys } from "../lib/query-keys";
 import type { RequestQueryParams } from "../lib/request-filters";
@@ -54,6 +56,24 @@ export function toDetailsMap<T extends { id: string }>(
 ): Map<string, T> {
 	if (raw instanceof Map) return raw;
 	return new Map((raw ?? []).map((s) => [s.id, s] as [string, T]));
+}
+
+/**
+ * Retry policy for the worker-backed dashboard reads (analytics, stats, the
+ * history endpoints, payments summary, filter options).
+ *
+ * Do NOT retry when the server ANSWERED — an HttpError means the request
+ * reached the handler and it decided. Retrying a 503 soft timeout is actively
+ * harmful: each attempt re-queues a full query behind the same slow read that
+ * caused the timeout, so a 3-retry default turns one slow query into four.
+ * A genuine network failure (no response at all) gets exactly one retry.
+ */
+export function shouldRetryDashboardQuery(
+	failureCount: number,
+	error: unknown,
+): boolean {
+	if (error instanceof HttpError) return false;
+	return failureCount < 1;
 }
 
 export const useStorageInfo = (refetchInterval?: number) => {
@@ -199,9 +219,18 @@ export const useStats = (
 		refetchInterval: refetchInterval ?? 30000, // Default to 30 seconds instead of 10
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
+/**
+ * Analytics query.
+ *
+ * `sections` scopes the SERVER to the query phases this caller renders — the
+ * dominant cost of the endpoint. Omitting it computes everything, which is only
+ * appropriate for a caller that genuinely reads everything. The list is
+ * canonicalized once so it can key the cache and the request identically.
+ */
 export const useAnalytics = (
 	timeRange: string,
 	filters: {
@@ -209,13 +238,17 @@ export const useAnalytics = (
 		models?: string[];
 		apiKeys?: string[];
 		projects?: string[];
+		noAccount?: boolean;
 		noProject?: boolean;
 		status?: "all" | "success" | "error";
 	},
 	viewMode: "normal" | "cumulative",
 	modelBreakdown?: boolean,
-	options?: { enabled?: boolean },
+	options?: { enabled?: boolean; sections?: readonly AnalyticsSection[] },
 ) => {
+	const sections = options?.sections
+		? canonicalSections(options.sections)
+		: undefined;
 	const logger = {
 		debug: (message: string, ...args: unknown[]) => {
 			console.debug(`[Analytics Query] ${message}`, ...args);
@@ -226,7 +259,13 @@ export const useAnalytics = (
 	};
 
 	return useQuery({
-		queryKey: queryKeys.analytics(timeRange, filters, viewMode, modelBreakdown),
+		queryKey: queryKeys.analytics(
+			timeRange,
+			filters,
+			viewMode,
+			modelBreakdown,
+			sections,
+		),
 		queryFn: async () => {
 			logger.debug(`Starting analytics query`, {
 				timeRange,
@@ -242,6 +281,7 @@ export const useAnalytics = (
 					filters,
 					viewMode,
 					modelBreakdown,
+					sections,
 				);
 				logger.debug(`Analytics query completed successfully`, {
 					timeRange,
@@ -271,13 +311,34 @@ export const useAnalytics = (
 		gcTime: 15 * 60 * 1000,
 		enabled: !!timeRange && (options?.enabled ?? true),
 		retry: (failureCount, error) => {
+			const willRetry = shouldRetryDashboardQuery(failureCount, error);
 			logger.debug(`Analytics query retry attempt ${failureCount + 1}`, {
 				error: error instanceof Error ? error.message : String(error),
-				willRetry: failureCount < 3, // Retry up to 3 times
+				willRetry,
 				timestamp: new Date().toISOString(),
 			});
-			return failureCount < 3;
+			return willRetry;
 		},
+	});
+};
+
+/**
+ * Options for the analytics filter dropdowns.
+ *
+ * Replaces accumulating them from whatever the analytics breakdowns returned:
+ * those are truncated to the top N models/projects and only cover the sub-tabs
+ * the user has opened, so the long tail was silently unselectable and the
+ * dropdown contents depended on browsing history.
+ *
+ * Slow-moving (a new model or project appears rarely), and the server caches it
+ * for 5 minutes, so this mirrors that with a long staleTime and no polling.
+ */
+export const useAnalyticsFilterOptions = () => {
+	return useQuery({
+		queryKey: queryKeys.analyticsFilterOptions(),
+		queryFn: () => api.getAnalyticsFilterOptions(),
+		staleTime: 5 * 60_000,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -293,6 +354,7 @@ export const useUsageHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -311,6 +373,7 @@ export const useMemoryHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -327,6 +390,7 @@ export const usePaymentsSummary = (range: string) => {
 		staleTime: 60_000,
 		refetchInterval: 120_000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -561,6 +625,7 @@ export const useCacheKeepaliveHistory = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 
@@ -576,6 +641,7 @@ export const useCacheEffectiveness = (range: string) => {
 		staleTime: 45000,
 		refetchInterval: 60000,
 		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
 	});
 };
 

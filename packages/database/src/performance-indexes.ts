@@ -212,6 +212,24 @@ export function addPerformanceIndexes(db: Database): void {
 	`);
 	log.info("Added index: idx_requests_billing_type_timestamp");
 
+	// 12. Covering index for the id -> timestamp lookup
+	// The active-sessions and tool-call-error analytics queries JOIN their child
+	// tables back to requests purely to read r.timestamp:
+	//   JOIN requests r ON r.id = rr.request_id
+	// EXPLAIN QUERY PLAN showed those doing
+	//   SEARCH r USING INDEX sqlite_autoindex_requests_1 (id=?)
+	// i.e. a per-row b-tree seek into the 116MB table for one column. Carrying
+	// timestamp in the index satisfies the join from the index alone.
+	// Measured against a no-lookup floor: active-sessions 2.46s -> 0.47s,
+	// tool-by-tool 2.93s -> 0.15s.
+	db.run(`
+		CREATE INDEX IF NOT EXISTS idx_requests_id_timestamp
+		ON requests(id, timestamp)
+	`);
+	log.info(
+		"Added index: idx_requests_id_timestamp (covering index for id -> timestamp joins)",
+	);
+
 	log.info("Performance indexes added successfully");
 }
 

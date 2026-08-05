@@ -1,12 +1,24 @@
-import { useEffect } from "react";
+import type { AnalyticsSection } from "@clankermux/types";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import {
 	AnalyticsControls,
 	ContextCompositionPanel,
+	MissingSectionsNotice,
 	ModelAnalytics,
 	TokenSpeedAnalytics,
 } from "..";
 import type { ModelsTabProps } from "./types";
+
+// `speedTotals` supplies the two headline speed percentiles inside `totals`;
+// `totals` itself is still needed for avgResponseTime.
+const MODELS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"speedTotals",
+	"costByModel",
+	"modelPerformance",
+	"speedTimeSeries",
+	"contextComposition",
+];
 
 /**
  * Models view. Owns the per-model performance table (with cost-by-model),
@@ -20,20 +32,18 @@ export function ModelsTab(props: ModelsTabProps) {
 		availableModels,
 		availableApiKeys,
 		availableProjects,
+		hasNoAccountBucket,
 		hasNoProjectBucket,
 		activeFilterCount,
 		filterOpen,
 		setFilterOpen,
-		mergeSeen,
 		range,
 		onRangeChange,
 	} = props;
 
-	const { analytics, loading, refetch } = useAnalyticsData(range, filters);
-
-	useEffect(() => {
-		if (analytics) mergeSeen(analytics);
-	}, [analytics, mergeSeen]);
+	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
+		sections: MODELS_SECTIONS,
+	});
 
 	// Use real cost by model data with filters. No slice cap: ModelAnalytics
 	// joins this per model against the (up to 10) modelPerformance rows, so
@@ -55,12 +65,18 @@ export function ModelsTab(props: ModelsTabProps) {
 				availableModels={availableModels}
 				availableApiKeys={availableApiKeys}
 				availableProjects={availableProjects}
+				hasNoAccountBucket={hasNoAccountBucket}
 				hasNoProjectBucket={hasNoProjectBucket}
 				activeFilterCount={activeFilterCount}
 				filterOpen={filterOpen}
 				setFilterOpen={setFilterOpen}
 				loading={loading}
 				onRefresh={refetch}
+			/>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={MODELS_SECTIONS}
 			/>
 
 			{/* Enhanced Model Analytics */}
@@ -73,9 +89,9 @@ export function ModelsTab(props: ModelsTabProps) {
 			{/* Token Speed Analytics */}
 			<TokenSpeedAnalytics
 				speedTimeSeries={analytics?.speedTimeSeries ?? []}
-				medianTokensPerSecond={analytics?.totals.medianTokensPerSecond ?? null}
-				p95TokensPerSecond={analytics?.totals.p95TokensPerSecond ?? null}
-				avgResponseTimeMs={analytics?.totals.avgResponseTime ?? 0}
+				medianTokensPerSecond={analytics?.totals?.medianTokensPerSecond ?? null}
+				p95TokensPerSecond={analytics?.totals?.p95TokensPerSecond ?? null}
+				avgResponseTimeMs={analytics?.totals?.avgResponseTime ?? 0}
 				modelPerformance={analytics?.modelPerformance || []}
 				loading={loading}
 				timeRange={range}
