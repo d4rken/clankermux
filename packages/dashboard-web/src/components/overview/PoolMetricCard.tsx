@@ -1,5 +1,5 @@
 import { formatPercentage } from "@clankermux/ui-common";
-import { AlertCircle, Info } from "lucide-react";
+import { AlertCircle, Clock, Info } from "lucide-react";
 import {
 	type ExcludedReason,
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
@@ -36,6 +36,12 @@ interface PoolMetricCardProps {
 	 * Precedence is `unavailableReason` → `loading` → resolved.
 	 */
 	unavailableReason?: string;
+	/**
+	 * Set when the pool is real but the most recent `/api/accounts` refresh
+	 * failed. The quota numbers, the next-quota line and the badges still render;
+	 * the card says how old they are.
+	 */
+	staleNote?: string;
 }
 
 const REASON_LABELS: Record<ExcludedReason, string> = {
@@ -464,6 +470,7 @@ export function PoolMetricCard({
 	inlineDetails = false,
 	loading = false,
 	unavailableReason,
+	staleNote,
 }: PoolMetricCardProps) {
 	const {
 		average,
@@ -553,6 +560,12 @@ export function PoolMetricCard({
 					<p className="text-xs text-muted-foreground truncate">
 						capacity used
 					</p>
+					{resolved && staleNote && (
+						<p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+							<Clock className="h-3.5 w-3.5 shrink-0" />
+							{staleNote}
+						</p>
+					)}
 					{nextQuotaText && (
 						<p className="text-xs text-muted-foreground truncate">
 							{nextQuotaText}

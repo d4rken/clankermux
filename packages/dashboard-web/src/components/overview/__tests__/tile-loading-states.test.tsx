@@ -146,6 +146,29 @@ describe("PoolMetricCard loading and unavailable", () => {
 		expect(html).not.toContain("Pool usage");
 		expect(html).not.toContain("animate-pulse");
 	});
+
+	it("ages the numbers when the latest accounts refresh failed", () => {
+		// The quota percentages, the next-quota line and the badges are all still
+		// the last real reading, so they stay — but presenting them as current
+		// alongside tiles that DO carry an age note is the claim to avoid.
+		const html = poolCard({ staleNote: "Last updated 3m ago" });
+
+		expect(html).toContain("Last updated 3m ago");
+		expect(html).toContain("61%");
+		expect(html).toContain("more quota at");
+	});
+
+	it("does not age a tile that has no numbers yet", () => {
+		expect(
+			poolCard({ loading: true, staleNote: "Last updated 3m ago" }),
+		).not.toContain("Last updated 3m ago");
+		expect(
+			poolCard({
+				unavailableReason: "Account data unavailable",
+				staleNote: "Last updated 3m ago",
+			}),
+		).not.toContain("Last updated 3m ago");
+	});
 });
 
 describe("ChartsSection unavailable", () => {

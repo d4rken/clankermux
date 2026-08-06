@@ -107,6 +107,10 @@ export const OverviewTab = React.memo(() => {
 		analyticsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(analyticsAvailability.lastUpdatedAt, now)}`
 			: undefined;
+	const accountsStaleNote =
+		accountsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
+			: undefined;
 
 	useEffect(() => {
 		return registerUIRefresh({
@@ -304,6 +308,7 @@ export const OverviewTab = React.memo(() => {
 					unavailableReason={
 						accountsUnavailable ? "Account data unavailable" : undefined
 					}
+					staleNote={accountsStaleNote}
 				/>
 				<PoolMetricCard
 					title="7d Pool"
@@ -314,6 +319,7 @@ export const OverviewTab = React.memo(() => {
 					unavailableReason={
 						accountsUnavailable ? "Account data unavailable" : undefined
 					}
+					staleNote={accountsStaleNote}
 				/>
 			</div>
 
