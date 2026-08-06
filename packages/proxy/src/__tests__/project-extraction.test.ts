@@ -444,13 +444,19 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		// would return the WRONG project (`workspace`), merging two distinct
 		// projects into one affinity partition, which is worse than returning none.
 		expect(
-			extractProjectFromBody(systemBody("Working directory: /workspace/model/repo")),
+			extractProjectFromBody(
+				systemBody("Working directory: /workspace/model/repo"),
+			),
 		).toEqual({ project: "repo", source: "wd_plain" });
 		expect(
-			extractProjectFromBody(systemBody("Working directory: /workspace/Model/repo")),
+			extractProjectFromBody(
+				systemBody("Working directory: /workspace/Model/repo"),
+			),
 		).toEqual({ project: "repo", source: "wd_plain" });
 		expect(
-			extractProjectFromBody(systemBody("Working directory: /workspace/shell/repo")),
+			extractProjectFromBody(
+				systemBody("Working directory: /workspace/shell/repo"),
+			),
 		).toEqual({ project: "repo", source: "wd_plain" });
 		expect(
 			extractProjectFromBody(
@@ -465,7 +471,9 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		// work — has to survive that, so the quote test is re-run on the remainder.
 		expect(
 			extractProjectFromBody(
-				systemBody('Working directory: "/workspace/My Project" Platform: linux'),
+				systemBody(
+					'Working directory: "/workspace/My Project" Platform: linux',
+				),
 			),
 		).toEqual({ project: "My Project", source: "wd_plain" });
 	});
