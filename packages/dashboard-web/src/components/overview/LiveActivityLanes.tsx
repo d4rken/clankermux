@@ -35,7 +35,12 @@ import {
 
 const LANE_HEIGHT = 28;
 const AXIS_HEIGHT = 20;
-const MAX_LANES = 6;
+/**
+ * How many NAMED project lanes the card draws. `(no project)` and the `Other`
+ * overflow lane are extra rows outside this quota (see `buildLanes`), so the
+ * card is at most 10 rows. Exported for the lane tests.
+ */
+export const MAX_LANES = 8;
 const DEFAULT_PLOT_WIDTH = 720;
 /** Right-hand inset so a mark at "now" is not clipped by the plot edge. */
 const NOW_INSET = 8;

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { RequestResponse } from "@clankermux/types";
+// The production quota, so these expectations track the card rather than a
+// copy of its number.
+import { MAX_LANES } from "../../components/overview/LiveActivityLanes";
 import {
 	ageOpacity,
 	applyHistoryRows,
@@ -513,12 +516,15 @@ describe("buildLanes", () => {
 
 		const { lanes } = buildLanes(events, T0 + 1000, WINDOW, 6);
 
-		expect(lanes).toHaveLength(6);
+		// `maxLanes` bounds the NAMED lanes; Other is an extra row rather than one
+		// carved out of that quota, so six projects keep a direct row and only the
+		// seventh folds. (Under the old whole-card bound this was 5 + Other(2).)
+		expect(lanes).toHaveLength(7);
 		const other = lanes[lanes.length - 1];
 		expect(other.key).toBe("other");
-		expect(other.label).toBe("Other (2 projects)");
-		// Volumes run 10, 9, 8, 7, 6, 5, 4; the two smallest fold in.
-		expect(other.requests).toBe(5 + 4);
+		expect(other.label).toBe("Other (1 project)");
+		// Volumes run 10, 9, 8, 7, 6, 5, 4; only the smallest folds in.
+		expect(other.requests).toBe(4);
 	});
 
 	it("keeps lane order stable as volumes change", () => {
@@ -616,6 +622,143 @@ describe("buildLanes", () => {
 
 		expect(lanes[0].active).toBe(1);
 		expect(lanes[0].requests).toBe(1);
+	});
+
+	// `maxLanes` bounds NAMED project lanes only. `(no project)` is not a
+	// project — letting it eat a named slot pushed a real project into Other and
+	// made the overflow label count a bucket that is not a project at all.
+	describe("named-lane quota", () => {
+		it("draws eight named project lanes", () => {
+			// The expected row lists below are written out for this value; if the
+			// card's quota moves they have to move with it rather than silently
+			// asserting a different card.
+			expect(MAX_LANES).toBe(8);
+		});
+
+		/** `count` projects with strictly descending volume, so folding is total. */
+		function namedProjects(count: number) {
+			return Array.from({ length: count }, (_, i) => `p${i + 1}`).flatMap(
+				(p, i) =>
+					Array.from({ length: (count + 1 - i) * 2 }, (_, n) =>
+						completed(`${p}-${n}`, p, T0 + n),
+					),
+			);
+		}
+
+		it("gives maxLanes rows to named projects and folds only the named tail", () => {
+			const { lanes } = buildLanes(
+				namedProjects(10),
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
+
+			expect(lanes.map((l) => l.label)).toEqual([
+				"p1",
+				"p2",
+				"p3",
+				"p4",
+				"p5",
+				"p6",
+				"p7",
+				"p8",
+				"Other (2 projects)",
+			]);
+			expect(lanes.some((l) => l.label === "(no project)")).toBe(false);
+		});
+
+		it("gives the no-project bucket its own row outside the named quota", () => {
+			const { lanes } = buildLanes(
+				[
+					...namedProjects(10),
+					completed("u1", null, T0),
+					completed("u2", null, T0 + 1),
+				],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
+
+			expect(lanes.map((l) => l.label)).toEqual([
+				"p1",
+				"p2",
+				"p3",
+				"p4",
+				"p5",
+				"p6",
+				"p7",
+				"p8",
+				"(no project)",
+				"Other (2 projects)",
+			]);
+			// The count is of NAMED projects: p9 and p10. The no-project bucket is
+			// never inside Other, so a "3" here would claim a project that does not
+			// exist.
+			const other = lanes[lanes.length - 1];
+			expect(other.key).toBe("other");
+			expect(other.label).toBe("Other (2 projects)");
+			// ...and its totals cover only the folded named projects (p9: 6, p10: 4).
+			expect(other.requests).toBe(6 + 4);
+		});
+
+		it("adds no overflow row when only the no-project bucket is extra", () => {
+			const { lanes } = buildLanes(
+				[...namedProjects(8), completed("u1", null, T0)],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
+
+			expect(lanes).toHaveLength(9);
+			expect(lanes.map((l) => l.label)).toEqual([
+				"p1",
+				"p2",
+				"p3",
+				"p4",
+				"p5",
+				"p6",
+				"p7",
+				"p8",
+				"(no project)",
+			]);
+		});
+
+		it("renders untagged-only traffic as a single no-project lane", () => {
+			const { lanes } = buildLanes(
+				[completed("u1", null, T0), completed("u2", null, T0 + 1)],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
+
+			expect(lanes).toHaveLength(1);
+			expect(lanes[0].label).toBe("(no project)");
+			expect(lanes[0].key).toBe(laneKeyOf(null));
+			expect(lanes[0].requests).toBe(2);
+		});
+
+		it("stays idempotent when fed its own order back", () => {
+			// The renderer writes `orderRef` during render, so a double invocation
+			// must reproduce the same rows — including the no-project row's position.
+			const events = [
+				...namedProjects(10),
+				completed("u1", null, T0),
+				completed("u2", null, T0 + 1),
+			];
+			const first = buildLanes(events, T0 + 1000, WINDOW, MAX_LANES);
+			const second = buildLanes(
+				events,
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+				first.order,
+			);
+
+			expect(second.order).toEqual(first.order);
+			expect(second.lanes.map((l) => l.label)).toEqual(
+				first.lanes.map((l) => l.label),
+			);
+		});
 	});
 });
 
