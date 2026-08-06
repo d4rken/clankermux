@@ -18,12 +18,12 @@ function queryInState(status: string) {
 
 describe("logHistoryQueryOptions", () => {
 	it("opts a SUCCESSFUL load out of the app-wide refetch interval", () => {
-		expect(logHistoryQueryOptions.refetchInterval(queryInState("success"))).toBe(
-			false,
-		);
-		expect(logHistoryQueryOptions.refetchInterval(queryInState("pending"))).toBe(
-			false,
-		);
+		expect(
+			logHistoryQueryOptions.refetchInterval(queryInState("success")),
+		).toBe(false);
+		expect(
+			logHistoryQueryOptions.refetchInterval(queryInState("pending")),
+		).toBe(false);
 	});
 
 	it("keeps retrying a FAILED load", () => {
