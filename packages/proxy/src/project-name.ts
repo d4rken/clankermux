@@ -1,11 +1,16 @@
-const PROJECT_NAME_MAX_LEN = 64;
+/**
+ * Longest project name we accept. Exported so the extraction guard can REJECT
+ * an over-long candidate instead of letting it be truncated here — truncation is
+ * what turns a leaked prompt tail into a plausible-looking project name. This is
+ * not a storage constraint: `requests.project` is plain TEXT.
+ */
+export const PROJECT_NAME_MAX_LEN = 64;
 
 const CLAUDE_ENV_MARKER_RE =
 	/\s*(?:-\s*)?(?:Is a git repository\b|Is directory a git repo\b|Platform\b|Shell\b|Today's date\b|Model\b).*$/i;
 
-export function sanitizeProjectName(
-	raw: string | undefined | null,
-): string | null {
+/** Everything {@link sanitizeProjectName} does except the length cap. */
+function cleanProjectName(raw: string | undefined | null): string | null {
 	if (!raw) return null;
 
 	// Strip ASCII control chars (incl. newlines/tabs) before applying marker
@@ -19,7 +24,29 @@ export function sanitizeProjectName(
 		.trim();
 
 	if (!withoutEnvBlock) return null;
-	return withoutEnvBlock.length > PROJECT_NAME_MAX_LEN
-		? withoutEnvBlock.slice(0, PROJECT_NAME_MAX_LEN)
-		: withoutEnvBlock;
+	return withoutEnvBlock;
+}
+
+export function sanitizeProjectName(
+	raw: string | undefined | null,
+): string | null {
+	const cleaned = cleanProjectName(raw);
+	if (cleaned === null) return null;
+	return cleaned.length > PROJECT_NAME_MAX_LEN
+		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
+		: cleaned;
+}
+
+/**
+ * True when {@link sanitizeProjectName} would TRUNCATE `raw` — i.e. it is still
+ * over the limit after env-marker cleanup. Callers that route or persist a
+ * freshly extracted name reject in that case rather than store the slice;
+ * `sanitizeProjectName` keeps truncating for its other callers (notably the
+ * backfill's repair pass over already-stored rows).
+ */
+export function exceedsProjectNameLimit(
+	raw: string | undefined | null,
+): boolean {
+	const cleaned = cleanProjectName(raw);
+	return cleaned !== null && cleaned.length > PROJECT_NAME_MAX_LEN;
 }

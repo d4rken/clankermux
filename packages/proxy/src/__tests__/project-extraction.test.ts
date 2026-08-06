@@ -8,6 +8,7 @@ import {
 	normalizeProjectCandidate,
 	resolveProject,
 } from "../project-extraction";
+import { PROJECT_NAME_MAX_LEN } from "../project-name";
 import type { RequestJsonBody } from "../request-body-context";
 import { SessionProjectCache } from "../session-project-cache";
 
@@ -33,6 +34,26 @@ describe("normalizeProjectCandidate", () => {
 
 	it("passes normal names through", () => {
 		expect(normalizeProjectCandidate("clankermux")).toBe("clankermux");
+	});
+
+	it("rejects an over-long candidate rather than truncating it", () => {
+		// Truncation would hand routing a 64-char slice of whatever text this was.
+		expect(normalizeProjectCandidate("a".repeat(PROJECT_NAME_MAX_LEN))).toBe(
+			"a".repeat(PROJECT_NAME_MAX_LEN),
+		);
+		expect(
+			normalizeProjectCandidate("a".repeat(PROJECT_NAME_MAX_LEN + 1)),
+		).toBeNull();
+	});
+
+	it("measures the limit AFTER env-marker cleanup", () => {
+		// The marker suffix is stripped first, so a short name carrying a long
+		// concatenated env block is still accepted.
+		expect(
+			normalizeProjectCandidate(
+				`octiIs directory a git repo: No${" - Platform: linux".repeat(4)}`,
+			),
+		).toBe("octi");
 	});
 });
 
@@ -86,6 +107,31 @@ describe("mapWorkingDirToProject", () => {
 	it("uses basename for deeper non-home paths", () => {
 		expect(mapWorkingDirToProject("/srv/data/myproj")).toBe("myproj");
 	});
+
+	it("maps a Windows drive path without leaking the user name", () => {
+		// Splitting on "/" alone left the whole backslash string as ONE segment,
+		// so the stored project was "C:\Users\Alice\myproj" — user name included.
+		expect(mapWorkingDirToProject("C:\\Users\\Alice\\myproj")).toBe("myproj");
+		expect(mapWorkingDirToProject("D:/Users/Alice/projects/my-app")).toBe(
+			"my-app",
+		);
+	});
+
+	it("returns null for a bare Windows home dir", () => {
+		expect(mapWorkingDirToProject("C:\\Users\\Alice")).toBeNull();
+	});
+
+	it("maps a UNC path to its basename, not the server name", () => {
+		expect(mapWorkingDirToProject("\\\\fileserver\\share\\myproj")).toBe(
+			"myproj",
+		);
+	});
+
+	it("rejects a candidate longer than the limit instead of truncating it", () => {
+		const atLimit = "a".repeat(PROJECT_NAME_MAX_LEN);
+		expect(mapWorkingDirToProject(`/home/u/${atLimit}`)).toBe(atLimit);
+		expect(mapWorkingDirToProject(`/home/u/${atLimit}b`)).toBeNull();
+	});
 });
 
 describe("extractProjectFromBody", () => {
@@ -134,13 +180,25 @@ describe("extractProjectFromBody", () => {
 		});
 	});
 
-	it("captures paths with spaces to end of line", () => {
-		const body: RequestJsonBody = {
+	it("rejects an UNQUOTED path with spaces but accepts the quoted form", () => {
+		// An unquoted spaced path is indistinguishable from a path followed by
+		// same-line prose, so it is refused; quoting removes the ambiguity.
+		const unquoted: RequestJsonBody = {
 			system:
 				"# Environment\nPrimary working directory: /Users/Me/My Project\nIs a git repository: false\n",
 			messages: [{ role: "user", content: "hi" }],
 		};
-		expect(extractProjectFromBody(body)).toEqual({
+		expect(extractProjectFromBody(unquoted)).toEqual({
+			project: null,
+			source: "none",
+		});
+
+		const quoted: RequestJsonBody = {
+			system:
+				'# Environment\nPrimary working directory: "/Users/Me/My Project"\nIs a git repository: false\n',
+			messages: [{ role: "user", content: "hi" }],
+		};
+		expect(extractProjectFromBody(quoted)).toEqual({
 			project: "My Project",
 			source: "wd_primary",
 		});
@@ -278,6 +336,189 @@ describe("extractProjectFromBody", () => {
 			project: null,
 			source: "none",
 		});
+	});
+});
+
+/**
+ * The extracted project is not display-only: it is persisted on the request row,
+ * offered in the dashboard filter, and used as a load-balancer affinity
+ * partition key. Anything the guard lets through therefore has to be a project
+ * name, not a fragment of the prompt that happened to follow the label.
+ */
+describe("extractProjectFromBody — prompt-leak guard", () => {
+	function systemBody(system: string): RequestJsonBody {
+		return { system, messages: [{ role: "user", content: "hi" }] };
+	}
+
+	function codexBody(text: string): RequestJsonBody {
+		return {
+			system: "You are a coding agent running in a terminal.",
+			messages: [{ role: "user", content: text }],
+		};
+	}
+
+	const NOTHING = { project: null, source: "none" } as const;
+
+	it("rejects same-line prose trailing an unquoted path", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/u/projects/repo LEAKED SECRET sk-ABCDEFGH12345678",
+				),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("rejects a long prompt tail instead of truncating it into a plausible name", () => {
+		// The 64-char truncation is what used to manufacture a project name out of
+		// prompt text; the tail must be refused outright.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/u/projects/repo followed by a long tail of leaked prompt text that keeps going and going",
+				),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("rejects a labelled path surrounded by prose lines", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"some notes\nWorking directory: /srv/app - set this before running\nmore notes",
+				),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("rejects a codex <cwd> whose path is followed by a newline and prose", () => {
+		// CODEX_CWD_RE captures across newlines, and the control-char strip in
+		// sanitizeProjectName used to FUSE the two lines into "repoLEAKED sk-…".
+		expect(
+			extractProjectFromBody(
+				codexBody("<cwd>/home/u/projects/repo\nLEAKED sk-AAAAAAAA1111</cwd>"),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("rejects a tab inside the capture", () => {
+		expect(
+			extractProjectFromBody(systemBody("Working directory: /srv/app\tnotes")),
+		).toEqual(NOTHING);
+	});
+
+	it("still accepts the real Claude Code environment block", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"<env>\nWorking directory: /home/darken/clankermux\nIs directory a git repo: Yes\nPlatform: linux\n</env>",
+				),
+			),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
+	});
+
+	it("still accepts an env block with CRLF line endings", () => {
+		// The capture keeps the trailing \r; trimming happens before the
+		// control-char check, so CRLF must not be read as a leak.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"<env>\r\nWorking directory: /home/darken/clankermux\r\nPlatform: linux\r\n</env>",
+				),
+			),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
+	});
+
+	it("still accepts a pretty-printed multi-line <cwd>", () => {
+		// Boundary whitespace is trimmed FIRST, so the newlines inside the tag are
+		// not mistaken for embedded prompt text.
+		expect(
+			extractProjectFromBody(
+				codexBody("<environment_context>\n<cwd>\n/home/u/repo\n</cwd>\n"),
+			),
+		).toEqual({ project: "repo", source: "codex_cwd" });
+	});
+
+	it("accepts legitimate names the dropped heuristics would have rejected", () => {
+		// A word-count cap and a secret-token-shape regex both misfired here: this
+		// is a real repository name, not a credential.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/u/projects/2026-client-migration-dashboard",
+				),
+			),
+		).toEqual({
+			project: "2026-client-migration-dashboard",
+			source: "wd_plain",
+		});
+		expect(
+			extractProjectFromBody(systemBody("Working directory: /srv/my.app.service")),
+		).toEqual({ project: "my.app.service", source: "wd_plain" });
+	});
+
+	it("accepts a name exactly at the length limit and rejects one over", () => {
+		const atLimit = "a".repeat(PROJECT_NAME_MAX_LEN);
+		expect(
+			extractProjectFromBody(systemBody(`Working directory: /home/u/${atLimit}`)),
+		).toEqual({ project: atLimit, source: "wd_plain" });
+		expect(
+			extractProjectFromBody(
+				systemBody(`Working directory: /home/u/${atLimit}b`),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("rejects an instruction-shaped tail (multi-word, no path)", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody("Working directory: ignore prior instructions"),
+			),
+		).toEqual(NOTHING);
+	});
+
+	it("documents the boundary: a whitespace-free single token is still accepted", () => {
+		// Deliberate. No deterministic rule separates a secret-shaped token from a
+		// legitimate repo name (the token-shape regex rejected
+		// "2026-client-migration-dashboard" and was defeated by a "token=" prefix),
+		// so the guard settles for: bounded length, no control chars, no unquoted
+		// whitespace. What it prevents is prompt PROSE becoming a partition key.
+		expect(
+			extractProjectFromBody(
+				systemBody("Working directory: token=sk-ABCDEFGH12345678"),
+			),
+		).toEqual({ project: "token=sk-ABCDEFGH12345678", source: "wd_plain" });
+		expect(
+			extractProjectFromBody(
+				systemBody("Working directory: eyJhbGciOi.eyJzdWIiOi.SflKxwRJ"),
+			),
+		).toEqual({
+			project: "eyJhbGciOi.eyJzdWIiOi.SflKxwRJ",
+			source: "wd_plain",
+		});
+	});
+
+	it("maps a Windows working directory without leaking the user name", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"# Environment\nPrimary working directory: C:\\Users\\Alice\\myproj\n",
+				),
+			),
+		).toEqual({ project: "myproj", source: "wd_primary" });
+	});
+
+	it("rejects an unquoted Windows path with spaces and accepts the quoted one", () => {
+		expect(
+			extractProjectFromBody(
+				systemBody("Working directory: C:\\Users\\Alice\\My Project"),
+			),
+		).toEqual(NOTHING);
+		expect(
+			extractProjectFromBody(
+				systemBody('Working directory: "C:\\Users\\Alice\\My Project"'),
+			),
+		).toEqual({ project: "My Project", source: "wd_plain" });
 	});
 });
 

@@ -1,5 +1,5 @@
 import type { ProjectAttributionSource } from "@clankermux/types";
-import { sanitizeProjectName } from "./project-name";
+import { exceedsProjectNameLimit, sanitizeProjectName } from "./project-name";
 import type { RequestJsonBody } from "./request-body-context";
 import type { SessionProjectCache } from "./session-project-cache";
 
@@ -43,6 +43,50 @@ const CODEX_CWD_RE = /<cwd>([^<]+)<\/cwd>/;
 // Per-chunk scan budget for the tier-3 user-message search.
 const CWD_SCAN_MAX_CHARS = 4096;
 
+/**
+ * Guard against prompt text reaching the project name.
+ *
+ * `WORKING_DIR_RE` captures to end of line and `CODEX_CWD_RE` captures across
+ * newlines, so whatever the client wrote after the label is captured with the
+ * path. The project is NOT display-only — it is persisted, offered as a
+ * dashboard filter, used as a load-balancer affinity partition key, and seeds
+ * the session project cache (where a conflicting seed withholds the project for
+ * the rest of the window) — so a rejected capture returns `null` and seeds
+ * nothing rather than being cleaned up into something plausible.
+ *
+ * Three rules, applied to the raw capture before `sanitizeProjectName` sees it:
+ *
+ *  a. Trim boundary whitespace, THEN reject any remaining ASCII control char.
+ *     Order matters both ways: checking before `sanitizeProjectName` strips
+ *     them is what stops `repo\nLEAKED sk-…` fusing into `repoLEAKED sk-…`, and
+ *     trimming first is what keeps a pretty-printed `<cwd>\n/home/u/repo\n</cwd>`
+ *     working.
+ *  b. Reject — never truncate — a candidate over `PROJECT_NAME_MAX_LEN`
+ *     (enforced in `normalizeProjectCandidate`, which also covers the
+ *     `x-project` header). Truncation is the mechanism that manufactured
+ *     plausible names out of prompt tails.
+ *  c. Reject whitespace in an UNQUOTED capture, allow it when the capture was
+ *     quoted. An unquoted path containing spaces is indistinguishable from a
+ *     path followed by same-line prose, so no heuristic can separate them;
+ *     quoting removes the ambiguity.
+ *
+ * Deliberately NOT rules: a word-count cap and a secret-token-shape regex. Both
+ * misfired in both directions — `ignore prior instructions` is four words and a
+ * `token=` prefix defeats an anchored token regex, while the legitimate repo
+ * name `2026-client-migration-dashboard` reads as a secret. The residual is
+ * that a whitespace-free single token still passes; it is bounded and cannot
+ * carry prose.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting them is the point
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+const WHITESPACE_RE = /\s/;
+
+// Windows paths: `C:\Users\Alice\myproj` and `\\server\share\myproj`. Without
+// the separator swap the whole string is a single segment, so the entire path —
+// user name included — became the project.
+const WINDOWS_DRIVE_PREFIX_RE = /^[A-Za-z]:/;
+const UNC_HOST_PREFIX_RE = /^\/\/[^/]+/;
+
 // Common "container" directories directly under /home/<user> or
 // /Users/<user> that hold projects rather than being projects themselves.
 const HOME_CONTAINER_DIRS = new Set([
@@ -56,6 +100,8 @@ const HOME_CONTAINER_DIRS = new Set([
 export function normalizeProjectCandidate(
 	raw: string | undefined | null,
 ): string | null {
+	// Rule (b): an over-long candidate is refused, not sliced to fit.
+	if (exceedsProjectNameLimit(raw)) return null;
 	const sanitized = sanitizeProjectName(raw);
 	if (!sanitized) return null;
 	// Dot-leading names are hidden/infra dirs (.claude, .config), never a
@@ -65,7 +111,13 @@ export function normalizeProjectCandidate(
 }
 
 export function mapWorkingDirToProject(wd: string): string | null {
-	const segments = wd.split("/").filter((segment) => segment.length > 0);
+	// Rule (d): normalize Windows separators and drop a drive/UNC-host prefix so
+	// the segment walk below sees the same shape it does on POSIX.
+	const normalized = wd
+		.replace(/\\/g, "/")
+		.replace(WINDOWS_DRIVE_PREFIX_RE, "")
+		.replace(UNC_HOST_PREFIX_RE, "");
+	const segments = normalized.split("/").filter((segment) => segment.length > 0);
 	if (segments.length === 0) return null;
 
 	let candidate: string | null;
@@ -112,21 +164,43 @@ function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 	return null;
 }
 
-function stripSurroundingQuotes(value: string): string {
+function stripSurroundingQuotes(value: string): {
+	value: string;
+	quoted: boolean;
+} {
 	if (value.length >= 2) {
 		const first = value[0];
 		const last = value[value.length - 1];
 		if ((first === '"' || first === "'") && first === last) {
-			return value.slice(1, -1);
+			return { value: value.slice(1, -1), quoted: true };
 		}
 	}
-	return value;
+	return { value, quoted: false };
+}
+
+/**
+ * Turn a raw working-directory capture into a project name, applying rules
+ * (a) and (c) of the guard documented above. Returns `null` for anything that
+ * carries prompt text rather than a path.
+ */
+function projectFromCapture(raw: string | undefined): string | null {
+	if (raw === undefined) return null;
+
+	// (a) Trim first, then reject on what is LEFT — boundary newlines are
+	// formatting, embedded ones are two different pieces of text.
+	const trimmed = raw.trim();
+	if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return null;
+
+	const { value, quoted } = stripSurroundingQuotes(trimmed);
+	if (!value) return null;
+	// (c) Only a quoted capture may contain whitespace.
+	if (!quoted && WHITESPACE_RE.test(value)) return null;
+
+	return mapWorkingDirToProject(value);
 }
 
 function projectFromLabelMatch(match: RegExpMatchArray | null): string | null {
-	const captured = match?.[1]?.trim();
-	if (!captured) return null;
-	return mapWorkingDirToProject(stripSurroundingQuotes(captured));
+	return projectFromCapture(match?.[1]);
 }
 
 function collectFirstUserMessageTexts(body: RequestJsonBody): string[] {
@@ -190,10 +264,8 @@ export function extractProjectFromBody(body: RequestJsonBody | null): {
 	// the conversation, and only the head of each text chunk.
 	for (const text of collectFirstUserMessageTexts(body)) {
 		const match = text.slice(0, CWD_SCAN_MAX_CHARS).match(CODEX_CWD_RE);
-		if (match?.[1]) {
-			const project = mapWorkingDirToProject(match[1].trim());
-			if (project) return { project, source: "codex_cwd" };
-		}
+		const project = projectFromCapture(match?.[1]);
+		if (project) return { project, source: "codex_cwd" };
 	}
 
 	return NO_BODY_PROJECT;
