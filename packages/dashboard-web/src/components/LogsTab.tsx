@@ -25,6 +25,15 @@ export function LogsTab() {
 	const logsEndRef = useRef<HTMLDivElement>(null);
 	const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 	const cardRef = useRef<HTMLDivElement>(null);
+	// The SSE subscription is created once and never re-created on an
+	// auto-scroll toggle (see startStreaming), so its callback reads the
+	// preference through a ref. Assigned during RENDER rather than in a passive
+	// effect: an effect would leave a window in which an arriving log line still
+	// saw the previous value.
+	const autoScrollRef = useRef(autoScroll);
+	autoScrollRef.current = autoScroll;
+	// History is a one-shot backfill; see the hydration effect below.
+	const hydratedRef = useRef(false);
 	const [availableHeight, setAvailableHeight] = useState<number | undefined>(
 		undefined,
 	);
@@ -54,22 +63,32 @@ export function LogsTab() {
 		return () => window.removeEventListener("resize", measure);
 	}, []);
 
+	const scheduleScrollToBottom = useCallback(() => {
+		if (!autoScrollRef.current || !logsEndRef.current) return;
+		// Clear any pending scroll timeout to prevent accumulation
+		if (scrollTimeoutRef.current) {
+			clearTimeout(scrollTimeoutRef.current);
+		}
+		scrollTimeoutRef.current = setTimeout(() => {
+			scrollTimeoutRef.current = null;
+			// Re-check: the stream is no longer torn down when auto-scroll is
+			// toggled, so stopStreaming() no longer clears this timeout on the way
+			// out. A scroll scheduled just before the user unticked the box would
+			// otherwise still yank the viewport.
+			if (!autoScrollRef.current) return;
+			logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+		}, 0);
+	}, []);
+
+	// Stable across auto-scroll toggles ON PURPOSE: the connection effect below
+	// lists this callback, and the log stream has no replay — closing and
+	// reopening the EventSource silently drops every line emitted in the gap.
 	const startStreaming = useCallback(() => {
 		eventSourceRef.current = api.streamLogs((log: LogEntry) => {
 			setLogs((prev) => [...prev.slice(-999), log]); // Keep last 1000 logs
-			// Auto-scroll to bottom when new log arrives
-			if (autoScroll && logsEndRef.current) {
-				// Clear any pending scroll timeout to prevent accumulation
-				if (scrollTimeoutRef.current) {
-					clearTimeout(scrollTimeoutRef.current);
-				}
-				scrollTimeoutRef.current = setTimeout(() => {
-					logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-					scrollTimeoutRef.current = null;
-				}, 0);
-			}
+			scheduleScrollToBottom();
 		});
-	}, [autoScroll]);
+	}, [scheduleScrollToBottom]);
 
 	const stopStreaming = useCallback(() => {
 		if (eventSourceRef.current) {
@@ -86,22 +105,17 @@ export function LogsTab() {
 	// Load historical logs on mount
 	const { data: history, isLoading: loading, error } = useLogHistory();
 
+	// Hydrate ONCE per mount. `setLogs(history)` replaces the whole list, so
+	// re-running it would discard every live line received since — which is what
+	// happened on each auto-scroll toggle and on each query refetch. The query
+	// itself no longer polls (see logHistoryQueryOptions); this guard covers the
+	// remaining ways React can hand us the same backfill twice.
 	useEffect(() => {
-		if (history) {
-			setLogs(history);
-			// Auto-scroll to bottom after loading history
-			if (autoScroll && logsEndRef.current) {
-				// Clear any pending scroll timeout
-				if (scrollTimeoutRef.current) {
-					clearTimeout(scrollTimeoutRef.current);
-				}
-				scrollTimeoutRef.current = setTimeout(() => {
-					logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-					scrollTimeoutRef.current = null;
-				}, 0);
-			}
-		}
-	}, [history, autoScroll]);
+		if (!history || hydratedRef.current) return;
+		hydratedRef.current = true;
+		setLogs(history);
+		scheduleScrollToBottom();
+	}, [history, scheduleScrollToBottom]);
 
 	useEffect(() => {
 		if (!paused && !loading) {
@@ -118,6 +132,8 @@ export function LogsTab() {
 		};
 	}, [paused, loading, startStreaming, stopStreaming]);
 
+	// Re-enabling auto-scroll jumps to the bottom once, so the user isn't left
+	// mid-buffer waiting for the next line to arrive.
 	useEffect(() => {
 		if (autoScroll && logsEndRef.current) {
 			logsEndRef.current.scrollIntoView({ behavior: "smooth" });

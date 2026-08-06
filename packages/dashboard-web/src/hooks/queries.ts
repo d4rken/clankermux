@@ -504,10 +504,23 @@ export const useRequestsCount = (
 	});
 };
 
+/**
+ * Log history backfills the live SSE stream ONCE per mount; it is not a polled
+ * resource. Without these options the query inherits the app-wide
+ * `refetchInterval` (App.tsx), and each refetch hands LogsTab a fresh array
+ * that would replace the live tail with the interval's snapshot.
+ */
+export const logHistoryQueryOptions = {
+	refetchInterval: false,
+	refetchOnWindowFocus: false,
+	staleTime: Infinity,
+} as const;
+
 export const useLogHistory = () => {
 	return useQuery({
 		queryKey: queryKeys.logHistory(),
 		queryFn: () => api.getLogHistory(),
+		...logHistoryQueryOptions,
 	});
 };
 
