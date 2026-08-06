@@ -271,8 +271,18 @@ function runOptimize(dbPath: string): void {
 		// ANALYZE_ANALYSIS_LIMIT — without it, ANALYZE full-scans indexes on the
 		// multi-GB tables and holds the slot for seconds, parking main-thread
 		// writes in their busy handler (the residual event-loop stall source).
+		//
+		// The limit and the mask below are a PAIR. `0x00002` is the default
+		// behaviour (ANALYZE the tables that would benefit); `0x10000` widens the
+		// candidate set from "tables this connection has itself queried" to every
+		// table. Without it a bare `PRAGMA optimize` here is close to a no-op — a
+		// maintenance connection queries nothing — which is how the live DB kept
+		// `request_routing` recorded at 71 rows against 362k real ones and had the
+		// planner drive the activeSessions join off it. Considering every table is
+		// only affordable because analysis_limit caps each index at ~400 sampled
+		// rows; dropping either half breaks the other.
 		db.exec(`PRAGMA analysis_limit = ${ANALYZE_ANALYSIS_LIMIT}`);
-		db.exec("PRAGMA optimize");
+		db.exec("PRAGMA optimize = 0x10002");
 		// TRUNCATE (not PASSIVE): actively reclaim and zero the WAL off-thread so
 		// it stays bounded now that the main connection's autocheckpoint is
 		// disabled (see `PRAGMA wal_autocheckpoint = 0` in database-operations.ts).
