@@ -667,6 +667,20 @@ describe("buildLanes", () => {
 			expect(lanes.some((l) => l.label === "(no project)")).toBe(false);
 		});
 
+		/**
+		 * Sticky order for `count` named projects followed by the no-project
+		 * bucket — i.e. untagged traffic that arrived AFTER the named projects.
+		 * Seeded explicitly because the no-project row is no longer pinned below
+		 * the named lanes: its position is its arrival position, so a test that
+		 * wants it last has to say so.
+		 */
+		function namedThenUntaggedOrder(count: number): string[] {
+			return [
+				...Array.from({ length: count }, (_, i) => laneKeyOf(`p${i + 1}`)),
+				laneKeyOf(null),
+			];
+		}
+
 		it("gives the no-project bucket its own row outside the named quota", () => {
 			const { lanes } = buildLanes(
 				[
@@ -677,6 +691,7 @@ describe("buildLanes", () => {
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
+				namedThenUntaggedOrder(10),
 			);
 
 			expect(lanes.map((l) => l.label)).toEqual([
@@ -707,6 +722,7 @@ describe("buildLanes", () => {
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
+				namedThenUntaggedOrder(8),
 			);
 
 			expect(lanes).toHaveLength(9);
@@ -735,6 +751,73 @@ describe("buildLanes", () => {
 			expect(lanes[0].label).toBe("(no project)");
 			expect(lanes[0].key).toBe(laneKeyOf(null));
 			expect(lanes[0].requests).toBe(2);
+		});
+
+		it("keeps the no-project lane in the row it arrived in", () => {
+			// Rows are the pointer hit targets and carry keyboard focus, so a lane
+			// whose index tracked "how many named projects exist" would slide down
+			// under the pointer every time a new project sent its first request.
+			const untagged = [
+				completed("u1", null, T0),
+				completed("u2", null, T0 + 1),
+			];
+			const first = buildLanes(untagged, T0 + 1000, WINDOW, MAX_LANES);
+			expect(first.lanes.map((l) => l.label)).toEqual(["(no project)"]);
+
+			const second = buildLanes(
+				[...untagged, ...namedProjects(2)],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+				first.order,
+			);
+			expect(second.lanes.map((l) => l.label)).toEqual([
+				"(no project)",
+				"p1",
+				"p2",
+			]);
+
+			const third = buildLanes(
+				[...untagged, ...namedProjects(3)],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+				second.order,
+			);
+			expect(third.lanes.map((l) => l.label)).toEqual([
+				"(no project)",
+				"p1",
+				"p2",
+				"p3",
+			]);
+		});
+
+		it("holds the no-project row above an overflow it never joins", () => {
+			// It arrived first, so it stays row 0 even once the named projects
+			// overflow — and the overflow label still counts named projects only.
+			const untagged = [completed("u1", null, T0)];
+			const first = buildLanes(untagged, T0 + 1000, WINDOW, MAX_LANES);
+
+			const { lanes } = buildLanes(
+				[...untagged, ...namedProjects(10)],
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+				first.order,
+			);
+
+			expect(lanes.map((l) => l.label)).toEqual([
+				"(no project)",
+				"p1",
+				"p2",
+				"p3",
+				"p4",
+				"p5",
+				"p6",
+				"p7",
+				"p8",
+				"Other (2 projects)",
+			]);
 		});
 
 		it("stays idempotent when fed its own order back", () => {

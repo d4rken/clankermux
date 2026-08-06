@@ -415,8 +415,9 @@ export interface BuildLanesResult {
  * `maxLanes` bounds the NAMED project lanes only. The `(no project)` bucket is
  * not a project — spending a named slot on it pushed a real project into the
  * overflow lane and made that lane's "Other (N projects)" label count a bucket
- * that is not a project at all. It therefore gets its own row outside the
- * quota, and so does the overflow lane, which appears only when named projects
+ * that is not a project at all. It therefore gets its own row, held at its
+ * sticky position like any other lane and simply not counted against the quota;
+ * it never folds into the overflow lane, which appears only when named projects
  * genuinely overflow and counts named projects only. The card is thus at most
  * `maxLanes + 2` rows.
  *
@@ -472,12 +473,26 @@ export function buildLanes(
 		);
 	const order = [...surviving, ...entrants];
 
-	// The quota is spent on named projects only; the no-project bucket is
-	// allocated separately below so it can neither take a named slot nor be
-	// folded into — or counted by — the overflow lane.
-	const namedOrder = order.filter((key) => key !== NO_PROJECT_LANE_KEY);
-	const direct = namedOrder.slice(0, maxLanes);
-	const overflow = namedOrder.slice(maxLanes);
+	// The quota is spent on named projects only. The no-project bucket keeps its
+	// sticky position in `order` — pulling it out and re-appending it would move
+	// its row every time a new named project sent its first request — it is
+	// simply not counted against `maxLanes`, and never folds into (or is counted
+	// by) the overflow lane.
+	const direct: string[] = [];
+	const overflow: string[] = [];
+	let namedTaken = 0;
+	for (const key of order) {
+		if (key === NO_PROJECT_LANE_KEY) {
+			direct.push(key);
+			continue;
+		}
+		if (namedTaken < maxLanes) {
+			direct.push(key);
+			namedTaken++;
+		} else {
+			overflow.push(key);
+		}
+	}
 
 	const toLaneFor = (key: string): Lane => {
 		const bucket = byKey.get(key) as {
@@ -493,11 +508,6 @@ export function buildLanes(
 	};
 
 	const lanes: Lane[] = direct.map(toLaneFor);
-
-	// Its own row, below the named projects and above any overflow.
-	if (byKey.has(NO_PROJECT_LANE_KEY)) {
-		lanes.push(toLaneFor(NO_PROJECT_LANE_KEY));
-	}
 
 	if (overflow.length > 0) {
 		const merged = overflow.flatMap((key) => byKey.get(key)?.events ?? []);
