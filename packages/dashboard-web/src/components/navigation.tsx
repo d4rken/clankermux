@@ -9,7 +9,6 @@ import {
 	Key,
 	LayoutDashboard,
 	Menu,
-	RefreshCw,
 	Settings,
 	Users,
 	X,
@@ -18,18 +17,19 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
 import { cn } from "../lib/utils";
-import { commitRelationshipLabel, version } from "../lib/version";
+import { version } from "../lib/version";
 import logoUrl from "../logo.png";
-import { CopyButton } from "./CopyButton";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
 import { ThemeToggle } from "./theme-toggle";
+import {
+	RESTART_COMMAND,
+	UPDATE_COMMAND,
+	type UpdateCheckStatus,
+	type UpdateInfo,
+	UpdateStatusPanel,
+} from "./UpdateStatusPanel";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
-
-// ClankerMux is build-from-source + systemd only, so "updating" means pulling
-// main and rebuilding — there is no npm/bun/binary install to detect.
-const UPDATE_COMMAND =
-	"git pull --ff-only && bun run build && sudo systemctl restart clankermux";
 
 // Fallback repo for the footer "open repository" link before/without a check.
 // Matches the backend's DEFAULT_REPO; the check response's `repo` overrides it.
@@ -57,18 +57,8 @@ const NAV_ITEMS: NavItem[] = [
 
 export function Navigation() {
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-	const [updateStatus, setUpdateStatus] = useState<
-		"idle" | "checking" | "available" | "current" | "unknown" | "error"
-	>("idle");
-	const [updateInfo, setUpdateInfo] = useState<{
-		currentSha: string | null;
-		latestSha: string;
-		latestUrl: string | null;
-		dirty: boolean;
-		behindBy: number | null;
-		aheadBy: number | null;
-		repo: string | null;
-	} | null>(null);
+	const [updateStatus, setUpdateStatus] = useState<UpdateCheckStatus>("idle");
+	const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
@@ -114,8 +104,18 @@ export function Navigation() {
 				behindBy: typeof data.behindBy === "number" ? data.behindBy : null,
 				aheadBy: typeof data.aheadBy === "number" ? data.aheadBy : null,
 				repo: typeof data.repo === "string" ? data.repo : null,
+				bootSha: data.boot?.shortSha ?? null,
+				restartPending: data.restartPending === true,
+				remoteError:
+					typeof data.latestError === "string" ? data.latestError : null,
 			});
 			setUpdateStatus(status);
+
+			if (data.restartPending === true) {
+				console.log(
+					`🔁 Restart pending: running ${data.boot?.shortSha ?? "?"}, checkout is at ${data.current?.shortSha ?? "?"}\nRun: ${RESTART_COMMAND}`,
+				);
+			}
 
 			if (status === "available") {
 				console.log(
@@ -259,105 +259,13 @@ export function Navigation() {
 					<div className="p-4 space-y-4">
 						<SidebarStatus />
 
-						{/* Update Check */}
-						<div
-							className={cn(
-								"rounded-lg bg-muted/50 p-3",
-								updateStatus === "checking" && "opacity-50",
-							)}
-						>
-							<button
-								type="button"
-								onClick={checkForUpdates}
-								disabled={updateStatus === "checking"}
-								className="w-full transition-colors hover:bg-muted/50 -m-3 p-3 rounded-lg"
-							>
-								<div className="flex items-center gap-2 text-sm">
-									<RefreshCw
-										className={cn(
-											"h-4 w-4",
-											updateStatus === "checking" && "animate-spin",
-											updateStatus === "available" && "text-green-500",
-											updateStatus === "current" && "text-primary",
-											updateStatus === "unknown" && "text-muted-foreground",
-											updateStatus === "error" && "text-red-500",
-										)}
-									/>
-									<span className="font-medium">
-										{updateStatus === "idle" && "Check for Updates"}
-										{updateStatus === "checking" && "Checking..."}
-										{updateStatus === "available" && "Update Available"}
-										{updateStatus === "current" && "Up to Date"}
-										{updateStatus === "unknown" && "Status Unknown"}
-										{updateStatus === "error" && "Check Failed"}
-									</span>
-								</div>
-							</button>
-							{updateStatus === "available" && (
-								<div className="mt-2 space-y-1">
-									<p className="text-xs text-muted-foreground text-left font-mono">
-										{updateInfo?.currentSha ?? "?"} → {updateInfo?.latestSha}
-									</p>
-									{typeof updateInfo?.behindBy === "number" &&
-										updateInfo.behindBy > 0 && (
-											<p className="text-xs text-muted-foreground text-left">
-												{updateInfo.behindBy} commit
-												{updateInfo.behindBy === 1 ? "" : "s"} behind
-											</p>
-										)}
-									<div className="flex items-center gap-1">
-										<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
-											{UPDATE_COMMAND}
-										</code>
-										<CopyButton
-											value={UPDATE_COMMAND}
-											size="sm"
-											variant="ghost"
-											className="h-6 w-6 p-0"
-											title="Copy update command"
-										/>
-									</div>
-									{updateInfo?.latestUrl && (
-										<a
-											href={updateInfo.latestUrl}
-											target="_blank"
-											rel="noopener noreferrer"
-											className="text-xs text-muted-foreground hover:text-foreground underline text-left block"
-										>
-											View latest commit
-										</a>
-									)}
-								</div>
-							)}
-							{updateStatus === "current" && (
-								<div className="mt-1 space-y-0.5 text-left">
-									<p className="text-xs text-muted-foreground font-mono">
-										{updateInfo?.currentSha ?? version.replace(/^v/, "")}
-									</p>
-									<p className="text-xs text-muted-foreground">
-										{commitRelationshipLabel(
-											updateInfo?.aheadBy ?? null,
-											updateInfo?.behindBy ?? null,
-										)}
-									</p>
-									{updateInfo?.dirty && (
-										<p className="text-xs italic text-muted-foreground/70">
-											local uncommitted changes
-										</p>
-									)}
-								</div>
-							)}
-							{updateStatus === "unknown" && (
-								<p className="mt-1 text-xs text-muted-foreground text-left">
-									Could not determine the deployed commit (not a git checkout?).
-								</p>
-							)}
-							{updateStatus === "error" && updateError && (
-								<p className="mt-1 text-xs text-destructive text-left break-words">
-									{updateError}
-								</p>
-							)}
-						</div>
+						{/* Deployment status: repo freshness AND process freshness */}
+						<UpdateStatusPanel
+							status={updateStatus}
+							info={updateInfo}
+							error={updateError}
+							onCheck={checkForUpdates}
+						/>
 
 						<div className="hidden lg:flex items-center justify-between">
 							<a

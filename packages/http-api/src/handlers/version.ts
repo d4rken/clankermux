@@ -1,9 +1,10 @@
-import { Logger } from "@clankermux/logger";
 import {
-	errorResponse,
-	InternalServerError,
-	jsonResponse,
-} from "../utils/http-error";
+	type BootProvenance,
+	getBootProvenance,
+	isRestartPending,
+} from "@clankermux/core";
+import { Logger } from "@clankermux/logger";
+import { jsonResponse } from "../utils/http-error";
 
 const log = new Logger("VersionHandler");
 
@@ -211,74 +212,115 @@ async function getCommitDistance(
 	}
 }
 
-export function createVersionCheckHandler() {
+/**
+ * Injection seam for the handler's three impure reads (local git, boot
+ * provenance, GitHub). Production passes nothing; tests substitute rather than
+ * mock the module, which in bun leaks across every file in the process.
+ */
+export interface VersionCheckDeps {
+	readCurrentCommit?: () => CurrentCommitInfo | null;
+	readBootProvenance?: () => BootProvenance | null;
+	fetchLatestCommit?: (
+		repo: string,
+		branch: string,
+	) => Promise<{ commit: CommitInfo; htmlUrl: string; cached: boolean }>;
+}
+
+export function createVersionCheckHandler(deps: VersionCheckDeps = {}) {
+	const readCurrentCommit = deps.readCurrentCommit ?? getCurrentCommit;
+	const readBootProvenance = deps.readBootProvenance ?? getBootProvenance;
+	const fetchLatestCommit = deps.fetchLatestCommit ?? getLatestCommit;
+
 	return async (): Promise<Response> => {
 		const repo = DEFAULT_REPO;
 		const branch = DEFAULT_BRANCH;
 
+		// Local provenance is computed BEFORE and independently of the GitHub call.
+		// Repo freshness and process freshness are orthogonal signals, and a rate
+		// limit or outage at GitHub must not hide the entirely local "the checkout
+		// moved since this process booted" answer.
+		const current = readCurrentCommit();
+		const boot = readBootProvenance();
+		const restartPending = isRestartPending(boot, current?.sha);
+		const localPayload = {
+			repo,
+			branch,
+			current: current
+				? {
+						sha: current.sha,
+						shortSha: current.shortSha,
+						date: current.date,
+						dirty: current.dirty,
+					}
+				: null,
+			boot: boot
+				? { sha: boot.sha, shortSha: boot.shortSha, date: boot.date }
+				: null,
+			restartPending,
+		};
+
+		let latest: CommitInfo;
+		let htmlUrl: string;
+		let cached: boolean;
 		try {
-			const current = getCurrentCommit();
-			const {
+			({
 				commit: latest,
 				htmlUrl,
 				cached,
-			} = await getLatestCommit(repo, branch);
-
-			const status = computeUpdateStatus({
-				current,
-				latest,
-				latestIsAncestorOfCurrent: current
-					? latestIsAncestorOfHead(latest.sha)
-					: false,
-			});
-
-			// Only spend a compare request when there's actually a gap to measure.
-			const behindBy =
-				status === "available" && current
-					? await getCommitDistance(repo, current.sha, latest.sha)
-					: status === "current"
-						? 0
-						: null;
-
-			// How many commits the deployment is *ahead* of main (unpushed local
-			// commits). Only meaningful when we're current/ahead; computed local-first
-			// (cheap, since we contain the remote commit) and 0 when we're behind.
-			const aheadBy = !current
-				? null
-				: current.sha === latest.sha
-					? 0
-					: status === "current"
-						? await getCommitDistance(repo, latest.sha, current.sha)
-						: 0;
-
-			return jsonResponse({
-				status,
-				repo,
-				branch,
-				behindBy,
-				aheadBy,
-				current: current
-					? {
-							sha: current.sha,
-							shortSha: current.shortSha,
-							date: current.date,
-							dirty: current.dirty,
-						}
-					: null,
-				latest: {
-					sha: latest.sha,
-					shortSha: latest.shortSha,
-					date: latest.date,
-					url: htmlUrl,
-				},
-				cached,
-			});
+			} = await fetchLatestCommit(repo, branch));
 		} catch (error) {
 			log.error("Failed to check for updates from GitHub:", error);
-			const message = error instanceof Error ? error.message : String(error);
-			return errorResponse(
-				InternalServerError(`Update check failed: ${message}`),
-			);
+			return jsonResponse({
+				...localPayload,
+				status: "unknown" satisfies UpdateStatus,
+				behindBy: null,
+				aheadBy: null,
+				latest: null,
+				latestError: error instanceof Error ? error.message : String(error),
+				cached: false,
+			});
 		}
+
+		const status = computeUpdateStatus({
+			current,
+			latest,
+			latestIsAncestorOfCurrent: current
+				? latestIsAncestorOfHead(latest.sha)
+				: false,
+		});
+
+		// Only spend a compare request when there's actually a gap to measure.
+		const behindBy =
+			status === "available" && current
+				? await getCommitDistance(repo, current.sha, latest.sha)
+				: status === "current"
+					? 0
+					: null;
+
+		// How many commits the deployment is *ahead* of main (unpushed local
+		// commits). Only meaningful when we're current/ahead; computed local-first
+		// (cheap, since we contain the remote commit) and 0 when we're behind.
+		const aheadBy = !current
+			? null
+			: current.sha === latest.sha
+				? 0
+				: status === "current"
+					? await getCommitDistance(repo, latest.sha, current.sha)
+					: 0;
+
+		return jsonResponse({
+			...localPayload,
+			status,
+			behindBy,
+			aheadBy,
+			latest: {
+				sha: latest.sha,
+				shortSha: latest.shortSha,
+				date: latest.date,
+				url: htmlUrl,
+			},
+			latestError: null,
+			cached,
+		});
 	};
 }

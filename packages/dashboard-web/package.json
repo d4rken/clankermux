@@ -43,8 +43,9 @@
 		"tailwindcss-animate": "1.0.7"
 	},
 	"devDependencies": {
+		"@happy-dom/global-registrator": "20.11.1",
+		"@types/bun": "1.3.14",
 		"@types/react": "19.1.9",
-		"@types/react-dom": "19.1.7",
-		"@types/bun": "1.3.14"
+		"@types/react-dom": "19.1.7"
 	}
 }

@@ -504,10 +504,35 @@ export const useRequestsCount = (
 	});
 };
 
+/**
+ * Log history backfills the live SSE stream ONCE per mount; it is not a polled
+ * resource. Without these options the query inherits the app-wide
+ * `refetchInterval` (App.tsx), and each refetch hands LogsTab a fresh array
+ * that would replace the live tail with the interval's snapshot.
+ *
+ * Two things the naive "never refetch" version got wrong, both because the
+ * stream has NO REPLAY — anything missed is missed for good:
+ *  - a cached snapshot must not survive unmount (`gcTime: 0`). With
+ *    `staleTime: Infinity` a remount would hydrate the old snapshot, consider
+ *    it fresh, and never fetch, so every line emitted while the tab was away
+ *    would be absent for the whole mount.
+ *  - a FAILED load must keep retrying. LogsTab renders its error branch ahead
+ *    of the log list, so a stuck error hides live lines that are arriving
+ *    perfectly well.
+ */
+export const logHistoryQueryOptions = {
+	refetchInterval: (query: { state: { status: string } }) =>
+		query.state.status === "error" ? 30_000 : false,
+	refetchOnWindowFocus: false,
+	staleTime: Infinity,
+	gcTime: 0,
+} as const;
+
 export const useLogHistory = () => {
 	return useQuery({
 		queryKey: queryKeys.logHistory(),
 		queryFn: () => api.getLogHistory(),
+		...logHistoryQueryOptions,
 	});
 };
 
