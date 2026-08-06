@@ -6,53 +6,14 @@
  */
 export const PROJECT_NAME_MAX_LEN = 64;
 
-const ENV_MARKER_WORDS =
-	"Is a git repository\\b|Is directory a git repo\\b|Platform\\b|Shell\\b|Today's date\\b|Model\\b";
-
 /**
  * Marker cleanup for an already-SELECTED name (a single path segment or an
- * `x-project` header). `\s*` matches zero whitespace on purpose: control-char
- * stripping fuses the environment block onto the name with no separator at all
- * (`octiIs directory a git repo: No`).
+ * `x-project` header). Deliberately NOT applied to a whole captured path: `\s*`
+ * matches zero whitespace, so on a path it would read `/workspace/model/repo`
+ * as `/workspace` plus a trailer. See the guard notes in project-extraction.ts.
  */
-const CLAUDE_ENV_MARKER_RE = new RegExp(
-	`\\s*(?:-\\s*)?(?:${ENV_MARKER_WORDS}).*$`,
-	"i",
-);
-
-/**
- * Marker cleanup for a whole CAPTURED path. Same words, but at least one
- * whitespace is required in front of them: a capture still contains the path's
- * separators, and the marker words are matched case-insensitively, so the
- * zero-whitespace form above would read `/workspace/model/repo` as
- * `/workspace` + a trailer. That returns the wrong project rather than none —
- * distinct projects collapse into one affinity partition — which is the worse
- * failure of the two.
- */
-const CAPTURED_ENV_MARKER_RE = new RegExp(
-	`\\s+(?:-\\s*)?(?:${ENV_MARKER_WORDS}).*$`,
-	"i",
-);
-
-function stripMarkerTrailer(value: string, marker: RegExp): string {
-	return value
-		.replace(marker, "")
-		.replace(/[\s:;,-]+$/g, "")
-		.trim();
-}
-
-/**
- * Drop a recognized Claude Code environment-block trailer (`… Is directory a
- * git repo: Yes Platform: linux`) from a captured path.
- *
- * A client that collapses the newlines in its system prompt hands us the whole
- * block on one line, so this is what tells us where the path ENDS. A value
- * carrying no whitespace-anchored marker comes back unchanged — the strip never
- * invents a boundary.
- */
-export function stripEnvMarkerTrailer(value: string): string {
-	return stripMarkerTrailer(value, CAPTURED_ENV_MARKER_RE);
-}
+const CLAUDE_ENV_MARKER_RE =
+	/\s*(?:-\s*)?(?:Is a git repository\b|Is directory a git repo\b|Platform\b|Shell\b|Today's date\b|Model\b).*$/i;
 
 /** Everything {@link sanitizeProjectName} does except the length cap. */
 function cleanProjectName(raw: string | undefined | null): string | null {
@@ -63,10 +24,10 @@ function cleanProjectName(raw: string | undefined | null): string | null {
 	// routing affinity keys.
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
 	const withoutControls = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
-	const withoutEnvBlock = stripMarkerTrailer(
-		withoutControls,
-		CLAUDE_ENV_MARKER_RE,
-	);
+	const withoutEnvBlock = withoutControls
+		.replace(CLAUDE_ENV_MARKER_RE, "")
+		.replace(/[\s:;,-]+$/g, "")
+		.trim();
 
 	if (!withoutEnvBlock) return null;
 	return withoutEnvBlock;

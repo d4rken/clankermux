@@ -3,7 +3,6 @@ import {
 	exceedsProjectNameLimit,
 	PROJECT_NAME_MAX_LEN,
 	sanitizeProjectName,
-	stripEnvMarkerTrailer,
 } from "../project-name";
 
 describe("sanitizeProjectName", () => {
@@ -36,44 +35,6 @@ describe("sanitizeProjectName", () => {
 		// guard's job, and this sanitizer also repairs already-stored rows.
 		expect(sanitizeProjectName("a".repeat(PROJECT_NAME_MAX_LEN + 10))).toBe(
 			"a".repeat(PROJECT_NAME_MAX_LEN),
-		);
-	});
-});
-
-describe("stripEnvMarkerTrailer", () => {
-	it("drops a collapsed environment block and the punctuation at the seam", () => {
-		expect(
-			stripEnvMarkerTrailer(
-				"/home/darken/clankermux Is directory a git repo: Yes Platform: linux",
-			),
-		).toBe("/home/darken/clankermux");
-		expect(
-			stripEnvMarkerTrailer(
-				"/home/darken/clankermux - Is a git repository: true",
-			),
-		).toBe("/home/darken/clankermux");
-	});
-
-	it("returns a value with no recognized marker unchanged", () => {
-		// It never invents a boundary — which is what lets the extraction guard
-		// keep rejecting an unquoted capture that still holds prose after it.
-		const leaked = "/home/u/projects/repo LEAKED SECRET sk-ABCDEFGH12345678";
-		expect(stripEnvMarkerTrailer(leaked)).toBe(leaked);
-	});
-
-	it("requires whitespace before the marker, so a path segment is not a trailer", () => {
-		// This helper sees WHOLE paths, where `sanitizeProjectName`'s regex only
-		// ever saw an already-selected segment. Matching a marker word with no
-		// separator in front of it would truncate `/workspace/model/repo` to
-		// `/workspace` — a wrong project, not a missing one.
-		expect(stripEnvMarkerTrailer("/workspace/model/repo")).toBe(
-			"/workspace/model/repo",
-		);
-		expect(stripEnvMarkerTrailer("/workspace/Shell/repo")).toBe(
-			"/workspace/Shell/repo",
-		);
-		expect(stripEnvMarkerTrailer("\\\\model\\share\\repo")).toBe(
-			"\\\\model\\share\\repo",
 		);
 	});
 });

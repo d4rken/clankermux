@@ -417,47 +417,51 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		).toEqual({ project: "clankermux", source: "wd_plain" });
 	});
 
-	it("still accepts a COLLAPSED env block (the whole block on one line)", () => {
-		// Some clients flatten the newlines out of the system prompt. The
-		// recognized markers are what say where the path ends, so the trailer is
-		// stripped BEFORE the unquoted-whitespace test — otherwise rule (c) would
-		// reject the line and the marker cleanup would never run.
+	it("rejects a COLLAPSED env block — accepted regression, do not 'fix' it", () => {
+		// A client that flattens the prompt's newlines puts the whole block on the
+		// label's line, and rule (c) then rejects it. Stripping a recognized marker
+		// trailer first was tried and removed: every variant misattributed instead
+		// (see the guard notes in project-extraction.ts). Correct, or nothing.
 		expect(
 			extractProjectFromBody(
 				systemBody(
 					"Working directory: /home/darken/clankermux Is directory a git repo: Yes Platform: linux",
 				),
 			),
-		).toEqual({ project: "clankermux", source: "wd_plain" });
+		).toEqual(NOTHING);
 		expect(
 			extractProjectFromBody(
 				systemBody(
-					"Primary working directory: /home/darken/clankermux - Is a git repository: true - Today's date is 2026-08-06",
+					"Primary working directory: /home/darken/clankermux - Is a git repository: true",
 				),
 			),
-		).toEqual({ project: "clankermux", source: "wd_primary" });
+		).toEqual(NOTHING);
+
+		// The newline-separated form — what Claude Code actually sends — is
+		// unaffected: the label regexes are line-anchored, so the env block never
+		// enters the capture in the first place.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/darken/clankermux\nIs directory a git repo: Yes\nPlatform: linux",
+				),
+			),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
 	});
 
-	it("does not mistake a path SEGMENT named like an env marker for a trailer", () => {
-		// The trailer strip requires whitespace in front of the marker word. A
-		// marker word that is simply part of the path must not truncate it — that
-		// would return the WRONG project (`workspace`), merging two distinct
-		// projects into one affinity partition, which is worse than returning none.
-		expect(
-			extractProjectFromBody(
-				systemBody("Working directory: /workspace/model/repo"),
-			),
-		).toEqual({ project: "repo", source: "wd_plain" });
-		expect(
-			extractProjectFromBody(
-				systemBody("Working directory: /workspace/Model/repo"),
-			),
-		).toEqual({ project: "repo", source: "wd_plain" });
-		expect(
-			extractProjectFromBody(
-				systemBody("Working directory: /workspace/shell/repo"),
-			),
-		).toEqual({ project: "repo", source: "wd_plain" });
+	it("never truncates a path at a directory named like an env marker", () => {
+		// The worst failure mode of the removed trailer strip: a WRONG project
+		// rather than none, merging two codebases into one affinity partition.
+		for (const wd of [
+			"/workspace/model/repo",
+			"/workspace/Model/repo",
+			"/workspace/shell/repo",
+			"/workspace/platform/repo",
+		]) {
+			expect(
+				extractProjectFromBody(systemBody(`Working directory: ${wd}`)),
+			).toEqual({ project: "repo", source: "wd_plain" });
+		}
 		expect(
 			extractProjectFromBody(
 				systemBody("Working directory: \\\\model\\share\\repo"),
@@ -465,23 +469,25 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		).toEqual({ project: "repo", source: "wd_plain" });
 	});
 
-	it("accepts a QUOTED spaced path that is followed by a collapsed trailer", () => {
-		// The trailer sits outside the closing quote, so the capture as a whole
-		// does not look quoted. Rule (c)'s guarantee — quoting makes a spaced path
-		// work — has to survive that, so the quote test is re-run on the remainder.
+	it("rejects a quoted path trailed by an env block rather than guessing", () => {
+		// The trailer sits outside the closing quote, so the capture as a whole is
+		// unquoted and rule (c) rejects it. Re-testing for quotes after a trailer
+		// strip made this resolve — and truncated `"/workspace/Data Platform/repo"
+		// Shell: bash` to `Data`. Failing safe is the trade we took.
 		expect(
 			extractProjectFromBody(
-				systemBody(
-					'Working directory: "/workspace/My Project" Platform: linux',
-				),
+				systemBody('Working directory: "/workspace/My Project" Platform: linux'),
 			),
-		).toEqual({ project: "My Project", source: "wd_plain" });
+		).toEqual(NOTHING);
+		expect(
+			extractProjectFromBody(
+				systemBody('Working directory: "/workspace/Data Platform/repo" Shell: bash'),
+			),
+		).toEqual(NOTHING);
 	});
 
-	it("does not let a recognized marker rescue prose in front of it", () => {
-		// The strip removes the marker trailer only; whatever the client wrote
-		// BETWEEN the path and the marker is still unquoted whitespace, so rule
-		// (c) still rejects the capture.
+	it("rejects leaked prose that happens to be followed by an env marker", () => {
+		// Nothing in the capture rescues it: rule (c) sees unquoted whitespace.
 		expect(
 			extractProjectFromBody(
 				systemBody(

@@ -1,9 +1,5 @@
 import type { ProjectAttributionSource } from "@clankermux/types";
-import {
-	exceedsProjectNameLimit,
-	sanitizeProjectName,
-	stripEnvMarkerTrailer,
-} from "./project-name";
+import { exceedsProjectNameLimit, sanitizeProjectName } from "./project-name";
 import type { RequestJsonBody } from "./request-body-context";
 import type { SessionProjectCache } from "./session-project-cache";
 
@@ -72,11 +68,7 @@ const CWD_SCAN_MAX_CHARS = 4096;
  *  c. Reject whitespace in an UNQUOTED capture, allow it when the capture was
  *     quoted. An unquoted path containing spaces is indistinguishable from a
  *     path followed by same-line prose, so no heuristic can separate them;
- *     quoting removes the ambiguity. One exception, applied first: a recognized
- *     Claude Code env-marker trailer is stripped, because that marker is an
- *     anchor that says where the path ends (clients that collapse the prompt's
- *     newlines put the whole env block on the label's line). Prose with no such
- *     marker is untouched and still rejected.
+ *     quoting removes the ambiguity.
  *
  * Deliberately NOT rules: a word-count cap and a secret-token-shape regex. Both
  * misfired in both directions — `ignore prior instructions` is four words and a
@@ -84,6 +76,27 @@ const CWD_SCAN_MAX_CHARS = 4096;
  * name `2026-client-migration-dashboard` reads as a secret. The residual is
  * that a whitespace-free single token still passes; it is bounded and cannot
  * carry prose.
+ *
+ * ACCEPTED CONSEQUENCE — do not "fix" this. A client that collapses the
+ * newlines out of its system prompt puts the whole environment block on the
+ * label's line, and rule (c) then rejects it:
+ *
+ *   "Working directory: /home/darken/clankermux Is directory a git repo: Yes"
+ *     -> null   (the newline-separated form still resolves; the label regexes
+ *                are line-anchored, so the block never enters the capture)
+ *
+ * Stripping a recognized env-marker trailer before rule (c) was tried and
+ * removed. Every variant of it misattributed instead: the marker words are
+ * matched case-insensitively, so `/workspace/model/repo` truncated to
+ * `workspace`; requiring whitespace before the marker fixed that but then a
+ * quoted path with a marker-named directory — `"/workspace/Data Platform/repo"
+ * Shell: bash` — truncated to `Data`. Nothing separates "trailer" from
+ * "directory named like a marker" inside a capture we did not tokenize.
+ *
+ * The invariant is therefore: CORRECT, OR NOTHING, NEVER WRONG. A null falls
+ * through to session inheritance and costs one request's attribution; a wrong
+ * project merges two codebases into one load-balancer affinity partition and
+ * mislabels their telemetry until someone notices.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting them is the point
 const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
@@ -201,21 +214,7 @@ function projectFromCapture(raw: string | undefined): string | null {
 	const trimmed = raw.trim();
 	if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return null;
 
-	let { value, quoted } = stripSurroundingQuotes(trimmed);
-	if (!quoted) {
-		// A client that collapses the newlines out of its system prompt puts the
-		// whole environment block on the label's line. An ANCHORED, recognized
-		// marker says where the path ends, so the trailer is dropped before rule
-		// (c) runs — the only case in which relaxing the whitespace test is safe.
-		// A capture with no recognized marker comes back unchanged and is still
-		// rejected below.
-		//
-		// The quote test is then RE-RUN: with the trailer sitting outside the
-		// closing quote the capture as a whole does not look quoted, and rule
-		// (c)'s guarantee — quoting makes a spaced path work — has to survive a
-		// flattened block.
-		({ value, quoted } = stripSurroundingQuotes(stripEnvMarkerTrailer(value)));
-	}
+	const { value, quoted } = stripSurroundingQuotes(trimmed);
 	if (!value) return null;
 	// (c) Only a quoted capture may contain whitespace.
 	if (!quoted && WHITESPACE_RE.test(value)) return null;
