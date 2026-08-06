@@ -1,5 +1,5 @@
 import { formatPercentage } from "@clankermux/ui-common";
-import { Info } from "lucide-react";
+import { AlertCircle, Info } from "lucide-react";
 import {
 	type ExcludedReason,
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
@@ -11,6 +11,7 @@ import {
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { Skeleton } from "../ui/skeleton";
 
 interface PoolMetricCardProps {
 	title: string;
@@ -18,6 +19,23 @@ interface PoolMetricCardProps {
 	result: PoolUsageResult;
 	window: PoolWindow;
 	inlineDetails?: boolean;
+	/**
+	 * Set while the first `/api/accounts` fetch is in flight and nothing is
+	 * cached.
+	 *
+	 * Required rather than inferable from `result`: `computePoolUsage([], …)`
+	 * returns an all-empty result that is indistinguishable from "no accounts
+	 * contribute to this pool" — a claim this card must not make about accounts
+	 * it has not read yet.
+	 */
+	loading?: boolean;
+	/**
+	 * Set when that read FAILED with nothing cached. Same reasoning as `loading`:
+	 * an empty pool would read as measured capacity of zero.
+	 *
+	 * Precedence is `unavailableReason` → `loading` → resolved.
+	 */
+	unavailableReason?: string;
 }
 
 const REASON_LABELS: Record<ExcludedReason, string> = {
@@ -444,6 +462,8 @@ export function PoolMetricCard({
 	result,
 	window,
 	inlineDetails = false,
+	loading = false,
+	unavailableReason,
 }: PoolMetricCardProps) {
 	const {
 		average,
@@ -465,11 +485,15 @@ export function PoolMetricCard({
 	);
 	const { label: familyWeeklyText, colorClass: familyWeeklyColor } =
 		familyWeeklyBadge(familyWeekly);
-	const showChip = eligibleTotal > 0;
+	// See the prop docs: an unread account list must not be rendered as a
+	// measured pool, and a failed read wins over a pending one.
+	const pending = loading && !unavailableReason;
+	const resolved = !pending && !unavailableReason;
+	const showChip = resolved && eligibleTotal > 0;
 	const colorClass = headlineColor(average);
 	const headline = average != null ? formatPercentage(average, 0) : "—";
 	const nextQuotaText =
-		earliestResetMs == null
+		!resolved || earliestResetMs == null
 			? null
 			: `more quota at ${nextQuotaTimeLabel(earliestResetMs, window)}`;
 
@@ -511,7 +535,21 @@ export function PoolMetricCard({
 					)}
 				</div>
 				<div className="space-y-1">
-					<p className={cn("text-2xl font-bold", colorClass)}>{headline}</p>
+					{unavailableReason ? (
+						<>
+							<p className="text-2xl font-bold text-muted-foreground/60">—</p>
+							<p className="flex items-center gap-1.5 text-xs text-warning">
+								<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+								{unavailableReason}
+							</p>
+						</>
+					) : pending ? (
+						// Same line box as the resolved headline, so the tile keeps its
+						// height when the accounts land.
+						<Skeleton className="h-8 w-20" />
+					) : (
+						<p className={cn("text-2xl font-bold", colorClass)}>{headline}</p>
+					)}
 					<p className="text-xs text-muted-foreground truncate">
 						capacity used
 					</p>
@@ -520,12 +558,12 @@ export function PoolMetricCard({
 							{nextQuotaText}
 						</p>
 					)}
-					{willRunOutText && (
+					{resolved && willRunOutText && (
 						<p className={cn("text-xs truncate", willRunOutColor)}>
 							{willRunOutText}
 						</p>
 					)}
-					{familyWeeklyText && (
+					{resolved && familyWeeklyText && (
 						<p className={cn("text-xs truncate", familyWeeklyColor)}>
 							{familyWeeklyText}
 						</p>

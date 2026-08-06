@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent } from "../ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { Skeleton } from "../ui/skeleton";
 
 export interface MetricCardSubRow {
 	label: string;
@@ -36,6 +37,16 @@ export interface MetricCardProps {
 	 * still render; the card says how old they are.
 	 */
 	staleNote?: string;
+	/**
+	 * Set while the FIRST fetch for this card's source is in flight and nothing
+	 * is cached. The value, trend, stale note and sub-rows are replaced by
+	 * placeholders; icon, title and caption stay so the grid does not reflow when
+	 * the data lands.
+	 *
+	 * Precedence is `unavailableReason` → `loading` → resolved: a read that
+	 * failed outright must never be presented as "still loading".
+	 */
+	loading?: boolean;
 }
 
 export function MetricCard({
@@ -49,8 +60,12 @@ export function MetricCard({
 	caption,
 	unavailableReason,
 	staleNote,
+	loading = false,
 }: MetricCardProps) {
-	const trendElement = trend !== "flat" && change !== undefined && (
+	// See the `loading` prop doc: unavailable wins, so a failed read is never
+	// dressed up as a pending one.
+	const pending = loading && !unavailableReason;
+	const trendElement = !pending && trend !== "flat" && change !== undefined && (
 		<div
 			className={`flex items-center gap-1 text-sm font-medium ${
 				trend === "up" ? "text-success" : "text-destructive"
@@ -102,16 +117,27 @@ export function MetricCard({
 							{unavailableReason}
 						</p>
 					</>
+				) : pending ? (
+					// Matches the resolved value's line box (text-2xl ⇒ 2rem), so the
+					// tile keeps its height when the number arrives.
+					<Skeleton className="h-8 w-24" />
 				) : (
 					<p className="text-2xl font-bold">{value}</p>
 				)}
-				{!unavailableReason && staleNote && (
+				{pending && subRows && subRows.length > 0 && (
+					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
+						{subRows.map((row) => (
+							<Skeleton key={row.label} className="h-3 w-full" />
+						))}
+					</div>
+				)}
+				{!unavailableReason && !pending && staleNote && (
 					<p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
 						<Clock className="h-3.5 w-3.5 shrink-0" />
 						{staleNote}
 					</p>
 				)}
-				{!unavailableReason && subRows && subRows.length > 0 && (
+				{!unavailableReason && !pending && subRows && subRows.length > 0 && (
 					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
 						{subRows.map((row) => {
 							if (row.inlineExplainer) {
