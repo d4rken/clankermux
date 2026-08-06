@@ -60,6 +60,22 @@ describe("stripEnvMarkerTrailer", () => {
 		const leaked = "/home/u/projects/repo LEAKED SECRET sk-ABCDEFGH12345678";
 		expect(stripEnvMarkerTrailer(leaked)).toBe(leaked);
 	});
+
+	it("requires whitespace before the marker, so a path segment is not a trailer", () => {
+		// This helper sees WHOLE paths, where `sanitizeProjectName`'s regex only
+		// ever saw an already-selected segment. Matching a marker word with no
+		// separator in front of it would truncate `/workspace/model/repo` to
+		// `/workspace` — a wrong project, not a missing one.
+		expect(stripEnvMarkerTrailer("/workspace/model/repo")).toBe(
+			"/workspace/model/repo",
+		);
+		expect(stripEnvMarkerTrailer("/workspace/Shell/repo")).toBe(
+			"/workspace/Shell/repo",
+		);
+		expect(stripEnvMarkerTrailer("\\\\model\\share\\repo")).toBe(
+			"\\\\model\\share\\repo",
+		);
+	});
 });
 
 describe("exceedsProjectNameLimit", () => {

@@ -438,6 +438,38 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		).toEqual({ project: "clankermux", source: "wd_primary" });
 	});
 
+	it("does not mistake a path SEGMENT named like an env marker for a trailer", () => {
+		// The trailer strip requires whitespace in front of the marker word. A
+		// marker word that is simply part of the path must not truncate it — that
+		// would return the WRONG project (`workspace`), merging two distinct
+		// projects into one affinity partition, which is worse than returning none.
+		expect(
+			extractProjectFromBody(systemBody("Working directory: /workspace/model/repo")),
+		).toEqual({ project: "repo", source: "wd_plain" });
+		expect(
+			extractProjectFromBody(systemBody("Working directory: /workspace/Model/repo")),
+		).toEqual({ project: "repo", source: "wd_plain" });
+		expect(
+			extractProjectFromBody(systemBody("Working directory: /workspace/shell/repo")),
+		).toEqual({ project: "repo", source: "wd_plain" });
+		expect(
+			extractProjectFromBody(
+				systemBody("Working directory: \\\\model\\share\\repo"),
+			),
+		).toEqual({ project: "repo", source: "wd_plain" });
+	});
+
+	it("accepts a QUOTED spaced path that is followed by a collapsed trailer", () => {
+		// The trailer sits outside the closing quote, so the capture as a whole
+		// does not look quoted. Rule (c)'s guarantee — quoting makes a spaced path
+		// work — has to survive that, so the quote test is re-run on the remainder.
+		expect(
+			extractProjectFromBody(
+				systemBody('Working directory: "/workspace/My Project" Platform: linux'),
+			),
+		).toEqual({ project: "My Project", source: "wd_plain" });
+	});
+
 	it("does not let a recognized marker rescue prose in front of it", () => {
 		// The strip removes the marker trailer only; whatever the client wrote
 		// BETWEEN the path and the marker is still unquoted whitespace, so rule

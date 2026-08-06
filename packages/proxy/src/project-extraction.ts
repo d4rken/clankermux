@@ -201,21 +201,26 @@ function projectFromCapture(raw: string | undefined): string | null {
 	const trimmed = raw.trim();
 	if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return null;
 
-	const { value, quoted } = stripSurroundingQuotes(trimmed);
+	let { value, quoted } = stripSurroundingQuotes(trimmed);
+	if (!quoted) {
+		// A client that collapses the newlines out of its system prompt puts the
+		// whole environment block on the label's line. An ANCHORED, recognized
+		// marker says where the path ends, so the trailer is dropped before rule
+		// (c) runs — the only case in which relaxing the whitespace test is safe.
+		// A capture with no recognized marker comes back unchanged and is still
+		// rejected below.
+		//
+		// The quote test is then RE-RUN: with the trailer sitting outside the
+		// closing quote the capture as a whole does not look quoted, and rule
+		// (c)'s guarantee — quoting makes a spaced path work — has to survive a
+		// flattened block.
+		({ value, quoted } = stripSurroundingQuotes(stripEnvMarkerTrailer(value)));
+	}
 	if (!value) return null;
-
-	// A client that collapses the newlines out of its system prompt puts the
-	// whole environment block on the label's line. An ANCHORED, recognized
-	// marker says where the path ends, so the trailer is dropped before rule (c)
-	// runs — the only case in which relaxing the whitespace test is safe. A
-	// capture with no recognized marker comes back unchanged and is still
-	// rejected below.
-	const path = stripEnvMarkerTrailer(value);
-	if (!path) return null;
 	// (c) Only a quoted capture may contain whitespace.
-	if (!quoted && WHITESPACE_RE.test(path)) return null;
+	if (!quoted && WHITESPACE_RE.test(value)) return null;
 
-	return mapWorkingDirToProject(path);
+	return mapWorkingDirToProject(value);
 }
 
 function projectFromLabelMatch(match: RegExpMatchArray | null): string | null {
