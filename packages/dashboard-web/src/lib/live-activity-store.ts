@@ -99,6 +99,7 @@ export class LiveActivityStore {
 	/** Earliest point history fetches have reached. */
 	private coveredSince: number | null = null;
 	/** When the live stream first came up; everything after it arrived live. */
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: the only read is the destructuring in computeCoverageFrom (`const { coveredSince, streamSince } = this`), which the rule does not track — it is written in setConnected. NOT stale: `biome check --write --unsafe` deletes this line without it, and the field is load-bearing for the coverage floor.
 	private streamSince: number | null = null;
 
 	private dirty = false;
