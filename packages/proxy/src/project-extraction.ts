@@ -1,5 +1,9 @@
 import type { ProjectAttributionSource } from "@clankermux/types";
-import { exceedsProjectNameLimit, sanitizeProjectName } from "./project-name";
+import {
+	exceedsProjectNameLimit,
+	sanitizeProjectName,
+	stripEnvMarkerTrailer,
+} from "./project-name";
 import type { RequestJsonBody } from "./request-body-context";
 import type { SessionProjectCache } from "./session-project-cache";
 
@@ -68,7 +72,11 @@ const CWD_SCAN_MAX_CHARS = 4096;
  *  c. Reject whitespace in an UNQUOTED capture, allow it when the capture was
  *     quoted. An unquoted path containing spaces is indistinguishable from a
  *     path followed by same-line prose, so no heuristic can separate them;
- *     quoting removes the ambiguity.
+ *     quoting removes the ambiguity. One exception, applied first: a recognized
+ *     Claude Code env-marker trailer is stripped, because that marker is an
+ *     anchor that says where the path ends (clients that collapse the prompt's
+ *     newlines put the whole env block on the label's line). Prose with no such
+ *     marker is untouched and still rejected.
  *
  * Deliberately NOT rules: a word-count cap and a secret-token-shape regex. Both
  * misfired in both directions — `ignore prior instructions` is four words and a
@@ -195,10 +203,19 @@ function projectFromCapture(raw: string | undefined): string | null {
 
 	const { value, quoted } = stripSurroundingQuotes(trimmed);
 	if (!value) return null;
-	// (c) Only a quoted capture may contain whitespace.
-	if (!quoted && WHITESPACE_RE.test(value)) return null;
 
-	return mapWorkingDirToProject(value);
+	// A client that collapses the newlines out of its system prompt puts the
+	// whole environment block on the label's line. An ANCHORED, recognized
+	// marker says where the path ends, so the trailer is dropped before rule (c)
+	// runs — the only case in which relaxing the whitespace test is safe. A
+	// capture with no recognized marker comes back unchanged and is still
+	// rejected below.
+	const path = stripEnvMarkerTrailer(value);
+	if (!path) return null;
+	// (c) Only a quoted capture may contain whitespace.
+	if (!quoted && WHITESPACE_RE.test(path)) return null;
+
+	return mapWorkingDirToProject(path);
 }
 
 function projectFromLabelMatch(match: RegExpMatchArray | null): string | null {

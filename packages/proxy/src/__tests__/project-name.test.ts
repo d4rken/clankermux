@@ -3,6 +3,7 @@ import {
 	exceedsProjectNameLimit,
 	PROJECT_NAME_MAX_LEN,
 	sanitizeProjectName,
+	stripEnvMarkerTrailer,
 } from "../project-name";
 
 describe("sanitizeProjectName", () => {
@@ -36,6 +37,28 @@ describe("sanitizeProjectName", () => {
 		expect(sanitizeProjectName("a".repeat(PROJECT_NAME_MAX_LEN + 10))).toBe(
 			"a".repeat(PROJECT_NAME_MAX_LEN),
 		);
+	});
+});
+
+describe("stripEnvMarkerTrailer", () => {
+	it("drops a collapsed environment block and the punctuation at the seam", () => {
+		expect(
+			stripEnvMarkerTrailer(
+				"/home/darken/clankermux Is directory a git repo: Yes Platform: linux",
+			),
+		).toBe("/home/darken/clankermux");
+		expect(
+			stripEnvMarkerTrailer(
+				"/home/darken/clankermux - Is a git repository: true",
+			),
+		).toBe("/home/darken/clankermux");
+	});
+
+	it("returns a value with no recognized marker unchanged", () => {
+		// It never invents a boundary — which is what lets the extraction guard
+		// keep rejecting an unquoted capture that still holds prose after it.
+		const leaked = "/home/u/projects/repo LEAKED SECRET sk-ABCDEFGH12345678";
+		expect(stripEnvMarkerTrailer(leaked)).toBe(leaked);
 	});
 });
 

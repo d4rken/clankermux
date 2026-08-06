@@ -417,6 +417,40 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		).toEqual({ project: "clankermux", source: "wd_plain" });
 	});
 
+	it("still accepts a COLLAPSED env block (the whole block on one line)", () => {
+		// Some clients flatten the newlines out of the system prompt. The
+		// recognized markers are what say where the path ends, so the trailer is
+		// stripped BEFORE the unquoted-whitespace test — otherwise rule (c) would
+		// reject the line and the marker cleanup would never run.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/darken/clankermux Is directory a git repo: Yes Platform: linux",
+				),
+			),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Primary working directory: /home/darken/clankermux - Is a git repository: true - Today's date is 2026-08-06",
+				),
+			),
+		).toEqual({ project: "clankermux", source: "wd_primary" });
+	});
+
+	it("does not let a recognized marker rescue prose in front of it", () => {
+		// The strip removes the marker trailer only; whatever the client wrote
+		// BETWEEN the path and the marker is still unquoted whitespace, so rule
+		// (c) still rejects the capture.
+		expect(
+			extractProjectFromBody(
+				systemBody(
+					"Working directory: /home/u/projects/repo LEAKED SECRET sk-ABCDEFGH12345678 Platform: linux",
+				),
+			),
+		).toEqual(NOTHING);
+	});
+
 	it("still accepts an env block with CRLF line endings", () => {
 		// The capture keeps the trailing \r; trimming happens before the
 		// control-char check, so CRLF must not be read as a leak.

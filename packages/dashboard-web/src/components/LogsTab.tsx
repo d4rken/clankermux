@@ -107,9 +107,13 @@ export function LogsTab() {
 
 	// Hydrate ONCE per mount. `setLogs(history)` replaces the whole list, so
 	// re-running it would discard every live line received since — which is what
-	// happened on each auto-scroll toggle and on each query refetch. The query
-	// itself no longer polls (see logHistoryQueryOptions); this guard covers the
-	// remaining ways React can hand us the same backfill twice.
+	// happened on each auto-scroll toggle and on each query refetch. A
+	// successful load no longer polls (see logHistoryQueryOptions); this guard
+	// covers the remaining ways React can hand us the same backfill twice,
+	// including the retry ticks that run while the load is failing.
+	//
+	// The guard is armed by DATA ARRIVING, not by mounting, so a history that
+	// only succeeds after several failed attempts still hydrates exactly once.
 	useEffect(() => {
 		if (!history || hydratedRef.current) return;
 		hydratedRef.current = true;

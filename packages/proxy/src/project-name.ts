@@ -9,6 +9,22 @@ export const PROJECT_NAME_MAX_LEN = 64;
 const CLAUDE_ENV_MARKER_RE =
 	/\s*(?:-\s*)?(?:Is a git repository\b|Is directory a git repo\b|Platform\b|Shell\b|Today's date\b|Model\b).*$/i;
 
+/**
+ * Drop a recognized Claude Code environment-block trailer (`… Is directory a
+ * git repo: Yes Platform: linux`) and any punctuation left at the seam.
+ *
+ * A client that collapses the newlines in its system prompt hands us the whole
+ * block on one line, so this is what tells us where the path ENDS. A value
+ * carrying no recognized marker comes back unchanged — the strip never invents
+ * a boundary.
+ */
+export function stripEnvMarkerTrailer(value: string): string {
+	return value
+		.replace(CLAUDE_ENV_MARKER_RE, "")
+		.replace(/[\s:;,-]+$/g, "")
+		.trim();
+}
+
 /** Everything {@link sanitizeProjectName} does except the length cap. */
 function cleanProjectName(raw: string | undefined | null): string | null {
 	if (!raw) return null;
@@ -18,10 +34,7 @@ function cleanProjectName(raw: string | undefined | null): string | null {
 	// routing affinity keys.
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
 	const withoutControls = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
-	const withoutEnvBlock = withoutControls
-		.replace(CLAUDE_ENV_MARKER_RE, "")
-		.replace(/[\s:;,-]+$/g, "")
-		.trim();
+	const withoutEnvBlock = stripEnvMarkerTrailer(withoutControls);
 
 	if (!withoutEnvBlock) return null;
 	return withoutEnvBlock;
