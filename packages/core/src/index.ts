@@ -1,4 +1,15 @@
 // Re-export only used items from each module
+
+export {
+	// Test-only handle (forget the captured boot commit). NOT a runtime API:
+	// re-capturing at runtime would erase the restart signal.
+	__bootProvenanceTestHooks,
+	type BootProvenance,
+	type CommitRead,
+	captureBootProvenance,
+	getBootProvenance,
+	isRestartPending,
+} from "./boot-provenance";
 export {
 	BUFFER_SIZES,
 	CACHE,
@@ -11,17 +22,6 @@ export {
 	NETWORK,
 	TIME_CONSTANTS,
 } from "./constants";
-
-export {
-	// Test-only handle (forget the captured boot commit). NOT a runtime API:
-	// re-capturing at runtime would erase the restart signal.
-	__bootProvenanceTestHooks,
-	type BootProvenance,
-	captureBootProvenance,
-	type CommitRead,
-	getBootProvenance,
-	isRestartPending,
-} from "./boot-provenance";
 
 export {
 	isInvalidGrantMessage,

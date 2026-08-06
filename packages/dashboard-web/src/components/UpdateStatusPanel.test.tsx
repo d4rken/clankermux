@@ -29,7 +29,10 @@ function asMarkup(command: string): string {
 	return command.replace(/&/g, "&amp;");
 }
 
-function render(status: UpdateCheckStatus, overrides: Partial<UpdateInfo> = {}) {
+function render(
+	status: UpdateCheckStatus,
+	overrides: Partial<UpdateInfo> = {},
+) {
 	return renderToStaticMarkup(
 		<UpdateStatusPanel
 			status={status}

@@ -117,7 +117,9 @@ export function mapWorkingDirToProject(wd: string): string | null {
 		.replace(/\\/g, "/")
 		.replace(WINDOWS_DRIVE_PREFIX_RE, "")
 		.replace(UNC_HOST_PREFIX_RE, "");
-	const segments = normalized.split("/").filter((segment) => segment.length > 0);
+	const segments = normalized
+		.split("/")
+		.filter((segment) => segment.length > 0);
 	if (segments.length === 0) return null;
 
 	let candidate: string | null;

@@ -21,8 +21,6 @@ import { version } from "../lib/version";
 import logoUrl from "../logo.png";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
 import { ThemeToggle } from "./theme-toggle";
-import { Button } from "./ui/button";
-import { Separator } from "./ui/separator";
 import {
 	RESTART_COMMAND,
 	UPDATE_COMMAND,
@@ -30,6 +28,8 @@ import {
 	type UpdateInfo,
 	UpdateStatusPanel,
 } from "./UpdateStatusPanel";
+import { Button } from "./ui/button";
+import { Separator } from "./ui/separator";
 
 // Fallback repo for the footer "open repository" link before/without a check.
 // Matches the backend's DEFAULT_REPO; the check response's `repo` overrides it.

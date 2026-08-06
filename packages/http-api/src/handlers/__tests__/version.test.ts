@@ -117,7 +117,11 @@ function handlerWith(overrides: {
 		fetchLatestCommit:
 			overrides.latest ??
 			(async () => ({
-				commit: { sha: current.sha, shortSha: current.shortSha, date: current.date },
+				commit: {
+					sha: current.sha,
+					shortSha: current.shortSha,
+					date: current.date,
+				},
 				htmlUrl: "https://example.invalid/commit",
 				cached: false,
 			})),

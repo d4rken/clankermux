@@ -96,7 +96,9 @@ export function UpdateStatusPanel({
 							restartPending && "text-warning",
 							!restartPending && status === "available" && "text-green-500",
 							!restartPending && status === "current" && "text-primary",
-							!restartPending && status === "unknown" && "text-muted-foreground",
+							!restartPending &&
+								status === "unknown" &&
+								"text-muted-foreground",
 							status === "error" && "text-red-500",
 						)}
 					/>

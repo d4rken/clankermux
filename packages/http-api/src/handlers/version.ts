@@ -263,10 +263,11 @@ export function createVersionCheckHandler(deps: VersionCheckDeps = {}) {
 		let htmlUrl: string;
 		let cached: boolean;
 		try {
-			({ commit: latest, htmlUrl, cached } = await fetchLatestCommit(
-				repo,
-				branch,
-			));
+			({
+				commit: latest,
+				htmlUrl,
+				cached,
+			} = await fetchLatestCommit(repo, branch));
 		} catch (error) {
 			log.error("Failed to check for updates from GitHub:", error);
 			return jsonResponse({

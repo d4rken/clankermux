@@ -453,14 +453,18 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 			source: "wd_plain",
 		});
 		expect(
-			extractProjectFromBody(systemBody("Working directory: /srv/my.app.service")),
+			extractProjectFromBody(
+				systemBody("Working directory: /srv/my.app.service"),
+			),
 		).toEqual({ project: "my.app.service", source: "wd_plain" });
 	});
 
 	it("accepts a name exactly at the length limit and rejects one over", () => {
 		const atLimit = "a".repeat(PROJECT_NAME_MAX_LEN);
 		expect(
-			extractProjectFromBody(systemBody(`Working directory: /home/u/${atLimit}`)),
+			extractProjectFromBody(
+				systemBody(`Working directory: /home/u/${atLimit}`),
+			),
 		).toEqual({ project: atLimit, source: "wd_plain" });
 		expect(
 			extractProjectFromBody(
