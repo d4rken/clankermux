@@ -476,12 +476,16 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		// Shell: bash` to `Data`. Failing safe is the trade we took.
 		expect(
 			extractProjectFromBody(
-				systemBody('Working directory: "/workspace/My Project" Platform: linux'),
+				systemBody(
+					'Working directory: "/workspace/My Project" Platform: linux',
+				),
 			),
 		).toEqual(NOTHING);
 		expect(
 			extractProjectFromBody(
-				systemBody('Working directory: "/workspace/Data Platform/repo" Shell: bash'),
+				systemBody(
+					'Working directory: "/workspace/Data Platform/repo" Shell: bash',
+				),
 			),
 		).toEqual(NOTHING);
 	});
