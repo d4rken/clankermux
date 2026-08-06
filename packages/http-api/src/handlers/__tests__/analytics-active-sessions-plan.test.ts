@@ -163,19 +163,32 @@ function outerTableAlias(plan: string[]): string | null {
 const SESSION_CTE = "WITH session_requests AS";
 const BY_ACCOUNT = "COUNT(DISTINCT rr.affinity_key_hash) AS sessions";
 
+/**
+ * `requests` entered through an indexed range scan on `timestamp`.
+ *
+ * Deliberately name-agnostic. The claim being defended is "the bounded range is
+ * served by an index range scan", not "it uses `idx_requests_timestamp`" —
+ * pinning the name would turn a future covering index on `(timestamp, …)` into
+ * a red test. The form still fails on `SCAN r`, which is the regression this
+ * file exists to catch: `outerTableAlias` alone accepts a full table scan as
+ * long as `requests` is the outer loop.
+ */
+const RANGE_SCAN_ON_TIMESTAMP =
+	/SEARCH r USING (?:COVERING )?INDEX [A-Za-z0-9_]+ \(timestamp>\?\)/;
+
+const ROUTING_PK_PROBE =
+	/SEARCH rr USING (?:COVERING )?INDEX sqlite_autoindex_request_routing_1 \(request_id=\?\)/;
+
 describe("activeSessions query plan — bounded range", () => {
 	it("drives the session CTE from requests and probes request_routing by its primary key", async () => {
 		const sqls = await capturedSql({ range: "24h" });
 		const plan = planFor(only(sqls, SESSION_CTE));
 
 		expect(outerTableAlias(plan)).toBe("r");
-		expect(
-			plan.some((detail) =>
-				/SEARCH rr USING (?:COVERING )?INDEX sqlite_autoindex_request_routing_1 \(request_id=\?\)/.test(
-					detail,
-				),
-			),
-		).toBe(true);
+		expect(plan.some((detail) => RANGE_SCAN_ON_TIMESTAMP.test(detail))).toBe(
+			true,
+		);
+		expect(plan.some((detail) => ROUTING_PK_PROBE.test(detail))).toBe(true);
 	});
 
 	it("drives the per-account breakdown from requests too", async () => {
@@ -183,13 +196,10 @@ describe("activeSessions query plan — bounded range", () => {
 		const plan = planFor(only(sqls, BY_ACCOUNT));
 
 		expect(outerTableAlias(plan)).toBe("r");
-		expect(
-			plan.some((detail) =>
-				/SEARCH rr USING (?:COVERING )?INDEX sqlite_autoindex_request_routing_1 \(request_id=\?\)/.test(
-					detail,
-				),
-			),
-		).toBe(true);
+		expect(plan.some((detail) => RANGE_SCAN_ON_TIMESTAMP.test(detail))).toBe(
+			true,
+		);
+		expect(plan.some((detail) => ROUTING_PK_PROBE.test(detail))).toBe(true);
 	});
 });
 
