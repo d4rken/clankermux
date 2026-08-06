@@ -472,6 +472,15 @@ export function createAnalyticsHandler(context: APIContext) {
 			conditions.push("r.timestamp > ?");
 			queryParams.push(startMs);
 		}
+		/**
+		 * Does this query carry a selective predicate on `requests`?
+		 *
+		 * Exactly `startMs !== null` — the flag that decided whether
+		 * `r.timestamp > ?` entered the WHERE clause just above. The two
+		 * `active_sessions` queries read it to pin their join order; see the
+		 * comment at the `active_sessions` CTE for why.
+		 */
+		const pinRequestsFirst = startMs !== null;
 
 		// Named accounts plus a dedicated flag for the NULL bucket, mirroring the
 		// project filter below. The NO_ACCOUNT_ID sentinel is never STORED on a
@@ -1091,6 +1100,25 @@ export function createAnalyticsHandler(context: APIContext) {
 			// Param order: queryParams (whereClause lives inside the CTE, which is
 			// emitted first in the SQL string) precede the two bucket placeholders
 			// (the bucket sub-select comes after the CTE).
+			//
+			// JOIN ORDER IS PINNED, CONDITIONALLY. `CROSS JOIN` in SQLite is not a
+			// cartesian product: it is the documented way to force the left table to
+			// be the outer loop. Only that freedom differs — the join order written
+			// in the text is identical either way.
+			//
+			// Why pin: the live DB's `sqlite_stat1` records
+			// `request_routing|idx_request_routing_affinity|71 24 1` — 71 rows, stale
+			// from when the table was new, against 362k real ones. On those numbers a
+			// plain JOIN is planned as `SCAN rr` plus a per-row probe into `requests`,
+			// which is the wrong way round once a selective `r.timestamp > ?` exists.
+			//
+			// Why conditional: measured on the live DB, 6h range vs range=all —
+			//   active_sessions (total + buckets):  2.31s -> 0.117s | 3.96s -> 4.16s
+			//   active_sessions_by_account:         1.94s -> 0.108s | 2.12s -> 2.63s
+			// ~20x faster bounded, 5-24% SLOWER at range=all where no `requests`
+			// predicate is selective and the planner should be left free. Results were
+			// byte-identical in every pair. Do not make this unconditional, and do not
+			// "simplify" it back to a plain JOIN.
 			const activeSessionRows =
 				(await runPhase("active_sessions", want("activeSessions"), () =>
 					db.query<{
@@ -1105,8 +1133,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						rr.affinity_key_hash AS hash,
 						rr.affinity_scope AS scope,
 						r.timestamp AS ts_source
-					FROM request_routing rr
-					JOIN requests r ON r.id = rr.request_id
+					FROM requests r ${pinRequestsFirst ? "CROSS JOIN" : "JOIN"} request_routing rr ON rr.request_id = r.id
 					WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
 				)
 				SELECT
@@ -1152,6 +1179,9 @@ export function createAnalyticsHandler(context: APIContext) {
 			// therefore does NOT sum to totalDistinctSessions — same caveat as
 			// timeSeries. NULL selected_account_id collapses to the NO_ACCOUNT_ID
 			// sentinel for both id and name.
+			//
+			// Same conditional `CROSS JOIN` pin as the CTE above, for the same
+			// reason and off the same flag — see the measured numbers there.
 			const activeSessionsByAccountRows =
 				(await runPhase(
 					"active_sessions_by_account",
@@ -1166,8 +1196,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					COALESCE(rr.selected_account_id, ?) AS account_id,
 					COALESCE(a.name, rr.selected_account_id, ?) AS account_name,
 					COUNT(DISTINCT rr.affinity_key_hash) AS sessions
-				FROM request_routing rr
-				JOIN requests r ON r.id = rr.request_id
+				FROM requests r ${pinRequestsFirst ? "CROSS JOIN" : "JOIN"} request_routing rr ON rr.request_id = r.id
 				LEFT JOIN accounts a ON a.id = rr.selected_account_id
 				WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
 				GROUP BY rr.selected_account_id, a.name

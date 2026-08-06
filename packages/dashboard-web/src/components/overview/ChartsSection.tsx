@@ -1,4 +1,5 @@
 import { formatTokens } from "@clankermux/ui-common";
+import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
 import { CHART_COLORS } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
@@ -28,6 +29,26 @@ interface ChartsSectionProps {
 	}>;
 	projectBreakdownData: ProjectTokensRow[];
 	loading: boolean;
+	/**
+	 * Set when the analytics read FAILED with nothing cached.
+	 *
+	 * Distinct from `loading` and from a genuinely empty range: an axis with no
+	 * series on it reads as "no traffic in this range", which is a measurement
+	 * claim a failed read never made.
+	 */
+	unavailable?: boolean;
+}
+
+/** Stands in for a chart whose data could not be read. */
+function ChartUnavailable({ height }: { height: string }) {
+	return (
+		<div
+			className={`flex items-center justify-center gap-1.5 text-xs text-warning ${height}`}
+		>
+			<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+			Chart data unavailable
+		</div>
+	);
 }
 
 export function ChartsSection({
@@ -37,6 +58,7 @@ export function ChartsSection({
 	accountModelUsageData,
 	projectBreakdownData,
 	loading,
+	unavailable = false,
 }: ChartsSectionProps) {
 	// Aggregate account-model usage into per-account totals for the donut chart
 	const accountUsageDonutData = useMemo(() => {
@@ -81,12 +103,16 @@ export function ChartsSection({
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
-					<RequestVolumeSuccessChart
-						data={timeSeriesData}
-						timeRange={timeRange}
-						loading={loading}
-						height="medium"
-					/>
+					{unavailable ? (
+						<ChartUnavailable height="h-64" />
+					) : (
+						<RequestVolumeSuccessChart
+							data={timeSeriesData}
+							timeRange={timeRange}
+							loading={loading}
+							height="medium"
+						/>
+					)}
 				</CardContent>
 			</Card>
 
@@ -101,15 +127,19 @@ export function ChartsSection({
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
-						<BasePieChart
-							data={modelData}
-							loading={loading}
-							height="compact"
-							innerRadius={48}
-							outerRadius={72}
-							paddingAngle={5}
-							tooltipStyle="success"
-						/>
+						{unavailable ? (
+							<ChartUnavailable height="h-40" />
+						) : (
+							<BasePieChart
+								data={modelData}
+								loading={loading}
+								height="compact"
+								innerRadius={48}
+								outerRadius={72}
+								paddingAngle={5}
+								tooltipStyle="success"
+							/>
+						)}
 						<div className="mt-3 space-y-2">
 							{modelData.map((model, index) => (
 								<div
@@ -142,15 +172,19 @@ export function ChartsSection({
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
-						<BasePieChart
-							data={accountUsageDonutData}
-							loading={loading}
-							height="compact"
-							innerRadius={48}
-							outerRadius={72}
-							paddingAngle={5}
-							tooltipStyle="success"
-						/>
+						{unavailable ? (
+							<ChartUnavailable height="h-40" />
+						) : (
+							<BasePieChart
+								data={accountUsageDonutData}
+								loading={loading}
+								height="compact"
+								innerRadius={48}
+								outerRadius={72}
+								paddingAngle={5}
+								tooltipStyle="success"
+							/>
+						)}
 						<div className="mt-3 space-y-2">
 							{accountUsageDonutData.map((account, index) => {
 								const models = accountModelBreakdown.get(account.name) ?? [];
@@ -200,19 +234,23 @@ export function ChartsSection({
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
-						<BasePieChart
-							data={projectDonutData}
-							loading={loading}
-							height="compact"
-							innerRadius={48}
-							outerRadius={72}
-							paddingAngle={5}
-							tooltipStyle="success"
-							tooltipFormatter={(value) => [
-								formatTokens(Number(value)),
-								"Tokens",
-							]}
-						/>
+						{unavailable ? (
+							<ChartUnavailable height="h-40" />
+						) : (
+							<BasePieChart
+								data={projectDonutData}
+								loading={loading}
+								height="compact"
+								innerRadius={48}
+								outerRadius={72}
+								paddingAngle={5}
+								tooltipStyle="success"
+								tooltipFormatter={(value) => [
+									formatTokens(Number(value)),
+									"Tokens",
+								]}
+							/>
+						)}
 						<div className="mt-3 space-y-2">
 							{projectDonutData.map((project, index) => (
 								<div

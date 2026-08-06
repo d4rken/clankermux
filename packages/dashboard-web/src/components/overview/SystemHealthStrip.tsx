@@ -41,8 +41,13 @@ interface SystemHealthStripViewProps {
 	 *
 	 * `null` means UNKNOWN — the error source (/api/stats) could not be read.
 	 * Deliberately not 0: an unread source must not be reported as "no errors".
+	 *
+	 * `undefined` means the first read is still IN FLIGHT. No badge is rendered,
+	 * matching how a count of 0 renders nothing — reusing `null` here would put
+	 * "errors unknown" on the strip during every ordinary page load, which is not
+	 * what that badge means.
 	 */
-	errorGroupCount: number | null;
+	errorGroupCount: number | null | undefined;
 }
 
 /**
@@ -155,7 +160,7 @@ export function SystemHealthStripView({
 						</>
 					) : null}
 
-					{errorGroupCount === null ? (
+					{errorGroupCount === undefined ? null : errorGroupCount === null ? (
 						<Badge variant="outline" className="gap-1 whitespace-nowrap">
 							<AlertTriangle className="h-3 w-3" aria-hidden="true" />
 							errors unknown
@@ -241,9 +246,10 @@ function integrityLabel(
 }
 
 interface SystemHealthStripProps {
-	/** Non-dismissed recent-error groups, shared with the list below, or `null`
-	 *  when the stats read that supplies them failed. */
-	errorGroupCount: number | null;
+	/** Non-dismissed recent-error groups, shared with the list below; `null` when
+	 *  the stats read that supplies them failed, `undefined` while it is still in
+	 *  flight. See {@link SystemHealthStripViewProps.errorGroupCount}. */
+	errorGroupCount: number | null | undefined;
 }
 
 /**

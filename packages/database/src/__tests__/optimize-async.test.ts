@@ -239,4 +239,64 @@ describe("incremental-vacuum worker protocol: kind discriminator", () => {
 			check.close();
 		}
 	});
+
+	it('kind "optimize" refreshes an EXISTING stale sqlite_stat1 row', async () => {
+		// The regression: a bare `PRAGMA optimize` only reconsiders tables the
+		// CALLING connection has itself queried, and this maintenance connection
+		// queries none — so stale statistics never self-healed. On the live DB
+		// that left `request_routing` recorded at 71 rows against 362k real ones,
+		// and the planner drove the activeSessions join the wrong way round.
+		//
+		// A test that only checks a MISSING stat gets created would pass under the
+		// bare pragma too (SQLite >= 3.46 analyzes tables with no stat1 entry), so
+		// this seeds a stat row that exists and is wrong.
+		{
+			const db = new Database(dbPath, { create: true });
+			try {
+				db.exec("PRAGMA journal_mode = WAL");
+				db.exec("CREATE TABLE stale (id INTEGER PRIMARY KEY, v TEXT)");
+				db.exec("CREATE INDEX idx_stale_v ON stale(v)");
+				const ins = db.prepare("INSERT INTO stale (v) VALUES (?)");
+				db.exec("BEGIN");
+				for (let i = 0; i < 2000; i++) ins.run(`val-${i % 50}`);
+				db.exec("COMMIT");
+				// Real stats first, then corrupt the row count the way the live DB's
+				// did: recorded when the table was almost empty and never refreshed.
+				db.exec("ANALYZE");
+				db.exec(
+					"UPDATE sqlite_stat1 SET stat = '7 1' WHERE idx = 'idx_stale_v'",
+				);
+			} finally {
+				db.close();
+			}
+		}
+
+		const worker = spawnWorker();
+		try {
+			const result = await roundTrip<{ ok: boolean; skipped?: boolean }>(
+				worker,
+				{ dbPath, kind: "optimize" },
+			);
+			expect(result.ok).toBe(true);
+			expect(result.skipped).toBe(false);
+		} finally {
+			worker.terminate();
+		}
+
+		const check = new Database(dbPath);
+		try {
+			const row = check
+				.query<{ stat: string }, []>(
+					"SELECT stat FROM sqlite_stat1 WHERE idx = 'idx_stale_v'",
+				)
+				.get();
+			// Leading token is the estimated row count. `analysis_limit = 400` makes
+			// it an estimate rather than exactly 2000, so assert it left the fiction
+			// behind rather than pinning a number the sampler does not promise.
+			const rowCount = Number(row?.stat.split(" ")[0]);
+			expect(rowCount).toBeGreaterThan(100);
+		} finally {
+			check.close();
+		}
+	});
 });

@@ -52,8 +52,13 @@ function systemStatus(gaps: PricingGap[]): SystemStatusResponse {
 }
 
 /**
- * OverviewTab returns a loading skeleton until stats + analytics + accounts have
- * resolved, so all three have to be seeded for the banner to be reached at all.
+ * Seeds all three page queries and renders the Overview.
+ *
+ * The page renders progressively — no whole-page gate — so the banner would be
+ * reached even with an empty cache. All three are still seeded so this test
+ * exercises the fully-resolved page: it asserts banner WIRING, and a tile stuck
+ * in a pending state is not the state a banner assertion should be made in.
+ * (See OverviewTab.progressive.test.tsx for the loading behaviour itself.)
  */
 function renderOverview(gaps: PricingGap[]): string {
 	const client = new QueryClient({
@@ -62,7 +67,7 @@ function renderOverview(gaps: PricingGap[]): string {
 	client.setQueryData(queryKeys.systemStatus(), systemStatus(gaps));
 	// The stats key embeds the error window, so it has to track the component's
 	// constant — seeding a different window silently yields `undefined` stats and
-	// the page renders its loading skeleton instead of the banner.
+	// leaves the stats-backed tiles in their pending state.
 	client.setQueryData(queryKeys.stats(OVERVIEW_ERROR_WINDOW_HOURS), {
 		totalRequests: 0,
 		successRate: 0,
@@ -74,7 +79,8 @@ function renderOverview(gaps: PricingGap[]): string {
 		topModels: [],
 	});
 	// The analytics key embeds the section list too — same reason as the error
-	// window above: a mismatched key means `undefined` analytics and a skeleton.
+	// window above: a mismatched key means `undefined` analytics and a tile that
+	// never leaves its placeholder.
 	client.setQueryData(
 		queryKeys.analytics(
 			"6h",

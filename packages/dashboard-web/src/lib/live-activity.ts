@@ -412,6 +412,15 @@ export interface BuildLanesResult {
 /**
  * Group events into per-project lanes.
  *
+ * `maxLanes` bounds the NAMED project lanes only. The `(no project)` bucket is
+ * not a project — spending a named slot on it pushed a real project into the
+ * overflow lane and made that lane's "Other (N projects)" label count a bucket
+ * that is not a project at all. It therefore gets its own row, held at its
+ * sticky position like any other lane and simply not counted against the quota;
+ * it never folds into the overflow lane, which appears only when named projects
+ * genuinely overflow and counts named projects only. The card is thus at most
+ * `maxLanes + 2` rows.
+ *
  * Ordering is STICKY. A lane keeps its row for as long as it has events in the
  * window, and new lanes are appended below the existing ones (busiest first
  * among simultaneous arrivals). Re-sorting by rolling volume every tick would
@@ -419,6 +428,11 @@ export interface BuildLanesResult {
  * projects in and out of the overflow lane while they are being inspected —
  * which is also why lane membership, not just row position, follows the sticky
  * order.
+ *
+ * Idempotent in `previousOrder`: feeding the returned `order` back with the
+ * same events reproduces that order exactly (everything is "surviving", nothing
+ * is an entrant), which is what lets the renderer write its order ref during
+ * render.
  *
  * Active requests are always included regardless of age: their start can be
  * older than the window while the work is still running.
@@ -459,12 +473,28 @@ export function buildLanes(
 		);
 	const order = [...surviving, ...entrants];
 
-	// One slot is reserved for the overflow lane only when something overflows.
-	const directCount = order.length > maxLanes ? maxLanes - 1 : maxLanes;
-	const direct = order.slice(0, directCount);
-	const overflow = order.slice(directCount);
+	// The quota is spent on named projects only. The no-project bucket keeps its
+	// sticky position in `order` — pulling it out and re-appending it would move
+	// its row every time a new named project sent its first request — it is
+	// simply not counted against `maxLanes`, and never folds into (or is counted
+	// by) the overflow lane.
+	const direct: string[] = [];
+	const overflow: string[] = [];
+	let namedTaken = 0;
+	for (const key of order) {
+		if (key === NO_PROJECT_LANE_KEY) {
+			direct.push(key);
+			continue;
+		}
+		if (namedTaken < maxLanes) {
+			direct.push(key);
+			namedTaken++;
+		} else {
+			overflow.push(key);
+		}
+	}
 
-	const lanes: Lane[] = direct.map((key) => {
+	const toLaneFor = (key: string): Lane => {
 		const bucket = byKey.get(key) as {
 			project: string | null;
 			events: LiveEvent[];
@@ -475,7 +505,9 @@ export function buildLanes(
 			sortByTime(bucket.events),
 			cutoff,
 		);
-	});
+	};
+
+	const lanes: Lane[] = direct.map(toLaneFor);
 
 	if (overflow.length > 0) {
 		const merged = overflow.flatMap((key) => byKey.get(key)?.events ?? []);

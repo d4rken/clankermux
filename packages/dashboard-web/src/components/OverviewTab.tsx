@@ -12,7 +12,6 @@ import { computePoolUsage } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
-import { LoadingSkeleton } from "./overview/LoadingSkeleton";
 import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
@@ -32,7 +31,8 @@ export const OVERVIEW_ERROR_WINDOW_HOURS = 1;
  * here: buildOverviewTimeSeries merges the session series into the chart rows.
  *
  * Exported so tests seeding the query cache key on the SAME list — a divergent
- * list yields `undefined` analytics and the page renders its loading skeleton.
+ * list yields `undefined` analytics and the analytics-backed tiles stay in
+ * their pending state.
  */
 export const OVERVIEW_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
@@ -53,20 +53,43 @@ export const OverviewTab = React.memo(() => {
 		OVERVIEW_ERROR_WINDOW_HOURS,
 	);
 	const { data: stats, isLoading: statsLoading } = statsQuery;
-	// A failed /api/stats read used to be invisible: every consumer below
-	// rendered `?? 0`, which is indistinguishable from a real zero. Resolve the
-	// three cases once here and hand the verdict to each stats-backed widget.
-	const statsAvailability = dataAvailability(statsQuery, statsLoading);
-	const statsUnavailable = statsAvailability.state === "unavailable";
 	const [timeRange, setTimeRange] = useState("6h");
-	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
+	const analyticsQuery = useAnalytics(
 		timeRange,
 		{ accounts: [], models: [], status: "all" },
 		"normal",
 		false,
 		{ sections: OVERVIEW_SECTIONS },
 	);
-	const { data: accounts, isLoading: accountsLoading } = useAccounts();
+	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
+	const accountsQuery = useAccounts();
+	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
+
+	// This page renders PROGRESSIVELY: there is no whole-page gate, because one
+	// slow section (activeSessions dominates /api/analytics) used to hide the
+	// Live Activity card for seconds even though that card depends on none of
+	// these queries.
+	//
+	// The cost of dropping the gate is that every tile now speaks for its own
+	// source, and the three claims must stay distinguishable — a `?? 0` fallback
+	// is indistinguishable from a measured zero:
+	//   pending     — first fetch in flight, nothing cached → skeleton
+	//   unavailable — terminal failure, nothing cached      → say so
+	//   stale       — cached numbers, latest refresh failed  → show them, aged
+	// `pending` is `isLoading && !data`, so a background refetch never
+	// re-skeletons a tile that already has numbers on it.
+	const statsAvailability = dataAvailability(statsQuery, statsLoading);
+	const statsUnavailable = statsAvailability.state === "unavailable";
+	const statsPending = statsLoading && !stats;
+	const analyticsAvailability = dataAvailability(
+		analyticsQuery,
+		analyticsLoading,
+	);
+	const analyticsUnavailable = analyticsAvailability.state === "unavailable";
+	const analyticsPending = analyticsLoading && !analytics;
+	const accountsAvailability = dataAvailability(accountsQuery, accountsLoading);
+	const accountsUnavailable = accountsAvailability.state === "unavailable";
+	const accountsPending = accountsLoading && !accounts;
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
@@ -79,6 +102,14 @@ export const OverviewTab = React.memo(() => {
 	const statsStaleNote =
 		statsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(statsAvailability.lastUpdatedAt, now)}`
+			: undefined;
+	const analyticsStaleNote =
+		analyticsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(analyticsAvailability.lastUpdatedAt, now)}`
+			: undefined;
+	const accountsStaleNote =
+		accountsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
 	useEffect(() => {
@@ -127,10 +158,6 @@ export const OverviewTab = React.memo(() => {
 		}
 	}, []);
 
-	const loading = statsLoading || analyticsLoading || accountsLoading;
-	const combinedData =
-		stats && analytics && accounts ? { stats, analytics, accounts } : null;
-
 	// Transform time series data
 	const timeSeriesData = useMemo(
 		() => buildOverviewTimeSeries(analytics),
@@ -163,10 +190,6 @@ export const OverviewTab = React.memo(() => {
 			trendRequests: getTrend(deltaRequests),
 		};
 	}, [timeSeriesData, pctChange]);
-
-	if (loading && !combinedData) {
-		return <LoadingSkeleton />;
-	}
 
 	const trendPeriod = getTrendPeriod(timeRange);
 
@@ -220,6 +243,13 @@ export const OverviewTab = React.memo(() => {
 					}
 					trend={trends.trendRequests}
 					trendPeriod={trendPeriod}
+					loading={analyticsPending}
+					// Without these the tile would render the `|| 0` fallback, which is
+					// indistinguishable from a range that genuinely saw no requests.
+					unavailableReason={
+						analyticsUnavailable ? "Request data unavailable" : undefined
+					}
+					staleNote={analyticsStaleNote}
 					icon={Activity}
 					subRows={[
 						{
@@ -236,6 +266,7 @@ export const OverviewTab = React.memo(() => {
 					title="Active Sessions"
 					caption={`· last ${Math.round((stats?.activeSessions?.windowMs ?? TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS) / 60000)}m`}
 					value={formatNumber(stats?.activeSessions?.total ?? 0)}
+					loading={statsPending}
 					// Without these the tile shows "0" for a failed read — exactly the
 					// "not all results are correct" symptom the lane split addresses,
 					// but which a DB-busy error or a worker crash can still produce.
@@ -265,17 +296,30 @@ export const OverviewTab = React.memo(() => {
 							: []),
 					]}
 				/>
+				{/* `computePoolUsage([], …)` yields an all-empty result that reads as
+				    "no accounts contribute to this pool" — a claim neither an
+				    in-flight nor a failed /api/accounts read is entitled to make. */}
 				<PoolMetricCard
 					title="5h Pool"
 					icon={Gauge}
 					result={fiveHourPool}
 					window="five_hour"
+					loading={accountsPending}
+					unavailableReason={
+						accountsUnavailable ? "Account data unavailable" : undefined
+					}
+					staleNote={accountsStaleNote}
 				/>
 				<PoolMetricCard
 					title="7d Pool"
 					icon={BarChart3}
 					result={weeklyPool}
 					window="seven_day"
+					loading={accountsPending}
+					unavailableReason={
+						accountsUnavailable ? "Account data unavailable" : undefined
+					}
+					staleNote={accountsStaleNote}
 				/>
 			</div>
 
@@ -288,14 +332,22 @@ export const OverviewTab = React.memo(() => {
 				modelData={modelData}
 				accountModelUsageData={accountModelUsageData}
 				projectBreakdownData={projectBreakdownData}
-				loading={loading}
+				loading={analyticsPending}
+				unavailable={analyticsUnavailable}
 			/>
 
 			{/* Glance-level health; the full diagnostics live on /system.
-			    `null` means the error count is UNKNOWN (the stats read failed) —
-			    passing 0 would claim "no errors". */}
+			    Tri-state count: `undefined` while the stats read is still in flight
+			    (no badge), `null` when it FAILED (the count is unknown — passing 0
+			    would claim "no errors"), a number once resolved. */}
 			<SystemHealthStrip
-				errorGroupCount={statsUnavailable ? null : visibleErrors.length}
+				errorGroupCount={
+					statsPending
+						? undefined
+						: statsUnavailable
+							? null
+							: visibleErrors.length
+				}
 			/>
 
 			<CompactRecentErrors
