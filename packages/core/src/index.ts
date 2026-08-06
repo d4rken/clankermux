@@ -13,6 +13,17 @@ export {
 } from "./constants";
 
 export {
+	// Test-only handle (forget the captured boot commit). NOT a runtime API:
+	// re-capturing at runtime would erase the restart signal.
+	__bootProvenanceTestHooks,
+	type BootProvenance,
+	captureBootProvenance,
+	type CommitRead,
+	getBootProvenance,
+	isRestartPending,
+} from "./boot-provenance";
+
+export {
 	isInvalidGrantMessage,
 	logError,
 	OAuthError,

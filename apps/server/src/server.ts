@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { Config, type RuntimeConfig } from "@clankermux/config";
 import {
 	CACHE,
+	captureBootProvenance,
 	DEFAULT_STRATEGY,
 	drainEventLoopSnapshotMaxLagMs,
 	getEventLoopStats,
@@ -609,6 +610,12 @@ export default async function startServer(options?: {
 			},
 		};
 	}
+
+	// Stamp the commit this process boots on, before anything else can spend
+	// time. The checkout IS the deployment, so HEAD moves under us whenever work
+	// lands without a restart; capturing at first request instead would just
+	// record the moved HEAD and report the process as up to date.
+	captureBootProvenance();
 
 	const {
 		port = NETWORK.DEFAULT_PORT,
