@@ -550,13 +550,43 @@ async function forwardToClientInner(
 							"reopened",
 						);
 					} else {
+						// Synthetic cache-keepalive replays are NOT authoritative evidence
+						// of an account limit. The keepalive scheduler replays warm bodies
+						// in waves of up to KEEPALIVE_CONCURRENCY, so its own requests can
+						// contend with each other and with live traffic for Anthropic's
+						// per-IP burst allowance. An SSE error frame is body data and
+						// carries no rate-limit headers, so this code genuinely cannot tell
+						// a self-inflicted burst apart from a real per-account limit —
+						// which is exactly why the probe's verdict must not mutate account
+						// state. Every pre-stream 429 site already takes that position (see
+						// the `isKeepalive` guards in proxy-operations.ts and
+						// response-processor.ts); letting identical upstream semantics cool
+						// an account here purely because the provider delivered them as
+						// 200-plus-error-frame instead of a 429 status would be an
+						// arbitrary split. If real traffic does reach this account while it
+						// is genuinely limited, its own (non-synthetic) 429 or error frame
+						// applies the normal cooldown — but nothing guarantees that happens
+						// inside the window skipped here, so this trades a possible late
+						// cooldown for never cooling an account off traffic no user sent.
+						//
+						// Trust-gated: the marker header alone is client-spoofable, so the
+						// exemption also requires the unspoofable in-process dispatch flag
+						// (an external caller cannot suppress its own cooldown with it).
+						const isKeepalive = isTrustedSyntheticProbe(
+							requestHeaders,
+							internalDispatch,
+							"keepalive",
+						);
+
 						// Mid-stream `rate_limit_error` is a per-account 429: apply the
 						// per-account cooldown (auto-derived reason).
-						applyRateLimitCooldown(
-							account,
-							{ resetTime: Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS },
-							ctx,
-						);
+						if (!isKeepalive) {
+							applyRateLimitCooldown(
+								account,
+								{ resetTime: Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS },
+								ctx,
+							);
+						}
 						// A mid-stream rate_limit_error is a per-ACCOUNT signal, not an
 						// overload-health verdict for the family — release the probe
 						// lease without closing or re-opening the bucket.
@@ -566,36 +596,24 @@ async function forwardToClientInner(
 						);
 
 						// Reliable burst marker (storm-affinity-hold Part 1). A mid-stream
-						// `rate_limit_error` frame is the per-IP burst throttle revealing
-						// itself after the 200 headers were already sent — it can't rescue
-						// THIS response, but it must trip the shared Anthropic-OAuth burst
-						// marker so the session's NEXT affinity_hold requests hold their
-						// cache account instead of diverting to a sibling. Only for a
-						// genuine OAuth-Anthropic 429 (the 529 overloaded_error branch
-						// above drives the family-scoped provider-overload breaker
-						// instead). The SSE frame carries no HTTP status, so there is no
-						// hard-limit-status check here — a mid-stream rate_limit_error is
-						// by nature the transient burst shape.
+						// `rate_limit_error` frame arrives after the 200 headers were
+						// already sent — it can't rescue THIS response, but it trips the
+						// shared Anthropic-OAuth burst marker so the session's NEXT
+						// affinity_hold requests hold their cache account instead of
+						// diverting to a sibling. Only for an OAuth-Anthropic
+						// `rate_limit_error` frame (the 529 overloaded_error branch above
+						// drives the family-scoped provider-overload breaker instead). The
+						// frame carries no HTTP status, so there is no hard-limit-status
+						// check here — nor could there be: the marker is
+						// deliberately optimistic about the frame being the transient burst
+						// shape, because holding a session on its warm cache account for a
+						// short window is cheap even when the cause was something else.
 						//
-						// Exclude synthetic cache-keepalive replays: the keepalive
-						// scheduler fires parallel requests across every cached account at
-						// once, so a burst of 4+ trips Anthropic's per-IP limit and a
-						// keepalive replay can itself surface a mid-stream
-						// rate_limit_error. That is a self-inflicted probe artifact, not a
-						// user-driven storm — tripping the marker on it would suppress
-						// sibling diversion for real requests off a synthetic burst.
-						// Mirrors the keepalive guard in response-processor.ts /
-						// proxy-operations.ts — including its trust gate: the marker
-						// header alone is client-spoofable, so an external caller must
-						// not be able to suppress the burst marker with it.
-						if (
-							isOAuthAnthropicAccount(account) &&
-							!isTrustedSyntheticProbe(
-								requestHeaders,
-								internalDispatch,
-								"keepalive",
-							)
-						) {
+						// Excluded on synthetic keepalive replays for the same reason the
+						// cooldown above is: a probe's verdict must not stand in for a
+						// user-driven storm. Tripping the marker on one would suppress
+						// sibling diversion for real requests off self-inflicted traffic.
+						if (isOAuthAnthropicAccount(account) && !isKeepalive) {
 							markAnthropicBurstThrottle(Date.now());
 						}
 					}

@@ -7,7 +7,9 @@
  *   model) and does NOT set a per-account rate-limit cooldown.
  * - A mid-stream `rate_limit_error` frame is a per-account 429: it applies the
  *   per-account cooldown (auto-derived reason) and trips the shared
- *   OAuth-Anthropic burst marker.
+ *   OAuth-Anthropic burst marker — EXCEPT on a trusted synthetic cache-keepalive
+ *   replay, whose verdict is not authoritative evidence of an account limit and
+ *   therefore mutates neither.
  *
  * Note: Mid-stream detection cannot rescue the current response — the stream
  * headers were already sent to the client. It only prevents future requests
@@ -16,8 +18,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
+	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	getProviderOverloadUntil,
+	tryAcquireProviderOverloadProbe,
 } from "../../provider-overload-cooldown";
 import { forwardToClient } from "../../response-handler";
 import {
@@ -396,14 +400,16 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
 
-	it("does NOT set the burst marker on a mid-stream rate_limit_error for a synthetic keepalive replay (Finding 4)", async () => {
-		// A cache-keepalive replay can itself trip Anthropic's per-IP limit (the
-		// scheduler fires parallel requests across every account). That is a
-		// self-inflicted probe artifact, not a user-driven storm — the marker must
-		// stay off so real requests aren't pinned to their cache account off a
-		// synthetic burst.
+	it("sets NEITHER the burst marker NOR the per-account cooldown on a mid-stream rate_limit_error for a synthetic keepalive replay", async () => {
+		// A cache-keepalive replay's own waves can contend for Anthropic's per-IP
+		// burst allowance, and an SSE error frame carries no rate-limit headers to
+		// tell that apart from a real account limit. A probe's verdict is therefore
+		// not authoritative: the marker stays off so real requests aren't pinned to
+		// their cache account off synthetic traffic, and the account is not cooled
+		// off a request no user made.
 		const account = makeAccount(); // OAuth anthropic
-		const ctx = makeStreamCtx();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 
 		const response = await forwardToClient(
@@ -432,15 +438,61 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 			ctx,
 		);
 		await response.text();
+		// The account mutation is synchronous under this fake asyncWriter, so the
+		// negative assertions below already hold; the beat only keeps them honest
+		// if the writer ever becomes genuinely deferred.
+		await new Promise((r) => setTimeout(r, 10));
+
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		expect(account.rate_limited_until).toBeNull();
+		expect(markCalls).toHaveLength(0);
 	});
 
-	it("SPOOF GUARD: DOES set the burst marker when the keepalive header arrives without an internal dispatch", async () => {
+	it("exempts the cooldown on a keepalive replay for a non-OAuth account too (the exemption is not coupled to the OAuth-only burst marker)", async () => {
+		// The burst marker is OAuth-Anthropic-only; the cooldown exemption is not.
+		// A console/API-key account replaying a keepalive must skip the cooldown for
+		// the same reason — otherwise the exemption would silently depend on which
+		// credential the account happens to use.
+		const account = makeAccount({ refresh_token: null, api_key: "sk-ant-x" });
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
+
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-keepalive-console",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-keepalive": "true",
+				}),
+				internal: true,
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				response: new Response(streamWithErrorFrame("rate_limit_error"), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+		await response.text();
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(account.rate_limited_until).toBeNull();
+		expect(markCalls).toHaveLength(0);
+	});
+
+	it("SPOOF GUARD: DOES set the burst marker AND the cooldown when the keepalive header arrives without an internal dispatch", async () => {
 		// Header-only, no trusted dispatch: an external caller must not be able to
-		// suppress the burst marker (and with it sibling diversion) by setting a
-		// header on its own requests.
+		// suppress the burst marker (and with it sibling diversion) or dodge its own
+		// account's cooldown by setting a header on its own requests.
 		const account = makeAccount(); // OAuth anthropic
-		const ctx = makeStreamCtx();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 
 		const response = await forwardToClient(
@@ -466,15 +518,21 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 			ctx,
 		);
 		await response.text();
+		await new Promise((r) => setTimeout(r, 10));
+
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(markCalls.length).toBeGreaterThan(0);
 	});
 
-	it("CROSS-KIND GUARD: an internal AUTO-REFRESH probe does not get the keepalive-only burst-marker exemption", async () => {
-		// The keepalive exemption exists because that scheduler fans out in
-		// parallel and trips Anthropic's per-IP limit. An auto-refresh probe does
-		// not, so it must NOT inherit the exemption.
+	it("CROSS-KIND GUARD: an internal AUTO-REFRESH probe does not get the keepalive-only exemption", async () => {
+		// The keepalive exemption exists because that scheduler replays warm bodies
+		// in concurrent waves, so its own traffic can produce the frame. An
+		// auto-refresh probe is a single request against one account, so it must NOT
+		// inherit the exemption — for the marker or the cooldown.
 		const account = makeAccount(); // OAuth anthropic
-		const ctx = makeStreamCtx();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 
 		const response = await forwardToClient(
@@ -500,7 +558,11 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 			ctx,
 		);
 		await response.text();
+		await new Promise((r) => setTimeout(r, 10));
+
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(markCalls.length).toBeGreaterThan(0);
 	});
 });
 
@@ -612,5 +674,111 @@ describe("forwardToClient — mid-stream overloaded_error trips the family break
 		expect(
 			getProviderOverloadUntil("anthropic", Date.now(), "claude-haiku-4-5"),
 		).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Probe-lease release is INDEPENDENT of the cooldown decision. Exempting a
+// keepalive replay from the per-account cooldown must not also swallow the
+// half-open breaker's single-flight lease — a leaked lease blocks every other
+// account from probing until the safety TTL expires.
+//
+// The assertion has to be made while the stream is still OPEN: forwardToClient's
+// onEnd handler settles the token as a backup, so a test that drains a
+// self-closing stream would pass even if the mid-stream release were removed.
+// ---------------------------------------------------------------------------
+describe("forwardToClient — mid-stream probe-lease release", () => {
+	beforeEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
+	afterEach(() => {
+		clearAnthropicBurstThrottle();
+		clearProviderOverloadCooldown();
+	});
+
+	/** A stream that emits one error frame and then stays open until closed. */
+	function openStreamWithErrorFrame(errorType: string): {
+		stream: ReadableStream<Uint8Array>;
+		close: () => void;
+	} {
+		const enc = new TextEncoder();
+		let controller!: ReadableStreamDefaultController<Uint8Array>;
+		const stream = new ReadableStream<Uint8Array>({
+			start(c) {
+				controller = c;
+				c.enqueue(
+					enc.encode(
+						`event: error\ndata: {"type":"error","error":{"type":"${errorType}","message":"x"}}\n\n`,
+					),
+				);
+			},
+		});
+		return { stream, close: () => controller.close() };
+	}
+
+	it("releases the half-open probe lease on a keepalive replay whose cooldown is exempted", async () => {
+		const model = "claude-haiku-4-5";
+		const account = makeAccount();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
+
+		// Trip the family bucket and let it lapse into half-open, then take the
+		// single-flight lease this request will carry.
+		applyProviderOverloadCooldown("anthropic", Date.now() + 5, model);
+		await new Promise((r) => setTimeout(r, 15));
+		const admission = tryAcquireProviderOverloadProbe("anthropic", model);
+		expect(admission.admitted).toBe(true);
+		const token = admission.admitted ? admission.token : null;
+		expect(token).not.toBeNull();
+		// While this lease is held, no sibling may probe.
+		expect(tryAcquireProviderOverloadProbe("anthropic", model)).toMatchObject({
+			admitted: false,
+			reason: "probe-active",
+		});
+
+		const { stream, close } = openStreamWithErrorFrame("rate_limit_error");
+		const response = await forwardToClient(
+			{
+				requestId: "req-mid-keepalive-lease",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers({
+					"content-type": "application/json",
+					"x-clankermux-keepalive": "true",
+				}),
+				internal: true,
+				requestBody: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+				upstreamModel: model,
+				overloadProbeToken: token,
+				response: new Response(stream, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+			},
+			ctx,
+		);
+
+		// Pull exactly the error frame through the analytics passthrough. The
+		// stream stays open afterwards, so onEnd has NOT run.
+		const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+		await reader.read();
+		await new Promise((r) => setTimeout(r, 10));
+
+		// The cooldown was exempted...
+		expect(account.rate_limited_until).toBeNull();
+		expect(markCalls).toHaveLength(0);
+		// ...but the lease was still released, so a sibling may probe again.
+		expect(tryAcquireProviderOverloadProbe("anthropic", model)).toMatchObject({
+			admitted: true,
+		});
+
+		close();
+		await reader.read().catch(() => undefined);
+		reader.releaseLock();
 	});
 });

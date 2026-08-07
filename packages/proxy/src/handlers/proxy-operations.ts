@@ -1764,12 +1764,14 @@ export async function proxyWithAccount(
 					// errors (404/400) warrant returning the upstream response.
 					if (rawResponse.status === 429) {
 						// Skip cooldown on synthetic cache-keepalive replays. The
-						// keepalive scheduler fires parallel requests to every
-						// cached account; a burst of 4+ simultaneous requests
-						// trips Anthropic's per-IP burst limit and 429s every
-						// account at the same instant. Applying real cooldowns
-						// here drains the pool to zero routable accounts even
-						// though no real user-facing rate limit was hit.
+						// keepalive scheduler replays warm bodies in waves of
+						// up to KEEPALIVE_CONCURRENCY, so its own requests can
+						// contend with each other and with live traffic for
+						// Anthropic's per-IP burst allowance and 429 several
+						// accounts at nearly the same instant. Applying real
+						// cooldowns here drains the pool toward zero routable
+						// accounts even though no real user-facing rate limit
+						// was hit.
 						const isKeepalive = isTrustedProbe("keepalive");
 						if (isKeepalive) {
 							log.warn(
