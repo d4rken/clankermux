@@ -343,13 +343,14 @@ export async function processProxyResponse(
 	// is handled separately by the streaming forwarder — see issue #114.
 	if (rateLimitInfo.isRateLimited) {
 		// Skip cooldown application on synthetic cache-keepalive replays. The
-		// keepalive scheduler fires parallel requests across every cached
-		// account simultaneously; bursts of 4+ concurrent requests can trip
-		// Anthropic's per-IP burst limit and 429 every account at the same
-		// instant. Treating those as real per-account rate limits drains the
-		// pool to zero routable accounts even though no user-visible quota
-		// was actually exhausted. Loop-prevention header set by
-		// cache-keepalive-scheduler.ts; only synthetic replays carry it.
+		// keepalive scheduler replays warm bodies in waves of up to
+		// KEEPALIVE_CONCURRENCY, so its own requests can contend with each
+		// other and with live traffic for Anthropic's per-IP burst allowance
+		// and 429 several accounts at nearly the same instant. Treating those
+		// as real per-account rate limits drains the pool toward zero routable
+		// accounts even though no user-visible quota was actually exhausted.
+		// Loop-prevention header set by cache-keepalive-scheduler.ts; only
+		// synthetic replays carry it.
 		const isKeepalive =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
