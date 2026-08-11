@@ -1,11 +1,11 @@
-import {
-	LATEST_FABLE_MODEL,
-	LATEST_HAIKU_MODEL,
-	LATEST_OPUS_MODEL,
-	LATEST_SONNET_MODEL,
-} from "@clankermux/core";
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import type { Account } from "../../api";
+import {
+	buildModelMappingsPayload,
+	formatMappingValue,
+	getPlaceholderModels,
+	type ModelFamilyFieldValues,
+} from "../../lib/model-mappings";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -28,19 +28,12 @@ interface AccountModelMappingsDialogProps {
 	) => Promise<void>;
 }
 
-function formatMappingValue(value: string | string[]): string {
-	return Array.isArray(value) ? value.join(", ") : value || "";
-}
-
-function parseMappingValue(value: string): string | string[] | null {
-	const trimmed = value.trim();
-	if (!trimmed) return null;
-	const parts = trimmed
-		.split(",")
-		.map((s) => s.trim())
-		.filter(Boolean);
-	return parts.length === 1 ? parts[0] : parts;
-}
+const EMPTY_FIELDS: ModelFamilyFieldValues = {
+	opus: "",
+	sonnet: "",
+	haiku: "",
+	fable: "",
+};
 
 export function AccountModelMappingsDialog({
 	isOpen,
@@ -48,35 +41,34 @@ export function AccountModelMappingsDialog({
 	onOpenChange,
 	onUpdateModelMappings,
 }: AccountModelMappingsDialogProps) {
-	const [modelMappings, setModelMappings] = useState<{
-		opus: string;
-		sonnet: string;
-		haiku: string;
-		fable: string;
-	}>({
-		opus: "",
-		sonnet: "",
-		haiku: "",
-		fable: "",
-	});
+	const [modelMappings, setModelMappings] =
+		useState<ModelFamilyFieldValues>(EMPTY_FIELDS);
+	// The account's mapping as stored. Keys outside the four family fields (e.g.
+	// an exact `claude-fable-5` entry) are not editable here but must survive a
+	// save, since the update endpoint replaces model_mappings wholesale.
+	const [storedMappings, setStoredMappings] = useState<{
+		[key: string]: string | string[];
+	} | null>(null);
 	const [isLoading, setIsLoading] = useState(false);
+
+	const placeholders = useMemo(
+		() => getPlaceholderModels(account?.provider),
+		[account?.provider],
+	);
 
 	// Update form when account changes
 	React.useEffect(() => {
-		if (account?.modelMappings) {
+		const stored = account?.modelMappings ?? null;
+		setStoredMappings(stored);
+		if (stored) {
 			setModelMappings({
-				opus: formatMappingValue(account.modelMappings.opus || ""),
-				sonnet: formatMappingValue(account.modelMappings.sonnet || ""),
-				haiku: formatMappingValue(account.modelMappings.haiku || ""),
-				fable: formatMappingValue(account.modelMappings.fable || ""),
+				opus: formatMappingValue(stored.opus),
+				sonnet: formatMappingValue(stored.sonnet),
+				haiku: formatMappingValue(stored.haiku),
+				fable: formatMappingValue(stored.fable),
 			});
 		} else {
-			setModelMappings({
-				opus: "",
-				sonnet: "",
-				haiku: "",
-				fable: "",
-			});
+			setModelMappings(EMPTY_FIELDS);
 		}
 	}, [account]);
 
@@ -85,18 +77,10 @@ export function AccountModelMappingsDialog({
 
 		setIsLoading(true);
 		try {
-			const mappingsToSend: { [key: string]: string | string[] } = {};
-			const opus = parseMappingValue(modelMappings.opus);
-			const sonnet = parseMappingValue(modelMappings.sonnet);
-			const haiku = parseMappingValue(modelMappings.haiku);
-			const fable = parseMappingValue(modelMappings.fable);
-
-			if (opus) mappingsToSend.opus = opus;
-			if (sonnet) mappingsToSend.sonnet = sonnet;
-			if (haiku) mappingsToSend.haiku = haiku;
-			if (fable) mappingsToSend.fable = fable;
-
-			await onUpdateModelMappings(account.id, mappingsToSend);
+			await onUpdateModelMappings(
+				account.id,
+				buildModelMappingsPayload(storedMappings, modelMappings),
+			);
 			onOpenChange(false);
 		} catch (error) {
 			console.error("Failed to update model mappings:", error);
@@ -106,7 +90,7 @@ export function AccountModelMappingsDialog({
 	};
 
 	const handleInputChange = (
-		modelType: "opus" | "sonnet" | "haiku" | "fable",
+		modelType: keyof ModelFamilyFieldValues,
 		value: string,
 	) => {
 		setModelMappings((prev) => ({
@@ -147,7 +131,7 @@ export function AccountModelMappingsDialog({
 									id="opus"
 									value={modelMappings.opus}
 									onChange={(e) => handleInputChange("opus", e.target.value)}
-									placeholder={`e.g., ${LATEST_OPUS_MODEL}`}
+									placeholder={`e.g., ${placeholders.opus}`}
 									className="h-8"
 								/>
 							</div>
@@ -159,7 +143,7 @@ export function AccountModelMappingsDialog({
 									id="sonnet"
 									value={modelMappings.sonnet}
 									onChange={(e) => handleInputChange("sonnet", e.target.value)}
-									placeholder={`e.g., ${LATEST_SONNET_MODEL}`}
+									placeholder={`e.g., ${placeholders.sonnet}`}
 									className="h-8"
 								/>
 							</div>
@@ -171,7 +155,7 @@ export function AccountModelMappingsDialog({
 									id="haiku"
 									value={modelMappings.haiku}
 									onChange={(e) => handleInputChange("haiku", e.target.value)}
-									placeholder={`e.g., ${LATEST_HAIKU_MODEL}`}
+									placeholder={`e.g., ${placeholders.haiku}`}
 									className="h-8"
 								/>
 							</div>
@@ -183,7 +167,7 @@ export function AccountModelMappingsDialog({
 									id="fable"
 									value={modelMappings.fable}
 									onChange={(e) => handleInputChange("fable", e.target.value)}
-									placeholder={`e.g., ${LATEST_FABLE_MODEL}`}
+									placeholder={`e.g., ${placeholders.fable}`}
 									className="h-8"
 								/>
 							</div>
