@@ -312,6 +312,36 @@ describe("processResponse – JSON (application/json)", () => {
 		const result = await provider.processResponse(upstream, makeAccount());
 		expect(result).toBeInstanceOf(Response);
 	});
+
+	it("malformed JSON is forwarded byte-verbatim on the fallback path", async () => {
+		const provider = makeProvider();
+		const raw = "not-valid-json{{{";
+		const upstream = new Response(raw, {
+			status: 502,
+			headers: { "content-type": "application/json" },
+		});
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		expect(result.status).toBe(502);
+		// The upstream error must surface verbatim — the original was consumed,
+		// so this proves the fallback re-forwards the captured bytes, not an
+		// empty stream.
+		expect(await result.text()).toBe(raw);
+	});
+
+	it("204 with a JSON content-type forwards as a body-less 204 instead of throwing", async () => {
+		const provider = makeProvider();
+		// A null-body status: `new Response("", { status: 204 })` throws, so the
+		// fallback must pass null for an empty capture.
+		const upstream = new Response(null, {
+			status: 204,
+			headers: { "content-type": "application/json" },
+		});
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		expect(result.status).toBe(204);
+		expect(result.body).toBeNull();
+	});
 });
 
 // ---------------------------------------------------------------------------

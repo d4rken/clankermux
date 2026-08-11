@@ -139,14 +139,20 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			// never forwards `response` itself, so a clone teed the body and then
 			// abandoned the original branch with nobody able to release it.
 			//
-			// The body is read ONCE into text so the conversion-failure path can
-			// still forward the upstream bytes verbatim (the "surface the real
+			// The body is read ONCE as bytes so the conversion-failure path can
+			// still forward the upstream payload verbatim (the "surface the real
 			// upstream error" contract) — falling through to `response.body` would
-			// forward an empty body once the original has been consumed.
-			let raw: string | null = null;
+			// forward an empty body once the original has been consumed, and
+			// re-encoding decoded text would not be byte-identical (BOM, invalid
+			// UTF-8) under a preserved Content-Length. An empty capture falls back
+			// to a null body: `new Response("", ...)` throws for null-body statuses
+			// like a 204, while null is valid for every status.
+			let rawBytes: ArrayBuffer | null = null;
 			try {
-				raw = await response.text();
-				const anthropicData = convertOpenAIResponseToAnthropic(JSON.parse(raw));
+				rawBytes = await response.arrayBuffer();
+				const anthropicData = convertOpenAIResponseToAnthropic(
+					JSON.parse(new TextDecoder().decode(rawBytes)),
+				);
 
 				return new Response(JSON.stringify(anthropicData), {
 					status: response.status,
@@ -158,9 +164,9 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					"Failed to convert OpenAI response to Anthropic format:",
 					error,
 				);
-				// If conversion fails, return the original body unchanged.
-				if (raw !== null) {
-					return new Response(raw, {
+				// If conversion fails, return the original bytes unchanged.
+				if (rawBytes !== null) {
+					return new Response(rawBytes.byteLength > 0 ? rawBytes : null, {
 						status: response.status,
 						statusText: response.statusText,
 						headers: sanitizeHeaders(response.headers),
