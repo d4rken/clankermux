@@ -180,41 +180,60 @@ describe("QwenProvider", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// 5. beforeConvert
+	// 5. model mapping (resolver-owned provider defaults)
 	// -------------------------------------------------------------------------
-	describe("beforeConvert", () => {
-		it("returns undefined when account is undefined", () => {
-			const result = provider.beforeConvert({}, undefined);
-			expect(result).toBeUndefined();
-		});
-
-		it("injects default Qwen model mappings when model_mappings is null", () => {
-			const account = makeAccount({ model_mappings: null });
-			const result = provider.beforeConvert({}, account);
-			expect(result).toBeDefined();
-			const mappings = JSON.parse(result?.model_mappings as string);
-			expect(mappings.opus).toBe("coder-model");
-			expect(mappings.sonnet).toBe("coder-model");
-			expect(mappings.haiku).toBe("coder-model");
-		});
-
-		it("preserves existing model_mappings when already set", () => {
-			const custom = JSON.stringify({
-				opus: "my-opus",
-				sonnet: "my-sonnet",
-				haiku: "my-haiku",
+	describe("model mapping", () => {
+		async function transformedModel(
+			anthropicModel: string,
+			account: Account,
+		): Promise<string> {
+			const request = new Request("https://example.invalid/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: anthropicModel,
+					max_tokens: 64,
+					messages: [{ role: "user", content: "Hello" }],
+				}),
 			});
-			const account = makeAccount({ model_mappings: custom });
-			const result = provider.beforeConvert({}, account);
-			expect(result?.model_mappings).toBe(custom);
+			const transformed = await provider.transformRequestBody(request, account);
+			const body = (await transformed.json()) as { model: string };
+			return body.model;
+		}
+
+		it("maps every Claude family to coder-model when model_mappings is null", async () => {
+			const account = makeAccount({ model_mappings: null });
+			expect(await transformedModel("claude-opus-4-8", account)).toBe(
+				"coder-model",
+			);
+			expect(await transformedModel("claude-sonnet-5", account)).toBe(
+				"coder-model",
+			);
+			expect(await transformedModel("claude-haiku-4-5", account)).toBe(
+				"coder-model",
+			);
 		});
 
-		it("does not mutate the original account", () => {
+		it("maps fable and mythos ids to coder-model", async () => {
 			const account = makeAccount({ model_mappings: null });
-			const original = { ...account };
-			provider.beforeConvert({}, account);
-			expect(account.model_mappings).toBeNull();
-			expect(account.id).toBe(original.id);
+			expect(await transformedModel("claude-fable-5", account)).toBe(
+				"coder-model",
+			);
+			expect(await transformedModel("claude-mythos-5", account)).toBe(
+				"coder-model",
+			);
+		});
+
+		it("honours a custom mapping and defaults the families it omits", async () => {
+			const account = makeAccount({
+				model_mappings: JSON.stringify({ opus: "my-opus" }),
+			});
+			expect(await transformedModel("claude-opus-4-8", account)).toBe(
+				"my-opus",
+			);
+			expect(await transformedModel("claude-fable-5", account)).toBe(
+				"coder-model",
+			);
 		});
 	});
 
