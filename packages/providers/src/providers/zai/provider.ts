@@ -1,3 +1,4 @@
+import { discardTeeBranch } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import type { RateLimitInfo } from "../../types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
@@ -22,12 +23,24 @@ export class ZaiProvider extends BaseAnthropicCompatibleProvider {
 	/**
 	 * Parse rate limit information from response body for Zai-specific format
 	 * Zai returns rate limit info in JSON response body with Singapore time
+	 *
+	 * This clone is rate-limit CLASSIFICATION, not usage extraction (which is
+	 * inline on the forwarding path): it runs on a response the proxy may still
+	 * forward to the client, so the caller keeps ownership and the clone must
+	 * stay.
+	 *
+	 * The clone is therefore disposed here instead. `discardTeeBranch` cancels
+	 * (never drains — draining a branch makes the tee buffer for its twin) and is
+	 * never awaited (a tee branch's cancel does not settle until both branches
+	 * cancel). It no-ops on the normal path, where `.json()` has already consumed
+	 * the branch; it matters when `.json()` throws part-way through a body, which
+	 * is exactly the malformed-error case this parser exists for.
 	 */
 	async parseRateLimitFromBody(
 		response: Response,
 	): Promise<number | undefined> {
+		const clone = response.clone();
 		try {
-			const clone = response.clone();
 			const body = await clone.json();
 
 			// Check for Zai rate limit error format
@@ -71,6 +84,10 @@ export class ZaiProvider extends BaseAnthropicCompatibleProvider {
 			}
 		} catch (error) {
 			log.debug("Failed to parse rate limit from response body:", error);
+		} finally {
+			if (!clone.bodyUsed && !clone.body?.locked) {
+				discardTeeBranch(clone);
+			}
 		}
 		return undefined;
 	}
