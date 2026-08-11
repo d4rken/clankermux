@@ -1,6 +1,5 @@
 import { Logger } from "@clankermux/logger";
 import type { OpenAIRequest } from "@clankermux/openai-formats";
-import type { Account } from "@clankermux/types";
 import type { RateLimitInfo } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
 
@@ -19,13 +18,6 @@ const STAINLESS_HEADERS: Record<string, string> = {
 	"X-Stainless-Arch": "arm64",
 	"X-Stainless-Package-Version": "5.11.0",
 	"X-Stainless-Retry-Count": "0",
-};
-
-// All Anthropic model tiers map to coder-model (Qwen's unified coding model)
-const QWEN_MODEL_MAPPINGS = {
-	opus: "coder-model",
-	sonnet: "coder-model",
-	haiku: "coder-model",
 };
 
 // Lines in the Claude Code system prompt that are environment/model-specific
@@ -141,21 +133,6 @@ export class QwenProvider extends OpenAICompatibleProvider {
 
 	override supportsUsageTracking(): boolean {
 		return true;
-	}
-
-	/**
-	 * Inject Qwen-specific model mappings when the account has no custom mappings.
-	 */
-	override beforeConvert(
-		_body: Record<string, unknown>,
-		account?: Account,
-	): Account | undefined {
-		if (!account) return account;
-		return {
-			...account,
-			model_mappings:
-				account.model_mappings ?? JSON.stringify(QWEN_MODEL_MAPPINGS),
-		};
 	}
 
 	/**

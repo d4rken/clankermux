@@ -1,8 +1,4 @@
-import {
-	CLAUDE_CLI_VERSION,
-	getNormalizedRepresentativeUtilization,
-	normalizeAnthropicUsage,
-} from "@clankermux/core";
+import { CLAUDE_CLI_VERSION, normalizeAnthropicUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	type AnthropicLimitEntry,
@@ -509,21 +505,84 @@ export async function fetchUsageData(
 	}
 }
 
+/** One account-level window considered for the representative reading. */
+interface RepresentativeCandidate {
+	/** Flat-payload window name, used verbatim as the reported window. */
+	name: string;
+	utilization: number;
+}
+
 /**
- * Representative account-wide utilization for an Anthropic/Codex windowed
- * payload: the max of the account-session (5h), account-wide weekly, and the
- * OAuth-apps weekly (`seven_day_oauth_apps`) windows. The session + weekly are
- * sourced through {@link normalizeAnthropicUsage} so it reads flat AND
- * `limits[]`-only payloads identically; the OAuth-apps window (the Claude Code
- * weekly quota — the binding constraint for OAuth accounts) is folded in from
- * the flat field, since the normalizer's account-wide windows don't capture it.
- * `weekly_scoped` (per-family) and `extra_usage` are deliberately excluded.
+ * Resolve THE representative account-level window for an Anthropic/Codex
+ * windowed payload — both its utilization and its name, from one and the same
+ * candidate. Utilization and window naming must never be derived independently:
+ * that is how a mixed payload came to report a number from one window under the
+ * name of another.
+ *
+ * Candidates, and only these: the account-session (5h), the account-wide weekly,
+ * and the OAuth-apps weekly (`seven_day_oauth_apps`). The session + weekly are
+ * sourced through {@link normalizeAnthropicUsage} so flat AND `limits[]`-only
+ * payloads read identically; the OAuth-apps window (the Claude Code weekly quota
+ * — the binding constraint for OAuth accounts) is folded in from the flat field,
+ * since the normalizer's account-wide windows don't capture it. `weekly_scoped`
+ * and the model-scoped flat windows (`seven_day_opus`/`seven_day_sonnet`) are
+ * NOT account-level, and `extra_usage` is deliberately excluded.
  *
  * Why exclude `extra_usage`: overage-credit exhaustion is handled by the
  * dedicated `out_of_credits` floor-until cooldown path, NOT this generic
  * usage-based clear guard; and `getAccountCapacitySignal` still folds
  * `extra_usage` into `bindingUtilization` for load-balancer deprioritization —
  * so excluding it here only affects the cooldown-clear guard, intentionally.
+ *
+ * Returns `null` when no candidate carries evidence.
+ */
+function resolveRepresentativeWindow(
+	usage: UsageData | null,
+	now: number,
+): RepresentativeCandidate | null {
+	if (!usage) return null;
+
+	const normalized = normalizeAnthropicUsage(
+		usage as AnthropicUsageData | null,
+		now,
+	);
+	const candidates: RepresentativeCandidate[] = [];
+	if (normalized.session) {
+		candidates.push({
+			name: "five_hour",
+			utilization: normalized.session.utilization,
+		});
+	}
+	if (normalized.weeklyAll) {
+		candidates.push({
+			name: "seven_day",
+			utilization: normalized.weeklyAll.utilization,
+		});
+	}
+	// (If Anthropic ever carries an OAuth-apps-equivalent in `limits[]`, add it to
+	// the normalizer; flat is the known shape today.)
+	const oauth = usage.seven_day_oauth_apps;
+	if (
+		oauth &&
+		typeof oauth.utilization === "number" &&
+		Number.isFinite(oauth.utilization)
+	) {
+		candidates.push({
+			name: "seven_day_oauth_apps",
+			utilization: oauth.utilization,
+		});
+	}
+
+	if (candidates.length === 0) return null;
+	return candidates.reduce((prev, current) =>
+		current.utilization > prev.utilization ? current : prev,
+	);
+}
+
+/**
+ * Representative account-wide utilization: the utilization of the binding
+ * account-level window resolved by {@link resolveRepresentativeWindow} (which
+ * documents exactly which windows count and why).
  *
  * **Returns `null` when there is no account-level evidence — NEVER 0.** The old
  * reader collapsed "no windows" into `0`, which read as "plenty of headroom"
@@ -535,21 +594,7 @@ export function getRepresentativeUtilization(
 	usage: UsageData | null,
 	now: number = Date.now(),
 ): number | null {
-	const base = getNormalizedRepresentativeUtilization(
-		normalizeAnthropicUsage(usage as AnthropicUsageData | null, now),
-	);
-	// Fold in the flat OAuth-apps weekly window if present. (If Anthropic ever
-	// carries an OAuth-apps-equivalent in `limits[]`, add it to the normalizer;
-	// flat is the known shape today.)
-	const oauth = usage?.seven_day_oauth_apps;
-	const oauthUtil =
-		oauth &&
-		typeof oauth.utilization === "number" &&
-		Number.isFinite(oauth.utilization)
-			? oauth.utilization
-			: null;
-	if (oauthUtil === null) return base;
-	return base === null ? oauthUtil : Math.max(base, oauthUtil);
+	return resolveRepresentativeWindow(usage, now)?.utilization ?? null;
 }
 
 /**
@@ -615,65 +660,15 @@ export function shouldReportCapacityRestored(
 }
 
 /**
- * Determine which window is the most restrictive (highest utilization)
- * Dynamically handles any usage window fields in the response
+ * Name the most restrictive account-level window — the same candidate
+ * {@link getRepresentativeUtilization} reports the number for, resolved by
+ * {@link resolveRepresentativeWindow}.
  */
 export function getRepresentativeWindow(
 	usage: UsageData | null,
 	now: number = Date.now(),
 ): string | null {
-	if (!usage) return null;
-
-	const windows: Array<{ name: string; util: number }> = [];
-
-	// Iterate through all properties to find UsageWindow objects
-	for (const [key, value] of Object.entries(usage)) {
-		// Check if this is a UsageWindow object
-		if (
-			value &&
-			typeof value === "object" &&
-			"utilization" in value &&
-			typeof value.utilization === "number"
-		) {
-			windows.push({ name: key, util: value.utilization });
-		}
-		// Also check extra_usage if present
-		if (
-			key === "extra_usage" &&
-			value &&
-			typeof value === "object" &&
-			"utilization" in value &&
-			typeof value.utilization === "number"
-		) {
-			windows.push({ name: key, util: value.utilization });
-		}
-	}
-
-	// `limits[]`-only payload: no flat UsageWindow fields were found, so name the
-	// binding window from the normalizer's account-wide windows.
-	if (windows.length === 0) {
-		const normalized = normalizeAnthropicUsage(
-			usage as AnthropicUsageData | null,
-			now,
-		);
-		if (normalized.session) {
-			windows.push({ name: "five_hour", util: normalized.session.utilization });
-		}
-		if (normalized.weeklyAll) {
-			windows.push({
-				name: "seven_day",
-				util: normalized.weeklyAll.utilization,
-			});
-		}
-	}
-
-	if (windows.length === 0) return null;
-
-	const max = windows.reduce((prev, current) =>
-		current.util > prev.util ? current : prev,
-	);
-
-	return max.name;
+	return resolveRepresentativeWindow(usage, now)?.name ?? null;
 }
 
 /**

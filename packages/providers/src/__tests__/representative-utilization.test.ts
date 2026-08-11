@@ -219,3 +219,96 @@ describe("getRepresentativeWindow — limits[]-only", () => {
 		expect(getRepresentativeWindow({} as UsageData)).toBeNull();
 	});
 });
+
+/**
+ * The utilization and the window name must always describe the SAME candidate.
+ * The old window-naming loop walked every UsageWindow-shaped key, so it could
+ * name `extra_usage` or a model-scoped window that the utilization reader
+ * deliberately excludes — pairing a number from one window with the name of
+ * another.
+ */
+describe("getRepresentativeUtilization / getRepresentativeWindow — same candidate", () => {
+	it("never names extra_usage, even when it is the highest window", () => {
+		const data = {
+			five_hour: { utilization: 35, resets_at: null },
+			extra_usage: {
+				is_enabled: true,
+				monthly_limit: 100,
+				used_credits: 100,
+				utilization: 100,
+			},
+		} as unknown as UsageData;
+		expect(getRepresentativeUtilization(data)).toBe(35);
+		expect(getRepresentativeWindow(data)).toBe("five_hour");
+	});
+
+	it("returns null for both when extra_usage is the only window present", () => {
+		const data = {
+			extra_usage: {
+				is_enabled: true,
+				monthly_limit: 100,
+				used_credits: 100,
+				utilization: 100,
+			},
+		} as unknown as UsageData;
+		expect(getRepresentativeUtilization(data)).toBeNull();
+		expect(getRepresentativeWindow(data)).toBeNull();
+	});
+
+	it("never names a model-scoped flat window in a mixed payload", () => {
+		// seven_day_opus (100) is model-scoped → excluded. The account-level
+		// candidates are the limits[] session (100) and the OAuth-apps weekly (20),
+		// so the pair must be 100 / five_hour — not 100 / seven_day_opus.
+		const data = {
+			seven_day_opus: { utilization: 100, resets_at: null },
+			seven_day_oauth_apps: { utilization: 20, resets_at: null },
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 100,
+					resets_at: null,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		expect(getRepresentativeUtilization(data)).toBe(100);
+		expect(getRepresentativeWindow(data)).toBe("five_hour");
+	});
+
+	it("leaves a limits[]-only payload unchanged", () => {
+		const data = {
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 40,
+					resets_at: null,
+					scope: null,
+					is_active: true,
+				},
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 60,
+					resets_at: null,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as UsageData;
+		expect(getRepresentativeUtilization(data)).toBe(60);
+		expect(getRepresentativeWindow(data)).toBe("seven_day");
+	});
+
+	it("names the OAuth-apps weekly window when it is the binding one", () => {
+		const data: UsageData = {
+			five_hour: { utilization: 10, resets_at: null },
+			seven_day: { utilization: 20, resets_at: null },
+			seven_day_oauth_apps: { utilization: 77, resets_at: null },
+		};
+		expect(getRepresentativeUtilization(data)).toBe(77);
+		expect(getRepresentativeWindow(data)).toBe("seven_day_oauth_apps");
+	});
+});

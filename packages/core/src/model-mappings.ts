@@ -138,13 +138,75 @@ function toArray(value: string | string[]): string[] {
 }
 
 /**
+ * True iff a raw mapping value is usable as a model target: a non-empty string,
+ * or a non-empty array of non-empty strings.
+ */
+function isValidMappingValue(value: unknown): value is string | string[] {
+	if (typeof value === "string") return value.trim().length > 0;
+	if (Array.isArray(value)) {
+		return (
+			value.length > 0 &&
+			value.every((item) => typeof item === "string" && item.trim().length > 0)
+		);
+	}
+	return false;
+}
+
+/**
+ * Apply one configuration layer over `target`, dropping entries whose value is
+ * not a usable model target. Unvalidated, `{"sonnet": null}` (or `42`, or `[]`)
+ * would shadow a lower-precedence default and reach the wire as the outbound
+ * model name via {@link toArray}.
+ */
+function applyMappingLayer(
+	target: Record<string, string | string[]>,
+	layer: Record<string, unknown> | null | undefined,
+	source: string,
+): void {
+	if (!layer) return;
+	for (const [key, value] of Object.entries(layer)) {
+		if (!isValidMappingValue(value)) {
+			log.warn(
+				`Ignoring invalid model mapping for '${key}' from ${source}: ${JSON.stringify(value)}`,
+			);
+			continue;
+		}
+		target[key] = value;
+	}
+}
+
+/**
+ * Built-in family defaults for `account.provider`, or undefined when the
+ * provider has none. Own-property lookup only — a provider name that collides
+ * with an Object.prototype key must not resolve to an inherited member.
+ */
+function getProviderDefaultMappings(
+	provider: string,
+): Record<ModelFamily, string> | undefined {
+	return Object.hasOwn(PROVIDER_DEFAULT_MODEL_MAPPINGS, provider)
+		? PROVIDER_DEFAULT_MODEL_MAPPINGS[provider]
+		: undefined;
+}
+
+/**
  * Get effective model mappings for an account, merging model_fallbacks into
  * the arrays so that model_fallbacks becomes the second+ entry for each family.
+ *
+ * Layered lowest-precedence first: built-in provider defaults, then the env
+ * override, then the account's `model_mappings`, then the legacy
+ * `custom_endpoint` payload. Explicit configuration always beats a built-in
+ * default.
  */
 export function getModelMappings(
 	account: Account,
 ): Record<string, string | string[]> {
 	const mappings: Record<string, string | string[]> = {};
+
+	// Built-in provider defaults (e.g. qwen → coder-model) — the lowest layer.
+	const providerDefaults = getProviderDefaultMappings(account.provider);
+	if (providerDefaults) {
+		Object.assign(mappings, providerDefaults);
+	}
 
 	// Check for environment variable overrides (only in Node.js)
 	if (
@@ -152,11 +214,15 @@ export function getModelMappings(
 		process.env?.OPENAI_COMPATIBLE_MODEL_MAPPINGS
 	) {
 		try {
-			const envMappings = safeJsonParse<Record<string, string | string[]>>(
+			const envMappings = safeJsonParse<Record<string, unknown>>(
 				process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS,
 				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
 			);
-			Object.assign(mappings, envMappings);
+			applyMappingLayer(
+				mappings,
+				envMappings,
+				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
+			);
 		} catch (error) {
 			log.warn(
 				"Failed to parse OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable:",
@@ -167,9 +233,11 @@ export function getModelMappings(
 
 	// Check for account-specific mappings in model_mappings field
 	const accountMappings = parseModelMappings(account.model_mappings);
-	if (accountMappings) {
-		Object.assign(mappings, accountMappings);
-	}
+	applyMappingLayer(
+		mappings,
+		accountMappings,
+		`model_mappings for account ${account.name}`,
+	);
 
 	// Check for legacy mappings in custom_endpoint JSON payload (fallback)
 	const customEndpointData = parseCustomEndpointData(account.custom_endpoint);
@@ -177,7 +245,11 @@ export function getModelMappings(
 		log.warn(
 			`Found model mappings in custom_endpoint for account ${account.name} - this is deprecated. Use model_mappings field instead.`,
 		);
-		Object.assign(mappings, customEndpointData.modelMappings);
+		applyMappingLayer(
+			mappings,
+			customEndpointData.modelMappings,
+			`custom_endpoint for account ${account.name}`,
+		);
 	}
 
 	// Merge model_fallbacks into the arrays so they become the next models to try
@@ -208,6 +280,8 @@ export function getModelMappings(
  * Returns false if the account should just forward the model name unchanged.
  */
 function hasAccountModelMappings(account: Account): boolean {
+	// A provider with built-in family defaults always maps, even unconfigured.
+	if (getProviderDefaultMappings(account.provider)) return true;
 	if (account.model_mappings) return true;
 	if (account.model_fallbacks) return true;
 
@@ -567,6 +641,39 @@ export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	haiku: "gpt-5.6-luna",
 	// Fable/Mythos are above Opus — route to the top Codex tier (same as opus).
 	fable: "gpt-5.6-sol",
+};
+
+/**
+ * Default Anthropic-family → Qwen model mapping. Qwen/DashScope serves every
+ * tier from one unified coding model, so all four families collapse onto it.
+ *
+ * Typed exhaustively over {@link ModelFamily}: adding a family must fail
+ * compilation here rather than silently leaving that family unmapped — which is
+ * exactly how the previous provider-local map missed `fable`/`mythos` and sent
+ * `claude-fable-5` upstream to DashScope as an unknown model.
+ */
+export const DEFAULT_QWEN_MODEL_BY_FAMILY: Record<ModelFamily, string> = {
+	opus: "coder-model",
+	sonnet: "coder-model",
+	haiku: "coder-model",
+	fable: "coder-model",
+};
+
+/**
+ * Built-in family defaults per provider, seeded by {@link getModelMappings} as
+ * the LOWEST-precedence layer. This is the single mechanism for "this provider
+ * has a sensible default target for every Claude family" — providers must not
+ * re-implement it in their own request hooks.
+ *
+ * Codex is deliberately absent: its defaults apply through
+ * {@link resolveCodexTargetModel} and the Codex provider's own `mapModel()`,
+ * which the context-window gate is built around. Registering them here too
+ * would give Codex two disagreeing default paths.
+ */
+export const PROVIDER_DEFAULT_MODEL_MAPPINGS: Partial<
+	Record<string, Record<ModelFamily, string>>
+> = {
+	qwen: DEFAULT_QWEN_MODEL_BY_FAMILY,
 };
 
 /**

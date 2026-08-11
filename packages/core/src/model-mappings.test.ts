@@ -1,17 +1,21 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
 	codexAccountFitsRequest,
 	codexAccountFitsRequestUnmargined,
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
+	DEFAULT_QWEN_MODEL_BY_FAMILY,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	GATE_CHARS_PER_TOKEN,
 	GATE_OUTPUT_RESERVE_CAP,
 	getAllowedModelsMessage,
 	getModelFamily,
+	getModelList,
+	getModelMappings,
 	isValidClaudeModel,
 	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
+	PROVIDER_DEFAULT_MODEL_MAPPINGS,
 	parseModelMappings,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
@@ -840,5 +844,192 @@ describe("claude-opus-5 routing", () => {
 			"z-ai/glm-4.5-air:free",
 		);
 		expect(mapModelName("claude-opus-5", account)).toBe("claude-opus-5");
+	});
+});
+
+function makeQwenAccount(overrides: Partial<Account> = {}): Account {
+	return {
+		id: "qwen-1",
+		name: "qwen-test",
+		provider: "qwen",
+		api_key: null,
+		refresh_token: null,
+		access_token: null,
+		expires_at: null,
+		created_at: Date.now(),
+		request_count: 0,
+		total_requests: 0,
+		priority: 10,
+		model_mappings: null,
+		custom_endpoint: null,
+		...overrides,
+	};
+}
+
+describe("PROVIDER_DEFAULT_MODEL_MAPPINGS", () => {
+	afterEach(() => {
+		delete process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS;
+	});
+
+	test("DEFAULT_QWEN_MODEL_BY_FAMILY covers every family", () => {
+		expect(DEFAULT_QWEN_MODEL_BY_FAMILY).toEqual({
+			opus: "coder-model",
+			sonnet: "coder-model",
+			haiku: "coder-model",
+			fable: "coder-model",
+		});
+	});
+
+	test("registers qwen and deliberately not codex", () => {
+		expect(PROVIDER_DEFAULT_MODEL_MAPPINGS.qwen).toBe(
+			DEFAULT_QWEN_MODEL_BY_FAMILY,
+		);
+		// Codex defaults apply through resolveCodexTargetModel / the Codex
+		// provider's own mapModel, never through the generic resolver.
+		expect(PROVIDER_DEFAULT_MODEL_MAPPINGS.codex).toBeUndefined();
+	});
+
+	test("all four families map to coder-model with NULL model_mappings", () => {
+		const account = makeQwenAccount({ model_mappings: null });
+		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
+		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
+	});
+
+	test("mythos ids map through the fable family", () => {
+		const account = makeQwenAccount({ model_mappings: null });
+		expect(mapModelName("claude-mythos-5", account)).toBe("coder-model");
+	});
+
+	test("a partial custom mapping only overrides the families it names", () => {
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({ opus: "custom-x" }),
+		});
+		expect(mapModelName("claude-opus-4-8", account)).toBe("custom-x");
+		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
+	});
+
+	test("an exact model-id entry wins over its family default", () => {
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({ "claude-fable-5": "special-model" }),
+		});
+		expect(mapModelName("claude-fable-5", account)).toBe("special-model");
+		// Other fable-family ids still take the default.
+		expect(mapModelName("claude-mythos-5", account)).toBe("coder-model");
+	});
+
+	test("array mapping values stay arrays with their order preserved", () => {
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({ opus: ["first", "second", "third"] }),
+		});
+		expect(getModelList("claude-opus-4-8", account)).toEqual([
+			"first",
+			"second",
+			"third",
+		]);
+	});
+
+	test("the env override beats the provider defaults", () => {
+		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
+			sonnet: "env-sonnet",
+		});
+		const account = makeQwenAccount({ model_mappings: null });
+		expect(mapModelName("claude-sonnet-5", account)).toBe("env-sonnet");
+		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
+	});
+
+	test("account mappings beat the env override", () => {
+		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
+			sonnet: "env-sonnet",
+		});
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({ sonnet: "account-sonnet" }),
+		});
+		expect(mapModelName("claude-sonnet-5", account)).toBe("account-sonnet");
+	});
+
+	test("legacy custom_endpoint mappings beat account mappings", () => {
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({ sonnet: "account-sonnet" }),
+			custom_endpoint: JSON.stringify({
+				endpoint: "https://example.invalid",
+				modelMappings: { sonnet: "legacy-sonnet" },
+			}),
+		});
+		expect(mapModelName("claude-sonnet-5", account)).toBe("legacy-sonnet");
+	});
+
+	test("a missing-family model_fallbacks entry lands as a secondary behind the default", () => {
+		// Accepted behaviour change: with provider defaults seeded, a fallback for
+		// an unmapped family is appended behind the default instead of becoming the
+		// effective primary.
+		const account = makeQwenAccount({
+			model_mappings: null,
+			model_fallbacks: JSON.stringify({ opus: "fallback-opus" }),
+		});
+		expect(getModelList("claude-opus-4-8", account)).toEqual([
+			"coder-model",
+			"fallback-opus",
+		]);
+	});
+
+	test("invalid mapping values are skipped and cannot shadow a default", () => {
+		const account = makeQwenAccount({
+			model_mappings: JSON.stringify({
+				sonnet: null,
+				opus: 42,
+				haiku: [],
+				fable: [""],
+			}),
+		});
+		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
+		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
+		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
+	});
+
+	test("an invalid env value is skipped and cannot shadow a default", () => {
+		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
+			sonnet: null,
+		});
+		const account = makeQwenAccount({ model_mappings: null });
+		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
+	});
+
+	test("unparseable model_mappings JSON leaves the defaults intact", () => {
+		const account = makeQwenAccount({ model_mappings: "not-json" });
+		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
+	});
+
+	test("an empty {} mapping leaves the defaults intact", () => {
+		const account = makeQwenAccount({ model_mappings: "{}" });
+		expect(getModelMappings(account)).toEqual({
+			opus: "coder-model",
+			sonnet: "coder-model",
+			haiku: "coder-model",
+			fable: "coder-model",
+		});
+	});
+
+	test("a non-qwen account with no mapping configuration still bails to null", () => {
+		const account = makeQwenAccount({
+			provider: "openai-compatible",
+			model_mappings: null,
+		});
+		expect(getModelList("claude-opus-4-8", account)).toBeNull();
+		expect(mapModelName("claude-opus-4-8", account)).toBe("claude-opus-4-8");
+	});
+
+	test("an invalid value on a non-qwen account passes the model through unchanged", () => {
+		// Without value validation this returned the raw `null` as the outbound
+		// model name.
+		const account = makeQwenAccount({
+			provider: "openai-compatible",
+			model_mappings: JSON.stringify({ sonnet: null }),
+		});
+		expect(mapModelName("claude-sonnet-5", account)).toBe("claude-sonnet-5");
 	});
 });
