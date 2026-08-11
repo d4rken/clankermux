@@ -125,9 +125,6 @@ export const BUFFER_SIZES = {
 	// Anthropic provider stream cap
 	ANTHROPIC_STREAM_CAP_BYTES: 32768, // 32KB
 
-	// Stream tee default max bytes
-	STREAM_TEE_MAX_BYTES: 1024 * 1024, // 1MB
-
 	// Log file size
 	LOG_FILE_MAX_SIZE: 10 * 1024 * 1024, // 10MB
 
