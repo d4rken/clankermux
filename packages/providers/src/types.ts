@@ -76,43 +76,6 @@ export interface Provider {
 	transformRequestBody?(request: Request, account?: Account): Promise<Request>;
 
 	/**
-	 * Extract tier information from response if available
-	 */
-	extractTierInfo?(response: Response): Promise<number | null>;
-
-	/**
-	 * Extract usage information from response if available
-	 */
-	extractUsageInfo?(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
-	} | null>;
-
-	/**
-	 * Parse usage information from streaming SSE response if available
-	 * This is called for streaming responses to extract usage from final SSE events
-	 * Falls back to extractUsageInfo for non-streaming responses
-	 */
-	parseUsage?(response: Response): Promise<{
-		model?: string;
-		promptTokens?: number;
-		completionTokens?: number;
-		totalTokens?: number;
-		costUsd?: number;
-		inputTokens?: number;
-		cacheReadInputTokens?: number;
-		cacheCreationInputTokens?: number;
-		outputTokens?: number;
-	} | null>;
-
-	/**
 	 * Check if the response is a streaming response
 	 */
 	isStreamingResponse?(response: Response): boolean;

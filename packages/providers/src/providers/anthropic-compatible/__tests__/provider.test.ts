@@ -433,65 +433,6 @@ describe("AnthropicCompatibleProvider", () => {
 		});
 	});
 
-	describe("Usage Information Extraction", () => {
-		test("should extract usage info from JSON response", async () => {
-			const provider = new AnthropicCompatibleProvider();
-
-			const mockResponse = new Response(
-				JSON.stringify({
-					model: "custom-model",
-					usage: {
-						input_tokens: 100,
-						output_tokens: 200,
-						cache_read_input_tokens: 50,
-					},
-				}),
-				{
-					headers: { "content-type": "application/json" },
-				},
-			);
-
-			const usageInfo = await provider.extractUsageInfo(mockResponse);
-
-			expect(usageInfo?.model).toBe("custom-model");
-			expect(usageInfo?.inputTokens).toBe(100);
-			expect(usageInfo?.outputTokens).toBe(200);
-			expect(usageInfo?.cacheReadInputTokens).toBe(50);
-			expect(usageInfo?.promptTokens).toBe(150); // 100 + 50
-			expect(usageInfo?.completionTokens).toBe(200);
-			expect(usageInfo?.totalTokens).toBe(350); // 150 + 200
-		});
-
-		test("should return null for responses without usage", async () => {
-			const provider = new AnthropicCompatibleProvider();
-
-			const mockResponse = new Response(
-				JSON.stringify({
-					model: "custom-model",
-				}),
-				{
-					headers: { "content-type": "application/json" },
-				},
-			);
-
-			const usageInfo = await provider.extractUsageInfo(mockResponse);
-
-			expect(usageInfo).toBeNull();
-		});
-
-		test("should handle invalid JSON", async () => {
-			const provider = new AnthropicCompatibleProvider();
-
-			const mockResponse = new Response("invalid json", {
-				headers: { "content-type": "application/json" },
-			});
-
-			const usageInfo = await provider.extractUsageInfo(mockResponse);
-
-			expect(usageInfo).toBeNull();
-		});
-	});
-
 	describe("Edge Cases", () => {
 		test("should handle empty model mapping object", async () => {
 			const config: AnthropicCompatibleConfig = {
