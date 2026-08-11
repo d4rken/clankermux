@@ -266,7 +266,10 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 				this.config.supportsStreaming &&
 				contentType?.includes("text/event-stream")
 			) {
-				return this.extractStreamingUsage(clone, response.headers);
+				// Awaited on purpose: without the await the catch below can never see
+				// a rejection from the streaming path (e.g. the read-timeout throw),
+				// and the caller would get a rejected promise instead of null.
+				return await this.extractStreamingUsage(clone, response.headers);
 			}
 
 			// Handle non-streaming JSON responses
