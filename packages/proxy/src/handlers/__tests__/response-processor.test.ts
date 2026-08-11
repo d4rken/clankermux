@@ -1039,8 +1039,6 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 					statusHeader: undefined,
 					remaining: undefined,
 				}),
-				parseUsage: undefined,
-				extractUsageInfo: undefined,
 			},
 			dbOps: {
 				markAccountRateLimited: async () => 1,
@@ -1150,7 +1148,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		});
 		const { ctx, clearCalls } = makeClearCtx();
 
-		await processProxyResponse(ok200(), account, ctx, undefined, {
+		await processProxyResponse(ok200(), account, ctx, {
 			headers: new Headers(),
 			internal: false,
 			timestamp: now - 60_000,
@@ -1177,7 +1175,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		});
 		const { ctx, clearCalls, resetCalls } = makeClearCtx();
 
-		await processProxyResponse(ok200(), account, ctx, undefined, {
+		await processProxyResponse(ok200(), account, ctx, {
 			headers: new Headers(),
 			internal: false,
 			timestamp: now - 10 * 60_000, // request started before the 429
@@ -1202,7 +1200,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		});
 		const { ctx, resetCalls } = makeClearCtx();
 
-		await processProxyResponse(ok200(), account, ctx, undefined, {
+		await processProxyResponse(ok200(), account, ctx, {
 			headers: new Headers(),
 			internal: false,
 			timestamp: now - 60_000,
@@ -1224,7 +1222,7 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		});
 		const { ctx, clearCalls } = makeClearCtx();
 
-		await processProxyResponse(ok200(), account, ctx, undefined, {
+		await processProxyResponse(ok200(), account, ctx, {
 			headers: new Headers(),
 			internal: false,
 			timestamp: now - 60_000,
