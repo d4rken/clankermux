@@ -361,8 +361,12 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 
 		try {
 			while (buffered.length < maxBytes) {
+				// Do NOT cancel here: the reader is a tee branch whose twin is the
+				// live client stream, so an awaited cancel can never settle (see
+				// packages/core/src/response-body-disposal.ts) — it made this throw
+				// unreachable and hung the extraction promise. The unawaited cancel
+				// in the `finally` below is the correct one.
 				if (Date.now() - startTime > READ_TIMEOUT_MS) {
-					await reader.cancel();
 					throw new Error("Stream read timeout while extracting usage info");
 				}
 
