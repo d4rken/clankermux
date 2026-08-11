@@ -604,6 +604,55 @@ export async function isModelUnavailableError(
 		) {
 			return true;
 		}
+
+		// Codex/ChatGPT-backend format: message sits on a top-level "detail"
+		// field rather than under "error". See issue #393 — e.g.
+		// {"detail": "The 'gpt-5.3-codex' model is not supported when using
+		// Codex with a ChatGPT account."}
+		if (
+			typeof json.detail === "string" &&
+			json.detail.toLowerCase().includes("model") &&
+			(json.detail.toLowerCase().includes("not supported") ||
+				json.detail.toLowerCase().includes("not found") ||
+				json.detail.toLowerCase().includes("does not exist"))
+		) {
+			return true;
+		}
+	} catch {
+		// Ignore parse errors
+	}
+
+	return false;
+}
+
+/**
+ * Narrower sibling of isModelUnavailableError: the Codex/ChatGPT-backend
+ * ENTITLEMENT error, where the model exists but this account's plan may not
+ * serve it (e.g. "The 'gpt-5.3-codex' model is not supported when using Codex
+ * with a ChatGPT account."). That condition is account-scoped, so failing over
+ * to another account can succeed — unlike a generic model-not-found, which is
+ * deliberately forwarded to the client.
+ */
+export async function isCodexEntitlementModelError(
+	response: Response,
+): Promise<boolean> {
+	if (response.status !== 404 && response.status !== 400) return false;
+
+	try {
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		const clone = response.clone();
+
+		const json = await clone.json();
+		if (typeof json.detail !== "string") return false;
+		const detail = json.detail.toLowerCase();
+		return (
+			detail.includes("model") &&
+			detail.includes("not supported") &&
+			(detail.includes("codex") || detail.includes("chatgpt"))
+		);
 	} catch {
 		// Ignore parse errors
 	}
@@ -1862,6 +1911,22 @@ export async function proxyWithAccount(
 							}),
 						);
 						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
+					}
+					// Codex/ChatGPT entitlement error: the model exists, but THIS
+					// account's plan is not entitled to it. That is account-scoped —
+					// another account on a different plan can serve the same model — so
+					// fail over instead of forwarding the 400. The generic
+					// model-not-found below stays a client-facing error: no account can
+					// serve a model that doesn't exist, so cycling the pool for it only
+					// burns attempts and hides the real cause.
+					if (await isCodexEntitlementModelError(rawResponse)) {
+						log.warn(
+							`Account ${account.name} is not entitled to the requested model (plan-scoped Codex/ChatGPT restriction) — failing over to next account`,
+						);
+						// Default "native" dispose: this short-circuit runs before any
+						// usage-extraction clone exists, so rawResponse is still a plain
+						// fetch body that must be drained, not a tee branch.
+						return await fail({ kind: "model_not_found" }, rawResponse);
 					}
 					// Model-not-found (404/400) is forwarded to the client so it can
 					// surface the real error. Strip content-encoding/content-length

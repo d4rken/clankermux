@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { OAuthRefreshTokenError } from "@clankermux/core";
 import type { Account } from "@clankermux/types";
 import { AnthropicProvider } from "../provider";
@@ -205,6 +205,50 @@ describe("AnthropicProvider", () => {
 			expect(usage?.outputTokens).toBe(0);
 			expect(usage?.promptTokens).toBe(20);
 			expect(usage?.totalTokens).toBe(20);
+		});
+
+		// Regression: the overall read-deadline branch used to `await
+		// reader.cancel()` before throwing. The reader is a tee branch whose twin
+		// is the live client stream, so that cancel never settles (see
+		// packages/core/src/response-body-disposal.ts) — the throw was unreachable
+		// and the extraction promise hung forever. The cancel now belongs solely
+		// to the unawaited `finally`.
+		it("settles (null) instead of hanging when the overall read deadline passes", async () => {
+			// A stream that never produces: only the deadline can end the loop.
+			const source = new ReadableStream<Uint8Array>({ start() {} });
+			const response = new Response(source, {
+				headers: { "content-type": "text/event-stream" },
+			});
+			// Keep a live twin branch, so the branch extractUsageInfo reads has a
+			// cancel() that cannot settle.
+			const twin = response.clone();
+			const twinReader = twin.body?.getReader();
+
+			// First call seeds startTime; every later call is past the 10s deadline,
+			// so the loop trips the overall timeout before the 5s per-read race.
+			const realNow = Date.now.bind(Date);
+			const start = realNow();
+			let calls = 0;
+			const nowSpy = spyOn(Date, "now").mockImplementation(() =>
+				calls++ === 0 ? start : start + 60_000,
+			);
+
+			try {
+				const usage = await Promise.race([
+					provider.extractUsageInfo(response),
+					new Promise((_, reject) =>
+						setTimeout(() => reject(new Error("extraction hung")), 1000),
+					),
+				]);
+				expect(usage).toBeNull();
+			} finally {
+				nowSpy.mockRestore();
+				// Never awaited, and in this order: each branch's cancel settles only
+				// once every branch of its tee has cancelled, so awaiting the twin
+				// first would deadlock on the branch cancelled after it.
+				response.body?.cancel().catch(() => {});
+				twinReader?.cancel().catch(() => {});
+			}
 		});
 
 		it("returns null for streaming response without message_start", async () => {
