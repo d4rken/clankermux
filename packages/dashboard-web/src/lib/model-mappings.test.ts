@@ -98,4 +98,37 @@ describe("buildModelMappingsPayload", () => {
 		);
 		expect(payload).toEqual({ fable: "new-a" });
 	});
+
+	it("omits unknown keys whose stored value the endpoint would reject", () => {
+		// Legacy/hand-edited rows can hold values the core resolver skips; the
+		// update endpoint 400s the entire save on any one of them.
+		const payload = buildModelMappingsPayload(
+			{
+				"claude-null": null,
+				"claude-number": 42,
+				"claude-empty-array": [],
+				"claude-blank-item": [""],
+				"claude-blank-string": "   ",
+				"claude-fable-5": "special",
+			},
+			{ ...blank, opus: "y" },
+		);
+		expect(payload).toEqual({ "claude-fable-5": "special", opus: "y" });
+	});
+
+	it("keeps valid unknown keys unchanged across a family-field edit", () => {
+		const payload = buildModelMappingsPayload(
+			{
+				"claude-fable-5": "special",
+				"claude-opus-4-1": ["first", "second"],
+				sonnet: "old",
+			},
+			{ ...blank, sonnet: "new" },
+		);
+		expect(payload).toEqual({
+			"claude-fable-5": "special",
+			"claude-opus-4-1": ["first", "second"],
+			sonnet: "new",
+		});
+	});
 });

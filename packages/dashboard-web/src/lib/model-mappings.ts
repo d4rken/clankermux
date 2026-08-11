@@ -73,15 +73,37 @@ export function parseMappingValue(value: string): string | string[] | null {
 }
 
 /**
+ * True iff a raw mapping value is usable as a model target: a non-empty string,
+ * or a non-empty array of non-empty strings. Mirrors the core resolver's
+ * validity rule and the update endpoint's request validation.
+ */
+function isValidMappingValue(value: unknown): value is string | string[] {
+	if (typeof value === "string") return value.trim().length > 0;
+	if (Array.isArray(value)) {
+		return (
+			value.length > 0 &&
+			value.every((item) => typeof item === "string" && item.trim().length > 0)
+		);
+	}
+	return false;
+}
+
+/**
  * Build the `model_mappings` payload for a save.
  *
  * The update endpoint REPLACES `model_mappings` wholesale, so every key the
  * dialog does not edit — exact model ids such as `claude-fable-5` — has to be
  * carried over from the account's current mapping or it is silently deleted by
  * an unrelated family edit.
+ *
+ * Stored data is not necessarily valid: legacy or hand-edited rows can hold
+ * `null`, a number, or an empty array, which the core resolver tolerates by
+ * skipping. The update endpoint rejects the WHOLE save with a 400 on any such
+ * value, so carrying one over would make every dialog save fail. Invalid
+ * unknown keys are dropped instead — they had no routing effect anyway.
  */
 export function buildModelMappingsPayload(
-	original: { [key: string]: string | string[] } | null | undefined,
+	original: { [key: string]: unknown } | null | undefined,
 	fields: ModelFamilyFieldValues,
 ): { [key: string]: string | string[] } {
 	const familyKeys = MODEL_FAMILY_FIELDS as readonly string[];
@@ -89,6 +111,7 @@ export function buildModelMappingsPayload(
 
 	for (const [key, value] of Object.entries(original ?? {})) {
 		if (familyKeys.includes(key)) continue;
+		if (!isValidMappingValue(value)) continue;
 		payload[key] = value;
 	}
 
