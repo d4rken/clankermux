@@ -452,6 +452,191 @@ describe("refreshAccessTokenSafe awaited CAS persist", () => {
 	});
 });
 
+describe("refreshAccessTokenSafe review-hardening regressions", () => {
+	it("stamps the in-memory refresh_token_issued_at BEFORE the persist (a later re-auth can never look older)", async () => {
+		const acctId = "stamp-before-persist";
+		let resolvePersist: (v: boolean) => void = () => {};
+		const persistGate = new Promise<boolean>((res) => {
+			resolvePersist = res;
+		});
+		const { ctx } = makeContext(
+			async () => ({
+				accessToken: "fresh-stamp",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-stamp",
+			}),
+			false,
+			{ updateAccountTokens: () => persistGate },
+		);
+
+		const acct = makeAccount(acctId);
+		const refreshP = refreshAccessTokenSafe(acct, ctx);
+		// Hold the persist open long enough that a stamp taken AFTER it would be
+		// measurably later than this reference point.
+		await Bun.sleep(15);
+		const beforePersistSettled = Date.now();
+		resolvePersist(true);
+		await refreshP;
+
+		expect(acct.refresh_token_issued_at).not.toBeNull();
+		// A re-auth landing while the persist was in flight would stamp its row
+		// at ~beforePersistSettled; our in-memory stamp must not exceed it, or
+		// the staleness guards would reject the re-auth's newer token as older.
+		expect(acct.refresh_token_issued_at as number).toBeLessThanOrEqual(
+			beforePersistSettled,
+		);
+	});
+
+	it("pauses against the EXCHANGED refresh token even when the shared account object was mutated mid-refresh", async () => {
+		const { ctx, pauseSpy } = makeContext(async (account) => {
+			// Simulate a concurrent writer (e.g. the usage poller's pre-poll sync)
+			// installing a newer token on the shared object while this refresh's
+			// network call is in flight.
+			account.refresh_token = "rt-hijacked-newer";
+			throw new OAuthRefreshTokenError("pause-key", "refresh rejected");
+		}, false);
+
+		let thrown: unknown;
+		try {
+			await refreshAccessTokenSafe(makeAccount("pause-key"), ctx);
+		} catch (err) {
+			thrown = err;
+		}
+
+		expect(thrown).toBeInstanceOf(TokenRefreshError);
+		expect(pauseSpy).toHaveBeenCalledTimes(1);
+		// The pause CAS must target the token this attempt actually exchanged —
+		// pausing against the newer token would match and pause the healthy row.
+		expect(pauseSpy.mock.calls[0][2]).toBe("rt-old");
+	});
+
+	it("adopts the winner's refresh token on CAS loss even when its access token is not servable (losing generation never installed)", async () => {
+		const acctId = "cas-loss-unservable";
+		let getAccountCalls = 0;
+		const { ctx } = makeContext(
+			async () => ({
+				accessToken: "fresh-losing2",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-losing2",
+			}),
+			false,
+			{
+				updateAccountTokens: async () => false,
+				getAccount: async () => {
+					getAccountCalls += 1;
+					if (getAccountCalls === 1) return null; // pre-refresh adoption check
+					return {
+						id: acctId,
+						// Winner's access token already expired → not servable…
+						access_token: "db-winner-expired",
+						expires_at: Date.now() - 1_000,
+						// …but its refresh token is still the authority.
+						refresh_token: "rt-winner2",
+						refresh_token_issued_at: 4_242,
+					} as Account;
+				},
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		// Minted ACCESS token served as last resort for this caller…
+		expect(token).toBe("fresh-losing2");
+		expect(acct.access_token).toBe("fresh-losing2");
+		// …but the REFRESH generation in memory is the winner's, with the
+		// winner's stamp — never the losing "rt-losing2" with a fresh stamp.
+		expect(acct.refresh_token).toBe("rt-winner2");
+		expect(acct.refresh_token_issued_at).toBe(4_242);
+		expect(getCoalescibleRecentRefresh(acctId, "older-token")).toBeNull();
+	});
+
+	it("syncs a joiner's full snapshot from the DB when the winner's persist CAS lost (no coalesce entry)", async () => {
+		const acctId = "superseded-joiner-sync";
+		const dbExpiry = Date.now() + 2 * HOUR_MS;
+		let getAccountCalls = 0;
+		let resolveRefresh: (r: RefreshResult) => void = () => {};
+		const refreshGate = new Promise<RefreshResult>((res) => {
+			resolveRefresh = res;
+		});
+		const { ctx, refreshTokenSpy } = makeContext(() => refreshGate, false, {
+			updateAccountTokens: async () => false, // CAS loss
+			getAccount: async () => {
+				getAccountCalls += 1;
+				// First two reads are the winner's and joiner's pre-refresh adoption
+				// checks; later reads (post-CAS-loss adopt + joiner sync) see the
+				// authoritative winner row.
+				if (getAccountCalls <= 2) return null;
+				return {
+					id: acctId,
+					access_token: "db-winner-access",
+					expires_at: dbExpiry,
+					refresh_token: "rt-winner",
+					refresh_token_issued_at: 999,
+				} as Account;
+			},
+		});
+
+		const winner = makeAccount(acctId);
+		const joiner = makeAccount(acctId);
+		const winnerP = refreshAccessTokenSafe(winner, ctx);
+		const joinerP = refreshAccessTokenSafe(joiner, ctx);
+
+		// Let both callers pass their pre-refresh re-reads and settle into
+		// create/join before resolving the provider refresh.
+		await Bun.sleep(10);
+		resolveRefresh({
+			accessToken: "fresh-losing-join",
+			expiresAt: Date.now() + HOUR_MS,
+			refreshToken: "rt-losing-join",
+		});
+
+		const [winnerToken, joinerToken] = await Promise.all([winnerP, joinerP]);
+		expect(refreshTokenSpy).toHaveBeenCalledTimes(1);
+		// Both callers receive the authoritative token…
+		expect(winnerToken).toBe("db-winner-access");
+		expect(joinerToken).toBe("db-winner-access");
+		// …and the JOINER's own snapshot is fully synced from the DB row, not
+		// left holding the consumed pre-refresh tokens.
+		expect(joiner.access_token).toBe("db-winner-access");
+		expect(joiner.refresh_token).toBe("rt-winner");
+		expect(joiner.refresh_token_issued_at).toBe(999);
+	});
+
+	it("consumes a refresh that completed entirely inside the pre-refresh re-read window (coalesce re-check)", async () => {
+		const acctId = "coalesce-after-reread";
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-rotate",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-should-not",
+			}),
+			false,
+			{
+				getAccount: async () => {
+					// While this caller is blocked in the re-read, another refresh
+					// starts, succeeds, caches its result, and unregisters.
+					recordRecentRefresh(
+						acctId,
+						"cached-mid-reread",
+						Date.now() + HOUR_MS,
+					);
+					return null;
+				},
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		// The cached result is consumed instead of exchanging the (now consumed)
+		// refresh token a second time.
+		expect(token).toBe("cached-mid-reread");
+		expect(acct.access_token).toBe("cached-mid-reread");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+	});
+});
+
 describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
 	it("adopts a strictly-fresher valid access token from the DB and skips the refresh entirely", async () => {
 		const acctId = "adopt-fresher-access";
