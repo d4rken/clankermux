@@ -29,6 +29,7 @@ import {
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
 import {
+	adoptAuthoritativeAccountTokens,
 	getCoalescibleRecentRefresh,
 	getValidAccessToken,
 	pauseAccountForReauthIfInvalidGrant,
@@ -1354,7 +1355,7 @@ export class AutoRefreshScheduler {
 						// must never silently lose the rotated refresh token. The
 						// exchanged-token CAS clause is the backstop that no-ops the write if
 						// a concurrent reauth/rotation installed new credentials meanwhile.
-						await this.proxyContext.dbOps.updateAccountTokens(
+						const persisted = await this.proxyContext.dbOps.updateAccountTokens(
 							row.id,
 							result.accessToken,
 							result.expiresAt,
@@ -1362,6 +1363,20 @@ export class AutoRefreshScheduler {
 							result.identity ?? null,
 							exchangedRefreshToken ?? undefined,
 						);
+						if (!persisted) {
+							// CAS loss: a concurrent rotation or re-auth won. Don't cache or
+							// claim success for the losing token; hand any joiners the
+							// authoritative credentials instead (the winner may have
+							// invalidated this attempt's session family).
+							log.warn(
+								`Proactive Qwen token persist for ${row.name} was superseded by a concurrent rotation or re-auth — adopting the authoritative DB credentials`,
+							);
+							const authoritative = await adoptAuthoritativeAccountTokens(
+								account,
+								this.proxyContext.dbOps,
+							);
+							return authoritative ?? result.accessToken;
+						}
 						// Feed the shared coalesce cache so a near-simultaneous
 						// request-triggered refresh reuses this token instead of racing.
 						recordRecentRefresh(row.id, result.accessToken, result.expiresAt);
@@ -1371,7 +1386,13 @@ export class AutoRefreshScheduler {
 						return result.accessToken;
 					})
 					.finally(() => {
-						this.proxyContext.refreshInFlight.delete(row.id);
+						// Identity-guarded: a reauth-triggered cache clear may have dropped
+						// this entry and a newer refresh registered its own.
+						if (
+							this.proxyContext.refreshInFlight.get(row.id) === refreshPromise
+						) {
+							this.proxyContext.refreshInFlight.delete(row.id);
+						}
 					});
 
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
@@ -1545,7 +1566,7 @@ export class AutoRefreshScheduler {
 						// must never silently lose the rotated refresh token. The
 						// exchanged-token CAS clause is the backstop that no-ops the write if
 						// a concurrent reauth/rotation installed new credentials meanwhile.
-						await this.proxyContext.dbOps.updateAccountTokens(
+						const persisted = await this.proxyContext.dbOps.updateAccountTokens(
 							row.id,
 							result.accessToken,
 							result.expiresAt,
@@ -1553,6 +1574,20 @@ export class AutoRefreshScheduler {
 							result.identity ?? null,
 							exchangedRefreshToken ?? undefined,
 						);
+						if (!persisted) {
+							// CAS loss: a concurrent rotation or re-auth won. Don't cache or
+							// claim success for the losing token; hand any joiners the
+							// authoritative credentials instead (the winner may have
+							// invalidated this attempt's session family).
+							log.warn(
+								`Proactive Codex token persist for ${row.name} was superseded by a concurrent rotation or re-auth — adopting the authoritative DB credentials`,
+							);
+							const authoritative = await adoptAuthoritativeAccountTokens(
+								account,
+								this.proxyContext.dbOps,
+							);
+							return authoritative ?? result.accessToken;
+						}
 						// Feed the shared coalesce cache so a near-simultaneous
 						// request-triggered refresh reuses this token instead of racing.
 						recordRecentRefresh(row.id, result.accessToken, result.expiresAt);
@@ -1562,7 +1597,13 @@ export class AutoRefreshScheduler {
 						return result.accessToken;
 					})
 					.finally(() => {
-						this.proxyContext.refreshInFlight.delete(row.id);
+						// Identity-guarded: a reauth-triggered cache clear may have dropped
+						// this entry and a newer refresh registered its own.
+						if (
+							this.proxyContext.refreshInFlight.get(row.id) === refreshPromise
+						) {
+							this.proxyContext.refreshInFlight.delete(row.id);
+						}
 					});
 
 				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);

@@ -74,6 +74,7 @@ export {
 	stopGlobalTokenHealthChecks,
 } from "./token-health-service";
 export {
+	adoptAuthoritativeAccountTokens,
 	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	clearAccountAffinity,
