@@ -172,6 +172,139 @@ export function getCoalescibleRecentRefresh(
 	return null;
 }
 
+/** Minimal slice of DatabaseOperations needed to re-read an account row. */
+interface AccountReader {
+	getAccount(accountId: string): Promise<Account | null>;
+}
+
+/**
+ * After a lost persist CAS (the stored refresh token changed underneath a
+ * successful refresh), re-read the row and install the AUTHORITATIVE DB
+ * credentials onto the in-memory account. The winning writer (a concurrent
+ * rotation or a manual re-auth) may have invalidated the losing token's whole
+ * session family, so serving the just-minted-but-losing token risks immediate
+ * 401s. Returns the adopted access token when it is servable (comfortably
+ * unexpired), else null — callers then fall back to the minted token.
+ *
+ * Shared by every path that persists a rotation with the exchanged-token CAS:
+ * `refreshAccessTokenSafe` and the proactive Codex/Qwen refreshers.
+ */
+export async function adoptAuthoritativeAccountTokens(
+	account: Pick<
+		Account,
+		| "id"
+		| "name"
+		| "access_token"
+		| "expires_at"
+		| "refresh_token"
+		| "refresh_token_issued_at"
+	>,
+	dbOps: AccountReader,
+): Promise<string | null> {
+	try {
+		const dbAccount = await dbOps.getAccount(account.id);
+		if (!dbAccount) return null;
+		const dbAccessToken = dbAccount.access_token;
+		const dbExpiresAt = dbAccount.expires_at;
+		const servable =
+			typeof dbAccessToken === "string" &&
+			typeof dbExpiresAt === "number" &&
+			dbExpiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS;
+		if (!servable) return null;
+		account.access_token = dbAccessToken;
+		account.expires_at = dbExpiresAt;
+		if (dbAccount.refresh_token) {
+			account.refresh_token = dbAccount.refresh_token;
+			account.refresh_token_issued_at = dbAccount.refresh_token_issued_at;
+		}
+		return dbAccessToken;
+	} catch (error) {
+		log.warn(
+			`Failed to re-read account ${account.name} after a lost persist CAS — keeping the in-memory tokens`,
+			error,
+		);
+		return null;
+	}
+}
+
+/**
+ * Re-read the account row right before firing a refresh and adopt fresher
+ * credentials another writer already produced:
+ *
+ * - A valid access token with a STRICTLY newer expiry (comparison is by expiry,
+ *   never by string difference, so a merely delayed read can't masquerade as
+ *   "fresher") → adopt it and return it; the caller skips the refresh entirely.
+ * - A rotated refresh token (guarded on `refresh_token_issued_at` not being
+ *   older than the in-memory one) → adopt it and return null; the refresh
+ *   proceeds with the LIVE token. Replaying the consumed one is a guaranteed
+ *   invalid_grant, and on providers with reuse detection (Codex) it can
+ *   invalidate the whole token family.
+ *
+ * This is what makes a stale in-memory snapshot (long-lived poller accounts,
+ * request snapshots held across failover holds) safe to refresh from.
+ */
+async function adoptDbTokensIfFresher(
+	account: Account,
+	ctx: ProxyContext,
+): Promise<string | null> {
+	let dbAccount: Account | null;
+	try {
+		dbAccount = await ctx.dbOps.getAccount(account.id);
+	} catch (error) {
+		log.warn(
+			`Pre-refresh DB re-read failed for account ${account.name} — refreshing with the in-memory tokens`,
+			error,
+		);
+		return null;
+	}
+	if (!dbAccount) return null;
+
+	const dbIssuedAt = dbAccount.refresh_token_issued_at ?? null;
+	const memIssuedAt = account.refresh_token_issued_at ?? null;
+	// A DB row predating issued-at tracking is never trusted over a snapshot
+	// that carries a stamp; an unstamped snapshot always defers to the DB.
+	const dbRefreshNotOlder =
+		memIssuedAt === null || (dbIssuedAt !== null && dbIssuedAt >= memIssuedAt);
+
+	const dbAccessToken = dbAccount.access_token;
+	const dbExpiresAt = dbAccount.expires_at;
+	if (
+		typeof dbAccessToken === "string" &&
+		typeof dbExpiresAt === "number" &&
+		dbExpiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS &&
+		dbExpiresAt > (account.expires_at ?? 0)
+	) {
+		account.access_token = dbAccessToken;
+		account.expires_at = dbExpiresAt;
+		// A fresher ACCESS token does not imply a fresher REFRESH token (a
+		// coalesced serve updates only the former), so the refresh token is
+		// adopted under its own staleness guard.
+		if (dbAccount.refresh_token && dbRefreshNotOlder) {
+			account.refresh_token = dbAccount.refresh_token;
+			account.refresh_token_issued_at = dbAccount.refresh_token_issued_at;
+		}
+		refreshFailures.delete(account.id);
+		backoffCounters.delete(account.id);
+		log.info(
+			`Adopted a fresher access token from the DB for account ${account.name} — skipping the refresh`,
+		);
+		return dbAccessToken;
+	}
+
+	if (
+		dbAccount.refresh_token &&
+		dbAccount.refresh_token !== account.refresh_token &&
+		dbRefreshNotOlder
+	) {
+		account.refresh_token = dbAccount.refresh_token;
+		account.refresh_token_issued_at = dbAccount.refresh_token_issued_at;
+		log.info(
+			`Adopted a rotated refresh token from the DB for account ${account.name} before refreshing`,
+		);
+	}
+	return null;
+}
+
 // Cleanup old failures periodically
 let cleanupInterval: Timer | null = null;
 
@@ -305,9 +438,12 @@ export async function refreshAccessTokenSafe(
 	// Join an in-progress refresh BEFORE consulting the coalesce cache: an active
 	// refresh yields the freshest result, so a caller holding an older token joins
 	// it rather than being served a possibly-stale (or already-rejected) cached
-	// token while a replacement refresh is mid-flight.
-	const inFlight = ctx.refreshInFlight.get(account.id);
-	if (inFlight) {
+	// token while a replacement refresh is mid-flight. Also re-invoked after the
+	// pre-refresh DB re-read below, whose await opens a window for another caller
+	// to register a refresh.
+	const joinInFlightRefresh = async (): Promise<string | null> => {
+		const inFlight = ctx.refreshInFlight.get(account.id);
+		if (!inFlight) return null;
 		const joinedToken = await inFlight;
 		// Sync this caller's account to the winner's fresh token so the 401-retry
 		// path (which re-derives from account.access_token) uses it.
@@ -317,7 +453,9 @@ export async function refreshAccessTokenSafe(
 			account.expires_at = recent.expiresAt;
 		}
 		return joinedToken;
-	}
+	};
+	const joined = await joinInFlightRefresh();
+	if (joined !== null) return joined;
 
 	// Coalesce short-circuit next (before the backoff gate): a just-completed
 	// refresh already produced a fresh token; reuse it rather than racing a second
@@ -422,6 +560,20 @@ export async function refreshAccessTokenSafe(
 		backoffCounters.delete(account.id);
 	}
 
+	// Re-read the row before firing a refresh: a concurrent refresh or re-auth
+	// (possibly in another process sharing this DB) may already have produced
+	// fresher credentials. Adopting a valid fresher access token skips the
+	// refresh; adopting a rotated refresh token prevents replaying a consumed
+	// one (a guaranteed invalid_grant, and family-invalidating on Codex).
+	const adoptedToken = await adoptDbTokensIfFresher(account, ctx);
+	if (adoptedToken) return adoptedToken;
+
+	// The re-read awaited, so another caller may have registered a refresh in
+	// the meantime — join it (with account sync) rather than racing a second
+	// rotation.
+	const joinedAfterAdopt = await joinInFlightRefresh();
+	if (joinedAfterAdopt !== null) return joinedAfterAdopt;
+
 	// Check if a refresh is already in progress for this account
 	if (!ctx.refreshInFlight.has(account.id)) {
 		// Get the provider for this account
@@ -438,47 +590,84 @@ export async function refreshAccessTokenSafe(
 		// Create a new refresh promise and store it
 		const refreshPromise = provider
 			.refreshToken(account, ctx.runtime.clientId)
-			.then((result: TokenRefreshResult) => {
-				// 1. Enqueue the durable write NON-BLOCKING (fire-and-forget). We do
-				// NOT await it: an unknown/timed-out write must not gate the refresh
-				// result. The exchanged-token CAS clause (WHERE refresh_token =
+			.then(async (result: TokenRefreshResult) => {
+				// 1. AWAIT the durable write. The provider has already rotated the
+				// refresh token — the old one is dead upstream — so a lost write
+				// leaves the DB holding a consumed token whose next replay is an
+				// invalid_grant that pauses a healthy account for reauth. The
+				// exchanged-token CAS clause (WHERE refresh_token =
 				// exchangedRefreshToken) is the backstop that no-ops the write if a
 				// concurrent reauth/rotation installed new credentials while this
 				// refresh was in flight — so a delayed write can't clobber them.
-				ctx.asyncWriter.enqueue(async () => {
-					await ctx.dbOps.updateAccountTokens(
+				let persistOutcome: "persisted" | "superseded" | "failed";
+				try {
+					persistOutcome = (await ctx.dbOps.updateAccountTokens(
 						account.id,
 						result.accessToken,
 						result.expiresAt,
 						result.refreshToken,
 						result.identity,
 						exchangedRefreshToken ?? undefined,
+					))
+						? "persisted"
+						: "superseded";
+				} catch (persistError) {
+					persistOutcome = "failed";
+					log.error(
+						`Failed to persist refreshed tokens for account ${account.name} — serving the in-memory token; the rotated refresh token is NOT durable and is lost on restart`,
+						persistError,
 					);
-				});
+				}
 
-				// 2. Update the live in-memory account object immediately
+				// Clear any previous failure record on successful refresh
+				refreshFailures.delete(account.id);
+
+				if (persistOutcome === "superseded") {
+					// CAS loss: a concurrent rotation or re-auth won and the row holds
+					// ITS credentials. The winner may have invalidated this attempt's
+					// session family, so adopt and serve the authoritative tokens; the
+					// losing token is neither installed nor cached for coalescing.
+					log.warn(
+						`Skipped persisting refreshed tokens for account ${account.name}: the stored refresh token changed underneath (a concurrent rotation or re-auth won) — adopting the authoritative DB credentials`,
+					);
+					const authoritative = await adoptAuthoritativeAccountTokens(
+						account,
+						ctx.dbOps,
+					);
+					if (authoritative) return authoritative;
+					// No servable authoritative row — fall through and serve the minted
+					// token as a last resort for THIS caller (still not cached).
+				}
+
+				// 2. Update the live in-memory account object
 				// This prevents subsequent requests from seeing stale token data
 				account.access_token = result.accessToken;
 				account.expires_at = result.expiresAt;
 				if (result.refreshToken) {
 					account.refresh_token = result.refreshToken;
+					account.refresh_token_issued_at = Date.now();
 				}
 				account.last_used = Date.now();
 
-				// Clear any previous failure record on successful refresh
-				refreshFailures.delete(account.id);
+				if (persistOutcome !== "superseded") {
+					// Record for single-flight coalescing so a near-simultaneous caller
+					// reuses this token instead of racing a second (doomed) rotation.
+					// Deliberately ALSO on a failed persist: while the DB row is stale,
+					// this cache is the only thing masking that doomed replay.
+					recordRecentRefresh(account.id, result.accessToken, result.expiresAt);
+				}
 
-				// Record for single-flight coalescing so a near-simultaneous caller
-				// reuses this token instead of racing a second (doomed) rotation.
-				recordRecentRefresh(account.id, result.accessToken, result.expiresAt);
-
-				const expiresInSec = Math.round((result.expiresAt - Date.now()) / 1000);
-				log.info(`Successfully refreshed token for account: ${account.name}`);
-				log.debug(`refresh for ${account.name}:`, {
-					expiresInSec,
-					newRefreshToken: result.refreshToken !== account.refresh_token,
-					provider: account.provider,
-				});
+				if (persistOutcome === "persisted") {
+					const expiresInSec = Math.round(
+						(result.expiresAt - Date.now()) / 1000,
+					);
+					log.info(`Successfully refreshed token for account: ${account.name}`);
+					log.debug(`refresh for ${account.name}:`, {
+						expiresInSec,
+						newRefreshToken: result.refreshToken !== exchangedRefreshToken,
+						provider: account.provider,
+					});
+				}
 				return result.accessToken;
 			})
 			.catch(async (error) => {
@@ -544,20 +733,27 @@ export async function refreshAccessTokenSafe(
 				);
 			})
 			.finally(() => {
-				// Clean up the map when done (success or failure)
-				ctx.refreshInFlight.delete(account.id);
+				// Clean up the map when done (success or failure). Identity-guarded:
+				// a reauth-triggered clearAccountRefreshCache may have dropped this
+				// entry and a NEWER refresh registered its own — this promise must
+				// not delete that one.
+				if (ctx.refreshInFlight.get(account.id) === refreshPromise) {
+					ctx.refreshInFlight.delete(account.id);
+				}
 			});
 		ctx.refreshInFlight.set(account.id, refreshPromise);
 	}
 
-	// Return the existing or new refresh promise
-	const promise = ctx.refreshInFlight.get(account.id);
-	if (!promise) {
+	// Await the existing or new refresh promise — via the join helper so a
+	// caller that lost the create race during the pre-refresh re-read still gets
+	// its account snapshot synced to the winner's fresh token.
+	const finalToken = await joinInFlightRefresh();
+	if (finalToken === null) {
 		throw new ServiceUnavailableError(
 			`${ERROR_MESSAGES.REFRESH_NOT_FOUND} ${account.id}`,
 		);
 	}
-	return promise;
+	return finalToken;
 }
 
 // Global registry for account refresh clearing functions

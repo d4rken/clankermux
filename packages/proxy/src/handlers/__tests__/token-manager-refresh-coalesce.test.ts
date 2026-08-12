@@ -60,14 +60,13 @@ function makeContext(
 } {
 	const refreshTokenSpy = mock(refreshToken);
 	const pauseSpy = mock(async () => pauseResult);
-	// The durable token write is fire-and-forget; the normal path returns a
-	// resolved boolean, callers override for a never-settling/rejecting write.
+	// The durable token write is AWAITED inside the refresh promise; the normal
+	// path returns a resolved true (persisted). Callers override with false (CAS
+	// loss), a rejection (write failure), or a gated promise (settlement order).
 	const updateTokensSpy = mock(opts.updateAccountTokens ?? (async () => true));
 	const getAccountSpy = mock(opts.getAccount ?? (async () => null));
-	// Mirror AsyncDbWriter.enqueue: run the job (so updateAccountTokens is
-	// exercised) and swallow any resulting promise rejection, then return the
-	// queue-accept boolean. The refresh code never awaits this, so a never-settling
-	// job proves the write is non-blocking.
+	// The refresh path must NOT route the token write through the async writer
+	// (a droppable queue); tests assert this spy is never called.
 	const enqueueSpy = mock((job: () => void | Promise<void>) => {
 		const r = job();
 		if (r && typeof (r as Promise<void>).catch === "function") {
@@ -293,39 +292,303 @@ describe("refreshAccessTokenSafe catch-block log gating", () => {
 	});
 });
 
-describe("refreshAccessTokenSafe request-path non-blocking CAS write", () => {
-	it("enqueues the write NON-BLOCKING with the exchanged refresh token as the CAS arg, and returns without it settling", async () => {
-		const acctId = "epoch-normal";
-		// A never-settling write proves the refresh does not await the durable write.
-		const neverSettles = new Promise<boolean>(() => {});
+describe("refreshAccessTokenSafe awaited CAS persist", () => {
+	it("AWAITS the durable write (the refresh does not resolve until the persist settles) with the exchanged refresh token as the CAS arg", async () => {
+		const acctId = "awaited-persist";
+		let resolvePersist: (v: boolean) => void = () => {};
+		const persistGate = new Promise<boolean>((res) => {
+			resolvePersist = res;
+		});
 		const { ctx, updateTokensSpy, enqueueSpy } = makeContext(
 			async () => ({
-				accessToken: "fresh-normal",
+				accessToken: "fresh-awaited",
 				expiresAt: Date.now() + HOUR_MS,
-				refreshToken: "rt-normal-new",
+				refreshToken: "rt-awaited-new",
 			}),
 			false,
-			{ updateAccountTokens: () => neverSettles },
+			{ updateAccountTokens: () => persistGate },
+		);
+
+		const acct = makeAccount(acctId);
+		let settled = false;
+		const refreshP = refreshAccessTokenSafe(acct, ctx).then((t) => {
+			settled = true;
+			return t;
+		});
+
+		// Give the provider refresh and the persist call time to run; the refresh
+		// must remain pending while the durable write is unsettled.
+		await Bun.sleep(10);
+		expect(updateTokensSpy).toHaveBeenCalledTimes(1);
+		expect(settled).toBe(false);
+
+		resolvePersist(true);
+		expect(await refreshP).toBe("fresh-awaited");
+		expect(acct.access_token).toBe("fresh-awaited");
+		// The exchanged (pre-refresh) token is the 6th argument (the CAS backstop).
+		expect(updateTokensSpy.mock.calls[0][5]).toBe("rt-old");
+		// Direct awaited write — never routed through the droppable async writer.
+		expect(enqueueSpy).not.toHaveBeenCalled();
+
+		// The fresh token IS cached for coalescing (a caller with an older token reuses it).
+		expect(getCoalescibleRecentRefresh(acctId, "older-token")).toEqual({
+			accessToken: "fresh-awaited",
+			expiresAt: expect.any(Number),
+		});
+	});
+
+	it("adopts the authoritative DB credentials when the persist CAS loses (a concurrent rotation/re-auth won)", async () => {
+		const acctId = "cas-loss-adopt";
+		const dbExpiry = Date.now() + 2 * HOUR_MS;
+		let getAccountCalls = 0;
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "fresh-losing",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-losing",
+			}),
+			false,
+			{
+				// CAS loss: the stored refresh token changed underneath.
+				updateAccountTokens: async () => false,
+				getAccount: async () => {
+					getAccountCalls += 1;
+					// First read is the pre-refresh adoption check — return null so the
+					// refresh actually fires. Second read is the post-CAS-loss re-read —
+					// return the winner's (authoritative) credentials.
+					if (getAccountCalls === 1) return null;
+					return {
+						id: acctId,
+						access_token: "db-winner-access",
+						expires_at: dbExpiry,
+						refresh_token: "rt-winner",
+						refresh_token_issued_at: 777,
+					} as Account;
+				},
+			},
 		);
 
 		const acct = makeAccount(acctId);
 		const token = await refreshAccessTokenSafe(acct, ctx);
 
-		// Refresh resolved with the fresh token despite the write never settling.
-		expect(token).toBe("fresh-normal");
-		expect(acct.access_token).toBe("fresh-normal");
+		expect(refreshTokenSpy).toHaveBeenCalledTimes(1);
+		// The caller gets the WINNER's token, not the losing just-minted one — the
+		// winning rotation/re-auth may have invalidated the loser's session family.
+		expect(token).toBe("db-winner-access");
+		expect(acct.access_token).toBe("db-winner-access");
+		expect(acct.expires_at).toBe(dbExpiry);
+		expect(acct.refresh_token).toBe("rt-winner");
+		expect(acct.refresh_token_issued_at).toBe(777);
+		// The losing token must NOT be cached for coalescing.
+		expect(getCoalescibleRecentRefresh(acctId, "older-token")).toBeNull();
+	});
 
-		// The write was enqueued via asyncWriter with the exchanged (pre-refresh)
-		// token as the 6th argument (the CAS backstop), and NOT awaited.
-		expect(enqueueSpy).toHaveBeenCalledTimes(1);
-		expect(updateTokensSpy).toHaveBeenCalledTimes(1);
-		expect(updateTokensSpy.mock.calls[0][5]).toBe("rt-old");
+	it("serves the minted token when the persist CAS loses and no servable authoritative row exists", async () => {
+		const acctId = "cas-loss-fallback";
+		const { ctx } = makeContext(
+			async () => ({
+				accessToken: "fresh-minted",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-minted",
+			}),
+			false,
+			{
+				updateAccountTokens: async () => false,
+				getAccount: async () => null,
+			},
+		);
 
-		// The fresh token IS cached for coalescing (a caller with an older token reuses it).
-		expect(getCoalescibleRecentRefresh(acctId, "older-token")).toEqual({
-			accessToken: "fresh-normal",
-			expiresAt: expect.any(Number),
+		const acct = makeAccount(acctId);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		// Last resort: the minted token still works for THIS caller.
+		expect(token).toBe("fresh-minted");
+		expect(acct.access_token).toBe("fresh-minted");
+		// But it is not advertised to other callers via the coalesce cache.
+		expect(getCoalescibleRecentRefresh(acctId, "older-token")).toBeNull();
+	});
+
+	it("still serves AND caches the minted token when the persist write THROWS (loss is loud, not silent)", async () => {
+		const acctId = "persist-throws";
+		const errorSpy = spyOn(Logger.prototype, "error");
+		try {
+			const { ctx } = makeContext(
+				async () => ({
+					accessToken: "fresh-unpersisted",
+					expiresAt: Date.now() + HOUR_MS,
+					refreshToken: "rt-unpersisted",
+				}),
+				false,
+				{
+					updateAccountTokens: async () => {
+						throw new Error("disk I/O error");
+					},
+				},
+			);
+
+			const acct = makeAccount(acctId);
+			const token = await refreshAccessTokenSafe(acct, ctx);
+
+			// The refresh itself succeeded; the caller is served the minted token.
+			expect(token).toBe("fresh-unpersisted");
+			expect(acct.access_token).toBe("fresh-unpersisted");
+			// The write failure is reported loudly.
+			expect(
+				errorSpy.mock.calls.some(
+					(args) =>
+						typeof args[0] === "string" &&
+						args[0].includes("Failed to persist refreshed tokens"),
+				),
+			).toBe(true);
+			// The token IS cached: while the DB row is stale, the coalesce cache is
+			// the only thing masking a doomed second rotation.
+			expect(getCoalescibleRecentRefresh(acctId, "older-token")).toEqual({
+				accessToken: "fresh-unpersisted",
+				expiresAt: expect.any(Number),
+			});
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+});
+
+describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
+	it("adopts a strictly-fresher valid access token from the DB and skips the refresh entirely", async () => {
+		const acctId = "adopt-fresher-access";
+		const dbExpiry = Date.now() + 2 * HOUR_MS;
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+			}),
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "db-fresh-access",
+						expires_at: dbExpiry,
+						refresh_token: "rt-db",
+						refresh_token_issued_at: 555,
+					}) as Account,
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("db-fresh-access");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+		expect(acct.access_token).toBe("db-fresh-access");
+		expect(acct.expires_at).toBe(dbExpiry);
+		expect(acct.refresh_token).toBe("rt-db");
+	});
+
+	it("does NOT adopt a DB access token whose expiry is not strictly newer (a delayed read is not 'fresher')", async () => {
+		const acctId = "adopt-equal-expiry";
+		const sharedExpiry = Date.now() + HOUR_MS;
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "fresh-real",
+				expiresAt: Date.now() + 2 * HOUR_MS,
+				refreshToken: "rt-real",
+			}),
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "db-same-generation",
+						expires_at: sharedExpiry,
+						refresh_token: "rt-old",
+						refresh_token_issued_at: null,
+					}) as Account,
+			},
+		);
+
+		// The caller holds a token of the SAME generation (equal expiry) that was
+		// just rejected upstream — adopting it would serve a failing token back.
+		const acct = makeAccount(acctId, {
+			access_token: "rejected-token",
+			expires_at: sharedExpiry,
 		});
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("fresh-real");
+		expect(refreshTokenSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("adopts a rotated refresh token from the DB before refreshing (never replays a consumed token)", async () => {
+		const acctId = "adopt-rotated-rt";
+		let refreshTokenAtCall: string | null = null;
+		const { ctx, refreshTokenSpy, updateTokensSpy } = makeContext(
+			async (account) => {
+				refreshTokenAtCall = account.refresh_token;
+				return {
+					accessToken: "fresh-after-adopt",
+					expiresAt: Date.now() + HOUR_MS,
+					refreshToken: "rt-next",
+				};
+			},
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						// No servable access token → the refresh must still run…
+						access_token: null,
+						expires_at: null,
+						// …but with the LIVE rotated refresh token, not the stale snapshot's.
+						refresh_token: "rt-rotated",
+						refresh_token_issued_at: 999,
+					}) as Account,
+			},
+		);
+
+		const acct = makeAccount(acctId); // snapshot holds stale "rt-old"
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("fresh-after-adopt");
+		expect(refreshTokenSpy).toHaveBeenCalledTimes(1);
+		expect(refreshTokenAtCall).toBe("rt-rotated");
+		// The CAS arg follows the adopted token too.
+		expect(updateTokensSpy.mock.calls[0][5]).toBe("rt-rotated");
+	});
+
+	it("does NOT adopt a DB refresh token that is OLDER than the in-memory one (issued_at guard)", async () => {
+		const acctId = "adopt-stale-rt-guard";
+		let refreshTokenAtCall: string | null = null;
+		const { ctx } = makeContext(
+			async (account) => {
+				refreshTokenAtCall = account.refresh_token;
+				return {
+					accessToken: "fresh-guarded",
+					expiresAt: Date.now() + HOUR_MS,
+					refreshToken: "rt-next",
+				};
+			},
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: null,
+						expires_at: null,
+						refresh_token: "rt-ancient",
+						refresh_token_issued_at: 500,
+					}) as Account,
+			},
+		);
+
+		// The in-memory snapshot carries a NEWER rotation than the DB row (e.g. a
+		// persist that has not landed yet) — the stale DB token must not win.
+		const acct = makeAccount(acctId, {
+			refresh_token_issued_at: 1_000,
+		} as Partial<Account>);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("fresh-guarded");
+		expect(refreshTokenAtCall).toBe("rt-old");
 	});
 });
 

@@ -142,6 +142,68 @@ describe("createUsagePollingTokenProvider", () => {
 		expect(dbOps.pauseAccount).not.toHaveBeenCalled();
 	});
 
+	it("does NOT let a stale DB row clobber fresher in-memory tokens (issued_at / expiry guards)", async () => {
+		// A request-path refresh just rotated the tokens in memory, but its DB
+		// persist has not landed (or failed). The poller's pre-poll sync must not
+		// overwrite the fresher in-memory credentials with the stale DB row —
+		// that would guarantee a replay of the consumed refresh token.
+		const account = makeAccount({
+			access_token: "mem-fresh-access",
+			refresh_token: "mem-rotated-refresh",
+			expires_at: 5_000,
+			refresh_token_issued_at: 1_000,
+		} as Partial<Account>);
+		const { proxyContext } = makeProxyContext({
+			id: account.id,
+			access_token: "db-stale-access",
+			refresh_token: "db-consumed-refresh",
+			expires_at: 4_000,
+			refresh_token_issued_at: 500,
+		});
+		const getValidAccessToken = mock(() => Promise.resolve("ok"));
+
+		const tokenProvider = createUsagePollingTokenProvider(
+			account,
+			proxyContext,
+			{ getValidAccessToken },
+		);
+		await tokenProvider();
+
+		expect(account.access_token).toBe("mem-fresh-access");
+		expect(account.expires_at).toBe(5_000);
+		expect(account.refresh_token).toBe("mem-rotated-refresh");
+		expect(account.refresh_token_issued_at).toBe(1_000);
+	});
+
+	it("adopts a re-auth's newer credentials from the DB (issued_at newer than memory)", async () => {
+		const account = makeAccount({
+			access_token: "mem-old-access",
+			refresh_token: "mem-old-refresh",
+			expires_at: 4_000,
+			refresh_token_issued_at: 500,
+		} as Partial<Account>);
+		const { proxyContext } = makeProxyContext({
+			id: account.id,
+			access_token: "db-reauth-access",
+			refresh_token: "db-reauth-refresh",
+			expires_at: 9_000,
+			refresh_token_issued_at: 2_000,
+		});
+		const getValidAccessToken = mock(() => Promise.resolve("ok"));
+
+		const tokenProvider = createUsagePollingTokenProvider(
+			account,
+			proxyContext,
+			{ getValidAccessToken },
+		);
+		await tokenProvider();
+
+		expect(account.access_token).toBe("db-reauth-access");
+		expect(account.expires_at).toBe(9_000);
+		expect(account.refresh_token).toBe("db-reauth-refresh");
+		expect(account.refresh_token_issued_at).toBe(2_000);
+	});
+
 	it("propagates token getter errors without any pause/resume calls", async () => {
 		const account = makeAccount({ paused: true });
 		const { proxyContext, dbOps } = makeProxyContext({ ...account });

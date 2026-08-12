@@ -26,13 +26,29 @@ export function createUsagePollingTokenProvider(
 	deps: UsagePollingTokenProviderDeps = { getValidAccessToken },
 ): () => Promise<string> {
 	return async () => {
-		// Update in-memory account with fresh token data from DB
-		// This prevents using stale tokens after re-authentication
+		// Update in-memory account with fresh token data from DB, so
+		// re-authentication via the API is picked up instead of refreshing with
+		// stale tokens. Guarded: the DB row can also be BEHIND the in-memory
+		// account (a request-path rotation whose persist is still settling or
+		// failed), and blindly copying it back would guarantee a replay of the
+		// consumed refresh token on the next refresh — so each field is adopted
+		// only when the DB copy is not older.
 		const currentAccount = await proxyContext.dbOps.getAccount(account.id);
 		if (currentAccount) {
-			account.access_token = currentAccount.access_token;
-			account.refresh_token = currentAccount.refresh_token;
-			account.expires_at = currentAccount.expires_at;
+			if ((currentAccount.expires_at ?? 0) >= (account.expires_at ?? 0)) {
+				account.access_token = currentAccount.access_token;
+				account.expires_at = currentAccount.expires_at;
+			}
+			const dbIssuedAt = currentAccount.refresh_token_issued_at ?? null;
+			const memIssuedAt = account.refresh_token_issued_at ?? null;
+			const dbRefreshNotOlder =
+				memIssuedAt === null ||
+				(dbIssuedAt !== null && dbIssuedAt >= memIssuedAt);
+			if (currentAccount.refresh_token && dbRefreshNotOlder) {
+				account.refresh_token = currentAccount.refresh_token;
+				account.refresh_token_issued_at =
+					currentAccount.refresh_token_issued_at;
+			}
 		}
 
 		// Get a valid access token (refreshes if necessary)
