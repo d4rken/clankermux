@@ -35,15 +35,26 @@ export function createUsagePollingTokenProvider(
 		// only when the DB copy is not older.
 		const currentAccount = await proxyContext.dbOps.getAccount(account.id);
 		if (currentAccount) {
-			if ((currentAccount.expires_at ?? 0) >= (account.expires_at ?? 0)) {
-				account.access_token = currentAccount.access_token;
-				account.expires_at = currentAccount.expires_at;
-			}
 			const dbIssuedAt = currentAccount.refresh_token_issued_at ?? null;
 			const memIssuedAt = account.refresh_token_issued_at ?? null;
 			const dbRefreshNotOlder =
 				memIssuedAt === null ||
 				(dbIssuedAt !== null && dbIssuedAt >= memIssuedAt);
+			// Adopt the DB access token when it is not older by expiry — or when
+			// it belongs to a strictly newer refresh generation (a re-auth's token
+			// can carry a SHORTER expiry than a stale pre-re-auth one and must
+			// still win; the pre-re-auth token may be revoked).
+			const dbGenerationStrictlyNewer =
+				dbIssuedAt !== null &&
+				(memIssuedAt === null || dbIssuedAt > memIssuedAt) &&
+				currentAccount.access_token !== account.access_token;
+			if (
+				(currentAccount.expires_at ?? 0) >= (account.expires_at ?? 0) ||
+				dbGenerationStrictlyNewer
+			) {
+				account.access_token = currentAccount.access_token;
+				account.expires_at = currentAccount.expires_at;
+			}
 			if (currentAccount.refresh_token && dbRefreshNotOlder) {
 				account.refresh_token = currentAccount.refresh_token;
 				account.refresh_token_issued_at =

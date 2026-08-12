@@ -831,6 +831,89 @@ describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
 		expect(joiner.refresh_token).toBe("rt-auth-v2");
 	});
 
+	it("adopts a differing stamped DB access token at equal expiry when the snapshot is UNSTAMPED (defers to the DB)", async () => {
+		const acctId = "adopt-equal-expiry-unstamped";
+		const sharedExpiry = Date.now() + HOUR_MS;
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+			}),
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "db-stamped-token",
+						expires_at: sharedExpiry,
+						refresh_token: "rt-stamped",
+						refresh_token_issued_at: 2_000,
+					}) as Account,
+			},
+		);
+
+		// Unstamped snapshot (e.g. scheduler-built) with a differing token at
+		// equal expiry: per policy it defers to the stamped DB row.
+		const acct = makeAccount(acctId, {
+			access_token: "unstamped-old-token",
+			expires_at: sharedExpiry,
+		});
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("db-stamped-token");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+	});
+
+	it("nulls a joiner's expiry when handed a token of unknown expiry (unservable-authority corner)", async () => {
+		const acctId = "joiner-unknown-expiry";
+		let getAccountCalls = 0;
+		let resolveRefresh: (r: RefreshResult) => void = () => {};
+		const refreshGate = new Promise<RefreshResult>((res) => {
+			resolveRefresh = res;
+		});
+		const { ctx } = makeContext(() => refreshGate, false, {
+			updateAccountTokens: async () => false, // winner's CAS loses
+			getAccount: async () => {
+				getAccountCalls += 1;
+				if (getAccountCalls <= 2) return null; // pre-refresh checks
+				// Authority row readable but its access token is NOT servable.
+				return {
+					id: acctId,
+					access_token: "db-winner-expired",
+					expires_at: Date.now() - 1_000,
+					refresh_token: "rt-winner3",
+					refresh_token_issued_at: 4_243,
+				} as Account;
+			},
+		});
+
+		const winner = makeAccount(acctId);
+		// A 401-rejected joiner can hold a FAR-FUTURE expiry for its rejected
+		// token — that horizon must not be inherited by the minted token.
+		const joiner = makeAccount(acctId, {
+			access_token: "rejected-far-future",
+			expires_at: Date.now() + 5 * HOUR_MS,
+		});
+		const winnerP = refreshAccessTokenSafe(winner, ctx);
+		const joinerP = refreshAccessTokenSafe(joiner, ctx);
+		await Bun.sleep(10);
+		resolveRefresh({
+			accessToken: "fresh-minted3",
+			expiresAt: Date.now() + HOUR_MS,
+			refreshToken: "rt-minted3",
+		});
+
+		const [winnerToken, joinerToken] = await Promise.all([winnerP, joinerP]);
+		expect(winnerToken).toBe("fresh-minted3");
+		expect(joinerToken).toBe("fresh-minted3");
+		// The joiner's snapshot matches the returned token, with expiry UNKNOWN
+		// (null → refresh before next use), never the rejected token's horizon.
+		expect(joiner.access_token).toBe("fresh-minted3");
+		expect(joiner.expires_at).toBeNull();
+		// And the authoritative refresh generation was still adopted.
+		expect(joiner.refresh_token).toBe("rt-winner3");
+	});
+
 	it("does NOT adopt a DB refresh token that is OLDER than the in-memory one (issued_at guard)", async () => {
 		const acctId = "adopt-stale-rt-guard";
 		let refreshTokenAtCall: string | null = null;

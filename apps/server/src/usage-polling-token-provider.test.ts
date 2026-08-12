@@ -204,6 +204,37 @@ describe("createUsagePollingTokenProvider", () => {
 		expect(account.refresh_token_issued_at).toBe(2_000);
 	});
 
+	it("adopts a newer-generation access token even when its expiry is SHORTER than the stale one", async () => {
+		// A re-auth's access token can expire sooner than a stale pre-re-auth
+		// token (different lifetimes); the newer generation must still win — the
+		// pre-re-auth token may be revoked.
+		const account = makeAccount({
+			access_token: "mem-pre-reauth-access",
+			refresh_token: "mem-pre-reauth-refresh",
+			expires_at: 9_000,
+			refresh_token_issued_at: 500,
+		} as Partial<Account>);
+		const { proxyContext } = makeProxyContext({
+			id: account.id,
+			access_token: "db-reauth-access",
+			refresh_token: "db-reauth-refresh",
+			expires_at: 8_000,
+			refresh_token_issued_at: 2_000,
+		});
+		const getValidAccessToken = mock(() => Promise.resolve("ok"));
+
+		const tokenProvider = createUsagePollingTokenProvider(
+			account,
+			proxyContext,
+			{ getValidAccessToken },
+		);
+		await tokenProvider();
+
+		expect(account.access_token).toBe("db-reauth-access");
+		expect(account.expires_at).toBe(8_000);
+		expect(account.refresh_token).toBe("db-reauth-refresh");
+	});
+
 	it("propagates token getter errors without any pause/resume calls", async () => {
 		const account = makeAccount({ paused: true });
 		const { proxyContext, dbOps } = makeProxyContext({ ...account });

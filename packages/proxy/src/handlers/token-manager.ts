@@ -275,13 +275,13 @@ async function adoptDbTokensIfFresher(
 	const dbAccessToken = dbAccount.access_token;
 	const dbExpiresAt = dbAccount.expires_at;
 	// Adopt on a STRICTLY newer expiry — or, at equal/rounded expiry, on a
-	// strictly newer refresh generation (issued_at) with a differing token:
-	// the newer generation proves this is not a delayed read of the caller's
-	// own (possibly just-rejected) token, so serving it is safe.
+	// newer refresh generation (issued_at) with a differing token: the newer
+	// generation proves this is not a delayed read of the caller's own
+	// (possibly just-rejected) token, so serving it is safe. Consistent with
+	// the policy above, an unstamped snapshot defers to a stamped DB row.
 	const dbGenerationStrictlyNewer =
 		dbIssuedAt !== null &&
-		memIssuedAt !== null &&
-		dbIssuedAt > memIssuedAt &&
+		(memIssuedAt === null || dbIssuedAt > memIssuedAt) &&
 		dbAccessToken !== account.access_token;
 	if (
 		typeof dbAccessToken === "string" &&
@@ -478,9 +478,13 @@ export async function refreshAccessTokenSafe(
 			const adopted = await adoptAuthoritativeAccountTokens(account, ctx.dbOps);
 			if (adopted) return adopted;
 			// No servable authority: keep the snapshot consistent with the token
-			// handed back. The expiry is left untouched (stale-conservative — it
-			// triggers an early re-check rather than overclaiming freshness).
+			// handed back. Its true expiry is unknown here — and the snapshot's
+			// own expiry may be far-future (a 401-rejected token is not
+			// necessarily near expiry) — so null it out, which getValidAccessToken
+			// treats as "refresh before next use" rather than trusting a stale
+			// horizon for a token it doesn't belong to.
 			account.access_token = joinedToken;
+			account.expires_at = null;
 		}
 		return joinedToken;
 	};
