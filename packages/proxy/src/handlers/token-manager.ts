@@ -274,11 +274,20 @@ async function adoptDbTokensIfFresher(
 
 	const dbAccessToken = dbAccount.access_token;
 	const dbExpiresAt = dbAccount.expires_at;
+	// Adopt on a STRICTLY newer expiry — or, at equal/rounded expiry, on a
+	// strictly newer refresh generation (issued_at) with a differing token:
+	// the newer generation proves this is not a delayed read of the caller's
+	// own (possibly just-rejected) token, so serving it is safe.
+	const dbGenerationStrictlyNewer =
+		dbIssuedAt !== null &&
+		memIssuedAt !== null &&
+		dbIssuedAt > memIssuedAt &&
+		dbAccessToken !== account.access_token;
 	if (
 		typeof dbAccessToken === "string" &&
 		typeof dbExpiresAt === "number" &&
 		dbExpiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS &&
-		dbExpiresAt > (account.expires_at ?? 0)
+		(dbExpiresAt > (account.expires_at ?? 0) || dbGenerationStrictlyNewer)
 	) {
 		account.access_token = dbAccessToken;
 		account.expires_at = dbExpiresAt;
@@ -462,8 +471,16 @@ export async function refreshAccessTokenSafe(
 			// lost and it adopted the authoritative DB credentials. Sync this
 			// caller's whole snapshot from the same authority (best-effort); its
 			// stale fields would otherwise feed the 401-retry path a rejected token
-			// or replay a consumed refresh token later.
-			await adoptAuthoritativeAccountTokens(account, ctx.dbOps);
+			// or replay a consumed refresh token later. If the authority has moved
+			// on again (e.g. a re-auth since the winner's adoption), the adopted
+			// token is fresher than the joined one — return THAT, never a token
+			// older than the account state just installed.
+			const adopted = await adoptAuthoritativeAccountTokens(account, ctx.dbOps);
+			if (adopted) return adopted;
+			// No servable authority: keep the snapshot consistent with the token
+			// handed back. The expiry is left untouched (stale-conservative — it
+			// triggers an early re-check rather than overclaiming freshness).
+			account.access_token = joinedToken;
 		}
 		return joinedToken;
 	};

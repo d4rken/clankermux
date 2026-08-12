@@ -740,6 +740,97 @@ describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
 		expect(updateTokensSpy.mock.calls[0][5]).toBe("rt-rotated");
 	});
 
+	it("adopts a differing DB access token at EQUAL expiry when its refresh generation is strictly newer", async () => {
+		const acctId = "adopt-equal-expiry-newer-gen";
+		const sharedExpiry = Date.now() + HOUR_MS;
+		const { ctx, refreshTokenSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+			}),
+			false,
+			{
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "db-newer-generation",
+						// Equal (possibly rounded) expiry — but a strictly newer
+						// issued_at proves a newer credential generation, so this is NOT
+						// a delayed read of the caller's own rejected token.
+						expires_at: sharedExpiry,
+						refresh_token: "rt-newer-gen",
+						refresh_token_issued_at: 2_000,
+					}) as Account,
+			},
+		);
+
+		const acct = makeAccount(acctId, {
+			access_token: "rejected-old-gen",
+			expires_at: sharedExpiry,
+			refresh_token_issued_at: 1_000,
+		} as Partial<Account>);
+		const token = await refreshAccessTokenSafe(acct, ctx);
+
+		expect(token).toBe("db-newer-generation");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+		expect(acct.refresh_token).toBe("rt-newer-gen");
+	});
+
+	it("returns the ADOPTED token to a joiner when the authority moved on after the winner resolved", async () => {
+		const acctId = "joiner-adopted-fresher";
+		const dbExpiry = Date.now() + 2 * HOUR_MS;
+		let getAccountCalls = 0;
+		let resolveRefresh: (r: RefreshResult) => void = () => {};
+		const refreshGate = new Promise<RefreshResult>((res) => {
+			resolveRefresh = res;
+		});
+		const { ctx } = makeContext(() => refreshGate, false, {
+			updateAccountTokens: async () => false, // winner's CAS loses
+			getAccount: async () => {
+				getAccountCalls += 1;
+				// Calls 1+2: the two pre-refresh adoption checks → null.
+				if (getAccountCalls <= 2) return null;
+				// Call 3: winner's post-CAS-loss adoption → first authority.
+				if (getAccountCalls === 3) {
+					return {
+						id: acctId,
+						access_token: "authority-v1",
+						expires_at: dbExpiry,
+						refresh_token: "rt-auth-v1",
+						refresh_token_issued_at: 100,
+					} as Account;
+				}
+				// Call 4+: joiner's sync — a re-auth landed meanwhile.
+				return {
+					id: acctId,
+					access_token: "authority-v2",
+					expires_at: dbExpiry,
+					refresh_token: "rt-auth-v2",
+					refresh_token_issued_at: 200,
+				} as Account;
+			},
+		});
+
+		const winner = makeAccount(acctId);
+		const joiner = makeAccount(acctId);
+		const winnerP = refreshAccessTokenSafe(winner, ctx);
+		const joinerP = refreshAccessTokenSafe(joiner, ctx);
+		await Bun.sleep(10);
+		resolveRefresh({
+			accessToken: "fresh-losing-v",
+			expiresAt: Date.now() + HOUR_MS,
+			refreshToken: "rt-losing-v",
+		});
+
+		const [winnerToken, joinerToken] = await Promise.all([winnerP, joinerP]);
+		expect(winnerToken).toBe("authority-v1");
+		// The joiner's sync saw the NEWER authority — it must return that token,
+		// never one older than the account state it just installed.
+		expect(joinerToken).toBe("authority-v2");
+		expect(joiner.access_token).toBe("authority-v2");
+		expect(joiner.refresh_token).toBe("rt-auth-v2");
+	});
+
 	it("does NOT adopt a DB refresh token that is OLDER than the in-memory one (issued_at guard)", async () => {
 		const acctId = "adopt-stale-rt-guard";
 		let refreshTokenAtCall: string | null = null;
