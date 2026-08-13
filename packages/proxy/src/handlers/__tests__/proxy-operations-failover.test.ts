@@ -14,7 +14,11 @@ import {
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
 } from "../../provider-overload-cooldown";
-import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
+import {
+	isCodexEntitlementModelError,
+	isModelUnavailableError,
+	proxyWithAccount,
+} from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 // Minimal Account fixture for openai-compatible provider
@@ -847,6 +851,73 @@ describe("proxyWithAccount — 529 failover", () => {
 		);
 		expect(await isModelUnavailableError(response)).toBe(false);
 	});
+
+	it("both predicates match the ChatGPT-account entitlement 400", async () => {
+		const body = JSON.stringify({
+			detail:
+				"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
+		});
+		expect(
+			await isModelUnavailableError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(true);
+		expect(
+			await isCodexEntitlementModelError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("neither predicate matches an unrelated top-level detail", async () => {
+		const body = JSON.stringify({ detail: "Not authenticated" });
+		expect(
+			await isModelUnavailableError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(false);
+		expect(
+			await isCodexEntitlementModelError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(false);
+	});
+
+	// Pins the tier split: the broad predicate takes any "model … not supported"
+	// detail, the entitlement predicate only the account-scoped Codex/ChatGPT one.
+	it("a non-entitlement unsupported-model detail is broad-only", async () => {
+		const body = JSON.stringify({
+			detail: "The model input field is not supported by this endpoint",
+		});
+		expect(
+			await isModelUnavailableError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(true);
+		expect(
+			await isCodexEntitlementModelError(
+				new Response(body, {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+			),
+		).toBe(false);
+	});
 });
 
 describe("proxyWithAccount — model-fallback loop skips overloaded families", () => {
@@ -1096,5 +1167,90 @@ describe("proxyWithAccount — staged-body cleanup on direct model-not-found ret
 		expect(discardSpy).toHaveBeenCalledWith("req-1");
 		// And nothing is left staged.
 		expect(cacheBodyStore.getStagingSize()).toBe(0);
+	});
+});
+
+describe("proxyWithAccount — Codex entitlement model error fails over", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
+	});
+
+	// A codex account with a SCALAR model mapping: modelList.length <= 1, so a
+	// model-unavailable 400 reaches the no-fallback branch.
+	function makeCodexAccount(overrides: Partial<Account> = {}): Account {
+		return makeAccount({
+			id: "acc-codex",
+			name: "codex-test",
+			provider: "codex",
+			api_key: null,
+			refresh_token: "rt-token",
+			access_token: "at-token",
+			expires_at: Date.now() + 3_600_000,
+			custom_endpoint: null,
+			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
+			...overrides,
+		});
+	}
+
+	it("returns null (failover) when the plan does not entitle the account to the model", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					detail:
+						"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
+				},
+				400,
+			),
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeCodexAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		// Account-scoped error: another account on a different plan can serve the
+		// same model, so this fails over instead of forwarding the 400.
+		expect(result).toBeNull();
+	});
+
+	it("still forwards a generic model-not-found 400 to the client", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{ error: { code: "model_not_found", message: "model does not exist" } },
+				400,
+			),
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			makeCodexAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).not.toBeNull();
+		expect(result?.status).toBe(400);
 	});
 });
