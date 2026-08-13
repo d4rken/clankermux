@@ -14,6 +14,14 @@ import type {
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
 import { TOKEN_REFRESH_BACKOFF_MS, TOKEN_SAFETY_WINDOW_MS } from "../constants";
+import {
+	clearPendingRotationIfCurrent,
+	flushPendingRotation,
+	getPendingRotation,
+	type PendingRotation,
+	recordPendingRotation,
+	resolvePendingAfterPersist,
+} from "./pending-rotation-registry";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {
 	checkRefreshTokenHealth,
@@ -233,6 +241,37 @@ export async function adoptAuthoritativeAccountTokens(
 	}
 }
 
+/** Whether a pending rotation's access token is still worth serving. */
+function isPendingAccessTokenServable(entry: PendingRotation): boolean {
+	return entry.expiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS;
+}
+
+/**
+ * Install a pending rotation's REFRESH generation on the in-memory account. The
+ * stamp is the entry's `recordedAt` (when the provider committed the rotation),
+ * never `Date.now()`: a later stamp would make a genuinely newer writer's row
+ * look older to the staleness guards.
+ */
+function installPendingRefreshGeneration(
+	account: Account,
+	entry: PendingRotation,
+): void {
+	if (entry.refreshToken) {
+		account.refresh_token = entry.refreshToken;
+	}
+	account.refresh_token_issued_at = entry.recordedAt;
+}
+
+/** Install a pending rotation's full credentials on the in-memory account. */
+function installPendingRotationCredentials(
+	account: Account,
+	entry: PendingRotation,
+): void {
+	account.access_token = entry.accessToken;
+	account.expires_at = entry.expiresAt;
+	installPendingRefreshGeneration(account, entry);
+}
+
 /**
  * Re-read the account row right before firing a refresh and adopt fresher
  * credentials another writer already produced:
@@ -253,6 +292,44 @@ async function adoptDbTokensIfFresher(
 	account: Account,
 	ctx: ProxyContext,
 ): Promise<string | null> {
+	// A pending rotation outranks the row: the provider already committed it and
+	// the row still holds the token it consumed. Land it first — and while one
+	// exists, the row is knowably stale, so the re-read below is skipped entirely
+	// rather than allowed to adopt a consumed generation backwards.
+	const { outcome: flushOutcome, entry: flushedEntry } =
+		await flushPendingRotation(account.id, ctx.dbOps);
+	if (flushOutcome === "persisted" && flushedEntry) {
+		installPendingRotationCredentials(account, flushedEntry);
+		if (isPendingAccessTokenServable(flushedEntry)) {
+			refreshFailures.delete(account.id);
+			backoffCounters.delete(account.id);
+			log.info(
+				`Persisted a pending rotation for account ${account.name} and adopted its access token — skipping the refresh`,
+			);
+			return flushedEntry.accessToken;
+		}
+		// The row now IS this entry, so a re-read could only repeat it; refresh
+		// with the just-persisted refresh token.
+		return null;
+	}
+	if (flushOutcome === "failed" || flushOutcome === "superseded") {
+		// "failed" keeps the entry; "superseded" dropped it, but a NEWER entry
+		// recorded meanwhile survives and still outranks the row.
+		const live =
+			flushOutcome === "failed" ? flushedEntry : getPendingRotation(account.id);
+		if (live) {
+			if (isPendingAccessTokenServable(live)) {
+				installPendingRotationCredentials(account, live);
+				log.info(
+					`Serving the pending (unpersisted) access token for account ${account.name} — the stored row is known stale`,
+				);
+				return live.accessToken;
+			}
+			installPendingRefreshGeneration(account, live);
+			return null;
+		}
+	}
+
 	let dbAccount: Account | null;
 	try {
 		dbAccount = await ctx.dbOps.getAccount(account.id);
@@ -644,6 +721,17 @@ export async function refreshAccessTokenSafe(
 				// stamps later still — so this stamp can never exceed a newer
 				// generation's and make the staleness guards reject it as "older".
 				const mintedAt = Date.now();
+				// A pending rotation means an EARLIER persist threw: the row still
+				// holds that entry's anchor, not the token this attempt exchanged, so
+				// the CAS has to name the anchor or it would miss and be misread as a
+				// supersede. The entry's refresh token also rides along when this
+				// refresh minted none of its own — otherwise the write would leave the
+				// consumed token in the row.
+				const pendingSnapshot = getPendingRotation(account.id);
+				const persistAnchor =
+					pendingSnapshot?.attemptedRefreshToken ?? exchangedRefreshToken;
+				const effectiveRefreshToken =
+					result.refreshToken ?? pendingSnapshot?.refreshToken;
 				// 1. AWAIT the durable write. The provider has already rotated the
 				// refresh token — the old one is dead upstream — so a lost write
 				// leaves the DB holding a consumed token whose next replay is an
@@ -658,14 +746,28 @@ export async function refreshAccessTokenSafe(
 						account.id,
 						result.accessToken,
 						result.expiresAt,
-						result.refreshToken,
+						effectiveRefreshToken,
 						result.identity,
-						exchangedRefreshToken ?? undefined,
+						persistAnchor ?? undefined,
 					))
 						? "persisted"
 						: "superseded";
 				} catch (persistError) {
 					persistOutcome = "failed";
+					// Hold the rotation in memory so a later touchpoint (or the
+					// registry's own retry) can still land it; without it the row keeps
+					// a token the provider already invalidated.
+					recordPendingRotation(
+						account.id,
+						{
+							accessToken: result.accessToken,
+							expiresAt: result.expiresAt,
+							refreshToken: effectiveRefreshToken,
+							identity: result.identity ?? null,
+							attemptedRefreshToken: persistAnchor ?? "",
+						},
+						ctx.dbOps,
+					);
 					log.error(
 						`Failed to persist refreshed tokens for account ${account.name} — serving the in-memory token; the rotated refresh token is NOT durable and is lost on restart`,
 						persistError,
@@ -675,7 +777,37 @@ export async function refreshAccessTokenSafe(
 				// Clear any previous failure record on successful refresh
 				refreshFailures.delete(account.id);
 
+				if (persistOutcome === "persisted" && pendingSnapshot) {
+					// The write carried the pending rotation into the row, so the entry
+					// is settled; a newer one recorded mid-write survives and is rebased
+					// onto the token this write actually put there.
+					resolvePendingAfterPersist(
+						account.id,
+						pendingSnapshot,
+						effectiveRefreshToken,
+					);
+				}
+
 				if (persistOutcome === "superseded") {
+					// An anchor-keyed CAS can only miss because the row genuinely moved
+					// past the anchor, so this entry (if any) describes a dead
+					// generation.
+					if (pendingSnapshot) {
+						clearPendingRotationIfCurrent(account.id, pendingSnapshot);
+					}
+					const survivor = getPendingRotation(account.id);
+					if (survivor) {
+						// A rotation recorded while this write was in flight is newer than
+						// anything the row can hold — the registry outranks it.
+						installPendingRotationCredentials(account, survivor);
+						account.last_used = Date.now();
+						if (isPendingAccessTokenServable(survivor)) {
+							log.warn(
+								`Persist for account ${account.name} was superseded, but a newer unpersisted rotation is live in memory — serving it`,
+							);
+							return survivor.accessToken;
+						}
+					}
 					// CAS loss: a concurrent rotation or re-auth won and the row holds
 					// ITS credentials. The winner may have invalidated this attempt's
 					// session family, so adopt and serve the authoritative tokens; the
@@ -703,8 +835,8 @@ export async function refreshAccessTokenSafe(
 				// This prevents subsequent requests from seeing stale token data
 				account.access_token = result.accessToken;
 				account.expires_at = result.expiresAt;
-				if (result.refreshToken) {
-					account.refresh_token = result.refreshToken;
+				if (effectiveRefreshToken) {
+					account.refresh_token = effectiveRefreshToken;
 					account.refresh_token_issued_at = mintedAt;
 				}
 				account.last_used = Date.now();
@@ -758,22 +890,60 @@ export async function refreshAccessTokenSafe(
 				// pre-poll sync) can install a newer refresh token on the shared
 				// object mid-refresh, and pausing against THAT token would match and
 				// pause the healthy, freshly-rotated row.
-				const paused = await pauseAccountForReauthIfInvalidGrant(
-					error,
-					{
-						id: account.id,
-						name: account.name,
-						refresh_token: exchangedRefreshToken,
-					},
-					ctx.dbOps,
-				);
+				//
+				// A pending rotation changes both questions — WHETHER to pause and
+				// WHICH token to key it on — so it is classified first.
+				const pendingAtFailure = getPendingRotation(account.id);
+				let paused = false;
+				let replayedStaleGeneration = false;
+				if (
+					isInvalidGrant &&
+					pendingAtFailure &&
+					exchangedRefreshToken !== pendingAtFailure.refreshToken
+				) {
+					// This attempt exchanged a generation the provider had already
+					// replaced (a concurrent rotation is awaiting persist). The account
+					// is healthy; pausing it would take a live account out of rotation.
+					// The failure record is dropped for the same reason the benign-race
+					// branch below drops it.
+					replayedStaleGeneration = true;
+					refreshFailures.delete(account.id);
+					log.info(
+						`Token refresh for account ${account.name} exchanged a stale refresh-token generation while a rotation awaits persist; leaving the account active.`,
+					);
+				} else if (isInvalidGrant && pendingAtFailure) {
+					// The LIVE pending token itself was rejected: that generation is dead
+					// and must not be retried. The pause is keyed on the ANCHOR — what
+					// the row actually holds — or its CAS would miss and leave a dead
+					// account in rotation.
+					clearPendingRotationIfCurrent(account.id, pendingAtFailure);
+					paused = await pauseAccountForReauthIfInvalidGrant(
+						error,
+						{
+							id: account.id,
+							name: account.name,
+							refresh_token: pendingAtFailure.attemptedRefreshToken,
+						},
+						ctx.dbOps,
+					);
+				} else {
+					paused = await pauseAccountForReauthIfInvalidGrant(
+						error,
+						{
+							id: account.id,
+							name: account.name,
+							refresh_token: exchangedRefreshToken,
+						},
+						ctx.dbOps,
+					);
+				}
 				if (paused) {
 					// Genuine terminal auth failure: pauseAccountForReauthIfInvalidGrant
 					// already logged an ERROR ("Account ... PAUSED — needs
 					// re-authentication"). Don't double-log. Drop any coalesce entry so a
 					// later caller doesn't reuse a token from a now-paused account.
 					recentRefreshes.delete(account.id);
-				} else if (isInvalidGrant) {
+				} else if (isInvalidGrant && !replayedStaleGeneration) {
 					// Terminal-looking auth error but the account was NOT newly flagged:
 					// the stored refresh token no longer matches the one this attempt
 					// used — a concurrent refresh already rotated it (benign race loser),
@@ -786,7 +956,7 @@ export async function refreshAccessTokenSafe(
 					log.info(
 						`Token refresh for account ${account.name} was not newly flagged for reauth (a concurrent refresh already rotated the token, or the account is already paused); leaving its state unchanged.`,
 					);
-				} else {
+				} else if (!isInvalidGrant) {
 					// Non-auth transient failure (network / 5xx / unexpected). Keep prior
 					// visibility.
 					log.error(
