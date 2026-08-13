@@ -7,6 +7,10 @@ import {
 } from "@clankermux/database";
 import { usageCache } from "@clankermux/providers";
 import {
+	clearAllPendingRotationsForTests,
+	getPendingRotation,
+	type PendingRotationWriter,
+	recordPendingRotation,
 	registerCodexUsageRefresher,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
@@ -444,6 +448,32 @@ describe("createCodexReauthHandler", () => {
 			expect(row?.codex_usage_observed_at ?? null).toBeNull();
 			expect(usageCache.peekAge(accountId)).toBeNull();
 			expect(refreshed).toEqual([accountId]);
+		});
+
+		// A rotation awaiting a persist describes a generation the provider has
+		// already replaced once a reauth lands; retrying it would write dead
+		// credentials over the fresh ones.
+		it("drops a pending refresh-token rotation for the re-authenticated account", async () => {
+			const accountId = "dddddddd-0000-0000-0000-000000000012";
+			await insertCodexAccount(accountId);
+			recordPendingRotation(
+				accountId,
+				{
+					accessToken: "at-pending",
+					expiresAt: Date.now() + 3_600_000,
+					refreshToken: "rt-pending",
+					identity: null,
+					attemptedRefreshToken: "old-rt",
+				},
+				{ updateAccountTokens: async () => true } as PendingRotationWriter,
+			);
+
+			try {
+				await reauth(accountId);
+				expect(getPendingRotation(accountId)).toBeUndefined();
+			} finally {
+				clearAllPendingRotationsForTests();
+			}
 		});
 
 		it("still completes the reauth when the triggered refresh fails", async () => {
