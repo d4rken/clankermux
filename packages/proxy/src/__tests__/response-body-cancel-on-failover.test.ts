@@ -284,24 +284,20 @@ describe("failover drains the abandoned upstream response body", () => {
 });
 
 /**
- * The ONE failover site where drain is the wrong primitive.
+ * The rate-limited failover site — historically the ONE site that cancelled.
  *
- * The rate-limited failover runs AFTER processProxyResponse →
- * updateAccountMetadata, which — whenever a requestId is set, i.e. always on
- * this path — hands a `response.clone()` to a floating usage-extraction IIFE.
- * The response being disposed there is a tee branch whose twin may still be
- * reading, and draining a branch makes the tee pull and buffer the whole body
- * for that twin. So this site cancels; every other fail() site still drains.
+ * It used to run AFTER processProxyResponse → updateAccountMetadata handed a
+ * `response.clone()` to a floating usage-extraction IIFE, so the body it
+ * disposed was a tee branch with a live twin and had to be CANCELLED (draining
+ * a branch makes the tee pull and buffer the whole body for the twin).
  *
- * The context below deliberately supplies a provider WITHOUT extractUsageInfo /
- * parseUsage, so no extraction clone is made and the disposal primitive is
- * observable at the stream source (with a live twin the tee absorbs the
- * difference: the twin's own read pulls the source to EOF either way, and a
- * single branch cancelling never runs the source's cancel algorithm). That is
- * the only way to see WHICH primitive the site used; it does not change which
- * one it uses.
+ * That clone is gone: usage is collected inline off the bytes already being
+ * forwarded, and updateAccountMetadata reads headers only. The body reaching
+ * this site is therefore exclusively owned, and it must be DRAINED like every
+ * other fail() site — cancelling alone does not reliably return Bun's native
+ * read buffer, which is the leak this whole file exists to pin.
  */
-describe("the rate-limited failover cancels its tee branch instead of draining", () => {
+describe("the rate-limited failover drains its exclusively owned body", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {
@@ -312,11 +308,10 @@ describe("the rate-limited failover cancels its tee branch instead of draining",
 		globalThis.fetch = originalFetch;
 	});
 
-	it("cancels the body of a 200 whose unified-status header reports the account is rate-limited", async () => {
+	it("drains the body of a 200 whose unified-status header reports the account is rate-limited", async () => {
 		// A rate-limited verdict is driven by the unified-status header
-		// INDEPENDENTLY of the HTTP status, so a successful 200 completion can
-		// take this branch — which is exactly why usage extraction still runs
-		// here (and therefore why the body is a tee branch).
+		// INDEPENDENTLY of the HTTP status, so a successful 200 completion — a
+		// body that carries a real usage summary — can take this branch.
 		const account = makeAccount({
 			id: "stub-a",
 			provider: "test-provider" as Account["provider"],
@@ -327,7 +322,6 @@ describe("the rate-limited failover cancels its tee branch instead of draining",
 			{ "anthropic-ratelimit-unified-status": "rate_limited" },
 		);
 
-		// No extractUsageInfo / parseUsage: see the block comment above.
 		const stubProvider = {
 			name: "test-provider",
 			canHandle: () => true,
@@ -373,14 +367,11 @@ describe("the rate-limited failover cancels its tee branch instead of draining",
 		expect(upstreamCalls).toBe(1);
 		expect(account.rate_limited_until ?? 0).toBeGreaterThan(Date.now());
 
-		// Disposal is fire-and-forget, so wait for whichever primitive ran.
+		// Disposal is fire-and-forget, so poll for the drain to reach EOF.
 		await waitFor(
-			() => state.cancelled || state.fullyRead,
-			"the rate-limited body to be disposed",
+			() => state.fullyRead,
+			"the rate-limited body to drain to EOF",
 		);
-		expect(state.cancelled).toBe(true);
-		// Never pulled to EOF: draining is what would make the tee buffer the
-		// whole body for a live twin.
-		expect(state.fullyRead).toBe(false);
+		expect(state.fullyRead).toBe(true);
 	});
 });

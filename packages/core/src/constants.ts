@@ -33,8 +33,6 @@ export const TIME_CONSTANTS = {
 
 	// Timeouts
 	STREAM_TIMEOUT_DEFAULT: 1000 * 60 * 1, // 1 minute
-	STREAM_READ_TIMEOUT_MS: 60000, // 60 seconds - overall timeout for stream reads
-	STREAM_OPERATION_TIMEOUT_MS: 30000, // 30 seconds - timeout per read operation
 
 	// Streaming forwarder timeouts (response-handler.ts).
 	// Agentic workloads (e.g. recursive claude-code-sdk sessions) can have long
@@ -121,9 +119,6 @@ export const BUFFER_SIZES = {
 	// Stream body max size
 	STREAM_BODY_MAX_KB: 256,
 	STREAM_BODY_MAX_BYTES: 256 * 1024, // 256KB default
-
-	// Anthropic provider stream cap
-	ANTHROPIC_STREAM_CAP_BYTES: 32768, // 32KB
 
 	// Log file size
 	LOG_FILE_MAX_SIZE: 10 * 1024 * 1024, // 10MB
