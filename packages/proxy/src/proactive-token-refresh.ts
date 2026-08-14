@@ -18,6 +18,7 @@ import {
 	getCoalescibleRecentRefresh,
 	pauseAccountForReauthIfInvalidGrant,
 	recordRecentRefresh,
+	retryPersistOnOwnFlushedRotation,
 } from "./handlers/token-manager";
 import type { ProxyContext } from "./proxy";
 
@@ -66,6 +67,16 @@ export async function refreshProactiveAccountToken({
 	providerLabel,
 	proxyContext,
 }: ProactiveTokenRefreshParams): Promise<ProactiveRefreshOutcome> {
+	// Skip if a refresh is already in-flight for this account (deduplication).
+	// Checked BEFORE the flush below: that refresh owns this account's next
+	// anchor-keyed write, so flushing underneath it would race its own persist.
+	if (proxyContext.refreshInFlight.has(row.id)) {
+		log.debug(
+			`Skipping proactive ${providerLabel} refresh for ${row.name} — refresh already in-flight`,
+		);
+		return { status: "skipped", reason: "in-flight" };
+	}
+
 	// Land any pending rotation before touching the provider. Whatever the
 	// outcome, this row is not refreshable this tick: "persisted"/"superseded"
 	// mean its refresh token was just consumed or replaced (replaying it can trip
@@ -80,14 +91,6 @@ export async function refreshProactiveAccountToken({
 			`Skipping proactive ${providerLabel} refresh for ${row.name} — a pending refresh-token rotation flush reported "${flushOutcome}"; the row's refresh token is not the live generation.`,
 		);
 		return { status: "skipped", reason: "pending-rotation" };
-	}
-
-	// Skip if a refresh is already in-flight for this account (deduplication)
-	if (proxyContext.refreshInFlight.has(row.id)) {
-		log.debug(
-			`Skipping proactive ${providerLabel} refresh for ${row.name} — refresh already in-flight`,
-		);
-		return { status: "skipped", reason: "in-flight" };
 	}
 
 	const account: Account = {
@@ -174,6 +177,13 @@ export async function refreshProactiveAccountToken({
 					result.refreshToken ??
 					pendingSnapshot?.refreshToken ??
 					row.refresh_token;
+				// What a CONCURRENT flush of that same entry writes into the row — the
+				// entry's own refresh token, or its anchor when it carries none. A CAS
+				// miss that finds exactly this token in the row was caused by OUR OWN
+				// rotation landing, not by another writer (see the retry below).
+				const pendingWrittenToken =
+					pendingSnapshot?.refreshToken ??
+					pendingSnapshot?.attemptedRefreshToken;
 
 				// AWAIT the durable write via the canonical token-write path, which
 				// COALESCE-merges identity (a null from a refresh lacking an id_token
@@ -217,35 +227,80 @@ export async function refreshProactiveAccountToken({
 				}
 
 				if (!persisted) {
-					// An anchor-keyed CAS can only miss because the row genuinely moved
-					// past the anchor, so this entry (if any) describes a dead generation.
+					// An anchor-keyed CAS misses either because the row genuinely moved
+					// past the anchor — this entry (if any) then describes a dead
+					// generation — or because our OWN pending rotation landed while this
+					// write was in flight (handled by the re-anchored retry below).
 					if (pendingSnapshot) {
 						clearPendingRotationIfCurrent(row.id, pendingSnapshot);
 					}
-					const survivor = getPendingRotation(row.id);
-					if (
-						survivor &&
-						survivor.expiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS
-					) {
-						// A rotation recorded while this write was in flight is newer than
-						// anything the row can hold — the registry outranks it.
-						log.warn(
-							`Proactive ${providerLabel} token persist for ${row.name} was superseded, but a newer unpersisted rotation is live in memory — serving it`,
+					let survivor = getPendingRotation(row.id);
+					let recovered = false;
+					if (!survivor && pendingWrittenToken) {
+						const retry = await retryPersistOnOwnFlushedRotation(
+							{ id: row.id, name: row.name },
+							proxyContext.dbOps,
+							{
+								pendingWrittenToken,
+								accessToken: result.accessToken,
+								expiresAt: result.expiresAt,
+								refreshToken: effectiveRefreshToken,
+								identity: result.identity ?? null,
+							},
 						);
-						return survivor.accessToken;
+						if (retry.outcome === "persisted") {
+							recovered = true;
+						} else if (retry.outcome === "failed") {
+							// Same handling as a first-attempt write failure, but anchored on
+							// what the row holds NOW: the token our own flush put there.
+							recordPendingRotation(
+								row.id,
+								{
+									accessToken: result.accessToken,
+									expiresAt: result.expiresAt,
+									refreshToken: effectiveRefreshToken,
+									identity: result.identity ?? null,
+									attemptedRefreshToken: pendingWrittenToken,
+								},
+								proxyContext.dbOps,
+							);
+							log.error(
+								`Failed to persist the proactive ${providerLabel} token refresh for ${row.name} — serving the in-memory token; the rotated refresh token is NOT durable and is lost on restart`,
+								retry.error,
+							);
+							recordRecentRefresh(row.id, result.accessToken, result.expiresAt);
+							return result.accessToken;
+						} else if (retry.outcome === "superseded") {
+							// The retry awaited too, so re-check for a rotation recorded
+							// since: it would outrank whatever the row holds.
+							survivor = getPendingRotation(row.id);
+						}
 					}
-					// CAS loss: a concurrent rotation or re-auth won. Don't cache or
-					// claim success for the losing token; hand any joiners the
-					// authoritative credentials instead (the winner may have
-					// invalidated this attempt's session family).
-					log.warn(
-						`Proactive ${providerLabel} token persist for ${row.name} was superseded by a concurrent rotation or re-auth — adopting the authoritative DB credentials`,
-					);
-					const authoritative = await adoptAuthoritativeAccountTokens(
-						account,
-						proxyContext.dbOps,
-					);
-					return authoritative ?? result.accessToken;
+					if (!recovered) {
+						if (
+							survivor &&
+							survivor.expiresAt - Date.now() > TOKEN_SAFETY_WINDOW_MS
+						) {
+							// A rotation recorded while this write was in flight is newer than
+							// anything the row can hold — the registry outranks it.
+							log.warn(
+								`Proactive ${providerLabel} token persist for ${row.name} was superseded, but a newer unpersisted rotation is live in memory — serving it`,
+							);
+							return survivor.accessToken;
+						}
+						// CAS loss: a concurrent rotation or re-auth won. Don't cache or
+						// claim success for the losing token; hand any joiners the
+						// authoritative credentials instead (the winner may have
+						// invalidated this attempt's session family).
+						log.warn(
+							`Proactive ${providerLabel} token persist for ${row.name} was superseded by a concurrent rotation or re-auth — adopting the authoritative DB credentials`,
+						);
+						const authoritative = await adoptAuthoritativeAccountTokens(
+							account,
+							proxyContext.dbOps,
+						);
+						return authoritative ?? result.accessToken;
+					}
 				}
 
 				if (pendingSnapshot) {
@@ -286,10 +341,17 @@ export async function refreshProactiveAccountToken({
 				error instanceof Error ? error.message : String(error),
 			);
 		const pendingAtFailure = getPendingRotation(row.id);
+		// The LIVE generation an entry describes: its own rotated token, or — for an
+		// entry recorded from an echo/non-rotating refresh, which carries none — the
+		// anchor itself. Falling back to the anchor is what keeps a genuinely
+		// revoked token from being classified as a benign stale replay forever (an
+		// `undefined` refresh token never matches).
+		const pendingGeneration =
+			pendingAtFailure?.refreshToken ?? pendingAtFailure?.attemptedRefreshToken;
 		if (
 			isInvalidGrant &&
 			pendingAtFailure &&
-			exchangedRefreshToken !== pendingAtFailure.refreshToken
+			exchangedRefreshToken !== pendingGeneration
 		) {
 			// This attempt exchanged a generation the provider had already replaced
 			// (a concurrent rotation is awaiting persist). The account is healthy.

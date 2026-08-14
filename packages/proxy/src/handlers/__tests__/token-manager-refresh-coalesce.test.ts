@@ -4,6 +4,8 @@ import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import {
 	clearAllPendingRotationsForTests,
+	clearPendingRotation,
+	flushPendingRotation,
 	getPendingRotation,
 	type PendingRotationWriter,
 	recordPendingRotation,
@@ -1128,6 +1130,208 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(acct.refresh_token).toBe("rt-pending");
 		// Still pending: the write has not landed.
 		expect(getPendingRotation(acctId)).toBeDefined();
+	});
+
+	it("serves the LIVE entry when a newer rotation was recorded while the flush was in flight", async () => {
+		const acctId = "pending-flush-live-newer";
+		seedPending(acctId, {
+			accessToken: "at-old-pending",
+			expiresAt: Date.now() + HOUR_MS,
+			refreshToken: "rt-old-pending",
+			attemptedRefreshToken: "rt-anchor",
+		});
+		let releasePersist: (v: boolean) => void = () => {};
+		const persistGate = new Promise<boolean>((res) => {
+			releasePersist = res;
+		});
+		const newerExpiry = Date.now() + 2 * HOUR_MS;
+		const { ctx, refreshTokenSpy, getAccountSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-should-not",
+			}),
+			false,
+			{ updateAccountTokens: () => persistGate },
+		);
+
+		const acct = makeAccount(acctId);
+		const tokenP = refreshAccessTokenSafe(acct, ctx);
+		await Bun.sleep(5);
+		// A newer rotation lands while the flush write is unsettled: the flush's
+		// snapshot is now a generation behind.
+		seedPending(acctId, {
+			accessToken: "at-newer-pending",
+			expiresAt: newerExpiry,
+			refreshToken: "rt-newer-pending",
+			attemptedRefreshToken: "rt-old-pending",
+		});
+		releasePersist(true);
+
+		const token = await tokenP;
+
+		// Installing the flushed (older) snapshot would serve a generation the
+		// provider has already replaced.
+		expect(token).toBe("at-newer-pending");
+		expect(acct.access_token).toBe("at-newer-pending");
+		expect(acct.refresh_token).toBe("rt-newer-pending");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+		expect(getAccountSpy).not.toHaveBeenCalled();
+		// The newer rotation is still unpersisted — its own write never ran.
+		expect(getPendingRotation(acctId)).toBeDefined();
+	});
+
+	it("re-reads the row when a reauth cleared the entry while the FAILING flush was in flight", async () => {
+		const acctId = "pending-flush-failed-cleared";
+		seedPending(acctId, {
+			accessToken: "at-cleared-pending",
+			expiresAt: Date.now() + HOUR_MS,
+			refreshToken: "rt-cleared-pending",
+			attemptedRefreshToken: "rt-anchor",
+		});
+		let failPersist: (error: unknown) => void = () => {};
+		const persistGate = new Promise<boolean>((_res, rej) => {
+			failPersist = rej;
+		});
+		const dbExpiry = Date.now() + 2 * HOUR_MS;
+		const { ctx, refreshTokenSpy, getAccountSpy } = makeContext(
+			async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-should-not",
+			}),
+			false,
+			{
+				updateAccountTokens: () => persistGate,
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "at-reauthed",
+						expires_at: dbExpiry,
+						refresh_token: "rt-reauthed",
+						refresh_token_issued_at: Date.now(),
+					}) as Account,
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const tokenP = refreshAccessTokenSafe(acct, ctx);
+		await Bun.sleep(5);
+		// A reauth completes and drops the pending rotation while the write is
+		// unsettled; the credentials it describes are the ones just replaced.
+		clearPendingRotation(acctId);
+		failPersist(new Error("disk I/O error"));
+
+		const token = await tokenP;
+
+		expect(token).toBe("at-reauthed");
+		expect(getAccountSpy).toHaveBeenCalledTimes(1);
+		expect(acct.refresh_token).toBe("rt-reauthed");
+		expect(refreshTokenSpy).not.toHaveBeenCalled();
+	});
+
+	it("re-anchors and retries the persist when its CAS missed because OUR OWN pending rotation landed", async () => {
+		const acctId = "pending-cas-miss-self-flush";
+		seedPending(acctId, {
+			// Unservable, so the refresh proceeds with the pending refresh token B.
+			accessToken: "at-pending-expired",
+			expiresAt: Date.now() - 1_000,
+			refreshToken: "B",
+			attemptedRefreshToken: "A",
+		});
+		let releasePersist: (v: boolean) => void = () => {};
+		const persistGate = new Promise<boolean>((res) => {
+			releasePersist = res;
+		});
+		let persistCalls = 0;
+		const { ctx, updateTokensSpy } = makeContext(
+			async () => ({
+				accessToken: "at-minted-C",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "C",
+			}),
+			false,
+			{
+				updateAccountTokens: async () => {
+					persistCalls += 1;
+					// Call 1 is the pre-refresh flush (still broken); call 2 is this
+					// refresh's own persist; call 3 the re-anchored retry.
+					if (persistCalls === 1) throw new Error("disk I/O error");
+					if (persistCalls === 2) return persistGate;
+					return true;
+				},
+				getAccount: async () =>
+					({
+						id: acctId,
+						access_token: "at-row-B",
+						expires_at: Date.now() + 2 * HOUR_MS,
+						refresh_token: "B",
+						refresh_token_issued_at: 555,
+					}) as Account,
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const tokenP = refreshAccessTokenSafe(acct, ctx);
+		await Bun.sleep(5);
+		// The background retry lands the pending rotation (A → B) and drops the
+		// entry while our own persist is still unsettled…
+		const flushed = await flushPendingRotation(acctId, {
+			updateAccountTokens: async () => true,
+		} as PendingRotationWriter);
+		expect(flushed.outcome).toBe("persisted");
+		// …so our CAS on A misses.
+		releasePersist(false);
+
+		const token = await tokenP;
+
+		// B was consumed by THIS exchange: adopting it would discard the minted C
+		// and pause a healthy account on the next replay of B.
+		expect(token).toBe("at-minted-C");
+		expect(acct.access_token).toBe("at-minted-C");
+		expect(acct.refresh_token).toBe("C");
+		expect(persistCalls).toBe(3);
+		// The retry names what the row actually holds now…
+		expect(updateTokensSpy.mock.calls[2][5]).toBe("B");
+		// …and still writes the minted generation.
+		expect(updateTokensSpy.mock.calls[2][3]).toBe("C");
+	});
+
+	it("pauses when the rejected token IS the pending generation even though the entry carries no refresh token", async () => {
+		const acctId = "pending-echoed-dead-generation";
+		seedPending(acctId, {
+			accessToken: "at-pending-expired",
+			expiresAt: Date.now() - 1_000,
+			// An echo/non-rotating refresh records no refresh token, so the live
+			// generation IS the anchor — the token this attempt exchanged.
+			refreshToken: undefined,
+			attemptedRefreshToken: "rt-old",
+		});
+		const { ctx, pauseSpy } = makeContext(
+			async () => {
+				throw new OAuthRefreshTokenError(acctId, "refresh rejected");
+			},
+			true,
+			{
+				updateAccountTokens: async () => {
+					throw new Error("disk I/O error");
+				},
+			},
+		);
+
+		let thrown: unknown;
+		try {
+			await refreshAccessTokenSafe(makeAccount(acctId), ctx);
+		} catch (err) {
+			thrown = err;
+		}
+
+		expect(thrown).toBeInstanceOf(TokenRefreshError);
+		// A genuinely revoked token must pause; `refreshToken === undefined` must
+		// not classify it as a benign stale replay forever.
+		expect(pauseSpy).toHaveBeenCalledTimes(1);
+		expect(pauseSpy.mock.calls[0][2]).toBe("rt-old");
+		expect(getPendingRotation(acctId)).toBeUndefined();
 	});
 
 	it("refreshes with the PENDING refresh token and CASes on the ORIGINAL anchor when the pending access token is expired", async () => {

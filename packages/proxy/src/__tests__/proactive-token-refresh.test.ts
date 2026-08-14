@@ -3,6 +3,7 @@ import { OAuthRefreshTokenError } from "@clankermux/core";
 import type { Account, AccountIdentity } from "@clankermux/types";
 import {
 	clearAllPendingRotationsForTests,
+	flushPendingRotation,
 	getPendingRotation,
 	type PendingRotationWriter,
 	recordPendingRotation,
@@ -160,6 +161,30 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 
 			expect(outcome).toEqual({ status: "skipped", reason: "in-flight" });
 			expect(ctx.refreshTokenSpy).not.toHaveBeenCalled();
+		});
+
+		it("checks the in-flight refresh BEFORE flushing (never races that refresh's own persist)", async () => {
+			const acctId = `${idPrefix}-in-flight-pending`;
+			seedPending(acctId, {
+				accessToken: "at-pending",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-pending",
+				attemptedRefreshToken: "rt-anchor",
+			});
+			const ctx = makeContext(async () => ({
+				accessToken: "should-not-run",
+				expiresAt: Date.now() + HOUR_MS,
+			}));
+			ctx.proxyContext.refreshInFlight.set(acctId, Promise.resolve("other"));
+
+			const outcome = await run(makeRow(acctId), ctx);
+
+			// The in-flight refresh owns this account's next anchor-keyed write; a
+			// flush fired underneath it would race that write.
+			expect(outcome).toEqual({ status: "skipped", reason: "in-flight" });
+			expect(ctx.updateTokensSpy).not.toHaveBeenCalled();
+			expect(ctx.refreshTokenSpy).not.toHaveBeenCalled();
+			expect(getPendingRotation(acctId)).toBeDefined();
 		});
 
 		it("skips a row whose token a concurrent refresh just produced (coalesce)", async () => {
@@ -329,6 +354,71 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 			});
 		});
 
+		it("re-anchors and retries the persist when its CAS missed because OUR OWN pending rotation landed", async () => {
+			const acctId = `${idPrefix}-cas-miss-self-flush`;
+			let releasePersist: (v: boolean) => void = () => {};
+			const persistGate = new Promise<boolean>((res) => {
+				releasePersist = res;
+			});
+			let persistCalls = 0;
+			const ctx = makeContext(
+				async () => {
+					// A request-path refresh rotated A → B and lost its persist while
+					// this exchange was in flight; this attempt exchanged B and minted C.
+					seedPending(acctId, {
+						accessToken: "at-pending",
+						expiresAt: Date.now() + HOUR_MS,
+						refreshToken: "B",
+						attemptedRefreshToken: "A",
+					});
+					return {
+						accessToken: "at-minted-C",
+						expiresAt: Date.now() + HOUR_MS,
+						refreshToken: "C",
+					};
+				},
+				{
+					updateAccountTokens: async () => {
+						persistCalls += 1;
+						return persistCalls === 1 ? persistGate : true;
+					},
+					getAccount: async () =>
+						({
+							id: acctId,
+							access_token: "at-row-B",
+							expires_at: Date.now() + 2 * HOUR_MS,
+							refresh_token: "B",
+							refresh_token_issued_at: 555,
+						}) as Account,
+				},
+			);
+
+			const outcomeP = run(makeRow(acctId), ctx);
+			await Bun.sleep(5);
+			// The background retry lands the pending rotation (A → B) and drops the
+			// entry while our own persist is still unsettled…
+			const flushed = await flushPendingRotation(acctId, {
+				updateAccountTokens: async () => true,
+			} as PendingRotationWriter);
+			expect(flushed.outcome).toBe("persisted");
+			// …so our CAS on A misses.
+			releasePersist(false);
+
+			const outcome = await outcomeP;
+
+			// B was consumed by THIS exchange: adopting it would discard the minted C
+			// and pause a healthy account on the next replay of B.
+			expect(outcome).toEqual({
+				status: "refreshed",
+				accessToken: "at-minted-C",
+			});
+			expect(persistCalls).toBe(2);
+			// The retry names what the row actually holds now…
+			expect(ctx.updateTokensSpy.mock.calls[1][5]).toBe("B");
+			// …and still writes the minted generation.
+			expect(ctx.updateTokensSpy.mock.calls[1][3]).toBe("C");
+		});
+
 		it("does NOT pause on an invalid_grant that replayed a stale generation", async () => {
 			const acctId = `${idPrefix}-benign-invalid-grant`;
 			const ctx = makeContext(async () => {
@@ -371,6 +461,34 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 			expect(getPendingRotation(acctId)).toBeUndefined();
 			expect(ctx.pauseSpy).toHaveBeenCalledTimes(1);
 			expect(ctx.pauseSpy.mock.calls[0][2]).toBe("rt-anchor");
+		});
+
+		it("pauses when the rejected token IS the pending generation even though the entry carries no refresh token", async () => {
+			const acctId = `${idPrefix}-echoed-dead-generation`;
+			const ctx = makeContext(
+				async () => {
+					// An echo/non-rotating refresh (Qwen) records an entry with NO
+					// refresh token: the live generation is then the ANCHOR itself —
+					// exactly the token this attempt exchanged and had rejected.
+					seedPending(acctId, {
+						accessToken: "at-live",
+						expiresAt: Date.now() + HOUR_MS,
+						refreshToken: undefined,
+						attemptedRefreshToken: "rt-row",
+					});
+					throw new OAuthRefreshTokenError(acctId, "refresh rejected");
+				},
+				{ pauseResult: true },
+			);
+
+			const outcome = await run(makeRow(acctId), ctx);
+
+			expect(outcome.status).toBe("failed");
+			// A revoked grant must pause; `refreshToken === undefined` must not make
+			// it look like a benign stale replay forever.
+			expect(ctx.pauseSpy).toHaveBeenCalledTimes(1);
+			expect(ctx.pauseSpy.mock.calls[0][2]).toBe("rt-row");
+			expect(getPendingRotation(acctId)).toBeUndefined();
 		});
 
 		it("pauses on the exchanged token for an invalid_grant with nothing pending", async () => {
