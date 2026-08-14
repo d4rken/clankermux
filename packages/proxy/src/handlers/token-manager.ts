@@ -244,10 +244,11 @@ export async function adoptAuthoritativeAccountTokens(
 }
 
 /**
- * Outcome of the re-anchored persist retry below. "not-ours" means the CAS miss
- * was NOT caused by our own pending rotation landing (the row read failed, or it
- * holds someone else's token), so the caller keeps its existing supersede
- * handling.
+ * Outcome of the re-anchored persist retry below. "not-ours" means the row was
+ * READ and holds someone else's token, so the CAS miss was NOT caused by our own
+ * pending rotation landing and the caller keeps its existing supersede handling.
+ * A read that throws is "failed", not "not-ours": an unreadable row proves
+ * nothing about who won.
  */
 export type OwnFlushedRotationRetry =
 	| { outcome: "persisted" }
@@ -270,8 +271,10 @@ export type OwnFlushedRotationRetry =
  *
  * So: re-read the row once, and only when it holds exactly what our own pending
  * rotation wrote (`pendingWrittenToken`), retry the write ONCE re-anchored on
- * it. Anything else is a genuine concurrent writer and is left to the caller's
- * adopt-authoritative path.
+ * it. A row that reads back as anything else is a genuine concurrent writer and
+ * is left to the caller's adopt-authoritative path; a row that cannot be read at
+ * all is reported as a failed write instead, so the caller holds the minted
+ * rotation pending rather than discarding it on an unproven supersede.
  */
 export async function retryPersistOnOwnFlushedRotation(
 	account: { id: string; name: string },
@@ -289,10 +292,16 @@ export async function retryPersistOnOwnFlushedRotation(
 		row = await dbOps.getAccount(account.id);
 	} catch (error) {
 		log.warn(
-			`Failed to re-read account ${account.name} while checking whether its persist CAS missed on our own just-flushed rotation`,
+			`Could not check whether the persist CAS for account ${account.name} missed on our own just-flushed rotation (the ownership re-read failed) — holding the rotation pending`,
 			error,
 		);
-		return { outcome: "not-ours" };
+		// An UNREADABLE row is not evidence that a foreign writer won: it may well
+		// hold our own just-flushed token. Reporting "not-ours" would route the
+		// caller into adopt-authoritative and discard the generation this exchange
+		// just minted — the exact loss this helper exists to prevent. "failed"
+		// instead holds it pending, anchored on our own flush; if that guess is
+		// wrong, the entry's later flush CAS-misses and is dropped as superseded.
+		return { outcome: "failed", error };
 	}
 	if (!row || row.refresh_token !== write.pendingWrittenToken) {
 		return { outcome: "not-ours" };

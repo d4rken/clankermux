@@ -1297,6 +1297,72 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(updateTokensSpy.mock.calls[2][3]).toBe("C");
 	});
 
+	it("holds the minted rotation pending when the ownership re-read THROWS on that same CAS miss", async () => {
+		const acctId = "pending-cas-miss-self-flush-unreadable";
+		seedPending(acctId, {
+			// Unservable, so the refresh proceeds with the pending refresh token B.
+			accessToken: "at-pending-expired",
+			expiresAt: Date.now() - 1_000,
+			refreshToken: "B",
+			attemptedRefreshToken: "A",
+		});
+		let releasePersist: (v: boolean) => void = () => {};
+		const persistGate = new Promise<boolean>((res) => {
+			releasePersist = res;
+		});
+		let persistCalls = 0;
+		const { ctx, getAccountSpy } = makeContext(
+			async () => ({
+				accessToken: "at-minted-C",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "C",
+			}),
+			false,
+			{
+				updateAccountTokens: async () => {
+					persistCalls += 1;
+					// Call 1 is the pre-refresh flush (still broken); call 2 is this
+					// refresh's own persist. No third: the ownership check never gets a
+					// readable row to re-anchor onto.
+					if (persistCalls === 1) throw new Error("disk I/O error");
+					if (persistCalls === 2) return persistGate;
+					return true;
+				},
+				getAccount: async () => {
+					throw new Error("database is locked");
+				},
+			},
+		);
+
+		const acct = makeAccount(acctId);
+		const tokenP = refreshAccessTokenSafe(acct, ctx);
+		await Bun.sleep(5);
+		// Same race as above: the background retry lands the pending rotation
+		// (A → B) while our own persist is unsettled…
+		const flushed = await flushPendingRotation(acctId, {
+			updateAccountTokens: async () => true,
+		} as PendingRotationWriter);
+		expect(flushed.outcome).toBe("persisted");
+		// …so our CAS on A misses.
+		releasePersist(false);
+
+		const token = await tokenP;
+
+		// An unreadable row is NOT evidence that a foreign writer won: adopting
+		// here would discard the only live copy of the minted generation C.
+		expect(token).toBe("at-minted-C");
+		expect(acct.access_token).toBe("at-minted-C");
+		expect(acct.refresh_token).toBe("C");
+		expect(persistCalls).toBe(2);
+		// Held pending instead, anchored on what our own flush put in the row.
+		const entry = getPendingRotation(acctId);
+		expect(entry?.accessToken).toBe("at-minted-C");
+		expect(entry?.refreshToken).toBe("C");
+		expect(entry?.attemptedRefreshToken).toBe("B");
+		// Only the ownership check read the row; no adopt-authoritative re-read.
+		expect(getAccountSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("pauses when the rejected token IS the pending generation even though the entry carries no refresh token", async () => {
 		const acctId = "pending-echoed-dead-generation";
 		seedPending(acctId, {
