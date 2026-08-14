@@ -656,6 +656,45 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 		});
 	});
 
+	// peekWrittenAt is the ABSOLUTE write-time read. It exists because the only
+	// other way to obtain that instant — `myNow - peekAge()` — takes TWO clock
+	// reads and therefore reports `timestamp - δ`, where δ is whatever elapsed
+	// between them. Callers that compare a before/after write time (the Codex
+	// coordinator's supersession guard) then see a phantom "advance" whenever δ
+	// differs between the two evaluations.
+	describe("peekWrittenAt() — absolute write time", () => {
+		it("returns the exact stored write timestamp regardless of the read clock", () => {
+			usageCache.set(ACCOUNT, sample); // stamped at BASE
+
+			nowSpy.mockReturnValue(BASE + 30_000);
+			expect(usageCache.peekWrittenAt(ACCOUNT)).toBe(BASE);
+			// Anchored to the write, not the reader: the clock moving does not move
+			// the answer (unlike `now - peekAge()`, which is only stable when both
+			// clock reads fall in the same millisecond).
+			nowSpy.mockReturnValue(BASE + 9 * 60_000);
+			expect(usageCache.peekWrittenAt(ACCOUNT)).toBe(BASE);
+		});
+
+		it("returns the true write time even when stale, and never evicts", () => {
+			usageCache.set(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + TTL_MS + 5_000); // past the routing TTL
+
+			expect(usageCache.peekWrittenAt(ACCOUNT)).toBe(BASE);
+			// Repeat reads keep seeing it — no eviction side effect...
+			expect(usageCache.peekWrittenAt(ACCOUNT)).toBe(BASE);
+			expect(usageCache.peekAge(ACCOUNT)).toBe(TTL_MS + 5_000);
+
+			// ...while an evicting read is what finally removes the stale entry, and
+			// only THEN does peekWrittenAt report absence.
+			expect(usageCache.getAge(ACCOUNT)).toBeNull();
+			expect(usageCache.peekWrittenAt(ACCOUNT)).toBeNull();
+		});
+
+		it("returns null for a missing account", () => {
+			expect(usageCache.peekWrittenAt("no-such-account")).toBeNull();
+		});
+	});
+
 	it("sampler-style freshness gating with peekAge stays correct", () => {
 		const FRESHNESS_MS = 180_000; // matches max(2*pollInterval, 150s) in practice
 

@@ -23,6 +23,14 @@ export {
 } from "./family-weekly-gate";
 export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
+	clearAllPendingRotationsForTests,
+	clearPendingRotation,
+	getPendingRotation,
+	type PendingRotation,
+	type PendingRotationWriter,
+	recordPendingRotation,
+} from "./pending-rotation-registry";
+export {
 	isAbsorbablePeer,
 	LIVENESS_DESIGN_SLOPE_PCT_PER_HOUR,
 	LIVENESS_RELEASE_HORIZON_MAX_MS,

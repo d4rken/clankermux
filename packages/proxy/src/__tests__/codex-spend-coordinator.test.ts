@@ -17,7 +17,15 @@
  * transport failure. `getProvider("codex").parseRateLimit` (also the default dep)
  * runs against the real, self-registered Codex provider.
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import {
 	type CodexCreditsInfo,
 	type CodexRateLimitResetCreditsFetchResult,
@@ -1482,6 +1490,57 @@ describe("CodexSpendCoordinator.refreshManual — free-GET application (end-to-e
 		expect(
 			runSql.some((c) => c.sql.includes("rate_limited_until = NULL")),
 		).toBe(false);
+	});
+
+	// REGRESSION: the supersession guard compares the usage-cache entry's write
+	// time before and after the GET. Reconstructing that instant as
+	// `Date.now() - peekAge()` costs TWO clock reads, so it yields
+	// `timestamp - δ` for whatever δ elapsed between them — and when δ differs
+	// between the two evaluations (δ ≥ 1 before, 0 after, i.e. only the first
+	// pair straddles a millisecond boundary) the guard sees a phantom advance and
+	// reports "superseded by a newer observation" although nothing wrote.
+	//
+	// The fake models exactly that asymmetry with no call counting: the clock
+	// advances 1ms per read while the pre-call phase runs, and is frozen from the
+	// moment the GET is issued (the toggle lives in fetchImpl, which the read path
+	// invokes strictly between the two evaluations). So the "before" read spans a
+	// boundary and the "after" read does not — the phantom-advance case, made
+	// deterministic. A UNIFORMLY ticking clock cannot express it: both evaluations
+	// would skew by the same 1ms and compare equal.
+	it("applies the read when the clock advances between the guard's two evaluations", async () => {
+		const { coordinator, setAccount } = makeRealCoordinator();
+		const id = seedId("cf-clock-skew");
+		setAccount(makeCodexAccount({ id, name: "codex-skew" }));
+
+		usageCache.set(id, {
+			five_hour: { utilization: 10, resets_at: null },
+			seven_day: { utilization: 50, resets_at: null },
+		});
+
+		let clock = Date.now();
+		let ticking = true;
+		fetchImpl = async () => {
+			ticking = false; // freeze from the moment the GET is issued
+			return whamUsageResponse(20, 40);
+		};
+		const nowSpy = spyOn(Date, "now").mockImplementation(() =>
+			ticking ? ++clock : clock,
+		);
+		try {
+			const outcome = await coordinator.refreshManual(id);
+
+			expect(outcome).toEqual({
+				success: true,
+				message: "Usage refreshed for 'codex-skew' (5h: 20%, 7d: 40%).",
+			});
+		} finally {
+			nowSpy.mockRestore();
+		}
+
+		// The observation was really applied, not skipped as "superseded".
+		const cached = usageCache.get(id) as UsageData | null;
+		expect(cached?.five_hour.utilization).toBe(20);
+		expect(cached?.seven_day.utilization).toBe(40);
 	});
 
 	it("clears rate_limited_until on a genuinely-recovered (allowed) 200", async () => {

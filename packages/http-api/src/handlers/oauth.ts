@@ -33,6 +33,7 @@ import {
 import {
 	clearAccountRefreshCache,
 	clearCodexUsagePersistMemo,
+	clearPendingRotation,
 	refreshCodexUsageForAccount,
 } from "@clankermux/proxy";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
@@ -295,6 +296,12 @@ export function createQwenReauthHandler(dbOps: DatabaseOperations) {
 						);
 					}
 					clearAccountRefreshCache(account.id);
+					// The credentials above supersede any rotation still awaiting a
+					// persist: replaying it would write a generation the provider has
+					// already replaced. Only reauth COMPLETION may drop one — the
+					// generic cache clears above are also used by admin actions that
+					// must never discard the sole live copy of a rotated token.
+					clearPendingRotation(account.id);
 
 					qwenSessions.set(sessionId, {
 						status: "complete",
@@ -568,6 +575,9 @@ export function createCodexReauthHandler(dbOps: DatabaseOperations) {
 						);
 					}
 					clearAccountRefreshCache(account.id);
+					// See the Qwen handler: only a completed reauth may drop a pending
+					// rotation, because these fresh credentials supersede it.
+					clearPendingRotation(account.id);
 
 					// Everything observed under the OLD credentials is now suspect: a
 					// reauth typically follows a plan change or a revoked grant, so the
@@ -827,6 +837,11 @@ export function createAnthropicReauthCallbackHandler(
 				// token is used immediately instead of waiting out the backoff window
 				// (completeReauth already lifted any oauth_invalid_grant pause).
 				clearAccountRefreshCache(account.id);
+				// completeReauth has committed the new credentials, so a rotation still
+				// awaiting a persist describes a generation the provider has already
+				// replaced. See the Qwen handler for why only reauth completion may
+				// drop one.
+				clearPendingRotation(account.id);
 
 				log.info(`Successfully re-authenticated Anthropic account '${name}'`);
 
