@@ -38,11 +38,17 @@ const log = new Logger("UsageFetcher");
  *    returns null AND deletes the entry.
  *  - peek(): non-evicting DATA read. A stale entry returns null but is left in
  *    place (so later eviction and window-reset comparisons see it).
- *  - peekAge(): non-evicting AGE read, and one of two exceptions to the
+ *  - peekAge(): non-evicting AGE read, and one of the exceptions to the
  *    "stale → null" rule — it returns the entry's TRUE age even when stale, and
  *    only returns null when NO entry exists. This lets pure observers (e.g. the
  *    usage snapshot sampler) apply their own freshness threshold, independent of
  *    this TTL. Pair it with peek() when staleness should gate the data itself.
+ *  - peekWrittenAt(): non-evicting ABSOLUTE WRITE-TIME read, another exception
+ *    to "stale → null" — it returns the entry's true timestamp even
+ *    when stale, and null only when NO entry exists. For callers comparing an
+ *    entry's write time across an await; never reconstruct that instant as
+ *    `now - peekAge()` (two clock reads, so it skews by whatever elapsed between
+ *    them).
  *  - peekWithAge(): non-evicting DATA+AGE read for the DASHBOARD. Also returns a
  *    stale entry (data plus its true age) so the UI can render an honest "as of"
  *    age instead of claiming the data is unavailable; it returns null only when
@@ -2095,6 +2101,27 @@ class UsageCache {
 		const cached = this.cache.get(accountId);
 		if (!cached) return null;
 		return Date.now() - cached.timestamp;
+	}
+
+	/**
+	 * Non-evicting read of the entry's ABSOLUTE write time (epoch ms), for
+	 * before/after comparisons. Returns the entry's TRUE timestamp even when the
+	 * entry is stale (like peekAge()), and null ONLY when there is no entry at
+	 * all. Never deletes.
+	 *
+	 * Use this instead of reconstructing the instant as `theirNow - peekAge()` —
+	 * the same rule peekWithAge()'s `sampledAtMs` states. That subtraction takes
+	 * TWO clock reads, so it yields `timestamp - δ` for whatever δ elapsed between
+	 * them (0 normally, ≥1 across a millisecond boundary or a GC pause). A caller
+	 * that compares the write time before and against after an await — the Codex
+	 * coordinator's supersession guard — then sees a phantom "advance" whenever δ
+	 * differs between its two evaluations, and skips applying a read that nothing
+	 * actually superseded.
+	 */
+	peekWrittenAt(accountId: string): number | null {
+		const cached = this.cache.get(accountId);
+		if (!cached) return null;
+		return cached.timestamp;
 	}
 
 	/**

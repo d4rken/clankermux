@@ -296,13 +296,16 @@ export class CodexSpendCoordinator {
 
 	/**
 	 * Absolute write time (epoch ms) of the account's usage-cache entry, or
-	 * -Infinity when there is none. Read through the non-evicting `peekAge()` so
-	 * this observation never mutates cache state.
+	 * -Infinity when there is none (so a missing entry can never read as
+	 * "advanced"). Read through the non-evicting `peekWrittenAt()`, which reports
+	 * the stored timestamp DIRECTLY, so this observation neither mutates cache
+	 * state nor drifts: reconstructing the instant as `Date.now() - peekAge()`
+	 * costs two clock reads and returns `timestamp - δ`, and a δ that differs
+	 * between the before- and after-call evaluations made the supersession guard
+	 * fire on a write that never happened.
 	 */
 	private usageCacheWrittenAt(accountId: string): number {
-		return (
-			Date.now() - (usageCache.peekAge(accountId) ?? Number.POSITIVE_INFINITY)
-		);
+		return usageCache.peekWrittenAt(accountId) ?? Number.NEGATIVE_INFINITY;
 	}
 
 	/**
