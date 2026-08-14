@@ -225,11 +225,17 @@ export function resolvePendingAfterPersist(
 		disarmRetryTimerIfIdle();
 		return;
 	}
-	// Mutated in place rather than replaced: a flush already holding this object
-	// as its snapshot must keep matching it, or its own identity-guarded delete
-	// would leave a stale entry behind.
+	// REPLACED, never mutated in place: a rebase makes every snapshot taken
+	// before it describe a superseded anchor, so the holders of those snapshots
+	// must FAIL the identity guards. Mutating would keep object identity, and a
+	// concurrent flush that had already submitted the OLD anchor would then pass
+	// its guard on the superseded path and delete the rebased survivor — the
+	// newest credentials, durably lost.
 	if (persistedRefreshToken) {
-		current.attemptedRefreshToken = persistedRefreshToken;
+		pending.set(accountId, {
+			...current,
+			attemptedRefreshToken: persistedRefreshToken,
+		});
 	}
 }
 

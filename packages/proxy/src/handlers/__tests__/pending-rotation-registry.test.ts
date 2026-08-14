@@ -384,6 +384,66 @@ describe("pending-rotation registry flush", () => {
 		// …and its anchor now names what the DB actually holds after the flush.
 		expect(survivor?.attemptedRefreshToken).toBe("rt-2");
 	});
+
+	it("keeps the rebased survivor when a concurrent flush holding its PRE-rebase snapshot reports a CAS miss", async () => {
+		const makeGate = () => {
+			let release: (v: boolean) => void = () => {};
+			const promise = new Promise<boolean>((res) => {
+				release = res;
+			});
+			return { promise, release: (v: boolean) => release(v) };
+		};
+		const gateA = makeGate();
+		const gateB = makeGate();
+		let calls = 0;
+		const { dbOps } = makeWriter(() => {
+			calls += 1;
+			return calls === 1 ? gateA.promise : gateB.promise;
+		});
+
+		recordPendingRotation(
+			"rebase-identity",
+			{
+				accessToken: "at-1",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-2",
+				identity: null,
+				attemptedRefreshToken: "rt-1",
+			},
+			dbOps,
+		);
+		const flushA = flushPendingRotation("rebase-identity", dbOps);
+		await Bun.sleep(5);
+		// A newer rotation lands mid-flush; anchor compression keeps rt-1.
+		recordPendingRotation(
+			"rebase-identity",
+			{
+				accessToken: "at-2",
+				expiresAt: Date.now() + HOUR_MS,
+				refreshToken: "rt-3",
+				identity: null,
+				attemptedRefreshToken: "rt-2",
+			},
+			dbOps,
+		);
+		// A second flush (the background sweep) picks that entry up and submits the
+		// OLD anchor it still carries.
+		const flushB = flushPendingRotation("rebase-identity", dbOps);
+		await Bun.sleep(5);
+
+		// Flush A lands and rebases the survivor onto rt-2…
+		gateA.release(true);
+		expect((await flushA).outcome).toBe("persisted");
+		// …so flush B's CAS on rt-1 now misses.
+		gateB.release(false);
+		expect((await flushB).outcome).toBe("superseded");
+
+		// Flush B's snapshot describes the PRE-rebase entry, so its identity-guarded
+		// delete must not take the rebased survivor with it.
+		const survivor = getPendingRotation("rebase-identity");
+		expect(survivor?.accessToken).toBe("at-2");
+		expect(survivor?.attemptedRefreshToken).toBe("rt-2");
+	});
 });
 
 describe("resolvePendingAfterPersist", () => {
