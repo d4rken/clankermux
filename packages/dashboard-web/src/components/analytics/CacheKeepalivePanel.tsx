@@ -41,8 +41,8 @@ interface KeepaliveRow {
 }
 
 /**
- * Small headline tile for the live cache-keepalive stats. Mirrors the
- * compact stat-card idiom used by TokenSpeedAnalytics.
+ * Small headline tile for the live cache-keepalive stats. Uses the compact
+ * stat-card idiom shared by the analytics panels.
  */
 function StatTile({
 	label,
