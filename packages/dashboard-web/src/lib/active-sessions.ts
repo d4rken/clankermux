@@ -51,22 +51,6 @@ export const SESSION_SCOPE_COLORS: Record<string, string> = {
 export const SESSION_TOTAL_KEY = "scope:total";
 export const SESSION_TOTAL_COLOR = "#94a3b8";
 
-/**
- * Compact client labels for the Overview live-gauge sub-rows, keyed by the
- * ActiveSessionCounts field names (claude/codex/other). Single source of truth
- * for the client naming so the gauge and the chart legend can't drift — the
- * chart's fuller "Other (project)" legend label (in SCOPE_ORDER) is an
- * intentional expansion of the gauge's compact "Other".
- */
-export const SESSION_SCOPE_SHORT_LABELS: Record<
-	"claude" | "codex" | "other",
-	string
-> = {
-	claude: "Claude",
-	codex: "Codex",
-	other: "Other",
-};
-
 /** One chart row: a bucket timestamp plus per-scope session counts keyed by scopeKey. */
 export interface ActiveSessionsTrendRow {
 	ts: number;

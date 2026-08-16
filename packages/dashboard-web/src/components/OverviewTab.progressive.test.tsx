@@ -82,7 +82,7 @@ describe("OverviewTab progressive render", () => {
 		expect(html).toContain("Every request in the last");
 		// Tiles are present but placeholdered, not gone and not zeroed.
 		expect(html).toContain("Total Requests");
-		expect(html).toContain("Active Sessions");
+		expect(html).toContain("7d Pool");
 		expect(html).toContain("5h Pool");
 		expect(html).toContain("animate-pulse");
 	});

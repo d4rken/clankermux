@@ -11,10 +11,6 @@
         "typescript": "6.0.2",
       },
     },
-    "apps/lander": {
-      "name": "@clankermux/lander",
-      "version": "1.0.0",
-    },
     "apps/server": {
       "name": "@clankermux/server",
       "version": "0.1.0",
@@ -270,8 +266,6 @@
     "@clankermux/http-api": ["@clankermux/http-api@workspace:packages/http-api"],
 
     "@clankermux/http-common": ["@clankermux/http-common@workspace:packages/http-common"],
-
-    "@clankermux/lander": ["@clankermux/lander@workspace:apps/lander"],
 
     "@clankermux/load-balancer": ["@clankermux/load-balancer@workspace:packages/load-balancer"],
 

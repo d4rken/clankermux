@@ -1,9 +1,11 @@
 /**
  * A metric card must never present a fallback zero as a measurement.
  *
- * The Overview's Active Sessions tile rendered `stats?.activeSessions?.total ?? 0`,
- * so a failed /api/stats read displayed a confident "0" — the reported "not all
- * results are correct" symptom.
+ * The regression this guards came from the Overview's since-removed Active
+ * Sessions tile, which rendered `stats?.activeSessions?.total ?? 0` and so
+ * displayed a confident "0" for a failed /api/stats read — the reported "not
+ * all results are correct" symptom. "Active Sessions" survives below only as a
+ * title fixture for the generic MetricCard, which every remaining tile uses.
  */
 import { describe, expect, it } from "bun:test";
 import { Users } from "lucide-react";

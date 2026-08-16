@@ -20,7 +20,6 @@
 		"build:db-workers:guarded": "bun run scripts/guarded-build.ts db-workers",
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
 		"build:dashboard:guarded": "bun run scripts/guarded-build.ts dashboard",
-		"build:lander": "bun run --cwd apps/lander build",
 		"format": "bunx biome format --write .",
 		"lint": "bunx --bun biome check --write --unsafe .",
 		"restart": "./scripts/restart.sh"
@@ -34,5 +33,5 @@
 		"bun-types": "1.3.14",
 		"typescript": "6.0.2"
 	},
-	"version": "2026.8.23"
+	"version": "2026.8.24"
 }

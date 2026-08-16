@@ -9,7 +9,6 @@ import {
 import {
 	Calendar,
 	ChevronDown,
-	ChevronRight,
 	Clock,
 	Eye,
 	Filter,
@@ -54,7 +53,6 @@ import { cn } from "../lib/utils";
 import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
-import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Badge, badgeVariants } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -106,9 +104,6 @@ export function costBadgeProps(billingType: string | null | undefined): {
 }
 
 export function RequestsTab() {
-	const [expandedRequests, setExpandedRequests] = useState<Set<string>>(
-		new Set(),
-	);
 	const [modalRequest, setModalRequest] = useState<RequestPayload | null>(null);
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string>("all");
@@ -247,18 +242,6 @@ export function RequestsTab() {
 			: [];
 		return Array.from(new Set([...fromEndpoint, ...fromRequests])).sort();
 	}, [knownProjects, data]);
-
-	const toggleExpanded = (id: string) => {
-		setExpandedRequests((prev) => {
-			const next = new Set(prev);
-			if (next.has(id)) {
-				next.delete(id);
-			} else {
-				next.add(id);
-			}
-			return next;
-		});
-	};
 
 	// Date preset helpers — produce local-time datetime-local strings so the
 	// values match what the inputs display (no UTC drift).
@@ -728,7 +711,6 @@ export function RequestsTab() {
 				) : (
 					<div className="space-y-2">
 						{requests.map((request) => {
-							const isExpanded = expandedRequests.has(request.id);
 							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
 							const summary = data?.summaries.get(request.id);
@@ -795,14 +777,8 @@ export function RequestsTab() {
 										<button
 											type="button"
 											className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
-											onClick={() => toggleExpanded(request.id)}
-											aria-expanded={isExpanded}
+											onClick={() => setModalRequest(request)}
 										>
-											{isExpanded ? (
-												<ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-											) : (
-												<ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-											)}
 											<span className="text-xs font-mono tabular-nums text-muted-foreground shrink-0">
 												{new Date(request.meta.timestamp).toLocaleTimeString(
 													[],
@@ -1050,21 +1026,6 @@ export function RequestsTab() {
 									{request.error && (
 										<div className="text-xs text-destructive px-3 pb-2 pl-9 break-words">
 											Error: {request.error}
-										</div>
-									)}
-
-									{isExpanded && (
-										<div className="px-3 pb-3 pl-9 space-y-3">
-											<TokenUsageDisplay summary={summary} />
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => setModalRequest(request)}
-												className="w-full"
-											>
-												<Eye className="h-4 w-4 mr-2" />
-												View More Details
-											</Button>
 										</div>
 									)}
 								</div>

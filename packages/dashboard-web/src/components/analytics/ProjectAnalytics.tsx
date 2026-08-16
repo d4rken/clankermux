@@ -7,13 +7,10 @@ import {
 } from "@clankermux/ui-common";
 import { FolderOpen } from "lucide-react";
 import { useMemo } from "react";
-import { formatCompactNumber } from "../../lib/chart-utils";
 import {
 	attributionCoverage,
 	describeProjectAttribution,
 } from "../../lib/project-attribution";
-import { BaseBarChart } from "../charts";
-import type { ChartDataPoint } from "../charts/types";
 import {
 	Card,
 	CardContent,
@@ -52,24 +49,15 @@ interface ProjectAnalyticsProps {
 }
 
 /**
- * Project Breakdown — per-project token volume (bar chart) plus a table with
- * requests, tokens, plan/api cost split, and success rate. Rows arrive from
- * the server already ordered by total tokens.
+ * Project Breakdown — a per-project table with requests, tokens, plan/api cost
+ * split, and success rate. Rows arrive from the server already ordered by
+ * total tokens.
  */
 export function ProjectAnalytics({
 	projectBreakdown,
 	attributionCoverageTotals,
 	loading = false,
 }: ProjectAnalyticsProps) {
-	const chartData = useMemo(
-		() =>
-			projectBreakdown.map((row) => ({
-				name: projectLabel(row.project),
-				tokens: row.totalTokens,
-			})),
-		[projectBreakdown],
-	);
-
 	// Coverage comes from the server's range-wide aggregate, never from the
 	// rows above: `projectBreakdown` is truncated to the top-N projects, so
 	// summing it would report full coverage for a range whose unmeasured rows
@@ -112,18 +100,7 @@ export function ProjectAnalytics({
 				<CardDescription>Requests, tokens, and cost by project</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<BaseBarChart
-					data={chartData as unknown as ChartDataPoint[]}
-					bars={{ dataKey: "tokens", radius: [0, 4, 4, 0], name: "Tokens" }}
-					xAxisKey="name"
-					loading={loading}
-					height="medium"
-					layout="vertical"
-					yAxisWidth={140}
-					xAxisTickFormatter={(value) => formatCompactNumber(Number(value))}
-					tooltipFormatter={(value) => [formatTokens(Number(value)), "Tokens"]}
-				/>
-				<div className="mt-4 border rounded-md overflow-hidden">
+				<div className="border rounded-md overflow-hidden">
 					<table aria-label="Project breakdown" className="w-full text-sm">
 						<thead className="bg-muted/50">
 							<tr>

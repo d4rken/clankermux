@@ -9,11 +9,10 @@ import {
 } from "..";
 import type { ModelsTabProps } from "./types";
 
-// `speedTotals` supplies the two headline speed percentiles inside `totals`;
-// `totals` itself is still needed for avgResponseTime.
+// `totals` is still requested because `contextComposition` is computed against
+// it server-side; no tile on this tab reads the totals directly any more.
 const MODELS_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
-	"speedTotals",
 	"costByModel",
 	"modelPerformance",
 	"speedTimeSeries",
@@ -89,10 +88,6 @@ export function ModelsTab(props: ModelsTabProps) {
 			{/* Token Speed Analytics */}
 			<TokenSpeedAnalytics
 				speedTimeSeries={analytics?.speedTimeSeries ?? []}
-				medianTokensPerSecond={analytics?.totals?.medianTokensPerSecond ?? null}
-				p95TokensPerSecond={analytics?.totals?.p95TokensPerSecond ?? null}
-				avgResponseTimeMs={analytics?.totals?.avgResponseTime ?? 0}
-				modelPerformance={analytics?.modelPerformance || []}
 				loading={loading}
 				timeRange={range}
 			/>

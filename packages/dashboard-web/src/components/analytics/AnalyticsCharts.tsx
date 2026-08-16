@@ -1,5 +1,5 @@
 import type { TimePoint } from "@clankermux/types";
-import { formatCost, formatNumber, formatTokens } from "@clankermux/ui-common";
+import { formatCost, formatTokens } from "@clankermux/ui-common";
 import type { ComponentProps } from "react";
 import {
 	Area,
@@ -28,9 +28,7 @@ import {
 } from "../../lib/time-format";
 import {
 	BaseAreaChart,
-	BaseBarChart,
 	BaseLineChart,
-	ModelPerformanceChart,
 	MultiModelChart,
 	RequestVolumeChart,
 	ResponseTimeChart,
@@ -493,71 +491,6 @@ export function TokenUsageBreakdown({
 	);
 }
 
-interface ModelComparisonChartsProps {
-	modelPerformance: Array<{
-		model: string;
-		avgTime: number;
-		p95Time: number;
-		errorRate: number;
-	}>;
-	costByModel: Array<{ model: string; cost: number; requests: number }>;
-	loading: boolean;
-	timeRange: TimeRange;
-}
-
-export function ModelComparisonCharts({
-	modelPerformance,
-	costByModel,
-	loading,
-	timeRange,
-}: ModelComparisonChartsProps) {
-	return (
-		<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-			{/* Model Performance */}
-			<Card>
-				<CardHeader>
-					<CardTitle>Model Performance Comparison</CardTitle>
-					<CardDescription>
-						Response times and error rates by model
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<ModelPerformanceChart
-						data={modelPerformance}
-						loading={loading}
-						height={CHART_HEIGHTS.medium}
-					/>
-				</CardContent>
-			</Card>
-
-			{/* Cost by Model */}
-			<Card>
-				<CardHeader>
-					<CardTitle>Cost Analysis by Model</CardTitle>
-					<CardDescription>
-						Top models by cost in the last {timeRange}
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<BaseBarChart
-						data={costByModel}
-						bars={{ dataKey: "cost", radius: [0, 4, 4, 0] }}
-						xAxisKey="model"
-						loading={loading}
-						height="medium"
-						layout="vertical"
-						yAxisWidth={120}
-						tooltipFormatter={(value, name) => {
-							if (name === "cost") return [formatCost(Number(value)), "Cost"];
-							return [formatNumber(value as number), "Requests"];
-						}}
-					/>
-				</CardContent>
-			</Card>
-		</div>
-	);
-}
-
 interface CumulativeGrowthChartProps {
 	data: ChartData[];
 	timeRange: TimeRange;
@@ -673,97 +606,6 @@ export function CumulativeGrowthChart({
 						/>
 					</AreaChart>
 				</ResponsiveContainer>
-			</CardContent>
-		</Card>
-	);
-}
-
-interface CumulativeTokenCompositionProps {
-	tokenBreakdown: TokenBreakdownItem[];
-}
-
-export function CumulativeTokenComposition({
-	tokenBreakdown,
-}: CumulativeTokenCompositionProps) {
-	return (
-		<Card>
-			<CardHeader>
-				<CardTitle>Cumulative Token Composition</CardTitle>
-				<CardDescription>Token type distribution over time</CardDescription>
-			</CardHeader>
-			<CardContent>
-				<div className="space-y-6">
-					<div className="relative h-24 bg-muted rounded-lg overflow-hidden">
-						{(() => {
-							let offset = 0;
-							return tokenBreakdown.map((item, index) => {
-								const width = item.percentage;
-								const currentOffset = offset;
-								offset += width;
-								return (
-									<div
-										key={item.type}
-										className="absolute h-full transition-all duration-1000 hover:opacity-80"
-										style={{
-											left: `${currentOffset}%`,
-											width: `${width}%`,
-											background: `linear-gradient(135deg, ${
-												index === 0
-													? COLORS.blue
-													: index === 1
-														? COLORS.success
-														: index === 2
-															? COLORS.warning
-															: COLORS.purple
-											} 0%, ${
-												index === 0
-													? COLORS.purple
-													: index === 1
-														? COLORS.blue
-														: index === 2
-															? COLORS.primary
-															: COLORS.warning
-											} 100%)`,
-										}}
-									>
-										<div className="flex items-center justify-center h-full">
-											{width > 10 && (
-												<span className="text-white font-medium text-xs">
-													{item.percentage}%
-												</span>
-											)}
-										</div>
-									</div>
-								);
-							});
-						})()}
-					</div>
-					<div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-						{tokenBreakdown.map((item, index) => (
-							<div key={item.type} className="flex items-center gap-2">
-								<div
-									className="w-3 h-3 rounded-full"
-									style={{
-										background:
-											index === 0
-												? COLORS.blue
-												: index === 1
-													? COLORS.success
-													: index === 2
-														? COLORS.warning
-														: COLORS.purple,
-									}}
-								/>
-								<div>
-									<p className="text-xs text-muted-foreground">{item.type}</p>
-									<p className="text-sm font-medium">
-										{formatTokens(item.value)}
-									</p>
-								</div>
-							</div>
-						))}
-					</div>
-				</div>
 			</CardContent>
 		</Card>
 	);

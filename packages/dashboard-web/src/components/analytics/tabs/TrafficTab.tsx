@@ -7,7 +7,6 @@ import {
 	ActiveSessionsPanel,
 	AnalyticsControls,
 	CumulativeGrowthChart,
-	CumulativeTokenComposition,
 	MainMetricsChart,
 	MissingSectionsNotice,
 	PerformanceIndicatorsChart,
@@ -226,9 +225,6 @@ export function TrafficTab(props: TrafficTabProps) {
 						</p>
 					</div>
 					<CumulativeGrowthChart data={cumulativeData} timeRange={range} />
-					{tokenBreakdown.length > 0 && (
-						<CumulativeTokenComposition tokenBreakdown={tokenBreakdown} />
-					)}
 				</section>
 			)}
 		</div>
