@@ -1,7 +1,6 @@
 export { ActiveSessionsPanel } from "./ActiveSessionsPanel";
 export {
 	CumulativeGrowthChart,
-	CumulativeTokenComposition,
 	MainMetricsChart,
 	PerformanceIndicatorsChart,
 	TokenUsageBreakdown,
