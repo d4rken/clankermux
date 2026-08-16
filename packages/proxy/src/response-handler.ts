@@ -1,6 +1,7 @@
 import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
+	stripHopByHopHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
@@ -796,11 +797,15 @@ async function forwardToClientInner(
 			},
 		});
 
-		// Return the sanitized response backed by the single-reader stream.
+		// Return the sanitized response backed by the single-reader stream. The
+		// upstream's hop-by-hop headers (connection, keep-alive, …) describe ITS
+		// link, not the client's — strip them before re-serving (RFC 9110 §7.6.1).
+		const clientHeaders = new Headers(response.headers);
+		stripHopByHopHeaders(clientHeaders);
 		return new Response(clientStream, {
 			status: response.status,
 			statusText: response.statusText,
-			headers: response.headers,
+			headers: clientHeaders,
 		});
 	}
 
@@ -845,10 +850,14 @@ async function forwardToClientInner(
 	}
 
 	const [clientStream, analyticsStream] = response.body.tee();
+	// Same hop-by-hop strip as the streaming path: the upstream's link headers
+	// must not be re-served to the client.
+	const clientHeaders = new Headers(response.headers);
+	stripHopByHopHeaders(clientHeaders);
 	const clientResponse = new Response(clientStream, {
 		status: response.status,
 		statusText: response.statusText,
-		headers: response.headers,
+		headers: clientHeaders,
 	});
 	const analyticsResponse = new Response(analyticsStream, {
 		status: response.status,

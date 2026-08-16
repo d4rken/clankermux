@@ -1,8 +1,47 @@
 /**
- * Sanitizes proxy headers by removing hop-by-hop headers that should not be forwarded
- * after Bun has automatically decompressed the response body.
- *
- * Removes: content-encoding, content-length, transfer-encoding
+ * Hop-by-hop headers (RFC 9110 §7.6.1): they govern a single transport link
+ * and MUST NOT be forwarded by a proxy — `connection: close` forwarded
+ * upstream, for example, invites the upstream to close its connection abruptly
+ * after the response. `Connection` may additionally NAME further headers as
+ * hop-by-hop for its link; those are removed too.
+ */
+const HOP_BY_HOP_HEADERS = [
+	"connection",
+	"keep-alive",
+	"proxy-connection",
+	"te",
+	"trailer",
+	"transfer-encoding",
+	"upgrade",
+	"proxy-authenticate",
+	"proxy-authorization",
+];
+
+/**
+ * Deletes every hop-by-hop header (and every header the `Connection` header
+ * names) from `headers`, IN PLACE. Apply to outbound upstream requests at the
+ * pre-fetch chokepoint and to upstream responses before re-serving them; the
+ * runtime re-derives per-link framing (Content-Length, Transfer-Encoding)
+ * itself.
+ */
+export function stripHopByHopHeaders(headers: Headers): void {
+	const connection = headers.get("connection");
+	if (connection) {
+		for (const name of connection.split(",")) {
+			const trimmed = name.trim();
+			if (trimmed) headers.delete(trimmed);
+		}
+	}
+	for (const name of HOP_BY_HOP_HEADERS) {
+		headers.delete(name);
+	}
+}
+
+/**
+ * Sanitizes proxy response headers: removes the headers invalidated by Bun's
+ * automatic response decompression (content-encoding, content-length,
+ * transfer-encoding) plus the remaining hop-by-hop set (connection,
+ * keep-alive, upgrade, …), which describes the upstream link, not ours.
  */
 export function sanitizeProxyHeaders(original: Headers): Headers {
 	const sanitized = new Headers(original);
@@ -10,7 +49,7 @@ export function sanitizeProxyHeaders(original: Headers): Headers {
 	// Remove headers that are invalidated by automatic decompression
 	sanitized.delete("content-encoding");
 	sanitized.delete("content-length");
-	sanitized.delete("transfer-encoding");
+	stripHopByHopHeaders(sanitized);
 
 	return sanitized;
 }
