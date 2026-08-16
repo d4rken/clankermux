@@ -206,7 +206,7 @@ describe("MinimaxProvider", () => {
 				statusText: "OK",
 				headers: {
 					"content-type": "application/json",
-					connection: "keep-alive", // This should remain
+					connection: "keep-alive", // hop-by-hop: removed (RFC 9110 §7.6.1)
 					"content-encoding": "gzip", // This should be removed
 					"transfer-encoding": "chunked", // This should be removed
 					"content-length": "123", // This should be removed
@@ -223,7 +223,8 @@ describe("MinimaxProvider", () => {
 			expect(processedResponse.headers.get("content-type")).toBe(
 				"application/json",
 			);
-			expect(processedResponse.headers.get("connection")).toBe("keep-alive"); // Should remain
+			// Hop-by-hop headers describe the upstream link, not ours — stripped.
+			expect(processedResponse.headers.get("connection")).toBeNull();
 			expect(processedResponse.headers.get("content-encoding")).toBeNull(); // Should be removed
 			expect(processedResponse.headers.get("transfer-encoding")).toBeNull(); // Should be removed
 			expect(processedResponse.headers.get("content-length")).toBeNull(); // Should be removed
