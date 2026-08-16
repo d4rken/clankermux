@@ -1,11 +1,10 @@
-import { registerUIRefresh, TIME_CONSTANTS } from "@clankermux/core";
+import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { Activity, BarChart3, Gauge, Users } from "lucide-react";
+import { Activity, BarChart3, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
 import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
-import { SESSION_SCOPE_SHORT_LABELS } from "../lib/active-sessions";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
@@ -234,7 +233,7 @@ export const OverviewTab = React.memo(() => {
 			/>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-3 gap-4">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals?.requests || 0)}
@@ -260,40 +259,6 @@ export const OverviewTab = React.memo(() => {
 							label: "Cache hit",
 							value: formatPercentage(analytics?.totals?.cacheHitRate || 0, 0),
 						},
-					]}
-				/>
-				<MetricCard
-					title="Active Sessions"
-					caption={`· last ${Math.round((stats?.activeSessions?.windowMs ?? TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS) / 60000)}m`}
-					value={formatNumber(stats?.activeSessions?.total ?? 0)}
-					loading={statsPending}
-					// Without these the tile shows "0" for a failed read — exactly the
-					// "not all results are correct" symptom the lane split addresses,
-					// but which a DB-busy error or a worker crash can still produce.
-					unavailableReason={
-						statsUnavailable ? "Session data unavailable" : undefined
-					}
-					staleNote={statsStaleNote}
-					icon={Users}
-					subRows={[
-						{
-							label: SESSION_SCOPE_SHORT_LABELS.claude,
-							value: formatNumber(stats?.activeSessions?.claude ?? 0),
-						},
-						{
-							label: SESSION_SCOPE_SHORT_LABELS.codex,
-							value: formatNumber(stats?.activeSessions?.codex ?? 0),
-						},
-						...(stats?.activeSessions?.other
-							? [
-									{
-										label: SESSION_SCOPE_SHORT_LABELS.other,
-										value: formatNumber(stats.activeSessions.other),
-										tooltip:
-											"Sessions identified only by a project label (no Claude Code session id or Codex thread id) — can't be reliably attributed to either provider.",
-									},
-								]
-							: []),
 					]}
 				/>
 				{/* `computePoolUsage([], …)` yields an all-empty result that reads as
