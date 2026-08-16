@@ -74,6 +74,11 @@ const MID_STREAM_RATE_LIMIT_COOLDOWN_MS =
 const log = new Logger("ResponseHandler");
 const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
+// Per-boot INFO budget for non-disconnect stream read errors (see onError):
+// enough samples to identify a runtime-level regression's error shape from a
+// default-level journal, without flooding it when a shape occurs at scale.
+let readErrorInfoSamples = 5;
+
 /**
  * Stable event id — the non-streaming analytics read stopped at its 256 KiB cap
  * without ever seeing EOF, so the body fed to the usage collector is truncated.
@@ -707,18 +712,73 @@ async function forwardToClientInner(
 				}
 			},
 			onError: (err) => {
-				// Probe verdict: the stream was cut (disconnect/timeout/read error)
-				// before a verdict — release the lease so another request may probe.
-				completeProviderOverloadProbe(overloadProbeToken ?? null, "abandoned");
+				// Flush BEFORE classifying (same rationale as onEnd): a provider that
+				// closes abruptly right after the last data byte can leave the terminal
+				// event's line unterminated in the SSE line buffer — which is exactly
+				// the shape of cut this branch has to judge.
 				if (usageState) {
-					// R3: finish transport FIRST, then finalize on the partial stream.
-					// The stream was cut (disconnect/timeout/error) → NOT endedCleanly,
-					// so finalize takes max(providerCount, bytes/4) to avoid
-					// undercounting a truncated response (R5).
+					flushPendingSseLine(usageState);
+				}
+				const outcome = streamErrorToOutcome(err);
+				// A stream whose terminal event was already parsed (`message_stop`, or
+				// `response.completed` on the Codex native path — both set
+				// `sawMessageStop` together with `providerReportedOutput`) delivered
+				// the complete response into the client stream before the cut. Two
+				// independent consequences, deliberately decoupled:
+				//
+				// 1. USAGE (any outcome): the provider's reported token counts are
+				//    authoritative → endedCleanly, no bytes/4 anti-undercount max()
+				//    (which inflated reasoning-heavy Codex streams ~180x).
+				// 2. TRANSPORT: only a GENERIC read error reclassifies to success —
+				//    the "error" is then merely the missing clean EOF. Seen at scale
+				//    on Codex passthrough under the Bun 1.4 canary, whose fetch
+				//    surfaces the ChatGPT backend's abrupt post-response connection
+				//    close as a read error where Bun 1.3.14 reported EOF. A client
+				//    disconnect or timeout keeps its outcome: an ENQUEUED terminal
+				//    chunk does not prove the client consumed it, and a post-terminal
+				//    hang is still an operational timeout worth seeing.
+				//
+				// An in-band SSE error frame wins over both: a fired sniffer keeps
+				// the error classification and the untrusted counts.
+				const terminalSeen =
+					usageState?.sawMessageStop === true &&
+					usageState.providerReportedOutput === true &&
+					rateLimitSniffer.firedReason == null;
+				const completedBeforeCut =
+					terminalSeen && outcome === "error" && success;
+				// Probe verdict: a complete-then-cut stream is the same family-health
+				// evidence as a clean EOF (mirrors onEnd's success verdict); a
+				// genuinely cut stream releases the lease so another request may probe.
+				completeProviderOverloadProbe(
+					overloadProbeToken ?? null,
+					completedBeforeCut ? "recovered" : "abandoned",
+				);
+				if (usageState) {
+					// The read error's message is surfaced nowhere else — log it so
+					// runtime-level read-error regressions (e.g. canary end-of-stream
+					// shapes) stay visible and reportable. Routine client disconnects
+					// go to DEBUG; everything else gets a few INFO samples per boot so
+					// the next incident is diagnosable without DEBUG logging enabled.
+					const detail =
+						`Stream read error for request ${requestId} ` +
+						`(provider=${ctx.provider.name}, model=${usageState.model ?? "unknown"}, ` +
+						`outcome=${completedBeforeCut ? "success (terminal event seen before cut)" : outcome}, ` +
+						`terminalSeen=${terminalSeen}): ${err.name}: ${err.message}`;
+					if (outcome !== "disconnect" && readErrorInfoSamples > 0) {
+						readErrorInfoSamples--;
+						log.info(detail);
+					} else {
+						log.debug(detail);
+					}
+					// R3: finish transport FIRST, then finalize. With the terminal event
+					// parsed, provider counts are trusted (R5, consequence 1 above).
+					// Otherwise the stream was cut mid-content → NOT endedCleanly, so
+					// finalize takes max(providerCount, bytes/4) to avoid undercounting
+					// a truncated response.
 					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
-						streamErrorToOutcome(err),
+						completedBeforeCut ? "success" : outcome,
 					);
 					trackFinalize(
 						usageState,
@@ -728,7 +788,7 @@ async function forwardToClientInner(
 							providerName: ctx.provider.name,
 							accountProvider,
 							isStream: true,
-							endedCleanly: false,
+							endedCleanly: terminalSeen,
 						},
 						ctx,
 					);
