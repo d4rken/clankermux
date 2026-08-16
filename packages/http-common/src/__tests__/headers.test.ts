@@ -59,6 +59,34 @@ describe("stripHopByHopHeaders", () => {
 		expect(h.get("accept")).toBe("text/event-stream");
 	});
 
+	it("does not throw on a malformed Connection token and still strips the rest", () => {
+		// `Headers.delete("bad name")` throws — a malformed client value must not
+		// become an uncontrolled proxy failure.
+		const h = new Headers({
+			connection: "close, bad name, x-real-hop",
+			"x-real-hop": "value",
+			"content-type": "application/json",
+		});
+		expect(() => stripHopByHopHeaders(h)).not.toThrow();
+		expect(h.has("connection")).toBe(false);
+		expect(h.has("x-real-hop")).toBe(false);
+		expect(h.get("content-type")).toBe("application/json");
+	});
+
+	it("a hostile Connection header cannot delete end-to-end credential fields", () => {
+		// RFC 9110 forbids naming end-to-end fields in Connection; at the outbound
+		// chokepoint authorization/cookie may already be PROXY-generated.
+		const h = new Headers({
+			connection: "authorization, cookie, host",
+			authorization: "Bearer proxy-token",
+			cookie: "cf=jar",
+		});
+		stripHopByHopHeaders(h);
+		expect(h.has("connection")).toBe(false);
+		expect(h.get("authorization")).toBe("Bearer proxy-token");
+		expect(h.get("cookie")).toBe("cf=jar");
+	});
+
 	it("the codex_cli_rs shape: `connection: close` no longer reaches upstream", () => {
 		// The observed incident vector: the Codex CLI sends `connection: close` on
 		// every request; forwarding it upstream invites an abrupt post-response

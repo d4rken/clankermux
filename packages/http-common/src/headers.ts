@@ -18,18 +18,34 @@ const HOP_BY_HOP_HEADERS = [
 ];
 
 /**
- * Deletes every hop-by-hop header (and every header the `Connection` header
- * names) from `headers`, IN PLACE. Apply to outbound upstream requests at the
- * pre-fetch chokepoint and to upstream responses before re-serving them; the
- * runtime re-derives per-link framing (Content-Length, Transfer-Encoding)
- * itself.
+ * End-to-end fields a Connection header must not be able to delete: RFC 9110
+ * forbids listing end-to-end fields in `Connection`, and at the proxy's
+ * outbound chokepoint they may already carry proxy-generated credentials — a
+ * hostile client sending `Connection: authorization, cookie` must not strip
+ * the proxy's own auth.
+ */
+const CONNECTION_UNDELETABLE = new Set(["authorization", "cookie", "host"]);
+
+/** RFC 9110 token grammar — `Headers.delete` THROWS on an invalid name, so a
+ * malformed Connection value (`Connection: bad name`) must be skipped, not
+ * passed through. */
+const HTTP_TOKEN_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/**
+ * Deletes every hop-by-hop header (and every valid, deletable header the
+ * `Connection` header names) from `headers`, IN PLACE. Apply to outbound
+ * upstream requests at the pre-fetch chokepoint and to upstream responses
+ * before re-serving them; the runtime re-derives per-link framing
+ * (Content-Length, Transfer-Encoding) itself.
  */
 export function stripHopByHopHeaders(headers: Headers): void {
 	const connection = headers.get("connection");
 	if (connection) {
 		for (const name of connection.split(",")) {
-			const trimmed = name.trim();
-			if (trimmed) headers.delete(trimmed);
+			const trimmed = name.trim().toLowerCase();
+			if (!HTTP_TOKEN_PATTERN.test(trimmed)) continue;
+			if (CONNECTION_UNDELETABLE.has(trimmed)) continue;
+			headers.delete(trimmed);
 		}
 	}
 	for (const name of HOP_BY_HOP_HEADERS) {

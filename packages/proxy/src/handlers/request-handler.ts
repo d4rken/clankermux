@@ -179,13 +179,15 @@ export async function makeProxyRequest(
 		if (target instanceof Request) {
 			const targetUrl = target.url;
 			const mutableHeaders = new Headers(target.headers);
-			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
-			stripInternalControlHeaders(mutableHeaders);
 			// Hop-by-hop headers (RFC 9110 §7.6.1) govern the client→proxy link and
 			// must not reach the upstream. Concretely: the Codex CLI sends
 			// `connection: close` on every request, and forwarding it invites the
 			// ChatGPT backend to close the connection abruptly after the response.
+			// Runs BEFORE the cookie jar so a Connection header naming `cookie`
+			// cannot delete the jar's proxy-side cookies.
 			stripHopByHopHeaders(mutableHeaders);
+			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
+			stripInternalControlHeaders(mutableHeaders);
 
 			const response = await fetch(
 				new Request(target, {
@@ -198,10 +200,10 @@ export async function makeProxyRequest(
 		}
 
 		const mutableHeaders = new Headers(headers);
+		// Same rationale and ordering as the Request-target branch above.
+		stripHopByHopHeaders(mutableHeaders);
 		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
 		stripInternalControlHeaders(mutableHeaders);
-		// Same rationale as the Request-target branch above.
-		stripHopByHopHeaders(mutableHeaders);
 
 		const response = await fetch(target, {
 			method,
