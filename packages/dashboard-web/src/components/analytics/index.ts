@@ -3,7 +3,6 @@ export {
 	CumulativeGrowthChart,
 	CumulativeTokenComposition,
 	MainMetricsChart,
-	ModelComparisonCharts,
 	PerformanceIndicatorsChart,
 	TokenUsageBreakdown,
 } from "./AnalyticsCharts";

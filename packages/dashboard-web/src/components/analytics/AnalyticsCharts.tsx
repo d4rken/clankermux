@@ -1,5 +1,5 @@
 import type { TimePoint } from "@clankermux/types";
-import { formatCost, formatNumber, formatTokens } from "@clankermux/ui-common";
+import { formatCost, formatTokens } from "@clankermux/ui-common";
 import type { ComponentProps } from "react";
 import {
 	Area,
@@ -28,9 +28,7 @@ import {
 } from "../../lib/time-format";
 import {
 	BaseAreaChart,
-	BaseBarChart,
 	BaseLineChart,
-	ModelPerformanceChart,
 	MultiModelChart,
 	RequestVolumeChart,
 	ResponseTimeChart,
@@ -490,71 +488,6 @@ export function TokenUsageBreakdown({
 				</div>
 			</CardContent>
 		</Card>
-	);
-}
-
-interface ModelComparisonChartsProps {
-	modelPerformance: Array<{
-		model: string;
-		avgTime: number;
-		p95Time: number;
-		errorRate: number;
-	}>;
-	costByModel: Array<{ model: string; cost: number; requests: number }>;
-	loading: boolean;
-	timeRange: TimeRange;
-}
-
-export function ModelComparisonCharts({
-	modelPerformance,
-	costByModel,
-	loading,
-	timeRange,
-}: ModelComparisonChartsProps) {
-	return (
-		<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-			{/* Model Performance */}
-			<Card>
-				<CardHeader>
-					<CardTitle>Model Performance Comparison</CardTitle>
-					<CardDescription>
-						Response times and error rates by model
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<ModelPerformanceChart
-						data={modelPerformance}
-						loading={loading}
-						height={CHART_HEIGHTS.medium}
-					/>
-				</CardContent>
-			</Card>
-
-			{/* Cost by Model */}
-			<Card>
-				<CardHeader>
-					<CardTitle>Cost Analysis by Model</CardTitle>
-					<CardDescription>
-						Top models by cost in the last {timeRange}
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<BaseBarChart
-						data={costByModel}
-						bars={{ dataKey: "cost", radius: [0, 4, 4, 0] }}
-						xAxisKey="model"
-						loading={loading}
-						height="medium"
-						layout="vertical"
-						yAxisWidth={120}
-						tooltipFormatter={(value, name) => {
-							if (name === "cost") return [formatCost(Number(value)), "Cost"];
-							return [formatNumber(value as number), "Requests"];
-						}}
-					/>
-				</CardContent>
-			</Card>
-		</div>
 	);
 }
 
