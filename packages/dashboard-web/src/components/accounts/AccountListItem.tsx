@@ -38,6 +38,7 @@ import {
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { Textarea } from "../ui/textarea";
+import { AccountIdentityLine } from "./AccountIdentity";
 import { AccountStatusChips } from "./AccountStatusChips";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
@@ -115,18 +116,6 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
-	// Combined plan label: Title-cased plan tier with the rate-limit multiplier
-	// appended when present, e.g. plan "max" + tier "20x" → "Max 20x". When only
-	// the multiplier is known (plan null), show it alone.
-	const identityPlanLabel = (() => {
-		const plan = account.identityPlanTier
-			? account.identityPlanTier.charAt(0).toUpperCase() +
-				account.identityPlanTier.slice(1)
-			: null;
-		const tier = account.identityRateLimitTier;
-		if (plan && tier) return `${plan} ${tier}`;
-		return plan ?? tier ?? null;
-	})();
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -157,31 +146,7 @@ export function AccountListItem({
 							hasRefreshToken={account.hasRefreshToken}
 						/>
 					</div>
-					{(account.identityEmail ||
-						account.identityOrganizationName ||
-						identityPlanLabel) && (
-						<p
-							className="text-xs text-muted-foreground truncate"
-							title={
-								account.identityExternalId
-									? `Account ID: ${account.identityExternalId}`
-									: undefined
-							}
-						>
-							{[
-								account.identityEmail,
-								account.identityOrganizationName,
-								identityPlanLabel,
-							]
-								.filter(Boolean)
-								.join(" · ")}
-							{account.identityExternalId && (
-								<span className="ml-1 opacity-60">
-									#{account.identityExternalId.slice(0, 8)}
-								</span>
-							)}
-						</p>
-					)}
+					<AccountIdentityLine account={account} className="truncate" />
 				</div>
 				<div className="flex items-center gap-1 shrink-0">
 					{(account.provider === "anthropic" ||
