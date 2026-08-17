@@ -81,15 +81,30 @@ mock.module("@clankermux/database", () => ({
 // two `.size` reads this suite makes. A partial `{ size }` object is exactly
 // what broke `packages/logger/src/__guards__/no-core-barrel-import.test.ts` on
 // CI (`statSync(...).isDirectory is not a function`) once file ordering put it
-// after this suite. Hence: real paths delegate to the genuine implementation,
-// and the synthetic paths this suite fabricates (/tmp/test.db, /tmp/huge.db,
-// /tmp/normal.db — none of which exist on disk) get a COMPLETE Stats-shaped
-// object, controlled `size` plus the whole `is*` predicate surface.
+// after this suite. Hence: only the synthetic paths this suite owns get a
+// COMPLETE Stats-shaped object (controlled `size` plus the whole `is*`
+// predicate surface); every other path delegates to the genuine implementation.
+//
+// Routing is by explicit allow-list, NOT by "does this path exist on disk" —
+// existence-based routing would silently hand a real `statSync` result (and
+// therefore a real size) to this suite the moment something else on the machine
+// happened to create /tmp/test.db, quietly disabling the `statSize` knob and the
+// size-skip branch these tests name.
+//
+// CONTRACT: a `dbPath` used by a future test in this file must be added to this
+// set. If it isn't, the call delegates to the real `statSync` and fails loudly
+// with ENOENT rather than silently fabricating a `Stats`.
+const SYNTHETIC_DB_PATHS = new Set([
+	"/tmp/test.db",
+	"/tmp/huge.db",
+	"/tmp/normal.db",
+]);
 const realStatSync = nodeFs.statSync;
-const realExistsSync = nodeFs.existsSync;
 let statSize = 1024;
 const mockStatSync = mock((path: nodeFs.PathLike) => {
-	if (realExistsSync(path)) return realStatSync(path);
+	if (typeof path !== "string" || !SYNTHETIC_DB_PATHS.has(path)) {
+		return realStatSync(path);
+	}
 	return {
 		size: statSize,
 		isFile: () => true,
@@ -253,13 +268,15 @@ describe("node:fs statSync mock contract", () => {
 		// a later file would do.
 		const fs = await import("node:fs");
 
-		// A path that really exists → the genuine Stats object, methods intact.
+		// A path outside the synthetic set (and a real one) delegates to the
+		// genuine implementation: real Stats object, methods intact.
 		const dirStats = fs.statSync(import.meta.dir);
 		expect(typeof dirStats.isDirectory).toBe("function");
 		expect(dirStats.isDirectory()).toBe(true);
 		expect(dirStats.isFile()).toBe(false);
 
-		// A synthetic path → the controlled size, and still a complete Stats shape.
+		// A declared synthetic path → the controlled size, and still a complete
+		// Stats shape.
 		statSize = 4242;
 		const fakeStats = fs.statSync("/tmp/test.db");
 		expect(fakeStats.size).toBe(4242);
