@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Regression guard for the logger<->core import cycle (TDZ crash:
@@ -15,9 +15,19 @@ const LOGGER_SRC = join(import.meta.dir, "..");
 
 function collectSourceFiles(dir: string): string[] {
 	const out: string[] = [];
-	for (const entry of readdirSync(dir)) {
+	// `withFileTypes` gets the entry kind straight from the directory read, so
+	// the walk needs no per-entry statSync. That's one syscall instead of two,
+	// and it keeps the traversal independent of `node:fs` exports that another
+	// test file may have replaced via the process-global `mock.module`. One
+	// deliberate semantic difference: `Dirent.isDirectory()` does not follow
+	// symlinks, where the previous `statSync` did, so a symlinked directory is
+	// now skipped rather than walked. There are no symlinks under
+	// `packages/logger/src`, so the collected set is unchanged today, and not
+	// following them is the safer behavior for a source-tree guard.
+	for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+		const entry = dirent.name;
 		const full = join(dir, entry);
-		if (statSync(full).isDirectory()) {
+		if (dirent.isDirectory()) {
 			out.push(...collectSourceFiles(full));
 			continue;
 		}

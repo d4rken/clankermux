@@ -107,6 +107,12 @@ function handlerWith(overrides: {
 		htmlUrl: string;
 		cached: boolean;
 	}>;
+	distance?: (
+		repo: string,
+		base: string,
+		head: string,
+	) => Promise<number | null>;
+	isAncestorOfHead?: (latestSha: string) => boolean;
 }) {
 	return createVersionCheckHandler({
 		readCurrentCommit: () => ({
@@ -125,6 +131,12 @@ function handlerWith(overrides: {
 				htmlUrl: "https://example.invalid/commit",
 				cached: false,
 			})),
+		// The two remaining impure reads are stubbed here so no test spawns git or
+		// reaches GitHub's compare API. The defaults mirror what the real helpers
+		// return for these synthetic SHAs: no such object exists locally, so the
+		// ancestor check fails, and the compare request can't resolve a count.
+		fetchCommitDistance: overrides.distance ?? (async () => null),
+		readIsAncestorOfHead: overrides.isAncestorOfHead ?? (() => false),
 	});
 }
 
