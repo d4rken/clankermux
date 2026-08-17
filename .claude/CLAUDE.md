@@ -100,9 +100,13 @@ error: `git log refs/heads/main`, `git diff refs/heads/main...`,
 - New functionality: write the tests first, then implement, then run them.
 - UI tests default to `renderToStaticMarkup`. A test that has to mount a
   component for real is named `*.dom-test.tsx` and lives next to the code it
-  tests. `bun test` never sees those files — bun only discovers
-  `.test`/`_test`/`.spec`/`_spec` names — they run via `bun run test:dom`, in
-  their own process with the DOM preloaded. The separation is required twice
+  tests. Bun's default discovery skips those names — it only picks up
+  `.test`/`_test`/`.spec`/`_spec` — so they run via `bun run test:dom`, which
+  globs the lane files and starts a separate `bun test --preload …` process
+  with their paths passed explicitly. Do not invoke one directly as
+  `bun test <path>`: bun does run an explicitly named path, but that skips the
+  preload, so the DOM is missing and portalled content renders empty.
+  The separation is required twice
   over: happy-dom's globals are process-wide and replace `fetch`, `Request`,
   `Response` and friends, which must never happen to the proxy suite; and
   `@radix-ui/react-use-layout-effect` binds `globalThis.document` once per
