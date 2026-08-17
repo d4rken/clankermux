@@ -102,13 +102,3 @@ error: `git log refs/heads/main`, `git diff refs/heads/main...`,
 - Hand independent tasks to subagents rather than doing them sequentially in the
   main context — context isolation matters more than speed here.
 
-## Skills
-
-| Skill | Read it when |
-|---|---|
-| `rate-limiting` | 429/529 handling, cooldowns, account selection or routing, usage polling, the usage cache, rate-limit display, `accounts.rate_limit_*` |
-| `fork-workflow` | branching, merging into main, version bumps, cherry-picking upstream, inbound PRs, working an issue |
-| `git-recovery` | the checkout is on an unexpected branch, WIP is missing, or you need worktree/read-only-inspection recipes |
-| `db-migrations` | adding a column or table, editing `packages/database/src/migrations.ts` |
-| `running-clankermux` | build/start/ports, account-management and maintenance APIs, sending a test request |
-| `qwen-provider` | the Qwen/DashScope provider or its streaming transform |
