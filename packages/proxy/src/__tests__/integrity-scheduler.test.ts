@@ -74,11 +74,33 @@ mock.module("@clankermux/database", () => ({
 // worker route; individual tests bump `statSize` past the ceiling to exercise
 // the size-skip branch. Spread the real module so every other fs export is
 // preserved for unrelated importers (core/logger).
+//
+// `mock.module` is process-global AND permanent for the whole test run: every
+// file bun loads after this one gets THIS `statSync`, so whatever it returns
+// must satisfy the full `Stats` contract for unrelated callers, not just the
+// two `.size` reads this suite makes. A partial `{ size }` object is exactly
+// what broke `packages/logger/src/__guards__/no-core-barrel-import.test.ts` on
+// CI (`statSync(...).isDirectory is not a function`) once file ordering put it
+// after this suite. Hence: real paths delegate to the genuine implementation,
+// and the synthetic paths this suite fabricates (/tmp/test.db, /tmp/huge.db,
+// /tmp/normal.db — none of which exist on disk) get a COMPLETE Stats-shaped
+// object, controlled `size` plus the whole `is*` predicate surface.
+const realStatSync = nodeFs.statSync;
+const realExistsSync = nodeFs.existsSync;
 let statSize = 1024;
-const mockStatSync = mock(
-	(_path: nodeFs.PathLike) =>
-		({ size: statSize }) as unknown as ReturnType<typeof nodeFs.statSync>,
-);
+const mockStatSync = mock((path: nodeFs.PathLike) => {
+	if (realExistsSync(path)) return realStatSync(path);
+	return {
+		size: statSize,
+		isFile: () => true,
+		isDirectory: () => false,
+		isSymbolicLink: () => false,
+		isBlockDevice: () => false,
+		isCharacterDevice: () => false,
+		isFIFO: () => false,
+		isSocket: () => false,
+	} as unknown as ReturnType<typeof nodeFs.statSync>;
+});
 mock.module("node:fs", () => ({ ...nodeFs, statSync: mockStatSync }));
 
 import {
@@ -221,6 +243,34 @@ beforeEach(() => {
 	workerResultByKind = { quick: { ok: true }, full: { ok: true } };
 	workerThrows = null;
 	statSize = 1024;
+});
+
+describe("node:fs statSync mock contract", () => {
+	it("keeps the full Stats surface for real paths and only fabricates size for synthetic ones", async () => {
+		// Pins the cross-file invariant: this file's `mock.module("node:fs")` is
+		// process-global and permanent, so every test file loaded after it must
+		// still get a usable `Stats`. Reading through the module registry is what
+		// a later file would do.
+		const fs = await import("node:fs");
+
+		// A path that really exists → the genuine Stats object, methods intact.
+		const dirStats = fs.statSync(import.meta.dir);
+		expect(typeof dirStats.isDirectory).toBe("function");
+		expect(dirStats.isDirectory()).toBe(true);
+		expect(dirStats.isFile()).toBe(false);
+
+		// A synthetic path → the controlled size, and still a complete Stats shape.
+		statSize = 4242;
+		const fakeStats = fs.statSync("/tmp/test.db");
+		expect(fakeStats.size).toBe(4242);
+		expect(fakeStats.isDirectory()).toBe(false);
+		expect(fakeStats.isFile()).toBe(true);
+		expect(fakeStats.isSymbolicLink()).toBe(false);
+		expect(fakeStats.isBlockDevice()).toBe(false);
+		expect(fakeStats.isCharacterDevice()).toBe(false);
+		expect(fakeStats.isFIFO()).toBe(false);
+		expect(fakeStats.isSocket()).toBe(false);
+	});
 });
 
 describe("startIntegrityScheduler", () => {
