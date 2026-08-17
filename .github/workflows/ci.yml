@@ -67,6 +67,11 @@ jobs:
       # build artifacts; without them that test hangs to timeout.
       - run: bun run build:dashboard
       - run: bun test
+      # Separate lane, separate process: happy-dom's globals are process-wide
+      # (they replace fetch/Request/Response/URL among others) and must not be
+      # installed for the proxy suite, so the DOM tests cannot share the run
+      # above. Needs no extra setup beyond the steps already run for `bun test`.
+      - run: bun run test:dom
 
   audit:
     name: Dependency audit (bun audit)

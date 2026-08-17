@@ -1,12 +1,8 @@
-// MUST be the first import: `react-dom/client` inspects the DOM globals when it
-// loads, and this module installs them (see test-utils/happy-dom).
-import "../../test-utils/happy-dom";
-import { afterAll, afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { ComponentType } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Account } from "../../api";
-import { unregisterDom } from "../../test-utils/happy-dom";
 import { AnthropicReauthDialog } from "./AnthropicReauthDialog";
 import { CodexReauthDialog } from "./CodexReauthDialog";
 import { QwenReauthDialog } from "./QwenReauthDialog";
@@ -116,10 +112,6 @@ afterEach(async () => {
 	root = null;
 	host?.remove();
 	host = null;
-});
-
-afterAll(async () => {
-	await unregisterDom();
 });
 
 describe.each(DIALOGS)("%s — account identity", (_name, Dialog, provider) => {

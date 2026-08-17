@@ -15,6 +15,7 @@
 		"dev:dashboard": "bun --hot packages/dashboard-web/src/index.tsx",
 		"typecheck": "bunx tsc --noEmit",
 		"test": "bun test",
+		"test:dom": "bash -O globstar -c 'bun test --preload ./packages/dashboard-web/src/test-utils/happy-dom.ts ./packages/dashboard-web/src/**/*.dom-test.tsx'",
 		"build": "echo \"🏗️  Building ClankerMux v$(node -p \"require('./package.json').version\")\" && bun run build:db-workers && bun run build:dashboard",
 		"build:db-workers": "bun run --cwd packages/database build:workers",
 		"build:db-workers:guarded": "bun run scripts/guarded-build.ts db-workers",
