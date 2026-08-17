@@ -10,6 +10,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "../ui/dialog";
+import { AccountIdentityPanel } from "./AccountIdentity";
 
 interface QwenReauthDialogProps {
 	account: Account | null;
@@ -102,10 +103,17 @@ export function QwenReauthDialog({
 			<DialogContent>
 				<DialogHeader>
 					<DialogTitle>Re-authenticate Qwen Account</DialogTitle>
-					<DialogDescription>
-						{account?.name
-							? `Re-authenticate "${account.name}". All account metadata (usage stats, priority, settings) will be preserved.`
-							: "Re-authenticate Qwen account."}
+					{/* `asChild`: the identity block must live INSIDE the description so
+					    Radix's `aria-describedby` announces it when the dialog opens, and
+					    a description rendered as the default `<p>` cannot contain it. */}
+					<DialogDescription asChild>
+						<div className="space-y-2">
+							<AccountIdentityPanel account={account} />
+							<span className="block">
+								All account metadata (usage stats, priority, settings) will be
+								preserved.
+							</span>
+						</div>
 					</DialogDescription>
 				</DialogHeader>
 
