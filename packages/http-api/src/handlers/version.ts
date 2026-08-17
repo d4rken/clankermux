@@ -213,9 +213,9 @@ async function getCommitDistance(
 }
 
 /**
- * Injection seam for the handler's three impure reads (local git, boot
- * provenance, GitHub). Production passes nothing; tests substitute rather than
- * mock the module, which in bun leaks across every file in the process.
+ * Injection seam for the handler's impure reads (local git, boot provenance,
+ * GitHub). Production passes nothing; tests substitute rather than mock the
+ * module, which in bun leaks across every file in the process.
  */
 export interface VersionCheckDeps {
 	readCurrentCommit?: () => CurrentCommitInfo | null;
@@ -224,12 +224,21 @@ export interface VersionCheckDeps {
 		repo: string,
 		branch: string,
 	) => Promise<{ commit: CommitInfo; htmlUrl: string; cached: boolean }>;
+	fetchCommitDistance?: (
+		repo: string,
+		base: string,
+		head: string,
+	) => Promise<number | null>;
+	readIsAncestorOfHead?: (latestSha: string) => boolean;
 }
 
 export function createVersionCheckHandler(deps: VersionCheckDeps = {}) {
 	const readCurrentCommit = deps.readCurrentCommit ?? getCurrentCommit;
 	const readBootProvenance = deps.readBootProvenance ?? getBootProvenance;
 	const fetchLatestCommit = deps.fetchLatestCommit ?? getLatestCommit;
+	const fetchCommitDistance = deps.fetchCommitDistance ?? getCommitDistance;
+	const readIsAncestorOfHead =
+		deps.readIsAncestorOfHead ?? latestIsAncestorOfHead;
 
 	return async (): Promise<Response> => {
 		const repo = DEFAULT_REPO;
@@ -285,14 +294,14 @@ export function createVersionCheckHandler(deps: VersionCheckDeps = {}) {
 			current,
 			latest,
 			latestIsAncestorOfCurrent: current
-				? latestIsAncestorOfHead(latest.sha)
+				? readIsAncestorOfHead(latest.sha)
 				: false,
 		});
 
 		// Only spend a compare request when there's actually a gap to measure.
 		const behindBy =
 			status === "available" && current
-				? await getCommitDistance(repo, current.sha, latest.sha)
+				? await fetchCommitDistance(repo, current.sha, latest.sha)
 				: status === "current"
 					? 0
 					: null;
@@ -305,7 +314,7 @@ export function createVersionCheckHandler(deps: VersionCheckDeps = {}) {
 			: current.sha === latest.sha
 				? 0
 				: status === "current"
-					? await getCommitDistance(repo, latest.sha, current.sha)
+					? await fetchCommitDistance(repo, latest.sha, current.sha)
 					: 0;
 
 		return jsonResponse({
