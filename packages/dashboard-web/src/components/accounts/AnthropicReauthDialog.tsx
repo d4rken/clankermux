@@ -12,6 +12,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { AccountIdentityPanel } from "./AccountIdentity";
 
 interface AnthropicReauthDialogProps {
 	account: Account | null;
@@ -88,10 +89,17 @@ export function AnthropicReauthDialog({
 			<DialogContent>
 				<DialogHeader>
 					<DialogTitle>Re-authenticate Anthropic Account</DialogTitle>
-					<DialogDescription>
-						{account?.name
-							? `Re-authenticate "${account.name}". All account metadata (usage stats, priority, settings) will be preserved.`
-							: "Re-authenticate Anthropic account."}
+					{/* `asChild`: the identity block must live INSIDE the description so
+					    Radix's `aria-describedby` announces it when the dialog opens, and
+					    a description rendered as the default `<p>` cannot contain it. */}
+					<DialogDescription asChild>
+						<div className="space-y-2">
+							<AccountIdentityPanel account={account} />
+							<span className="block">
+								All account metadata (usage stats, priority, settings) will be
+								preserved.
+							</span>
+						</div>
 					</DialogDescription>
 				</DialogHeader>
 

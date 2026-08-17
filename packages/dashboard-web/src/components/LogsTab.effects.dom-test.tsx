@@ -1,10 +1,9 @@
-import { afterAll, afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { api, type LogEntry } from "../api";
 import { queryKeys } from "../lib/query-keys";
-import { unregisterDom } from "../test-utils/happy-dom";
 import { LogsTab } from "./LogsTab";
 
 /**
@@ -12,6 +11,10 @@ import { LogsTab } from "./LogsTab";
  * `EventSource` torn down by a dependency array, a state reset fired by a
  * re-running effect. `renderToStaticMarkup` — how the rest of this package is
  * tested — never runs effects, so these need a real DOM and a real mount.
+ *
+ * `.dom-test.tsx`, so plain `bun test` does not collect it: this file runs in
+ * the DOM lane (`bun run test:dom`), whose `--preload` installs the DOM globals
+ * before any test module evaluates (see test-utils/happy-dom.ts).
  *
  * The stream has NO REPLAY. Anything the component drops while reconnecting or
  * resetting is gone for good, which is why "an EventSource is open" is not a
@@ -124,12 +127,6 @@ afterEach(async () => {
 	host = null;
 	queryClient = null;
 	FakeEventSource.instances = [];
-});
-
-afterAll(async () => {
-	// Hand the process back without DOM globals: bun shares one process across
-	// test files, and the rest of the suite runs without them.
-	await unregisterDom();
 });
 
 describe("LogsTab live stream", () => {
