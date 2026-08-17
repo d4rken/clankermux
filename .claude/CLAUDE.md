@@ -98,6 +98,16 @@ error: `git log refs/heads/main`, `git diff refs/heads/main...`,
   trailing `biome format --write` reports "No fixes applied" and changes nothing.
   Use `bun run format` only on its own, never as the last link of the chain.
 - New functionality: write the tests first, then implement, then run them.
+- UI tests default to `renderToStaticMarkup`. A test that has to mount a
+  component for real is named `*.dom-test.tsx` and lives next to the code it
+  tests. `bun test` never sees those files — bun only discovers
+  `.test`/`_test`/`.spec`/`_spec` names — they run via `bun run test:dom`, in
+  their own process with the DOM preloaded. The separation is required twice
+  over: happy-dom's globals are process-wide and replace `fetch`, `Request`,
+  `Response` and friends, which must never happen to the proxy suite; and
+  `@radix-ui/react-use-layout-effect` binds `globalThis.document` once per
+  process, so anything portal-based renders empty unless the DOM exists before
+  any test module loads.
 - Prefer the clean, robust implementation over the minimal diff.
 - Hand independent tasks to subagents rather than doing them sequentially in the
   main context — context isolation matters more than speed here.
