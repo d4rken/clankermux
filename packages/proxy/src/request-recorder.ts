@@ -1059,6 +1059,13 @@ export class RequestRecorder {
 		errorSource?: { outcome?: TransportOutcome; errorMessage?: string | null },
 	): RequestResponse {
 		const usage = summary?.usage;
+		const composition = meta.contextComposition;
+		// Same 0/NULL collapse as the REST list handler: a request without
+		// attachments (and one recorded without a composition) carries no field.
+		const attachmentChars = composition
+			? composition.imagePayloadChars + composition.documentPayloadChars ||
+				undefined
+			: undefined;
 		return {
 			id: meta.requestId,
 			timestamp: new Date(meta.timestamp).toISOString(),
@@ -1094,6 +1101,7 @@ export class RequestRecorder {
 			billingType,
 			comboName: meta.comboName ?? undefined,
 			reasoningEffort: meta.reasoningEffort ?? undefined,
+			attachmentChars,
 		};
 	}
 

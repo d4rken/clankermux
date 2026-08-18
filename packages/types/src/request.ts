@@ -201,6 +201,12 @@ export interface RequestResponse {
 	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
 	// or the raw reasoning.effort string (OpenAI Responses).
 	reasoningEffort?: string;
+	/**
+	 * Summed base64 payload chars of the request's image/PDF attachments
+	 * (`context_binary_chars`); decoded size is roughly `chars × 3/4`. Absent for
+	 * attachment-free requests and for rows predating v2026.8.26.
+	 */
+	attachmentChars?: number;
 	// Derived from statusCode === 429 server-side so the list view can render
 	// the "Rate Limited" badge without lazy-loading the full payload.
 	rateLimited?: boolean;
