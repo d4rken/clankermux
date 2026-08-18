@@ -2907,6 +2907,39 @@ describe("count_tokens synthetic response", () => {
 		const body = (await result.json()) as { input_tokens: number };
 		expect(body.input_tokens).toBeGreaterThanOrEqual(1);
 	});
+
+	it("counts an attached image per-image, not by its base64 size", async () => {
+		const provider = new CodexProvider();
+		const req = new Request("https://clankermux.local/codex/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-5",
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "what is in this screenshot?" },
+							{
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: "image/png",
+									// ~1.9MB of base64: ~630k tokens under the old chars/3.
+									data: "A".repeat(1_900_000),
+								},
+							},
+						],
+					},
+				],
+			}),
+		});
+		const result = await provider.transformRequestBody(req);
+		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("200");
+		const body = (await result.json()) as { input_tokens: number };
+		expect(body.input_tokens).toBeLessThan(5_000);
+		expect(body.input_tokens).toBeGreaterThanOrEqual(2_000);
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

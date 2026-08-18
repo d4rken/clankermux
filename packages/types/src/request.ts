@@ -48,6 +48,23 @@ export interface ContextComposition {
 	largestToolResultChars: number;
 	/** Tool name of the largest tool_result, resolved via tool_use_id. */
 	largestToolName: string | null;
+	/**
+	 * Recognised image blocks (base64 AND url sources), including images nested
+	 * in tool_result content. Estimators price these at a flat per-image token
+	 * allowance instead of by payload size.
+	 */
+	imageCount: number;
+	/**
+	 * Base64 image payload chars. EXCLUDED from every char field above — a
+	 * transport payload is not prompt text.
+	 */
+	imagePayloadChars: number;
+	/**
+	 * Base64 document (e.g. PDF) payload chars. EXCLUDED from every char field
+	 * above; the gate adds them back at chars/N, so only their attribution
+	 * changes.
+	 */
+	documentPayloadChars: number;
 }
 
 /**

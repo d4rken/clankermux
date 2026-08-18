@@ -122,7 +122,8 @@ export function ensureSchema(db: Database): void {
 			context_message_count INTEGER,
 			context_tool_result_chars INTEGER,
 			context_largest_tool_chars INTEGER,
-			context_largest_tool_name TEXT
+			context_largest_tool_name TEXT,
+			context_binary_chars INTEGER
 		)
 	`);
 
@@ -746,6 +747,14 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "codex_usage_observed_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN codex_usage_observed_at INTEGER",
+	},
+	// Base64 attachment chars (images + documents) carried by the request,
+	// EXCLUDED from the context_*_chars buckets — transport bytes are not
+	// context. NULL = the row predates the column or had no composition walk.
+	{
+		table: "requests",
+		column: "context_binary_chars",
+		ddl: "ALTER TABLE requests ADD COLUMN context_binary_chars INTEGER",
 	},
 ];
 

@@ -187,14 +187,121 @@ describe("computeContextAndToolStats — composition", () => {
 	});
 
 	it("counts non-text content blocks via JSON.stringify length", () => {
+		const toolUse = {
+			type: "tool_use",
+			id: "tu_x",
+			name: "grep",
+			input: { pattern: "foo" },
+		};
+		const result = computeContextComposition({
+			messages: [{ role: "user", content: [toolUse] }],
+		});
+		expect(result?.messagesChars).toBe(jsonLen(toolUse));
+	});
+
+	it("excludes a base64 image payload from the char buckets and counts the image", () => {
+		const data = "A".repeat(100_000);
 		const imageBlock = {
 			type: "image",
-			source: { type: "base64", data: "aGVsbG8=" },
+			source: { type: "base64", media_type: "image/png", data },
+		};
+		const result = computeContextComposition({
+			messages: [{ role: "user", content: [imageBlock] }],
+		});
+		expect(result?.messagesChars).toBe(jsonLen(imageBlock) - data.length);
+		expect(result?.imageCount).toBe(1);
+		expect(result?.imagePayloadChars).toBe(data.length);
+		expect(result?.documentPayloadChars).toBe(0);
+	});
+
+	it("strips an image nested in a tool_result from toolResultChars", () => {
+		const data = "B".repeat(80_000);
+		const toolResult = {
+			type: "tool_result",
+			tool_use_id: "tu_shot",
+			content: [
+				{ type: "text", text: "screenshot" },
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data },
+				},
+			],
+		};
+		const result = computeContextComposition({
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "tu_shot", name: "screenshot", input: {} },
+					],
+				},
+				{ role: "user", content: [toolResult] },
+			],
+		});
+		expect(result?.toolResultChars).toBe(jsonLen(toolResult) - data.length);
+		expect(result?.imageCount).toBe(1);
+		expect(result?.imagePayloadChars).toBe(data.length);
+	});
+
+	it("no longer ranks the largest tool_result by attachment bytes", () => {
+		const data = "C".repeat(200_000);
+		const screenshotResult = {
+			type: "tool_result",
+			tool_use_id: "tu_shot",
+			content: [
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data },
+				},
+			],
+		};
+		const textResult = {
+			type: "tool_result",
+			tool_use_id: "tu_read",
+			content: "x".repeat(5_000),
+		};
+		const result = computeContextComposition({
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "tu_shot", name: "screenshot", input: {} },
+						{ type: "tool_use", id: "tu_read", name: "read_file", input: {} },
+					],
+				},
+				{ role: "user", content: [screenshotResult, textResult] },
+			],
+		});
+		// The 200k of base64 no longer outweighs 5k of real file content.
+		expect(result?.largestToolName).toBe("read_file");
+		expect(result?.largestToolResultChars).toBe(jsonLen(textResult));
+	});
+
+	it("tallies a base64 document payload separately from images", () => {
+		const data = "D".repeat(40_000);
+		const documentBlock = {
+			type: "document",
+			source: { type: "base64", media_type: "application/pdf", data },
+		};
+		const result = computeContextComposition({
+			messages: [{ role: "user", content: [documentBlock] }],
+		});
+		expect(result?.messagesChars).toBe(jsonLen(documentBlock) - data.length);
+		expect(result?.imageCount).toBe(0);
+		expect(result?.documentPayloadChars).toBe(data.length);
+	});
+
+	it("counts a malformed image block at full length with no tallies", () => {
+		const imageBlock = {
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data: { nope: 1 } },
 		};
 		const result = computeContextComposition({
 			messages: [{ role: "user", content: [imageBlock] }],
 		});
 		expect(result?.messagesChars).toBe(jsonLen(imageBlock));
+		expect(result?.imageCount).toBe(0);
+		expect(result?.imagePayloadChars).toBe(0);
 	});
 
 	it("lets weird blocks and malformed messages contribute 0 without throwing", () => {
@@ -238,6 +345,9 @@ describe("computeContextAndToolStats — composition", () => {
 			toolResultChars: 0,
 			largestToolResultChars: 0,
 			largestToolName: null,
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
 		});
 	});
 });

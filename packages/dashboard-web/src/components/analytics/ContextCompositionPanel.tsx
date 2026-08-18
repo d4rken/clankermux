@@ -50,12 +50,14 @@ const SEGMENT_COLORS: Record<string, string> = {
 	system: COLORS.blue,
 	tools: COLORS.purple,
 	messages: COLORS.success,
+	binary: COLORS.warning,
 };
 
 const SEGMENT_LABELS: Record<string, string> = {
 	system: "System prompt",
 	tools: "Tool definitions",
 	messages: "Messages",
+	binary: "Attachments",
 };
 
 function projectLabel(project: string | null): string {
@@ -83,8 +85,8 @@ function EmptyState({
 					Context Composition
 				</CardTitle>
 				<CardDescription>
-					What fills the context window: system prompt, tool definitions, and
-					messages
+					What fills the context window: system prompt, tool definitions,
+					messages, and attachments
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -102,37 +104,65 @@ function EmptyState({
 
 function CompositionSplit({
 	totals,
+	avgPerRequest,
 }: {
 	totals: ContextComposition["totals"];
+	avgPerRequest: ContextComposition["avgPerRequest"];
 }) {
 	const totalChars =
-		totals.systemChars + totals.toolsChars + totals.messagesChars;
+		totals.systemChars +
+		totals.toolsChars +
+		totals.messagesChars +
+		totals.binaryChars;
 	if (totalChars === 0) return null;
 
-	const segments = (["system", "tools", "messages"] as const).map((key) => {
-		const chars =
-			key === "system"
-				? totals.systemChars
-				: key === "tools"
-					? totals.toolsChars
-					: totals.messagesChars;
-		const share = chars / totalChars;
-		return {
-			key,
-			label: SEGMENT_LABELS[key],
-			chars,
-			share,
-			// Proportion applied to the REAL covered-row average context tokens —
-			// an estimate, since char counts don't map 1:1 to tokens.
-			estimatedTokens: share * totals.avgContextTokens,
-		};
-	});
+	// Text-only denominator for the tool-result callout: attachments are base64
+	// transport bytes, so including them would understate how much of the actual
+	// prose context tool results occupy.
+	const textChars =
+		totals.systemChars + totals.toolsChars + totals.messagesChars;
+
+	const segments = (["system", "tools", "messages", "binary"] as const).map(
+		(key) => {
+			const chars =
+				key === "system"
+					? totals.systemChars
+					: key === "tools"
+						? totals.toolsChars
+						: key === "messages"
+							? totals.messagesChars
+							: totals.binaryChars;
+			const share = chars / totalChars;
+			// Per-segment token estimate from that segment's OWN average chars —
+			// never a slice of avgContextTokens, which would silently hand the
+			// attachments' per-image token cost to the text segments (base64 chars
+			// dwarf prose chars while an image prices at a flat few thousand
+			// tokens). Attachments get no token figure at all: their char count
+			// carries no usable token signal.
+			const estimatedTokens =
+				key === "system"
+					? avgPerRequest.systemChars / CHARS_PER_TOKEN_ESTIMATE
+					: key === "tools"
+						? avgPerRequest.toolsChars / CHARS_PER_TOKEN_ESTIMATE
+						: key === "messages"
+							? avgPerRequest.messagesChars / CHARS_PER_TOKEN_ESTIMATE
+							: null;
+			return {
+				key,
+				label: SEGMENT_LABELS[key],
+				chars,
+				share,
+				estimatedTokens,
+			};
+		},
+	);
 
 	const toolResultShareOfMessages =
 		totals.messagesChars > 0
 			? (totals.toolResultChars / totals.messagesChars) * 100
 			: 0;
-	const toolResultShareOfTotal = (totals.toolResultChars / totalChars) * 100;
+	const toolResultShareOfText =
+		textChars > 0 ? (totals.toolResultChars / textChars) * 100 : 0;
 
 	const chartRow: Record<string, string | number> = { name: "context" };
 	for (const segment of segments) {
@@ -144,8 +174,11 @@ function CompositionSplit({
 	const tooltipFormatter = ((value: number, name: string) => {
 		const segment = segments.find((s) => s.label === name);
 		if (!segment) return [formatNumber(Number(value)), name];
+		const base = `${formatNumber(segment.chars)} chars · ${formatPercentage(segment.share * 100, 0)}`;
 		return [
-			`${formatNumber(segment.chars)} chars · ${formatPercentage(segment.share * 100, 0)} · ~${formatTokens(Math.round(segment.estimatedTokens))} tokens/request (estimated)`,
+			segment.estimatedTokens === null
+				? base
+				: `${base} · ~${formatTokens(Math.round(segment.estimatedTokens))} tokens/request (estimated)`,
 			name,
 		];
 	}) as TooltipFormatter;
@@ -192,7 +225,7 @@ function CompositionSplit({
 			{totals.toolResultChars > 0 && (
 				<p className="text-xs text-muted-foreground">
 					Tool results make up {formatPercentage(toolResultShareOfMessages, 0)}{" "}
-					of messages ({formatPercentage(toolResultShareOfTotal, 0)} of total
+					of messages ({formatPercentage(toolResultShareOfText, 0)} of text
 					context).
 				</p>
 			)}
@@ -351,8 +384,8 @@ interface ContextCompositionPanelProps {
 
 /**
  * Context Composition — what fills the context window. Char-proportion split
- * (system / tool definitions / messages, with tool results called out inside
- * messages), per-project context growth over time (real tokens), and the
+ * (system / tool definitions / messages / attachments, with tool results called
+ * out inside messages), per-project context growth over time (real tokens), and the
  * largest single tool-result contributors. Composition is recorded at ingest,
  * so coverage over historical rows can be partial — the banner says so.
  */
@@ -366,7 +399,7 @@ export function ContextCompositionPanel({
 		return <EmptyState loading={loading} noCoverage={false} />;
 	}
 
-	const { coverage, totals, growthCurve, topToolContributors } =
+	const { coverage, totals, avgPerRequest, growthCurve, topToolContributors } =
 		contextComposition;
 
 	if (coverage.withComposition === 0) {
@@ -384,7 +417,7 @@ export function ContextCompositionPanel({
 						</CardTitle>
 						<CardDescription>
 							What fills the context window: system prompt, tool definitions,
-							and messages
+							messages, and attachments
 						</CardDescription>
 					</div>
 					<Badge variant="secondary">
@@ -401,7 +434,7 @@ export function ContextCompositionPanel({
 						at request time)
 					</p>
 				)}
-				<CompositionSplit totals={totals} />
+				<CompositionSplit totals={totals} avgPerRequest={avgPerRequest} />
 				<GrowthChart growthCurve={growthCurve} timeRange={timeRange} />
 				<TopContributorsTable contributors={topToolContributors} />
 			</CardContent>

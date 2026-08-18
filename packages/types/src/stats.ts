@@ -513,6 +513,11 @@ export interface AnalyticsResponse {
 			toolsChars: number;
 			messagesChars: number;
 			toolResultChars: number;
+			/**
+			 * Base64 attachment chars (images + documents). EXCLUDED from the char
+			 * buckets above — attachments are priced per-image, not per byte.
+			 */
+			binaryChars: number;
 			contextTokens: number;
 			avgContextTokens: number;
 		};
@@ -520,6 +525,7 @@ export interface AnalyticsResponse {
 			systemChars: number;
 			toolsChars: number;
 			messagesChars: number;
+			binaryChars: number;
 			messageCount: number;
 		};
 		byProject: Array<{
@@ -529,6 +535,7 @@ export interface AnalyticsResponse {
 			avgSystemChars: number;
 			avgToolsChars: number;
 			avgMessagesChars: number;
+			avgBinaryChars: number;
 		}>;
 		// Context size over time per project (top projects by request count in
 		// range), over ALL rows — works for history without composition columns.

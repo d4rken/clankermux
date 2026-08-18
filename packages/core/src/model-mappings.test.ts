@@ -12,9 +12,12 @@ import {
 	getModelFamily,
 	getModelList,
 	getModelMappings,
+	IMAGE_TOKEN_ESTIMATE,
 	isValidClaudeModel,
 	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
+	measureBodyForEstimate,
+	measureContentBlock,
 	PROVIDER_DEFAULT_MODEL_MAPPINGS,
 	parseModelMappings,
 	resolveCodexTargetModel,
@@ -433,6 +436,9 @@ describe("estimateRequestTokens", () => {
 			largestToolResultChars: 0,
 			largestToolName: null,
 			toolCount: 0,
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
 		};
 
 		const withComposition = estimateRequestTokens(body, composition);
@@ -455,6 +461,9 @@ describe("estimateRequestTokens", () => {
 			largestToolResultChars: 0,
 			largestToolName: null,
 			toolCount: 0,
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
 		};
 		const body = { messages: [], max_tokens: 8192 };
 		const est = estimateRequestTokens(body, composition);
@@ -555,6 +564,12 @@ describe("estimateContextWindowTokens", () => {
 		systemChars: number,
 		toolsChars: number,
 		messagesChars: number,
+		binary?: Partial<
+			Pick<
+				ContextComposition,
+				"imageCount" | "imagePayloadChars" | "documentPayloadChars"
+			>
+		>,
 	): ContextComposition => ({
 		systemChars,
 		toolsChars,
@@ -564,6 +579,10 @@ describe("estimateContextWindowTokens", () => {
 		toolResultChars: 0,
 		largestToolResultChars: 0,
 		largestToolName: null,
+		imageCount: 0,
+		imagePayloadChars: 0,
+		documentPayloadChars: 0,
+		...binary,
 	});
 
 	test("null/undefined body → 0", () => {
@@ -607,6 +626,62 @@ describe("estimateContextWindowTokens", () => {
 		const expected = Math.ceil(jsonLen / 3.0) + GATE_OUTPUT_RESERVE_CAP;
 		expect(estimateContextWindowTokens(body)).toBe(expected);
 	});
+
+	test("composition path prices images flat and keeps document payloads at chars/3", () => {
+		// 30,000 text chars → 10,000 tokens, plus two images and a 9,000-char PDF.
+		const comp = composition(0, 0, 30_000, {
+			imageCount: 2,
+			imagePayloadChars: 1_900_000,
+			documentPayloadChars: 9_000,
+		});
+		expect(estimateContextWindowTokens({ max_tokens: 0 }, comp)).toBe(
+			Math.ceil(39_000 / GATE_CHARS_PER_TOKEN) + 2 * IMAGE_TOKEN_ESTIMATE,
+		);
+	});
+
+	test("the screenshot request (1.9MB base64 image + 140k text) no longer blows the window", () => {
+		// The observed failure: one attached PNG estimated at 657,214 tokens on a
+		// request whose real size was ~47k, rejected as context_window_exceeded.
+		const imageData = "A".repeat(1_900_000);
+		const text = "x".repeat(140_000);
+		const body = {
+			max_tokens: 32_000,
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text },
+						{
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: "image/png",
+								data: imageData,
+							},
+						},
+					],
+				},
+			],
+		};
+		// The production path: ingest walks the body, the gate reads the walk.
+		const measured = measureBodyForEstimate(body);
+		const comp = composition(0, 0, text.length, {
+			imageCount: measured.imageCount,
+			imagePayloadChars: measured.imagePayloadChars,
+			documentPayloadChars: measured.documentPayloadChars,
+		});
+		const est = estimateContextWindowTokens(body, comp);
+		expect(est).toBeLessThan(100_000);
+		const account = makeCodexAccount({ model_mappings: null });
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
+
+		// Same body through the no-composition fallback (e.g. count_tokens).
+		const fallbackEst = estimateContextWindowTokens(body);
+		expect(fallbackEst).toBeLessThan(100_000);
+		expect(
+			codexAccountFitsRequest(account, "claude-opus-4-8", fallbackEst),
+		).toBe(true);
+	});
 });
 
 describe("estimateRequestTokens is unchanged (cache-warming promotion regression guard)", () => {
@@ -620,6 +695,9 @@ describe("estimateRequestTokens is unchanged (cache-warming promotion regression
 			toolResultChars: 0,
 			largestToolResultChars: 0,
 			largestToolName: null,
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
 		};
 		// 40,000 / 4.0 = 10,000 + full 64,000 max_tokens = 74,000 (NOT capped).
 		expect(estimateRequestTokens({ max_tokens: 64_000 }, comp)).toBe(74_000);
@@ -627,6 +705,44 @@ describe("estimateRequestTokens is unchanged (cache-warming promotion regression
 		expect(estimateContextWindowTokens({ max_tokens: 64_000 }, comp)).not.toBe(
 			74_000,
 		);
+	});
+
+	test("fallback path on a text-only body is byte-identical to the old formula", () => {
+		const body = {
+			max_tokens: 8_192,
+			messages: [
+				{ role: "user", content: [{ type: "text", text: "y".repeat(50_000) }] },
+				{ role: "assistant", content: "ok" },
+			],
+			tools: [{ name: "bash", input_schema: { type: "object" } }],
+		};
+		const old = Math.ceil(JSON.stringify(body).length / 3.0) + 8_192;
+		expect(estimateRequestTokens(body)).toBe(old);
+	});
+
+	test("an attached screenshot no longer inflates the promotion estimate", () => {
+		// Transport bytes used to push a screenshot session past the 100k
+		// promotion threshold and buy the 2x 1h-cache-write premium.
+		const body = {
+			max_tokens: 0,
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "look at this" },
+						{
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: "image/png",
+								data: "A".repeat(1_900_000),
+							},
+						},
+					],
+				},
+			],
+		};
+		expect(estimateRequestTokens(body)).toBeLessThan(10_000);
 	});
 });
 
@@ -1031,5 +1147,211 @@ describe("PROVIDER_DEFAULT_MODEL_MAPPINGS", () => {
 			model_mappings: JSON.stringify({ sonnet: null }),
 		});
 		expect(mapModelName("claude-sonnet-5", account)).toBe("claude-sonnet-5");
+	});
+});
+
+describe("measureContentBlock (binary-payload aware block measurement)", () => {
+	const jsonLen = (value: unknown) => JSON.stringify(value).length;
+
+	test("base64 image: payload chars stripped from chars and reported", () => {
+		const data = "A".repeat(50_000);
+		const block = {
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(50_000);
+		expect(measured.documentPayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block) - 50_000);
+		// The envelope survives — only the payload is gone.
+		expect(measured.chars).toBeGreaterThan(0);
+		expect(measured.chars).toBeLessThan(200);
+	});
+
+	test("url image: counted, but carries no payload to strip", () => {
+		const block = {
+			type: "image",
+			source: { type: "url", url: "https://example.test/a.png" },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("image nested in a tool_result content array is recognised", () => {
+		const data = "B".repeat(30_000);
+		const block = {
+			type: "tool_result",
+			tool_use_id: "toolu_1",
+			content: [
+				{ type: "text", text: "screenshot captured" },
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data },
+				},
+			],
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(30_000);
+		expect(measured.chars).toBe(jsonLen(block) - 30_000);
+	});
+
+	test("base64 document payload is tallied separately from images", () => {
+		const data = "C".repeat(10_000);
+		const block = {
+			type: "document",
+			source: { type: "base64", media_type: "application/pdf", data },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.documentPayloadChars).toBe(10_000);
+		expect(measured.chars).toBe(jsonLen(block) - 10_000);
+	});
+
+	test("text-source document is real prompt text and keeps its full count", () => {
+		const block = {
+			type: "document",
+			source: {
+				type: "text",
+				media_type: "text/plain",
+				data: "D".repeat(5_000),
+			},
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.documentPayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("malformed image block (non-string data) falls back to the full length", () => {
+		const block = {
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data: { oops: true } },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("a plain text block is measured as JSON, with no tallies", () => {
+		const block = { type: "text", text: "hello" };
+		const measured = measureContentBlock(block);
+		expect(measured).toEqual({
+			chars: jsonLen(block),
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+		});
+	});
+});
+
+describe("measureBodyForEstimate (semantic-position payload stripping)", () => {
+	const jsonLen = (value: unknown) => JSON.stringify(value).length;
+
+	test("a body with no messages array measures byte-identically to stringify", () => {
+		const body = { model: "claude-opus-4-8", max_tokens: 64_000, system: "hi" };
+		const measured = measureBodyForEstimate(body);
+		expect(measured).toEqual({
+			textChars: jsonLen(body),
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+		});
+	});
+
+	test("message image payloads are excluded from textChars", () => {
+		const data = "A".repeat(100_000);
+		const body = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "look" },
+						{
+							type: "image",
+							source: { type: "base64", media_type: "image/png", data },
+						},
+					],
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(100_000);
+		expect(measured.textChars).toBe(jsonLen(body) - 100_000);
+	});
+
+	test("an image-shaped object inside tool_use.input is NOT stripped", () => {
+		const data = "A".repeat(20_000);
+		const body = {
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "tool_use",
+							id: "toolu_1",
+							name: "write_file",
+							input: {
+								// Model-visible text that merely LOOKS like an image block.
+								block: { type: "image", source: { type: "base64", data } },
+							},
+						},
+					],
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.textChars).toBe(jsonLen(body));
+	});
+
+	test("an image-shaped object inside a tool definition is NOT stripped", () => {
+		const data = "A".repeat(20_000);
+		const body = {
+			messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			tools: [
+				{
+					name: "render",
+					input_schema: {
+						type: "object",
+						properties: {
+							example: { type: "image", source: { type: "base64", data } },
+						},
+					},
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.textChars).toBe(jsonLen(body));
+	});
+
+	test("measurement never mutates the measured body", () => {
+		const body = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: "image/png",
+								data: "A".repeat(1_000),
+							},
+						},
+					],
+				},
+			],
+		};
+		const before = structuredClone(body);
+		measureBodyForEstimate(body);
+		expect(body).toEqual(before);
 	});
 });

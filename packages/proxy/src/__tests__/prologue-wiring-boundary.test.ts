@@ -627,6 +627,9 @@ describe("handleProxy prologue wiring", () => {
 				toolResultChars,
 				largestToolResultChars: toolResultChars,
 				largestToolName: "Bash",
+				imageCount: 0,
+				imagePayloadChars: 0,
+				documentPayloadChars: 0,
 			});
 			expect(recorded[0].toolCallStats).toEqual([
 				{

@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import {
 	DEFAULT_CODEX_MODEL_BY_FAMILY,
 	getModelFamily,
+	IMAGE_TOKEN_ESTIMATE,
 	isDebugEnabled,
 	isInvalidGrantMessage,
 	mapModelName,
+	measureBodyForEstimate,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
 	ValidationError,
@@ -816,8 +818,26 @@ export class CodexProvider extends BaseProvider {
 			});
 		}
 
-		// Conservative token estimate: same heuristic used elsewhere in ClankerMux
-		const inputTokens = Math.max(1, Math.ceil(JSON.stringify(body).length / 3));
+		// Conservative token estimate: same heuristic used elsewhere in ClankerMux.
+		// Attached images are priced per-image rather than by their base64 size —
+		// counting transport bytes as text answered a one-screenshot request with
+		// hundreds of thousands of tokens.
+		const measured =
+			typeof body === "object" && body !== null
+				? measureBodyForEstimate(body as Record<string, unknown>)
+				: {
+						// Non-object JSON body (string/number/null): measured exactly as
+						// before, it carries no message blocks to recognise.
+						textChars: JSON.stringify(body)?.length ?? 0,
+						imageCount: 0,
+						imagePayloadChars: 0,
+						documentPayloadChars: 0,
+					};
+		const inputTokens = Math.max(
+			1,
+			Math.ceil((measured.textChars + measured.documentPayloadChars) / 3) +
+				measured.imageCount * IMAGE_TOKEN_ESTIMATE,
+		);
 		const responseBody = JSON.stringify({ input_tokens: inputTokens });
 		const successHeaders = new Headers(request.headers);
 		successHeaders.set("content-type", "application/json");
