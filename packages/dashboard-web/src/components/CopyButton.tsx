@@ -50,6 +50,10 @@ export function CopyButton({
 	const [loading, setLoading] = useState(false);
 	const [errored, setErrored] = useState(false);
 	const timeoutRef = useRef<number | null>(null);
+	// Mount point for the non-secure-context fallback's textarea. It has to sit
+	// inside any surrounding focus trap (Radix Dialog) or the copy silently
+	// grabs nothing — see copyText.
+	const buttonRef = useRef<HTMLButtonElement | null>(null);
 
 	const flashError = (err: unknown) => {
 		console.error("Copy failed", err);
@@ -71,7 +75,7 @@ export function CopyButton({
 			return;
 		}
 
-		copyText(text)
+		copyText(text, buttonRef.current?.parentElement)
 			.then(() => {
 				setCopied(true);
 				// Clear any lingering error state from a previous attempt.
@@ -104,6 +108,7 @@ export function CopyButton({
 
 	return (
 		<Button
+			ref={buttonRef}
 			variant={variant}
 			size={size}
 			onClick={handleCopy}
