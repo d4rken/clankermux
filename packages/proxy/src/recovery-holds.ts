@@ -18,7 +18,7 @@
  * span every pass a single request makes.
  */
 
-import { NETWORK } from "@clankermux/core";
+import { mapModelName, NETWORK } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type {
@@ -51,6 +51,7 @@ import {
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	inspectProviderOverload,
+	resolveOverloadAttributionModel,
 } from "./provider-overload-cooldown";
 
 // Same channel name as handleProxy's own logger: this module was carved out of
@@ -142,6 +143,23 @@ export interface RecoveryHoldsDeps {
 		jitterMs?: number;
 	};
 	/**
+	 * Deterministic-timing seam for the non-Codex recovery hold — the sibling of
+	 * `burstHoldTimingOverride`, and like it, production never passes it.
+	 * `holdForNonCodexRecovery` reads EVERY clock through it (budget elapsed,
+	 * cooldown deadlines, jitter) and sleeps through `sleep`, which defaults to
+	 * `abortableSleep` and keeps its contract (resolves false when the signal
+	 * aborts). A test can therefore hand in a fake clock whose `sleep` advances
+	 * `now` synchronously and drive the hold with no wall-clock wait at all,
+	 * instead of racing an absolute cooldown window against a preempted worker.
+	 *
+	 * No `maxHoldMs` counterpart: this hold takes its budget as a call parameter.
+	 */
+	nonCodexHoldTimingOverride?: {
+		now?: () => number;
+		jitterMs?: number;
+		sleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+	};
+	/**
 	 * handleProxy's once-per-request post-gate routing log. Called from every
 	 * admission point inside a hold, exactly as it is from the ones outside.
 	 */
@@ -213,9 +231,17 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		gates,
 		bumpIdleTimeout,
 		burstHoldTimingOverride,
+		nonCodexHoldTimingOverride,
 		logFinalOrderOnce,
 		attemptThroughProbeGate,
 	} = deps;
+
+	// Resolved once: the non-Codex hold's clock, jitter width and sleep. Production
+	// passes no override, so these ARE Date.now / CW_HOLD_JITTER_MS / abortableSleep.
+	const nonCodexNow = nonCodexHoldTimingOverride?.now ?? Date.now;
+	const nonCodexJitterMs =
+		nonCodexHoldTimingOverride?.jitterMs ?? CW_HOLD_JITTER_MS;
+	const nonCodexSleep = nonCodexHoldTimingOverride?.sleep ?? abortableSleep;
 
 	// Transparent burst-retry hold state + orchestration (OAuth-Anthropic). It is
 	// per-request factory state because BOTH burst-hold call sites — the
@@ -411,16 +437,31 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			// probe completes mid-sweep. After an earlier candidate re-trips the
 			// shared bucket, the next inspection reads `open` on its own.
 			//
-			// The model is gates.modelForAccount — the same canonical
-			// overload-attribution resolution (account mapping + combo override,
-			// with the logical-model fallback) that already gated this candidate
-			// into the list and that the authoritative admission re-derives from the
-			// transformed body. Using the request's logical model instead would
-			// sideline an account whose mapped model belongs to a different, healthy
-			// family for the whole hold budget.
+			// The model is resolved EXACTLY as the attempt below resolves it: the
+			// CURRENT combo slot override (see currentComboOverrideForAccount —
+			// re-read per attempt, because a hold wake re-runs selection and can
+			// change a slot's override) falling back to the request's logical model,
+			// then run through the shared canonical overload attribution (account
+			// mapping, with the logical-model fallback) that the authoritative
+			// admission re-derives from the transformed body.
+			//
+			// Deliberately NOT gates.modelForAccount: that reads the combo snapshot
+			// frozen at gate construction (admission-gates.ts), so after a wake
+			// changed the slot's override it would inspect one family while the
+			// attempt sends another — suppressing a healthy account on every ~1.5s
+			// round for the whole hold budget. Using the request's logical model
+			// alone would be wrong the other way: it would sideline an account whose
+			// mapped model belongs to a different, healthy family.
+			const attemptLogicalModel =
+				currentComboOverrideForAccount(candidate) ?? effectiveRequestModel;
 			const overload = inspectProviderOverload(
 				candidate.provider,
-				gates.modelForAccount(candidate),
+				attemptLogicalModel
+					? resolveOverloadAttributionModel(
+							mapModelName(attemptLogicalModel, candidate),
+							attemptLogicalModel,
+						)
+					: null,
 			);
 			if (overload.state === "open" || overload.probeActive) {
 				// Same bookkeeping as a recovery-probe suppression: NOTHING was
@@ -790,7 +831,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	): Promise<Response | null> => {
 		const isEligible = (a: Account): boolean =>
 			opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
-		const holdStart = Date.now();
+		const holdStart = nonCodexNow();
 		// The candidates the PREVIOUS round skipped via the single-flight
 		// recovery-probe gate. Such a candidate has no cooldown deadline to wait
 		// on (that is exactly why it was selectable), so without this the loop
@@ -807,7 +848,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		// exit behaviour on the next pass.
 		let probeSuppressedIds = new Set<string>();
 		while (true) {
-			const nowMs = Date.now();
+			const nowMs = nonCodexNow();
 			const elapsed = nowMs - holdStart;
 			if (elapsed >= budgetMs) break;
 			const remaining = budgetMs - elapsed;
@@ -846,7 +887,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				if (probeSuppressedIds.size === 0) break;
 				waitMs =
 					OVERLOAD_HOLD_PROBE_POLL_MS +
-					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+					Math.floor(Math.random() * nonCodexJitterMs);
 				log.info(
 					`${label}: waiting ${waitMs}ms for an in-flight recovery probe`,
 				);
@@ -854,7 +895,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				const soonest = Math.min(...unavailable.map((x) => x.availableAt));
 				waitMs =
 					Math.max(0, soonest - nowMs) +
-					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
+					Math.floor(Math.random() * nonCodexJitterMs);
 				log.info(
 					`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
 				);
@@ -862,7 +903,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 
 			if (waitMs > remaining) break; // soonest expiry is beyond budget
 
-			const completed = await abortableSleep(waitMs, req.signal);
+			const completed = await nonCodexSleep(waitMs, req.signal);
 			if (!completed) {
 				log.info(`${label}: client disconnected during wait`);
 				return createClientAbortResponse();
