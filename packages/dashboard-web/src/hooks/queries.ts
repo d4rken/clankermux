@@ -487,13 +487,23 @@ export const useInfiniteRequests = (
  * `refetchInterval: false` is explicit: without it the query inherits the
  * app-wide `REFRESH_INTERVALS.default` from App.tsx and polls for as long as
  * the details modal stays open. A recorded request never changes.
+ *
+ * The two results have opposite staleness, which is why `staleTime` is a
+ * function of the data. A summary is immutable, so it never needs looking up
+ * again. `null` is not an answer but a "not recorded YET": the request was
+ * still in flight when we asked, and caching that for the whole `gcTime` would
+ * leave a reader who navigated away and back stuck on the not-recorded notice
+ * with no lookup running even though the row now exists. `refetchOnMount` is
+ * spelled out for the same reason — remounting the tab is exactly when that
+ * second look has to happen.
  */
 export const useRequestById = (id: string | null) => {
 	return useQuery({
 		queryKey: queryKeys.requestById(id ?? ""),
 		queryFn: () => api.getRequestById(id as string),
 		enabled: id !== null,
-		staleTime: Infinity,
+		staleTime: (query) => (query.state.data == null ? 0 : Infinity),
+		refetchOnMount: true,
 		gcTime: 5 * 60 * 1000,
 		refetchInterval: false,
 		retry: shouldRetryDashboardQuery,
