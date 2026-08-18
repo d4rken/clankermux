@@ -1388,16 +1388,17 @@ export class CodexProvider extends BaseProvider {
 		// `none` succeeds through the native passthrough (which preserves it) and
 		// fails through this translator, decided only by which account routing
 		// picked. So when this account really reaches that backend, short-circuit
-		// every string effort the backend clamp resolves to `none` (`none` itself
-		// and `minimal`) straight to `none`, and keep the resolver-then-clamp path
-		// for every other value.
+		// exactly `none` — and nothing else. Every other value, `minimal`
+		// included, stays on the resolver-then-clamp path, because the resolver is
+		// what raises an effort UP to the target model's documented minimum
+		// (`minimal` → `low` for a profile that floors at `low`, e.g.
+		// gpt-5.4-mini). Short-circuiting on "the clamp would say none" would
+		// bypass that floor and send `none` where `low` was due.
 		const reasoningResolution: {
 			effort: string | undefined;
 			downgrades: ReadonlyArray<{ model: string; from: string; to: string }>;
 		} =
-			targetsChatGptBackend &&
-			typeof requestedEffort === "string" &&
-			clampChatGptBackendReasoningEffort(requestedEffort) === "none"
+			targetsChatGptBackend && requestedEffort === "none"
 				? { effort: "none", downgrades: [] }
 				: resolveReasoningEffort(requestedEffort, {
 						sourceModel: body.model,

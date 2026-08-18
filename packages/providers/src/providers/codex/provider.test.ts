@@ -2646,6 +2646,21 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		expect(body.reasoning).toEqual({ effort: "none" });
 	});
 
+	it("still raises minimal to the target model's floor on the translated path", async () => {
+		// gpt-5.4-mini's profile is ["low", "medium"], so the resolver clamps
+		// `minimal` UP to `low` — and the backend accepts `low` unchanged. The
+		// `none` short-circuit must not swallow `minimal` on the way past: that
+		// would send `none` where the target model's documented minimum is `low`.
+		const body = await translatedTransform(
+			{ reasoning: { effort: "minimal" } },
+			codexAccount({
+				model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
+			}),
+		);
+		expect(body.model).toBe("gpt-5.4-mini");
+		expect(body.reasoning).toEqual({ effort: "low" });
+	});
+
 	it("preserves reasoning.effort none on the translated path", async () => {
 		// `none` is accepted by the backend but unknown to resolveReasoningEffort,
 		// which throws on it — so the translated path must short-circuit the
