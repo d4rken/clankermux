@@ -303,11 +303,30 @@ export function RequestsTab() {
 	const isFetchingMore = filteredQuery.isFetchingNextPage;
 
 	// ── Resolving the request named in the URL ────────────────────────────────
-	// 1. In the loaded slice: use it directly. This is every ordinary row click,
+	// 1. In the loaded data: use it directly. This is every ordinary row click,
 	//    and it issues no extra request.
-	const loadedRequest = modalRequestId
+	//
+	//    BOTH collections are consulted, because they do not gain a request at
+	//    the same moment. A request that was already in flight when this tab
+	//    connected never gets a `start` event, so the stream reducer has no row
+	//    to update when its `summary` arrives: the summary lands in the details
+	//    map and the payload array stays without it. Searching only the array
+	//    would leave a deep-linked in-flight request showing the
+	//    "not recorded yet" notice forever, even after it completed — which is
+	//    the primary case this deep link exists for.
+	const loadedPayload = modalRequestId
 		? (requests.find((request) => request.id === modalRequestId) ?? null)
 		: null;
+	const loadedSummary = modalRequestId
+		? data?.summaries.get(modalRequestId)
+		: undefined;
+	// Memoized so the modal's hydration effect sees a stable request identity.
+	const localRequest = useMemo(
+		() =>
+			loadedPayload ??
+			(loadedSummary ? summaryToPlaceholder(loadedSummary) : null),
+		[loadedPayload, loadedSummary],
+	);
 	// 2. Otherwise look it up by id. A deep link from Live Activity regularly
 	//    names a request outside the slice: the live tail is the latest
 	//    `API_LIMITS.requestsDetail` rows while the Live Activity window reaches
@@ -317,18 +336,19 @@ export function RequestsTab() {
 	//    has not arrived yet, and firing immediately would fetch a row that is
 	//    about to appear in it anyway.
 	const byIdActive =
-		modalRequestId !== null && loadedRequest === null && !loading;
+		modalRequestId !== null &&
+		localRequest === null &&
+		loadedSummary === undefined &&
+		!loading;
 	const byIdQuery = useRequestById(byIdActive ? modalRequestId : null);
 
-	const modalSummary = loadedRequest
-		? data?.summaries.get(loadedRequest.id)
-		: (byIdQuery.data ?? undefined);
-	// Memoized so the modal's hydration effect sees a stable request identity.
+	const modalSummary = loadedSummary ?? byIdQuery.data ?? undefined;
+	// Memoized for the same reason as `localRequest` above.
 	const byIdPlaceholder = useMemo(
 		() => (byIdQuery.data ? summaryToPlaceholder(byIdQuery.data) : null),
 		[byIdQuery.data],
 	);
-	const modalRequest = loadedRequest ?? (byIdActive ? byIdPlaceholder : null);
+	const modalRequest = localRequest ?? (byIdActive ? byIdPlaceholder : null);
 
 	// The by-id lookup's four states are kept distinct on purpose:
 	//  - pending: nothing at all, so no header flashes an epoch-0 timestamp;

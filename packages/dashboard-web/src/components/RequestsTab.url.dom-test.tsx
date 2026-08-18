@@ -12,7 +12,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router";
-import { api, type RequestSummary } from "../api";
+import { api, type RequestPayload, type RequestSummary } from "../api";
+import { API_LIMITS } from "../constants";
+import { queryKeys } from "../lib/query-keys";
 import { RequestsTab } from "./RequestsTab";
 
 /**
@@ -217,6 +219,41 @@ describe("RequestsTab — ?request=", () => {
 		expect(pageText()).toContain("has not been recorded yet");
 		expect(pageText()).toContain("still be in flight");
 		expect(modalIsOpen()).toBe(false);
+	});
+
+	it("opens the modal once a request that was in flight completes", async () => {
+		// The scenario the deep link exists for: the tab was not open when the
+		// request started, so the stream never delivered a `start` for it and no
+		// placeholder row exists. On `summary` the reducer finds no row to patch
+		// and updates the details map ALONE — resolving the URL from the payload
+		// list only would leave this stuck on the not-recorded notice forever.
+		await mount(`/requests?request=${REMOTE_ID}`, {
+			loaded: [summary()],
+			byId: async () => null,
+		});
+		expect(pageText()).toContain("has not been recorded yet");
+		expect(modalIsOpen()).toBe(false);
+
+		// Exactly the shape the `summary` branch of `useRequestStream` writes for
+		// a request with no row in `requests`.
+		const completed = summary({ id: REMOTE_ID, model: "claude-sonnet-5" });
+		await act(async () => {
+			queryClient?.setQueryData(
+				queryKeys.requests(API_LIMITS.requestsDetail),
+				(current: {
+					requests: RequestPayload[];
+					detailsMap: Map<string, RequestSummary>;
+				}) => ({
+					requests: current.requests,
+					detailsMap: new Map(current.detailsMap).set(REMOTE_ID, completed),
+				}),
+			);
+		});
+		await settle();
+
+		expect(modalIsOpen()).toBe(true);
+		expect(pageText()).toContain("claude-sonnet-5");
+		expect(pageText()).not.toContain("has not been recorded yet");
 	});
 
 	it("treats an empty request parameter as no selection", async () => {
