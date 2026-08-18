@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import {
 	AlertTriangle,
-	Copy,
 	Pencil,
 	Plus,
 	RefreshCw,
@@ -15,6 +14,7 @@ import {
 import { useState } from "react";
 import { type Account, api } from "../api";
 import { useAccounts } from "../hooks/queries";
+import { CopyButton } from "./CopyButton";
 import { Button } from "./ui/button";
 import {
 	Card,
@@ -458,12 +458,6 @@ export function ApiKeysTab() {
 		renameKeyMutation.mutate({ id: selectedKey.id, name: renameValue.trim() });
 	};
 
-	const copyToClipboard = (text: string) => {
-		navigator.clipboard.writeText(text).catch((err) => {
-			console.error("Failed to copy to clipboard:", err);
-		});
-	};
-
 	const stats = statsResponse?.data;
 	const apiKeys = apiKeysResponse?.data || [];
 	const sortedApiKeys = sortApiKeys(apiKeys, sortMode);
@@ -691,13 +685,12 @@ export function ApiKeysTab() {
 											>
 												<Route className="h-4 w-4" />
 											</Button>
-											<Button
+											<CopyButton
 												variant="outline"
 												size="sm"
-												onClick={() => copyToClipboard(key.prefixLast8)}
-											>
-												<Copy className="h-4 w-4" />
-											</Button>
+												value={key.prefixLast8}
+												title="Copy key prefix"
+											/>
 											<Button
 												variant="outline"
 												size="sm"
@@ -801,15 +794,12 @@ export function ApiKeysTab() {
 								<code className="flex-1 p-3 bg-muted rounded text-sm font-mono break-all">
 									{generatedKey?.apiKey}
 								</code>
-								<Button
+								<CopyButton
 									variant="outline"
 									size="sm"
-									onClick={() =>
-										generatedKey && copyToClipboard(generatedKey.apiKey)
-									}
-								>
-									<Copy className="h-4 w-4" />
-								</Button>
+									value={generatedKey?.apiKey ?? ""}
+									title="Copy API key"
+								/>
 							</div>
 						</div>
 						<div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
