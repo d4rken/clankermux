@@ -530,6 +530,204 @@ export const GATE_CHARS_PER_TOKEN = 3.0;
 export const GATE_OUTPUT_RESERVE_CAP = 4_000;
 
 /**
+ * Flat per-image token allowance used by every estimator instead of counting an
+ * attached image's base64 payload as prompt text.
+ *
+ * Vision tokens are a function of pixels, not of transport bytes: Anthropic
+ * bills roughly (width × height) / 750, which tops out near 1,600 tokens at the
+ * 1568×1568 resize ceiling, and OpenAI's high-detail tile pricing caps around
+ * 1.1k–1.5k. 2,000 is a deliberate slight over-count, matching the gate's
+ * conservative bias, and is applied uniformly to every recognised image block.
+ *
+ * The bug this replaces: a 1.4MB PNG arrives as ~1.9MB of base64, which the
+ * chars/3 heuristic read as ~630k tokens — enough to fail the context-window
+ * gate with a spurious context_window_exceeded on a request whose real size was
+ * ~47k tokens.
+ */
+export const IMAGE_TOKEN_ESTIMATE = 2_000;
+
+/** Per-block measurement produced by {@link measureContentBlock}. */
+export interface ContentBlockMeasurement {
+	/** JSON.stringify length with recognised binary payloads removed. */
+	chars: number;
+	/** Recognised image blocks (base64 AND url sources). */
+	imageCount: number;
+	/** Base64 image payload chars excluded from `chars`. */
+	imagePayloadChars: number;
+	/** Base64 document payload chars excluded from `chars`. */
+	documentPayloadChars: number;
+}
+
+/** Whole-body measurement produced by {@link measureBodyForEstimate}. */
+export interface BodyMeasurement {
+	/** Whole-body JSON length minus the recognised binary payload chars. */
+	textChars: number;
+	imageCount: number;
+	imagePayloadChars: number;
+	documentPayloadChars: number;
+}
+
+function isBlockRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+/** JSON.stringify length, 0 for unstringifiable values (circular refs, undefined). */
+function safeJsonLength(value: unknown): number {
+	try {
+		const json = JSON.stringify(value);
+		return typeof json === "string" ? json.length : 0;
+	} catch {
+		return 0;
+	}
+}
+
+const EMPTY_MEASUREMENT: ContentBlockMeasurement = {
+	chars: 0,
+	imageCount: 0,
+	imagePayloadChars: 0,
+	documentPayloadChars: 0,
+};
+
+/**
+ * Measure ONE content block of an Anthropic-shaped message: its char size with
+ * any base64 attachment payload stripped out, plus what was stripped.
+ *
+ * Recognised shapes (everything else is measured as plain JSON, unchanged):
+ *   - `{type:"image", source:{type:"base64", data:"<b64>"}}` — payload chars are
+ *     excluded from `chars` and reported separately; counts as one image.
+ *   - `{type:"image", source:{type:"url", …}}` — counts as one image, carries no
+ *     payload.
+ *   - `{type:"document", source:{type:"base64", data:"<b64>"}}` — payload chars
+ *     reported separately. A `text`-source document's `data` is REAL prompt text
+ *     and is deliberately left in `chars`; so is a URL source.
+ *   - `{type:"tool_result", content:[…]}` — the nested blocks get the same
+ *     recognition (Claude Code returns screenshots inside tool results).
+ *
+ * Malformed shapes (non-string `data`, missing `source`) fall through to the
+ * full JSON length with no tallies: never guess about a shape we don't know.
+ *
+ * This is the single source of truth shared by the proxy's ingest-time
+ * composition walk and the whole-body estimator fallback.
+ */
+export function measureContentBlock(block: unknown): ContentBlockMeasurement {
+	if (!isBlockRecord(block)) return EMPTY_MEASUREMENT;
+
+	const fullChars = safeJsonLength(block);
+
+	if (block.type === "image" && isBlockRecord(block.source)) {
+		const source = block.source;
+		if (source.type === "base64" && typeof source.data === "string") {
+			return {
+				chars: Math.max(0, fullChars - source.data.length),
+				imageCount: 1,
+				imagePayloadChars: source.data.length,
+				documentPayloadChars: 0,
+			};
+		}
+		if (source.type === "url") {
+			return {
+				chars: fullChars,
+				imageCount: 1,
+				imagePayloadChars: 0,
+				documentPayloadChars: 0,
+			};
+		}
+		return { ...EMPTY_MEASUREMENT, chars: fullChars };
+	}
+
+	if (block.type === "document" && isBlockRecord(block.source)) {
+		const source = block.source;
+		if (source.type === "base64" && typeof source.data === "string") {
+			return {
+				chars: Math.max(0, fullChars - source.data.length),
+				imageCount: 0,
+				imagePayloadChars: 0,
+				documentPayloadChars: source.data.length,
+			};
+		}
+		return { ...EMPTY_MEASUREMENT, chars: fullChars };
+	}
+
+	if (block.type === "tool_result" && Array.isArray(block.content)) {
+		let imageCount = 0;
+		let imagePayloadChars = 0;
+		let documentPayloadChars = 0;
+		for (const nested of block.content) {
+			const measured = measureContentBlock(nested);
+			imageCount += measured.imageCount;
+			imagePayloadChars += measured.imagePayloadChars;
+			documentPayloadChars += measured.documentPayloadChars;
+		}
+		return {
+			chars: Math.max(0, fullChars - imagePayloadChars - documentPayloadChars),
+			imageCount,
+			imagePayloadChars,
+			documentPayloadChars,
+		};
+	}
+
+	return { ...EMPTY_MEASUREMENT, chars: fullChars };
+}
+
+/**
+ * Whole-body measurement for the estimator fallback (no ContextComposition
+ * available — e.g. /v1/messages/count_tokens, which ingress excludes from the
+ * composition walk by exact-path match).
+ *
+ * `textChars` is the plain `JSON.stringify(body).length` MINUS the base64
+ * payload chars found at SEMANTIC positions only: `messages[].content[]` blocks
+ * and the blocks nested in a `tool_result.content[]`. Deliberately not a
+ * JSON.stringify replacer — an image-shaped object sitting in a `tool_use.input`
+ * or in a tool's JSON schema is model-visible text and must keep its full count.
+ * Base64-looking strings in ordinary text are prompt text too, and are never
+ * touched.
+ *
+ * A body with no `messages` array is measured exactly as before (plain
+ * stringify length, zero tallies). Stringify throws propagate to the caller,
+ * as they always did — no fail-open zero.
+ */
+export function measureBodyForEstimate(
+	parsedBody: Record<string, unknown>,
+): BodyMeasurement {
+	const totalChars = JSON.stringify(parsedBody).length;
+	const messages = parsedBody.messages;
+	if (!Array.isArray(messages)) {
+		return {
+			textChars: totalChars,
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+		};
+	}
+
+	let imageCount = 0;
+	let imagePayloadChars = 0;
+	let documentPayloadChars = 0;
+
+	for (const message of messages) {
+		if (!isBlockRecord(message)) continue;
+		const content = message.content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			const measured = measureContentBlock(block);
+			imageCount += measured.imageCount;
+			imagePayloadChars += measured.imagePayloadChars;
+			documentPayloadChars += measured.documentPayloadChars;
+		}
+	}
+
+	return {
+		textChars: Math.max(
+			0,
+			totalChars - imagePayloadChars - documentPayloadChars,
+		),
+		imageCount,
+		imagePayloadChars,
+		documentPayloadChars,
+	};
+}
+
+/**
  * Look up the context window for a Codex model.
  * Returns undefined for unknown/compaction models.
  *

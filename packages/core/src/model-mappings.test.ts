@@ -15,6 +15,8 @@ import {
 	isValidClaudeModel,
 	MODEL_CONTEXT_WINDOWS,
 	mapModelName,
+	measureBodyForEstimate,
+	measureContentBlock,
 	PROVIDER_DEFAULT_MODEL_MAPPINGS,
 	parseModelMappings,
 	resolveCodexTargetModel,
@@ -1031,5 +1033,211 @@ describe("PROVIDER_DEFAULT_MODEL_MAPPINGS", () => {
 			model_mappings: JSON.stringify({ sonnet: null }),
 		});
 		expect(mapModelName("claude-sonnet-5", account)).toBe("claude-sonnet-5");
+	});
+});
+
+describe("measureContentBlock (binary-payload aware block measurement)", () => {
+	const jsonLen = (value: unknown) => JSON.stringify(value).length;
+
+	test("base64 image: payload chars stripped from chars and reported", () => {
+		const data = "A".repeat(50_000);
+		const block = {
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(50_000);
+		expect(measured.documentPayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block) - 50_000);
+		// The envelope survives — only the payload is gone.
+		expect(measured.chars).toBeGreaterThan(0);
+		expect(measured.chars).toBeLessThan(200);
+	});
+
+	test("url image: counted, but carries no payload to strip", () => {
+		const block = {
+			type: "image",
+			source: { type: "url", url: "https://example.test/a.png" },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("image nested in a tool_result content array is recognised", () => {
+		const data = "B".repeat(30_000);
+		const block = {
+			type: "tool_result",
+			tool_use_id: "toolu_1",
+			content: [
+				{ type: "text", text: "screenshot captured" },
+				{
+					type: "image",
+					source: { type: "base64", media_type: "image/png", data },
+				},
+			],
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(30_000);
+		expect(measured.chars).toBe(jsonLen(block) - 30_000);
+	});
+
+	test("base64 document payload is tallied separately from images", () => {
+		const data = "C".repeat(10_000);
+		const block = {
+			type: "document",
+			source: { type: "base64", media_type: "application/pdf", data },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.documentPayloadChars).toBe(10_000);
+		expect(measured.chars).toBe(jsonLen(block) - 10_000);
+	});
+
+	test("text-source document is real prompt text and keeps its full count", () => {
+		const block = {
+			type: "document",
+			source: {
+				type: "text",
+				media_type: "text/plain",
+				data: "D".repeat(5_000),
+			},
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.documentPayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("malformed image block (non-string data) falls back to the full length", () => {
+		const block = {
+			type: "image",
+			source: { type: "base64", media_type: "image/png", data: { oops: true } },
+		};
+		const measured = measureContentBlock(block);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.chars).toBe(jsonLen(block));
+	});
+
+	test("a plain text block is measured as JSON, with no tallies", () => {
+		const block = { type: "text", text: "hello" };
+		const measured = measureContentBlock(block);
+		expect(measured).toEqual({
+			chars: jsonLen(block),
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+		});
+	});
+});
+
+describe("measureBodyForEstimate (semantic-position payload stripping)", () => {
+	const jsonLen = (value: unknown) => JSON.stringify(value).length;
+
+	test("a body with no messages array measures byte-identically to stringify", () => {
+		const body = { model: "claude-opus-4-8", max_tokens: 64_000, system: "hi" };
+		const measured = measureBodyForEstimate(body);
+		expect(measured).toEqual({
+			textChars: jsonLen(body),
+			imageCount: 0,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+		});
+	});
+
+	test("message image payloads are excluded from textChars", () => {
+		const data = "A".repeat(100_000);
+		const body = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "look" },
+						{
+							type: "image",
+							source: { type: "base64", media_type: "image/png", data },
+						},
+					],
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(1);
+		expect(measured.imagePayloadChars).toBe(100_000);
+		expect(measured.textChars).toBe(jsonLen(body) - 100_000);
+	});
+
+	test("an image-shaped object inside tool_use.input is NOT stripped", () => {
+		const data = "A".repeat(20_000);
+		const body = {
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "tool_use",
+							id: "toolu_1",
+							name: "write_file",
+							input: {
+								// Model-visible text that merely LOOKS like an image block.
+								block: { type: "image", source: { type: "base64", data } },
+							},
+						},
+					],
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.imagePayloadChars).toBe(0);
+		expect(measured.textChars).toBe(jsonLen(body));
+	});
+
+	test("an image-shaped object inside a tool definition is NOT stripped", () => {
+		const data = "A".repeat(20_000);
+		const body = {
+			messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+			tools: [
+				{
+					name: "render",
+					input_schema: {
+						type: "object",
+						properties: {
+							example: { type: "image", source: { type: "base64", data } },
+						},
+					},
+				},
+			],
+		};
+		const measured = measureBodyForEstimate(body);
+		expect(measured.imageCount).toBe(0);
+		expect(measured.textChars).toBe(jsonLen(body));
+	});
+
+	test("measurement never mutates the measured body", () => {
+		const body = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: "image/png",
+								data: "A".repeat(1_000),
+							},
+						},
+					],
+				},
+			],
+		};
+		const before = structuredClone(body);
+		measureBodyForEstimate(body);
+		expect(body).toEqual(before);
 	});
 });
