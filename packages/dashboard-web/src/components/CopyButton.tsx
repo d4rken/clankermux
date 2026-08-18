@@ -69,13 +69,16 @@ export function CopyButton({
 		timeoutRef.current = window.setTimeout(() => setErrored(false), 1500);
 	};
 
-	const finishCopy = (text: string) => {
+	// Returns the copy promise so the async path can keep the button disabled
+	// until the copy itself settles, not merely until it has been kicked off.
+	// The returned promise never rejects — the `.catch` below absorbs it.
+	const finishCopy = (text: string): Promise<void> => {
 		if (!text) {
 			flashError(new Error("No value to copy"));
-			return;
+			return Promise.resolve();
 		}
 
-		copyText(text, buttonRef.current?.parentElement)
+		return copyText(text, buttonRef.current?.parentElement)
 			.then(() => {
 				setCopied(true);
 				// Clear any lingering error state from a previous attempt.
@@ -97,7 +100,7 @@ export function CopyButton({
 		if (typeof getValueAsync === "function") {
 			setLoading(true);
 			getValueAsync()
-				.then((text) => finishCopy(text))
+				.then(finishCopy)
 				.catch((err) => flashError(err))
 				.finally(() => setLoading(false));
 			return;
