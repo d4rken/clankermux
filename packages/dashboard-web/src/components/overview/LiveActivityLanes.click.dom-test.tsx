@@ -12,8 +12,11 @@ import { ScrollingLanes } from "./LiveActivityLanes";
  * reads the SVG's live bounding rect, and the "Open selected request" link only
  * exists once focus has put a cursor on a mark. `ScrollingLanes` is mounted
  * rather than a copy of its handlers — the handlers ARE the behaviour under
- * test — with `reducedMotion` on, which is the branch that applies no scroll
- * transform and so pins the marks to the layout origin the test aims at.
+ * test. Most cases run with `reducedMotion` on, the branch that applies no
+ * scroll transform and so pins the marks to the layout origin the test aims at;
+ * the animated branch gets its own case, because there the marks are translated
+ * away from that origin and a click has to be resolved against where they
+ * actually are.
  */
 
 (
@@ -62,6 +65,7 @@ let root: Root | null = null;
 let host: HTMLElement | null = null;
 let opened: string[] = [];
 let realOpen: typeof window.open;
+const realDateNow = Date.now;
 
 /**
  * happy-dom has no layout engine, so the plot's rect has to be supplied. Sized
@@ -95,7 +99,7 @@ function selectedLink(): HTMLAnchorElement | null {
 		null) as HTMLAnchorElement | null;
 }
 
-async function mount() {
+async function mount(reducedMotion = true) {
 	host = document.createElement("div");
 	document.body.appendChild(host);
 	root = createRoot(host);
@@ -112,7 +116,7 @@ async function mount() {
 				outages={[]}
 				coverageFrom={T0 - WINDOW}
 				primed={true}
-				reducedMotion={true}
+				reducedMotion={reducedMotion}
 			/>,
 		);
 	});
@@ -137,6 +141,7 @@ beforeEach(() => {
 
 afterEach(async () => {
 	window.open = realOpen;
+	Date.now = realDateNow;
 	await act(async () => {
 		root?.unmount();
 	});
@@ -184,6 +189,27 @@ describe("Live Activity plot — clicking a mark", () => {
 		await mount();
 		await clickPlot(xOfTs(T0 - 5_000), LANE_HEIGHT * 8);
 
+		expect(opened).toEqual([]);
+	});
+
+	it("resolves against where an animated mark currently IS, not where it was laid out", async () => {
+		// Without reduced motion the marks are laid out against `renderNow` and
+		// then translated left by `(Date.now() - renderNow) * pxPerMs`, so the
+		// on-screen position of a mark drifts away from its layout x between
+		// renders. Resolving a click against `renderNow` would miss by exactly
+		// that drift.
+		const ELAPSED = 20_000;
+		Date.now = () => T0 + ELAPSED;
+		await mount(false);
+
+		const drift = (ELAPSED * (PLOT_WIDTH - NOW_INSET)) / WINDOW;
+		await clickPlot(xOfTs(T0 - 5_000) - drift, LANE_HEIGHT / 2);
+		expect(opened).toEqual(["/requests?request=recent"]);
+
+		// The un-animated layout x is now empty space: the nearest mark by time
+		// is 20s away, well beyond its radius plus the click slack.
+		opened = [];
+		await clickPlot(xOfTs(T0 - 5_000), LANE_HEIGHT / 2);
 		expect(opened).toEqual([]);
 	});
 });
