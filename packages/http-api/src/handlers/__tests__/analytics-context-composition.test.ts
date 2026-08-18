@@ -53,6 +53,8 @@ interface InsertComposition {
 	toolResultChars: number;
 	largestToolChars: number;
 	largestToolName: string | null;
+	/** Base64 attachment chars, excluded from the char buckets above. */
+	binaryChars: number;
 }
 
 async function insertRequest(opts: {
@@ -63,7 +65,7 @@ async function insertRequest(opts: {
 	inputTokens?: number;
 	cacheReadTokens?: number;
 	cacheCreationTokens?: number;
-	// null = not recorded (all 8 context_* columns stay NULL)
+	// null = not recorded (all 9 context_* columns stay NULL)
 	composition: InsertComposition | null;
 }): Promise<void> {
 	const c = opts.composition;
@@ -75,8 +77,8 @@ async function insertRequest(opts: {
 			context_system_chars, context_tools_chars, context_tool_count,
 			context_messages_chars, context_message_count,
 			context_tool_result_chars, context_largest_tool_chars,
-			context_largest_tool_name
-		) VALUES (?, ?, 'POST', '/v1/messages', 200, TRUE, 100, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			context_largest_tool_name, context_binary_chars
+		) VALUES (?, ?, 'POST', '/v1/messages', 200, TRUE, 100, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			opts.id,
 			opts.timestamp,
@@ -93,6 +95,7 @@ async function insertRequest(opts: {
 			c?.toolResultChars ?? null,
 			c?.largestToolChars ?? null,
 			c?.largestToolName ?? null,
+			c?.binaryChars ?? null,
 		],
 	);
 }
@@ -123,6 +126,7 @@ async function seedRequests(base: number): Promise<void> {
 			toolResultChars: 800,
 			largestToolChars: 600,
 			largestToolName: "Read",
+			binaryChars: 90_000,
 		},
 	});
 	// Zero-valued buckets are valid recorded values: this row is covered even
@@ -141,6 +145,7 @@ async function seedRequests(base: number): Promise<void> {
 			toolResultChars: 0,
 			largestToolChars: 0,
 			largestToolName: null,
+			binaryChars: 0,
 		},
 	});
 	await insertRequest({
@@ -158,6 +163,7 @@ async function seedRequests(base: number): Promise<void> {
 			toolResultChars: 50,
 			largestToolChars: 50,
 			largestToolName: "Bash",
+			binaryChars: 0,
 		},
 	});
 	// Uncovered rows (composition NULL — pre-feature history); their large token
@@ -213,9 +219,12 @@ describe("analytics contextComposition", () => {
 		expect(totals.toolsChars).toBe(600);
 		expect(totals.messagesChars).toBe(3600);
 		expect(totals.toolResultChars).toBe(850);
+		// Attachment bytes are their own bucket (c1 only).
+		expect(totals.binaryChars).toBe(90_000);
 		expect(avgPerRequest.systemChars).toBeCloseTo(600, 5);
 		expect(avgPerRequest.toolsChars).toBeCloseTo(200, 5);
 		expect(avgPerRequest.messagesChars).toBeCloseTo(1200, 5);
+		expect(avgPerRequest.binaryChars).toBeCloseTo(30_000, 5);
 		expect(avgPerRequest.messageCount).toBeCloseTo(7 / 3, 5);
 	});
 
@@ -244,6 +253,7 @@ describe("analytics contextComposition", () => {
 			avgSystemChars: 750,
 			avgToolsChars: 250,
 			avgMessagesChars: 1500,
+			avgBinaryChars: 45_000,
 		});
 		expect(byProject[1]).toEqual({
 			project: null,
@@ -252,6 +262,7 @@ describe("analytics contextComposition", () => {
 			avgSystemChars: 300,
 			avgToolsChars: 100,
 			avgMessagesChars: 600,
+			avgBinaryChars: 0,
 		});
 	});
 
@@ -388,6 +399,7 @@ describe("analytics contextComposition", () => {
 			toolsChars: 0,
 			messagesChars: 0,
 			toolResultChars: 0,
+			binaryChars: 0,
 			contextTokens: 0,
 			avgContextTokens: 0,
 		});

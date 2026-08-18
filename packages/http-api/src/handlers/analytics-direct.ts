@@ -1435,11 +1435,13 @@ export function createAnalyticsHandler(context: APIContext) {
 						sum_tools_chars: number | null;
 						sum_messages_chars: number | null;
 						sum_tool_result_chars: number | null;
+						sum_binary_chars: number | null;
 						sum_context_tokens: number | null;
 						avg_context_tokens: number | null;
 						avg_system_chars: number | null;
 						avg_tools_chars: number | null;
 						avg_messages_chars: number | null;
+						avg_binary_chars: number | null;
 						avg_message_count: number | null;
 					}>(
 						`
@@ -1450,6 +1452,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						COALESCE(r.context_tools_chars, 0) as tools_chars,
 						COALESCE(r.context_messages_chars, 0) as messages_chars,
 						COALESCE(r.context_tool_result_chars, 0) as tool_result_chars,
+						COALESCE(r.context_binary_chars, 0) as binary_chars,
 						COALESCE(r.context_message_count, 0) as message_count,
 						${CONTEXT_TOKENS_SQL} as context_tokens
 					FROM requests r
@@ -1463,11 +1466,13 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(tools_chars) as sum_tools_chars,
 					SUM(messages_chars) as sum_messages_chars,
 					SUM(tool_result_chars) as sum_tool_result_chars,
+					SUM(binary_chars) as sum_binary_chars,
 					SUM(context_tokens) as sum_context_tokens,
 					AVG(context_tokens) as avg_context_tokens,
 					AVG(system_chars) as avg_system_chars,
 					AVG(tools_chars) as avg_tools_chars,
 					AVG(messages_chars) as avg_messages_chars,
+					AVG(binary_chars) as avg_binary_chars,
 					AVG(message_count) as avg_message_count
 				FROM covered
 
@@ -1482,11 +1487,13 @@ export function createAnalyticsHandler(context: APIContext) {
 						CAST(NULL AS BIGINT) as sum_tools_chars,
 						CAST(NULL AS BIGINT) as sum_messages_chars,
 						CAST(NULL AS BIGINT) as sum_tool_result_chars,
+						CAST(NULL AS BIGINT) as sum_binary_chars,
 						CAST(NULL AS BIGINT) as sum_context_tokens,
 						AVG(context_tokens) as avg_context_tokens,
 						AVG(system_chars) as avg_system_chars,
 						AVG(tools_chars) as avg_tools_chars,
 						AVG(messages_chars) as avg_messages_chars,
+						AVG(binary_chars) as avg_binary_chars,
 						CAST(NULL AS DOUBLE PRECISION) as avg_message_count
 					FROM covered
 					GROUP BY project
@@ -1725,6 +1732,7 @@ export function createAnalyticsHandler(context: APIContext) {
 								Number(compositionTotalsRow?.sum_messages_chars) || 0,
 							toolResultChars:
 								Number(compositionTotalsRow?.sum_tool_result_chars) || 0,
+							binaryChars: Number(compositionTotalsRow?.sum_binary_chars) || 0,
 							contextTokens:
 								Number(compositionTotalsRow?.sum_context_tokens) || 0,
 							avgContextTokens:
@@ -1735,6 +1743,7 @@ export function createAnalyticsHandler(context: APIContext) {
 							toolsChars: Number(compositionTotalsRow?.avg_tools_chars) || 0,
 							messagesChars:
 								Number(compositionTotalsRow?.avg_messages_chars) || 0,
+							binaryChars: Number(compositionTotalsRow?.avg_binary_chars) || 0,
 							messageCount:
 								Number(compositionTotalsRow?.avg_message_count) || 0,
 						},
@@ -1747,6 +1756,7 @@ export function createAnalyticsHandler(context: APIContext) {
 								avgSystemChars: Number(row.avg_system_chars) || 0,
 								avgToolsChars: Number(row.avg_tools_chars) || 0,
 								avgMessagesChars: Number(row.avg_messages_chars) || 0,
+								avgBinaryChars: Number(row.avg_binary_chars) || 0,
 							})),
 						growthCurve: growthCurveRows.map((row) => ({
 							ts: Number(row.ts),

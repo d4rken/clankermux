@@ -1,13 +1,14 @@
 /**
- * Tests for the 8 requests.context_* columns (ingest-time context composition:
- * per-bucket character counts computed from the parsed /v1/messages body).
+ * Tests for the 9 requests.context_* columns (ingest-time context composition:
+ * per-bucket character counts computed from the parsed /v1/messages body, plus
+ * the base64 attachment chars excluded from those buckets).
  *
  * Covers BOTH halves of the mandatory two-step migration rule:
  *   1. ensureSchema() includes the columns for fresh installs.
  *   2. runMigrations()'s ADDITIVE_COLUMNS adds them to a pre-existing live DB.
  *
  * Plus the persistence rules:
- *   - the 8 columns round-trip through DatabaseOperations.saveRequest,
+ *   - the 9 columns round-trip through DatabaseOperations.saveRequest,
  *     including ZERO values staying 0 (not NULL) — `?? null` binding,
  *   - a metadata-only re-save (no composition) preserves them via the
  *     UPSERT's COALESCE,
@@ -30,6 +31,7 @@ const CONTEXT_COLUMNS = [
 	"context_tool_result_chars",
 	"context_largest_tool_chars",
 	"context_largest_tool_name",
+	"context_binary_chars",
 ] as const;
 
 interface ContextRow {
@@ -41,6 +43,7 @@ interface ContextRow {
 	context_tool_result_chars: number | null;
 	context_largest_tool_chars: number | null;
 	context_largest_tool_name: string | null;
+	context_binary_chars: number | null;
 }
 
 function columnNames(db: Database, table: string): Set<string> {
@@ -64,7 +67,7 @@ describe("requests.context_* migration", () => {
 		db.close();
 	});
 
-	it("ensureSchema() creates all 8 columns on a fresh DB", () => {
+	it("ensureSchema() creates all 9 columns on a fresh DB", () => {
 		ensureSchema(db);
 		const cols = columnNames(db, "requests");
 		for (const col of CONTEXT_COLUMNS) {
@@ -124,7 +127,7 @@ describe("context composition persistence through saveRequest", () => {
 			);
 	}
 
-	it("round-trips all 8 columns including zero values staying 0 (not NULL)", async () => {
+	it("round-trips all 9 columns including zero values staying 0 (not NULL)", async () => {
 		await dbOps.saveRequest({
 			id: "req-comp-1",
 			method: "POST",
@@ -149,6 +152,9 @@ describe("context composition persistence through saveRequest", () => {
 				toolResultChars: 900,
 				largestToolResultChars: 450,
 				largestToolName: "read_file",
+				imageCount: 2,
+				imagePayloadChars: 90_000,
+				documentPayloadChars: 1_500,
 			},
 		});
 
@@ -162,10 +168,12 @@ describe("context composition persistence through saveRequest", () => {
 			context_tool_result_chars: 900,
 			context_largest_tool_chars: 450,
 			context_largest_tool_name: "read_file",
+			// Images + documents, summed into one attachment figure.
+			context_binary_chars: 91_500,
 		});
 	});
 
-	it("leaves all 8 columns NULL when no composition is provided (legacy callers)", async () => {
+	it("leaves all 9 columns NULL when no composition is provided (legacy callers)", async () => {
 		await dbOps.saveRequest({
 			id: "req-comp-null",
 			method: "POST",
@@ -189,6 +197,7 @@ describe("context composition persistence through saveRequest", () => {
 			context_tool_result_chars: null,
 			context_largest_tool_chars: null,
 			context_largest_tool_name: null,
+			context_binary_chars: null,
 		});
 	});
 
@@ -213,6 +222,9 @@ describe("context composition persistence through saveRequest", () => {
 				toolResultChars: 0,
 				largestToolResultChars: 0,
 				largestToolName: null,
+				imageCount: 1,
+				imagePayloadChars: 40,
+				documentPayloadChars: 0,
 			},
 		});
 
@@ -240,6 +252,7 @@ describe("context composition persistence through saveRequest", () => {
 			context_tool_result_chars: 0,
 			context_largest_tool_chars: 0,
 			context_largest_tool_name: null,
+			context_binary_chars: 40,
 		});
 	});
 
@@ -264,6 +277,9 @@ describe("context composition persistence through saveRequest", () => {
 				toolResultChars: 44,
 				largestToolResultChars: 22,
 				largestToolName: "bash",
+				imageCount: 0,
+				imagePayloadChars: 0,
+				documentPayloadChars: 0,
 			},
 		});
 
@@ -286,6 +302,7 @@ describe("context composition persistence through saveRequest", () => {
 			context_tool_result_chars: 44,
 			context_largest_tool_chars: 22,
 			context_largest_tool_name: "bash",
+			context_binary_chars: 0,
 		});
 	});
 });

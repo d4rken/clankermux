@@ -50,12 +50,14 @@ const SEGMENT_COLORS: Record<string, string> = {
 	system: COLORS.blue,
 	tools: COLORS.purple,
 	messages: COLORS.success,
+	binary: COLORS.warning,
 };
 
 const SEGMENT_LABELS: Record<string, string> = {
 	system: "System prompt",
 	tools: "Tool definitions",
 	messages: "Messages",
+	binary: "Attachments",
 };
 
 function projectLabel(project: string | null): string {
@@ -83,8 +85,8 @@ function EmptyState({
 					Context Composition
 				</CardTitle>
 				<CardDescription>
-					What fills the context window: system prompt, tool definitions, and
-					messages
+					What fills the context window: system prompt, tool definitions,
+					messages, and attachments
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -106,27 +108,34 @@ function CompositionSplit({
 	totals: ContextComposition["totals"];
 }) {
 	const totalChars =
-		totals.systemChars + totals.toolsChars + totals.messagesChars;
+		totals.systemChars +
+		totals.toolsChars +
+		totals.messagesChars +
+		totals.binaryChars;
 	if (totalChars === 0) return null;
 
-	const segments = (["system", "tools", "messages"] as const).map((key) => {
-		const chars =
-			key === "system"
-				? totals.systemChars
-				: key === "tools"
-					? totals.toolsChars
-					: totals.messagesChars;
-		const share = chars / totalChars;
-		return {
-			key,
-			label: SEGMENT_LABELS[key],
-			chars,
-			share,
-			// Proportion applied to the REAL covered-row average context tokens —
-			// an estimate, since char counts don't map 1:1 to tokens.
-			estimatedTokens: share * totals.avgContextTokens,
-		};
-	});
+	const segments = (["system", "tools", "messages", "binary"] as const).map(
+		(key) => {
+			const chars =
+				key === "system"
+					? totals.systemChars
+					: key === "tools"
+						? totals.toolsChars
+						: key === "messages"
+							? totals.messagesChars
+							: totals.binaryChars;
+			const share = chars / totalChars;
+			return {
+				key,
+				label: SEGMENT_LABELS[key],
+				chars,
+				share,
+				// Proportion applied to the REAL covered-row average context tokens —
+				// an estimate, since char counts don't map 1:1 to tokens.
+				estimatedTokens: share * totals.avgContextTokens,
+			};
+		},
+	);
 
 	const toolResultShareOfMessages =
 		totals.messagesChars > 0
@@ -351,8 +360,8 @@ interface ContextCompositionPanelProps {
 
 /**
  * Context Composition — what fills the context window. Char-proportion split
- * (system / tool definitions / messages, with tool results called out inside
- * messages), per-project context growth over time (real tokens), and the
+ * (system / tool definitions / messages / attachments, with tool results called
+ * out inside messages), per-project context growth over time (real tokens), and the
  * largest single tool-result contributors. Composition is recorded at ingest,
  * so coverage over historical rows can be partial — the banner says so.
  */
@@ -384,7 +393,7 @@ export function ContextCompositionPanel({
 						</CardTitle>
 						<CardDescription>
 							What fills the context window: system prompt, tool definitions,
-							and messages
+							messages, and attachments
 						</CardDescription>
 					</div>
 					<Badge variant="secondary">

@@ -129,9 +129,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					billing_type, combo_name, reasoning_effort,
 					context_system_chars, context_tools_chars, context_tool_count,
 					context_messages_chars, context_message_count, context_tool_result_chars,
-					context_largest_tool_chars, context_largest_tool_name
+					context_largest_tool_chars, context_largest_tool_name,
+					context_binary_chars
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -168,7 +169,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				context_message_count = COALESCE(EXCLUDED.context_message_count, requests.context_message_count),
 				context_tool_result_chars = COALESCE(EXCLUDED.context_tool_result_chars, requests.context_tool_result_chars),
 				context_largest_tool_chars = COALESCE(EXCLUDED.context_largest_tool_chars, requests.context_largest_tool_chars),
-				context_largest_tool_name = COALESCE(EXCLUDED.context_largest_tool_name, requests.context_largest_tool_name)
+				context_largest_tool_name = COALESCE(EXCLUDED.context_largest_tool_name, requests.context_largest_tool_name),
+				context_binary_chars = COALESCE(EXCLUDED.context_binary_chars, requests.context_binary_chars)
 		`,
 			[
 				data.id,
@@ -210,6 +212,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				comp?.toolResultChars ?? null,
 				comp?.largestToolResultChars ?? null,
 				comp?.largestToolName ?? null,
+				// Attachment bytes stripped out of the char buckets, stored as one
+				// figure: images + documents.
+				comp ? comp.imagePayloadChars + comp.documentPayloadChars : null,
 			],
 		);
 	}
