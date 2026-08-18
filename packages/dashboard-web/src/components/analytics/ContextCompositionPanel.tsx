@@ -104,8 +104,10 @@ function EmptyState({
 
 function CompositionSplit({
 	totals,
+	avgPerRequest,
 }: {
 	totals: ContextComposition["totals"];
+	avgPerRequest: ContextComposition["avgPerRequest"];
 }) {
 	const totalChars =
 		totals.systemChars +
@@ -113,6 +115,12 @@ function CompositionSplit({
 		totals.messagesChars +
 		totals.binaryChars;
 	if (totalChars === 0) return null;
+
+	// Text-only denominator for the tool-result callout: attachments are base64
+	// transport bytes, so including them would understate how much of the actual
+	// prose context tool results occupy.
+	const textChars =
+		totals.systemChars + totals.toolsChars + totals.messagesChars;
 
 	const segments = (["system", "tools", "messages", "binary"] as const).map(
 		(key) => {
@@ -125,14 +133,26 @@ function CompositionSplit({
 							? totals.messagesChars
 							: totals.binaryChars;
 			const share = chars / totalChars;
+			// Per-segment token estimate from that segment's OWN average chars —
+			// never a slice of avgContextTokens, which would silently hand the
+			// attachments' per-image token cost to the text segments (base64 chars
+			// dwarf prose chars while an image prices at a flat few thousand
+			// tokens). Attachments get no token figure at all: their char count
+			// carries no usable token signal.
+			const estimatedTokens =
+				key === "system"
+					? avgPerRequest.systemChars / CHARS_PER_TOKEN_ESTIMATE
+					: key === "tools"
+						? avgPerRequest.toolsChars / CHARS_PER_TOKEN_ESTIMATE
+						: key === "messages"
+							? avgPerRequest.messagesChars / CHARS_PER_TOKEN_ESTIMATE
+							: null;
 			return {
 				key,
 				label: SEGMENT_LABELS[key],
 				chars,
 				share,
-				// Proportion applied to the REAL covered-row average context tokens —
-				// an estimate, since char counts don't map 1:1 to tokens.
-				estimatedTokens: share * totals.avgContextTokens,
+				estimatedTokens,
 			};
 		},
 	);
@@ -141,7 +161,8 @@ function CompositionSplit({
 		totals.messagesChars > 0
 			? (totals.toolResultChars / totals.messagesChars) * 100
 			: 0;
-	const toolResultShareOfTotal = (totals.toolResultChars / totalChars) * 100;
+	const toolResultShareOfText =
+		textChars > 0 ? (totals.toolResultChars / textChars) * 100 : 0;
 
 	const chartRow: Record<string, string | number> = { name: "context" };
 	for (const segment of segments) {
@@ -153,8 +174,11 @@ function CompositionSplit({
 	const tooltipFormatter = ((value: number, name: string) => {
 		const segment = segments.find((s) => s.label === name);
 		if (!segment) return [formatNumber(Number(value)), name];
+		const base = `${formatNumber(segment.chars)} chars · ${formatPercentage(segment.share * 100, 0)}`;
 		return [
-			`${formatNumber(segment.chars)} chars · ${formatPercentage(segment.share * 100, 0)} · ~${formatTokens(Math.round(segment.estimatedTokens))} tokens/request (estimated)`,
+			segment.estimatedTokens === null
+				? base
+				: `${base} · ~${formatTokens(Math.round(segment.estimatedTokens))} tokens/request (estimated)`,
 			name,
 		];
 	}) as TooltipFormatter;
@@ -201,7 +225,7 @@ function CompositionSplit({
 			{totals.toolResultChars > 0 && (
 				<p className="text-xs text-muted-foreground">
 					Tool results make up {formatPercentage(toolResultShareOfMessages, 0)}{" "}
-					of messages ({formatPercentage(toolResultShareOfTotal, 0)} of total
+					of messages ({formatPercentage(toolResultShareOfText, 0)} of text
 					context).
 				</p>
 			)}
@@ -375,7 +399,7 @@ export function ContextCompositionPanel({
 		return <EmptyState loading={loading} noCoverage={false} />;
 	}
 
-	const { coverage, totals, growthCurve, topToolContributors } =
+	const { coverage, totals, avgPerRequest, growthCurve, topToolContributors } =
 		contextComposition;
 
 	if (coverage.withComposition === 0) {
@@ -410,7 +434,7 @@ export function ContextCompositionPanel({
 						at request time)
 					</p>
 				)}
-				<CompositionSplit totals={totals} />
+				<CompositionSplit totals={totals} avgPerRequest={avgPerRequest} />
 				<GrowthChart growthCurve={growthCurve} timeRange={timeRange} />
 				<TopContributorsTable contributors={topToolContributors} />
 			</CardContent>
