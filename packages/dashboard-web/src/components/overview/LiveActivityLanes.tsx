@@ -308,7 +308,7 @@ export function LiveActivityLanesView({
 													<Mark
 														key={event.id}
 														event={event}
-														cx={clampToPlot(xOf(event.ts))}
+														cx={markCenterX(event.ts, now, windowMs, plotWidth)}
 														cy={laneIndex * LANE_HEIGHT + LANE_HEIGHT / 2}
 														opacity={ageOpacity(event.ts, now, windowMs)}
 														selected={selected?.id === event.id}
@@ -549,6 +549,23 @@ function Mark({
 /** Marks older than the window are pinned at the left edge, never dropped. */
 function clampToPlot(x: number): number {
 	return Math.max(x, 2);
+}
+
+/**
+ * X of a mark's centre in plot space, pinning included.
+ *
+ * The single definition of where a mark actually sits: the renderer places marks
+ * with it and `resolveMarkHref` measures click distance against it, so the two
+ * cannot drift into disagreeing about what the pointer is over.
+ */
+export function markCenterX(
+	ts: number,
+	now: number,
+	windowMs: number,
+	plotWidth: number,
+): number {
+	const usable = Math.max(plotWidth - NOW_INSET, 1);
+	return clampToPlot(usable - ((now - ts) * usable) / windowMs);
 }
 
 /**
