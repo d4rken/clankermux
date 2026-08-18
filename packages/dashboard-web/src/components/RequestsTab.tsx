@@ -51,6 +51,7 @@ import {
 	type StatusCategory,
 } from "../lib/request-filters";
 import { getRequestModelPresentation } from "../lib/request-model";
+import { isRowActivationClick } from "../lib/row-activation";
 import { cn } from "../lib/utils";
 import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
@@ -767,9 +768,28 @@ export function RequestsTab() {
 												: "bg-muted text-muted-foreground";
 
 							return (
+								// The card delegates POINTER clicks only, so any dead space in it
+								// opens the details modal. Keyboard and screen-reader users go
+								// through the real <button> on row 1 below — giving the card a
+								// role="button" instead would nest the action buttons and filter
+								// chips inside a button role, which flattens them in the
+								// accessibility tree and names the row after every badge it holds.
+								// biome-ignore lint/a11y/noStaticElementInteractions: keyboard access is the row-1 button, not this delegate
+								// biome-ignore lint/a11y/useKeyWithClickEvents: same — a key handler here would double up with that button
 								<div
 									key={request.id}
-									className={`border rounded-lg transition-all duration-300 ${
+									onClick={(e) => {
+										if (
+											isRowActivationClick(
+												e.target,
+												e.currentTarget,
+												window.getSelection(),
+											)
+										) {
+											setModalRequest(request);
+										}
+									}}
+									className={`border rounded-lg cursor-pointer transition-all duration-300 hover:bg-accent/40 ${
 										isError ? "border-destructive/50" : "border-border"
 									} ${request.meta.pending ? "animate-pulse opacity-70" : "opacity-100"}`}
 								>
@@ -832,9 +852,15 @@ export function RequestsTab() {
 											</span>
 										</button>
 
-										{/* Action buttons stay outside the toggle-expand button so they
-										    never get cut off by flex shrinking and have their own hit area. */}
-										<div className="flex items-center gap-1 shrink-0">
+										{/* Action buttons stay outside the row-1 button so they never
+										    get cut off by flex shrinking and have their own hit area.
+										    `data-row-ignore` covers the gaps between them: a button
+										    mid-copy is disabled and stops receiving pointer events, and
+										    a click landing on this strip must not open the modal. */}
+										<div
+											data-row-ignore
+											className="flex items-center gap-1 shrink-0"
+										>
 											<Button
 												variant="ghost"
 												size="icon"
