@@ -84,6 +84,52 @@ describe("createRequestsSummaryHandler", () => {
 		expect(body[0].requestedModel).toBe("claude-haiku-4-5-20251001");
 	});
 
+	it("maps context_binary_chars into attachmentChars", async () => {
+		const { db } = mockDb([
+			{
+				id: "r3",
+				timestamp: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				account_used: "acc1",
+				account_name: "Primary",
+				status_code: 200,
+				success: 1,
+				error_message: null,
+				context_binary_chars: 91_500,
+			},
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<{ attachmentChars?: number }>;
+		expect(body[0].attachmentChars).toBe(91_500);
+	});
+
+	it("omits attachmentChars for attachment-free rows (0) and pre-column rows (NULL)", async () => {
+		const base = {
+			timestamp: 1_700_000_000_000,
+			method: "POST",
+			path: "/v1/messages",
+			account_used: "acc1",
+			account_name: "Primary",
+			status_code: 200,
+			success: 1,
+			error_message: null,
+		};
+		const { db } = mockDb([
+			{ ...base, id: "zero", context_binary_chars: 0 },
+			{ ...base, id: "null", context_binary_chars: null },
+			{ ...base, id: "missing" },
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<{
+			id: string;
+			attachmentChars?: number;
+		}>;
+		for (const row of body) {
+			expect(row.attachmentChars).toBeUndefined();
+		}
+	});
+
 	it("omits reasoningEffort when the row has none", async () => {
 		const { db } = mockDb([
 			{
