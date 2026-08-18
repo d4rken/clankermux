@@ -745,10 +745,15 @@ export function resolveModelContextWindow(model: string): number | undefined {
 
 /**
  * Coarse request-size estimate used by the cache-warming session-promotion path
- * (not the context-window gate — that uses `estimateContextWindowTokens`). Kept
- * intentionally unchanged: the promotion threshold (`getCacheWarmingMinTokens`,
- * default 100k) was tuned against this formula, and cache-warming is sensitive
- * to perturbation, so this stays byte-identical.
+ * (not the context-window gate — that uses `estimateContextWindowTokens`). The
+ * promotion threshold (`getCacheWarmingMinTokens`, default 100k) was tuned
+ * against this formula and cache-warming is sensitive to perturbation, so a
+ * TEXT-ONLY body still measures byte-identically to the original.
+ *
+ * Image-bearing bodies deliberately do NOT: attached screenshots were counted
+ * as base64 text, so a screenshot session crossed the 100k promotion threshold
+ * on transport bytes alone and paid the 2× 1h-cache-write premium for context
+ * it never had. Images now cost {@link IMAGE_TOKEN_ESTIMATE} each.
  *
  * When a ContextComposition is provided (preferred), uses the already-walked
  * content-char counts (system + tools + messages) divided by 4.0.  This avoids
@@ -758,8 +763,8 @@ export function resolveModelContextWindow(model: string): number | undefined {
  * chars/token.
  *
  * Without a composition (e.g. non-messages endpoints), falls back to
- * JSON.stringify(body).length / 3.0 — deliberately over-counts, but that is
- * acceptable as a last resort.
+ * `measureBodyForEstimate(body).textChars / 3.0` — deliberately over-counts,
+ * but that is acceptable as a last resort.
  *
  * No tiktoken — hot path.
  */
@@ -775,9 +780,20 @@ export function estimateRequestTokens(
 			composition.systemChars +
 			composition.toolsChars +
 			composition.messagesChars;
-		return Math.ceil(contentChars / 4.0) + maxTokens;
+		// Document payloads keep the chars/N treatment; only images are priced
+		// per-attachment.
+		return (
+			Math.ceil(
+				(contentChars + (composition.documentPayloadChars ?? 0)) / 4.0,
+			) +
+			(composition.imageCount ?? 0) * IMAGE_TOKEN_ESTIMATE +
+			maxTokens
+		);
 	}
-	const inputTokens = Math.ceil(JSON.stringify(parsedBody).length / 3.0);
+	const measured = measureBodyForEstimate(parsedBody);
+	const inputTokens =
+		Math.ceil((measured.textChars + measured.documentPayloadChars) / 3.0) +
+		measured.imageCount * IMAGE_TOKEN_ESTIMATE;
 	return inputTokens + maxTokens;
 }
 
@@ -792,6 +808,12 @@ export function estimateRequestTokens(
  *   2. the output reservation is capped at `GATE_OUTPUT_RESERVE_CAP` (4k) rather
  *      than trusting the client's `max_tokens` ceiling (32k–64k), because real
  *      output is tiny (p95 ≈ 3k).
+ *
+ * Attached images are priced at a flat {@link IMAGE_TOKEN_ESTIMATE} each rather
+ * than by their base64 size: transport bytes are not prompt text, and counting
+ * them as such made one 1.4MB screenshot estimate at 657,214 tokens on a ~47k
+ * request, which the gate rejected as context_window_exceeded. Base64 documents
+ * keep the chars/N treatment (their real tokenisation is text-like).
  *
  * The result is fed to `codexAccountFitsRequest` (admits at `window * SAFETY_MARGIN`)
  * during normal routing, and to `codexAccountFitsRequestUnmargined` (admits at
@@ -810,11 +832,21 @@ export function estimateContextWindowTokens(
 			composition.systemChars +
 			composition.toolsChars +
 			composition.messagesChars;
-		return Math.ceil(contentChars / GATE_CHARS_PER_TOKEN) + outputReserve;
+		return (
+			Math.ceil(
+				(contentChars + (composition.documentPayloadChars ?? 0)) /
+					GATE_CHARS_PER_TOKEN,
+			) +
+			(composition.imageCount ?? 0) * IMAGE_TOKEN_ESTIMATE +
+			outputReserve
+		);
 	}
 	// Fallback (non-/v1/messages): whole-body JSON over-counts; keep /3.0 but
 	// still cap the output reservation for consistency with the gate's intent.
-	const inputTokens = Math.ceil(JSON.stringify(parsedBody).length / 3.0);
+	const measured = measureBodyForEstimate(parsedBody);
+	const inputTokens =
+		Math.ceil((measured.textChars + measured.documentPayloadChars) / 3.0) +
+		measured.imageCount * IMAGE_TOKEN_ESTIMATE;
 	return inputTokens + outputReserve;
 }
 

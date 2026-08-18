@@ -1,3 +1,4 @@
+import { measureContentBlock } from "@clankermux/core";
 import type { ContextComposition, ToolCallStat } from "@clankermux/types";
 import type { RequestJsonBody } from "./request-body-context";
 
@@ -5,7 +6,13 @@ import type { RequestJsonBody } from "./request-body-context";
  * Ingest-time context-composition walk: per-bucket character counts (system
  * prompt / tool definitions / messages / tool results) computed from the
  * ALREADY-parsed /v1/messages body — no JSON.parse anywhere in this module,
- * at most one JSON.stringify per non-text content block.
+ * and non-text blocks are sized by JSON.stringify (once per block, plus once
+ * per block nested in a tool_result) via `measureContentBlock`.
+ *
+ * Base64 image/document payloads are EXCLUDED from every char bucket and
+ * reported as their own counts: transport bytes are not context, and counting
+ * them as text made a single screenshot look like hundreds of thousands of
+ * tokens to the context-window gate.
  *
  * Char counts are proportions, not tokens. Defensive throughout: malformed
  * shapes contribute 0 and the walk never throws; a shapeless body (no
@@ -137,6 +144,9 @@ export function computeContextAndToolStats(body: RequestJsonBody | null): {
 	let toolResultChars = 0;
 	let largestToolResultChars = 0;
 	let largestToolUseId: string | null = null;
+	let imageCount = 0;
+	let imagePayloadChars = 0;
+	let documentPayloadChars = 0;
 
 	systemChars = computeSystemChars(body.system);
 
@@ -168,9 +178,16 @@ export function computeContextAndToolStats(body: RequestJsonBody | null): {
 			}
 
 			// Non-text blocks (tool_use input, tool_result content, images):
-			// JSON.stringify length — consistent, cheap, deterministic.
-			const chars = safeJsonLength(block);
+			// JSON.stringify length — consistent, cheap, deterministic — MINUS any
+			// base64 attachment payload, which is transport bytes rather than
+			// context. The stripped payloads are tallied separately so the gate can
+			// price images per-attachment (see measureContentBlock).
+			const measured = measureContentBlock(block);
+			const chars = measured.chars;
 			messagesChars += chars;
+			imageCount += measured.imageCount;
+			imagePayloadChars += measured.imagePayloadChars;
+			documentPayloadChars += measured.documentPayloadChars;
 
 			if (block.type === "tool_use" && typeof block.id === "string") {
 				if (typeof block.name === "string") {
@@ -199,6 +216,9 @@ export function computeContextAndToolStats(body: RequestJsonBody | null): {
 			largestToolUseId !== null
 				? (toolNamesByUseId.get(largestToolUseId) ?? null)
 				: null,
+		imageCount,
+		imagePayloadChars,
+		documentPayloadChars,
 	};
 
 	return {
