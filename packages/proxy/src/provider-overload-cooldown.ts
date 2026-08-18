@@ -143,6 +143,29 @@ export function isOfficialAnthropicProvider(provider: string): boolean {
 	);
 }
 
+/**
+ * THE canonical overload-attribution model: which model an attempt's 529s are
+ * attributed to, and which bucket it is admitted against.
+ *
+ * `candidateModel` is the model the attempt actually sends upstream — the
+ * transformed request's model at the authoritative admission, the account's
+ * mapped/combo-overridden model at every pre-attempt gate. It wins when it
+ * resolves to a family; otherwise the request's LOGICAL model does. Without
+ * that fallback an account mapping (e.g. Haiku → "qwen/...") would probe the
+ * haiku bucket but TRIP the provider-wide one, gating every family off a
+ * single-family signal.
+ *
+ * Exported and shared so the pre-selection gate, the hold's pre-attempt skip
+ * and the authoritative admission can never target different buckets.
+ */
+export function resolveOverloadAttributionModel(
+	candidateModel: string | null | undefined,
+	logicalModel: string | null | undefined,
+): string | null {
+	if (candidateModel && getModelFamily(candidateModel)) return candidateModel;
+	return logicalModel ?? candidateModel ?? null;
+}
+
 export function getProviderOverloadKey(provider: string): string {
 	return isOfficialAnthropicProvider(provider)
 		? ANTHROPIC_UPSTREAM_OVERLOAD_KEY

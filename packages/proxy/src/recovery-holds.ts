@@ -396,6 +396,42 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		};
 		for (let i = 0; i < candidates.length; i++) {
 			const candidate = candidates[i];
+			// Pre-attempt overload read. The authoritative admission lives inside
+			// proxyWithAccount, but by the time it refuses, the attempt has already
+			// staged a ~0.5–1.5MB copy of the body, validated (and possibly
+			// refreshed, over the network + a DB write) the token, and transformed +
+			// re-parsed the body. Inside a hold that happens on every ~1.5s poll for
+			// every candidate, so read the bucket first and skip on a verdict that
+			// is already decided.
+			//
+			// Inspected FRESH per candidate, deliberately: no sticky per-sweep set
+			// and no getOverloadHoldSlotKey dedup. That key collapses families under
+			// a live provider-wide bucket, so it would suppress a family that is
+			// already probeable, and a sticky verdict would go stale exactly when a
+			// probe completes mid-sweep. After an earlier candidate re-trips the
+			// shared bucket, the next inspection reads `open` on its own.
+			//
+			// The model is gates.modelForAccount — the same canonical
+			// overload-attribution resolution (account mapping + combo override,
+			// with the logical-model fallback) that already gated this candidate
+			// into the list and that the authoritative admission re-derives from the
+			// transformed body. Using the request's logical model instead would
+			// sideline an account whose mapped model belongs to a different, healthy
+			// family for the whole hold budget.
+			const overload = inspectProviderOverload(
+				candidate.provider,
+				gates.modelForAccount(candidate),
+			);
+			if (overload.state === "open" || overload.probeActive) {
+				// Same bookkeeping as a recovery-probe suppression: NOTHING was
+				// attempted and a verdict is pending, so the hold loops keep waiting
+				// for exactly this candidate rather than counting it as a failure.
+				round.probeSuppressedAccountIds.add(candidate.id);
+				log.debug(
+					`Overload-suppressed candidate ${candidate.name} skipped before the attempt (${overload.state}${overload.probeActive ? ", probe active" : ""})`,
+				);
+				continue;
+			}
 			// Same single-flight probe gate as every other upstream attempt: a hold
 			// wake must not stampede a freshly-recovered account either.
 			const gated = await attemptThroughProbeGate(candidate, () => {
@@ -418,6 +454,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					false,
 					{
 						...(options?.signal ? { signal: options.signal } : {}),
+						// Log-level only: inside a hold an admission refusal is the
+						// expected steady state, and the hold logs its own exit summary.
+						fromHold: true,
 						onOutcome: (o) => {
 							if (o.kind === "overload_suppressed") {
 								round.sawOverloadSuppression = true;
@@ -548,6 +587,11 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		// can deepen a real rate limit. They stay excluded for the rest of the hold;
 		// the hold itself still ends (below) when a round has no verdict to wait on.
 		const ordinaryFailedIds = new Set<string>();
+		// Hold-exit summary counters. ONE INFO line per hold, at exit — not per
+		// round: at a ~1.5s poll and up to 8 holders per bucket, a per-round line
+		// would be noisier than the per-attempt refusals it replaces.
+		let rounds = 0;
+		let suppressedAttempts = 0;
 		try {
 			while (true) {
 				const nowMs = Date.now();
@@ -643,10 +687,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					? req.signal
 					: AbortSignal.any([req.signal, budgetController.signal]);
 				let round: AttemptRound;
+				rounds++;
 				try {
 					round = await attemptCandidates(attemptableCandidates, {
 						signal: wakeSignal,
 					});
+					suppressedAttempts += round.probeSuppressedAccountIds.size;
 				} finally {
 					// Disarm the budget timer on every path; the composed signal's
 					// listeners are released with the per-wake controller itself.
@@ -701,6 +747,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			}
 			return null;
 		} finally {
+			// The one INFO line the hold emits on the way out — the per-attempt
+			// admission refusals it replaces are DEBUG inside a hold.
+			log.info(
+				`Overload hold exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms: ` +
+					`${rounds} round(s), ${suppressedAttempts} suppressed attempt(s)`,
+			);
 			clearInterval(holdRearm);
 			for (const held of acquiredSlotKeys) {
 				releaseOverloadHoldSlot(held);
@@ -918,7 +970,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				apiKeyName,
 				requestBodyContext,
 				false,
-				{ reprobe: true, signal },
+				// `fromHold`: log-level only — this re-probe runs inside the burst
+				// hold, which reports its own outcome (see runBurstHold).
+				{ reprobe: true, signal, fromHold: true },
 			);
 		});
 		if (gated.suppressed) return { kind: "suppressed" };

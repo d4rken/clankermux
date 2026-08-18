@@ -44,6 +44,7 @@ import {
 	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
 	type OverloadProbeToken,
+	resolveOverloadAttributionModel,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 import { RequestBodyContext } from "../request-body-context";
@@ -224,6 +225,16 @@ export interface ProxyAttemptOptions {
 	 * than waiting for the upstream timeout.
 	 */
 	signal?: AbortSignal;
+	/**
+	 * True when this attempt originates from a recovery hold's re-attempt sweep.
+	 * Purely a LOG-LEVEL discriminator: inside a hold, an overload-admission
+	 * refusal is the expected steady state (one holder probes, every other
+	 * holder is refused, ~14 times per hold), and the hold emits its own
+	 * one-line exit summary — so the per-attempt line goes to DEBUG. Outside a
+	 * hold it stays at INFO: there it is the ONLY signal that a main-loop
+	 * attempt hit contention and failed over.
+	 */
+	fromHold?: boolean;
 }
 
 /**
@@ -1149,16 +1160,16 @@ export async function proxyWithAccount(
 		// ── Canonical overload-attribution model ────────────────────────────────
 		// Single source for probe admission, the pre-stream 529 trip,
 		// forwardToClient's `upstreamModel` (mid-stream trip), and fallback
-		// tracking: the model actually sent upstream when it resolves to a
-		// family; otherwise the request's LOGICAL model (combo/patched). Without
-		// the shared fallback, an account mapping (e.g. Haiku → "qwen/...")
-		// would probe the haiku bucket but TRIP the provider-wide bucket —
-		// gating every family off a single-family signal. Recomputed whenever
-		// `activeUpstreamModel` changes (model-fallback cycling below).
+		// tracking. The rule itself lives in resolveOverloadAttributionModel and
+		// is shared with the pre-selection gate (admission-gates' modelForAccount)
+		// and the holds' pre-attempt skip, so no two of them can target different
+		// buckets. Recomputed whenever `activeUpstreamModel` changes
+		// (model-fallback cycling below).
 		const computeOverloadAttributionModel = (): string | null =>
-			activeUpstreamModel && getModelFamily(activeUpstreamModel)
-				? activeUpstreamModel
-				: (effectiveBodyContext.getModel() ?? activeUpstreamModel);
+			resolveOverloadAttributionModel(
+				activeUpstreamModel,
+				effectiveBodyContext.getModel(),
+			);
 		let overloadAttributionModel = computeOverloadAttributionModel();
 		if (
 			transformedModel &&
@@ -1203,9 +1214,12 @@ export async function proxyWithAccount(
 				overloadAttributionModel,
 			);
 			if (!overloadAdmission.admitted) {
-				log.info(
-					`Overload probe admission refused for account ${account.name} (${overloadAdmission.reason}) — failing over without an upstream attempt`,
-				);
+				const refusalLine = `Overload probe admission refused for account ${account.name} (${overloadAdmission.reason}) — failing over without an upstream attempt`;
+				if (options?.fromHold) {
+					log.debug(refusalLine);
+				} else {
+					log.info(refusalLine);
+				}
 				return await fail({
 					kind: "overload_suppressed",
 					until: overloadAdmission.until,
