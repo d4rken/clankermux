@@ -506,6 +506,49 @@ describe("buildLanes", () => {
 		expect(lanes[0].key).toBe(laneKeyOf(null));
 	});
 
+	it("carries each lane's scope as data, not as an encoded key", () => {
+		// The renderer links a lane to its filtered request list; parsing the
+		// `project:`-prefixed key back apart would put that parsing in the view.
+		const events = ["p1", "p2", "p3"].flatMap((p, i) =>
+			Array.from({ length: 3 - i }, (_, n) =>
+				completed(`${p}-${n}`, p, T0 + n),
+			),
+		);
+		const { lanes } = buildLanes(
+			[...events, completed("anon", null, T0)],
+			T0 + 1000,
+			WINDOW,
+			// One named lane, so p2/p3 fold into the overflow row.
+			1,
+		);
+
+		expect(lanes.find((l) => l.label === "p1")?.scope).toEqual({
+			kind: "project",
+			project: "p1",
+		});
+		expect(lanes.find((l) => l.label === "(no project)")?.scope).toEqual({
+			kind: "no-project",
+		});
+		expect(lanes.find((l) => l.key === "other")?.scope).toEqual({
+			kind: "other",
+		});
+	});
+
+	it("scopes a project literally named '(no project)' as that project", () => {
+		// The label collides with the empty bucket's; the scope must not.
+		const { lanes } = buildLanes(
+			[completed("a", "(no project)", T0)],
+			T0 + 1000,
+			WINDOW,
+			6,
+		);
+
+		expect(lanes[0].scope).toEqual({
+			kind: "project",
+			project: "(no project)",
+		});
+	});
+
 	it("folds the tail into a single Other lane with aggregated totals", () => {
 		const events = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].flatMap((p, i) =>
 			// Descending volume so the fold order is unambiguous.

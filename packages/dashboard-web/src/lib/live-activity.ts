@@ -378,9 +378,24 @@ export function laneKeyOf(project: string | null): string {
 	return project === null ? NO_PROJECT_LANE_KEY : `project:${project}`;
 }
 
+/**
+ * What a lane stands for, as data rather than an encoded key.
+ *
+ * A discriminated union so no invalid combination is representable — the
+ * renderer builds its "show these requests" link from this instead of parsing
+ * `key` back apart, and the overflow lane cannot accidentally be treated as a
+ * project because it has no project field at all.
+ */
+export type LaneScope =
+	| { kind: "project"; project: string }
+	| { kind: "no-project" }
+	| { kind: "other" };
+
 export interface Lane {
 	key: string;
 	label: string;
+	/** The requests this lane covers, expressed as a filter, not a label. */
+	scope: LaneScope;
 	/** Events in this lane, ascending by time. Includes long-running requests
 	 *  that started before the window and are pinned at its left edge. */
 	events: LiveEvent[];
@@ -502,6 +517,9 @@ export function buildLanes(
 		return toLane(
 			key,
 			bucket.project ?? NO_PROJECT_LABEL,
+			bucket.project === null
+				? { kind: "no-project" }
+				: { kind: "project", project: bucket.project },
 			sortByTime(bucket.events),
 			cutoff,
 		);
@@ -515,6 +533,7 @@ export function buildLanes(
 			toLane(
 				OTHER_LANE_KEY,
 				`Other (${overflow.length} project${overflow.length === 1 ? "" : "s"})`,
+				{ kind: "other" },
 				sortByTime(merged),
 				cutoff,
 			),
@@ -531,6 +550,7 @@ function sortByTime(events: LiveEvent[]): LiveEvent[] {
 function toLane(
 	key: string,
 	label: string,
+	scope: LaneScope,
 	events: LiveEvent[],
 	cutoff: number,
 ): Lane {
@@ -552,7 +572,17 @@ function toLane(
 		if (isActiveStatus(event.status)) active++;
 	}
 
-	return { key, label, events, requests, tokens, rateLimited, errors, active };
+	return {
+		key,
+		label,
+		scope,
+		events,
+		requests,
+		tokens,
+		rateLimited,
+		errors,
+		active,
+	};
 }
 
 // ---------------------------------------------------------------------------
