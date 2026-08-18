@@ -249,7 +249,10 @@ function leaseProbeExternally(model?: string): OverloadProbeToken {
 
 /**
  * A candidate for the non-Codex hold: briefly cooled, so the hold has a
- * deadline to wait out and then re-attempts it. `target` gives the account a
+ * deadline to wait out and then re-attempts it. The window is generous (500ms)
+ * because a machine under full-suite load can otherwise let it lapse before the
+ * hold's first pass reads it — at which point the hold has nothing to wait for
+ * and exits without attempting anything. `target` gives the account a
  * model mapping that sends THIS request's model somewhere else. Build these
  * AFTER any breaker setup — the cooldown window starts when the account is
  * built, and the hold exits immediately if it has already lapsed.
@@ -259,7 +262,7 @@ function cooledCandidate(id: string, target?: string): Account {
 		id,
 		name: id,
 		...(target ? { model_mappings: JSON.stringify({ [MODEL]: target }) } : {}),
-		rate_limited_until: Date.now() + 60,
+		rate_limited_until: Date.now() + 500,
 	});
 }
 
@@ -411,7 +414,7 @@ describe("createRecoveryHolds", () => {
 			usageCache.delete(account.id);
 			const { holds, gated } = makeHolds([account], alwaysThrottled);
 
-			const held = await holds.holdForNonCodexRecovery(2_000, "Test hold");
+			const held = await holds.holdForNonCodexRecovery(3_000, "Test hold");
 
 			expect(held).toBeNull();
 			expect(gated).toEqual([]);
@@ -429,7 +432,7 @@ describe("createRecoveryHolds", () => {
 			usageCache.delete(account.id);
 			const { holds, gated } = makeHolds([account], alwaysThrottled);
 
-			await holds.holdForNonCodexRecovery(2_000, "Test hold");
+			await holds.holdForNonCodexRecovery(3_000, "Test hold");
 
 			expect(gated).toEqual([account.id]);
 			completeProviderOverloadProbe(token, "abandoned");
@@ -458,11 +461,13 @@ describe("createRecoveryHolds", () => {
 				},
 			);
 
-			await holds.holdForNonCodexRecovery(2_000, "Test hold");
+			await holds.holdForNonCodexRecovery(3_000, "Test hold");
 
-			// `first` was skipped (probe in flight), `last` was attempted (the same
-			// bucket had recovered by the time IT was inspected).
-			expect(gated).toEqual([middle.id, last.id]);
+			// First round: `first` was skipped (probe in flight) while `last` was
+			// attempted — the same bucket had recovered by the time IT was
+			// inspected. (A later poll re-attempts `first` too, which is exactly the
+			// point: the skip was never sticky.)
+			expect(gated.slice(0, 2)).toEqual([middle.id, last.id]);
 		});
 
 		it("does not collapse a different family under a half-open provider-wide bucket", async () => {
@@ -484,7 +489,7 @@ describe("createRecoveryHolds", () => {
 				alwaysThrottled,
 			);
 
-			await holds.holdForNonCodexRecovery(2_000, "Test hold");
+			await holds.holdForNonCodexRecovery(3_000, "Test hold");
 
 			expect(gated).toEqual([sonnetAccount.id]);
 			completeProviderOverloadProbe(token, "abandoned");

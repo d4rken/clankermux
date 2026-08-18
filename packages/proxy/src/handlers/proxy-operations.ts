@@ -11,6 +11,7 @@ import {
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	TIME_CONSTANTS,
+	ValidationError,
 } from "@clankermux/core";
 import {
 	type DrainReport,
@@ -1043,8 +1044,29 @@ export async function proxyWithAccount(
 		// Get the provider for this account
 		const provider = getProvider(account.provider) || ctx.provider;
 
-		// Validate that the account-specific provider can handle this path
-		validateProviderPath(provider, url.pathname);
+		// Validate that the account-specific provider can handle this path.
+		//
+		// Caught HERE, around this one call, rather than left to the attempt-wide
+		// catch below: an incompatible path is a routing fact about this account
+		// (only CodexProvider restricts paths at all), not a failure — nothing was
+		// sent and nothing broke. The attempt-wide catch logged it at ERROR and
+		// classified it as `network_error`. Failover behaviour is unchanged: the
+		// attempt still fails over through `fail()`, and an all-Codex pool asked
+		// for an endpoint Codex does not serve still reaches the generic give-up
+		// terminal.
+		//
+		// Deliberately NOT a broad ValidationError catch: request transformation
+		// and reasoning validation throw the same class further down this
+		// function, and those keep their existing (loud) handling.
+		try {
+			validateProviderPath(provider, url.pathname);
+		} catch (error) {
+			if (!(error instanceof ValidationError)) throw error;
+			log.debug(
+				`Account ${account.name} (${account.provider}) cannot serve ${url.pathname} — failing over`,
+			);
+			return await fail({ kind: "other" });
+		}
 
 		// Skip token refresh for synthetic paths (e.g. Codex count_tokens) that
 		// never reach the upstream network.
