@@ -1,10 +1,11 @@
 import { HttpError } from "@clankermux/http-common";
 import {
+	formatBytes,
 	formatCost,
 	formatTimestamp,
 	formatTokens,
 } from "@clankermux/ui-common";
-import { Eye } from "lucide-react";
+import { Eye, Paperclip } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { decodeBase64Utf8 } from "../lib/base64";
@@ -196,6 +197,17 @@ export function RequestDetailsModal({
 							{summary?.totalTokens && (
 								<Badge variant="outline">
 									{formatTokens(summary.totalTokens)} tokens
+								</Badge>
+							)}
+							{(summary?.attachmentChars ?? 0) > 0 && (
+								<Badge
+									variant="outline"
+									title="Attached images/documents (decoded size)"
+								>
+									<Paperclip className="h-3 w-3 mr-1" />
+									{formatBytes(
+										Math.round((summary?.attachmentChars ?? 0) * 0.75),
+									)}
 								</Badge>
 							)}
 							{summary?.costUsd && summary.costUsd > 0 && (

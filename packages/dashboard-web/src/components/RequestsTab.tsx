@@ -1,5 +1,6 @@
 import { HttpError } from "@clankermux/http-common";
 import {
+	formatBytes,
 	formatCost,
 	formatDuration,
 	formatReasoningEffort,
@@ -15,6 +16,7 @@ import {
 	Folder,
 	Hash,
 	Key,
+	Paperclip,
 	RefreshCw,
 	User,
 	X,
@@ -954,6 +956,7 @@ export function RequestsTab() {
 									{(modelPresentation ||
 										summary?.reasoningEffort ||
 										summary?.totalTokens != null ||
+										(summary?.attachmentChars ?? 0) > 0 ||
 										(summary?.tokensPerSecond ?? 0) > 0 ||
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
@@ -988,6 +991,18 @@ export function RequestsTab() {
 													freshTokens !== summary.totalTokens
 														? ` (${formatTokens(freshTokens)} fresh)`
 														: ""}
+												</Badge>
+											)}
+											{(summary?.attachmentChars ?? 0) > 0 && (
+												<Badge
+													variant="outline"
+													className="text-xs"
+													title="Attached images/documents (decoded size)"
+												>
+													<Paperclip className="h-3 w-3 mr-1" />
+													{formatBytes(
+														Math.round((summary?.attachmentChars ?? 0) * 0.75),
+													)}
 												</Badge>
 											)}
 											{summary?.tokensPerSecond != null &&
