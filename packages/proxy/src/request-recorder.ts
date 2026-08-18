@@ -392,6 +392,19 @@ export class RequestRecorder {
 		return this.records.size;
 	}
 
+	/**
+	 * Whether a record already exists for this request id — live (begun, not yet
+	 * persisted) or patch-retained. Read-only.
+	 *
+	 * Terminal writers use it as a collision guard: {@link recordSynthetic}
+	 * bypasses the live-record map and the repository upserts by request id, so
+	 * writing a synthetic row for an id that already has a record would either
+	 * overwrite the real completion or emit a second summary for one request.
+	 */
+	hasRecord(requestId: string): boolean {
+		return this.records.has(requestId);
+	}
+
 	// -------------------------------------------------------------------------
 	// Lifecycle
 	// -------------------------------------------------------------------------

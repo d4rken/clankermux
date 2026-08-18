@@ -124,6 +124,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 		asyncWriter: { enqueue: mock(() => undefined) } as never,
 		requestRecorder: {
 			begin: mock(() => undefined),
+			hasRecord: mock(() => false),
 			captureResponseChunk: mock(() => undefined),
 			finishTransport: mock(() => undefined),
 			attachUsageSummary: mock(() => undefined),

@@ -240,6 +240,7 @@ function makeContext(accounts: Account[], strategy: unknown): ProxyContext {
 		} as never,
 		requestRecorder: {
 			begin: mock(() => {}),
+			hasRecord: mock(() => false),
 			captureResponseChunk: mock(() => {}),
 			finishTransport: mock(() => {}),
 			attachUsageSummary: mock(() => {}),

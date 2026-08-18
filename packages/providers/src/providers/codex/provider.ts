@@ -22,6 +22,7 @@ import {
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
+import { clampChatGptBackendReasoningEffort } from "./backend-params";
 import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage } from "./usage";
 
@@ -64,8 +65,13 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
+/** The ChatGPT/Codex backend host (the default endpoint's host). */
+const CHATGPT_BACKEND_HOST = "chatgpt.com";
 /** Hosts that are OpenAI's own Codex/Responses API, not a custom endpoint. */
-const OPENAI_PROMPT_CACHE_HOSTS = new Set(["chatgpt.com", "api.openai.com"]);
+const OPENAI_PROMPT_CACHE_HOSTS = new Set([
+	CHATGPT_BACKEND_HOST,
+	"api.openai.com",
+]);
 /**
  * Hex length of the truncated sha256 digest in a derived prompt_cache_key.
  * OpenAI caps prompt_cache_key at 64 chars; the longest prefix we emit is
@@ -336,6 +342,23 @@ function resolveCodexPromptCacheEndpoint(account?: Account): string {
 }
 
 /**
+ * True when this account's requests actually reach the ChatGPT/Codex backend
+ * (the default endpoint, or a custom endpoint that still points at chatgpt.com).
+ * Gates the backend-parameter sanitation in `backend-params.ts`: a custom
+ * endpoint has its own parameter vocabulary, and deleting a client's
+ * `max_output_tokens` there would silently remove an output cap — i.e. uncap
+ * spend — for a backend that may well accept it.
+ */
+function targetsChatGptCodexBackend(account?: Account): boolean {
+	try {
+		const { hostname } = new URL(resolveCodexPromptCacheEndpoint(account));
+		return hostname === CHATGPT_BACKEND_HOST;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
  * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
  * only attach it when the account resolves to OpenAI's own hosts.
@@ -535,7 +558,7 @@ export class CodexProvider extends BaseProvider {
 		// ORIGINAL OpenAI-Responses body — do NOT run the Anthropic→Codex
 		// translator; only patch the transport invariants the backend requires.
 		if (request.headers.get(NATIVE_RESPONSES_REQUEST_HEADER) === "1") {
-			return this.transformNativeResponsesBody(request);
+			return this.transformNativeResponsesBody(request, account);
 		}
 
 		try {
@@ -583,20 +606,56 @@ export class CodexProvider extends BaseProvider {
 	 * - `store: false` — stateless HTTP path,
 	 * - drop `previous_response_id` — the HTTP path always sends full history
 	 *   (mirrors the translator's handling; see the adapter's note).
-	 * Everything else — tools of ALL types (web_search etc.), reasoning,
-	 * instructions — is forwarded untouched.
+	 * Plus, ONLY when the account actually targets the ChatGPT/Codex backend,
+	 * the backend-compatibility sanitation that backend requires (see
+	 * `backend-params.ts`): drop `max_output_tokens` and clamp
+	 * `reasoning.effort` into the accepted set. Without it a client that sets
+	 * either (observed: opencode via the ai-sdk) gets a raw 400 with no
+	 * failover, because the body reaches upstream verbatim.
+	 * Everything else — tools of ALL types (web_search etc.), reasoning
+	 * siblings, instructions — is forwarded untouched.
 	 */
 	private async transformNativeResponsesBody(
 		request: Request,
+		account?: Account,
 	): Promise<Request> {
 		let bodyText = "";
 		try {
 			this.sweepRequestStreamById();
 			bodyText = await request.text();
-			const body = JSON.parse(bodyText) as Record<string, unknown>;
+			const parsed: unknown = JSON.parse(bodyText);
+			// JSON.parse happily returns null, a primitive or an array. An array in
+			// particular survives mutation + re-stringification and would reach the
+			// backend without any of the fields it requires, so a non-object root
+			// takes the same path as an unparseable body.
+			if (
+				typeof parsed !== "object" ||
+				parsed === null ||
+				Array.isArray(parsed)
+			) {
+				throw new Error(
+					`Native Responses body is not a JSON object (got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})`,
+				);
+			}
+			const body = parsed as Record<string, unknown>;
 			body.stream = true;
 			body.store = false;
 			delete body.previous_response_id;
+			if (targetsChatGptCodexBackend(account)) {
+				delete body.max_output_tokens;
+				const reasoning = body.reasoning;
+				if (
+					typeof reasoning === "object" &&
+					reasoning !== null &&
+					!Array.isArray(reasoning)
+				) {
+					const effort = (reasoning as Record<string, unknown>).effort;
+					if (typeof effort === "string") {
+						(reasoning as Record<string, unknown>).effort =
+							clampChatGptBackendReasoningEffort(effort);
+					}
+				}
+			}
 
 			const requestId = request.headers.get("x-clankermux-request-id");
 			if (requestId) {
@@ -1320,10 +1379,31 @@ export class CodexProvider extends BaseProvider {
 			}));
 		}
 
-		const reasoningResolution = resolveReasoningEffort(body.reasoning?.effort, {
-			sourceModel: body.model,
-			targetModel: model,
-		});
+		const requestedEffort = body.reasoning?.effort;
+		const targetsChatGptBackend = targetsChatGptCodexBackend(account);
+		// `none` is a value the ChatGPT/Codex backend ACCEPTS, but the resolver has
+		// no notion of it: it THROWS a ValidationError for anything outside
+		// REASONING_EFFORT_VALUES. Resolving first would therefore fail a request
+		// the backend would have served, and make the two paths disagree — the same
+		// `none` succeeds through the native passthrough (which preserves it) and
+		// fails through this translator, decided only by which account routing
+		// picked. So when this account really reaches that backend, short-circuit
+		// exactly `none` — and nothing else. Every other value, `minimal`
+		// included, stays on the resolver-then-clamp path, because the resolver is
+		// what raises an effort UP to the target model's documented minimum
+		// (`minimal` → `low` for a profile that floors at `low`, e.g.
+		// gpt-5.4-mini). Short-circuiting on "the clamp would say none" would
+		// bypass that floor and send `none` where `low` was due.
+		const reasoningResolution: {
+			effort: string | undefined;
+			downgrades: ReadonlyArray<{ model: string; from: string; to: string }>;
+		} =
+			targetsChatGptBackend && requestedEffort === "none"
+				? { effort: "none", downgrades: [] }
+				: resolveReasoningEffort(requestedEffort, {
+						sourceModel: body.model,
+						targetModel: model,
+					});
 		if (reasoningResolution.downgrades.length > 0) {
 			for (const downgrade of reasoningResolution.downgrades) {
 				log.warn(
@@ -1332,6 +1412,16 @@ export class CodexProvider extends BaseProvider {
 			}
 		}
 
+		// The resolver knows each TARGET MODEL's effort profile, not the BACKEND's:
+		// for a Codex model with no explicit profile it falls through to the generic
+		// "gpt-5" set, which still lists "minimal" — a value the ChatGPT backend
+		// 400s on. Clamp the resolved value into the accepted set (same helper as
+		// the native passthrough), but only when we really target that backend.
+		const resolvedEffort = reasoningResolution.effort ?? "medium";
+		const backendEffort = targetsChatGptBackend
+			? clampChatGptBackendReasoningEffort(resolvedEffort)
+			: resolvedEffort;
+
 		// Codex always requires streaming upstream; non-streaming clients are handled
 		// on the response side via transformSseResponseToJson.
 		const codexRequest: CodexRequest = {
@@ -1339,7 +1429,7 @@ export class CodexProvider extends BaseProvider {
 			input,
 			stream: true,
 			store: false,
-			reasoning: { effort: reasoningResolution.effort ?? "medium" },
+			reasoning: { effort: backendEffort },
 		};
 
 		codexRequest.instructions = instructions || "You are a helpful assistant.";

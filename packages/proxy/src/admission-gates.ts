@@ -33,6 +33,7 @@ import {
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	isProviderOverloaded,
+	resolveOverloadAttributionModel,
 } from "./provider-overload-cooldown";
 import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
@@ -152,11 +153,10 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// model — then resolved through the account's model mapping so the gate
 	// sees the model the account will actually send upstream. mapModelName is
 	// a pure, cheap lookup over the account's mapping columns (no body
-	// parsing), so it is safe on the pre-selection hot path. When the mapped
-	// model resolves to NO family (e.g. "qwen/..."), fall back to the logical
-	// model — the same family-resolvability fallback the authoritative
-	// admission inside proxyWithAccount applies, so gate and admission can
-	// never target different buckets. Routing optimization only —
+	// parsing), so it is safe on the pre-selection hot path. The mapped-vs-
+	// logical choice is the SHARED resolveOverloadAttributionModel rule the
+	// authoritative admission inside proxyWithAccount also applies, so gate and
+	// admission can never target different buckets. Routing optimization only —
 	// authoritative per-attempt enforcement is the admission chokepoint. The
 	// comboName check keeps a cleared combo (fallback path) from resurrecting
 	// stale overrides.
@@ -169,8 +169,10 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 			if (slot?.modelOverride) logical = slot.modelOverride;
 		}
 		if (!logical) return null;
-		const mapped = mapModelName(logical, account);
-		return mapped !== logical && getModelFamily(mapped) ? mapped : logical;
+		return resolveOverloadAttributionModel(
+			mapModelName(logical, account),
+			logical,
+		);
 	};
 
 	const applyProviderOverloadGate = (accounts: Account[]) => {

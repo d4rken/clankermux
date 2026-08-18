@@ -473,6 +473,7 @@ async function handleIngestedProxy(
 	const recordSyntheticErrorResponse = async (
 		response: Response,
 		error: string,
+		opts?: { failoverAttempts?: number },
 	): Promise<void> => {
 		// Same recordable-request predicate as forwardToClient (S1) — keeps
 		// synthetic pool/provider-exhaustion rows out of history for the same
@@ -548,7 +549,9 @@ async function handleIngestedProxy(
 			timestamp: requestMeta.timestamp,
 			requestBody: storePayloads ? finalBodyBuffer : null,
 			retryAttempt: 0,
-			failoverAttempts: 0,
+			// Most synthetic terminals fire before anything was attempted; the
+			// give-up terminal passes the attempts it really made.
+			failoverAttempts: opts?.failoverAttempts ?? 0,
 		};
 		ctx.requestRecorder.recordSynthetic(meta, "error", error, {
 			responseBody,
@@ -673,6 +676,23 @@ async function handleIngestedProxy(
 		);
 	};
 
+	// Real upstream attempts made for this request, counted at the probe-gate
+	// callback — the last point before `proxyWithAccount` runs. Candidates that
+	// were never attempted (probe-gate suppressed, overload-skipped, burst
+	// double-attempt guard, path-incompatible before any network work) do not
+	// increment it, so it is the honest denominator for the give-up terminal:
+	// neither `recordSyntheticErrorResponse`'s hardcoded 0 nor the candidate-list
+	// length the thrown message quotes.
+	let upstreamAttempts = 0;
+	const countedAttemptThroughProbeGate = (
+		account: Account,
+		attempt: () => Promise<Response | null>,
+	): Promise<{ response: Response | null; suppressed: boolean }> =>
+		attemptThroughProbeGate(account, () => {
+			upstreamAttempts++;
+			return attempt();
+		});
+
 	// Every hold that parks a live client connection and re-attempts is built ONCE
 	// per request here (see recovery-holds.ts): the overload hold, the shared
 	// non-Codex wait+retry hold behind the context-window / family-weekly / pin
@@ -694,7 +714,7 @@ async function handleIngestedProxy(
 		bumpIdleTimeout,
 		burstHoldTimingOverride,
 		logFinalOrderOnce,
-		attemptThroughProbeGate,
+		attemptThroughProbeGate: countedAttemptThroughProbeGate,
 	});
 
 	// 7. Handle no accounts case
@@ -722,7 +742,7 @@ async function handleIngestedProxy(
 			recordSyntheticErrorResponse,
 			createProviderOverloadedResponse,
 			logFinalOrderOnce,
-			attemptThroughProbeGate,
+			attemptThroughProbeGate: countedAttemptThroughProbeGate,
 		});
 	}
 
@@ -860,36 +880,39 @@ async function handleIngestedProxy(
 				// which is the dominant path. Once it is no longer the primary, fall
 				// through to the normal failover loop, which honors the reorder.
 				let firstOutcome: ProxyAttemptOutcome | null = null;
-				const gatedFirst = await attemptThroughProbeGate(heldAccount, () => {
-					logFinalOrderOnce(heldAccount.id);
-					// Record the attempt (only when it actually happens) so the normal
-					// loop below skips a duplicate if we fall through.
-					holds.noteBurstAttempt(heldAccount.id);
-					return proxyWithAccount(
-						req,
-						url,
-						heldAccount,
-						requestMeta,
-						finalBodyBuffer,
-						finalCreateBodyStream,
-						0,
-						ctx,
-						null,
-						apiKeyId,
-						apiKeyName,
-						requestBodyContext,
-						false,
-						{
-							signal: req.signal,
-							onOutcome: (o) => {
-								firstOutcome = o;
-								// The normal loop below skips the held account (attempted-id
-								// guard), so its suppression must be recorded here.
-								holds.noteOverloadSuppression(heldAccount, o);
+				const gatedFirst = await countedAttemptThroughProbeGate(
+					heldAccount,
+					() => {
+						logFinalOrderOnce(heldAccount.id);
+						// Record the attempt (only when it actually happens) so the normal
+						// loop below skips a duplicate if we fall through.
+						holds.noteBurstAttempt(heldAccount.id);
+						return proxyWithAccount(
+							req,
+							url,
+							heldAccount,
+							requestMeta,
+							finalBodyBuffer,
+							finalCreateBodyStream,
+							0,
+							ctx,
+							null,
+							apiKeyId,
+							apiKeyName,
+							requestBodyContext,
+							false,
+							{
+								signal: req.signal,
+								onOutcome: (o) => {
+									firstOutcome = o;
+									// The normal loop below skips the held account (attempted-id
+									// guard), so its suppression must be recorded here.
+									holds.noteOverloadSuppression(heldAccount, o);
+								},
 							},
-						},
-					);
-				});
+						);
+					},
+				);
 				if (gatedFirst.response) {
 					return gatedFirst.response;
 				}
@@ -1079,7 +1102,7 @@ async function handleIngestedProxy(
 			// freshly-recovered account admits exactly ONE probe. Concurrent requests
 			// that would re-select it are suppressed and skip to the next candidate
 			// instead of stampeding it.
-			const gated = await attemptThroughProbeGate(list[i], () => {
+			const gated = await countedAttemptThroughProbeGate(list[i], () => {
 				logFinalOrderOnce(list[i].id);
 				return proxyWithAccount(
 					req,
@@ -1299,16 +1322,51 @@ async function handleIngestedProxy(
 		isRefreshTokenLikelyExpired(acc),
 	);
 
+	/**
+	 * Write the give-up terminal into Request History, the way the synthetic 529s
+	 * already are. Without this the request is a log line only: the client gets a
+	 * 503 that history never shows.
+	 *
+	 * The response mirrors what `dispatchProxyRequest` builds from the thrown
+	 * error, so the recorded row and the bytes the client receives agree.
+	 *
+	 * Collision guard: `recordSynthetic` bypasses the live-record map and the
+	 * repository upserts by request id, so a request that already called
+	 * `begin()` — an upstream responded, then a setup exception inside
+	 * `forwardToClient` turned into failover — would have its terminal row
+	 * overwritten by the late live completion, or emit two summaries. Skipping
+	 * leaves exactly today's behaviour in that rare case.
+	 */
+	const recordGiveUpTerminal = async (
+		label: string,
+		message: string,
+	): Promise<void> => {
+		if (ctx.requestRecorder.hasRecord(requestMeta.id)) return;
+		const terminalResponse = new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: "service_unavailable_error", message },
+			}),
+			{ status: 503, headers: { "Content-Type": "application/json" } },
+		);
+		await recordSyntheticErrorResponse(terminalResponse, label, {
+			failoverAttempts: upstreamAttempts,
+		});
+	};
+
 	if (needsReauth.length > 0) {
 		const accountNames = needsReauth.map((acc) => acc.name).join(", ");
-		throw new ServiceUnavailableError(
-			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${accountNames}.\n\nRe-authenticate these account(s) from the dashboard (Accounts tab).`,
-			ctx.provider.name,
-		);
+		const message = `All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${accountNames}.\n\nRe-authenticate these account(s) from the dashboard (Accounts tab).`;
+		// Its own label: this terminal names the accounts and has an actionable
+		// fix (re-authenticate), which is a different diagnosis from a pool that
+		// simply exhausted — collapsing them would hide it in history. The label
+		// itself stays account-independent so history's (error, account) grouping
+		// doesn't fragment per account list.
+		await recordGiveUpTerminal("oauth_tokens_expired", message);
+		throw new ServiceUnavailableError(message, ctx.provider.name);
 	}
 
-	throw new ServiceUnavailableError(
-		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
-		ctx.provider.name,
-	);
+	const exhaustedMessage = `${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`;
+	await recordGiveUpTerminal("all_accounts_failed", exhaustedMessage);
+	throw new ServiceUnavailableError(exhaustedMessage, ctx.provider.name);
 }
