@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Lane, LiveEvent, LiveStatus } from "../../../lib/live-activity";
-import { buildLanes } from "../../../lib/live-activity";
-import {
-	hitTest,
-	LiveActivityLanesView,
-	unknownRegions,
-} from "../LiveActivityLanes";
+import { buildLanes, hitTest } from "../../../lib/live-activity";
+import { LiveActivityLanesView, unknownRegions } from "../LiveActivityLanes";
 
 const WINDOW = 180_000;
 const T0 = 1_700_000_000_000;

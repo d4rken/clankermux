@@ -4,10 +4,14 @@ import { COLORS } from "../../constants";
 import {
 	ageOpacity,
 	buildLanes,
+	hitTest,
+	LANE_HEIGHT,
 	type Lane,
 	type LiveEvent,
 	type LiveStatus,
+	markCenterX,
 	markRadius,
+	NOW_INSET,
 } from "../../lib/live-activity";
 import type { Outage } from "../../lib/live-activity-store";
 import { LIVE_WINDOW_OPTIONS } from "../../lib/live-activity-window";
@@ -38,7 +42,6 @@ import {
  * `SystemHealthStrip`.
  */
 
-const LANE_HEIGHT = 28;
 const AXIS_HEIGHT = 20;
 /**
  * How many NAMED project lanes the card draws. `(no project)` and the `Other`
@@ -47,8 +50,6 @@ const AXIS_HEIGHT = 20;
  */
 export const MAX_LANES = 8;
 const DEFAULT_PLOT_WIDTH = 720;
-/** Right-hand inset so a mark at "now" is not clipped by the plot edge. */
-const NOW_INSET = 8;
 
 /**
  * Status → mark colour.
@@ -611,63 +612,6 @@ function Mark({
 			<circle cx={cx} cy={cy} r={r} fill={color} {...ring} />
 		</g>
 	);
-}
-
-/** Marks older than the window are pinned at the left edge, never dropped. */
-function clampToPlot(x: number): number {
-	return Math.max(x, 2);
-}
-
-/**
- * X of a mark's centre in plot space, pinning included.
- *
- * The single definition of where a mark actually sits: the renderer places marks
- * with it and `resolveMarkHref` measures click distance against it, so the two
- * cannot drift into disagreeing about what the pointer is over.
- */
-export function markCenterX(
-	ts: number,
-	now: number,
-	windowMs: number,
-	plotWidth: number,
-): number {
-	const usable = Math.max(plotWidth - NOW_INSET, 1);
-	return clampToPlot(usable - ((now - ts) * usable) / windowMs);
-}
-
-/**
- * Nearest-mark hit test.
- *
- * `y` picks the lane (rows are the generous part of the target) and `x` picks
- * the nearest event within it by time. Returns null only when the lane is empty
- * or the pointer is off the lanes entirely.
- */
-export function hitTest(
-	lanes: Lane[],
-	x: number,
-	y: number,
-	now: number,
-	windowMs: number,
-	plotWidth: number,
-): { event: LiveEvent; laneIndex: number; eventIndex: number } | null {
-	const laneIndex = Math.floor(y / LANE_HEIGHT);
-	const lane = lanes[laneIndex];
-	if (!lane || lane.events.length === 0) return null;
-
-	const usable = Math.max(plotWidth - NOW_INSET, 1);
-	const targetTs = now - ((usable - x) * windowMs) / usable;
-
-	let bestIndex = 0;
-	let bestDistance = Number.POSITIVE_INFINITY;
-	for (let i = 0; i < lane.events.length; i++) {
-		const distance = Math.abs(lane.events[i].ts - targetTs);
-		if (distance < bestDistance) {
-			bestDistance = distance;
-			bestIndex = i;
-		}
-	}
-
-	return { event: lane.events[bestIndex], laneIndex, eventIndex: bestIndex };
 }
 
 /**

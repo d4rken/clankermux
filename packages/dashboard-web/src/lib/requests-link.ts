@@ -12,8 +12,13 @@
  * `no-project`.
  */
 
-import { hitTest, markCenterX } from "../components/overview/LiveActivityLanes";
-import { type Lane, type LaneScope, markRadius } from "./live-activity";
+import {
+	hitTest,
+	type Lane,
+	type LaneScope,
+	markCenterX,
+	markRadius,
+} from "./live-activity";
 
 /** Requests page with `id`'s details modal already open. */
 export function requestDetailsHref(id: string): string {
