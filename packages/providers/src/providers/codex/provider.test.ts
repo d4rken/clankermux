@@ -2646,6 +2646,15 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		expect(body.reasoning).toEqual({ effort: "none" });
 	});
 
+	it("preserves reasoning.effort none on the translated path", async () => {
+		// `none` is accepted by the backend but unknown to resolveReasoningEffort,
+		// which throws on it — so the translated path must short-circuit the
+		// resolver, or the same value that succeeds through the native passthrough
+		// fails here purely because routing picked a translated account.
+		const body = await translatedTransform({ reasoning: { effort: "none" } });
+		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+
 	it("does not clamp the translated path for a custom-endpoint account", async () => {
 		const body = await translatedTransform(
 			{ reasoning: { effort: "minimal" } },

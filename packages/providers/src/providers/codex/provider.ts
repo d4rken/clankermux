@@ -1379,10 +1379,30 @@ export class CodexProvider extends BaseProvider {
 			}));
 		}
 
-		const reasoningResolution = resolveReasoningEffort(body.reasoning?.effort, {
-			sourceModel: body.model,
-			targetModel: model,
-		});
+		const requestedEffort = body.reasoning?.effort;
+		const targetsChatGptBackend = targetsChatGptCodexBackend(account);
+		// `none` is a value the ChatGPT/Codex backend ACCEPTS, but the resolver has
+		// no notion of it: it THROWS a ValidationError for anything outside
+		// REASONING_EFFORT_VALUES. Resolving first would therefore fail a request
+		// the backend would have served, and make the two paths disagree — the same
+		// `none` succeeds through the native passthrough (which preserves it) and
+		// fails through this translator, decided only by which account routing
+		// picked. So when this account really reaches that backend, short-circuit
+		// every string effort the backend clamp resolves to `none` (`none` itself
+		// and `minimal`) straight to `none`, and keep the resolver-then-clamp path
+		// for every other value.
+		const reasoningResolution: {
+			effort: string | undefined;
+			downgrades: ReadonlyArray<{ model: string; from: string; to: string }>;
+		} =
+			targetsChatGptBackend &&
+			typeof requestedEffort === "string" &&
+			clampChatGptBackendReasoningEffort(requestedEffort) === "none"
+				? { effort: "none", downgrades: [] }
+				: resolveReasoningEffort(requestedEffort, {
+						sourceModel: body.model,
+						targetModel: model,
+					});
 		if (reasoningResolution.downgrades.length > 0) {
 			for (const downgrade of reasoningResolution.downgrades) {
 				log.warn(
@@ -1397,7 +1417,7 @@ export class CodexProvider extends BaseProvider {
 		// 400s on. Clamp the resolved value into the accepted set (same helper as
 		// the native passthrough), but only when we really target that backend.
 		const resolvedEffort = reasoningResolution.effort ?? "medium";
-		const backendEffort = targetsChatGptCodexBackend(account)
+		const backendEffort = targetsChatGptBackend
 			? clampChatGptBackendReasoningEffort(resolvedEffort)
 			: resolvedEffort;
 
