@@ -155,11 +155,14 @@ export function RequestsTab() {
 	// avoids: a project can be named that, and then the link would show
 	// everything instead of it.
 	const noProjectFilter = searchParams.get("noProject") === "1";
+	// Empty is no filter, exactly as `?request=` is no selection. Both
+	// `requestQueryToSearchParams` and the server's `parseRequestFilters` drop an
+	// empty name by truthiness, so keeping it as an active value would put the
+	// page in the filtered explorer — SSE paused, "Filtered results" in the
+	// header, an empty filter chip — over a completely unfiltered list.
 	const projectFilter = noProjectFilter
 		? null
-		: searchParams.has("project")
-			? (searchParams.get("project") ?? null)
-			: null;
+		: searchParams.get("project") || null;
 
 	const setProjectSelection = useCallback(
 		(selection: NameSelection) => {

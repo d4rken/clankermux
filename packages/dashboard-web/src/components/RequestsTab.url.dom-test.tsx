@@ -295,6 +295,23 @@ describe("RequestsTab — ?project=", () => {
 			expect.objectContaining({ noProject: true }),
 		);
 	});
+
+	it("treats an empty project parameter as no filter at all", async () => {
+		// Both the client serializer and the server drop an empty name by
+		// truthiness, so treating it as active would pause the live tail and
+		// claim "Filtered results" over a completely unfiltered list.
+		await mount("/requests?project=", { loaded: [summary()] });
+
+		expect(pageText()).toContain("Live · latest");
+		expect(pageText()).not.toContain("live updates paused");
+		// The live tail passes a bare limit; only the filtered explorer sends a
+		// params object.
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(expect.any(Number));
+		expect(api.getRequestsSummary).not.toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.anything(),
+		);
+	});
 });
 
 describe("RequestsTab — the two URL parameters coexist", () => {
