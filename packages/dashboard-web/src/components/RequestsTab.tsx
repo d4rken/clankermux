@@ -844,10 +844,18 @@ export function RequestsTab() {
 										<User className="h-3 w-3" />
 										Account
 									</Label>
+									{/* Namespaced values, like the API key and project selects: a
+									    bare account name of "all" would otherwise be read back as
+									    the any-account sentinel and silently show everything.
+									    There is no "recorded without one" bucket for accounts, so
+									    `none` is always false here. */}
 									<Select
-										value={accountFilter ?? SELECT_ALL}
+										value={nameSelectValue({
+											name: accountFilter,
+											none: false,
+										})}
 										onValueChange={(value) =>
-											setAccountFilter(value === SELECT_ALL ? null : value)
+											setAccountFilter(decodeNameSelectValue(value).name)
 										}
 									>
 										<SelectTrigger className="h-9">
@@ -856,7 +864,13 @@ export function RequestsTab() {
 										<SelectContent>
 											<SelectItem value={SELECT_ALL}>All accounts</SelectItem>
 											{uniqueAccounts.map((account) => (
-												<SelectItem key={account} value={account || ""}>
+												<SelectItem
+													key={account}
+													value={nameSelectValue({
+														name: account,
+														none: false,
+													})}
+												>
 													{account}
 												</SelectItem>
 											))}
