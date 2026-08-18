@@ -1682,8 +1682,36 @@ export class CodexProvider extends BaseProvider {
 		};
 
 		const processEvents = async () => {
+			// Every exit from this loop must dispose of the upstream body. Without
+			// it, a client hang-up or an upstream error event leaves Codex
+			// streaming into a reader nobody drains, which holds the socket and
+			// its buffers until the connection is reaped.
+			let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+			let upstreamCancelStarted = false;
+			const cancelUpstreamOnce = (reason: unknown): void => {
+				if (upstreamCancelStarted || !reader) return;
+				upstreamCancelStarted = true;
+				try {
+					void reader.cancel(reason).catch(() => undefined);
+				} catch {
+					// Cancellation is best effort; downstream termination must still
+					// finish.
+				}
+			};
+			// A client that hangs up while this loop is parked in `reader.read()`
+			// on a silent upstream errors the writable side without any write in
+			// flight to observe it, so the catch below would never run. The
+			// writer's closed promise is the only signal available in that
+			// ordering. It resolves (never rejects) on a normal close, where the
+			// reader is already finished and cancelling is a no-op.
+			void writer.closed.catch((error: unknown) => {
+				cancelUpstreamOnce(error);
+			});
 			try {
-				const reader = response.body?.getReader();
+				// Acquiring the reader inside the try keeps a locked body (which
+				// throws TypeError) on the path that still closes the writer;
+				// otherwise processEvents() rejects unhandled and the client hangs.
+				reader = response.body?.getReader();
 				if (!reader) throw new Error("Response body is not readable");
 
 				while (true) {
@@ -1728,10 +1756,19 @@ export class CodexProvider extends BaseProvider {
 							writeSSE,
 							ensureMessageStart,
 						);
+						// Nothing may be emitted after a terminal event (handleCodexEvent
+						// guards every later case on it), so anything still buffered or
+						// in flight upstream is dead weight. Cancelling makes the next
+						// read resolve `done`, which ends the outer loop.
+						if (state.hasSentTerminalEvents) {
+							cancelUpstreamOnce("Codex terminal response received");
+							break;
+						}
 					}
 				}
 
 				if (state.upstreamError) {
+					cancelUpstreamOnce("Codex upstream reported a stream error");
 					return;
 				}
 
@@ -1759,9 +1796,19 @@ export class CodexProvider extends BaseProvider {
 					await writeSSE("message_stop", { type: "message_stop" });
 				}
 			} catch (error) {
+				// Also covers the client hanging up: the downstream writer rejects,
+				// and the upstream body has to go with it.
 				log.error("Error processing Codex SSE stream:", error);
+				cancelUpstreamOnce(error);
 			} finally {
-				await writer.close();
+				try {
+					await writer.close();
+				} catch (closeError) {
+					// A client that hung up errors the writable side; closing it then
+					// rejects. Nothing awaits processEvents(), so an escaping rejection
+					// would surface as an unhandled rejection.
+					log.debug("Codex SSE writer close failed:", closeError);
+				}
 			}
 		};
 
