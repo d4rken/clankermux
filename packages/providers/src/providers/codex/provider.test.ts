@@ -2470,6 +2470,193 @@ describe("CodexProvider native Responses passthrough", () => {
 	});
 });
 
+describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
+	// Test files are excluded from typecheck, so a minimal account shape is fine.
+	const codexAccount = (overrides: Record<string, unknown> = {}) =>
+		({
+			id: "codex-1",
+			name: "codex-test",
+			provider: "codex",
+			api_key: null,
+			refresh_token: null,
+			access_token: null,
+			expires_at: null,
+			created_at: Date.now(),
+			request_count: 0,
+			total_requests: 0,
+			priority: 20,
+			model_mappings: null,
+			custom_endpoint: null,
+			...overrides,
+		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
+
+	const nativeTransform = async (
+		payload: Record<string, unknown>,
+		account?: Parameters<CodexProvider["transformRequestBody"]>[1],
+	) => {
+		const request = new Request(
+			"https://chatgpt.com/backend-api/codex/responses",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+				},
+				body: JSON.stringify({
+					model: "gpt-5.5-codex",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+					...payload,
+				}),
+			},
+		);
+		const transformed = await new CodexProvider().transformRequestBody(
+			request,
+			account,
+		);
+		return { transformed, body: await transformed.json() };
+	};
+
+	const nativeTransformRaw = async (rawBody: string) => {
+		const request = new Request(
+			"https://chatgpt.com/backend-api/codex/responses",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+				},
+				body: rawBody,
+			},
+		);
+		return new CodexProvider().transformRequestBody(request, undefined);
+	};
+
+	const translatedTransform = async (
+		payload: Record<string, unknown>,
+		account?: Parameters<CodexProvider["transformRequestBody"]>[1],
+	) => {
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-3-7-sonnet",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "hello" }],
+				...payload,
+			}),
+		});
+		return new CodexProvider()
+			.transformRequestBody(request, account)
+			.then((r) => r.json());
+	};
+
+	it("strips max_output_tokens on the native path (no model override)", async () => {
+		const { body } = await nativeTransform({ max_output_tokens: 4096 });
+		expect("max_output_tokens" in body).toBe(false);
+		// The transport patches are unaffected.
+		expect(body.stream).toBe(true);
+		expect(body.store).toBe(false);
+		expect(body.input).toHaveLength(1);
+	});
+
+	it("strips max_output_tokens on the native path with a model override applied", async () => {
+		// The proxy's prepareNativeBody rewrites `model` for a combo slot BEFORE
+		// the provider sees the body — sanitation must not be model-conditional.
+		const { body } = await nativeTransform({
+			model: "gpt-5.4-mini",
+			max_output_tokens: 512,
+		});
+		expect("max_output_tokens" in body).toBe(false);
+		expect(body.model).toBe("gpt-5.4-mini");
+	});
+
+	it("maps reasoning.effort minimal to none and keeps its siblings", async () => {
+		const { body } = await nativeTransform({
+			reasoning: { effort: "minimal", summary: "auto" },
+		});
+		expect(body.reasoning).toEqual({ effort: "none", summary: "auto" });
+	});
+
+	it("preserves reasoning.effort none", async () => {
+		const { body } = await nativeTransform({ reasoning: { effort: "none" } });
+		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+
+	it("clamps an above-ceiling reasoning.effort down to xhigh", async () => {
+		const { body } = await nativeTransform({ reasoning: { effort: "max" } });
+		expect(body.reasoning).toEqual({ effort: "xhigh" });
+	});
+
+	it("leaves an unrecognised reasoning.effort untouched without throwing", async () => {
+		const { transformed, body } = await nativeTransform({
+			reasoning: { effort: "ludicrous" },
+		});
+		expect(body.reasoning).toEqual({ effort: "ludicrous" });
+		// Still a native attempt — the fallback path was NOT taken.
+		expect(transformed.headers.get(NATIVE_RESPONSES_REQUEST_HEADER)).toBe("1");
+	});
+
+	it("leaves a non-object reasoning value untouched", async () => {
+		const { body } = await nativeTransform({ reasoning: "minimal" });
+		expect(body.reasoning).toBe("minimal");
+	});
+
+	for (const [label, raw] of [
+		["null", "null"],
+		["an array", '[{"model":"gpt-5.5-codex"}]'],
+		["a primitive", '"gpt-5.5-codex"'],
+	] as const) {
+		it(`takes the corrupt-body path for a JSON root that is ${label}`, async () => {
+			const transformed = await nativeTransformRaw(raw);
+			// The native flag is stripped, so the proxy can never mark the response
+			// native, and the body is forwarded byte-identically.
+			expect(
+				transformed.headers.get(NATIVE_RESPONSES_REQUEST_HEADER),
+			).toBeNull();
+			expect(await transformed.text()).toBe(raw);
+		});
+	}
+
+	it("keeps max_output_tokens and the raw effort for a custom-endpoint account", async () => {
+		// A custom endpoint is not the ChatGPT backend: deleting a client's output
+		// cap there would silently uncap spend, and its effort vocabulary is its own.
+		const { body } = await nativeTransform(
+			{ max_output_tokens: 4096, reasoning: { effort: "minimal" } },
+			codexAccount({
+				custom_endpoint: "https://my-openai-proxy.example.com/v1/responses",
+			}),
+		);
+		expect(body.max_output_tokens).toBe(4096);
+		expect(body.reasoning).toEqual({ effort: "minimal" });
+	});
+
+	it("applies the same clamp on the translated path", async () => {
+		// resolveReasoningEffort leaves "minimal" alone for a Codex target model
+		// (it falls through to the generic gpt-5 profile, which still lists it) —
+		// the backend clamp is what keeps it off the wire.
+		const body = await translatedTransform({
+			reasoning: { effort: "minimal" },
+		});
+		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+
+	it("does not clamp the translated path for a custom-endpoint account", async () => {
+		const body = await translatedTransform(
+			{ reasoning: { effort: "minimal" } },
+			codexAccount({
+				custom_endpoint: "https://my-openai-proxy.example.com/v1/responses",
+			}),
+		);
+		expect(body.reasoning).toEqual({ effort: "minimal" });
+	});
+});
+
 describe("normalizeCodexInputUsage", () => {
 	it("subtracts cached tokens from the cache-inclusive total", () => {
 		const result = normalizeCodexInputUsage(100, 30);
