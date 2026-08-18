@@ -33,6 +33,7 @@ export {
 	CodexSpendCoordinator,
 	type CodexSpendResult,
 } from "./codex-spend-coordinator";
+export { computeContextAndToolStats } from "./context-composition";
 export { dispatchProxyRequest } from "./dispatch";
 export {
 	type CapacityProbeReservation,
