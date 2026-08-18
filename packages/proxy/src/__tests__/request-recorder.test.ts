@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { RequestResponse } from "@clankermux/types";
+import type { ContextComposition, RequestResponse } from "@clankermux/types";
 // Import the recorder (and the re-exported NO_ACCOUNT_ID) FIRST: the recorder
 // pulls @clankermux/core before @clankermux/types, which is the load order that
 // avoids the latent types↔core module-eval cycle. A standalone value-import of
@@ -1293,6 +1293,64 @@ describe("RequestRecorder — reasoningEffort threading", () => {
 
 		expect(h.dbOps.saveRequestCalls[0].reasoningEffort).toBeNull();
 		expect(h.emitted[0].reasoningEffort).toBeUndefined();
+	});
+});
+
+describe("RequestRecorder — attachmentChars threading", () => {
+	function makeComposition(
+		overrides: Partial<ContextComposition> = {},
+	): ContextComposition {
+		return {
+			systemChars: 100,
+			toolsChars: 0,
+			toolCount: 0,
+			messagesChars: 500,
+			messageCount: 2,
+			toolResultChars: 0,
+			largestToolResultChars: 0,
+			largestToolName: null,
+			imageCount: 1,
+			imagePayloadChars: 0,
+			documentPayloadChars: 0,
+			...overrides,
+		};
+	}
+
+	it("sums image and document payload chars into the dashboard event", async () => {
+		// The Requests page live-tails via SSE, so a chip fed only by the REST
+		// list handler would be missing from every fresh row until a reload.
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				contextComposition: makeComposition({
+					imagePayloadChars: 90_000,
+					documentPayloadChars: 1_500,
+				}),
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted.length).toBe(1);
+		expect(h.emitted[0].attachmentChars).toBe(91_500);
+	});
+
+	it("omits attachmentChars when the composition is absent or carries no attachments", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		h.recorder.begin(
+			makeMeta({ requestId: "req-2", contextComposition: makeComposition() }),
+		);
+		h.recorder.attachUsageSummary("req-2", makeSummary({ requestId: "req-2" }));
+		h.recorder.finishTransport("req-2", "success");
+		await h.flush();
+
+		expect(h.emitted.length).toBe(2);
+		expect(h.emitted[0].attachmentChars).toBeUndefined();
+		expect(h.emitted[1].attachmentChars).toBeUndefined();
 	});
 });
 
