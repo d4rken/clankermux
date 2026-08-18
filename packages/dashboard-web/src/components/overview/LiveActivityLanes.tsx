@@ -400,17 +400,24 @@ export function LiveActivityLanesView({
 							    role="img": Enter on an image role is not announced as
 							    actionable, and with no initial selection it would do
 							    nothing until an arrow key was guessed. A real anchor is
-							    reachable by Tab and reads as a link. */}
-							{selected && (
-								<a
-									href={requestDetailsHref(selected.id)}
-									target="_blank"
-									rel="noopener noreferrer"
-									className="mt-1 inline-block text-xs text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-								>
-									Open selected request
-								</a>
-							)}
+							    reachable by Tab and reads as a link.
+
+							    The row is RESERVED rather than conditional: `selected` is
+							    set by pointer movement as well as by focus, so growing the
+							    column by a line of text on hover would shove everything
+							    below the card down and back on every pass over a mark. */}
+							<div className="mt-1 h-4">
+								{selected && (
+									<a
+										href={requestDetailsHref(selected.id)}
+										target="_blank"
+										rel="noopener noreferrer"
+										className="inline-block text-xs text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+									>
+										Open selected request
+									</a>
+								)}
+							</div>
 						</div>
 
 						{/* Direct labels: every number the marks encode is also written
