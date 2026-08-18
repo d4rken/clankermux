@@ -1,8 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildRequestFilterClause,
-	NO_API_KEY,
-	NO_PROJECT,
 	parseRequestFilters,
 } from "../request-filters";
 
@@ -63,10 +61,24 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["acct-1", "acct-1"]);
 	});
 
-	it("matches the no-API-key sentinel with IS NULL and no param", () => {
-		const { sql, params } = buildRequestFilterClause({ apiKey: NO_API_KEY });
+	it("matches an exact request id, ahead of every other clause", () => {
+		const { sql, params } = buildRequestFilterClause({ id: "req-1" });
+		expect(sql).toBe("WHERE r.id = ?");
+		expect(params).toEqual(["req-1"]);
+	});
+
+	it("matches the no-API-key bucket with IS NULL and no param", () => {
+		const { sql, params } = buildRequestFilterClause({ noApiKey: true });
 		expect(sql).toBe("WHERE r.api_key_name IS NULL");
 		expect(params).toEqual([]);
+	});
+
+	it("treats a key literally named 'no-api-key' as a name, not a bucket", () => {
+		const { sql, params } = buildRequestFilterClause({ apiKey: "no-api-key" });
+		expect(sql).toBe(
+			"WHERE COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+		);
+		expect(params).toEqual(["no-api-key"]);
 	});
 
 	it("matches a named API key by current name with snapshot fallback", () => {
@@ -77,8 +89,8 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["my-key"]);
 	});
 
-	it("matches the no-project sentinel with IS NULL and no param", () => {
-		const { sql, params } = buildRequestFilterClause({ project: NO_PROJECT });
+	it("matches the no-project bucket with IS NULL and no param", () => {
+		const { sql, params } = buildRequestFilterClause({ noProject: true });
 		expect(sql).toBe("WHERE r.project IS NULL");
 		expect(params).toEqual([]);
 	});
@@ -89,8 +101,19 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["my-proj"]);
 	});
 
+	it("treats projects named 'all' and 'no-project' as literal names", () => {
+		// Both used to be reinterpreted: `all` was dropped entirely (unfiltered
+		// results) and `no-project` selected the empty bucket.
+		for (const name of ["all", "no-project"]) {
+			const { sql, params } = buildRequestFilterClause({ project: name });
+			expect(sql).toBe("WHERE r.project = ?");
+			expect(params).toEqual([name]);
+		}
+	});
+
 	it("combines clauses with AND in a stable order and param sequence", () => {
 		const { sql, params } = buildRequestFilterClause({
+			id: "req-1",
 			status: "error",
 			from: 100,
 			to: 200,
@@ -99,13 +122,33 @@ describe("buildRequestFilterClause", () => {
 			project: "my-proj",
 		});
 		expect(sql).toBe(
-			"WHERE r.success = 0 " +
+			"WHERE r.id = ? " +
+				"AND r.success = 0 " +
 				"AND r.timestamp >= ? AND r.timestamp <= ? " +
 				"AND (a.name = ? OR r.account_used = ?) " +
 				"AND COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ? " +
 				"AND r.project = ?",
 		);
-		expect(params).toEqual([100, 200, "acct-1", "acct-1", "my-key", "my-proj"]);
+		expect(params).toEqual([
+			"req-1",
+			100,
+			200,
+			"acct-1",
+			"acct-1",
+			"my-key",
+			"my-proj",
+		]);
+	});
+
+	it("lets the empty buckets win over a name sent alongside them", () => {
+		const { sql, params } = buildRequestFilterClause({
+			apiKey: "my-key",
+			noApiKey: true,
+			project: "my-proj",
+			noProject: true,
+		});
+		expect(sql).toBe("WHERE r.api_key_name IS NULL AND r.project IS NULL");
+		expect(params).toEqual([]);
 	});
 });
 
@@ -144,8 +187,16 @@ describe("parseRequestFilters", () => {
 		expect(parse("from=abc")).toEqual({});
 	});
 
-	it("omits the 'all' sentinel for account, apiKey, and project", () => {
-		expect(parse("account=all&apiKey=all&project=all")).toEqual({});
+	it("takes name filters on presence, so 'all' is just a name", () => {
+		expect(parse("account=all&apiKey=all&project=all")).toEqual({
+			account: "all",
+			apiKey: "all",
+			project: "all",
+		});
+	});
+
+	it("drops empty name params", () => {
+		expect(parse("account=&apiKey=&project=")).toEqual({});
 	});
 
 	it("parses account, apiKey, and project values", () => {
@@ -156,11 +207,30 @@ describe("parseRequestFilters", () => {
 		});
 	});
 
-	it("parses the no-API-key sentinel", () => {
-		expect(parse(`apiKey=${NO_API_KEY}`)).toEqual({ apiKey: NO_API_KEY });
+	it("parses an exact request id", () => {
+		expect(parse("id=req-1")).toEqual({ id: "req-1" });
+		expect(parse("id=")).toEqual({});
 	});
 
-	it("parses the no-project sentinel", () => {
-		expect(parse(`project=${NO_PROJECT}`)).toEqual({ project: NO_PROJECT });
+	it("parses the no-API-key bucket from its own flag", () => {
+		expect(parse("noApiKey=1")).toEqual({ noApiKey: true });
+		// A key literally called "no-api-key" stays a name.
+		expect(parse("apiKey=no-api-key")).toEqual({ apiKey: "no-api-key" });
+	});
+
+	it("parses the no-project bucket from its own flag", () => {
+		expect(parse("noProject=1")).toEqual({ noProject: true });
+		expect(parse("project=no-project")).toEqual({ project: "no-project" });
+	});
+
+	it("ignores a name param when the matching bucket flag is set", () => {
+		expect(parse("noProject=1&project=my-proj")).toEqual({ noProject: true });
+		expect(parse("noApiKey=1&apiKey=my-key")).toEqual({ noApiKey: true });
+	});
+
+	it("ignores a bucket flag that is not exactly '1'", () => {
+		expect(parse("noProject=0&project=my-proj")).toEqual({
+			project: "my-proj",
+		});
 	});
 });

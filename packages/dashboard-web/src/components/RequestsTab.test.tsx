@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { costBadgeProps } from "./RequestsTab";
+import {
+	costBadgeProps,
+	decodeNameSelectValue,
+	nameSelectValue,
+} from "./RequestsTab";
 
 describe("costBadgeProps", () => {
 	it("renders neutral for plan-covered requests", () => {
@@ -36,5 +40,30 @@ describe("costBadgeProps", () => {
 			className: "text-xs",
 			title: undefined,
 		});
+	});
+});
+
+describe("nameSelectValue / decodeNameSelectValue", () => {
+	it("round-trips an account literally named 'all' as a name", () => {
+		// The account select used to pass raw names through, so picking an
+		// account called "all" decoded back to the any-account sentinel and
+		// showed every request with no filter chip.
+		const value = nameSelectValue({ name: "all", none: false });
+
+		expect(value).not.toBe("all");
+		expect(decodeNameSelectValue(value)).toEqual({ name: "all", none: false });
+	});
+
+	it("round-trips a name colliding with the empty-bucket sentinel", () => {
+		const value = nameSelectValue({ name: "none", none: false });
+
+		expect(decodeNameSelectValue(value)).toEqual({ name: "none", none: false });
+	});
+
+	it("keeps both sentinels distinct from every name", () => {
+		expect(nameSelectValue({ name: null, none: false })).toBe("all");
+		expect(nameSelectValue({ name: null, none: true })).toBe("none");
+		expect(decodeNameSelectValue("all")).toEqual({ name: null, none: false });
+		expect(decodeNameSelectValue("none")).toEqual({ name: null, none: true });
 	});
 });

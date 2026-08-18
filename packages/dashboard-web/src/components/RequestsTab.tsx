@@ -21,7 +21,8 @@ import {
 	User,
 	X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { API_LIMITS } from "../constants";
 import {
@@ -30,6 +31,7 @@ import {
 	useAccounts,
 	useApiKeys,
 	useInfiniteRequests,
+	useRequestById,
 	useRequestProjects,
 	useRequests,
 	useRequestsCount,
@@ -45,7 +47,6 @@ import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
 	mergeStatusCodes,
-	NO_PROJECT,
 	presetRange,
 	type RequestFilterState,
 	type StatusCategory,
@@ -106,12 +107,113 @@ export function costBadgeProps(billingType: string | null | undefined): {
 	};
 }
 
+/**
+ * Option values for the name-valued filter dropdowns.
+ *
+ * Radix `Select` needs a non-empty string per item, so the widget cannot avoid
+ * sentinels — but a bare "all" or "no-project" is confusable with a project or
+ * key genuinely called that. Real names are therefore namespaced under a `v:`
+ * prefix, which no unprefixed sentinel can collide with.
+ */
+const SELECT_ALL = "all";
+const SELECT_NONE = "none";
+const SELECT_NAME_PREFIX = "v:";
+
+/** What a name-valued filter is currently selecting. */
+interface NameSelection {
+	/** Literal name, or null when no name is selected. */
+	name: string | null;
+	/** The "recorded without one" bucket. */
+	none: boolean;
+}
+
+/** Selection -> the `Select` option value that represents it. */
+export function nameSelectValue(selection: NameSelection): string {
+	if (selection.none) return SELECT_NONE;
+	return selection.name === null
+		? SELECT_ALL
+		: `${SELECT_NAME_PREFIX}${selection.name}`;
+}
+
+/** Option value -> the selection it means. Inverse of {@link nameSelectValue}. */
+export function decodeNameSelectValue(value: string): NameSelection {
+	if (value === SELECT_NONE) return { name: null, none: true };
+	if (value.startsWith(SELECT_NAME_PREFIX)) {
+		return { name: value.slice(SELECT_NAME_PREFIX.length), none: false };
+	}
+	return { name: null, none: false };
+}
+
 export function RequestsTab() {
-	const [modalRequest, setModalRequest] = useState<RequestPayload | null>(null);
+	// ── URL-addressable state ─────────────────────────────────────────────────
+	// Only the project filter and the open request live in the URL: they are the
+	// two things Live Activity links to. Every setter clones the current params
+	// first, so none of them can drop a parameter it does not own.
+	const [searchParams, setSearchParams] = useSearchParams();
+
+	// Presence, not value. Reading "all" as "no filter" is exactly the bug this
+	// avoids: a project can be named that, and then the link would show
+	// everything instead of it.
+	const noProjectFilter = searchParams.get("noProject") === "1";
+	// Empty is no filter, exactly as `?request=` is no selection. Both
+	// `requestQueryToSearchParams` and the server's `parseRequestFilters` drop an
+	// empty name by truthiness, so keeping it as an active value would put the
+	// page in the filtered explorer — SSE paused, "Filtered results" in the
+	// header, an empty filter chip — over a completely unfiltered list.
+	const projectFilter = noProjectFilter
+		? null
+		: searchParams.get("project") || null;
+
+	const setProjectSelection = useCallback(
+		(selection: NameSelection) => {
+			setSearchParams(
+				(prev) => {
+					const next = new URLSearchParams(prev);
+					// The two forms are mutually exclusive; leaving the other key
+					// behind would let a stale one win on the next read.
+					next.delete("project");
+					next.delete("noProject");
+					if (selection.none) next.set("noProject", "1");
+					else if (selection.name !== null) next.set("project", selection.name);
+					return next;
+				},
+				// Fiddling with the dropdown must not fill the history stack.
+				{ replace: true },
+			);
+		},
+		[setSearchParams],
+	);
+
+	/** The open request, or null. Empty means no selection, not a request "". */
+	const modalRequestId = searchParams.get("request") || null;
+
+	// Opening PUSHES and closing REPLACES: Back then closes an open modal, and
+	// a closed modal leaves no entry behind that Forward could reopen.
+	const openRequest = useCallback(
+		(id: string) => {
+			setSearchParams((prev) => {
+				const next = new URLSearchParams(prev);
+				next.set("request", id);
+				return next;
+			});
+		},
+		[setSearchParams],
+	);
+	const closeRequest = useCallback(() => {
+		setSearchParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				next.delete("request");
+				return next;
+			},
+			{ replace: true },
+		);
+	}, [setSearchParams]);
+
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
-	const [accountFilter, setAccountFilter] = useState<string>("all");
-	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
-	const [projectFilter, setProjectFilter] = useState<string>("all");
+	const [accountFilter, setAccountFilter] = useState<string | null>(null);
+	const [apiKeyFilter, setApiKeyFilter] = useState<string | null>(null);
+	const [noApiKeyFilter, setNoApiKeyFilter] = useState(false);
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -128,7 +230,9 @@ export function RequestsTab() {
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
 			apiKey: apiKeyFilter,
+			noApiKey: noApiKeyFilter,
 			project: projectFilter,
+			noProject: noProjectFilter,
 			from: dateFrom,
 			to: dateTo,
 		}),
@@ -137,7 +241,9 @@ export function RequestsTab() {
 			statusCodeFilters,
 			accountFilter,
 			apiKeyFilter,
+			noApiKeyFilter,
 			projectFilter,
+			noProjectFilter,
 			dateFrom,
 			dateTo,
 		],
@@ -198,6 +304,68 @@ export function RequestsTab() {
 		filtersActive ? filteredQuery.refetch() : liveQuery.refetch();
 	const hasMore = filtersActive && Boolean(filteredQuery.hasNextPage);
 	const isFetchingMore = filteredQuery.isFetchingNextPage;
+
+	// ── Resolving the request named in the URL ────────────────────────────────
+	// 1. In the loaded data: use it directly. This is every ordinary row click,
+	//    and it issues no extra request.
+	//
+	//    BOTH collections are consulted, because they do not gain a request at
+	//    the same moment. A request that was already in flight when this tab
+	//    connected never gets a `start` event, so the stream reducer has no row
+	//    to update when its `summary` arrives: the summary lands in the details
+	//    map and the payload array stays without it. Searching only the array
+	//    would leave a deep-linked in-flight request showing the
+	//    "not recorded yet" notice forever, even after it completed — which is
+	//    the primary case this deep link exists for.
+	const loadedPayload = modalRequestId
+		? (requests.find((request) => request.id === modalRequestId) ?? null)
+		: null;
+	const loadedSummary = modalRequestId
+		? data?.summaries.get(modalRequestId)
+		: undefined;
+	// Memoized so the modal's hydration effect sees a stable request identity.
+	const localRequest = useMemo(
+		() =>
+			loadedPayload ??
+			(loadedSummary ? summaryToPlaceholder(loadedSummary) : null),
+		[loadedPayload, loadedSummary],
+	);
+	// 2. Otherwise look it up by id. A deep link from Live Activity regularly
+	//    names a request outside the slice: the live tail is the latest
+	//    `API_LIMITS.requestsDetail` rows while the Live Activity window reaches
+	//    30 minutes, and the modal reads its model, token, cost and attribution
+	//    fields off the summary — without this they would all render empty.
+	//    Held until the list query has settled: on a cold deep link the slice
+	//    has not arrived yet, and firing immediately would fetch a row that is
+	//    about to appear in it anyway.
+	const byIdActive =
+		modalRequestId !== null &&
+		localRequest === null &&
+		loadedSummary === undefined &&
+		!loading;
+	const byIdQuery = useRequestById(byIdActive ? modalRequestId : null);
+
+	const modalSummary = loadedSummary ?? byIdQuery.data ?? undefined;
+	// Memoized for the same reason as `localRequest` above.
+	const byIdPlaceholder = useMemo(
+		() => (byIdQuery.data ? summaryToPlaceholder(byIdQuery.data) : null),
+		[byIdQuery.data],
+	);
+	const modalRequest = localRequest ?? (byIdActive ? byIdPlaceholder : null);
+
+	// The by-id lookup's four states are kept distinct on purpose:
+	//  - pending: nothing at all, so no header flashes an epoch-0 timestamp;
+	//  - error: a durable failure, because the retry policy deliberately does
+	//    not retry an HttpError — so it needs a Retry the reader can press;
+	//  - success with no row: the COMMON case, not an error. An in-flight
+	//    request has no database row until it completes, and Live Activity
+	//    deliberately shows pending and streaming marks. No polling is added:
+	//    a deep link carries no filters, so the tab is in live-tail mode with
+	//    the SSE stream running, and the request lands in `data.summaries` on
+	//    completion — which opens the modal through step 1 above.
+	const byIdError = byIdActive ? byIdQuery.error : null;
+	const byIdMissing =
+		byIdActive && byIdQuery.isSuccess && byIdQuery.data === null;
 
 	// Filter dropdown options come from dedicated endpoints (not from the loaded
 	// requests slice) so every configured account/API key is selectable, even
@@ -276,9 +444,10 @@ export function RequestsTab() {
 
 	const clearAllFilters = () => {
 		setStatusCategory("all");
-		setAccountFilter("all");
-		setApiKeyFilter("all");
-		setProjectFilter("all");
+		setAccountFilter(null);
+		setApiKeyFilter(null);
+		setNoApiKeyFilter(false);
+		setProjectSelection({ name: null, none: false });
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
@@ -336,6 +505,42 @@ export function RequestsTab() {
 					</div>
 				)}
 
+				{/* A linked-to request that could not be looked up. Retryable by
+				    hand because the dashboard retry policy deliberately does not
+				    retry an HttpError — the server answered, so this state stays
+				    until someone asks again. */}
+				{byIdError != null && (
+					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
+						<p className="text-destructive text-sm">
+							Could not load the linked request:{" "}
+							{byIdError instanceof Error
+								? byIdError.message
+								: String(byIdError)}
+						</p>
+						<Button
+							onClick={() => byIdQuery.refetch()}
+							variant="outline"
+							size="sm"
+							className="mt-2"
+						>
+							<RefreshCw className="mr-2 h-4 w-4" />
+							Retry
+						</Button>
+					</div>
+				)}
+
+				{/* Not an error: a request has no recorded row until it completes,
+				    and Live Activity links in-flight marks on purpose. The live tail
+				    is still running, so it opens by itself once the row lands. */}
+				{byIdMissing && (
+					<div className="mb-4 p-3 rounded-lg border bg-muted/50">
+						<p className="text-sm text-muted-foreground">
+							That request has not been recorded yet — it may still be in
+							flight. Its details will open here as soon as it completes.
+						</p>
+					</div>
+				)}
+
 				{/* Active Filters Display */}
 				{filtersActive && (
 					<div className="mb-4 p-3 bg-muted/50 rounded-lg">
@@ -366,39 +571,44 @@ export function RequestsTab() {
 									</button>
 								</Badge>
 							)}
-							{accountFilter !== "all" && (
+							{accountFilter !== null && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<User className="h-3 w-3" />
 									{accountFilter}
 									<button
 										type="button"
-										onClick={() => setAccountFilter("all")}
+										onClick={() => setAccountFilter(null)}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
 									</button>
 								</Badge>
 							)}
-							{apiKeyFilter !== "all" && (
+							{(noApiKeyFilter || apiKeyFilter !== null) && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<Hash className="h-3 w-3" />
-									{apiKeyFilter === "no-api-key" ? "No API Key" : apiKeyFilter}
+									{noApiKeyFilter ? "No API Key" : apiKeyFilter}
 									<button
 										type="button"
-										onClick={() => setApiKeyFilter("all")}
+										onClick={() => {
+											setApiKeyFilter(null);
+											setNoApiKeyFilter(false);
+										}}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
 									</button>
 								</Badge>
 							)}
-							{projectFilter !== "all" && (
+							{(noProjectFilter || projectFilter !== null) && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<Folder className="h-3 w-3" />
-									{projectFilter === NO_PROJECT ? "No Project" : projectFilter}
+									{noProjectFilter ? "No Project" : projectFilter}
 									<button
 										type="button"
-										onClick={() => setProjectFilter("all")}
+										onClick={() =>
+											setProjectSelection({ name: null, none: false })
+										}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -634,17 +844,33 @@ export function RequestsTab() {
 										<User className="h-3 w-3" />
 										Account
 									</Label>
+									{/* Namespaced values, like the API key and project selects: a
+									    bare account name of "all" would otherwise be read back as
+									    the any-account sentinel and silently show everything.
+									    There is no "recorded without one" bucket for accounts, so
+									    `none` is always false here. */}
 									<Select
-										value={accountFilter}
-										onValueChange={setAccountFilter}
+										value={nameSelectValue({
+											name: accountFilter,
+											none: false,
+										})}
+										onValueChange={(value) =>
+											setAccountFilter(decodeNameSelectValue(value).name)
+										}
 									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All accounts" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All accounts</SelectItem>
+											<SelectItem value={SELECT_ALL}>All accounts</SelectItem>
 											{uniqueAccounts.map((account) => (
-												<SelectItem key={account} value={account || ""}>
+												<SelectItem
+													key={account}
+													value={nameSelectValue({
+														name: account,
+														none: false,
+													})}
+												>
 													{account}
 												</SelectItem>
 											))}
@@ -658,15 +884,28 @@ export function RequestsTab() {
 										<Key className="h-3 w-3" />
 										API Key
 									</Label>
-									<Select value={apiKeyFilter} onValueChange={setApiKeyFilter}>
+									<Select
+										value={nameSelectValue({
+											name: apiKeyFilter,
+											none: noApiKeyFilter,
+										})}
+										onValueChange={(value) => {
+											const next = decodeNameSelectValue(value);
+											setApiKeyFilter(next.name);
+											setNoApiKeyFilter(next.none);
+										}}
+									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All API keys" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All API keys</SelectItem>
-											<SelectItem value="no-api-key">No API Key</SelectItem>
+											<SelectItem value={SELECT_ALL}>All API keys</SelectItem>
+											<SelectItem value={SELECT_NONE}>No API Key</SelectItem>
 											{uniqueApiKeys.map((key) => (
-												<SelectItem key={key} value={key || ""}>
+												<SelectItem
+													key={key}
+													value={nameSelectValue({ name: key, none: false })}
+												>
 													{key}
 												</SelectItem>
 											))}
@@ -681,17 +920,28 @@ export function RequestsTab() {
 										Project
 									</Label>
 									<Select
-										value={projectFilter}
-										onValueChange={setProjectFilter}
+										value={nameSelectValue({
+											name: projectFilter,
+											none: noProjectFilter,
+										})}
+										onValueChange={(value) =>
+											setProjectSelection(decodeNameSelectValue(value))
+										}
 									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All projects" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All projects</SelectItem>
-											<SelectItem value={NO_PROJECT}>No Project</SelectItem>
+											<SelectItem value={SELECT_ALL}>All projects</SelectItem>
+											<SelectItem value={SELECT_NONE}>No Project</SelectItem>
 											{uniqueProjects.map((project) => (
-												<SelectItem key={project} value={project || ""}>
+												<SelectItem
+													key={project}
+													value={nameSelectValue({
+														name: project,
+														none: false,
+													})}
+												>
 													{project}
 												</SelectItem>
 											))}
@@ -786,7 +1036,7 @@ export function RequestsTab() {
 												window.getSelection(),
 											)
 										) {
-											setModalRequest(request);
+											openRequest(request.id);
 										}
 									}}
 									className={`border rounded-lg cursor-pointer transition-all duration-300 hover:bg-accent/40 ${
@@ -799,7 +1049,7 @@ export function RequestsTab() {
 										<button
 											type="button"
 											className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
-											onClick={() => setModalRequest(request)}
+											onClick={() => openRequest(request.id)}
 										>
 											<span className="text-xs font-mono tabular-nums text-muted-foreground shrink-0">
 												{new Date(request.meta.timestamp).toLocaleTimeString(
@@ -865,7 +1115,7 @@ export function RequestsTab() {
 												variant="ghost"
 												size="icon"
 												className="h-7 w-7"
-												onClick={() => setModalRequest(request)}
+												onClick={() => openRequest(request.id)}
 												title="View Details"
 											>
 												<Eye className="h-4 w-4" />
@@ -937,7 +1187,10 @@ export function RequestsTab() {
 														badgeVariants({ variant: "outline" }),
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
-													onClick={() => setApiKeyFilter(apiKeyName)}
+													onClick={() => {
+														setApiKeyFilter(apiKeyName);
+														setNoApiKeyFilter(false);
+													}}
 													title={`Filter by API key ${apiKeyName}`}
 												>
 													<Key className="h-3 w-3 mr-1" />
@@ -951,7 +1204,9 @@ export function RequestsTab() {
 														badgeVariants({ variant: "outline" }),
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
-													onClick={() => setProjectFilter(project)}
+													onClick={() => {
+														setProjectSelection({ name: project, none: false });
+													}}
 													title={`Filter by project ${project}`}
 												>
 													<Folder className="h-3 w-3 mr-1" />
@@ -1105,9 +1360,9 @@ export function RequestsTab() {
 			{modalRequest && (
 				<RequestDetailsModal
 					request={modalRequest}
-					summary={data?.summaries.get(modalRequest.id)}
+					summary={modalSummary}
 					isOpen={true}
-					onClose={() => setModalRequest(null)}
+					onClose={closeRequest}
 				/>
 			)}
 		</Card>

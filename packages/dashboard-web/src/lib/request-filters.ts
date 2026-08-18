@@ -11,23 +11,29 @@
 /** Recorded outcome category. Explicit code filters still use raw HTTP status. */
 export type StatusCategory = "all" | "success" | "error";
 
-/** Sentinel `apiKey` value meaning "requests that carried no API key". */
-export const NO_API_KEY = "no-api-key";
-
-/** Sentinel `project` value meaning "requests that carried no project". */
-export const NO_PROJECT = "no-project";
-
-/** Raw filter state held by the component (mirrors the form controls). */
+/**
+ * Raw filter state held by the component (mirrors the form controls).
+ *
+ * Names are `string | null`, with `null` meaning "filter inactive". No sentinel
+ * string stands in for either "inactive" or "the empty bucket": every candidate
+ * ("all", "no-project", "no-api-key") is also a name a real project or key can
+ * have, so a sentinel silently reinterprets it. The empty buckets are their own
+ * booleans, mirroring `RequestFilters` on the server.
+ */
 export interface RequestFilterState {
 	status: StatusCategory;
 	/** Specific status codes as strings (from the multi-select Set). */
 	codes: string[];
-	/** Account name, or "all". */
-	account: string;
-	/** API key name, {@link NO_API_KEY}, or "all". */
-	apiKey: string;
-	/** Project name, {@link NO_PROJECT}, or "all". */
-	project: string;
+	/** Account name, or null when inactive. */
+	account: string | null;
+	/** API key name, or null when inactive. */
+	apiKey: string | null;
+	/** Restrict to requests that carried no API key at all. */
+	noApiKey: boolean;
+	/** Project name, or null when inactive. */
+	project: string | null;
+	/** Restrict to requests that carried no project at all. */
+	noProject: boolean;
 	/** `datetime-local` string (local time), or "". */
 	from: string;
 	/** `datetime-local` string (local time), or "". */
@@ -36,13 +42,17 @@ export interface RequestFilterState {
 
 /** Resolved filter params sent to the server (only active filters present). */
 export interface RequestQueryParams {
+	/** Exact request id — resolves a single row regardless of any other filter. */
+	id?: string;
 	status?: StatusCategory;
 	codes?: number[];
 	from?: number;
 	to?: number;
 	account?: string;
 	apiKey?: string;
+	noApiKey?: boolean;
 	project?: string;
+	noProject?: boolean;
 	limit?: number;
 	offset?: number;
 }
@@ -69,9 +79,11 @@ export function isRequestFilterActive(state: RequestFilterState): boolean {
 	return (
 		state.status !== "all" ||
 		state.codes.length > 0 ||
-		state.account !== "all" ||
-		state.apiKey !== "all" ||
-		state.project !== "all" ||
+		state.account !== null ||
+		state.apiKey !== null ||
+		state.noApiKey ||
+		state.project !== null ||
+		state.noProject ||
 		state.from !== "" ||
 		state.to !== ""
 	);
@@ -101,9 +113,11 @@ export function buildRequestQueryParams(
 	const to = localDateTimeToEpoch(state.to);
 	if (to !== undefined) params.to = to;
 
-	if (state.account !== "all") params.account = state.account;
-	if (state.apiKey !== "all") params.apiKey = state.apiKey;
-	if (state.project !== "all") params.project = state.project;
+	if (state.account !== null) params.account = state.account;
+	if (state.noApiKey) params.noApiKey = true;
+	else if (state.apiKey !== null) params.apiKey = state.apiKey;
+	if (state.noProject) params.noProject = true;
+	else if (state.project !== null) params.project = state.project;
 
 	return params;
 }
@@ -115,19 +129,22 @@ export function requestQueryToSearchParams(
 	const p = new URLSearchParams();
 	if (params.limit != null) p.set("limit", String(params.limit));
 	if (params.offset != null) p.set("offset", String(params.offset));
+	if (params.id) p.set("id", params.id);
 	if (params.status && params.status !== "all") p.set("status", params.status);
 	if (params.codes && params.codes.length > 0) {
 		p.set("codes", params.codes.join(","));
 	}
 	if (params.from != null) p.set("from", String(params.from));
 	if (params.to != null) p.set("to", String(params.to));
-	if (params.account && params.account !== "all") {
+	if (params.account) {
 		p.set("account", params.account);
 	}
-	if (params.apiKey && params.apiKey !== "all") p.set("apiKey", params.apiKey);
-	if (params.project && params.project !== "all") {
-		p.set("project", params.project);
-	}
+	// Names are serialized verbatim — no value is filtered out as a sentinel,
+	// so a key or project called "all" reaches the server as itself.
+	if (params.noApiKey) p.set("noApiKey", "1");
+	else if (params.apiKey) p.set("apiKey", params.apiKey);
+	if (params.noProject) p.set("noProject", "1");
+	else if (params.project) p.set("project", params.project);
 	return p;
 }
 

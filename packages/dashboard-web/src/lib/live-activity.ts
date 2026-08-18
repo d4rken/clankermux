@@ -378,9 +378,24 @@ export function laneKeyOf(project: string | null): string {
 	return project === null ? NO_PROJECT_LANE_KEY : `project:${project}`;
 }
 
+/**
+ * What a lane stands for, as data rather than an encoded key.
+ *
+ * A discriminated union so no invalid combination is representable — the
+ * renderer builds its "show these requests" link from this instead of parsing
+ * `key` back apart, and the overflow lane cannot accidentally be treated as a
+ * project because it has no project field at all.
+ */
+export type LaneScope =
+	| { kind: "project"; project: string }
+	| { kind: "no-project" }
+	| { kind: "other" };
+
 export interface Lane {
 	key: string;
 	label: string;
+	/** The requests this lane covers, expressed as a filter, not a label. */
+	scope: LaneScope;
 	/** Events in this lane, ascending by time. Includes long-running requests
 	 *  that started before the window and are pinned at its left edge. */
 	events: LiveEvent[];
@@ -502,6 +517,9 @@ export function buildLanes(
 		return toLane(
 			key,
 			bucket.project ?? NO_PROJECT_LABEL,
+			bucket.project === null
+				? { kind: "no-project" }
+				: { kind: "project", project: bucket.project },
 			sortByTime(bucket.events),
 			cutoff,
 		);
@@ -515,6 +533,7 @@ export function buildLanes(
 			toLane(
 				OTHER_LANE_KEY,
 				`Other (${overflow.length} project${overflow.length === 1 ? "" : "s"})`,
+				{ kind: "other" },
 				sortByTime(merged),
 				cutoff,
 			),
@@ -531,6 +550,7 @@ function sortByTime(events: LiveEvent[]): LiveEvent[] {
 function toLane(
 	key: string,
 	label: string,
+	scope: LaneScope,
 	events: LiveEvent[],
 	cutoff: number,
 ): Lane {
@@ -552,7 +572,17 @@ function toLane(
 		if (isActiveStatus(event.status)) active++;
 	}
 
-	return { key, label, events, requests, tokens, rateLimited, errors, active };
+	return {
+		key,
+		label,
+		scope,
+		events,
+		requests,
+		tokens,
+		rateLimited,
+		errors,
+		active,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -595,4 +625,71 @@ export function ageOpacity(ts: number, now: number, windowMs: number): number {
 	const age = (now - ts) / windowMs;
 	const clamped = Math.min(Math.max(age, 0), 1);
 	return 1 - (1 - MIN_OPACITY) * clamped;
+}
+
+// ---------------------------------------------------------------------------
+// Plot geometry
+// ---------------------------------------------------------------------------
+
+/** Height of one lane row, in plot px. Shared by the renderer and `hitTest`. */
+export const LANE_HEIGHT = 28;
+
+/** Right-hand inset so a mark at "now" is not clipped by the plot edge. */
+export const NOW_INSET = 8;
+
+/** Marks older than the window are pinned at the left edge, never dropped. */
+function clampToPlot(x: number): number {
+	return Math.max(x, 2);
+}
+
+/**
+ * X of a mark's centre in plot space, pinning included.
+ *
+ * The single definition of where a mark actually sits: the renderer places marks
+ * with it and `resolveMarkHref` measures click distance against it, so the two
+ * cannot drift into disagreeing about what the pointer is over.
+ */
+export function markCenterX(
+	ts: number,
+	now: number,
+	windowMs: number,
+	plotWidth: number,
+): number {
+	const usable = Math.max(plotWidth - NOW_INSET, 1);
+	return clampToPlot(usable - ((now - ts) * usable) / windowMs);
+}
+
+/**
+ * Nearest-mark hit test.
+ *
+ * `y` picks the lane (rows are the generous part of the target) and `x` picks
+ * the nearest event within it by time. Returns null only when the lane is empty
+ * or the pointer is off the lanes entirely.
+ */
+export function hitTest(
+	lanes: Lane[],
+	x: number,
+	y: number,
+	now: number,
+	windowMs: number,
+	plotWidth: number,
+): { event: LiveEvent; laneIndex: number; eventIndex: number } | null {
+	const laneIndex = Math.floor(y / LANE_HEIGHT);
+	const lane = lanes[laneIndex];
+	if (!lane || lane.events.length === 0) return null;
+
+	const usable = Math.max(plotWidth - NOW_INSET, 1);
+	const targetTs = now - ((usable - x) * windowMs) / usable;
+
+	let bestIndex = 0;
+	let bestDistance = Number.POSITIVE_INFINITY;
+	for (let i = 0; i < lane.events.length; i++) {
+		const distance = Math.abs(lane.events[i].ts - targetTs);
+		if (distance < bestDistance) {
+			bestDistance = distance;
+			bestIndex = i;
+		}
+	}
+
+	return { event: lane.events[bestIndex], laneIndex, eventIndex: bestIndex };
 }

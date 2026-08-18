@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Lane, LiveEvent, LiveStatus } from "../../../lib/live-activity";
-import { buildLanes } from "../../../lib/live-activity";
-import {
-	hitTest,
-	LiveActivityLanesView,
-	unknownRegions,
-} from "../LiveActivityLanes";
+import { buildLanes, hitTest } from "../../../lib/live-activity";
+import { LiveActivityLanesView, unknownRegions } from "../LiveActivityLanes";
 
 const WINDOW = 180_000;
 const T0 = 1_700_000_000_000;
@@ -128,6 +124,63 @@ describe("LiveActivityLanesView", () => {
 	it("says so when the stream is down", () => {
 		expect(render({ connected: false })).toContain("reconnecting");
 		expect(render({ connected: true })).toContain("live");
+	});
+
+	it("links a named project lane to its filtered request list", () => {
+		const html = render();
+
+		expect(html).toContain('href="/requests?project=clankermux"');
+		expect(html).toContain('target="_blank"');
+		expect(html).toContain('rel="noopener noreferrer"');
+		expect(html).toContain('aria-label="Show clankermux requests"');
+	});
+
+	it("links the no-project lane to the empty bucket, not to a name", () => {
+		const lanes = buildLanes([event({ project: null })], T0, WINDOW, 6).lanes;
+
+		expect(render({ lanes })).toContain('href="/requests?noProject=1"');
+	});
+
+	it("leaves the overflow lane as plain text", () => {
+		// It aggregates several projects, so no single project filter expresses
+		// it and a link would silently show a subset.
+		const events = ["p1", "p2", "p3"].flatMap((p, i) =>
+			Array.from({ length: 3 - i }, (_, n) =>
+				event({ id: `${p}-${n}`, project: p, ts: T0 - 1000 * n }),
+			),
+		);
+		const lanes = buildLanes(events, T0, WINDOW, 1).lanes;
+		const html = render({ lanes });
+
+		expect(html).toContain("Other (2 projects)");
+		expect(html).not.toMatch(/<a[^>]*>Other \(2 projects\)/);
+	});
+
+	it("keeps the lane label list out of aria-hidden now that it holds links", () => {
+		// Focusable content inside an aria-hidden subtree is an accessibility
+		// violation, not a cosmetic one.
+		const html = render();
+		const labelList = html.slice(html.indexOf("<ul"), html.indexOf("</ul>"));
+
+		expect(labelList).toContain('href="/requests?project=clankermux"');
+		expect(labelList).not.toContain("aria-hidden");
+	});
+
+	it("offers the selected mark as a real link, not just a synthesized key", () => {
+		// The plot is role="img"; Enter on an image role is not announced as
+		// actionable, so keyboard and screen-reader users need native link
+		// semantics for the mark they have selected.
+		const html = render({ selected: event({ id: "req-42" }) });
+		expect(html).toContain('href="/requests?request=req-42"');
+		expect(html).toContain("Open selected request");
+	});
+
+	it("renders no selected-request link when nothing is selected", () => {
+		expect(render()).not.toContain("Open selected request");
+	});
+
+	it("says the marks are clickable", () => {
+		expect(render()).toContain("Click a mark to open its request.");
 	});
 
 	it("renders without interaction wiring, so it is server-safe", () => {

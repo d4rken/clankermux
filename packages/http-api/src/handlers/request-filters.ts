@@ -14,13 +14,12 @@
 /** Recorded outcome category. Explicit `codes` still filters raw HTTP status. */
 export type StatusFilter = "all" | "success" | "error";
 
-/** Sentinel `apiKey` value meaning "requests that carried no API key". */
-export const NO_API_KEY = "no-api-key";
-
-/** Sentinel `project` value meaning "requests that carried no project". */
-export const NO_PROJECT = "no-project";
-
 export interface RequestFilters {
+	/**
+	 * Exact request id. Backs the deep link from Live Activity, whose target row
+	 * can sit outside whatever slice the list view happens to have loaded.
+	 */
+	id?: string;
 	/** Recorded success/error outcome. Ignored when `codes` is non-empty. */
 	status?: StatusFilter;
 	/** Explicit status codes; when present these win over `status`. */
@@ -31,10 +30,18 @@ export interface RequestFilters {
 	to?: number;
 	/** Account name (falls back to matching the raw account id). */
 	account?: string;
-	/** API key name, or {@link NO_API_KEY} for the "no key" bucket. */
+	/**
+	 * API key name — a LITERAL name and nothing else. The "no key" bucket is
+	 * {@link RequestFilters.noApiKey} rather than a magic name, because every
+	 * sentinel string is also a name a real key can be given.
+	 */
 	apiKey?: string;
-	/** Project name, or {@link NO_PROJECT} for the "no project" bucket. */
+	/** Restrict to requests that carried no API key at all. */
+	noApiKey?: boolean;
+	/** Project name — a LITERAL name; see {@link RequestFilters.apiKey}. */
 	project?: string;
+	/** Restrict to requests that carried no project at all. */
+	noProject?: boolean;
 }
 
 /**
@@ -50,6 +57,12 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 } {
 	const clauses: string[] = [];
 	const params: (string | number)[] = [];
+
+	// First, so the positional params keep a stable, documented order.
+	if (filters.id) {
+		clauses.push("r.id = ?");
+		params.push(filters.id);
+	}
 
 	// Status: explicit codes are the most specific selection, so they take
 	// precedence over the success/error category when both are present.
@@ -81,31 +94,27 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		params.push(filters.account, filters.account);
 	}
 
-	if (filters.apiKey) {
-		if (filters.apiKey === NO_API_KEY) {
-			clauses.push("r.api_key_name IS NULL");
-		} else {
-			// Match the key's CURRENT name (api_keys.name) so a filter on the
-			// post-rename name finds requests stamped under the old one. The
-			// stamped snapshot remains the fallback for hard-deleted keys. A
-			// correlated subquery keeps the clause self-contained — it drops into
-			// any query whose requests alias is `r`, no extra JOIN required.
-			clauses.push(
-				"COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
-			);
-			params.push(filters.apiKey);
-		}
+	if (filters.noApiKey) {
+		clauses.push("r.api_key_name IS NULL");
+	} else if (filters.apiKey) {
+		// Match the key's CURRENT name (api_keys.name) so a filter on the
+		// post-rename name finds requests stamped under the old one. The
+		// stamped snapshot remains the fallback for hard-deleted keys. A
+		// correlated subquery keeps the clause self-contained — it drops into
+		// any query whose requests alias is `r`, no extra JOIN required.
+		clauses.push(
+			"COALESCE((SELECT name FROM api_keys WHERE id = r.api_key_id), r.api_key_name) = ?",
+		);
+		params.push(filters.apiKey);
 	}
 
-	if (filters.project) {
-		if (filters.project === NO_PROJECT) {
-			clauses.push("r.project IS NULL");
-		} else {
-			// The project name is stamped directly on the row at record time (no
-			// rename indirection like api_keys), so a plain equality match suffices.
-			clauses.push("r.project = ?");
-			params.push(filters.project);
-		}
+	if (filters.noProject) {
+		clauses.push("r.project IS NULL");
+	} else if (filters.project) {
+		// The project name is stamped directly on the row at record time (no
+		// rename indirection like api_keys), so a plain equality match suffices.
+		clauses.push("r.project = ?");
+		params.push(filters.project);
 	}
 
 	const sql = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -113,11 +122,22 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 }
 
 /**
- * Parse {@link RequestFilters} from URL search params. Invalid or "all"-sentinel
- * values are dropped so the result only ever contains active filters.
+ * Parse {@link RequestFilters} from URL search params.
+ *
+ * Name-valued filters are PRESENCE-based: `account`, `apiKey` and `project` are
+ * active whenever the parameter is present and non-empty, whatever it says. The
+ * old "drop the literal value `all`" rule silently discarded the filter for
+ * anything genuinely named `all`, with no value a caller could send to ask for
+ * it instead. The empty buckets are their own booleans (`noApiKey=1`,
+ * `noProject=1`) for the same reason.
  */
 export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	const filters: RequestFilters = {};
+
+	const id = params.get("id");
+	if (id) {
+		filters.id = id;
+	}
 
 	const status = params.get("status");
 	if (status === "success" || status === "error") {
@@ -145,18 +165,26 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	}
 
 	const account = params.get("account");
-	if (account && account !== "all") {
+	if (account) {
 		filters.account = account;
 	}
 
-	const apiKey = params.get("apiKey");
-	if (apiKey && apiKey !== "all") {
-		filters.apiKey = apiKey;
+	if (params.get("noApiKey") === "1") {
+		filters.noApiKey = true;
+	} else {
+		const apiKey = params.get("apiKey");
+		if (apiKey) {
+			filters.apiKey = apiKey;
+		}
 	}
 
-	const project = params.get("project");
-	if (project && project !== "all") {
-		filters.project = project;
+	if (params.get("noProject") === "1") {
+		filters.noProject = true;
+	} else {
+		const project = params.get("project");
+		if (project) {
+			filters.project = project;
+		}
 	}
 
 	return filters;

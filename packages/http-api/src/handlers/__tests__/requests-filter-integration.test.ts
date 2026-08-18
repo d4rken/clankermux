@@ -19,6 +19,7 @@ type Row = {
 	account_used: string | null;
 	api_key_name: string | null;
 	api_key_id?: string | null;
+	project?: string | null;
 };
 
 /** Live API keys: id → CURRENT name (post-rename). */
@@ -40,7 +41,8 @@ function makeDb(rows: Row[], apiKeys: ApiKeyRow[] = []): BunSqlAdapter {
 			error_message TEXT,
 			response_time_ms INTEGER,
 			api_key_id TEXT,
-			api_key_name TEXT
+			api_key_name TEXT,
+			project TEXT
 		);
 	`);
 	db.run("INSERT INTO accounts (id, name) VALUES ('acc1', 'Primary')");
@@ -49,8 +51,8 @@ function makeDb(rows: Row[], apiKeys: ApiKeyRow[] = []): BunSqlAdapter {
 	}
 	const insert = db.prepare(
 		`INSERT INTO requests
-			(id, timestamp, method, path, account_used, status_code, success, api_key_id, api_key_name)
-		 VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?)`,
+			(id, timestamp, method, path, account_used, status_code, success, api_key_id, api_key_name, project)
+		 VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const r of rows) {
 		insert.run(
@@ -61,6 +63,7 @@ function makeDb(rows: Row[], apiKeys: ApiKeyRow[] = []): BunSqlAdapter {
 			r.status_code != null && r.status_code < 300 ? 1 : 0,
 			r.api_key_id ?? null,
 			r.api_key_name,
+			r.project ?? null,
 		);
 	}
 	return {
@@ -160,11 +163,102 @@ describe("requests filtering — real SQLite", () => {
 		expect(await ids(res)).toEqual(["ok-new", "err-429", "err-404", "ok-old"]);
 	});
 
-	it("apiKey no-api-key sentinel matches NULL keys", async () => {
+	it("the noApiKey bucket matches NULL keys", async () => {
 		const res = await createRequestsSummaryHandler(makeDb(rows))(50, 0, {
-			apiKey: "no-api-key",
+			noApiKey: true,
 		});
 		expect(await ids(res)).toEqual(["err-500", "ok-old"]);
+	});
+
+	it("id selects exactly one row, whatever else is in the table", async () => {
+		const res = await createRequestsSummaryHandler(makeDb(rows))(50, 0, {
+			id: "err-404",
+		});
+		expect(await ids(res)).toEqual(["err-404"]);
+
+		const missing = await createRequestsSummaryHandler(makeDb(rows))(50, 0, {
+			id: "not-a-request",
+		});
+		expect(await ids(missing)).toEqual([]);
+	});
+
+	describe("project filtering", () => {
+		// Project names that used to be reinterpreted by the wire format: "all"
+		// was dropped (unfiltered results) and "no-project" selected the empty
+		// bucket. Both are ordinary names a working directory can produce.
+		const projectRows: Row[] = [
+			{
+				id: "p-all",
+				timestamp: 5000,
+				status_code: 200,
+				account_used: "acc1",
+				api_key_name: null,
+				project: "all",
+			},
+			{
+				id: "p-no-project",
+				timestamp: 4000,
+				status_code: 200,
+				account_used: "acc1",
+				api_key_name: null,
+				project: "no-project",
+			},
+			{
+				id: "p-clankermux",
+				timestamp: 3000,
+				status_code: 200,
+				account_used: "acc1",
+				api_key_name: null,
+				project: "clankermux",
+			},
+			{
+				id: "p-none",
+				timestamp: 2000,
+				status_code: 200,
+				account_used: "acc1",
+				api_key_name: null,
+				project: null,
+			},
+		];
+
+		it("matches a named project literally, including 'all'", async () => {
+			const res = await createRequestsSummaryHandler(makeDb(projectRows))(
+				50,
+				0,
+				{ project: "all" },
+			);
+			expect(await ids(res)).toEqual(["p-all"]);
+		});
+
+		it("matches a project literally named 'no-project'", async () => {
+			const res = await createRequestsSummaryHandler(makeDb(projectRows))(
+				50,
+				0,
+				{ project: "no-project" },
+			);
+			expect(await ids(res)).toEqual(["p-no-project"]);
+		});
+
+		it("the noProject bucket matches only the rows with no project", async () => {
+			const res = await createRequestsSummaryHandler(makeDb(projectRows))(
+				50,
+				0,
+				{ noProject: true },
+			);
+			expect(await ids(res)).toEqual(["p-none"]);
+		});
+
+		it("count agrees with the list for both project forms", async () => {
+			const named = await createRequestsCountHandler(makeDb(projectRows))({
+				project: "all",
+			});
+			expect(((await named.json()) as { total: number }).total).toBe(1);
+
+			const bucket = await createRequestsCountHandler(makeDb(projectRows))({
+				noProject: true,
+			});
+			expect(((await bucket.json()) as { total: number }).total).toBe(1);
+		});
 	});
 
 	it("limit + offset paginate the filtered set", async () => {
