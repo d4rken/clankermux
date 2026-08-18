@@ -597,6 +597,7 @@
 			"toolsChars": 52500,
 			"messagesChars": 209000,
 			"toolResultChars": 81500,
+			"binaryChars": 0,
 			"contextTokens": 9900,
 			"avgContextTokens": 900
 		},
@@ -604,6 +605,7 @@
 			"systemChars": 1909.090909090909,
 			"toolsChars": 4772.727272727273,
 			"messagesChars": 19000,
+			"binaryChars": 0,
 			"messageCount": 11.363636363636363
 		},
 		"byProject": [
@@ -613,7 +615,8 @@
 				"avgContextTokens": 900,
 				"avgSystemChars": 2000,
 				"avgToolsChars": 5000,
-				"avgMessagesChars": 20000
+				"avgMessagesChars": 20000,
+				"avgBinaryChars": 0
 			},
 			{
 				"project": "beta",
@@ -621,7 +624,8 @@
 				"avgContextTokens": 900,
 				"avgSystemChars": 1666.6666666666667,
 				"avgToolsChars": 4166.666666666667,
-				"avgMessagesChars": 16333.333333333334
+				"avgMessagesChars": 16333.333333333334,
+				"avgBinaryChars": 0
 			},
 			{
 				"project": null,
@@ -629,7 +633,8 @@
 				"avgContextTokens": 900,
 				"avgSystemChars": 2000,
 				"avgToolsChars": 5000,
-				"avgMessagesChars": 20000
+				"avgMessagesChars": 20000,
+				"avgBinaryChars": 0
 			}
 		],
 		"growthCurve": [
