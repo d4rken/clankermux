@@ -45,7 +45,6 @@ import {
 	buildRequestQueryParams,
 	isRequestFilterActive,
 	mergeStatusCodes,
-	NO_PROJECT,
 	presetRange,
 	type RequestFilterState,
 	type StatusCategory,
@@ -106,12 +105,51 @@ export function costBadgeProps(billingType: string | null | undefined): {
 	};
 }
 
+/**
+ * Option values for the name-valued filter dropdowns.
+ *
+ * Radix `Select` needs a non-empty string per item, so the widget cannot avoid
+ * sentinels — but a bare "all" or "no-project" is confusable with a project or
+ * key genuinely called that. Real names are therefore namespaced under a `v:`
+ * prefix, which no unprefixed sentinel can collide with.
+ */
+const SELECT_ALL = "all";
+const SELECT_NONE = "none";
+const SELECT_NAME_PREFIX = "v:";
+
+/** What a name-valued filter is currently selecting. */
+interface NameSelection {
+	/** Literal name, or null when no name is selected. */
+	name: string | null;
+	/** The "recorded without one" bucket. */
+	none: boolean;
+}
+
+/** Selection -> the `Select` option value that represents it. */
+export function nameSelectValue(selection: NameSelection): string {
+	if (selection.none) return SELECT_NONE;
+	return selection.name === null
+		? SELECT_ALL
+		: `${SELECT_NAME_PREFIX}${selection.name}`;
+}
+
+/** Option value -> the selection it means. Inverse of {@link nameSelectValue}. */
+export function decodeNameSelectValue(value: string): NameSelection {
+	if (value === SELECT_NONE) return { name: null, none: true };
+	if (value.startsWith(SELECT_NAME_PREFIX)) {
+		return { name: value.slice(SELECT_NAME_PREFIX.length), none: false };
+	}
+	return { name: null, none: false };
+}
+
 export function RequestsTab() {
 	const [modalRequest, setModalRequest] = useState<RequestPayload | null>(null);
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
-	const [accountFilter, setAccountFilter] = useState<string>("all");
-	const [apiKeyFilter, setApiKeyFilter] = useState<string>("all");
-	const [projectFilter, setProjectFilter] = useState<string>("all");
+	const [accountFilter, setAccountFilter] = useState<string | null>(null);
+	const [apiKeyFilter, setApiKeyFilter] = useState<string | null>(null);
+	const [noApiKeyFilter, setNoApiKeyFilter] = useState(false);
+	const [projectFilter, setProjectFilter] = useState<string | null>(null);
+	const [noProjectFilter, setNoProjectFilter] = useState(false);
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -128,7 +166,9 @@ export function RequestsTab() {
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
 			apiKey: apiKeyFilter,
+			noApiKey: noApiKeyFilter,
 			project: projectFilter,
+			noProject: noProjectFilter,
 			from: dateFrom,
 			to: dateTo,
 		}),
@@ -137,7 +177,9 @@ export function RequestsTab() {
 			statusCodeFilters,
 			accountFilter,
 			apiKeyFilter,
+			noApiKeyFilter,
 			projectFilter,
+			noProjectFilter,
 			dateFrom,
 			dateTo,
 		],
@@ -276,9 +318,11 @@ export function RequestsTab() {
 
 	const clearAllFilters = () => {
 		setStatusCategory("all");
-		setAccountFilter("all");
-		setApiKeyFilter("all");
-		setProjectFilter("all");
+		setAccountFilter(null);
+		setApiKeyFilter(null);
+		setNoApiKeyFilter(false);
+		setProjectFilter(null);
+		setNoProjectFilter(false);
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
@@ -366,39 +410,45 @@ export function RequestsTab() {
 									</button>
 								</Badge>
 							)}
-							{accountFilter !== "all" && (
+							{accountFilter !== null && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<User className="h-3 w-3" />
 									{accountFilter}
 									<button
 										type="button"
-										onClick={() => setAccountFilter("all")}
+										onClick={() => setAccountFilter(null)}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
 									</button>
 								</Badge>
 							)}
-							{apiKeyFilter !== "all" && (
+							{(noApiKeyFilter || apiKeyFilter !== null) && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<Hash className="h-3 w-3" />
-									{apiKeyFilter === "no-api-key" ? "No API Key" : apiKeyFilter}
+									{noApiKeyFilter ? "No API Key" : apiKeyFilter}
 									<button
 										type="button"
-										onClick={() => setApiKeyFilter("all")}
+										onClick={() => {
+											setApiKeyFilter(null);
+											setNoApiKeyFilter(false);
+										}}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
 									</button>
 								</Badge>
 							)}
-							{projectFilter !== "all" && (
+							{(noProjectFilter || projectFilter !== null) && (
 								<Badge variant="outline" className="gap-1.5 pr-1">
 									<Folder className="h-3 w-3" />
-									{projectFilter === NO_PROJECT ? "No Project" : projectFilter}
+									{noProjectFilter ? "No Project" : projectFilter}
 									<button
 										type="button"
-										onClick={() => setProjectFilter("all")}
+										onClick={() => {
+											setProjectFilter(null);
+											setNoProjectFilter(false);
+										}}
 										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
 									>
 										<X className="h-3 w-3" />
@@ -635,14 +685,16 @@ export function RequestsTab() {
 										Account
 									</Label>
 									<Select
-										value={accountFilter}
-										onValueChange={setAccountFilter}
+										value={accountFilter ?? SELECT_ALL}
+										onValueChange={(value) =>
+											setAccountFilter(value === SELECT_ALL ? null : value)
+										}
 									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All accounts" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All accounts</SelectItem>
+											<SelectItem value={SELECT_ALL}>All accounts</SelectItem>
 											{uniqueAccounts.map((account) => (
 												<SelectItem key={account} value={account || ""}>
 													{account}
@@ -658,15 +710,28 @@ export function RequestsTab() {
 										<Key className="h-3 w-3" />
 										API Key
 									</Label>
-									<Select value={apiKeyFilter} onValueChange={setApiKeyFilter}>
+									<Select
+										value={nameSelectValue({
+											name: apiKeyFilter,
+											none: noApiKeyFilter,
+										})}
+										onValueChange={(value) => {
+											const next = decodeNameSelectValue(value);
+											setApiKeyFilter(next.name);
+											setNoApiKeyFilter(next.none);
+										}}
+									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All API keys" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All API keys</SelectItem>
-											<SelectItem value="no-api-key">No API Key</SelectItem>
+											<SelectItem value={SELECT_ALL}>All API keys</SelectItem>
+											<SelectItem value={SELECT_NONE}>No API Key</SelectItem>
 											{uniqueApiKeys.map((key) => (
-												<SelectItem key={key} value={key || ""}>
+												<SelectItem
+													key={key}
+													value={nameSelectValue({ name: key, none: false })}
+												>
 													{key}
 												</SelectItem>
 											))}
@@ -681,17 +746,30 @@ export function RequestsTab() {
 										Project
 									</Label>
 									<Select
-										value={projectFilter}
-										onValueChange={setProjectFilter}
+										value={nameSelectValue({
+											name: projectFilter,
+											none: noProjectFilter,
+										})}
+										onValueChange={(value) => {
+											const next = decodeNameSelectValue(value);
+											setProjectFilter(next.name);
+											setNoProjectFilter(next.none);
+										}}
 									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All projects" />
 										</SelectTrigger>
 										<SelectContent>
-											<SelectItem value="all">All projects</SelectItem>
-											<SelectItem value={NO_PROJECT}>No Project</SelectItem>
+											<SelectItem value={SELECT_ALL}>All projects</SelectItem>
+											<SelectItem value={SELECT_NONE}>No Project</SelectItem>
 											{uniqueProjects.map((project) => (
-												<SelectItem key={project} value={project || ""}>
+												<SelectItem
+													key={project}
+													value={nameSelectValue({
+														name: project,
+														none: false,
+													})}
+												>
 													{project}
 												</SelectItem>
 											))}
@@ -937,7 +1015,10 @@ export function RequestsTab() {
 														badgeVariants({ variant: "outline" }),
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
-													onClick={() => setApiKeyFilter(apiKeyName)}
+													onClick={() => {
+														setApiKeyFilter(apiKeyName);
+														setNoApiKeyFilter(false);
+													}}
 													title={`Filter by API key ${apiKeyName}`}
 												>
 													<Key className="h-3 w-3 mr-1" />
@@ -951,7 +1032,10 @@ export function RequestsTab() {
 														badgeVariants({ variant: "outline" }),
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
-													onClick={() => setProjectFilter(project)}
+													onClick={() => {
+														setProjectFilter(project);
+														setNoProjectFilter(false);
+													}}
 													title={`Filter by project ${project}`}
 												>
 													<Folder className="h-3 w-3 mr-1" />
