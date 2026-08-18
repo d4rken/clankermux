@@ -11,6 +11,11 @@ import {
 } from "../../lib/live-activity";
 import type { Outage } from "../../lib/live-activity-store";
 import { LIVE_WINDOW_OPTIONS } from "../../lib/live-activity-window";
+import {
+	laneRequestsHref,
+	requestDetailsHref,
+	resolveMarkHref,
+} from "../../lib/requests-link";
 import { useLiveActivity, useLiveWindow } from "../RequestEventProvider";
 import {
 	Card,
@@ -117,7 +122,15 @@ export interface LiveActivityLanesViewProps {
 		onPointerMove?: React.PointerEventHandler<SVGSVGElement>;
 		onPointerLeave?: React.PointerEventHandler<SVGSVGElement>;
 		onKeyDown?: React.KeyboardEventHandler<SVGSVGElement>;
-		onBlur?: React.FocusEventHandler<SVGSVGElement>;
+		onClick?: React.MouseEventHandler<SVGSVGElement>;
+		onFocus?: React.FocusEventHandler<SVGSVGElement>;
+		/**
+		 * Lands on the WRAPPER around the plot and the selected-request link, not
+		 * on the SVG. Tabbing from the plot to that link is a blur of the SVG; if
+		 * it cleared the selection there, the link would unmount mid-tab and the
+		 * focus would have nowhere to go.
+		 */
+		onBlur?: React.FocusEventHandler<HTMLDivElement>;
 	};
 }
 
@@ -156,7 +169,8 @@ export function LiveActivityLanesView({
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
 							Every request in the last {Math.round(windowMs / 60_000)} minutes,
-							by project. Mark size follows token count.
+							by project. Mark size follows token count. Click a mark to open
+							its request.
 						</CardDescription>
 					</div>
 					<div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
@@ -197,21 +211,52 @@ export function LiveActivityLanesView({
 				) : (
 					<div className="flex gap-3">
 						{/* Lane labels — real text, not SVG, so they wrap, truncate and
-						    are selectable like any other list. */}
-						<ul className="w-32 shrink-0 space-y-0 pt-0" aria-hidden="true">
-							{lanes.map((lane) => (
-								<li
-									key={lane.key}
-									className="flex items-center truncate text-sm text-muted-foreground"
-									style={{ height: LANE_HEIGHT }}
-									title={lane.label}
-								>
-									{lane.label}
-								</li>
-							))}
+						    are selectable like any other list. NOT aria-hidden: each
+						    label that maps to a single filter is a link, and focusable
+						    content inside an aria-hidden subtree is an accessibility
+						    violation. */}
+						<ul className="w-32 shrink-0 space-y-0 pt-0">
+							{lanes.map((lane) => {
+								const href = laneRequestsHref(lane.scope);
+								return (
+									<li
+										key={lane.key}
+										className="flex items-center truncate text-sm text-muted-foreground"
+										style={{ height: LANE_HEIGHT }}
+										title={lane.label}
+									>
+										{/* The overflow lane aggregates several projects, so no
+										    single project filter expresses it — it stays text
+										    rather than linking to a subset of what it shows. */}
+										{href === null ? (
+											lane.label
+										) : (
+											<a
+												href={href}
+												target="_blank"
+												rel="noopener noreferrer"
+												aria-label={`Show ${lane.label} requests`}
+												className="truncate hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+											>
+												{lane.label}
+											</a>
+										)}
+									</li>
+								);
+							})}
 						</ul>
 
-						<div className="min-w-0 flex-1" ref={plot?.areaRef}>
+						{/* Wrapper, so a blur can tell "focus left the plot area" from
+						    "focus moved to the selected-request link below the plot".
+						    Focus BOOKKEEPING for the controls inside it, not an
+						    interactive element of its own — it is never focusable and
+						    has nothing to activate. */}
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: onBlur here tracks focus leaving the group, it does not make the div actionable */}
+						<div
+							className="min-w-0 flex-1"
+							ref={plot?.areaRef}
+							onBlur={plot?.onBlur}
+						>
 							<svg
 								ref={plot?.ref}
 								width="100%"
@@ -219,16 +264,22 @@ export function LiveActivityLanesView({
 								viewBox={`0 0 ${plotWidth} ${height}`}
 								role="img"
 								aria-label={describeLanes(lanes, windowMs)}
-								className="overflow-visible focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+								className={`overflow-visible focus:outline-none focus-visible:ring-1 focus-visible:ring-ring${
+									plot?.onClick ? " cursor-pointer" : ""
+								}`}
 								// The 28px lane row is the hit target: the pointer only
 								// has to be CLOSEST to a mark, never on it. A 5px dot is
 								// a pinpoint nobody lands on reliably, and at this
-								// density per-mark hit areas would overlap anyway.
+								// density per-mark hit areas would overlap anyway. The
+								// CLICK path additionally caps the horizontal distance
+								// (see resolveMarkHref) so empty space does not open a
+								// request minutes away from the pointer.
 								tabIndex={plot ? 0 : undefined}
 								onPointerMove={plot?.onPointerMove}
 								onPointerLeave={plot?.onPointerLeave}
 								onKeyDown={plot?.onKeyDown}
-								onBlur={plot?.onBlur}
+								onClick={plot?.onClick}
+								onFocus={plot?.onFocus}
 							>
 								<title>{describeLanes(lanes, windowMs)}</title>
 								<defs>
@@ -343,6 +394,22 @@ export function LiveActivityLanesView({
 									</text>
 								))}
 							</svg>
+
+							{/* Native link semantics for the selected mark. The plot is
+							    role="img": Enter on an image role is not announced as
+							    actionable, and with no initial selection it would do
+							    nothing until an arrow key was guessed. A real anchor is
+							    reachable by Tab and reads as a link. */}
+							{selected && (
+								<a
+									href={requestDetailsHref(selected.id)}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="mt-1 inline-block text-xs text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+								>
+									Open selected request
+								</a>
+							)}
 						</div>
 
 						{/* Direct labels: every number the marks encode is also written
@@ -780,8 +847,11 @@ export function LiveActivityLanes() {
  * time has passed since. Deriving the offset from a fixed origin rather than
  * accumulating it per frame is what stops the 1 Hz relayout and the animation
  * frame from double-advancing the marks.
+ *
+ * Exported for the DOM test lane: this is where the pointer, click and focus
+ * handling lives, and asserting a copy of it would prove nothing about it.
  */
-function ScrollingLanes({
+export function ScrollingLanes({
 	plotAreaRef,
 	lanes,
 	renderNow,
@@ -820,19 +890,49 @@ function ScrollingLanes({
 		? (lanes[cursor.laneIndex]?.events[cursor.eventIndex] ?? null)
 		: null;
 
+	/**
+	 * Pointer position in the plot's own coordinate space.
+	 *
+	 * The bounding rect is the SVG's, which does NOT include the transform
+	 * applied to the inner scroll group — only the element's own box.
+	 */
+	const plotPoint = useCallback(
+		(pointer: { clientX: number; clientY: number }) => {
+			const element = svgRef.current;
+			if (!element) return null;
+			const rect = element.getBoundingClientRect();
+			const scale = rect.width === 0 ? 1 : plotWidth / rect.width;
+			return {
+				x: (pointer.clientX - rect.left) * scale,
+				y: pointer.clientY - rect.top,
+			};
+		},
+		[plotWidth],
+	);
+
+	/**
+	 * The instant the marks are CURRENTLY drawn against.
+	 *
+	 * Marks are laid out against `renderNow` and then translated by
+	 * `(Date.now() - renderNow) * pxPerMs` on the inner group, so resolving a
+	 * pointer against `renderNow` misses by that offset — up to a few px at the
+	 * narrowest window. Reduced motion applies no transform, so there the layout
+	 * origin is still the on-screen truth.
+	 */
+	const hitNow = useCallback(
+		() => (reducedMotion ? renderNow : Date.now()),
+		[reducedMotion, renderNow],
+	);
+
 	const onPointerMove = useCallback(
 		(pointerEvent: React.PointerEvent<SVGSVGElement>) => {
-			const element = svgRef.current;
-			if (!element) return;
-			const rect = element.getBoundingClientRect();
-			// The rect already reflects the scroll transform, so pointer x maps
-			// straight back into the same layout space the marks were placed in.
-			const scale = rect.width === 0 ? 1 : plotWidth / rect.width;
+			const point = plotPoint(pointerEvent);
+			if (!point) return;
 			const hit = hitTest(
 				lanes,
-				(pointerEvent.clientX - rect.left) * scale,
-				pointerEvent.clientY - rect.top,
-				renderNow,
+				point.x,
+				point.y,
+				hitNow(),
 				windowMs,
 				plotWidth,
 			);
@@ -840,11 +940,61 @@ function ScrollingLanes({
 				hit ? { laneIndex: hit.laneIndex, eventIndex: hit.eventIndex } : null,
 			);
 		},
-		[lanes, plotWidth, renderNow, windowMs],
+		[hitNow, lanes, plotPoint, plotWidth, windowMs],
 	);
+
+	/** Open a request in a new tab. Same call for pointer and keyboard. */
+	const openRequest = useCallback((href: string) => {
+		window.open(href, "_blank", "noopener,noreferrer");
+	}, []);
+
+	const onClick = useCallback(
+		(mouseEvent: React.MouseEvent<SVGSVGElement>) => {
+			const point = plotPoint(mouseEvent);
+			if (!point) return;
+			const href = resolveMarkHref(
+				lanes,
+				point.x,
+				point.y,
+				hitNow(),
+				windowMs,
+				plotWidth,
+			);
+			if (href) openRequest(href);
+		},
+		[hitNow, lanes, openRequest, plotPoint, plotWidth, windowMs],
+	);
+
+	/**
+	 * Focusing the plot selects something, so Enter always has a target.
+	 *
+	 * The most recent mark of the first non-empty lane: with no selection at
+	 * all, a keyboard user would have to guess that an arrow key is what makes
+	 * the plot do anything.
+	 */
+	const onFocus = useCallback(() => {
+		setCursor((prior) => {
+			if (prior) return prior;
+			const laneIndex = lanes.findIndex((lane) => lane.events.length > 0);
+			if (laneIndex === -1) return null;
+			return {
+				laneIndex,
+				eventIndex: lanes[laneIndex].events.length - 1,
+			};
+		});
+	}, [lanes]);
 
 	const onKeyDown = useCallback(
 		(keyEvent: React.KeyboardEvent<SVGSVGElement>) => {
+			// Convenience only — the authoritative keyboard affordance is the
+			// "Open selected request" anchor below the plot, which is a real link.
+			// preventDefault so Space does not scroll the page instead.
+			if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+				keyEvent.preventDefault();
+				if (selected) openRequest(requestDetailsHref(selected.id));
+				return;
+			}
+
 			const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
 			if (!keys.includes(keyEvent.key)) return;
 			keyEvent.preventDefault();
@@ -871,10 +1021,24 @@ function ScrollingLanes({
 				};
 			});
 		},
-		[lanes],
+		[lanes, openRequest, selected],
 	);
 
 	const clearCursor = useCallback(() => setCursor(null), []);
+
+	/**
+	 * Clear the selection only when focus leaves the plot AREA.
+	 *
+	 * Tabbing from the plot to the "Open selected request" link is a blur of the
+	 * SVG; clearing there would unmount the link the focus is moving to.
+	 */
+	const onAreaBlur = useCallback(
+		(focusEvent: React.FocusEvent<HTMLDivElement>) => {
+			if (focusEvent.currentTarget.contains(focusEvent.relatedTarget)) return;
+			clearCursor();
+		},
+		[clearCursor],
+	);
 
 	useEffect(() => {
 		const element = scrollRef.current;
@@ -943,8 +1107,10 @@ function ScrollingLanes({
 						scrollRef,
 						onPointerMove,
 						onPointerLeave: clearCursor,
-						onBlur: clearCursor,
+						onBlur: onAreaBlur,
 						onKeyDown,
+						onClick,
+						onFocus,
 					}}
 				/>
 			</div>
@@ -991,6 +1157,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				<Row label="Project" value={event.project ?? "(no project)"} />
 				<Row label="At" value={new Date(event.ts).toLocaleTimeString()} />
 			</dl>
+			<p className="mt-1 text-muted-foreground">Click to open details</p>
 		</div>
 	);
 }
