@@ -477,6 +477,30 @@ export const useInfiniteRequests = (
 };
 
 /**
+ * One request resolved by id.
+ *
+ * Only for the deep link from Live Activity, whose target is regularly outside
+ * the slice the list view has loaded. Callers pass `null` whenever the row is
+ * already in that slice, which disables the query entirely — an ordinary row
+ * click therefore issues no extra request.
+ *
+ * `refetchInterval: false` is explicit: without it the query inherits the
+ * app-wide `REFRESH_INTERVALS.default` from App.tsx and polls for as long as
+ * the details modal stays open. A recorded request never changes.
+ */
+export const useRequestById = (id: string | null) => {
+	return useQuery({
+		queryKey: queryKeys.requestById(id ?? ""),
+		queryFn: () => api.getRequestById(id as string),
+		enabled: id !== null,
+		staleTime: Infinity,
+		gcTime: 5 * 60 * 1000,
+		refetchInterval: false,
+		retry: shouldRetryDashboardQuery,
+	});
+};
+
+/**
  * Distinct project names observed across all recorded requests. Backs the
  * Project filter dropdown; mirrors useApiKeys' caching (the list changes
  * rarely, so a minute of staleness is fine).

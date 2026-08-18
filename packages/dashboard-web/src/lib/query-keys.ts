@@ -45,6 +45,10 @@ export const queryKeys = {
 		[...queryKeys.all, "requests", "filtered", params] as const,
 	requestsCount: (params: unknown) =>
 		[...queryKeys.all, "requests", "count", params] as const,
+	// A single request resolved by id, for a deep link whose target is outside
+	// the loaded slice.
+	requestById: (id: string) =>
+		[...queryKeys.all, "requests", "by-id", { id }] as const,
 	requestProjects: () => [...queryKeys.all, "requests", "projects"] as const,
 	// Options for the analytics filter dropdowns. Unkeyed: the lists are global
 	// by design, so scoping them to the active filters would make a filter

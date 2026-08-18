@@ -720,6 +720,19 @@ class API extends HttpClient {
 	}
 
 	/**
+	 * One request by id, or null when nothing has been recorded under it.
+	 *
+	 * A deep link from Live Activity can name a request outside whatever slice
+	 * the list view has loaded — and, because an in-flight request has no
+	 * database row until it completes, one that does not exist yet. Both are
+	 * ordinary outcomes here, so a miss is null rather than a 404.
+	 */
+	async getRequestById(id: string): Promise<RequestSummary | null> {
+		const rows = await this.getRequestsSummary(1, { id });
+		return rows[0] ?? null;
+	}
+
+	/**
 	 * Count requests matching a filter set (no limit/offset). Backs the
 	 * "M of N matching requests" total in the filtered request explorer.
 	 */
