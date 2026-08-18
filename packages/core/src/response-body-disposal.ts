@@ -4,11 +4,26 @@
  * Two DIFFERENT kinds of abandoned body need two DIFFERENT treatments, and
  * using the wrong one costs memory (or hangs):
  *
- *   - A NATIVE `fetch()` body must be DRAINED. At Bun 1.3.x a fetch Response
- *     body that is neither read to EOF nor cancelled keeps its socket and its
- *     ~512 KB native read buffer committed indefinitely; cancelling alone does
- *     not reliably return the native allocation, whereas reading to EOF does.
- *     Use {@link discardUpstreamBody}.
+ *   - A NATIVE `fetch()` body must be DRAINED, then cancelled. Use
+ *     {@link discardUpstreamBody}.
+ *
+ *     Historical, and no longer true: on Bun 1.3.x a fetch Response body that
+ *     was neither read to EOF nor cancelled kept its socket and its ~512 KB
+ *     native read buffer committed indefinitely, and cancelling alone did not
+ *     reliably return the native allocation. Re-measured on 1.4.0-canary
+ *     (8326d1bd3), cancelling a discarded body retains 0.2-0.8 KB/req — noise,
+ *     against a harness that reports a known 71 KB/req retention as 75. Bun
+ *     closed the gap upstream; the `body.cancel()` cost fell from ~93 KB/req on
+ *     1.3.2 to ~9 KB/req on main well before oven-sh/bun#35093, which is about
+ *     `AbortController.abort()` and NOT about `cancel()` (a live misreading in
+ *     the wild — better-ccflare v3.5.59 rewrote two call sites citing it).
+ *
+ *     Drain-then-cancel is KEPT anyway: it measures at or below plain cancel on
+ *     the current runtime, so there is nothing to win by reverting, and it is
+ *     the only variant that is also correct on the 1.3.x runtimes this code
+ *     still has to survive being pinned back to. Do not "simplify" it to a bare
+ *     cancel on the strength of the numbers above without re-measuring on the
+ *     runtime you are actually shipping.
  *
  *   - A `clone()` / tee BRANCH must be CANCELLED, never drained. Draining a
  *     branch forces the tee to keep pulling bytes FOR that branch and buffer
@@ -449,10 +464,15 @@ async function drainToRelease(
  * branch makes the tee buffer for the twin).
  *
  * Never awaited, and callers must not await it either. `await
- * branch.body.cancel()` with the twin still unread does not settle (measured:
- * >3 s, no resolution) and that is spec-correct: WHATWG `ReadableStreamTee`
- * settles its `cancelPromise` only once BOTH branches have cancelled, and the
- * twin here is the live response someone else is actively reading.
+ * branch.body.cancel()` with the twin still unread does not settle (>3 s, no
+ * resolution; re-confirmed on Bun 1.4.0-canary 8326d1bd3) and that is
+ * spec-correct: WHATWG `ReadableStreamTee` settles its `cancelPromise` only
+ * once BOTH branches have cancelled, and the twin here is the response someone
+ * else still owns. Unlike the fetch-body note above, this one has NOT aged out.
+ * A twin that is actively being read does settle the cancel promptly, which is
+ * exactly why the hazard is easy to miss in a test — the shape that hangs is a
+ * twin nobody has started reading yet, i.e. a response the proxy may still
+ * forward.
  *
  * Safe with any `Response`/`null`/`undefined`; skips a null/locked body and
  * swallows the harmless error from an already-cancelled one.
