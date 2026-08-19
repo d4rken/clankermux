@@ -35,16 +35,14 @@ function formatCodexCreditBalance(credits: number): string {
 /**
  * "Re-auth in 5 days" — days, not `formatDuration`'s hours, because the chip
  * only ever appears inside the final week and "144.0h" is a worse way to say
- * "six days". Rounds UP so the last partial day still reads as a day left
- * rather than "today", and only says "today" once the deadline is genuinely
- * inside 24 hours.
+ * "six days". Takes the already-derived day count rather than a deadline plus
+ * its own `Date.now()`, so the label cannot drift from the status flag that
+ * decides whether the chip renders at all.
  */
-function formatReauthDeadline(deadlineMs: number, now: number = Date.now()) {
-	const msLeft = deadlineMs - now;
-	if (msLeft <= 0) return "Re-auth overdue";
-	const days = Math.ceil(msLeft / (24 * 60 * 60 * 1000));
-	if (days <= 1) return "Re-auth today";
-	return `Re-auth in ${days} days`;
+function formatReauthDeadline(daysRemaining: number): string {
+	if (daysRemaining <= 0) return "Re-auth overdue";
+	if (daysRemaining === 1) return "Re-auth today";
+	return `Re-auth in ${daysRemaining} days`;
 }
 
 interface AccountStatusChipsProps {
@@ -532,17 +530,19 @@ export function AccountStatusChips({
 					Needs re-authentication
 				</StatusChip>
 			)}
-			{status.isReauthDueSoon && status.reauthDeadlineMs !== null && (
-				<StatusChip
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-					title={`This account's OAuth refresh token expires on ${new Date(
-						status.reauthDeadlineMs,
-					).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`}
-				>
-					<CalendarClock className="h-3.5 w-3.5" />
-					{formatReauthDeadline(status.reauthDeadlineMs)}
-				</StatusChip>
-			)}
+			{status.isReauthDueSoon &&
+				status.reauthDeadlineMs !== null &&
+				status.reauthDaysRemaining !== null && (
+					<StatusChip
+						className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+						title={`This account's OAuth refresh token expires on ${new Date(
+							status.reauthDeadlineMs,
+						).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`}
+					>
+						<CalendarClock className="h-3.5 w-3.5" />
+						{formatReauthDeadline(status.reauthDaysRemaining)}
+					</StatusChip>
+				)}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip
 					status={status.rateLimitStatus}

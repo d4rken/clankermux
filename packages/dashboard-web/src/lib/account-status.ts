@@ -67,6 +67,16 @@ export interface AccountStatus {
 	 * that still leaves time to do something about it.
 	 */
 	isReauthDueSoon: boolean;
+	/**
+	 * Whole days until {@link AccountStatus.reauthDeadlineMs}, rounded UP so the
+	 * last partial day still reads as a day left; 0 once the deadline is inside
+	 * 24 hours, negative once it has passed, null when there is no deadline.
+	 *
+	 * Derived here rather than in the chip so the countdown and the warning that
+	 * gates it read the same clock — a component formatting from `Date.now()`
+	 * would silently ignore the `now` this function was given.
+	 */
+	reauthDaysRemaining: number | null;
 	/** Unified rate-limit status string, e.g. "rate_limited (30m)" or "OK". */
 	rateLimitStatus: string;
 	/** Normalized rate-limit cause from the API; null on legacy payloads. */
@@ -195,6 +205,10 @@ export function deriveAccountStatus(
 	// both would just be the same fact twice in two tenses.
 	const isReauthDueSoon =
 		!isNeedsReauth && isReauthDueSoonShared(reauthDeadlineMs, now);
+	const reauthDaysRemaining =
+		reauthDeadlineMs === null
+			? null
+			: Math.ceil((reauthDeadlineMs - now) / (24 * 60 * 60 * 1000));
 	const rateLimitStatus = presenter.rateLimitStatus;
 
 	// Prefer the API's structured cause; fall back to prefix-matching the display
@@ -361,6 +375,7 @@ export function deriveAccountStatus(
 		isNeedsReauth,
 		reauthDeadlineMs,
 		isReauthDueSoon,
+		reauthDaysRemaining,
 		rateLimitStatus,
 		rateLimitCause,
 		rateLimitCauseResetMs: account.rateLimitCauseResetMs ?? null,
