@@ -17,9 +17,11 @@ export {
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
 	isPlausibleSpeed,
+	isReauthDueSoon,
 	LIMITS,
 	MAX_PLAUSIBLE_TOKENS_PER_SECOND,
 	NETWORK,
+	REFRESH_TOKEN_REAUTH_WARNING_MS,
 	TIME_CONSTANTS,
 } from "./constants";
 

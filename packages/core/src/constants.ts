@@ -205,6 +205,32 @@ export function isPlausibleSpeed(tps: number): boolean {
 	return tps > 0 && tps <= MAX_PLAUSIBLE_TOKENS_PER_SECOND;
 }
 
+/**
+ * How far ahead of an OAuth refresh token's expiry the account is flagged as
+ * needing re-authentication.
+ *
+ * Only a human can complete an OAuth flow, so the deadline cannot be met
+ * automatically — the sole defence is knowing the date before the refresh
+ * fails and the account auto-pauses mid-rotation. Seven days puts the warning
+ * a full week of ordinary use ahead of the outage.
+ */
+export const REFRESH_TOKEN_REAUTH_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * True when a stored refresh-token deadline is close enough to warrant a
+ * re-auth prompt. `null`/`undefined` means the provider never told us when the
+ * token dies (only Anthropic reports `refresh_token_expires_in`; Codex and the
+ * API-key providers do not), which is NOT the same as "plenty of time" — it is
+ * unknown, and an unknown deadline must never render as a warning.
+ */
+export function isReauthDueSoon(
+	refreshTokenExpiresAt: number | null | undefined,
+	now: number = Date.now(),
+): boolean {
+	if (refreshTokenExpiresAt == null) return false;
+	return refreshTokenExpiresAt - now <= REFRESH_TOKEN_REAUTH_WARNING_MS;
+}
+
 // HTTP status codes
 export const HTTP_STATUS = {
 	OK: 200,

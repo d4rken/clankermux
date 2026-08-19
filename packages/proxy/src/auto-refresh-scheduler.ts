@@ -752,6 +752,7 @@ export class AutoRefreshScheduler {
 				pause_reason: null,
 				notes: null,
 				refresh_token_issued_at: null,
+				refresh_token_expires_at: null,
 				renewal_anchor: null,
 				renewal_cadence: null,
 				renewal_price_usd_micros: null,

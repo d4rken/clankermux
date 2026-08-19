@@ -13,6 +13,12 @@ export interface OAuthTokens {
 	accessToken: string;
 	refreshToken?: string;
 	expiresAt: number;
+	/**
+	 * When `refreshToken` itself stops being accepted, in epoch ms; null/absent
+	 * when the provider reports no such deadline. See
+	 * {@link import("../types").TokenRefreshResult.refreshTokenExpiresAt}.
+	 */
+	refreshTokenExpiresAt?: number | null;
 	/** Optional account identity resolved from the token response / claims. */
 	identity?: AccountIdentity | null;
 }

@@ -57,6 +57,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			billing_type TEXT,
 			pause_reason TEXT,
 			refresh_token_issued_at INTEGER,
+			refresh_token_expires_at INTEGER,
 			consecutive_rate_limits INTEGER DEFAULT 0,
 			notes TEXT,
 			renewal_anchor TEXT,

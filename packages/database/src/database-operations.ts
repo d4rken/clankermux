@@ -921,6 +921,7 @@ OAuth tokens will need to be re-authenticated.
 		refreshToken?: string,
 		identity?: AccountIdentity | null,
 		expectedRefreshToken?: string | null,
+		options?: { refreshTokenExpiresAt?: number | null },
 	): Promise<boolean> {
 		return this.accounts.updateTokens(
 			accountId,
@@ -929,6 +930,7 @@ OAuth tokens will need to be re-authenticated.
 			refreshToken,
 			identity,
 			expectedRefreshToken,
+			options,
 		);
 	}
 

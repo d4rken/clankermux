@@ -32,6 +32,22 @@ function formatCodexCreditBalance(credits: number): string {
 	return `${Math.round(credits)} cr (€${eur})`;
 }
 
+/**
+ * "Re-auth in 5 days" — days, not `formatDuration`'s hours, because the chip
+ * only ever appears inside the final week and "144.0h" is a worse way to say
+ * "six days". Takes the already-derived day count rather than a deadline plus
+ * its own `Date.now()`, so the label cannot drift from the status flag that
+ * decides whether the chip renders at all.
+ */
+function formatReauthDeadline(daysRemaining: number): string {
+	if (daysRemaining <= 0) return "Re-auth overdue";
+	// "within 24h", not "today": the count is a duration, so at 23:30 a deadline
+	// of 00:30 would read "today" while the date rendered beside it in the
+	// account row says tomorrow. Naming the duration keeps the two consistent.
+	if (daysRemaining === 1) return "Re-auth within 24h";
+	return `Re-auth in ${daysRemaining} days`;
+}
+
 interface AccountStatusChipsProps {
 	account: AccountResponse;
 	/** Pre-derived status; falls back to deriving from `account` when omitted. */
@@ -517,6 +533,19 @@ export function AccountStatusChips({
 					Needs re-authentication
 				</StatusChip>
 			)}
+			{status.isReauthDueSoon &&
+				status.reauthDeadlineMs !== null &&
+				status.reauthDaysRemaining !== null && (
+					<StatusChip
+						className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+						title={`This account's OAuth refresh token expires on ${new Date(
+							status.reauthDeadlineMs,
+						).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`}
+					>
+						<CalendarClock className="h-3.5 w-3.5" />
+						{formatReauthDeadline(status.reauthDaysRemaining)}
+					</StatusChip>
+				)}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip
 					status={status.rateLimitStatus}

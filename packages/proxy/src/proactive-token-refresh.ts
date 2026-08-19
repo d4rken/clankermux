@@ -11,6 +11,7 @@ import {
 	flushPendingRotation,
 	getPendingRotation,
 	recordPendingRotation,
+	refreshTokenDeadlineFor,
 	resolvePendingAfterPersist,
 } from "./handlers/pending-rotation-registry";
 import {
@@ -128,6 +129,7 @@ export async function refreshProactiveAccountToken({
 		pause_reason: null,
 		notes: null,
 		refresh_token_issued_at: null,
+		refresh_token_expires_at: null,
 		renewal_anchor: null,
 		renewal_cadence: null,
 		renewal_price_usd_micros: null,
@@ -177,6 +179,14 @@ export async function refreshProactiveAccountToken({
 					result.refreshToken ??
 					pendingSnapshot?.refreshToken ??
 					row.refresh_token;
+				// Keyed on the token above, not on which branch produced it. When it
+				// falls through to the row's own token nothing knows a deadline, and
+				// the write then keeps the stored one (see updateTokens).
+				const effectiveRefreshTokenExpiresAt = refreshTokenDeadlineFor(
+					effectiveRefreshToken,
+					result,
+					pendingSnapshot,
+				);
 				// What a CONCURRENT flush of that same entry writes into the row — the
 				// entry's own refresh token, or its anchor when it carries none. A CAS
 				// miss that finds exactly this token in the row was caused by OUR OWN
@@ -201,6 +211,7 @@ export async function refreshProactiveAccountToken({
 						effectiveRefreshToken,
 						result.identity ?? null,
 						persistAnchor ?? undefined,
+						{ refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt },
 					);
 				} catch (persistError) {
 					// The provider already rotated, so this is a COMPLETED rotation with
@@ -213,6 +224,7 @@ export async function refreshProactiveAccountToken({
 							accessToken: result.accessToken,
 							expiresAt: result.expiresAt,
 							refreshToken: effectiveRefreshToken,
+							refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 							identity: result.identity ?? null,
 							attemptedRefreshToken: persistAnchor ?? "",
 						},
@@ -245,6 +257,7 @@ export async function refreshProactiveAccountToken({
 								accessToken: result.accessToken,
 								expiresAt: result.expiresAt,
 								refreshToken: effectiveRefreshToken,
+								refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 								identity: result.identity ?? null,
 							},
 						);
@@ -259,6 +272,7 @@ export async function refreshProactiveAccountToken({
 									accessToken: result.accessToken,
 									expiresAt: result.expiresAt,
 									refreshToken: effectiveRefreshToken,
+									refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 									identity: result.identity ?? null,
 									attemptedRefreshToken: pendingWrittenToken,
 								},

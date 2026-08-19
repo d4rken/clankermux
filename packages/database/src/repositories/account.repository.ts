@@ -52,6 +52,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				notes,
 				refresh_token_issued_at,
+				refresh_token_expires_at,
 				renewal_anchor,
 				renewal_cadence,
 				renewal_price_usd_micros,
@@ -93,6 +94,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				pause_reason,
 				notes,
 				refresh_token_issued_at,
+				refresh_token_expires_at,
 				renewal_anchor,
 				renewal_cadence,
 				renewal_price_usd_micros,
@@ -125,6 +127,22 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * delayed refresh success can never clobber freshly-installed credentials.
 	 * When `expectedRefreshToken` is omitted, the write is unconditional on
 	 * `id = ?` as before. Returns true iff a row was actually written.
+	 *
+	 * `options.refreshTokenExpiresAt` rides along with a rotated refresh token
+	 * and is written in the SAME statement, because it describes that specific
+	 * token: splitting it into a second write would leave a CAS-rejected
+	 * rotation's deadline attached to the token that actually survived.
+	 *
+	 * Three cases, in the order the SET resolves them:
+	 *   1. A deadline was reported — always written. Whatever the provider just
+	 *      told us about the token it just issued outranks anything stored.
+	 *   2. No deadline, and the token is UNCHANGED (Qwen echoes on every
+	 *      refresh; Anthropic does whenever its response omits `refresh_token`)
+	 *      — keep the stored date. The credential did not change, so erasing its
+	 *      known deadline would invent an unknown that isn't there.
+	 *   3. No deadline, and the token DID rotate — clear it. The stored date
+	 *      described the previous token, which is now dead upstream; carrying it
+	 *      forward would advertise a deadline for a credential that is gone.
 	 */
 	async updateTokens(
 		accountId: string,
@@ -133,6 +151,7 @@ export class AccountRepository extends BaseRepository<Account> {
 		refreshToken?: string,
 		identity?: AccountIdentity | null,
 		expectedRefreshToken?: string | null,
+		options?: { refreshTokenExpiresAt?: number | null },
 	): Promise<boolean> {
 		const now = Date.now();
 		// When identity is provided, COALESCE-merge each field so a null arriving
@@ -155,14 +174,18 @@ export class AccountRepository extends BaseRepository<Account> {
 			expectedRefreshToken != null ? " AND refresh_token = ?" : "";
 		const casParams: Array<string | null> =
 			expectedRefreshToken != null ? [expectedRefreshToken] : [];
+		const newRefreshTokenExpiresAt = options?.refreshTokenExpiresAt ?? null;
 		if (refreshToken) {
 			const changes = await this.runWithChanges(
-				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?${identitySet} WHERE id = ?${casClause}`,
+				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, refresh_token_expires_at = CASE WHEN ? IS NOT NULL THEN ? WHEN refresh_token = ? THEN refresh_token_expires_at ELSE NULL END${identitySet} WHERE id = ?${casClause}`,
 				[
 					accessToken,
 					expiresAt,
 					refreshToken,
 					now,
+					newRefreshTokenExpiresAt,
+					newRefreshTokenExpiresAt,
+					refreshToken,
 					...identityParams,
 					accountId,
 					...casParams,

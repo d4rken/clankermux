@@ -97,6 +97,7 @@ describe("ensureSchema completeness", () => {
 			"renewal_price_usd_micros",
 			"renewal_auto_start_date",
 			"notes",
+			"refresh_token_expires_at",
 		];
 		for (const col of expected) {
 			expect(cols.has(col)).toBe(true);

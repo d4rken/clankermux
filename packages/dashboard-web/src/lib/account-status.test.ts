@@ -685,6 +685,70 @@ describe("deriveAccountStatus — subscription expired", () => {
 	});
 });
 
+describe("deriveAccountStatus — refresh-token re-auth deadline", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+
+	it("warns inside the final week with the deadline attached", () => {
+		const deadline = NOW + 5 * DAY;
+		const status = deriveAccountStatus(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(deadline).toISOString(),
+			}),
+			NOW,
+		);
+		expect(status.isReauthDueSoon).toBe(true);
+		expect(status.reauthDeadlineMs).toBe(deadline);
+	});
+
+	it("stays quiet while the deadline is further out, but still reports it", () => {
+		// The date is surfaced for the whole life of the token; only the WARNING
+		// is gated, so an account 60 days out still shows its date in the list.
+		const deadline = NOW + 60 * DAY;
+		const status = deriveAccountStatus(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(deadline).toISOString(),
+			}),
+			NOW,
+		);
+		expect(status.isReauthDueSoon).toBe(false);
+		expect(status.reauthDeadlineMs).toBe(deadline);
+	});
+
+	it("treats a missing deadline as unknown, never as distant", () => {
+		// Every non-Anthropic provider lands here: no deadline reported at all.
+		const status = deriveAccountStatus(
+			makeAccount({ refreshTokenExpiresAt: null }),
+			NOW,
+		);
+		expect(status.reauthDeadlineMs).toBeNull();
+		expect(status.isReauthDueSoon).toBe(false);
+	});
+
+	it("ignores an unparseable deadline instead of rendering Invalid Date", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ refreshTokenExpiresAt: "not-a-date" }),
+			NOW,
+		);
+		expect(status.reauthDeadlineMs).toBeNull();
+		expect(status.isReauthDueSoon).toBe(false);
+	});
+
+	it("suppresses the warning once the account is already paused for reauth", () => {
+		// The deadline has passed and the terminal "Needs re-authentication" chip
+		// is the accurate one; showing both would state the same fact twice.
+		const status = deriveAccountStatus(
+			makeAccount({
+				paused: true,
+				pauseReason: "oauth_invalid_grant",
+				refreshTokenExpiresAt: new Date(NOW - DAY).toISOString(),
+			}),
+			NOW,
+		);
+		expect(status.isNeedsReauth).toBe(true);
+		expect(status.isReauthDueSoon).toBe(false);
+	});
+});
+
 describe("deriveAccountStatus — needs reauth", () => {
 	it("flags isNeedsReauth when paused with pause_reason oauth_invalid_grant", () => {
 		const status = deriveAccountStatus(

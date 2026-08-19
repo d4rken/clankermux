@@ -76,7 +76,8 @@ export function ensureSchema(db: Database): void {
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER,
 			codex_usage_json TEXT,
-			codex_usage_observed_at INTEGER
+			codex_usage_observed_at INTEGER,
+			refresh_token_expires_at INTEGER
 		)
 	`);
 
@@ -755,6 +756,18 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "context_binary_chars",
 		ddl: "ALTER TABLE requests ADD COLUMN context_binary_chars INTEGER",
+	},
+	// When the account's CURRENT refresh token stops being accepted, from the
+	// provider's own `refresh_token_expires_in`. Distinct from expires_at (the
+	// short-lived access token) and from refresh_token_issued_at (when we last
+	// rotated). Written atomically with refresh_token, because it describes that
+	// exact token. NULL = the provider does not report a deadline (Codex, the
+	// API-key providers) or the row predates the column — unknown, never "far
+	// away", so nothing may warn off a NULL.
+	{
+		table: "accounts",
+		column: "refresh_token_expires_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN refresh_token_expires_at INTEGER",
 	},
 ];
 

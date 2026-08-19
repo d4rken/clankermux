@@ -91,6 +91,60 @@ describe("AccountStatusChips — renewal chip wording", () => {
 	});
 });
 
+describe("AccountStatusChips — refresh-token re-auth chip", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+
+	it("counts down in days inside the warning window", () => {
+		const html = render(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(NOW + 5 * DAY).toISOString(),
+			}),
+		);
+		expect(html).toContain("Re-auth in 5 days");
+		// The tooltip carries the actual date, not just the countdown.
+		expect(html).toContain("rotation does not extend");
+	});
+
+	it("names the duration, not a calendar day, inside the last 24 hours", () => {
+		// "today" would contradict the date rendered beside it whenever the
+		// deadline crosses local midnight.
+		const html = render(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(NOW + 6 * 60 * 60 * 1000).toISOString(),
+			}),
+		);
+		expect(html).toContain("Re-auth within 24h");
+		expect(html).not.toContain("Re-auth today");
+	});
+
+	it("renders no chip while the deadline is far out", () => {
+		const html = render(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(NOW + 60 * DAY).toISOString(),
+			}),
+		);
+		expect(html).not.toContain("Re-auth");
+	});
+
+	it("renders no chip for a provider that reports no deadline", () => {
+		const html = render(makeAccount({ refreshTokenExpiresAt: null }));
+		expect(html).not.toContain("Re-auth");
+	});
+
+	it("shows only the terminal chip once the account is already paused for reauth", () => {
+		const html = render(
+			makeAccount({
+				paused: true,
+				pauseReason: "oauth_invalid_grant",
+				refreshTokenExpiresAt: new Date(NOW - DAY).toISOString(),
+			}),
+		);
+		expect(html).toContain("Needs re-authentication");
+		expect(html).not.toContain("Re-auth in");
+		expect(html).not.toContain("Re-auth overdue");
+	});
+});
+
 describe("AccountStatusChips — expired suppresses renewal chip", () => {
 	it("shows 'Subscription expired' and no renewal chip when expired with a past date", () => {
 		const html = render(

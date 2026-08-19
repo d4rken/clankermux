@@ -238,6 +238,7 @@ export class OAuthFlow {
 				access_token = ?,
 				expires_at = ?,
 				refresh_token_issued_at = ?,
+				refresh_token_expires_at = ?,
 				identity_external_id = COALESCE(?, identity_external_id),
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
@@ -251,6 +252,7 @@ export class OAuthFlow {
 				tokens.accessToken,
 				tokens.expiresAt,
 				now,
+				tokens.refreshTokenExpiresAt ?? null,
 				identity.externalAccountId,
 				identity.email,
 				identity.organizationName,
@@ -401,12 +403,12 @@ export class OAuthFlow {
 			INSERT INTO accounts (
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
 				created_at, request_count, total_requests, priority, custom_endpoint,
-				refresh_token_issued_at,
+				refresh_token_issued_at, refresh_token_expires_at,
 				identity_external_id, identity_email, identity_organization_name,
 				identity_plan_tier, identity_rate_limit_tier,
 				identity_captured_at, identity_profile_fetched_at,
 				auto_pause_on_overage_enabled
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 			`,
 			[
 				id,
@@ -419,6 +421,7 @@ export class OAuthFlow {
 				priority,
 				customEndpoint || null,
 				now,
+				tokens.refreshTokenExpiresAt ?? null,
 				identity.externalAccountId,
 				identity.email,
 				identity.organizationName,
