@@ -41,7 +41,10 @@ function formatCodexCreditBalance(credits: number): string {
  */
 function formatReauthDeadline(daysRemaining: number): string {
 	if (daysRemaining <= 0) return "Re-auth overdue";
-	if (daysRemaining === 1) return "Re-auth today";
+	// "within 24h", not "today": the count is a duration, so at 23:30 a deadline
+	// of 00:30 would read "today" while the date rendered beside it in the
+	// account row says tomorrow. Naming the duration keeps the two consistent.
+	if (daysRemaining === 1) return "Re-auth within 24h";
 	return `Re-auth in ${daysRemaining} days`;
 }
 

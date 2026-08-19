@@ -30,7 +30,20 @@ export interface RefreshTokenExpiryFields {
  * a token that the provider just issued and simultaneously declared expired is
  * a response we do not understand, and guessing would surface a permanent
  * "re-auth overdue" warning on a working account.
+ *
+ * The computed instant is range-checked too, not just the input. A finite but
+ * absurd duration still lands outside what `Date` can represent, and such a
+ * value stored in the row would make `new Date(...).toISOString()` throw in the
+ * accounts API — one malformed token response taking out the whole account
+ * list. Out of range is treated the same as absent: unknown.
  */
+
+/**
+ * ECMAScript's TimeClip bound: `Date` represents ±100,000,000 days around the
+ * epoch, and `toISOString()` throws a RangeError beyond it.
+ */
+const MAX_REPRESENTABLE_DATE_MS = 8.64e15;
+
 export function resolveRefreshTokenExpiresAt(
 	json: RefreshTokenExpiryFields,
 	now: number = Date.now(),
@@ -43,5 +56,12 @@ export function resolveRefreshTokenExpiresAt(
 	) {
 		return null;
 	}
-	return now + seconds * 1000;
+	const expiresAt = now + seconds * 1000;
+	if (
+		!Number.isFinite(expiresAt) ||
+		Math.abs(expiresAt) > MAX_REPRESENTABLE_DATE_MS
+	) {
+		return null;
+	}
+	return expiresAt;
 }

@@ -22,6 +22,7 @@ import {
 	type PendingRotation,
 	type PendingRotationWriter,
 	recordPendingRotation,
+	refreshTokenDeadlineFor,
 	resolvePendingAfterPersist,
 } from "./pending-rotation-registry";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
@@ -824,11 +825,14 @@ export async function refreshAccessTokenSafe(
 					pendingSnapshot?.attemptedRefreshToken ?? exchangedRefreshToken;
 				const effectiveRefreshToken =
 					result.refreshToken ?? pendingSnapshot?.refreshToken;
-				// The deadline belongs to whichever token the line above selected.
-				const effectiveRefreshTokenExpiresAt =
-					result.refreshToken != null
-						? (result.refreshTokenExpiresAt ?? null)
-						: (pendingSnapshot?.refreshTokenExpiresAt ?? null);
+				// Keyed on the token above, not on which branch produced it: the
+				// result and the pending entry can name the SAME token while only
+				// one of them carries its deadline.
+				const effectiveRefreshTokenExpiresAt = refreshTokenDeadlineFor(
+					effectiveRefreshToken,
+					result,
+					pendingSnapshot,
+				);
 				// What a CONCURRENT flush of that same entry writes into the row — the
 				// entry's own refresh token, or its anchor when it carries none. A CAS
 				// miss that finds exactly this token in the row was caused by OUR OWN

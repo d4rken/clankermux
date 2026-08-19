@@ -105,13 +105,16 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 		expect(html).toContain("rotation does not extend");
 	});
 
-	it("says 'today' once the deadline is inside 24 hours", () => {
+	it("names the duration, not a calendar day, inside the last 24 hours", () => {
+		// "today" would contradict the date rendered beside it whenever the
+		// deadline crosses local midnight.
 		const html = render(
 			makeAccount({
 				refreshTokenExpiresAt: new Date(NOW + 6 * 60 * 60 * 1000).toISOString(),
 			}),
 		);
-		expect(html).toContain("Re-auth today");
+		expect(html).toContain("Re-auth within 24h");
+		expect(html).not.toContain("Re-auth today");
 	});
 
 	it("renders no chip while the deadline is far out", () => {

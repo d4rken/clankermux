@@ -11,6 +11,7 @@ import {
 	flushPendingRotation,
 	getPendingRotation,
 	recordPendingRotation,
+	refreshTokenDeadlineFor,
 	resolvePendingAfterPersist,
 } from "./handlers/pending-rotation-registry";
 import {
@@ -178,13 +179,14 @@ export async function refreshProactiveAccountToken({
 					result.refreshToken ??
 					pendingSnapshot?.refreshToken ??
 					row.refresh_token;
-				// The deadline belongs to whichever token the line above selected.
-				// When that falls through to the row's own token the write keeps the
-				// stored date (see updateTokens), so null here is correct.
-				const effectiveRefreshTokenExpiresAt =
-					result.refreshToken != null
-						? (result.refreshTokenExpiresAt ?? null)
-						: (pendingSnapshot?.refreshTokenExpiresAt ?? null);
+				// Keyed on the token above, not on which branch produced it. When it
+				// falls through to the row's own token nothing knows a deadline, and
+				// the write then keeps the stored one (see updateTokens).
+				const effectiveRefreshTokenExpiresAt = refreshTokenDeadlineFor(
+					effectiveRefreshToken,
+					result,
+					pendingSnapshot,
+				);
 				// What a CONCURRENT flush of that same entry writes into the row — the
 				// entry's own refresh token, or its anchor when it carries none. A CAS
 				// miss that finds exactly this token in the row was caused by OUR OWN

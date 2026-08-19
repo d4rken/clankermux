@@ -47,6 +47,45 @@ export interface PendingRotationWriter {
 	): Promise<boolean>;
 }
 
+/**
+ * The deadline known for `refreshToken` — the token a persist is about to
+ * install — or null when nothing knows one.
+ *
+ * Both refresh paths pick the token they write from up to three sources (this
+ * refresh's result, a pending rotation, the row's own token) and must attach
+ * the deadline belonging to THAT token, not to whichever source was consulted
+ * first. Those can diverge: a pending rotation can hold a token plus its
+ * deadline while the refresh that follows returns the same token with no
+ * deadline of its own (the provider echoed it, or our own earlier flush had
+ * already landed it). Sourcing by position would then assert "no deadline" for
+ * a token whose deadline is sitting right there in the registry, and the write
+ * would clear a date we know.
+ *
+ * Matching on token identity instead makes the answer independent of which
+ * branch supplied the token. Null stays "unknown", which the repository turns
+ * into keep-or-clear depending on whether the stored token actually changed.
+ */
+export function refreshTokenDeadlineFor(
+	refreshToken: string | undefined,
+	result: {
+		refreshToken?: string | null;
+		refreshTokenExpiresAt?: number | null;
+	},
+	pending: PendingRotation | undefined,
+): number | null {
+	if (refreshToken === undefined) return null;
+	if (
+		result.refreshToken === refreshToken &&
+		result.refreshTokenExpiresAt != null
+	) {
+		return result.refreshTokenExpiresAt;
+	}
+	if (pending?.refreshToken === refreshToken) {
+		return pending.refreshTokenExpiresAt ?? null;
+	}
+	return null;
+}
+
 export type PendingRotationFlushOutcome =
 	| "none"
 	| "persisted"
@@ -125,8 +164,14 @@ export function recordPendingRotation(
 		expiresAt: rotation.expiresAt,
 		refreshToken: rotation.refreshToken,
 		// Chained rotations compress onto the newest token, so its deadline wins
-		// outright rather than merging with the superseded one's.
-		refreshTokenExpiresAt: rotation.refreshTokenExpiresAt ?? null,
+		// outright — EXCEPT when the incoming rotation names the token this entry
+		// already holds and reports no deadline of its own, where dropping to
+		// null would discard a date the entry already knew.
+		refreshTokenExpiresAt: refreshTokenDeadlineFor(
+			rotation.refreshToken,
+			rotation,
+			existing,
+		),
 		// The DB write COALESCE-merges identity fields, so preserving the whole
 		// previously-captured identity here is enough to keep a later null from
 		// erasing what an earlier rotation captured.

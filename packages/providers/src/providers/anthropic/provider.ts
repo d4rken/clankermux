@@ -272,12 +272,14 @@ export class AnthropicProvider extends BaseProvider {
 
 		const identity = extractAnthropicIdentity(json);
 
-		// Only meaningful alongside a rotated token: the deadline describes the
-		// refresh token this response issued, and a response that reused the old
-		// one says nothing about how long that older token still has.
-		const refreshTokenExpiresAt = json.refresh_token
-			? resolveRefreshTokenExpiresAt(json)
-			: null;
+		// Read unconditionally, including when the response rotates nothing. The
+		// field then describes the token we already hold and keep using, which is
+		// exactly the credential whose deadline we want; gating on rotation would
+		// throw away the only report we get for an account whose deadline is not
+		// yet recorded. The repository decides what that means for the stored
+		// row — a reported deadline is authoritative whether or not the token
+		// moved.
+		const refreshTokenExpiresAt = resolveRefreshTokenExpiresAt(json);
 
 		log.debug(`token response for ${account.name}:`, {
 			expiresIn: json.expires_in,

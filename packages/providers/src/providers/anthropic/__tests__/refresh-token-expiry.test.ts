@@ -77,6 +77,29 @@ describe("resolveRefreshTokenExpiresAt", () => {
 		expect(resolveRefreshTokenExpiresAt(codexResponse, NOW)).toBeNull();
 	});
 
+	it("rejects a duration whose deadline falls outside the Date range", () => {
+		// Finite input, unrepresentable result: `new Date(x).toISOString()` throws
+		// a RangeError past ±8.64e15, and this value reaches the accounts API,
+		// where one malformed token response would take out the whole list.
+		expect(
+			resolveRefreshTokenExpiresAt(
+				{ refresh_token_expires_in: Number.MAX_VALUE },
+				NOW,
+			),
+		).toBeNull();
+		expect(
+			resolveRefreshTokenExpiresAt({ refresh_token_expires_in: 1e13 }, NOW),
+		).toBeNull();
+		// The boundary itself stays usable.
+		const justInside = Math.floor((8.64e15 - NOW) / 1000) - 1;
+		const resolved = resolveRefreshTokenExpiresAt(
+			{ refresh_token_expires_in: justInside },
+			NOW,
+		);
+		expect(resolved).not.toBeNull();
+		expect(() => new Date(resolved as number).toISOString()).not.toThrow();
+	});
+
 	it("rejects unusable durations instead of minting a past deadline", () => {
 		// A past deadline would render as a permanent "re-auth overdue" warning on
 		// an account that is working fine.
@@ -146,10 +169,30 @@ describe("AnthropicProvider.refreshToken — refresh-token deadline", () => {
 		expect(result.refreshTokenExpiresAt).toBeNull();
 	});
 
-	it("does not carry a deadline forward when the response reuses the old token", async () => {
+	it("reports a deadline for the existing token when the response rotates nothing", async () => {
 		// No `refresh_token` in the response means the stored token is unchanged.
-		// The deadline belongs to whichever token is stored, and this response
-		// said nothing about it, so the refresh must not assert one.
+		// A deadline alongside it describes THAT token, and is the only report we
+		// get for an account whose deadline is not yet recorded — so it must not
+		// be gated on rotation.
+		globalThis.fetch = jsonFetch({
+			access_token: "new-access-token",
+			expires_in: 28_800,
+			refresh_token_expires_in: NINETY_DAYS_SEC,
+		});
+
+		const before = Date.now();
+		const result = await new AnthropicProvider().refreshToken(
+			makeAccount(),
+			"client-id",
+		);
+
+		expect(result.refreshToken).toBe("sk-ant-ort01-EXISTING");
+		expect(result.refreshTokenExpiresAt).toBeGreaterThanOrEqual(
+			before + NINETY_DAYS_SEC * 1000,
+		);
+	});
+
+	it("asserts no deadline when the response neither rotates nor reports one", async () => {
 		globalThis.fetch = jsonFetch({
 			access_token: "new-access-token",
 			expires_in: 28_800,
