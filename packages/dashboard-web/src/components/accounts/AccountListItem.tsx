@@ -511,6 +511,23 @@ export function AccountListItem({
 						</span>
 					)}
 					<span className="text-muted-foreground">{presenter.sessionInfo}</span>
+					{status.reauthDeadlineMs !== null && (
+						// Always shown once known, not only inside the warning window: the
+						// point of capturing the deadline is that it stops being a
+						// surprise, and a date that only appears in its final week is
+						// still a surprise for the other eleven.
+						<span
+							className="text-muted-foreground"
+							title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
+						>
+							· re-auth by{" "}
+							{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
+								year: "numeric",
+								month: "short",
+								day: "numeric",
+							})}
+						</span>
+					)}
 					{status.showForceReset && (
 						<Button
 							variant="outline"

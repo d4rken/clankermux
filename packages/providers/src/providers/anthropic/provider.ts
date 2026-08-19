@@ -1,6 +1,7 @@
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
 	isInvalidGrantMessage,
+	isReauthDueSoon,
 	mapModelName,
 	OAuthRefreshTokenError,
 	SOFT_WARNING_STATUSES as SHARED_SOFT_WARNING_STATUSES,
@@ -13,6 +14,7 @@ import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import { transformRequestBodyModel } from "../../utils/model-mapping";
 import { extractAnthropicIdentity } from "./identity";
+import { resolveRefreshTokenExpiresAt } from "./refresh-token-expiry";
 
 /**
  * Hard rate limit statuses that should block account usage.
@@ -263,15 +265,24 @@ export class AnthropicProvider extends BaseProvider {
 			access_token: string;
 			expires_in: number;
 			refresh_token?: string;
+			refresh_token_expires_in?: unknown;
 			account?: unknown;
 			organization?: unknown;
 		};
 
 		const identity = extractAnthropicIdentity(json);
 
+		// Only meaningful alongside a rotated token: the deadline describes the
+		// refresh token this response issued, and a response that reused the old
+		// one says nothing about how long that older token still has.
+		const refreshTokenExpiresAt = json.refresh_token
+			? resolveRefreshTokenExpiresAt(json)
+			: null;
+
 		log.debug(`token response for ${account.name}:`, {
 			expiresIn: json.expires_in,
 			hasRefreshToken: !!json.refresh_token,
+			refreshTokenExpiresAt,
 			responseKeys: Object.keys(json),
 		});
 		// Ensure we always return a refresh token
@@ -287,10 +298,23 @@ export class AnthropicProvider extends BaseProvider {
 			);
 		}
 
+		if (isReauthDueSoon(refreshTokenExpiresAt)) {
+			// Rotation does not push this deadline out, so continuing to refresh
+			// will not save the account — only a human re-auth will. Warn on every
+			// refresh through the final week rather than once, because a single
+			// line in a busy journal is a line nobody reads.
+			log.warn(
+				`Account ${account.name} needs re-authentication by ${new Date(
+					refreshTokenExpiresAt as number,
+				).toISOString()} — its OAuth refresh token expires then and token rotation does not extend it. The account will auto-pause mid-rotation if the deadline passes.`,
+			);
+		}
+
 		return {
 			accessToken: json.access_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
 			refreshToken: refreshToken,
+			refreshTokenExpiresAt,
 			identity,
 		};
 	}

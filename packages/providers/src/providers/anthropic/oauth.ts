@@ -7,6 +7,7 @@ import type {
 	TokenResult,
 } from "../../types";
 import { extractAnthropicIdentity } from "./identity";
+import { resolveRefreshTokenExpiresAt } from "./refresh-token-expiry";
 
 const oauthLog = new Logger("AnthropicOAuthProvider");
 
@@ -151,13 +152,17 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 			refresh_token: string;
 			access_token: string;
 			expires_in: number;
+			refresh_token_expires_in?: unknown;
 			account?: unknown;
 			organization?: unknown;
 		};
 
+		const refreshTokenExpiresAt = resolveRefreshTokenExpiresAt(json);
+
 		oauthLog.debug("exchange response:", {
 			expiresIn: json.expires_in,
 			hasRefreshToken: !!json.refresh_token,
+			refreshTokenExpiresAt,
 			responseKeys: Object.keys(json),
 		});
 
@@ -167,6 +172,7 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 			refreshToken: json.refresh_token,
 			accessToken: json.access_token,
 			expiresAt: Date.now() + json.expires_in * 1000,
+			refreshTokenExpiresAt,
 			identity,
 		};
 	}

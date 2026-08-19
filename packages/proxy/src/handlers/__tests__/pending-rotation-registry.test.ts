@@ -284,6 +284,10 @@ describe("pending-rotation registry flush", () => {
 			"rt-pending",
 			identity,
 			"rt-anchor",
+			// The entry carried no deadline, so the flush asserts none — the
+			// repository then keeps or clears the stored one based on whether
+			// "rt-pending" is actually a rotation.
+			{ refreshTokenExpiresAt: null },
 		]);
 		expect(getPendingRotation("flush-ok")).toBeUndefined();
 	});

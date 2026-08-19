@@ -699,6 +699,7 @@ export function createAccountsListHandler(
 			identity_profile_fetched_at: number | null;
 			codex_usage_json: string | null;
 			codex_usage_observed_at: number | null;
+			refresh_token_expires_at: number | null;
 		}>(
 			`
 				SELECT
@@ -747,6 +748,7 @@ export function createAccountsListHandler(
 					identity_profile_fetched_at,
 					codex_usage_json,
 					codex_usage_observed_at,
+					refresh_token_expires_at,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -1364,6 +1366,12 @@ export function createAccountsListHandler(
 					tokenStatus: account.token_valid ? "valid" : "expired",
 					tokenExpiresAt: account.expires_at
 						? new Date(Number(account.expires_at)).toISOString()
+						: null,
+					// When the REFRESH token dies and the account needs a human
+					// re-auth. null = the provider never reports one (only Anthropic
+					// does), which the UI must render as unknown rather than distant.
+					refreshTokenExpiresAt: account.refresh_token_expires_at
+						? new Date(Number(account.refresh_token_expires_at)).toISOString()
 						: null,
 					rateLimitStatus,
 					rateLimitCause: rateLimitPresentation.cause,

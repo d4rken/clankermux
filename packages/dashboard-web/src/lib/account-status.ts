@@ -1,4 +1,7 @@
-import { ACCOUNT_WIDE_HARD_STATUSES } from "@clankermux/core";
+import {
+	ACCOUNT_WIDE_HARD_STATUSES,
+	isReauthDueSoon as isReauthDueSoonShared,
+} from "@clankermux/core";
 import type {
 	AccountResponse,
 	RateLimitCause,
@@ -52,6 +55,18 @@ export interface AccountStatus {
 	 * Terminal — requires re-authentication; auto-resumes once reauth succeeds.
 	 */
 	isNeedsReauth: boolean;
+	/**
+	 * Epoch ms at which the OAuth refresh token expires and the account will
+	 * need a human re-auth; null when the provider reports no deadline.
+	 */
+	reauthDeadlineMs: number | null;
+	/**
+	 * The refresh token expires soon enough to act on. Deliberately independent
+	 * of {@link AccountStatus.isNeedsReauth}, which means the deadline has
+	 * already been missed and the account is paused — this one is the warning
+	 * that still leaves time to do something about it.
+	 */
+	isReauthDueSoon: boolean;
 	/** Unified rate-limit status string, e.g. "rate_limited (30m)" or "OK". */
 	rateLimitStatus: string;
 	/** Normalized rate-limit cause from the API; null on legacy payloads. */
@@ -169,6 +184,17 @@ export function deriveAccountStatus(
 		isPaused && account.pauseReason === "subscription_expired";
 	const isNeedsReauth =
 		isPaused && account.pauseReason === "oauth_invalid_grant";
+	const parsedReauthDeadline = account.refreshTokenExpiresAt
+		? Date.parse(account.refreshTokenExpiresAt)
+		: Number.NaN;
+	const reauthDeadlineMs = Number.isNaN(parsedReauthDeadline)
+		? null
+		: parsedReauthDeadline;
+	// Suppressed once the account is already paused for reauth: at that point the
+	// deadline has passed and the terminal chip is the accurate one, so showing
+	// both would just be the same fact twice in two tenses.
+	const isReauthDueSoon =
+		!isNeedsReauth && isReauthDueSoonShared(reauthDeadlineMs, now);
 	const rateLimitStatus = presenter.rateLimitStatus;
 
 	// Prefer the API's structured cause; fall back to prefix-matching the display
@@ -333,6 +359,8 @@ export function deriveAccountStatus(
 		isPaused,
 		isSubscriptionExpired,
 		isNeedsReauth,
+		reauthDeadlineMs,
+		isReauthDueSoon,
 		rateLimitStatus,
 		rateLimitCause,
 		rateLimitCauseResetMs: account.rateLimitCauseResetMs ?? null,

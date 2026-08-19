@@ -301,6 +301,7 @@ export interface AccountRow {
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes?: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	refresh_token_expires_at?: number | null; // When the current refresh token stops being accepted; null=provider reports no deadline (unknown, not distant)
 	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros?: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
@@ -351,6 +352,7 @@ export interface Account {
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes: string | null; // Free-text per-account operator notes
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
+	refresh_token_expires_at: number | null; // When the current refresh token stops being accepted; null=provider reports no deadline (unknown, not distant)
 	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
@@ -410,6 +412,16 @@ export interface AccountResponse {
 	pauseReason?: string | null;
 	tokenStatus: "valid" | "expired";
 	tokenExpiresAt: string | null; // ISO timestamp of token expiration
+	/**
+	 * ISO timestamp at which the account's OAuth REFRESH token stops being
+	 * accepted, after which only a human re-auth restores the account. Distinct
+	 * from {@link AccountResponse.tokenExpiresAt}, which is the access token the
+	 * proxy rotates by itself every few hours.
+	 *
+	 * null means the provider does not report a deadline (everything except
+	 * Anthropic). Unknown, not distant — never render null as "plenty of time".
+	 */
+	refreshTokenExpiresAt?: string | null;
 	/**
 	 * Back-compat display string (`<base>` or `<base> (Nm)`), derived from the
 	 * same decision as {@link AccountResponse.rateLimitCause} so the two can never
@@ -742,6 +754,7 @@ export function toAccount(row: AccountRow): Account {
 		pause_reason: row.pause_reason || null,
 		notes: row.notes || null,
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
+		refresh_token_expires_at: toNumOrNull(row.refresh_token_expires_at),
 		renewal_anchor: row.renewal_anchor || null,
 		renewal_cadence: row.renewal_cadence || null,
 		renewal_price_usd_micros: toNumOrNull(row.renewal_price_usd_micros),
@@ -818,6 +831,9 @@ export function toAccountResponse(account: Account): AccountResponse {
 		tokenStatus,
 		tokenExpiresAt: account.expires_at
 			? new Date(account.expires_at).toISOString()
+			: null,
+		refreshTokenExpiresAt: account.refresh_token_expires_at
+			? new Date(account.refresh_token_expires_at).toISOString()
 			: null,
 		rateLimitStatus,
 		// Minimal honest projection: this mapper has no usage data, so it can only

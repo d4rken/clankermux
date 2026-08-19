@@ -284,6 +284,7 @@ export async function retryPersistOnOwnFlushedRotation(
 		accessToken: string;
 		expiresAt: number;
 		refreshToken: string | undefined;
+		refreshTokenExpiresAt?: number | null;
 		identity: AccountIdentity | null | undefined;
 	},
 ): Promise<OwnFlushedRotationRetry> {
@@ -314,6 +315,7 @@ export async function retryPersistOnOwnFlushedRotation(
 			write.refreshToken,
 			write.identity,
 			write.pendingWrittenToken,
+			{ refreshTokenExpiresAt: write.refreshTokenExpiresAt ?? null },
 		);
 		if (persisted) {
 			log.info(
@@ -822,6 +824,11 @@ export async function refreshAccessTokenSafe(
 					pendingSnapshot?.attemptedRefreshToken ?? exchangedRefreshToken;
 				const effectiveRefreshToken =
 					result.refreshToken ?? pendingSnapshot?.refreshToken;
+				// The deadline belongs to whichever token the line above selected.
+				const effectiveRefreshTokenExpiresAt =
+					result.refreshToken != null
+						? (result.refreshTokenExpiresAt ?? null)
+						: (pendingSnapshot?.refreshTokenExpiresAt ?? null);
 				// What a CONCURRENT flush of that same entry writes into the row — the
 				// entry's own refresh token, or its anchor when it carries none. A CAS
 				// miss that finds exactly this token in the row was caused by OUR OWN
@@ -846,6 +853,7 @@ export async function refreshAccessTokenSafe(
 						effectiveRefreshToken,
 						result.identity,
 						persistAnchor ?? undefined,
+						{ refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt },
 					))
 						? "persisted"
 						: "superseded";
@@ -860,6 +868,7 @@ export async function refreshAccessTokenSafe(
 							accessToken: result.accessToken,
 							expiresAt: result.expiresAt,
 							refreshToken: effectiveRefreshToken,
+							refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 							identity: result.identity ?? null,
 							attemptedRefreshToken: persistAnchor ?? "",
 						},
@@ -893,6 +902,7 @@ export async function refreshAccessTokenSafe(
 								accessToken: result.accessToken,
 								expiresAt: result.expiresAt,
 								refreshToken: effectiveRefreshToken,
+								refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 								identity: result.identity,
 							},
 						);
@@ -908,6 +918,7 @@ export async function refreshAccessTokenSafe(
 									accessToken: result.accessToken,
 									expiresAt: result.expiresAt,
 									refreshToken: effectiveRefreshToken,
+									refreshTokenExpiresAt: effectiveRefreshTokenExpiresAt,
 									identity: result.identity ?? null,
 									attemptedRefreshToken: pendingWrittenToken,
 								},

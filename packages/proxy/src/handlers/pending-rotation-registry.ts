@@ -18,6 +18,13 @@ export interface PendingRotation {
 	accessToken: string;
 	expiresAt: number;
 	refreshToken?: string;
+	/**
+	 * Deadline of `refreshToken`, carried with it so a flush lands the pair the
+	 * provider actually issued. Reading it back off the row at flush time would
+	 * describe whichever token the row still holds, which is precisely the one
+	 * this entry exists to replace.
+	 */
+	refreshTokenExpiresAt?: number | null;
 	identity: AccountIdentity | null;
 	attemptedRefreshToken: string;
 	recordedAt: number;
@@ -36,6 +43,7 @@ export interface PendingRotationWriter {
 		refreshToken?: string,
 		identity?: AccountIdentity | null,
 		expectedRefreshToken?: string | null,
+		options?: { refreshTokenExpiresAt?: number | null },
 	): Promise<boolean>;
 }
 
@@ -116,6 +124,9 @@ export function recordPendingRotation(
 		accessToken: rotation.accessToken,
 		expiresAt: rotation.expiresAt,
 		refreshToken: rotation.refreshToken,
+		// Chained rotations compress onto the newest token, so its deadline wins
+		// outright rather than merging with the superseded one's.
+		refreshTokenExpiresAt: rotation.refreshTokenExpiresAt ?? null,
 		// The DB write COALESCE-merges identity fields, so preserving the whole
 		// previously-captured identity here is enough to keep a later null from
 		// erasing what an earlier rotation captured.
@@ -178,6 +189,7 @@ export async function flushPendingRotation(
 			entry.refreshToken,
 			entry.identity,
 			entry.attemptedRefreshToken,
+			{ refreshTokenExpiresAt: entry.refreshTokenExpiresAt ?? null },
 		);
 		if (persisted) {
 			resolvePendingAfterPersist(

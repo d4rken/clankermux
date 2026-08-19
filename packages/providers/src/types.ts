@@ -4,6 +4,18 @@ export interface TokenRefreshResult {
 	accessToken: string;
 	expiresAt: number;
 	refreshToken: string; // Always required - either new token or existing one
+	/**
+	 * When `refreshToken` itself stops being accepted, in epoch ms.
+	 *
+	 * Distinct from `expiresAt`, which is the short-lived access token. Rotating
+	 * the refresh token does not push this out: Anthropic counts it down toward a
+	 * fixed date set at the original authorization, so a continuously-refreshed
+	 * account still reaches it and needs a human re-auth.
+	 *
+	 * `null`/absent means the provider does not report a deadline (only Anthropic
+	 * sends `refresh_token_expires_in`). Absent is "unknown", never "far away".
+	 */
+	refreshTokenExpiresAt?: number | null;
 	/** Optional account identity resolved during refresh (token claims / profile). */
 	identity?: AccountIdentity | null;
 }
@@ -110,6 +122,8 @@ export interface TokenResult {
 	refreshToken: string;
 	accessToken: string;
 	expiresAt: number;
+	/** See {@link TokenRefreshResult.refreshTokenExpiresAt}. */
+	refreshTokenExpiresAt?: number | null;
 	/** Optional account identity resolved during code exchange (token claims / profile). */
 	identity?: AccountIdentity | null;
 }
