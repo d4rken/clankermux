@@ -88,7 +88,37 @@ export interface PayloadWriteAck {
 
 export type PayloadWriteResponse =
 	| { type: "ready"; generation: number }
-	| { type: "ack"; generation: number; results: PayloadWriteAck[] }
+	| {
+			type: "ack";
+			generation: number;
+			results: PayloadWriteAck[];
+			/**
+			 * Wall-clock ms spent inside `BEGIN IMMEDIATE` itself, i.e. waiting to
+			 * ACQUIRE the writer slot because someone else held it. This worker is
+			 * the victim during this span, not the cause.
+			 */
+			acquireWaitMs?: number;
+			/**
+			 * Wall-clock ms this batch HELD the writer slot: from a successful
+			 * `BEGIN IMMEDIATE` to the return of `COMMIT`. This is the span during
+			 * which any main-connection write parks in its busy handler with the
+			 * event loop frozen, so it is the supply side of the contention that
+			 * `lock-contention-stats` measures from the demand side.
+			 *
+			 * Kept separate from `acquireWaitMs` on purpose: summing them would
+			 * report this worker as the cause of a stall it was itself waiting
+			 * through, reversing the causality the measurement exists to establish.
+			 */
+			holdMs?: number;
+			/**
+			 * This batch touched the writer slot but produced NO usable span,
+			 * because it failed at BEGIN, mid-batch or at COMMIT. Reported so a
+			 * reader can see that `acquireWaitMs`/`holdMs` for the interval are
+			 * incomplete: both omit these attempts, so both are lower bounds, and
+			 * without this flag a failing worker would look like an idle one.
+			 */
+			slotUnmeasured?: boolean;
+	  }
 	| { type: "closed"; generation: number }
 	| {
 			type: "error";
@@ -377,6 +407,7 @@ export function createPayloadWriteEngine(
 		batch: PendingRow[],
 		errorClass: PayloadWriteErrorClass,
 		detail: string,
+		slotUnmeasured = false,
 	): void {
 		post({
 			type: "ack",
@@ -388,6 +419,7 @@ export function createPayloadWriteEngine(
 				errorClass,
 				detail,
 			})),
+			slotUnmeasured,
 		});
 	}
 
@@ -409,12 +441,20 @@ export function createPayloadWriteEngine(
 			return;
 		}
 
+		// Two distinct spans, measured separately. BEGIN IMMEDIATE is where this
+		// connection BLOCKS if another already holds the slot; everything after it
+		// is where this connection HOLDS the slot and blocks everyone else.
+		const acquireStartedAt = performance.now();
+		let slotHeldFrom = 0;
 		try {
 			db.exec("BEGIN IMMEDIATE");
+			slotHeldFrom = performance.now();
 		} catch (err) {
 			const errorClass = classifyCommitError(err);
 			if (errorClass === "writer-fatal") fatal = errorDetail(err);
-			nackAll(batch, errorClass, errorDetail(err));
+			// A failed BEGIN can still have sat in the busy handler for the
+			// worker's full timeout; that wait is real but unmeasurable here.
+			nackAll(batch, errorClass, errorDetail(err), true);
 			return;
 		}
 
@@ -458,7 +498,7 @@ export function createPayloadWriteEngine(
 			// hand every row back, including the ones that inserted cleanly.
 			rollbackQuietly();
 			fatal = fatalRow.detail;
-			nackAll(batch, "writer-fatal", fatalRow.detail);
+			nackAll(batch, "writer-fatal", fatalRow.detail, true);
 			return;
 		}
 
@@ -471,11 +511,17 @@ export function createPayloadWriteEngine(
 			// Every row of the batch is unwritten — including rows that failed
 			// their savepoint, whose "permanent" verdict came from a transaction
 			// that no longer exists. Nothing may be acked or dropped here.
-			nackAll(batch, errorClass, errorDetail(err));
+			nackAll(batch, errorClass, errorDetail(err), true);
 			return;
 		}
 
-		post({ type: "ack", generation, results });
+		post({
+			type: "ack",
+			generation,
+			results,
+			acquireWaitMs: slotHeldFrom - acquireStartedAt,
+			holdMs: performance.now() - slotHeldFrom,
+		});
 	}
 
 	function flush(): void {

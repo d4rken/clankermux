@@ -13,6 +13,12 @@ export type {
 export { DatabaseFactory } from "./factory";
 export type { IntegrityCheckKind } from "./integrity-check-runner";
 export { runIntegrityCheckInWorker } from "./integrity-check-runner";
+export type { LockContentionSnapshot } from "./lock-contention-stats";
+export {
+	formatLockContention,
+	LockContentionStats,
+	lockContentionStats,
+} from "./lock-contention-stats";
 export { ensureSchema, runMigrations } from "./migrations";
 export { resolveDbPath } from "./paths";
 // Public encryption API — only init/status helpers are exported.

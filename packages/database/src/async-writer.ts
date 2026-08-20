@@ -1,5 +1,9 @@
 import type { Disposable } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import {
+	formatLockContention,
+	lockContentionStats,
+} from "./lock-contention-stats";
 import type {
 	PayloadSettlement,
 	PayloadWriterFactory,
@@ -206,6 +210,16 @@ export class AsyncDbWriter implements Disposable {
 	private closingForDispose = false;
 	private disposed = false;
 
+	// Previous cumulative readings of the payload writer's slot-hold counters,
+	// so each report shows the interval delta rather than a total that only ever
+	// grows. The client's counters survive worker rotation, so these are safe to
+	// subtract; `reportLockContention` still clamps in case that ever changes.
+	private lastSlotHoldBatches = 0;
+	private lastSlotHoldTotalMs = 0;
+	private lastSlotHoldLong = 0;
+	private lastSlotAcquireWaitTotalMs = 0;
+	private lastSlotHoldUnmeasured = 0;
+
 	constructor(options: AsyncDbWriterOptions = {}) {
 		this.createPayloadWriter = options.createPayloadWriter;
 		this.intervalId = setInterval(() => void this.processQueue(), 100);
@@ -221,7 +235,102 @@ export class AsyncDbWriter implements Disposable {
 					`AsyncDbWriter health: metadataQueued=${h.metadataQueuedJobs}, payloadReserved=${h.payloadQueuedJobs}, payloadInFlight=${h.payloadInFlightJobs}, payloadBytesPending=${h.payloadBytesPending}, oldestMetadataAgeMs=${h.oldestMetadataAgeMs}, oldestPayloadAgeMs=${h.oldestPayloadAgeMs}, metadataDropped=${h.metadataDropped}, payloadDropped=${h.payloadDropped}, payloadDroppedBytes=${h.payloadDroppedBytes}, payloadCommitted=${h.payloadCommitted}, payloadExpired=${h.payloadExpired}, writerHealthy=${h.payloadWriterHealthy}, writerFatal=${h.payloadWriterFatal ?? "none"}, droppedThisInterval=${recentDrops}`,
 				);
 			}
+			this.reportLockContention();
 		}, 30000);
+	}
+
+	/**
+	 * Emit one interval's writer-slot contention picture: demand side (main
+	 * connection operations that parked, from `lockContentionStats`) and supply
+	 * side (how long the payload worker held the writer slot). Both are needed
+	 * because EventLoopMonitor can see that the loop froze but not why, and its
+	 * own WARN threshold coincides with the main connection's busy timeout, so
+	 * the journal alone cannot separate lock waits from slow reads.
+	 *
+	 * Silent when nothing happened, so idle intervals add no noise.
+	 */
+	private reportLockContention(): void {
+		const snap = lockContentionStats.drain();
+		const writerStats = this.payloadWriter?.getStats() ?? null;
+
+		// Clamp at zero: the client's counters are cumulative across worker
+		// rotations, but if the writer is ever replaced wholesale they restart,
+		// and a negative delta would read as "the slot was never held".
+		//
+		// The finite check is not paranoia about arithmetic — `PayloadWriterLike`
+		// is an interface, so a stats source that predates these fields (or a
+		// test double) yields `undefined` here, and `undefined - 0` is NaN. A
+		// diagnostic line reading "totalMs=NaN" is worse than useless, because
+		// the whole point of this log is to be trusted as evidence.
+		// A reading BELOW the baseline means the source restarted its counters, so
+		// the whole current value is new work since that reset. Clamping to zero
+		// instead (the obvious guard) would wedge the baseline high and suppress
+		// every reading until it climbed past the pre-reset total.
+		const delta = (current: number | undefined, previous: number): number => {
+			if (typeof current !== "number" || !Number.isFinite(current)) return 0;
+			return current < previous ? current : current - previous;
+		};
+		const holdBatches = writerStats
+			? delta(writerStats.slotHoldBatches, this.lastSlotHoldBatches)
+			: 0;
+		const holdMs = writerStats
+			? delta(writerStats.slotHoldTotalMs, this.lastSlotHoldTotalMs)
+			: 0;
+		const holdLong = writerStats
+			? delta(writerStats.slotHoldLong, this.lastSlotHoldLong)
+			: 0;
+		const acquireMs = writerStats
+			? delta(
+					writerStats.slotAcquireWaitTotalMs,
+					this.lastSlotAcquireWaitTotalMs,
+				)
+			: 0;
+		// Non-zero means the two totals above omit real slot activity, so they
+		// must be read as lower bounds for this interval.
+		const unmeasured = writerStats
+			? delta(writerStats.slotHoldUnmeasured, this.lastSlotHoldUnmeasured)
+			: 0;
+		if (writerStats) {
+			// Track the source's own reading, not baseline+delta: after a reset
+			// those diverge, and only the real reading keeps future deltas right.
+			// `advance` keeps a missing/non-finite field from latching NaN in.
+			const advance = (
+				current: number | undefined,
+				previous: number,
+			): number =>
+				typeof current === "number" && Number.isFinite(current)
+					? current
+					: previous;
+			this.lastSlotHoldBatches = advance(
+				writerStats.slotHoldBatches,
+				this.lastSlotHoldBatches,
+			);
+			this.lastSlotHoldTotalMs = advance(
+				writerStats.slotHoldTotalMs,
+				this.lastSlotHoldTotalMs,
+			);
+			this.lastSlotHoldLong = advance(
+				writerStats.slotHoldLong,
+				this.lastSlotHoldLong,
+			);
+			this.lastSlotAcquireWaitTotalMs = advance(
+				writerStats.slotAcquireWaitTotalMs,
+				this.lastSlotAcquireWaitTotalMs,
+			);
+			this.lastSlotHoldUnmeasured = advance(
+				writerStats.slotHoldUnmeasured,
+				this.lastSlotHoldUnmeasured,
+			);
+		}
+
+		if (snap.operations === 0 && holdBatches === 0 && unmeasured === 0) return;
+
+		logger.info(
+			`Lock contention: ${formatLockContention(snap)} | slotHold batches=${holdBatches} ` +
+				`totalMs=${holdMs} long=${holdLong} maxMsAllTime=${writerStats?.slotHoldMaxMs ?? 0} ` +
+				`| payloadWorkerWaited totalMs=${acquireMs} maxMsAllTime=${writerStats?.slotAcquireWaitMaxMs ?? 0} ` +
+				`unmeasuredBatches=${unmeasured}`,
+		);
 	}
 
 	/**
