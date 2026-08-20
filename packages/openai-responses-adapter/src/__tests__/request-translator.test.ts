@@ -160,6 +160,32 @@ describe("translateRequestToAnthropic", () => {
 		]);
 	});
 
+	test("an unrecognised nested block is preserved, not erased", () => {
+		// Returning empty text for an unknown item would make the routing estimate
+		// too SMALL: native passthrough still forwards the ORIGINAL body upstream,
+		// so the content is really there and really costs context. Under-measuring
+		// admits the request to an account it does not fit — the mirror image of
+		// the over-measuring bug this branch exists to fix.
+		const req: ResponsesRequest = {
+			model: "claude-3-5-sonnet-20241022",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_file",
+					output: [
+						{ type: "input_file", file_data: "PAYLOAD", filename: "a.pdf" },
+					],
+				} as unknown as ResponsesRequest["input"][number],
+			],
+		};
+		const result = translateRequestToAnthropic(req);
+		const block = (
+			result.messages[0].content[0] as { content: { text: string }[] }
+		).content[0];
+		expect(block.text).toContain("PAYLOAD");
+		expect(block.text).toContain("input_file");
+	});
+
 	test("empty array output stays an empty array", () => {
 		const req: ResponsesRequest = {
 			model: "claude-3-5-sonnet-20241022",

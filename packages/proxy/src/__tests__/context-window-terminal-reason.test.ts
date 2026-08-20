@@ -53,6 +53,11 @@ describe("context_window_exceeded terminal reason", () => {
 		expect(message).toContain("Codex CLI");
 		// The old wording asserted a condition nobody had checked.
 		expect(message).not.toContain("rate-limited or paused");
+		// And do not swap one false claim for another: Anthropic's 200k window is
+		// SMALLER than gpt-5.6-sol's 353k, so those accounts are not the
+		// larger-context option here. The flag proves exclusion and nothing more —
+		// not that such an account exists, nor that it would have had room.
+		expect(message).not.toContain("larger context");
 	});
 
 	it("keeps the availability wording for ordinary traffic", async () => {

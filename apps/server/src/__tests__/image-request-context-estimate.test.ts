@@ -248,12 +248,46 @@ describe("screenshot attached as a tool RESULT (the production shape)", () => {
 			composition,
 		);
 
-		// Production measured 430,847 for a request of this shape and rejected it.
-		// The base64 alone accounts for ~223k of that at 3 chars/token.
-		expect(estimate).toBeLessThan(100_000);
+		// Measured: 54,848. Counting the base64 as prompt text instead adds
+		// 667,968/3 and lands at 277,504 (production saw 430,847 for a slightly
+		// larger conversation of this shape). The band is deliberately tight in
+		// BOTH directions — an estimate that collapses toward the floor would mean
+		// the attachments stopped being counted at all, which admits a request to
+		// an account it does not fit. That is the same failure as the one being
+		// fixed here, just with the sign flipped.
+		expect(estimate).toBeGreaterThan(50_000);
+		expect(estimate).toBeLessThan(60_000);
 		expect(
 			codexAccountFitsRequest(codexAccount(), "claude-opus-4-8", estimate),
 		).toBe(true);
+	});
+
+	it("counts a url-source image in a tool result as an image too", () => {
+		// Only a data: URL carries a payload to strip; a bare URL has none. It must
+		// still register as an attachment so it draws the flat per-image allowance
+		// rather than being priced as the ~40 chars of its own JSON.
+		const anthropicBody = translateRequestToAnthropic({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_url",
+					output: [
+						{ type: "input_image", image_url: "https://example.com/shot.png" },
+					],
+				} as unknown as NonNullable<
+					Exclude<ResponsesRequest["input"], string>
+				>[number],
+			],
+		});
+
+		const { composition } = computeContextAndToolStats(
+			anthropicBody as unknown as Parameters<
+				typeof computeContextAndToolStats
+			>[0],
+		);
+		expect(composition?.imageCount).toBe(1);
+		expect(composition?.imagePayloadChars).toBe(0);
 	});
 
 	it("leaves a plain string tool output exactly as it was", () => {

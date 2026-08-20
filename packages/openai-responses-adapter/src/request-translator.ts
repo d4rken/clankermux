@@ -13,6 +13,15 @@ import type {
 
 const logger = new Logger("openai-responses-adapter");
 
+/** JSON text for a value, or "" if it cannot be stringified (circular refs). */
+function safeStringify(value: unknown): string {
+	try {
+		return JSON.stringify(value) ?? "";
+	} catch {
+		return "";
+	}
+}
+
 function parseArguments(args: string): unknown {
 	try {
 		return JSON.parse(args);
@@ -92,8 +101,14 @@ function translateContentItem(c: {
 		return { type: "text", text: "[image content omitted]" };
 	}
 
-	logger.warn(`Unknown content type "${c.type}" — content dropped`);
-	return { type: "text", text: "" };
+	// Preserve an unrecognised block instead of erasing it. Whatever it is still
+	// occupies real context upstream — native passthrough forwards the ORIGINAL
+	// Responses body verbatim — so returning "" would make the routing estimate
+	// too SMALL and admit the request to an account it does not fit. That is the
+	// same class of error as counting a screenshot's base64 as prompt text, just
+	// in the opposite direction. Carrying the block's JSON keeps it measurable.
+	logger.warn(`Unknown content type "${c.type}" — preserved verbatim as text`);
+	return { type: "text", text: safeStringify(c) };
 }
 
 function mergeConsecutiveSameRole(
