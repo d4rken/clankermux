@@ -1010,7 +1010,21 @@ export class RequestRecorder {
 		const meta = record.meta;
 		let requestBody: string | null = null;
 		if (record.reqBytes && record.reqBytes.byteLength > 0) {
-			requestBody = Buffer.from(record.reqBytes).toString("base64");
+			// Buffer.from(uint8array) COPIES the contents; the (buffer, offset,
+			// length) overload wraps the same memory. Both encode to identical
+			// base64, so the copy bought nothing — and it is a copy of the whole
+			// captured body, up to MAX_REQUEST_BODY_BYTES (4 MiB), on every stored
+			// request. Safe to share because the wrap is only ever read and never
+			// outlives this expression: toString() does not mutate and returns an
+			// independent string, so the alias is gone before the next event-loop
+			// turn. (`reqBytes` is cleared below for ordinary records; a synthetic
+			// record's async persistence closure can keep it alive longer under
+			// writer backlog, which affects retention, not this.)
+			requestBody = Buffer.from(
+				record.reqBytes.buffer,
+				record.reqBytes.byteOffset,
+				record.reqBytes.byteLength,
+			).toString("base64");
 		}
 		let responseBody: string | null = null;
 		if (record.respBytes > 0) {
