@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import { EMBEDDED_PAYLOAD_WRITE_WORKER_CODE } from "./inline-payload-write-worker";
+import { SLOT_HOLD_LONG_MS } from "./lock-contention-stats";
 import type {
 	PayloadWriteAck,
 	PayloadWriteErrorClass,
@@ -141,6 +142,28 @@ export interface PayloadWriterStats {
 	replays: number;
 	rotations: number;
 	spawnFailures: number;
+	/** Committed batches that reported a writer-slot hold measurement. */
+	slotHoldBatches: number;
+	/** Summed writer-slot hold across those batches, ms. */
+	slotHoldTotalMs: number;
+	/** Longest single writer-slot hold, ms. */
+	slotHoldMaxMs: number;
+	/** Holds at or above {@link SLOT_HOLD_LONG_MS}. */
+	slotHoldLong: number;
+	/**
+	 * Time the worker spent WAITING to acquire the writer slot, summed. High
+	 * values mean something else is holding the slot against the payload
+	 * worker, which is the opposite attribution from {@link slotHoldTotalMs}.
+	 */
+	slotAcquireWaitTotalMs: number;
+	/** Longest single acquisition wait, ms. */
+	slotAcquireWaitMaxMs: number;
+	/**
+	 * Batches that touched the writer slot but yielded no span, because they
+	 * failed at BEGIN, mid-batch or at COMMIT. Non-zero means the hold and wait
+	 * totals are incomplete by an unbounded amount; zero means they are whole.
+	 */
+	slotHoldUnmeasured: number;
 	fences: number;
 	activeGeneration: number | null;
 	liveGenerations: number;
@@ -346,6 +369,13 @@ export class PayloadWriteClient implements PayloadWriterLike {
 	private rotations = 0;
 	private spawnFailures = 0;
 	private fences = 0;
+	private slotHoldBatches = 0;
+	private slotHoldTotalMs = 0;
+	private slotHoldMaxMs = 0;
+	private slotHoldLong = 0;
+	private slotAcquireWaitTotalMs = 0;
+	private slotAcquireWaitMaxMs = 0;
+	private slotHoldUnmeasured = 0;
 
 	constructor(options: PayloadWriteClientOptions) {
 		this.options = options;
@@ -447,6 +477,13 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			rotations: this.rotations,
 			spawnFailures: this.spawnFailures,
 			fences: this.fences,
+			slotHoldBatches: this.slotHoldBatches,
+			slotHoldTotalMs: Math.round(this.slotHoldTotalMs),
+			slotHoldMaxMs: Math.round(this.slotHoldMaxMs),
+			slotHoldLong: this.slotHoldLong,
+			slotAcquireWaitTotalMs: Math.round(this.slotAcquireWaitTotalMs),
+			slotAcquireWaitMaxMs: Math.round(this.slotAcquireWaitMaxMs),
+			slotHoldUnmeasured: this.slotHoldUnmeasured,
 			activeGeneration: this.active?.id ?? null,
 			liveGenerations: this.generations.size,
 			healthy:
@@ -779,8 +816,55 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				generation.onClosed = null;
 				return;
 			case "ack":
+				this.recordSlotHold(
+					message.holdMs,
+					message.acquireWaitMs,
+					message.slotUnmeasured,
+				);
 				this.handleAck(generation, message.generation, message.results);
 				return;
+		}
+	}
+
+	/**
+	 * Accumulate one batch's writer-slot hold. Every ms counted here is a ms
+	 * during which a main-thread write would have parked in SQLite's busy
+	 * handler, freezing the event loop, so these totals are the supply side of
+	 * the contention the main connection measures from the demand side.
+	 */
+	private recordSlotHold(
+		holdMs: number | undefined,
+		acquireWaitMs: number | undefined,
+		slotUnmeasured: boolean | undefined,
+	): void {
+		if (slotUnmeasured === true) {
+			// A batch that touched the slot and produced no span. Counted so the
+			// totals below are readable as lower bounds rather than as complete.
+			this.slotHoldUnmeasured++;
+			return;
+		}
+		// Absent on the NACK paths and on any worker build predating the fields;
+		// a missing measurement must not be counted as a zero-length hold.
+		if (typeof holdMs !== "number" || !Number.isFinite(holdMs) || holdMs < 0) {
+			return;
+		}
+		this.slotHoldBatches++;
+		this.slotHoldTotalMs += holdMs;
+		if (holdMs > this.slotHoldMaxMs) this.slotHoldMaxMs = holdMs;
+		if (holdMs >= SLOT_HOLD_LONG_MS) this.slotHoldLong++;
+
+		// Tracked apart from the hold: this is time the WORKER lost waiting for
+		// someone else's lock, so attributing it to the worker would invert the
+		// direction of the contention being diagnosed.
+		if (
+			typeof acquireWaitMs === "number" &&
+			Number.isFinite(acquireWaitMs) &&
+			acquireWaitMs >= 0
+		) {
+			this.slotAcquireWaitTotalMs += acquireWaitMs;
+			if (acquireWaitMs > this.slotAcquireWaitMaxMs) {
+				this.slotAcquireWaitMaxMs = acquireWaitMs;
+			}
 		}
 	}
 
