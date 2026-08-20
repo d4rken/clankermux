@@ -5,7 +5,27 @@ const encoder = new TextEncoder();
 
 function encodeJson(body: RequestJsonBody): ArrayBuffer {
 	const encoded = encoder.encode(JSON.stringify(body));
-	// .buffer may be shared/oversized in some runtimes; slice to exact range
+	// TextEncoder.encode() is specified to return a fresh, exactly-sized
+	// Uint8Array, and does on Bun — so the slice below is a full duplicate of the
+	// whole request body for nothing. Bodies here run to megabytes (p90 ~2.3 MB,
+	// capped at 4 MiB), and this runs on every request whose body is patched, so
+	// the copy is a meaningful share of per-request garbage.
+	//
+	// The guard is O(1) and the slice is kept rather than deleted, for a runtime
+	// that hands back a shared or oversized buffer — unreachable on native Bun,
+	// where encode() always returns a fresh exactly-sized ArrayBuffer, so treat
+	// it as belt-and-braces rather than a live path.
+	//
+	// The `instanceof` is load-bearing and not redundant with the size checks:
+	// an exactly-sized SharedArrayBuffer would satisfy both offset and length
+	// conditions while still being unsafe to hand out as solely-owned memory.
+	if (
+		encoded.buffer instanceof ArrayBuffer &&
+		encoded.byteOffset === 0 &&
+		encoded.byteLength === encoded.buffer.byteLength
+	) {
+		return encoded.buffer;
+	}
 	return encoded.buffer.slice(
 		encoded.byteOffset,
 		encoded.byteOffset + encoded.byteLength,
