@@ -3062,6 +3062,13 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * @param estimatedTokens  Conservative token estimate for the request
  * @param excludedBackends Codex backends dropped by the size gate
  * @param requestModel     The Anthropic-side model name from the request
+ * @param excludeOfficialAnthropic Whether the Codex-CLI floor barred official
+ *   Anthropic accounts from this request. It decides WHY nothing else stepped
+ *   in: with the floor active they were never candidates, so reporting them as
+ *   rate-limited or paused describes a condition nobody checked — and is
+ *   routinely false, since the floor applies to healthy accounts too. The
+ *   replacement clause claims only exclusion, not that such an account exists
+ *   or would have had room.
  */
 export interface ContextWindowExcludedBackend {
 	account: Account;
@@ -3072,6 +3079,7 @@ export function createContextWindowExceededResponse(
 	estimatedTokens: number,
 	excludedBackends: ContextWindowExcludedBackend[],
 	requestModel: string,
+	excludeOfficialAnthropic = false,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
 		const target = resolveCodexTargetModel(model, account);
@@ -3095,10 +3103,19 @@ export function createContextWindowExceededResponse(
 			)
 			.join(", ") || "no eligible backend";
 
+	// Say only what the flag establishes. It proves official Anthropic accounts
+	// were barred from selection; it does NOT prove any exist, or that one would
+	// have fit — Anthropic's 200k window is SMALLER than gpt-5.6-sol's 353k, so
+	// claiming they are the larger-context option would be false here.
+	const largerContextReason = excludeOfficialAnthropic
+		? `Official Anthropic accounts are never eligible for Codex CLI traffic ` +
+			`and were not considered.`
+		: `Larger-context accounts are currently unavailable (rate-limited or paused).`;
+
 	const message =
 		`Request estimated at ~${estimatedTokens} tokens exceeds the context ` +
 		`window of every available backend: ${backendSummary}. ` +
-		`Larger-context accounts are currently unavailable (rate-limited or paused).`;
+		largerContextReason;
 
 	return new Response(
 		JSON.stringify({

@@ -552,6 +552,7 @@ export async function resolveZeroAccountsOutcome(
 					gateTokenEstimate,
 					[...gates.contextExcludedAccounts],
 					effectiveRequestModel ?? "unknown",
+					requestMeta.excludeOfficialAnthropic === true,
 				);
 			}
 			if (!relaxAttempted && relaxSuppressed > 0) {

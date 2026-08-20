@@ -66,10 +66,16 @@ export interface FunctionCallItem {
 	arguments: string; // JSON string
 }
 
+/**
+ * A tool result. `output` is usually a JSON string, but Codex CLI sends an
+ * ARRAY of content items whenever the result carries an attachment — a
+ * screenshot comes back as `[{input_text}, {input_image}]`. Declaring this
+ * `string` is what let those items reach the Anthropic body untranslated.
+ */
 export interface FunctionCallOutputItem {
 	type: "function_call_output";
 	call_id: string;
-	output: string; // JSON string
+	output: string | ResponseContent[];
 }
 
 export interface CustomToolCallItem {
@@ -83,7 +89,7 @@ export interface CustomToolCallItem {
 export interface CustomToolCallOutputItem {
 	type: "custom_tool_call_output";
 	call_id: string;
-	output: string;
+	output: string | ResponseContent[];
 }
 
 // Tool definition
@@ -216,7 +222,13 @@ export interface AnthropicToolUseContent {
 export interface AnthropicToolResultContent {
 	type: "tool_result";
 	tool_use_id: string;
-	content: string | AnthropicTextContent[];
+	/**
+	 * Blocks, not just text: a tool result can carry an image (Codex CLI
+	 * screenshots, Claude Code's own tool_result attachments). Anything nested
+	 * here has to be a real Anthropic block so `measureContentBlock` can strip
+	 * the base64 payload out of the token estimate.
+	 */
+	content: string | (AnthropicTextContent | AnthropicImageContent)[];
 }
 
 export interface AnthropicTool {

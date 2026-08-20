@@ -5,12 +5,22 @@ import type {
 	AnthropicRequest,
 	AnthropicTool,
 	AnthropicToolChoice,
+	AnthropicToolResultContent,
 	ResponseItem,
 	ResponsesRequest,
 	ResponsesTool,
 } from "./types";
 
 const logger = new Logger("openai-responses-adapter");
+
+/** JSON text for a value, or "" if it cannot be stringified (circular refs). */
+function safeStringify(value: unknown): string {
+	try {
+		return JSON.stringify(value) ?? "";
+	} catch {
+		return "";
+	}
+}
 
 function parseArguments(args: string): unknown {
 	try {
@@ -91,8 +101,14 @@ function translateContentItem(c: {
 		return { type: "text", text: "[image content omitted]" };
 	}
 
-	logger.warn(`Unknown content type "${c.type}" — content dropped`);
-	return { type: "text", text: "" };
+	// Preserve an unrecognised block instead of erasing it. Whatever it is still
+	// occupies real context upstream — native passthrough forwards the ORIGINAL
+	// Responses body verbatim — so returning "" would make the routing estimate
+	// too SMALL and admit the request to an account it does not fit. That is the
+	// same class of error as counting a screenshot's base64 as prompt text, just
+	// in the opposite direction. Carrying the block's JSON keeps it measurable.
+	logger.warn(`Unknown content type "${c.type}" — preserved verbatim as text`);
+	return { type: "text", text: safeStringify(c) };
 }
 
 function mergeConsecutiveSameRole(
@@ -154,13 +170,23 @@ export function translateRequestToAnthropic(
 			item.type === "function_call_output" ||
 			item.type === "custom_tool_call_output"
 		) {
+			// `output` is a plain string for ordinary tool results, but an ARRAY of
+			// Responses content items when the result carries an attachment — Codex
+			// CLI returns a screenshot as [{input_text}, {input_image}]. Those items
+			// go through the same translation as message content: forwarding them
+			// verbatim leaves `input_image` blocks inside an Anthropic tool_result,
+			// where measureContentBlock cannot recognise the attachment and prices
+			// its base64 as prompt text.
+			const content = Array.isArray(item.output)
+				? item.output.map((c) => translateContentItem(c))
+				: item.output;
 			messages.push({
 				role: "user",
 				content: [
 					{
 						type: "tool_result",
 						tool_use_id: item.call_id,
-						content: item.output,
+						content: content as AnthropicToolResultContent["content"],
 					},
 				],
 			});
