@@ -3062,6 +3062,12 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * @param estimatedTokens  Conservative token estimate for the request
  * @param excludedBackends Codex backends dropped by the size gate
  * @param requestModel     The Anthropic-side model name from the request
+ * @param excludeOfficialAnthropic Whether the Codex-CLI floor barred official
+ *   Anthropic accounts from this request. It decides WHY no larger-context
+ *   backend stepped in: with the floor active they were never candidates, so
+ *   reporting them as rate-limited or paused describes a condition nobody
+ *   checked — and is routinely false, since the floor applies to healthy
+ *   accounts too.
  */
 export interface ContextWindowExcludedBackend {
 	account: Account;
@@ -3072,6 +3078,7 @@ export function createContextWindowExceededResponse(
 	estimatedTokens: number,
 	excludedBackends: ContextWindowExcludedBackend[],
 	requestModel: string,
+	excludeOfficialAnthropic = false,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
 		const target = resolveCodexTargetModel(model, account);
@@ -3095,10 +3102,15 @@ export function createContextWindowExceededResponse(
 			)
 			.join(", ") || "no eligible backend";
 
+	const largerContextReason = excludeOfficialAnthropic
+		? `Official Anthropic accounts have larger context windows but are never ` +
+			`eligible for Codex CLI traffic, so none could take this request.`
+		: `Larger-context accounts are currently unavailable (rate-limited or paused).`;
+
 	const message =
 		`Request estimated at ~${estimatedTokens} tokens exceeds the context ` +
 		`window of every available backend: ${backendSummary}. ` +
-		`Larger-context accounts are currently unavailable (rate-limited or paused).`;
+		largerContextReason;
 
 	return new Response(
 		JSON.stringify({

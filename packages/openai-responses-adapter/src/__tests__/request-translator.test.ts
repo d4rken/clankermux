@@ -95,6 +95,88 @@ describe("translateRequestToAnthropic", () => {
 		]);
 	});
 
+	test("array-shaped function_call_output → translated tool_result blocks", () => {
+		// Codex CLI returns an image-bearing tool result as an array of Responses
+		// content items, not the JSON string the type used to claim. Passing those
+		// through verbatim left `input_image` blocks inside an Anthropic
+		// tool_result, where nothing downstream recognises them as attachments.
+		const req: ResponsesRequest = {
+			model: "claude-3-5-sonnet-20241022",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_img",
+					output: [
+						{ type: "input_text", text: "Script completed" },
+						{
+							type: "input_image",
+							image_url: "data:image/png;base64,QUJD",
+						},
+					],
+				} as unknown as ResponsesRequest["input"][number],
+			],
+		};
+		const result = translateRequestToAnthropic(req);
+		expect(result.messages[0].content).toEqual([
+			{
+				type: "tool_result",
+				tool_use_id: "call_img",
+				content: [
+					{ type: "text", text: "Script completed" },
+					{
+						type: "image",
+						source: { type: "base64", media_type: "image/png", data: "QUJD" },
+					},
+				],
+			},
+		]);
+	});
+
+	test("array-shaped output with a bare image URL keeps the url source", () => {
+		const req: ResponsesRequest = {
+			model: "claude-3-5-sonnet-20241022",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_url",
+					output: [
+						{ type: "input_image", image_url: "https://example.com/a.png" },
+					],
+				} as unknown as ResponsesRequest["input"][number],
+			],
+		};
+		const result = translateRequestToAnthropic(req);
+		expect(result.messages[0].content).toEqual([
+			{
+				type: "tool_result",
+				tool_use_id: "call_url",
+				content: [
+					{
+						type: "image",
+						source: { type: "url", url: "https://example.com/a.png" },
+					},
+				],
+			},
+		]);
+	});
+
+	test("empty array output stays an empty array", () => {
+		const req: ResponsesRequest = {
+			model: "claude-3-5-sonnet-20241022",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_empty",
+					output: [],
+				} as unknown as ResponsesRequest["input"][number],
+			],
+		};
+		const result = translateRequestToAnthropic(req);
+		expect(result.messages[0].content).toEqual([
+			{ type: "tool_result", tool_use_id: "call_empty", content: [] },
+		]);
+	});
+
 	test("mixed conversation: user, assistant+function_call, function_call_output, user", () => {
 		const req: ResponsesRequest = {
 			model: "claude-3-5-sonnet-20241022",

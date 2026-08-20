@@ -5,6 +5,7 @@ import type {
 	AnthropicRequest,
 	AnthropicTool,
 	AnthropicToolChoice,
+	AnthropicToolResultContent,
 	ResponseItem,
 	ResponsesRequest,
 	ResponsesTool,
@@ -154,13 +155,23 @@ export function translateRequestToAnthropic(
 			item.type === "function_call_output" ||
 			item.type === "custom_tool_call_output"
 		) {
+			// `output` is a plain string for ordinary tool results, but an ARRAY of
+			// Responses content items when the result carries an attachment — Codex
+			// CLI returns a screenshot as [{input_text}, {input_image}]. Those items
+			// go through the same translation as message content: forwarding them
+			// verbatim leaves `input_image` blocks inside an Anthropic tool_result,
+			// where measureContentBlock cannot recognise the attachment and prices
+			// its base64 as prompt text.
+			const content = Array.isArray(item.output)
+				? item.output.map((c) => translateContentItem(c))
+				: item.output;
 			messages.push({
 				role: "user",
 				content: [
 					{
 						type: "tool_result",
 						tool_use_id: item.call_id,
-						content: item.output,
+						content: content as AnthropicToolResultContent["content"],
 					},
 				],
 			});
