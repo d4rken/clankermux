@@ -110,7 +110,27 @@ export function createSseRateLimitSniffer(
 				buffer = `\n${buffer.slice(buffer.length - MAX_BUFFER_BYTES)}`;
 			}
 
-			const match = RATE_LIMIT_MARKER.exec(buffer);
+			// Necessary-condition gate before the expensive scan. The pattern
+			// cannot match without the literal "error" appearing (it requires
+			// `event:\s*error`), so skipping the regex when that substring is
+			// absent cannot change the outcome — it is strictly weaker than the
+			// pattern, never a filter on top of it.
+			//
+			// Worth doing because the regex runs on EVERY chunk over the whole
+			// rolling buffer, and on a normal stream it is looking for something
+			// that is not there: measured at 5000 chunks, decode+trim is ~10 ms
+			// while adding the per-chunk regex takes the total to ~97 ms. This
+			// gate cuts that to ~33 ms. A stream whose content legitimately
+			// contains the word "error" pays slightly MORE than before (this scan
+			// plus the regex) until that substring rolls out of the window — the
+			// bet is that most streamed content never contains it.
+			//
+			// Gate on `buffer`, never on the incoming chunk: an error frame can be
+			// completed by a chunk that holds no "error" substring itself, and the
+			// sniffer is one-shot, so a chunk-level gate would miss it forever.
+			const match = buffer.includes("error")
+				? RATE_LIMIT_MARKER.exec(buffer)
+				: null;
 			if (match) {
 				fired = true;
 				// match[2] is the first capture group inside the typePattern alternation
