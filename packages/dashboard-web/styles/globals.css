@@ -88,16 +88,23 @@
 	   larger starts to look like a consumer app rather than an instrument. */
 	--radius: 3px;
 	--card-shadow: none;
-	--card-border: 1px solid var(--border);
-	--card-pad: 1.25rem;
 
-	/* Type. A serif display face against a humanist sans and a tabular mono:
-	   headings read as typography, figures read as data, and the two never get
-	   confused for each other. */
-	--app-font-sans: "Karla", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-	--app-font-display: "Fraunces", Georgia, "Times New Roman", serif;
-	--display-tracking: -0.015em;
+	/* Type. One sans and its own mono, rather than three families.
+	   Geist and Geist Mono are drawn as a single system, so a label in the sans
+	   and a figure in the mono share proportions instead of merely coexisting —
+	   which is what a screen made mostly of labelled numbers needs.
+
+	   There is no separate display face any more. A serif heading gave the app
+	   an editorial character that read as quirky at UI sizes and sat oddly
+	   against dense tabular data; headings now differ from body text by size,
+	   weight and tracking alone. --app-font-display stays as a name so
+	   .display-face and .page-title keep one place to change. */
+	--app-font-sans:
+		"Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--app-font-mono:
+		"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--app-font-display: var(--app-font-sans);
+	--display-tracking: -0.02em;
 
 	/* Rhythm. Five steps, and every gap and stack in the app is one of them.
 	   Each value is the one already dominant at that role before the scale
@@ -269,18 +276,6 @@
 
 	.glass {
 		@apply bg-background/80 backdrop-blur-md;
-	}
-
-	/* Panel geometry. Written as base-layer rules rather than Tailwind
-	   arbitrary values because `border-(--x)` in v4 resolves to border-COLOR
-	   and would drop the width half of the shorthand. Base rules also lose to
-	   utilities, so a caller passing `p-4` still overrides. */
-	.surface-edge {
-		border: var(--card-border);
-	}
-
-	.surface-pad {
-		padding: var(--card-pad);
 	}
 
 	/* Section and panel headings take the display serif. Applied by CardTitle

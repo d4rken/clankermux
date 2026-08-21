@@ -529,7 +529,11 @@ export function PoolMetricCard({
 
 	return (
 		<Card>
-			<CardContent>
+			{/* p-4, not the bare default: CardContent ships `pt-0` so a header and a
+			    body do not double their facing edges, and this card has no header.
+			    Passing the padding explicitly is what lets tailwind-merge cancel
+			    that `pt-0`. */}
+			<CardContent className="p-4">
 				<div className="flex items-center justify-between gap-item mb-1.5">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
