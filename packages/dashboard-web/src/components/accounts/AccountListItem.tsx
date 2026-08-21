@@ -1,4 +1,5 @@
 import { TIME_CONSTANTS } from "@clankermux/core";
+import type { SessionStats } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
 	CalendarClock,
@@ -20,6 +21,7 @@ import {
 import { useState } from "react";
 import type { Account } from "../../api";
 import { deriveAccountStatus } from "../../lib/account-status";
+import { cn } from "../../lib/utils";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -52,6 +54,23 @@ function formatTokenCount(n: number): string {
 const ACTIVE_SESSION_WINDOW_MINUTES = Math.round(
 	TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS / 60000,
 );
+
+/**
+ * The four token counts for the account's current session window, as a single
+ * tooltip string. They used to occupy a whole visible row per account, which
+ * cost a line of height on every card to show numbers that are only ever read
+ * deliberately — and whose request count already appears in the info row as the
+ * server-rendered "Active: N reqs". The cost stayed visible; the breakdown
+ * moved here, so nothing was lost.
+ */
+function formatSessionTokenSummary(stats: SessionStats): string {
+	return [
+		`Since this session window started: ↑${formatTokenCount(stats.inputTokens)} in`,
+		`✦${formatTokenCount(stats.cacheCreationInputTokens)} cache↑`,
+		`✦${formatTokenCount(stats.cacheReadInputTokens)} cache↓`,
+		`↓${formatTokenCount(stats.outputTokens)} out`,
+	].join(" · ");
+}
 
 interface AccountListItemProps {
 	account: Account;
@@ -116,6 +135,20 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
+	const sessionTokenSummary = account.sessionStats
+		? formatSessionTokenSummary(account.sessionStats)
+		: null;
+	// Spend inside the current session window. Both kinds can be non-zero at
+	// once (a plan account that spilled into overage), and a zero is omitted
+	// rather than rendered as "$0.00" — an unused billing mode is not news.
+	const sessionCosts = account.sessionStats
+		? (
+				[
+					{ kind: "plan", usd: account.sessionStats.planCostUsd },
+					{ kind: "api", usd: account.sessionStats.apiCostUsd },
+				] as const
+			).filter((entry) => entry.usd > 0)
+		: [];
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -135,7 +168,7 @@ export function AccountListItem({
 				!!onAutoApplyResetOnWeeklyLimitToggle));
 
 	return (
-		<div className="p-4 border rounded-lg transition-colors space-y-3 border-border hover:border-muted-foreground/50">
+		<div className="p-3 border rounded-lg transition-colors space-y-2 border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
 				<div className="flex flex-col min-w-0">
 					<div className="flex items-center gap-2 min-w-0">
@@ -501,71 +534,67 @@ export function AccountListItem({
 				</div>
 			) : null}
 			<AccountStatusChips account={account} status={status} />
-			<div className="space-y-1">
-				<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-					<span>{presenter.requestCount} requests</span>
-					{presenter.activeSessionCount > 0 && (
-						<span className="text-muted-foreground">
-							· {presenter.activeSessionCount} clients (
-							{ACTIVE_SESSION_WINDOW_MINUTES}m)
-						</span>
+			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+				<span>{presenter.requestCount} requests</span>
+				{presenter.activeSessionCount > 0 && (
+					<span className="text-muted-foreground">
+						· {presenter.activeSessionCount} clients (
+						{ACTIVE_SESSION_WINDOW_MINUTES}m)
+					</span>
+				)}
+				{/* The session segments carry the token breakdown as their tooltip,
+				    so they take the help cursor to advertise that there is more
+				    behind them than the text shows. */}
+				<span
+					className={cn(
+						"text-muted-foreground",
+						sessionTokenSummary && "cursor-help",
 					)}
-					<span className="text-muted-foreground">{presenter.sessionInfo}</span>
-					{status.reauthDeadlineMs !== null && (
-						// Always shown once known, not only inside the warning window: the
-						// point of capturing the deadline is that it stops being a
-						// surprise, and a date that only appears in its final week is
-						// still a surprise for the other eleven.
-						<span
-							className="text-muted-foreground"
-							title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
-						>
-							· re-auth by{" "}
-							{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
-								year: "numeric",
-								month: "short",
-								day: "numeric",
-							})}
-						</span>
-					)}
-					{status.showForceReset && (
-						<Button
-							variant="outline"
-							size="sm"
-							className="h-7 gap-1 text-xs"
-							onClick={() => onForceResetRateLimit(account)}
-							title={
-								status.staleLockDetected
-									? "Reset stale rate limit lock (usage shows capacity available)"
-									: "Force clear rate limit state from database"
-							}
-						>
-							<RefreshCw className="h-3.5 w-3.5" />
-							Force Reset
-						</Button>
-					)}
-				</div>
-				{account.sessionStats && (
-					<div className="text-sm text-muted-foreground">
-						Session: {account.sessionStats.requests} req
-						{" · "}↑{formatTokenCount(account.sessionStats.inputTokens)} in
-						{" · "}✦
-						{formatTokenCount(account.sessionStats.cacheCreationInputTokens)}{" "}
-						cache↑
-						{" · "}✦
-						{formatTokenCount(account.sessionStats.cacheReadInputTokens)} cache↓
-						{" · "}↓{formatTokenCount(account.sessionStats.outputTokens)} out
-						{account.sessionStats.planCostUsd > 0 && (
-							<>
-								{" · "}${account.sessionStats.planCostUsd.toFixed(2)} plan
-							</>
-						)}
-						{account.sessionStats.apiCostUsd > 0 && (
-							<>
-								{" · "}${account.sessionStats.apiCostUsd.toFixed(2)} api
-							</>
-						)}
-					</div>
+					title={sessionTokenSummary ?? undefined}
+				>
+					{presenter.sessionInfo}
+				</span>
+				{sessionCosts.map(({ kind, usd }) => (
+					<span
+						key={kind}
+						className="cursor-help text-muted-foreground"
+						title={sessionTokenSummary ?? undefined}
+					>
+						· ${usd.toFixed(2)} {kind}
+					</span>
+				))}
+				{status.reauthDeadlineMs !== null && (
+					// Always shown once known, not only inside the warning window: the
+					// point of capturing the deadline is that it stops being a
+					// surprise, and a date that only appears in its final week is
+					// still a surprise for the other eleven.
+					<span
+						className="text-muted-foreground"
+						title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
+					>
+						· re-auth by{" "}
+						{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
+							year: "numeric",
+							month: "short",
+							day: "numeric",
+						})}
+					</span>
+				)}
+				{status.showForceReset && (
+					<Button
+						variant="outline"
+						size="sm"
+						className="h-7 gap-1 text-xs"
+						onClick={() => onForceResetRateLimit(account)}
+						title={
+							status.staleLockDetected
+								? "Reset stale rate limit lock (usage shows capacity available)"
+								: "Force clear rate limit state from database"
+						}
+					>
+						<RefreshCw className="h-3.5 w-3.5" />
+						Force Reset
+					</Button>
 				)}
 			</div>
 			{(account.rateLimitReset ||
@@ -586,6 +615,7 @@ export function AccountListItem({
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					prediction={account.prediction}
+					compact
 				/>
 			)}
 		</div>

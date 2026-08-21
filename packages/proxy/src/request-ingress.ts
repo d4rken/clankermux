@@ -21,6 +21,10 @@ import {
 	RequestBodyContext,
 	validateProviderPath,
 } from "./handlers";
+import {
+	createIdentityBoundRefusalResponse,
+	isIdentityBoundPath,
+} from "./identity-bound-paths";
 import { isAnchoredSource, resolveProject } from "./project-extraction";
 import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
@@ -84,7 +88,21 @@ export async function ingestProxyRequest(
 	apiKeyId: string | null | undefined,
 	isInternal: boolean,
 ): Promise<IngressResult> {
-	// 0. Silently ignore Claude Code internal endpoints (non-critical, not supported by all providers)
+	// 0a. Refuse identity-bound endpoints outright. These belong to a single
+	// Anthropic OAuth identity, so a pooled account token must never be sent to
+	// them — see identity-bound-paths.ts. Refusing HERE, at the ingest
+	// short-circuit, is what makes that guarantee structural: this returns
+	// before the dashboard ingress announcement, before account selection, and
+	// without a Request History row, so there is no path from one of these URLs
+	// to an upstream request on someone else's credential.
+	if (isIdentityBoundPath(url.pathname)) {
+		return {
+			kind: "response",
+			response: createIdentityBoundRefusalResponse(url.pathname),
+		};
+	}
+
+	// 0b. Silently ignore Claude Code internal endpoints (non-critical, not supported by all providers)
 	if (
 		url.pathname === "/api/event_logging/batch" ||
 		url.pathname === "/api/system/package-manager"

@@ -37,6 +37,7 @@ interface RateLimitProgressProps {
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
+	compact?: boolean; // Tighter card padding and a single-row window strip on wide viewports
 }
 
 // Maps a render-loop window name to its server-computed prediction. Only the
@@ -71,16 +72,25 @@ const LIVE_USAGE_FRESH_MS = 10 * 60 * 1000;
 // whereas a mere opacity difference on `bg-muted` is near-invisible in light
 // mode (muted is ~96% lightness, so it barely differs from a white surface).
 const WINDOW_CARD_CLASS = "rounded-lg border p-3";
+// Compact variant: same card, two fewer pixels of padding on every side. Used
+// by the Accounts list, where a dozen accounts stack vertically and the padding
+// is paid once per window card per account. The Limits tab keeps the roomy
+// default — it shows one account's quota at a time and has the space.
+const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-2";
 const PRIMARY_WINDOW_TINT = "border-border/60 bg-muted/50";
 const SECONDARY_WINDOW_TINT = "border-border/50 bg-transparent";
 
 // The three standalone message blocks (rate-limited, stale, Kilo credits) all
-// render as a single primary card.
-const PRIMARY_CARD_CLASS = cn(
-	WINDOW_CARD_CLASS,
-	PRIMARY_WINDOW_TINT,
-	"space-y-2",
-);
+// render as a single primary card. They sit behind early returns, so they take
+// the density from the same `compact` flag rather than from the per-window
+// values computed further down.
+function primaryCardClass(compact: boolean): string {
+	return cn(
+		compact ? COMPACT_WINDOW_CARD_CLASS : WINDOW_CARD_CLASS,
+		PRIMARY_WINDOW_TINT,
+		compact ? "space-y-1.5" : "space-y-2",
+	);
+}
 
 function computeExpectedPct(
 	resetTime: string | null,
@@ -257,7 +267,12 @@ function isSameLocalDay(a: Date, b: Date): boolean {
 	);
 }
 
-function formatResetText(
+/**
+ * The reset moment alone — "Aug 27, 08:59" or "08:59" — with no leading verb,
+ * so callers can either prefix "Resets " or place the stamp somewhere a verb
+ * would not fit (the compact caption puts the countdown first).
+ */
+function formatResetStamp(
 	resetTime: string,
 	window: string | null,
 	now: number,
@@ -270,19 +285,27 @@ function formatResetText(
 		shouldShowResetDate(window) ||
 		!isSameLocalDay(resetDate, new Date(now))
 	) {
-		return `Resets ${resetDate.toLocaleString(undefined, {
+		return resetDate.toLocaleString(undefined, {
 			month: "short",
 			day: "numeric",
 			hour: "2-digit",
 			minute: "2-digit",
 			hour12: false,
-		})}`;
+		});
 	}
-	return `Resets ${resetDate.toLocaleTimeString(undefined, {
+	return resetDate.toLocaleTimeString(undefined, {
 		hour: "2-digit",
 		minute: "2-digit",
 		hour12: false,
-	})}`;
+	});
+}
+
+function formatResetText(
+	resetTime: string,
+	window: string | null,
+	now: number,
+): string {
+	return `Resets ${formatResetStamp(resetTime, window, now)}`;
 }
 
 function formatAsOfText(asOfIso: string, now: number): string {
@@ -342,6 +365,7 @@ export function RateLimitProgress({
 	showWeekly = false,
 	inlineProjection = false,
 	prediction = null,
+	compact = false,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -393,7 +417,7 @@ export function RateLimitProgress({
 			hour12: false,
 		});
 		return (
-			<div className={cn(PRIMARY_CARD_CLASS, className)}>
+			<div className={cn(primaryCardClass(compact), className)}>
 				<div className="flex items-center justify-between">
 					<span className="text-xs text-amber-600 dark:text-amber-400">
 						Rate limited — usage data unavailable
@@ -414,7 +438,7 @@ export function RateLimitProgress({
 	// Wording never implies the value is live — "last known as of HH:MM".
 	if (!usageData && staleUsage) {
 		return (
-			<div className={cn(PRIMARY_CARD_CLASS, className)}>
+			<div className={cn(primaryCardClass(compact), className)}>
 				<div className="space-y-1.5">
 					{staleUsage.fiveHour && (
 						<>
@@ -482,14 +506,7 @@ export function RateLimitProgress({
 		if (typeof kiloData.remainingUsd === "number") {
 			const hasCredits = (kiloData.totalMicrodollarsAcquired ?? 0) > 0;
 			return (
-				<div
-					className={cn(
-						WINDOW_CARD_CLASS,
-						PRIMARY_WINDOW_TINT,
-						"space-y-2",
-						className,
-					)}
-				>
+				<div className={cn(primaryCardClass(compact), className)}>
 					<div className="flex items-center justify-between">
 						<span className="text-xs text-muted-foreground">
 							Kilo Gateway credits
@@ -679,13 +696,20 @@ export function RateLimitProgress({
 
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
+	const cardClass = compact ? COMPACT_WINDOW_CARD_CLASS : WINDOW_CARD_CLASS;
+	const cardSpacing = compact ? "space-y-1" : "space-y-1.5";
+	// Compact mode collapses the wrapping 2-up grid into a single equal-width
+	// strip once there is room for it. `grid-cols-none` is required alongside
+	// `grid-flow-col`: without clearing the template the sm:2-column track list
+	// still applies and the flow only fills those two tracks. `auto-cols-fr`
+	// then divides the row evenly however many windows an account reports, so
+	// no per-count class map is needed.
+	const gridClass = compact
+		? "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-none xl:auto-cols-fr xl:grid-flow-col"
+		: "grid grid-cols-1 gap-3 sm:grid-cols-2";
+
 	const windowGrid = (
-		<div
-			className={cn(
-				"grid grid-cols-1 gap-3 sm:grid-cols-2",
-				!agedAsOfText && className,
-			)}
-		>
+		<div className={cn(gridClass, !agedAsOfText && className)}>
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
@@ -702,11 +726,7 @@ export function RateLimitProgress({
 									? `${usage.window}-${usage.label}`
 									: usage.window || "default"
 							}
-							className={cn(
-								WINDOW_CARD_CLASS,
-								PRIMARY_WINDOW_TINT,
-								"space-y-1.5",
-							)}
+							className={cn(cardClass, PRIMARY_WINDOW_TINT, cardSpacing)}
 						>
 							<div className="flex items-center justify-between">
 								<span className="text-xs text-muted-foreground">
@@ -769,15 +789,25 @@ export function RateLimitProgress({
 				// status (center), utilization % (end). The reset status pairs the
 				// absolute 24-hour reset time with the time remaining in brackets,
 				// e.g. "Resets Jul 26, 08:59 (2d 13h)".
+				//
+				// `resetStatus` is what renders; `resetStatusFull` is what the
+				// tooltip carries. They differ only in compact mode, where a card
+				// can be a fifth of the row wide and the caption truncates: there
+				// the countdown leads and the absolute stamp trails, so what gets
+				// cut is the date rather than the time-remaining most people are
+				// actually reading. The unabbreviated sentence stays on hover.
 				let resetStatus = "";
+				let resetStatusFull = "";
 				if (usage.resetTime) {
 					const resetMs = new Date(usage.resetTime).getTime();
-					resetStatus =
-						resetMs <= now
-							? "Ready to refresh"
-							: `${formatResetText(usage.resetTime, usage.window, now)} (${formatRemaining(
-									resetMs - now,
-								)})`;
+					if (resetMs <= now) {
+						resetStatus = "Ready to refresh";
+					} else {
+						const stamp = formatResetStamp(usage.resetTime, usage.window, now);
+						const remaining = formatRemaining(resetMs - now);
+						resetStatusFull = `Resets ${stamp} (${remaining})`;
+						resetStatus = compact ? `${remaining} · ${stamp}` : resetStatusFull;
+					}
 				} else if (
 					usage.window === "seven_day" ||
 					usage.window === "seven_day_scoped"
@@ -800,9 +830,9 @@ export function RateLimitProgress({
 								: usage.window || "default"
 						}
 						className={cn(
-							WINDOW_CARD_CLASS,
+							cardClass,
 							isSecondary ? SECONDARY_WINDOW_TINT : PRIMARY_WINDOW_TINT,
-							"space-y-1.5",
+							cardSpacing,
 						)}
 					>
 						<div className={cn(!inlineProjection && "group", "relative")}>
@@ -850,11 +880,27 @@ export function RateLimitProgress({
 							)}
 						</div>
 						<div className="flex items-center justify-between gap-2 text-xs">
-							<span className="shrink-0 text-muted-foreground">
+							{/* `shrink-0` is safe in a half-width card but not in a
+							    fifth-width one: a long provider-supplied label (Codex's
+							    synthetic per-model windows carry the full model name)
+							    would push the row past the card instead of yielding,
+							    because only the centre caption can absorb the squeeze.
+							    In compact mode the label truncates too, keeping its full
+							    text on hover. */}
+							<span
+								className={cn(
+									"text-muted-foreground",
+									compact ? "min-w-0 shrink truncate" : "shrink-0",
+								)}
+								title={compact ? windowLabel : undefined}
+							>
 								{windowLabel}
 							</span>
 							{resetStatus && (
-								<span className="min-w-0 flex-1 truncate text-center text-muted-foreground">
+								<span
+									className="min-w-0 flex-1 truncate text-center text-muted-foreground"
+									title={resetStatusFull || resetStatus}
+								>
 									{resetStatus}
 								</span>
 							)}

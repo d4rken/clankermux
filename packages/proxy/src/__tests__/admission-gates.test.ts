@@ -13,6 +13,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates } from "../admission-gates";
+import {
+	recordFamilyWeeklyExhausted,
+	resetFamilyWeeklyMemoForTests,
+} from "../family-weekly-memo";
 import type { ProxyContext } from "../handlers";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
@@ -142,6 +146,7 @@ describe("createAdmissionGates", () => {
 	const reset = () => {
 		clearProviderOverloadCooldown();
 		resetRateLimitProbeGatesForTests();
+		resetFamilyWeeklyMemoForTests();
 		for (const id of SEEDED_IDS) usageCache.delete(id);
 	};
 
@@ -349,6 +354,161 @@ describe("createAdmissionGates", () => {
 			// … while modelForAccount keeps the CONSTRUCTION-time snapshot. Existing
 			// behavior, pinned deliberately rather than "fixed".
 			expect(gates.modelForAccount(account)).toBe("claude-opus-4-5");
+		});
+	});
+
+	describe("family-weekly 429-learned memo demotion", () => {
+		const FABLE = "claude-fable-5";
+
+		const memo = (id: string, resetInMs = 4 * HOUR) =>
+			recordFamilyWeeklyExhausted(
+				id,
+				"fable",
+				Date.now() + resetInMs,
+				Date.now(),
+			);
+
+		it("sorts an account the memo marks exhausted behind its healthy siblings", () => {
+			const account = makeAccount({ id: "acc-a" });
+			const other = makeAccount({ id: "acc-b" });
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+
+			// Demoted, not dropped: the healthy sibling is what gets asked, while
+			// the refused account stays available as a last resort.
+			expect(
+				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+			).toEqual(["acc-b", "acc-a"]);
+		});
+
+		// The reactive rung deliberately withholds an account-wide cooldown so the
+		// account keeps serving its other families. A memo that sidelined the whole
+		// account would silently undo that.
+		it("leaves the account's other families in front", () => {
+			const account = makeAccount({ id: "acc-a" });
+			const other = makeAccount({ id: "acc-b" });
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: MODEL });
+
+			expect(
+				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+			).toEqual(["acc-a", "acc-b"]);
+		});
+
+		it("stops demoting once the remembered window has reset", async () => {
+			const account = makeAccount({ id: "acc-a" });
+			const other = makeAccount({ id: "acc-b" });
+			memo("acc-a", 40);
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+			expect(
+				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+			).toEqual(["acc-b", "acc-a"]);
+
+			await Bun.sleep(60);
+			expect(
+				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+			).toEqual(["acc-a", "acc-b"]);
+		});
+
+		// The memo is inferred state and other gates drop candidates of their own,
+		// so it must never shrink the pool — otherwise a stale entry can empty it
+		// by proxy and strand the request on a terminal no upstream asked for.
+		it("never removes a candidate, even when every account is memo'd", () => {
+			const a = makeAccount({ id: "acc-a" });
+			const b = makeAccount({ id: "acc-b" });
+			memo("acc-a");
+			memo("acc-b");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+
+			expect(gates.applyFamilyMemoDemotion([a, b]).map((x) => x.id)).toEqual([
+				"acc-a",
+				"acc-b",
+			]);
+		});
+
+		it("keeps a memo'd account when it is the only candidate", () => {
+			const account = makeAccount({ id: "acc-a" });
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+
+			expect(gates.applyFamilyMemoDemotion([account])).toEqual([account]);
+		});
+
+		// Demoted accounts are still in the pool, so they must not appear in the
+		// list the zero-accounts terminals report as the reason for failure.
+		it("does not record demoted accounts as excluded", () => {
+			const account = makeAccount({ id: "acc-a" });
+			const other = makeAccount({ id: "acc-b" });
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+			gates.applyFamilyMemoDemotion([account, other]);
+
+			expect(gates.familyWeeklyExcludedAccounts).toHaveLength(0);
+		});
+
+		it("ignores the memo for non-Anthropic accounts", () => {
+			const codex = makeAccount({ id: "codex-1", provider: "codex" });
+			memo("codex-1");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+
+			expect(gates.applyFamilyMemoDemotion([codex])).toEqual([codex]);
+		});
+
+		it("returns the candidate list untouched when nothing is memo'd", () => {
+			const a = makeAccount({ id: "acc-a" });
+			const b = makeAccount({ id: "acc-b" });
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const candidates = [a, b];
+
+			expect(gates.applyFamilyMemoDemotion(candidates)).toBe(candidates);
+		});
+
+		// Combo slots are positional; reordering desyncs the account-to-slot
+		// mapping, which is why the soft reorder skips combos too.
+		it("skips combo requests entirely", () => {
+			const account = makeAccount({ id: "acc-a" });
+			const other = makeAccount({ id: "acc-b" });
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const candidates = [account, other];
+
+			expect(
+				gates.applyFamilyMemoDemotion(candidates, {
+					slots: [{ accountId: "acc-a", modelOverride: FABLE }],
+				}),
+			).toBe(candidates);
+		});
+
+		// The reason this runs LAST rather than inside the family gate: stable
+		// partitions do not compose. With the memo applied first, the soft
+		// demotion partition can keep the memo'd account and demote the healthy
+		// sibling, promoting exactly the account a 429 just refused.
+		it("survives a soft-demotion reorder that would otherwise promote it", () => {
+			const memod = makeAccount({ id: "acc-a", name: "a" });
+			const healthy = makeAccount({ id: "acc-b", name: "b" });
+			// acc-b sits in the weekly reserve tail, so the soft reorder demotes it
+			// while leaving acc-a in front.
+			seedUsage("acc-a", 0, 10);
+			seedUsage("acc-b", 0, 95);
+			memo("acc-a");
+
+			const gates = makeGates({ effectiveRequestModel: FABLE });
+
+			const softReordered = gates.applySoftDemotionReorder([memod, healthy]);
+			expect(softReordered.map((a) => a.id)).toEqual(["acc-a", "acc-b"]);
+
+			// Applied last, the memo still wins: the refused account ends up behind.
+			expect(
+				gates.applyFamilyMemoDemotion(softReordered).map((a) => a.id),
+			).toEqual(["acc-b", "acc-a"]);
 		});
 	});
 });
