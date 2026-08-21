@@ -5,18 +5,17 @@ import { cn } from "../../lib/utils";
 /**
  * Surface primitive.
  *
- * Panel geometry comes from tokens rather than from literal utilities here, so
- * every panel in the app changes together:
+ * Interior padding is 1rem — the same value the spacing scale calls `group`,
+ * so what separates panels and what lines them agree.
  *
- *   --card-border  full border shorthand, `1px solid var(--border)`.
- *   --card-shadow  none. Paper separates panels with a hairline, not a lift.
- *   --card-pad     interior padding, and the app's main density lever.
- *
- * These are applied by `.surface-edge` / `.surface-pad` in the base layer
- * rather than by Tailwind arbitrary-value utilities: `border-(--x)` in v4 maps
- * to border-COLOR, which would silently drop the width half of the shorthand.
- * Base-layer rules also lose to utilities, so a caller passing `p-4` still
- * wins.
+ * It is spelled `p-4` rather than `p-group` deliberately. `CardContent` carries
+ * `pt-0` so a header and a body do not double up their facing edges, and
+ * tailwind-merge can only cancel that against a padding utility it recognises.
+ * It does not recognise a custom scale key — `twMerge("p-group pt-0", "p-group")`
+ * returns all three classes with `pt-0` still live — and it recognised the
+ * previous custom `.surface-pad` class even less. The result was that every
+ * card WITHOUT a header, which is every metric tile, rendered with zero top
+ * padding and its content jammed against the border.
  *
  * There is deliberately no hover lift anywhere: geometry that moves under the
  * cursor is noise on a page whose job is reporting throttling state.
@@ -28,7 +27,7 @@ const Card = React.forwardRef<
 	<div
 		ref={ref}
 		className={cn(
-			"rounded-lg bg-card text-card-foreground shadow-card surface-edge",
+			"rounded-lg border bg-card text-card-foreground shadow-card",
 			className,
 		)}
 		{...props}
@@ -42,7 +41,7 @@ const CardHeader = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<div
 		ref={ref}
-		className={cn("flex flex-col space-y-tight surface-pad", className)}
+		className={cn("flex flex-col space-y-tight p-4", className)}
 		{...props}
 	/>
 ));
@@ -79,7 +78,7 @@ const CardContent = React.forwardRef<
 	HTMLDivElement,
 	React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-	<div ref={ref} className={cn("surface-pad pt-0", className)} {...props} />
+	<div ref={ref} className={cn("p-4 pt-0", className)} {...props} />
 ));
 CardContent.displayName = "CardContent";
 
@@ -89,7 +88,7 @@ const CardFooter = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<div
 		ref={ref}
-		className={cn("flex items-center surface-pad pt-0", className)}
+		className={cn("flex items-center p-4 pt-0", className)}
 		{...props}
 	/>
 ));

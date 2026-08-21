@@ -16,7 +16,7 @@ export function SpendSummaryBand() {
 	if (isLoading && !summary) {
 		return (
 			<Card>
-				<CardContent className="p-6">
+				<CardContent className="p-4">
 					<div className="grid grid-cols-2 md:grid-cols-4 gap-group">
 						{["month", "day", "week", "amortized-month"].map((key) => (
 							<div key={key}>
@@ -52,7 +52,7 @@ export function SpendSummaryBand() {
 
 	return (
 		<Card>
-			<CardContent className="p-6">
+			<CardContent className="p-4">
 				<div className="grid grid-cols-2 md:grid-cols-4 gap-group">
 					<div>
 						<p className="text-sm text-muted-foreground">Spend this month</p>
