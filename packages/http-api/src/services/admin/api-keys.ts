@@ -4,6 +4,7 @@ import { Logger } from "@clankermux/logger";
 import {
 	type ApiKeyGenerationResult,
 	type ApiKeyResponse,
+	apiKeyLookupSuffix,
 	NodeCryptoUtils,
 	toApiKeyResponse,
 } from "@clankermux/types";
@@ -18,7 +19,8 @@ async function mintNewSecret(): Promise<{
 	const crypto = new NodeCryptoUtils();
 	const apiKey = await crypto.generateApiKey();
 	const hashedKey = await crypto.hashApiKey(apiKey);
-	return { apiKey, hashedKey, prefixLast8: apiKey.slice(-8) };
+	// Same derivation the verification path uses to find this record again.
+	return { apiKey, hashedKey, prefixLast8: apiKeyLookupSuffix(apiKey) };
 }
 
 /**
