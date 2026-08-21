@@ -286,6 +286,20 @@
 		letter-spacing: var(--display-tracking);
 	}
 
+	/* Title → subtitle. The one gap in the app that a spacing utility could not
+	   own: `CardHeader` can only space its DIRECT children, and 15 of the 44
+	   headers that have a description wrap the pair in a flex row so a range
+	   picker can sit beside it — those rendered with no gap at all, the other 29
+	   with a different one. Keying on the adjacency instead makes it true at any
+	   wrapper depth, and puts the value on the scale. Not card-specific: any
+	   heading that owns the line beneath it marks the pair the same way, which
+	   is why the slots are named for the roles rather than for Card. Utilities
+	   still outrank the base layer, so a call site that needs its own `mt-*`
+	   keeps winning. */
+	[data-slot="title"] + [data-slot="subtitle"] {
+		margin-top: var(--space-item);
+	}
+
 	/* The one label style. Uppercase micro-caps in the sans, for column heads,
 	   panel eyebrows and metric labels — anything naming a value rather than
 	   being one. Replaces a dozen hand-rolled
