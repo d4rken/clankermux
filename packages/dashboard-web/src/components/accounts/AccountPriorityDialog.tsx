@@ -70,8 +70,8 @@ export function AccountPriorityDialog({
 						will make this account more likely to be selected for requests.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-4 py-4">
-					<div className="grid grid-cols-4 items-center gap-4">
+				<div className="grid gap-group py-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="priority" className="text-right">
 							Priority
 						</Label>

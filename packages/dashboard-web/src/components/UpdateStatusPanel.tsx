@@ -88,7 +88,7 @@ export function UpdateStatusPanel({
 				disabled={status === "checking"}
 				className="w-full transition-colors hover:bg-muted/50 -m-3 p-3 rounded-lg"
 			>
-				<div className="flex items-center gap-2 text-sm">
+				<div className="flex items-center gap-item text-sm">
 					<RefreshCw
 						className={cn(
 							"h-4 w-4",
@@ -123,7 +123,7 @@ export function UpdateStatusPanel({
 			</button>
 
 			{restartPending && (
-				<div className="mt-2 space-y-1">
+				<div className="mt-2 space-y-tight">
 					<p className="text-xs text-muted-foreground text-left font-mono">
 						{info?.bootSha ?? "?"} → {info?.currentSha ?? "?"}
 					</p>
@@ -131,7 +131,7 @@ export function UpdateStatusPanel({
 						The checkout's HEAD moved after this process started; it is still
 						running the commit on the left. Restart to run the checked-out one.
 					</p>
-					<div className="flex items-center gap-1">
+					<div className="flex items-center gap-tight">
 						<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
 							{RESTART_COMMAND}
 						</code>
@@ -147,7 +147,7 @@ export function UpdateStatusPanel({
 			)}
 
 			{showUpdateDetail && (
-				<div className="mt-2 space-y-1">
+				<div className="mt-2 space-y-tight">
 					{restartPending && (
 						<p className="text-xs text-muted-foreground text-left">
 							An update is also available:
@@ -161,7 +161,7 @@ export function UpdateStatusPanel({
 							{behindLabel(info.behindBy)}
 						</p>
 					)}
-					<div className="flex items-center gap-1">
+					<div className="flex items-center gap-tight">
 						<code className="text-xs bg-background px-1 py-0.5 rounded font-mono flex-1 truncate">
 							{UPDATE_COMMAND}
 						</code>
@@ -187,7 +187,7 @@ export function UpdateStatusPanel({
 			)}
 
 			{showCurrentDetail && (
-				<div className="mt-1 space-y-0.5 text-left">
+				<div className="mt-1 space-y-tight text-left">
 					<p className="text-xs text-muted-foreground font-mono">
 						{info?.currentSha ?? version.replace(/^v/, "")}
 					</p>

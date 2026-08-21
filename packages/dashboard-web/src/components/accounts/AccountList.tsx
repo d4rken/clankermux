@@ -61,7 +61,7 @@ export function AccountList({
 	}
 
 	return (
-		<div className="space-y-2">
+		<div className="space-y-item">
 			{accounts.map((account) => (
 				<AccountListItem
 					key={account.name}

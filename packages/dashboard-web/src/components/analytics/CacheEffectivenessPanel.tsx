@@ -46,7 +46,7 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<Gauge className="h-5 w-5" />
 					Effectiveness
 				</CardTitle>
@@ -57,9 +57,9 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 					Code's native behaviour with no bridge.
 				</p>
 			</CardHeader>
-			<CardContent className="space-y-4">
+			<CardContent className="space-y-group">
 				{/* Honest headline tiles. */}
-				<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+				<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-row">
 					<StatTile
 						label="Net (honest)"
 						value={isLoading ? "—" : formatUsd(netConservative)}

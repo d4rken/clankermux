@@ -72,7 +72,7 @@ export function ModelAnalytics({
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<BarChart3 className="h-5 w-5" />
 					Model Performance
 				</CardTitle>

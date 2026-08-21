@@ -119,7 +119,7 @@ export function AccountPerformanceSection({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
+				<div className="flex items-center justify-between gap-group">
 					<div>
 						<CardTitle>Account Performance</CardTitle>
 						<CardDescription>
@@ -134,13 +134,11 @@ export function AccountPerformanceSection({
 				    standalone tiles). The averages below Plan Value are fixed 7d/30d
 				    windows and stay put when the range above changes; the amortized
 				    rows under Cost are likewise range-independent run rates. */}
-				<div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-4 border-b pb-4">
+				<div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-4">
 					<div>
 						<p className="text-sm text-muted-foreground">Plan Value</p>
-						<p className="text-2xl font-bold">
-							{formatCost(costSummary.planCostUsd)}
-						</p>
-						<div className="mt-2 space-y-1 text-xs">
+						<p className="figure-xl">{formatCost(costSummary.planCostUsd)}</p>
+						<div className="mt-2 space-y-tight text-xs">
 							{planAvgRows.map((row) => (
 								<div
 									key={row.label}
@@ -159,14 +157,14 @@ export function AccountPerformanceSection({
 					<div>
 						<p className="text-sm text-muted-foreground">Cost</p>
 						<p
-							className="text-2xl font-bold"
+							className="figure-xl"
 							title="Ledger payments (subscriptions + credits) plus token-billed cost in the selected range"
 						>
 							{paymentsSummary
 								? formatUsd(paymentsSummary.range.totalUsd)
 								: "—"}
 						</p>
-						<div className="mt-2 space-y-1 text-xs">
+						<div className="mt-2 space-y-tight text-xs">
 							{costAmortizedRows.map((row) => (
 								<div
 									key={row.label}
@@ -184,7 +182,7 @@ export function AccountPerformanceSection({
 					</div>
 					<div>
 						<p className="text-sm text-muted-foreground">Value Ratio</p>
-						<p className="text-2xl font-bold">
+						<p className="figure-xl">
 							{formatValueRatio(paymentsSummary?.range.valueRatio)}
 						</p>
 						<p className="mt-2 text-xs text-muted-foreground">

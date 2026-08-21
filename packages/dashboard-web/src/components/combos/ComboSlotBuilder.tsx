@@ -72,7 +72,7 @@ function SortableSlotRow({
 		<div
 			ref={setNodeRef}
 			style={style}
-			className="flex items-center gap-2 rounded-md border bg-card px-3 py-2"
+			className="flex items-center gap-item rounded-md border bg-card px-3 py-2"
 		>
 			<span className="w-4 shrink-0 text-center text-xs font-medium text-muted-foreground">
 				{index}
@@ -86,7 +86,7 @@ function SortableSlotRow({
 				<GripVertical className="h-4 w-4" />
 			</button>
 
-			<div className="flex min-w-0 flex-1 items-center gap-2">
+			<div className="flex min-w-0 flex-1 items-center gap-item">
 				<Badge variant="secondary" className="shrink-0 text-xs">
 					{provider}
 				</Badge>
@@ -191,9 +191,9 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 					</Button>
 				</div>
 			</CardHeader>
-			<CardContent className="space-y-2">
+			<CardContent className="space-y-item">
 				{assignedFamily && (
-					<div className="flex items-center gap-2 text-xs text-muted-foreground">
+					<div className="flex items-center gap-item text-xs text-muted-foreground">
 						<span>Assigned to:</span>
 						<Badge variant="default" className="text-xs">
 							{assignedFamily.family.charAt(0).toUpperCase() +
@@ -202,8 +202,8 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 					</div>
 				)}
 				{showAddForm && (
-					<div className="space-y-3 rounded-md border border-dashed p-3">
-						<div className="space-y-1.5">
+					<div className="space-y-row rounded-md border border-dashed p-3">
+						<div className="space-y-item">
 							<Label>Account</Label>
 							<Select value={newAccountId} onValueChange={setNewAccountId}>
 								<SelectTrigger>
@@ -218,7 +218,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								<SelectContent>
 									{accounts.map((account) => (
 										<SelectItem key={account.id} value={account.id}>
-											<span className="flex items-center gap-2">
+											<span className="flex items-center gap-item">
 												<Badge variant="secondary" className="text-xs">
 													{account.provider}
 												</Badge>
@@ -229,7 +229,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								</SelectContent>
 							</Select>
 						</div>
-						<div className="space-y-1.5">
+						<div className="space-y-item">
 							<Label>Model</Label>
 							<Input
 								value={newModel}
@@ -237,7 +237,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								placeholder="claude-3-opus"
 							/>
 						</div>
-						<div className="flex justify-end gap-2">
+						<div className="flex justify-end gap-item">
 							<Button
 								variant="outline"
 								size="sm"
@@ -278,7 +278,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 							items={combo.slots.map((s) => s.id)}
 							strategy={verticalListSortingStrategy}
 						>
-							<div className="space-y-1">
+							<div className="space-y-tight">
 								{combo.slots.map((slot, index) => {
 									const { name, provider } = getAccountInfo(slot.account_id);
 									return (

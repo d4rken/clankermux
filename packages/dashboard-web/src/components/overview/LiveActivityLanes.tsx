@@ -165,7 +165,7 @@ export function LiveActivityLanesView({
 				{/* Wraps rather than overflowing: the status/rate readouts plus a
 				    four-option selector are wider than a phone-width card interior,
 				    and a non-wrapping row would clip them or push the page sideways. */}
-				<div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+				<div className="flex flex-wrap items-baseline justify-between gap-x-group gap-y-item">
 					<div className="min-w-0">
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
@@ -174,8 +174,8 @@ export function LiveActivityLanesView({
 							its request.
 						</CardDescription>
 					</div>
-					<div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-						<span className="flex items-center gap-1.5">
+					<div className="flex flex-wrap items-center gap-x-row gap-y-item text-sm">
+						<span className="flex items-center gap-item">
 							<span
 								className="inline-block h-2 w-2 rounded-full"
 								style={{
@@ -210,7 +210,7 @@ export function LiveActivityLanesView({
 							: "Waiting for the request stream…"}
 					</p>
 				) : (
-					<div className="flex gap-3">
+					<div className="flex gap-row">
 						{/* Lane labels — real text, not SVG, so they wrap, truncate and
 						    are selectable like any other list. NOT aria-hidden: each
 						    label that maps to a single filter is a link, and focusable
@@ -426,7 +426,7 @@ export function LiveActivityLanesView({
 							{lanes.map((lane) => (
 								<li
 									key={lane.key}
-									className="flex items-center justify-end gap-1.5 tabular-nums"
+									className="flex items-center justify-end gap-item tabular-nums"
 									style={{ height: LANE_HEIGHT }}
 								>
 									<span className="font-medium">{lane.requests} req</span>
@@ -474,7 +474,7 @@ function WindowSelector({
 			// A fieldset rather than role="group": same semantics, native
 			// element. `min-w-0` undoes the UA's min-inline-size, which would
 			// otherwise stop it shrinking inside the flex header.
-			className="flex min-w-0 items-center gap-0.5 rounded-md border p-0.5"
+			className="flex min-w-0 items-center gap-tight rounded-md border p-0.5"
 			aria-label="Live activity time range"
 		>
 			{LIVE_WINDOW_OPTIONS.map((option) => {
@@ -1092,13 +1092,13 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 			aria-live="polite"
 			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-3 py-2 text-xs shadow-md backdrop-blur"
 		>
-			<div className="flex items-baseline gap-2">
+			<div className="flex items-baseline gap-item">
 				<span className="text-sm font-semibold tabular-nums">
 					{event.tokens === null ? "—" : formatTokens(event.tokens)}
 				</span>
 				<span className="text-muted-foreground">tokens</span>
 			</div>
-			<dl className="mt-1 space-y-0.5 text-muted-foreground">
+			<dl className="mt-1 space-y-tight text-muted-foreground">
 				<Row label="Status" value={STATUS_LABEL[event.status]} />
 				{event.durationMs !== null && (
 					<Row
@@ -1118,7 +1118,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 
 function Row({ label, value }: { label: string; value: string }) {
 	return (
-		<div className="flex gap-3">
+		<div className="flex gap-row">
 			<dt className="w-16 shrink-0">{label}</dt>
 			{/* Project, model and account names come from request bodies and
 			    upstream responses — rendered as text nodes, never as markup. */}

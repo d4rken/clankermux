@@ -43,7 +43,7 @@ interface ChartsSectionProps {
 function ChartUnavailable({ height }: { height: string }) {
 	return (
 		<div
-			className={`flex items-center justify-center gap-1.5 text-xs text-warning-strong ${height}`}
+			className={`flex items-center justify-center gap-item text-xs text-warning-strong ${height}`}
 		>
 			<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 			Chart data unavailable
@@ -118,7 +118,7 @@ export function ChartsSection({
 			</Card>
 
 			{/* Charts Row 2 — three donut charts */}
-			<div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+			<div className="grid grid-cols-1 lg:grid-cols-3 gap-group">
 				{/* Model Distribution */}
 				<Card>
 					<CardHeader className="p-4">
@@ -141,13 +141,13 @@ export function ChartsSection({
 								tooltipStyle="success"
 							/>
 						)}
-						<div className="mt-3 space-y-2">
+						<div className="mt-3 space-y-item">
 							{modelData.map((model, index) => (
 								<div
 									key={model.name}
 									className="flex items-center justify-between text-sm"
 								>
-									<div className="flex items-center gap-2">
+									<div className="flex items-center gap-item">
 										<div
 											className="h-3 w-3 rounded-full"
 											style={{
@@ -186,13 +186,13 @@ export function ChartsSection({
 								tooltipStyle="success"
 							/>
 						)}
-						<div className="mt-3 space-y-2">
+						<div className="mt-3 space-y-item">
 							{accountUsageDonutData.map((account, index) => {
 								const models = accountModelBreakdown.get(account.name) ?? [];
 								return (
-									<div key={account.name} className="space-y-1">
+									<div key={account.name} className="space-y-tight">
 										<div className="flex items-center justify-between text-sm">
-											<div className="flex items-center gap-2">
+											<div className="flex items-center gap-item">
 												<div
 													className="h-3 w-3 rounded-full"
 													style={{
@@ -207,7 +207,7 @@ export function ChartsSection({
 											<span className="font-medium">{account.value}</span>
 										</div>
 										{models.length > 1 && (
-											<div className="pl-5 space-y-0.5">
+											<div className="pl-5 space-y-tight">
 												{models.map((m) => (
 													<div
 														key={m.model}
@@ -252,13 +252,13 @@ export function ChartsSection({
 								]}
 							/>
 						)}
-						<div className="mt-3 space-y-2">
+						<div className="mt-3 space-y-item">
 							{projectDonutData.map((project, index) => (
 								<div
 									key={project.name}
 									className="flex items-center justify-between text-sm"
 								>
-									<div className="flex items-center gap-2 min-w-0">
+									<div className="flex items-center gap-item min-w-0">
 										<div
 											className="h-3 w-3 shrink-0 rounded-full"
 											style={{

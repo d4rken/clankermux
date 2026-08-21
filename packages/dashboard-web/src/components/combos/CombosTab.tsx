@@ -33,12 +33,12 @@ export function CombosTab() {
 	};
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			<FamilyActivationSection />
 
 			<Separator />
 
-			<div className="space-y-4">
+			<div className="space-y-group">
 				<div className="flex items-center justify-between">
 					<h2 className="text-lg font-semibold">Routing Chains</h2>
 					<Button onClick={() => setIsCreateDialogOpen(true)}>
@@ -62,7 +62,7 @@ export function CombosTab() {
 				{!combosQuery.isLoading &&
 					!combosQuery.isError &&
 					combos.length === 0 && (
-						<div className="flex flex-col items-center gap-3 rounded-lg border border-dashed px-8 py-12 text-center">
+						<div className="flex flex-col items-center gap-row rounded-lg border border-dashed px-8 py-12 text-center">
 							<p className="text-sm text-muted-foreground">
 								No routing chains yet. Create one to define a fallback chain.
 							</p>
@@ -74,7 +74,7 @@ export function CombosTab() {
 					)}
 
 				{combos.length > 0 && (
-					<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+					<div className="grid gap-group sm:grid-cols-2 lg:grid-cols-3">
 						{combos.map((combo) => (
 							<ComboCard
 								key={combo.id}

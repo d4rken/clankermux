@@ -468,7 +468,7 @@ export function RequestsTab() {
 								: `Live · latest ${API_LIMITS.requestsDetail} requests`}
 						</CardDescription>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-item">
 						<Button
 							onClick={() => setShowFilters(!showFilters)}
 							variant={showFilters ? "default" : "outline"}
@@ -544,9 +544,9 @@ export function RequestsTab() {
 				{/* Active Filters Display */}
 				{filtersActive && (
 					<div className="mb-4 p-3 bg-muted/50 rounded-lg">
-						<div className="flex flex-wrap items-center gap-2">
+						<div className="flex flex-wrap items-center gap-item">
 							{statusCategory !== "all" && statusCodeFilters.size === 0 && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<Hash className="h-3 w-3" />
 									{statusCategoryLabel(statusCategory)}
 									<button
@@ -559,7 +559,7 @@ export function RequestsTab() {
 								</Badge>
 							)}
 							{statusCodeFilters.size > 0 && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<Hash className="h-3 w-3" />
 									{Array.from(statusCodeFilters).join(", ")}
 									<button
@@ -572,7 +572,7 @@ export function RequestsTab() {
 								</Badge>
 							)}
 							{accountFilter !== null && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<User className="h-3 w-3" />
 									{accountFilter}
 									<button
@@ -585,7 +585,7 @@ export function RequestsTab() {
 								</Badge>
 							)}
 							{(noApiKeyFilter || apiKeyFilter !== null) && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<Hash className="h-3 w-3" />
 									{noApiKeyFilter ? "No API Key" : apiKeyFilter}
 									<button
@@ -601,7 +601,7 @@ export function RequestsTab() {
 								</Badge>
 							)}
 							{(noProjectFilter || projectFilter !== null) && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<Folder className="h-3 w-3" />
 									{noProjectFilter ? "No Project" : projectFilter}
 									<button
@@ -616,7 +616,7 @@ export function RequestsTab() {
 								</Badge>
 							)}
 							{(dateFrom || dateTo) && (
-								<Badge variant="outline" className="gap-1.5 pr-1">
+								<Badge variant="outline" className="gap-item pr-1">
 									<Calendar className="h-3 w-3" />
 									{dateFrom && dateTo
 										? "Custom range"
@@ -635,7 +635,7 @@ export function RequestsTab() {
 									</button>
 								</Badge>
 							)}
-							<div className="ml-auto flex items-center gap-2">
+							<div className="ml-auto flex items-center gap-item">
 								<span className="text-xs text-muted-foreground">
 									{totalMatching != null
 										? `${loadedCount} of ${totalMatching} matching`
@@ -671,14 +671,14 @@ export function RequestsTab() {
 							</div>
 						</div>
 
-						<div className="p-4 space-y-4">
+						<div className="p-4 space-y-group">
 							{/* Time Range Section */}
 							<div>
-								<h4 className="text-sm font-medium mb-3 flex items-center gap-2">
+								<h4 className="text-sm font-medium mb-3 flex items-center gap-item">
 									<Clock className="h-4 w-4" />
 									Time Range
 								</h4>
-								<div className="flex flex-wrap gap-2 mb-3">
+								<div className="flex flex-wrap gap-item mb-3">
 									<Button
 										variant={dateFrom || dateTo ? "outline" : "secondary"}
 										size="sm"
@@ -708,7 +708,7 @@ export function RequestsTab() {
 										Last 30 days
 									</Button>
 								</div>
-								<div className="grid grid-cols-2 gap-3">
+								<div className="grid grid-cols-2 gap-row">
 									<div>
 										<Label htmlFor="date-from" className="text-xs">
 											From
@@ -739,10 +739,10 @@ export function RequestsTab() {
 							<div className="h-px bg-border" />
 
 							{/* Resource Filters */}
-							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-group">
 								{/* Status Category */}
 								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-2">
 										<Hash className="h-3 w-3" />
 										Status
 									</Label>
@@ -770,7 +770,7 @@ export function RequestsTab() {
 
 								{/* Status Code Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-2">
 										<Hash className="h-3 w-3" />
 										Status Codes
 									</Label>
@@ -795,7 +795,7 @@ export function RequestsTab() {
 													<button
 														key={code}
 														type="button"
-														className="flex items-center gap-2 p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
+														className="flex items-center gap-item p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
 														onClick={() => toggleStatusCode(code.toString())}
 													>
 														<div
@@ -831,7 +831,7 @@ export function RequestsTab() {
 													</button>
 												))}
 											</div>
-											<div className="border-t p-2 text-[11px] text-muted-foreground">
+											<div className="border-t p-2 text-xs text-muted-foreground">
 												Specific codes override the Status category.
 											</div>
 										</DropdownMenuContent>
@@ -840,7 +840,7 @@ export function RequestsTab() {
 
 								{/* Account Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-2">
 										<User className="h-3 w-3" />
 										Account
 									</Label>
@@ -880,7 +880,7 @@ export function RequestsTab() {
 
 								{/* API Key Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-2">
 										<Key className="h-3 w-3" />
 										API Key
 									</Label>
@@ -915,7 +915,7 @@ export function RequestsTab() {
 
 								{/* Project Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-1 mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-2">
 										<Folder className="h-3 w-3" />
 										Project
 									</Label>
@@ -962,7 +962,7 @@ export function RequestsTab() {
 							: "No requests found"}
 					</p>
 				) : (
-					<div className="space-y-2">
+					<div className="space-y-item">
 						{requests.map((request) => {
 							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
@@ -1045,10 +1045,10 @@ export function RequestsTab() {
 								>
 									{/* Row 1 "where": single line, never wraps — time, status,
 									    method, unusual endpoint, account, retries, timing, id */}
-									<div className="flex items-center gap-2 px-3 py-1.5">
+									<div className="flex items-center gap-item px-3 py-1.5">
 										<button
 											type="button"
-											className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+											className="flex items-center gap-item min-w-0 flex-1 text-left cursor-pointer"
 											onClick={() => openRequest(request.id)}
 										>
 											<span className="text-xs font-mono tabular-nums text-muted-foreground shrink-0">
@@ -1082,7 +1082,7 @@ export function RequestsTab() {
 											{/* Spacer keeps timing/id right-aligned when no path is shown */}
 											{!showPath && <span className="flex-1" />}
 											{retries > 0 && (
-												<span className="text-[11px] text-muted-foreground border rounded px-1.5 py-0.5 shrink-0">
+												<span className="text-xs text-muted-foreground border rounded px-1.5 py-0.5 shrink-0">
 													{retries} {retries === 1 ? "retry" : "retries"}
 												</span>
 											)}
@@ -1095,7 +1095,7 @@ export function RequestsTab() {
 												</span>
 											)}
 											<span
-												className="text-[11px] font-mono text-muted-foreground/70 shrink-0 hidden sm:inline"
+												className="text-xs figure text-muted-foreground/70 shrink-0 hidden sm:inline"
 												title={request.id}
 											>
 												{request.id.slice(0, 8)}
@@ -1109,7 +1109,7 @@ export function RequestsTab() {
 										    a click landing on this strip must not open the modal. */}
 										<div
 											data-row-ignore
-											className="flex items-center gap-1 shrink-0"
+											className="flex items-center gap-tight shrink-0"
 										>
 											<Button
 												variant="ghost"
@@ -1179,7 +1179,7 @@ export function RequestsTab() {
 										comboName: summary?.comboName,
 										source: attributionSource,
 									}) && (
-										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5 pl-9 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-3 pb-1.5 pl-9 text-xs">
 											{apiKeyName && (
 												<button
 													type="button"
@@ -1242,7 +1242,7 @@ export function RequestsTab() {
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
 										isZaiPeak) && (
-										<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-3 pb-2 pl-9 text-xs">
 											{(modelPresentation || summary?.reasoningEffort) && (
 												<Badge
 													variant="secondary"

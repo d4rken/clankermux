@@ -93,7 +93,7 @@ export function AnalyticsFilters({
 				</Button>
 			</PopoverTrigger>
 			<PopoverContent className="w-80" align="start">
-				<div className="space-y-4">
+				<div className="space-y-group">
 					<div className="flex items-center justify-between">
 						<h4 className="font-medium leading-none">Filters</h4>
 						{activeFilterCount > 0 && (
@@ -110,7 +110,7 @@ export function AnalyticsFilters({
 					<Separator />
 
 					{/* Status Filter */}
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<Label>Status</Label>
 						<Select
 							value={filters.status}
@@ -138,15 +138,15 @@ export function AnalyticsFilters({
 					{(availableAccounts.length > 0 ||
 						hasNoAccountBucket ||
 						filters.noAccount) && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label>
 								Accounts (
 								{filters.accounts.length + (filters.noAccount ? 1 : 0)}{" "}
 								selected)
 							</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
 								{(hasNoAccountBucket || filters.noAccount) && (
-									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
+									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded">
 										<input
 											type="checkbox"
 											className="rounded border-input"
@@ -161,7 +161,7 @@ export function AnalyticsFilters({
 								{availableAccounts.map((account) => (
 									<label
 										key={account.value}
-										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"
@@ -192,13 +192,13 @@ export function AnalyticsFilters({
 
 					{/* Model Filter */}
 					{availableModels.length > 0 && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label>Models ({filters.models.length} selected)</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
 								{availableModels.map((model) => (
 									<label
 										key={model}
-										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"
@@ -227,13 +227,13 @@ export function AnalyticsFilters({
 
 					{/* API Key Filter */}
 					{availableApiKeys.length > 0 && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label>API Keys ({filters.apiKeys.length} selected)</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
 								{availableApiKeys.map((apiKey) => (
 									<label
 										key={apiKey.value}
-										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"
@@ -268,15 +268,15 @@ export function AnalyticsFilters({
 					{(availableProjects.length > 0 ||
 						hasNoProjectBucket ||
 						filters.noProject) && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label>
 								Projects (
 								{filters.projects.length + (filters.noProject ? 1 : 0)}{" "}
 								selected)
 							</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-1">
+							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
 								{(hasNoProjectBucket || filters.noProject) && (
-									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
+									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded">
 										<input
 											type="checkbox"
 											className="rounded border-input"
@@ -291,7 +291,7 @@ export function AnalyticsFilters({
 								{availableProjects.map((project) => (
 									<label
 										key={project}
-										className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
 									>
 										<input
 											type="checkbox"

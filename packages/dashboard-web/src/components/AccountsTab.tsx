@@ -652,11 +652,11 @@ export function AccountsTab() {
 	const forcedAccountLabel = forcedAccount?.name ?? forcedAccountId;
 
 	return (
-		<div className="space-y-4">
+		<div className="space-y-section">
 			{displayError && (
 				<Card className="border-destructive">
 					<CardContent className="pt-6">
-						<div className="flex items-center gap-2">
+						<div className="flex items-center gap-item">
 							<AlertCircle className="h-4 w-4 text-destructive-strong" />
 							<p className="text-destructive-strong">{displayError}</p>
 						</div>
@@ -667,7 +667,7 @@ export function AccountsTab() {
 			{forcedAccountId && (
 				<Card className="border-destructive bg-destructive/10">
 					<CardContent className="pt-6">
-						<div className="flex items-start gap-2">
+						<div className="flex items-start gap-item">
 							<Crosshair className="h-5 w-5 shrink-0 text-destructive-strong" />
 							<p className="text-sm text-destructive-strong">
 								<span className="font-semibold">Force mode:</span> ALL traffic

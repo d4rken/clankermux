@@ -67,7 +67,7 @@ export function PaymentsHistoryCard({ payments }: PaymentsHistoryCardProps) {
 						{payments.map((payment) => (
 							<div
 								key={payment.id}
-								className="flex items-center gap-3 py-2 text-sm"
+								className="flex items-center gap-row py-2 text-sm"
 								title={payment.notes ?? undefined}
 							>
 								<span className="text-muted-foreground tabular-nums shrink-0">

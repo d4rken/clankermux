@@ -18,7 +18,7 @@ function ThinkingBlockComponent({ content }: ThinkingBlockProps) {
 	return (
 		<div className="p-3 bg-warning/10 border border-warning/25 rounded-lg">
 			<div className="flex items-center justify-between mb-1">
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-item">
 					<MessageSquare className="w-3 h-3 text-warning-strong" />
 					<span className="text-xs font-medium text-warning-strong">
 						Thinking

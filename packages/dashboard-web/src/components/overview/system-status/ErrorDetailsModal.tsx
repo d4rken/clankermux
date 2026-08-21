@@ -45,9 +45,7 @@ interface DetailRowProps {
 function DetailRow({ label, children }: DetailRowProps) {
 	return (
 		<div>
-			<p className="text-xs text-muted-foreground uppercase tracking-wide">
-				{label}
-			</p>
+			<p className="label-caps">{label}</p>
 			<div className="text-sm mt-0.5">{children}</div>
 		</div>
 	);
@@ -84,14 +82,14 @@ export function ErrorDetailsModal({
 				{error && meta && (
 					<>
 						<DialogHeader>
-							<DialogTitle className="flex items-center gap-2">
+							<DialogTitle className="flex items-center gap-item">
 								<Icon className={`h-5 w-5 ${iconColor}`} />
 								{meta.title}
 							</DialogTitle>
 							<DialogDescription>{meta.description}</DialogDescription>
 						</DialogHeader>
 
-						<div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+						<div className="grid grid-cols-1 sm:grid-cols-2 gap-group">
 							<DetailRow label="Error code">
 								<code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
 									{error.errorCode}
@@ -150,9 +148,7 @@ export function ErrorDetailsModal({
 						<Separator />
 
 						<div className="rounded-lg bg-muted/50 p-3 text-sm">
-							<p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-								Suggestion
-							</p>
+							<p className="label-caps mb-1">Suggestion</p>
 							{meta.suggestion}
 						</div>
 

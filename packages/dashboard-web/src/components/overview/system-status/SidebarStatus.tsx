@@ -27,7 +27,7 @@ export function SidebarStatus() {
 
 	return (
 		<div className="rounded-lg bg-muted/50 p-3">
-			<div className="flex items-center gap-2 text-sm">
+			<div className="flex items-center gap-item text-sm">
 				<span
 					className="inline-block h-2.5 w-2.5 rounded-full bg-muted-foreground"
 					style={dotColor ? { backgroundColor: dotColor } : undefined}

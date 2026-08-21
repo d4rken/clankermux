@@ -100,7 +100,7 @@ export function FamilyActivationSection() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-3">
+				<div className="space-y-row">
 					{FAMILIES.map((family) => {
 						const assignment = getFamilyAssignment(family);
 						const isEnabled = assignment?.enabled ?? false;
@@ -109,7 +109,7 @@ export function FamilyActivationSection() {
 						return (
 							<div
 								key={family}
-								className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-3"
+								className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-row"
 							>
 								<Label className="font-medium">{FAMILY_LABELS[family]}</Label>
 								<Switch

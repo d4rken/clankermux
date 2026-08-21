@@ -111,7 +111,7 @@ export function AccountModelMappingsDialog({
 						models with commas to cycle through them on rate limits.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="space-y-4 py-2 overflow-y-auto flex-1">
+				<div className="space-y-group py-2 overflow-y-auto flex-1">
 					<div>
 						<h4 className="text-sm font-medium mb-2">Model Mappings</h4>
 						<p className="text-xs text-muted-foreground mb-3">
@@ -122,8 +122,8 @@ export function AccountModelMappingsDialog({
 							</code>
 							) to cycle on rate limits.
 						</p>
-						<div className="grid grid-cols-2 gap-3">
-							<div className="space-y-1">
+						<div className="grid grid-cols-2 gap-row">
+							<div className="space-y-tight">
 								<Label htmlFor="opus" className="text-xs">
 									Opus
 								</Label>
@@ -135,7 +135,7 @@ export function AccountModelMappingsDialog({
 									className="h-8"
 								/>
 							</div>
-							<div className="space-y-1">
+							<div className="space-y-tight">
 								<Label htmlFor="sonnet" className="text-xs">
 									Sonnet
 								</Label>
@@ -147,7 +147,7 @@ export function AccountModelMappingsDialog({
 									className="h-8"
 								/>
 							</div>
-							<div className="space-y-1">
+							<div className="space-y-tight">
 								<Label htmlFor="haiku" className="text-xs">
 									Haiku
 								</Label>
@@ -159,7 +159,7 @@ export function AccountModelMappingsDialog({
 									className="h-8"
 								/>
 							</div>
-							<div className="space-y-1">
+							<div className="space-y-tight">
 								<Label htmlFor="fable" className="text-xs">
 									Fable
 								</Label>

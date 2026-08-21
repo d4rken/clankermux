@@ -67,7 +67,7 @@ export function MetricCard({
 	const pending = loading && !unavailableReason;
 	const trendElement = !pending && trend !== "flat" && change !== undefined && (
 		<div
-			className={`flex items-center gap-1 text-sm font-medium ${
+			className={`flex items-center gap-tight text-sm font-medium ${
 				trend === "up" ? "text-success-strong" : "text-destructive-strong"
 			}`}
 		>
@@ -82,9 +82,9 @@ export function MetricCard({
 
 	return (
 		<Card>
-			<CardContent className="p-4">
-				<div className="flex items-center justify-between gap-2 mb-1.5">
-					<div className="flex items-center gap-1.5 min-w-0">
+			<CardContent>
+				<div className="flex items-center justify-between gap-item mb-1.5">
+					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						<p className="text-sm text-muted-foreground truncate">{title}</p>
 						{caption && (
@@ -96,7 +96,7 @@ export function MetricCard({
 					{trendPeriod && trendElement ? (
 						<Popover>
 							<PopoverTrigger asChild>
-								<div className="flex items-center gap-1 cursor-help shrink-0">
+								<div className="flex items-center gap-tight cursor-help shrink-0">
 									{trendElement}
 									<Info className="h-3 w-3 text-muted-foreground" />
 								</div>
@@ -111,34 +111,35 @@ export function MetricCard({
 				</div>
 				{unavailableReason ? (
 					<>
-						<p className="text-2xl font-bold text-muted-foreground/60">—</p>
-						<p className="mt-1 flex items-center gap-1.5 text-xs text-warning-strong">
+						<p className="figure-xl text-muted-foreground/60">—</p>
+						<p className="mt-1 flex items-center gap-item text-xs text-warning-strong">
 							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 							{unavailableReason}
 						</p>
 					</>
 				) : pending ? (
-					// Matches the resolved value's line box (text-2xl ⇒ 2rem), so the
-					// tile keeps its height when the number arrives.
-					<Skeleton className="h-8 w-24" />
+					// Matches the resolved value's line box (.figure-xl is a fixed
+					// 1.75rem = h-7), so the tile keeps its height when the number
+					// arrives.
+					<Skeleton className="h-7 w-24" />
 				) : (
-					<p className="text-2xl font-bold">{value}</p>
+					<p className="figure-xl">{value}</p>
 				)}
 				{pending && subRows && subRows.length > 0 && (
-					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
+					<div className="mt-3 pt-3 border-t border-border/50 space-y-tight">
 						{subRows.map((row) => (
 							<Skeleton key={row.label} className="h-3 w-full" />
 						))}
 					</div>
 				)}
 				{!unavailableReason && !pending && staleNote && (
-					<p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+					<p className="mt-1 flex items-center gap-item text-xs text-muted-foreground">
 						<Clock className="h-3.5 w-3.5 shrink-0" />
 						{staleNote}
 					</p>
 				)}
 				{!unavailableReason && !pending && subRows && subRows.length > 0 && (
-					<div className="mt-3 pt-3 border-t border-border/50 space-y-1">
+					<div className="mt-3 pt-3 border-t border-border/50 space-y-tight">
 						{subRows.map((row) => {
 							if (row.inlineExplainer) {
 								return (

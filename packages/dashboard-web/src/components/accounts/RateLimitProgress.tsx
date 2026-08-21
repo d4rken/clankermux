@@ -88,7 +88,7 @@ function primaryCardClass(compact: boolean): string {
 	return cn(
 		compact ? COMPACT_WINDOW_CARD_CLASS : WINDOW_CARD_CLASS,
 		PRIMARY_WINDOW_TINT,
-		compact ? "space-y-1.5" : "space-y-2",
+		compact ? "space-y-tight" : "space-y-item",
 	);
 }
 
@@ -436,14 +436,14 @@ export function RateLimitProgress({
 	if (!usageData && staleUsage) {
 		return (
 			<div className={cn(primaryCardClass(compact), className)}>
-				<div className="space-y-1.5">
+				<div className="space-y-item">
 					{staleUsage.fiveHour && (
 						<>
 							<Progress
 								value={staleUsage.fiveHour.utilization}
 								className="h-2"
 							/>
-							<div className="flex items-center justify-between gap-2 text-xs">
+							<div className="flex items-center justify-between gap-item text-xs">
 								<span className="min-w-0 flex-1 truncate text-muted-foreground">
 									5h: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
 								</span>
@@ -466,7 +466,7 @@ export function RateLimitProgress({
 								value={staleUsage.sevenDay.utilization}
 								className="h-2"
 							/>
-							<div className="flex items-center justify-between gap-2 text-xs">
+							<div className="flex items-center justify-between gap-item text-xs">
 								<span className="min-w-0 flex-1 truncate text-muted-foreground">
 									Weekly: last known as of{" "}
 									{formatAsOfText(staleUsage.asOfIso, now)}
@@ -694,7 +694,7 @@ export function RateLimitProgress({
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	const cardClass = compact ? COMPACT_WINDOW_CARD_CLASS : WINDOW_CARD_CLASS;
-	const cardSpacing = compact ? "space-y-1" : "space-y-1.5";
+	const cardSpacing = compact ? "space-y-tight" : "space-y-item";
 	// Compact mode collapses the wrapping 2-up grid into a single equal-width
 	// strip once there is room for it. `grid-cols-none` is required alongside
 	// `grid-flow-col`: without clearing the template the sm:2-column track list
@@ -702,8 +702,8 @@ export function RateLimitProgress({
 	// then divides the row evenly however many windows an account reports, so
 	// no per-count class map is needed.
 	const gridClass = compact
-		? "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-none xl:auto-cols-fr xl:grid-flow-col"
-		: "grid grid-cols-1 gap-3 sm:grid-cols-2";
+		? "grid grid-cols-1 gap-item sm:grid-cols-2 xl:grid-cols-none xl:auto-cols-fr xl:grid-flow-col"
+		: "grid grid-cols-1 gap-row sm:grid-cols-2";
 
 	const windowGrid = (
 		<div className={cn(gridClass, !agedAsOfText && className)}>
@@ -874,7 +874,7 @@ export function RateLimitProgress({
 								/>
 							)}
 						</div>
-						<div className="flex items-center justify-between gap-2 text-xs">
+						<div className="flex items-center justify-between gap-item text-xs">
 							{/* `shrink-0` is safe in a half-width card but not in a
 							    fifth-width one: a long provider-supplied label (Codex's
 							    synthetic per-model windows carry the full model name)
@@ -921,7 +921,7 @@ export function RateLimitProgress({
 							</p>
 						)}
 						{isWindowThrottled && throttleDisplayUntil && (
-							<div className="flex items-center justify-between gap-2 text-xs">
+							<div className="flex items-center justify-between gap-item text-xs">
 								<span className="text-warning-strong">
 									Usage throttling enabled; requests are being delayed
 								</span>
@@ -947,7 +947,7 @@ export function RateLimitProgress({
 	if (!agedAsOfText) return windowGrid;
 
 	return (
-		<div className={cn("space-y-1.5", className)}>
+		<div className={cn("space-y-item", className)}>
 			{windowGrid}
 			<p className="text-xs text-muted-foreground">
 				Live usage as of {agedAsOfText}

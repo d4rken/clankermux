@@ -109,10 +109,10 @@ export function DataRetentionCard() {
 					Analytics remain intact.
 				</CardDescription>
 			</CardHeader>
-			<CardContent className="space-y-3">
+			<CardContent className="space-y-row">
 				<div>
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">Payloads</span>
 							<Input
 								type="number"
@@ -142,8 +142,8 @@ export function DataRetentionCard() {
 				</div>
 
 				<div className="pt-2">
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">Payload size cap</span>
 							<Input
 								type="number"
@@ -182,8 +182,8 @@ export function DataRetentionCard() {
 				</div>
 
 				<div className="pt-2">
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">Requests</span>
 							<Input
 								type="number"
@@ -209,8 +209,8 @@ export function DataRetentionCard() {
 				</div>
 
 				<div className="pt-2">
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">Usage snapshots</span>
 							<Input
 								type="number"
@@ -240,8 +240,8 @@ export function DataRetentionCard() {
 				</div>
 
 				<div className="pt-2">
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">Memory history</span>
 							<Input
 								type="number"
@@ -271,8 +271,8 @@ export function DataRetentionCard() {
 				</div>
 
 				<div className="pt-2">
-					<div className="flex items-center gap-2">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
+						<div className="flex items-center gap-item">
 							<span className="text-sm font-medium w-28">
 								Cache keep-alive snapshots
 							</span>
@@ -340,7 +340,7 @@ export function DataRetentionCard() {
 					/>
 				</div>
 
-				<div className="pt-1 flex items-center gap-2">
+				<div className="pt-1 flex items-center gap-item">
 					<Button
 						variant="secondary"
 						size="sm"

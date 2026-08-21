@@ -9,7 +9,7 @@ import { ProviderMarkIcon } from "./provider-marks";
  * neutral fill unlisted providers already fell back to.
  */
 const CHIP_CLASSES =
-	"inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground";
+	"inline-flex items-center gap-item rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground";
 
 interface ProviderChipProps {
 	provider: string;

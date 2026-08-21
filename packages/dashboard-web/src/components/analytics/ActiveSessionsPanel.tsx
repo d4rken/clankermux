@@ -29,7 +29,7 @@ function EmptyState({ loading }: { loading: boolean }) {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<Users className="h-5 w-5" />
 					Active Sessions
 				</CardTitle>
@@ -92,12 +92,12 @@ export function ActiveSessionsPanel({
 	}
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			<Card>
 				<CardHeader>
-					<div className="flex flex-wrap items-start justify-between gap-3">
+					<div className="flex flex-wrap items-start justify-between gap-row">
 						<div>
-							<CardTitle className="flex items-center gap-2">
+							<CardTitle className="flex items-center gap-item">
 								<Users className="h-5 w-5" />
 								Active Sessions
 							</CardTitle>

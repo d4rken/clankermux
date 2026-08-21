@@ -156,7 +156,7 @@ export function TrafficTab(props: TrafficTabProps) {
 	const mainLoading = modelBreakdown ? loading || perModelLoading : loading;
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			<AnalyticsControls
 				timeRange={range}
 				setTimeRange={onRangeChange}
@@ -196,7 +196,7 @@ export function TrafficTab(props: TrafficTabProps) {
 			/>
 
 			{/* Secondary Charts Row */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			<div className="grid grid-cols-1 lg:grid-cols-2 gap-section">
 				<PerformanceIndicatorsChart
 					data={data}
 					loading={loading}
@@ -217,7 +217,7 @@ export function TrafficTab(props: TrafficTabProps) {
 
 			{/* Cumulative Trends - always shown at the bottom */}
 			{analytics && data.length > 0 && (
-				<section className="space-y-6">
+				<section className="space-y-section">
 					<div className="border-t pt-6">
 						<h2 className="text-lg font-semibold">Cumulative Trends</h2>
 						<p className="text-sm text-muted-foreground">

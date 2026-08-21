@@ -47,8 +47,8 @@ export function AnalyticsControls({
 	onRefresh,
 }: AnalyticsControlsProps) {
 	return (
-		<div className="flex flex-col sm:flex-row gap-4 justify-between">
-			<div className="flex flex-wrap gap-2">
+		<div className="flex flex-col sm:flex-row gap-group justify-between">
+			<div className="flex flex-wrap gap-item">
 				<Select
 					value={timeRange}
 					onValueChange={(v) => setTimeRange(v as TimeRange)}
@@ -82,7 +82,7 @@ export function AnalyticsControls({
 				/>
 			</div>
 
-			<div className="flex gap-2">
+			<div className="flex gap-item">
 				<Button
 					variant="outline"
 					size="sm"

@@ -171,7 +171,10 @@ describe("SystemHealthStripView", () => {
 		expect(html).toContain("Could not reach the proxy status endpoint.");
 		// Metric slots need live data — none of them should render placeholders.
 		expect(html).not.toContain("RSS");
-		expect(html).not.toContain("up ");
+		// `>up ` rather than a bare `up `: the uptime text is rendered directly
+		// after the clock icon's </svg>, and a bare "up " also matches inside
+		// class attributes (`gap-x-group ` ends with it).
+		expect(html).not.toContain(">up ");
 	});
 
 	it("shows a loading label instead of an error before the first fetch", () => {

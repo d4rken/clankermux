@@ -36,9 +36,9 @@ export function DeleteConfirmationDialog({
 					<CardTitle>Confirm Account Removal</CardTitle>
 					<CardDescription>This action cannot be undone.</CardDescription>
 				</CardHeader>
-				<CardContent className="space-y-4">
+				<CardContent className="space-y-group">
 					<div className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-						<div className="flex items-center gap-2 text-destructive-strong">
+						<div className="flex items-center gap-item text-destructive-strong">
 							<AlertCircle className="h-5 w-5" />
 							<p className="font-medium">Warning</p>
 						</div>
@@ -47,7 +47,7 @@ export function DeleteConfirmationDialog({
 							This will delete all associated data and cannot be recovered.
 						</p>
 					</div>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<Label htmlFor="confirm-input">
 							Type{" "}
 							<span className="font-mono font-semibold">{accountName}</span> to
@@ -63,7 +63,7 @@ export function DeleteConfirmationDialog({
 							autoComplete="off"
 						/>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-item">
 						<Button
 							variant="destructive"
 							onClick={onConfirm}

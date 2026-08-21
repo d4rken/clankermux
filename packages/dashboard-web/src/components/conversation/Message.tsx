@@ -55,7 +55,7 @@ function MessageComponent({
 
 	return (
 		<div
-			className={`flex gap-3 w-full ${isRightAligned ? "flex-row-reverse" : "flex-row"}`}
+			className={`flex gap-row w-full ${isRightAligned ? "flex-row-reverse" : "flex-row"}`}
 		>
 			<div
 				className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${roleStyle.bg}`}
@@ -69,7 +69,7 @@ function MessageComponent({
 				<div
 					className={`inline-block max-w-[85%] ${isRightAligned ? "ml-auto" : "mr-auto"}`}
 				>
-					<div className="flex items-center gap-2 mb-1">
+					<div className="flex items-center gap-item mb-1">
 						<span className="text-xs font-medium text-muted-foreground">
 							{role.charAt(0).toUpperCase() + role.slice(1)}
 						</span>
@@ -106,7 +106,7 @@ function MessageComponent({
 
 					{/* Tool usage */}
 					{hasTools > 0 && (
-						<div className="mt-2 space-y-2">
+						<div className="mt-2 space-y-item">
 							{tools?.map((tool, index) => (
 								<ToolUsageBlock
 									key={
@@ -122,7 +122,7 @@ function MessageComponent({
 
 					{/* Tool results */}
 					{hasToolResults > 0 && (
-						<div className="mt-2 space-y-2">
+						<div className="mt-2 space-y-item">
 							{toolResults?.map((result, index) => (
 								<ToolResultBlock
 									key={`result-${result.tool_use_id || index}`}

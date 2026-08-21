@@ -357,9 +357,9 @@ export function CacheFlowPanel({ cacheFlow, loading }: CacheFlowPanelProps) {
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex flex-wrap items-start justify-between gap-3">
+				<div className="flex flex-wrap items-start justify-between gap-row">
 					<div>
-						<CardTitle className="flex items-center gap-2">
+						<CardTitle className="flex items-center gap-item">
 							<Layers className="h-5 w-5" />
 							Cache Flow
 						</CardTitle>
@@ -367,7 +367,7 @@ export function CacheFlowPanel({ cacheFlow, loading }: CacheFlowPanelProps) {
 							Input tokens by cache status, model, and account
 						</CardDescription>
 					</div>
-					<div className="flex flex-wrap items-center gap-2">
+					<div className="flex flex-wrap items-center gap-item">
 						<Badge variant="secondary">
 							{formatCompactNumber(totals.total)} input tokens
 						</Badge>

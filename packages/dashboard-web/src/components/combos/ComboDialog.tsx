@@ -75,7 +75,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 				</DialogHeader>
 
 				{isEditMode ? (
-					<div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2">
+					<div className="min-h-0 flex-1 space-y-group overflow-y-auto py-2">
 						{comboQuery.isLoading && (
 							<p className="text-sm text-muted-foreground">
 								Loading routing chain...
@@ -84,8 +84,8 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 						{combo && <ComboSlotBuilder combo={combo} />}
 					</div>
 				) : (
-					<div className="space-y-4 py-2">
-						<div className="space-y-2">
+					<div className="space-y-group py-2">
+						<div className="space-y-item">
 							<Label htmlFor="combo-name">Name</Label>
 							<Input
 								id="combo-name"
@@ -96,7 +96,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 							/>
 						</div>
 
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label htmlFor="combo-description">Description</Label>
 							<Input
 								id="combo-description"

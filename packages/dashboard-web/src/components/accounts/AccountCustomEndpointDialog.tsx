@@ -101,8 +101,8 @@ export function AccountCustomEndpointDialog({
 						)}
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-4 py-4">
-					<div className="grid gap-2">
+				<div className="grid gap-group py-4">
+					<div className="grid gap-item">
 						<Label htmlFor="customEndpoint">Custom Endpoint</Label>
 						<Input
 							id="customEndpoint"

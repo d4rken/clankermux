@@ -94,8 +94,8 @@ export function SystemHealthStripView({
 			className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg"
 		>
 			<Card className={`px-4 py-3 ${tone}`}>
-				<div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-					<span className="flex items-center gap-2 whitespace-nowrap font-medium">
+				<div className="flex flex-wrap items-center gap-x-group gap-y-item text-sm">
+					<span className="flex items-center gap-item whitespace-nowrap font-medium">
 						<span
 							className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-muted-foreground"
 							style={
@@ -112,12 +112,12 @@ export function SystemHealthStripView({
 
 					{status ? (
 						<>
-							<span className="flex items-center gap-1.5 whitespace-nowrap tabular-nums text-muted-foreground">
+							<span className="flex items-center gap-item whitespace-nowrap tabular-nums text-muted-foreground">
 								<Clock className="h-3.5 w-3.5" aria-hidden="true" />
 								up {formatUptime(status.uptime_s)}
 							</span>
 
-							<span className="flex items-center gap-1.5 whitespace-nowrap tabular-nums text-muted-foreground">
+							<span className="flex items-center gap-item whitespace-nowrap tabular-nums text-muted-foreground">
 								<Zap
 									className={`h-3.5 w-3.5 ${
 										lagTone === "ok"
@@ -134,7 +134,7 @@ export function SystemHealthStripView({
 							{/* Live point-in-time RSS, deliberately NOT the last sparkline
 							    point: history buckets carry the per-bucket MAX, so that
 							    point reads high and would disagree with the sidebar. */}
-							<span className="flex items-center gap-2 whitespace-nowrap tabular-nums text-muted-foreground">
+							<span className="flex items-center gap-item whitespace-nowrap tabular-nums text-muted-foreground">
 								RSS {status.memory.rss_mb.toLocaleString()} MB
 								<Sparkline
 									values={rssHistoryMb}
@@ -143,7 +143,7 @@ export function SystemHealthStripView({
 							</span>
 
 							{integrity ? (
-								<span className="flex items-center gap-1.5 whitespace-nowrap text-muted-foreground">
+								<span className="flex items-center gap-item whitespace-nowrap text-muted-foreground">
 									<Database
 										className={`h-3.5 w-3.5 ${
 											integrity === "corrupt"
@@ -161,12 +161,15 @@ export function SystemHealthStripView({
 					) : null}
 
 					{errorGroupCount === undefined ? null : errorGroupCount === null ? (
-						<Badge variant="outline" className="gap-1 whitespace-nowrap">
+						<Badge variant="outline" className="gap-tight whitespace-nowrap">
 							<AlertTriangle className="h-3 w-3" aria-hidden="true" />
 							errors unknown
 						</Badge>
 					) : errorGroupCount > 0 ? (
-						<Badge variant="destructive" className="gap-1 whitespace-nowrap">
+						<Badge
+							variant="destructive"
+							className="gap-tight whitespace-nowrap"
+						>
 							<AlertTriangle className="h-3 w-3" aria-hidden="true" />
 							{errorGroupCount} error{errorGroupCount === 1 ? "" : "s"}
 						</Badge>

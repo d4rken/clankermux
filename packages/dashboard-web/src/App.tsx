@@ -28,17 +28,17 @@ const LazyLimitsTab = lazy(() =>
 	})),
 );
 const LoadingSkeleton = () => (
-	<div className="space-y-6 p-6">
+	<div className="space-y-section p-6">
 		<div className="animate-pulse">
 			<div className="h-8 bg-muted rounded w-32 mb-4"></div>
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-group">
 				{Array.from({ length: 4 }, (_, i) => `skeleton-card-${i}`).map(
 					(key) => (
 						<div key={key} className="h-24 bg-muted rounded" />
 					),
 				)}
 			</div>
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			<div className="grid grid-cols-1 lg:grid-cols-2 gap-section">
 				{Array.from({ length: 2 }, (_, i) => `skeleton-chart-${i}`).map(
 					(key) => (
 						<div key={key} className="h-64 bg-muted rounded" />
@@ -152,19 +152,14 @@ export function App() {
 							<div className="h-16 lg:hidden" />
 
 							{/* Page Content */}
-							{/* content-surface is where Blueprint paints its drafting
-							    grid; every other palette leaves --grid-line unset so the
-							    rule never applies. */}
-							<div className="content-surface p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
+							<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
 								{/* One line, not three. The title used to be a gradient-filled
 								    3xl over a subtitle that restated it, and Overview then
 								    printed its own name a third time immediately below. The
 								    title now matches the sidebar label exactly, so a page has
 								    one name instead of three. */}
 								<div className="mb-6 border-b pb-3">
-									<h1 className="display-face text-2xl font-semibold">
-										{currentRoute.title}
-									</h1>
+									<h1 className="page-title">{currentRoute.title}</h1>
 								</div>
 
 								{/* No enter animation: a fade on every navigation is a delay

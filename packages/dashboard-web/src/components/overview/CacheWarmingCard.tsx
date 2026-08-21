@@ -96,9 +96,9 @@ export function CacheWarmingCard() {
 					don't benefit.
 				</CardDescription>
 			</CardHeader>
-			<CardContent className="space-y-4">
+			<CardContent className="space-y-group">
 				<div>
-					<div className="flex items-center gap-3">
+					<div className="flex items-center gap-row">
 						<span className="text-sm font-medium w-12">Mode</span>
 						<Select
 							value={mode}
@@ -125,12 +125,12 @@ export function CacheWarmingCard() {
 				</div>
 
 				<div>
-					<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
 						<span className="text-sm font-medium">
 							Minimum context size (tokens)
 						</span>
 					</div>
-					<div className="flex items-center gap-2 mt-1">
+					<div className="flex items-center gap-item mt-1">
 						<Input
 							type="number"
 							min={0}
@@ -157,10 +157,10 @@ export function CacheWarmingCard() {
 				</div>
 
 				<div>
-					<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
 						<span className="text-sm font-medium">Bridge horizon (hours)</span>
 					</div>
-					<div className="flex items-center gap-2 mt-1">
+					<div className="flex items-center gap-item mt-1">
 						<Input
 							type="number"
 							min={0}

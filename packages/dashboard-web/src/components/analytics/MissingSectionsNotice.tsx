@@ -35,7 +35,7 @@ export function MissingSectionsNotice({
 	return (
 		<Card
 			role="alert"
-			className="flex items-start gap-3 px-4 py-3 text-sm bg-warning/10 border-warning/30"
+			className="flex items-start gap-row px-4 py-3 text-sm bg-warning/10 border-warning/30"
 		>
 			<AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-warning-strong" />
 			<div>

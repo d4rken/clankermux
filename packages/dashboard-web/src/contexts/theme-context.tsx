@@ -9,80 +9,9 @@ import {
 
 type Theme = "dark" | "light" | "system";
 
-/**
- * Visual direction. Independent of light/dark: every palette defines both
- * modes, so switching direction never changes whether the app is light or dark.
- *
- * Each id must have a matching `[data-palette="…"]` token block in
- * styles/globals.css. `classic` is the palette that shipped before the
- * directions existed and is what an unknown or absent stored value resolves to.
- */
-export type Palette =
-	| "classic"
-	| "signal"
-	| "foundry"
-	| "paper"
-	| "ledger"
-	| "blueprint"
-	| "tape";
-
-export const DEFAULT_PALETTE: Palette = "classic";
-
-export interface PaletteOption {
-	id: Palette;
-	label: string;
-	description: string;
-}
-
-/**
- * Rendered by the palette picker. A palette present in the CSS but missing here
- * is unreachable from the UI, which is what theme-context.dom-test.tsx checks.
- */
-export const PALETTES: PaletteOption[] = [
-	{
-		id: "classic",
-		label: "Classic",
-		description: "Cloudflare orange on blue-grey",
-	},
-	{
-		id: "signal",
-		label: "Signal",
-		description: "Instrument deck — cold, hairline, mono figures",
-	},
-	{
-		id: "foundry",
-		label: "Foundry",
-		description: "Warm industrial — orange kept, rationed",
-	},
-	{
-		id: "paper",
-		label: "Paper Terminal",
-		description: "Clinical — ink on paper, deep teal",
-	},
-	{
-		id: "ledger",
-		label: "Ledger",
-		description: "Rules, not boxes — monochrome ink",
-	},
-	{
-		id: "blueprint",
-		label: "Blueprint",
-		description: "Drafting paper — faint grid, ink blue",
-	},
-	{
-		id: "tape",
-		label: "Tape",
-		description: "Dense dark terminal — mono figures",
-	},
-];
-
-const PALETTE_IDS = new Set<string>(PALETTES.map((p) => p.id));
-
 type ThemeContextType = {
 	theme: Theme;
 	setTheme: (theme: Theme) => void;
-	palette: Palette;
-	setPalette: (palette: Palette) => void;
 };
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
@@ -103,30 +32,16 @@ function withThemeTransition(apply: () => void): void {
 }
 
 /**
- * Best-effort persistence. Reads are already guarded; writes need the same
- * treatment because `setItem` throws outright when site data is blocked or the
- * quota is full, and these run from a passive effect where the throw would
- * surface as an unhandled render error rather than a failed save.
+ * Best-effort persistence. Reads are guarded too: `localStorage` throws
+ * outright when site data is blocked, and this runs from a passive effect where
+ * the throw would surface as an unhandled render error rather than a failed
+ * save.
  */
 function persist(key: string, value: string): void {
 	try {
 		localStorage.setItem(key, value);
 	} catch {
 		// A preference that cannot be saved is not worth breaking the app over.
-	}
-}
-
-function readStoredPalette(): Palette {
-	try {
-		const stored = localStorage.getItem("palette");
-		// An id that no longer has a token block would leave every colour
-		// resolving against whatever :root holds, so unknown values are discarded
-		// rather than trusted.
-		return stored && PALETTE_IDS.has(stored)
-			? (stored as Palette)
-			: DEFAULT_PALETTE;
-	} catch {
-		return DEFAULT_PALETTE;
 	}
 }
 
@@ -151,23 +66,13 @@ function resolveMode(theme: Theme): "light" | "dark" {
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
 	const [theme, setThemeState] = useState<Theme>(readStoredTheme);
-	const [palette, setPaletteState] = useState<Palette>(readStoredPalette);
 
-	// Mode axis: owns the light/dark class and nothing else.
 	useEffect(() => {
 		const root = window.document.documentElement;
 		root.classList.remove("light", "dark");
 		root.classList.add(resolveMode(theme));
 		persist("theme", theme);
 	}, [theme]);
-
-	// Palette axis: owns data-palette and nothing else. Kept in its own effect so
-	// a direction change cannot disturb the mode class, or vice versa.
-	useEffect(() => {
-		const root = window.document.documentElement;
-		root.setAttribute("data-palette", palette);
-		persist("palette", palette);
-	}, [palette]);
 
 	// Track the OS preference only while following it.
 	useEffect(() => {
@@ -187,12 +92,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 		withThemeTransition(() => setThemeState(next));
 	}, []);
 
-	const setPalette = useCallback((next: Palette) => {
-		withThemeTransition(() => setPaletteState(next));
-	}, []);
-
 	return (
-		<ThemeContext.Provider value={{ theme, setTheme, palette, setPalette }}>
+		<ThemeContext.Provider value={{ theme, setTheme }}>
 			{children}
 		</ThemeContext.Provider>
 	);

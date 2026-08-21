@@ -83,7 +83,7 @@ function EmptyState({
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<Gauge className="h-5 w-5" />
 					Context Composition
 				</CardTitle>
@@ -188,7 +188,7 @@ function CompositionSplit({
 	}) as TooltipFormatter;
 
 	return (
-		<div className="space-y-3">
+		<div className="space-y-row">
 			<ResponsiveContainer width="100%" height={56}>
 				<BarChart
 					data={[chartRow]}
@@ -212,9 +212,9 @@ function CompositionSplit({
 					))}
 				</BarChart>
 			</ResponsiveContainer>
-			<div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+			<div className="flex flex-wrap items-center gap-x-group gap-y-item text-sm">
 				{segments.map((segment) => (
-					<div key={segment.key} className="flex items-center gap-2">
+					<div key={segment.key} className="flex items-center gap-item">
 						<span
 							className="h-2.5 w-2.5 rounded-sm"
 							style={{
@@ -416,9 +416,9 @@ export function ContextCompositionPanel({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex flex-wrap items-start justify-between gap-3">
+				<div className="flex flex-wrap items-start justify-between gap-row">
 					<div>
-						<CardTitle className="flex items-center gap-2">
+						<CardTitle className="flex items-center gap-item">
 							<Gauge className="h-5 w-5" />
 							Context Composition
 						</CardTitle>
@@ -433,7 +433,7 @@ export function ContextCompositionPanel({
 					</Badge>
 				</div>
 			</CardHeader>
-			<CardContent className="space-y-6">
+			<CardContent className="space-y-section">
 				{coverage.withComposition < coverage.totalRequests && (
 					<p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
 						Composition recorded for {formatNumber(coverage.withComposition)} of{" "}

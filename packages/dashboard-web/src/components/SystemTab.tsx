@@ -35,7 +35,7 @@ export function SystemTab() {
 		useMemoryHistory(memoryRange);
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			<SystemStatus />
 
 			<RecentErrorsCard />

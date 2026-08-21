@@ -5,11 +5,10 @@ import { join } from "node:path";
 /**
  * Contrast guard for the theme tokens.
  *
- * The dashboard has four palettes across two colour modes, which is eight
- * complete token sets. Nothing else checks them: the components only name
- * roles (`text-warning-strong`, `bg-card`), so a palette whose amber is too
- * light for 12px text produces no error anywhere — it just ships an unreadable
- * status chip in one direction and nobody notices until they switch to it.
+ * Paper Terminal defines two complete token sets, one per colour mode.
+ * Nothing else checks them: the components only name roles
+ * (`text-warning-strong`, `bg-card`), so an amber too light for 12px text
+ * produces no error anywhere — it just ships an unreadable status chip.
  *
  * This parses styles/globals.css directly rather than going through a rendered
  * page, because the failure lives in the token values, not in any component.
@@ -29,13 +28,12 @@ const CSS_PATH = join(import.meta.dir, "../../styles/globals.css");
 
 type Tokens = Record<string, string>;
 
-/** Token blocks in source order. Later blocks override earlier ones. */
+/** The `:root` and `.dark` token blocks, in source order. */
 function parseBlocks(css: string): Array<{ selector: string; tokens: Tokens }> {
 	// Comments can contain braces and colons; strip them before matching.
 	const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
 	const blocks: Array<{ selector: string; tokens: Tokens }> = [];
-	const blockRe =
-		/^(:root|\.dark|\[data-palette="[a-z]+"\](?:\.dark)?)\s*\{([\s\S]*?)^\}/gm;
+	const blockRe = /^(:root|\.dark)\s*\{([\s\S]*?)^\}/gm;
 	let match = blockRe.exec(stripped);
 	while (match !== null) {
 		const tokens: Tokens = {};
@@ -52,31 +50,20 @@ function parseBlocks(css: string): Array<{ selector: string; tokens: Tokens }> {
 }
 
 /**
- * Resolve the token set a browser would compute for one palette/mode pair.
+ * Resolve the token set a browser would compute for one colour mode.
  *
- * `:root`, `.dark` and `[data-palette=x]` all have specificity (0,1,0), so
- * source order decides between them; `[data-palette=x].dark` is (0,2,0) and
- * outranks all three. Applying matching blocks in file order and letting the
- * higher-specificity block land last reproduces that.
+ * `:root` and `.dark` have equal specificity (0,1,0), so source order decides
+ * and `.dark` wins by coming second. Dark deliberately redefines only colour —
+ * radius, fonts and spacing are inherited from `:root` — so applying `:root`
+ * first and layering `.dark` over it reproduces the cascade exactly.
  */
 function resolve(
 	blocks: ReturnType<typeof parseBlocks>,
-	palette: string,
 	mode: "light" | "dark",
 ): Tokens {
-	const equalSpecificity = blocks.filter(({ selector }) => {
-		if (selector === ":root") return true;
-		if (selector === ".dark") return mode === "dark";
-		if (selector === `[data-palette="${palette}"]`) return true;
-		return false;
-	});
-	const higherSpecificity = blocks.filter(
-		({ selector }) =>
-			mode === "dark" && selector === `[data-palette="${palette}"].dark`,
-	);
-
 	const out: Tokens = {};
-	for (const { tokens } of [...equalSpecificity, ...higherSpecificity]) {
+	for (const { selector, tokens } of blocks) {
+		if (selector === ".dark" && mode !== "dark") continue;
 		Object.assign(out, tokens);
 	}
 	return out;
@@ -180,15 +167,6 @@ function contrast(a: string, b: string): number {
 
 // ── the checks ───────────────────────────────────────────────────────────────
 
-const PALETTES = [
-	"classic",
-	"signal",
-	"foundry",
-	"paper",
-	"ledger",
-	"blueprint",
-	"tape",
-] as const;
 const MODES = ["light", "dark"] as const;
 
 const blocks = parseBlocks(readFileSync(CSS_PATH, "utf8"));
@@ -197,39 +175,18 @@ const blocks = parseBlocks(readFileSync(CSS_PATH, "utf8"));
 const TEXT_MIN = 4.5;
 
 /**
- * Solid semantic fills carry a lower floor on purpose. Classic's destructive
- * badge is white on `hsl(0 84.2% 60.2%)` at ~3.35:1 and shipped that way long
- * before the palettes existed; asserting 4.5 here would fail on the untouched
- * baseline rather than on anything this change introduced. The floor guards
- * against regressing BELOW what ships, it does not certify AA.
+ * Solid semantic fills. Paper's own fills clear 4.5, but the floor stays at 3
+ * because a fill is a badge background carrying a short word, not running
+ * prose — and the pairing that matters most (`-foreground` on its own fill) is
+ * checked here rather than assumed.
  */
 const FILL_MIN = 3;
 
-/**
- * Pre-existing pairs that do not meet FILL_MIN, pinned at the ratio they
- * actually ship so they cannot get worse.
- *
- * `classic` primary is ClankerMux orange `#F38020` with white on top: 2.74:1,
- * in both modes, on every default button, primary badge and active nav pill.
- * That is the brand colour and it predates the palette work — this file records
- * it rather than silently redesigning it or lowering FILL_MIN for everyone,
- * which would let the three new directions regress unnoticed too.
- *
- * Fixing it means either darkening the orange (it would need roughly #B4530A
- * to clear 4.5:1 against white) or giving `--primary-foreground` a near-black
- * value in classic. Both change the brand's appearance, so it is a decision
- * rather than a cleanup.
- */
-const KNOWN_FILL_EXCEPTIONS: Record<string, number> = {
-	"classic/light primary": 2.74,
-	"classic/dark primary": 2.74,
-};
-
 describe("theme token contrast", () => {
-	it("parses a complete token set for every palette and mode", () => {
-		for (const palette of PALETTES) {
-			for (const mode of MODES) {
-				const tokens = resolve(blocks, palette, mode);
+	it("parses a complete token set for both colour modes", () => {
+		for (const mode of MODES) {
+			{
+				const tokens = resolve(blocks, mode);
 				for (const required of [
 					"--background",
 					"--foreground",
@@ -251,8 +208,8 @@ describe("theme token contrast", () => {
 					"--surface-raised",
 					"--border",
 				]) {
-					expect(`${palette}/${mode} ${required}`).toBe(
-						`${palette}/${mode} ${tokens[required] ? required : "MISSING"}`,
+					expect(`${mode} ${required}`).toBe(
+						`${mode} ${tokens[required] ? required : "MISSING"}`,
 					);
 				}
 			}
@@ -261,9 +218,9 @@ describe("theme token contrast", () => {
 
 	it("keeps body and muted text readable on both surfaces", () => {
 		const failures: string[] = [];
-		for (const palette of PALETTES) {
-			for (const mode of MODES) {
-				const t = resolve(blocks, palette, mode);
+		for (const mode of MODES) {
+			{
+				const t = resolve(blocks, mode);
 				const pairs: Array<[string, string, string]> = [
 					["foreground on background", t["--foreground"], t["--background"]],
 					[
@@ -299,7 +256,7 @@ describe("theme token contrast", () => {
 					const ratio = contrast(fg, bg);
 					if (ratio < TEXT_MIN) {
 						failures.push(
-							`${palette}/${mode} ${label}: ${ratio.toFixed(2)}:1 (min ${TEXT_MIN})`,
+							`${mode} ${label}: ${ratio.toFixed(2)}:1 (min ${TEXT_MIN})`,
 						);
 					}
 				}
@@ -313,15 +270,15 @@ describe("theme token contrast", () => {
 		// guards: `bg-warning/15 text-warning` rendered a pale amber on a white
 		// card at ~2.4:1.
 		const failures: string[] = [];
-		for (const palette of PALETTES) {
-			for (const mode of MODES) {
-				const t = resolve(blocks, palette, mode);
+		for (const mode of MODES) {
+			{
+				const t = resolve(blocks, mode);
 				for (const role of ["success", "warning", "destructive", "info"]) {
 					const token = role === "info" ? "--info" : `--${role}-strong`;
 					const ratio = contrast(t[token], surfaceOf(t, "--card"));
 					if (ratio < TEXT_MIN) {
 						failures.push(
-							`${palette}/${mode} ${token} on --card: ${ratio.toFixed(2)}:1 (min ${TEXT_MIN})`,
+							`${mode} ${token} on --card: ${ratio.toFixed(2)}:1 (min ${TEXT_MIN})`,
 						);
 					}
 				}
@@ -332,9 +289,9 @@ describe("theme token contrast", () => {
 
 	it("keeps solid fills legible against their own foreground", () => {
 		const failures: string[] = [];
-		for (const palette of PALETTES) {
-			for (const mode of MODES) {
-				const t = resolve(blocks, palette, mode);
+		for (const mode of MODES) {
+			{
+				const t = resolve(blocks, mode);
 				const pairs: Array<[string, string, string]> = [
 					["primary", t["--primary-foreground"], t["--primary"]],
 					["success", t["--success-foreground"], t["--success"]],
@@ -343,18 +300,7 @@ describe("theme token contrast", () => {
 				];
 				for (const [label, fg, bg] of pairs) {
 					const ratio = contrast(fg, bg);
-					const key = `${palette}/${mode} ${label}`;
-					const exception = KNOWN_FILL_EXCEPTIONS[key];
-					if (exception !== undefined) {
-						// Pinned: allowed to improve, never to slip below what ships.
-						// A 0.01 tolerance absorbs float noise in the colour maths.
-						if (ratio < exception - 0.01) {
-							failures.push(
-								`${key} fill regressed: ${ratio.toFixed(2)}:1 (was ${exception}:1)`,
-							);
-						}
-						continue;
-					}
+					const key = `${mode} ${label}`;
 					if (ratio < FILL_MIN) {
 						failures.push(
 							`${key} fill: ${ratio.toFixed(2)}:1 (min ${FILL_MIN})`,
@@ -371,14 +317,12 @@ describe("theme token contrast", () => {
 		// instead of shadows, so a border that vanishes into the card takes the
 		// whole card boundary with it.
 		const failures: string[] = [];
-		for (const palette of PALETTES) {
-			for (const mode of MODES) {
-				const t = resolve(blocks, palette, mode);
+		for (const mode of MODES) {
+			{
+				const t = resolve(blocks, mode);
 				const ratio = contrast(t["--border"], surfaceOf(t, "--card"));
 				if (ratio < 1.15) {
-					failures.push(
-						`${palette}/${mode} --border on --card: ${ratio.toFixed(2)}:1`,
-					);
+					failures.push(`${mode} --border on --card: ${ratio.toFixed(2)}:1`);
 				}
 			}
 		}

@@ -298,7 +298,7 @@ export function UsageSawtoothChart({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
+				<div className="flex items-center justify-between gap-group">
 					<div>
 						<CardTitle>Usage Over Time</CardTitle>
 						<CardDescription>
@@ -312,7 +312,7 @@ export function UsageSawtoothChart({
 					<TimeRangeSelector value={range} onChange={onRangeChange} />
 				</div>
 			</CardHeader>
-			<CardContent className="space-y-6">
+			<CardContent className="space-y-section">
 				<WindowChartPanel
 					label="5-hour window"
 					chart={fiveHour}

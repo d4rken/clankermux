@@ -71,7 +71,7 @@ export function ProjectAnalytics({
 		return (
 			<Card>
 				<CardHeader>
-					<CardTitle className="flex items-center gap-2">
+					<CardTitle className="flex items-center gap-item">
 						<FolderOpen className="h-5 w-5" />
 						Project Breakdown
 					</CardTitle>
@@ -93,7 +93,7 @@ export function ProjectAnalytics({
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<FolderOpen className="h-5 w-5" />
 					Project Breakdown
 				</CardTitle>

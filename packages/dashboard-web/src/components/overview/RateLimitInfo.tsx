@@ -81,7 +81,7 @@ export function RateLimitInfo({
 				<CardDescription>Rate limit information about accounts</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-3">
+				<div className="space-y-row">
 					{rateLimitedAccounts.map((account) => {
 						// The cause's own reset is authoritative — `rateLimitReset` is the
 						// raw provider header and can disagree with the countdown baked
@@ -110,7 +110,7 @@ export function RateLimitInfo({
 								key={account.id}
 								className={`flex items-center justify-between p-4 rounded-lg ${bgClass}`}
 							>
-								<div className="flex items-center gap-3">
+								<div className="flex items-center gap-row">
 									<AlertCircle className={`h-5 w-5 ${iconColor}`} />
 									<div>
 										<p className="font-medium">{account.name}</p>

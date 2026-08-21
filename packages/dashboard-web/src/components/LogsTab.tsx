@@ -186,7 +186,7 @@ export function LogsTab() {
 							Real-time log stream {paused && "(Paused)"}
 						</CardDescription>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-item">
 						<Button onClick={togglePause} variant="outline" size="sm">
 							{paused ? (
 								<>
@@ -208,7 +208,7 @@ export function LogsTab() {
 				</div>
 			</CardHeader>
 			<CardContent className="flex flex-1 flex-col min-h-0">
-				<div className="space-y-1 flex-1 min-h-0 overflow-y-auto font-mono text-sm">
+				<div className="space-y-tight flex-1 min-h-0 overflow-y-auto font-mono text-sm">
 					{loading ? (
 						<p className="text-muted-foreground">Loading logs...</p>
 					) : error ? (
@@ -224,7 +224,7 @@ export function LogsTab() {
 									// biome-ignore lint/suspicious/noArrayIndexKey: append-only log buffer; LogEvent has no per-event id and ts is not unique across same-ms bursts
 									`${log.ts}-${i}`
 								}
-								className="flex gap-2"
+								className="flex gap-item"
 							>
 								<span className="text-muted-foreground">
 									{formatTimestamp(log.ts)}
@@ -238,7 +238,7 @@ export function LogsTab() {
 					)}
 					<div ref={logsEndRef} />
 				</div>
-				<div className="mt-4 flex shrink-0 items-center gap-2">
+				<div className="mt-4 flex shrink-0 items-center gap-item">
 					<input
 						type="checkbox"
 						id="autoscroll"

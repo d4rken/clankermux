@@ -817,13 +817,13 @@ export function AccountAddForm({
 	};
 
 	return (
-		<div className="space-y-4 mb-6 p-4 border rounded-lg">
+		<div className="space-y-group mb-6 p-4 border rounded-lg">
 			<h4 className="font-medium">
 				{authStep === "form" ? "Add New Account" : "Enter Authorization Code"}
 			</h4>
 			{authStep === "form" && (
 				<>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<Label htmlFor="name">Account Name</Label>
 						<Input
 							id="name"
@@ -837,7 +837,7 @@ export function AccountAddForm({
 							placeholder="e.g., work-account or user@example.com"
 						/>
 					</div>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<Label htmlFor="mode">Mode</Label>
 						<Select
 							value={newAccount.mode}
@@ -888,7 +888,7 @@ export function AccountAddForm({
 						</Select>
 					</div>
 					{newAccount.mode === "codex" && (
-						<div className="space-y-3">
+						<div className="space-y-row">
 							{codexStep === "idle" && (
 								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
 									<p className="text-sm text-foreground font-medium mb-1">
@@ -901,14 +901,14 @@ export function AccountAddForm({
 								</div>
 							)}
 							{codexStep === "pending" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-2">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-item">
 									<p className="text-sm text-foreground font-medium">
 										Waiting for authorization...
 									</p>
 									<p className="text-xs text-muted-foreground">
 										Enter this code in the browser tab:
 									</p>
-									<div className="flex items-center gap-2">
+									<div className="flex items-center gap-item">
 										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{codexUserCode}
 										</code>
@@ -931,7 +931,7 @@ export function AccountAddForm({
 								</div>
 							)}
 							{codexStep === "error" && (
-								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-2">
+								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-item">
 									<p className="text-sm text-foreground font-medium">
 										Authentication failed
 									</p>
@@ -951,7 +951,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "qwen" && (
-						<div className="space-y-3">
+						<div className="space-y-row">
 							{qwenStep === "idle" && (
 								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
 									<p className="text-sm text-foreground font-medium mb-1">
@@ -964,14 +964,14 @@ export function AccountAddForm({
 								</div>
 							)}
 							{qwenStep === "pending" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-2">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-item">
 									<p className="text-sm text-foreground font-medium">
 										Waiting for authorization...
 									</p>
 									<p className="text-xs text-muted-foreground">
 										Enter this code in the browser tab:
 									</p>
-									<div className="flex items-center gap-2">
+									<div className="flex items-center gap-item">
 										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{qwenUserCode}
 										</code>
@@ -994,7 +994,7 @@ export function AccountAddForm({
 								</div>
 							)}
 							{qwenStep === "error" && (
-								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-2">
+								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-item">
 									<p className="text-sm text-foreground font-medium">
 										Authentication failed
 									</p>
@@ -1015,7 +1015,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "zai" && (
 						<>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="apiKey">z.ai API Key</Label>
 								<Input
 									id="apiKey"
@@ -1030,7 +1030,7 @@ export function AccountAddForm({
 									placeholder="Enter your z.ai API key"
 								/>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label className="text-sm font-medium">
 									Model Mappings (Optional)
 								</Label>
@@ -1038,7 +1038,7 @@ export function AccountAddForm({
 									Map Anthropic model names to z.ai-specific models. Leave empty
 									to use Claude models directly.
 								</p>
-								<div className="space-y-2 pl-4">
+								<div className="space-y-item pl-4">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1095,7 +1095,7 @@ export function AccountAddForm({
 						</>
 					)}
 					{newAccount.mode === "minimax" && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label htmlFor="apiKey">Minimax API Key</Label>
 							<Input
 								id="apiKey"
@@ -1113,7 +1113,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "anthropic-compatible" && (
 						<>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="apiKey">Anthropic-Compatible API Key</Label>
 								<Input
 									id="apiKey"
@@ -1128,7 +1128,7 @@ export function AccountAddForm({
 									placeholder="Enter your Anthropic-Compatible API key"
 								/>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="customEndpoint">
 									Custom Endpoint URL (Optional)
 								</Label>
@@ -1145,13 +1145,13 @@ export function AccountAddForm({
 									placeholder="https://api.anthropic-compatible.com"
 								/>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
 								<p className="text-xs text-muted-foreground mb-2">
 									Map Anthropic model names to provider-specific models. Leave
 									empty to use defaults.
 								</p>
-								<div className="space-y-2 pl-4">
+								<div className="space-y-item pl-4">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1209,7 +1209,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "openai-compatible" && (
 						<>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="apiKey">API Key</Label>
 								<Input
 									id="apiKey"
@@ -1224,7 +1224,7 @@ export function AccountAddForm({
 									placeholder="Enter your API key"
 								/>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="endpoint">Endpoint URL</Label>
 								<Input
 									id="endpoint"
@@ -1241,13 +1241,13 @@ export function AccountAddForm({
 									Enter the base URL for the OpenAI-compatible API
 								</p>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
 								<p className="text-xs text-muted-foreground mb-2">
 									Map Anthropic model names to provider-specific models. Leave
 									empty to use defaults.
 								</p>
-								<div className="space-y-2 pl-4">
+								<div className="space-y-item pl-4">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1305,7 +1305,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "ollama" && (
 						<>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="customEndpoint">
 									Ollama Endpoint URL (Optional)
 								</Label>
@@ -1326,13 +1326,13 @@ export function AccountAddForm({
 									Ollama v0.14.0+.
 								</p>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
 								<p className="text-xs text-muted-foreground mb-2">
 									Map Anthropic model names to Ollama model names (e.g.
 									qwen3-coder, llama3.3).
 								</p>
-								<div className="space-y-2 pl-4">
+								<div className="space-y-item pl-4">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1390,7 +1390,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "ollama-cloud" && (
 						<>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="apiKey">Ollama Cloud API Key</Label>
 								<Input
 									id="apiKey"
@@ -1405,13 +1405,13 @@ export function AccountAddForm({
 									placeholder="Enter your Ollama Cloud API key"
 								/>
 							</div>
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
 								<p className="text-xs text-muted-foreground mb-2">
 									Map Anthropic model names to Ollama model names (e.g.
 									qwen3-coder, llama3.3).
 								</p>
-								<div className="space-y-2 pl-4">
+								<div className="space-y-item pl-4">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1469,7 +1469,7 @@ export function AccountAddForm({
 					)}
 					{(newAccount.mode === "claude-oauth" ||
 						newAccount.mode === "console") && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<Label htmlFor="customEndpoint">
 								Custom Endpoint URL (Optional)
 							</Label>
@@ -1491,7 +1491,7 @@ export function AccountAddForm({
 							</p>
 						</div>
 					)}
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<Label htmlFor="priority">Priority</Label>
 						<Select
 							value={String(newAccount.priority)}
@@ -1514,7 +1514,7 @@ export function AccountAddForm({
 				</>
 			)}
 			{authStep === "form" ? (
-				<div className="flex gap-2">
+				<div className="flex gap-item">
 					{newAccount.mode === "qwen" ? (
 						<>
 							{(qwenStep === "idle" || qwenStep === "error") && (
@@ -1550,7 +1550,7 @@ export function AccountAddForm({
 				</div>
 			) : (
 				<>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						<p className="text-sm text-muted-foreground">
 							A new browser tab has opened for authentication. After
 							authorizing, copy the code and paste it below.
@@ -1575,7 +1575,7 @@ export function AccountAddForm({
 							placeholder="Paste authorization code here"
 						/>
 					</div>
-					<div className="flex gap-2">
+					<div className="flex gap-item">
 						<Button onClick={handleCodeSubmit} disabled={isSubmitting}>
 							Complete Setup
 						</Button>
