@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./fonts.css";
 
 @plugin "tailwindcss-animate";
 
@@ -321,11 +322,15 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* The headline number on a metric tile. Deliberately lighter than the old
-	   `font-bold`: at this size the mono face carries enough weight on its own,
-	   and bold made every tile shout at the same volume. */
+	/* Headline numbers. The SANS with tabular figures, not the mono.
+	   Tabular-nums already gives every digit the same advance, so columns of
+	   these still line up — but punctuation keeps its natural width. In a mono
+	   the comma and the point each take a full character cell, which at 24px
+	   turns "$1,075.00" into visibly disconnected clumps. Mono stays for
+	   `.figure`, where the values sit in dense columns and cell alignment is
+	   the whole point. */
 	.figure-xl {
-		font-family: var(--app-font-mono);
+		font-family: var(--app-font-sans);
 		font-variant-numeric: tabular-nums;
 		font-size: 1.5rem;
 		/* An exact 1.75rem rather than a ratio: the loading skeleton that stands
@@ -336,9 +341,10 @@
 		letter-spacing: -0.02em;
 	}
 
-	/* Secondary figures: panel totals and inline measurements. */
+	/* Secondary figures: panel totals and inline measurements. Same reasoning
+	   as .figure-xl. */
 	.figure-lg {
-		font-family: var(--app-font-mono);
+		font-family: var(--app-font-sans);
 		font-variant-numeric: tabular-nums;
 		font-size: 1.125rem;
 		line-height: 1.5rem; /* = h-6, same skeleton reasoning as figure-xl */

@@ -32,6 +32,12 @@ async function embedAssets() {
 		else if (file.endsWith(".json")) contentType = "application/json";
 		else if (file.endsWith(".svg")) contentType = "image/svg+xml";
 		else if (file.endsWith(".png")) contentType = "image/png";
+		// Bun currently inlines the Geist woff2 files into the CSS as data: URIs
+		// rather than emitting them, so this branch is usually unreached. It
+		// exists because that is a size-threshold decision: a larger face added
+		// later would be emitted as a real file, and serving it as text/plain
+		// would break it silently.
+		else if (file.endsWith(".woff2")) contentType = "font/woff2";
 		else if (file.endsWith(".map")) contentType = "application/json";
 
 		assets[`/${file}`] = {
