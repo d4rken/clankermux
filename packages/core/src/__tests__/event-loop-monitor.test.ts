@@ -121,7 +121,7 @@ describe("EventLoopMonitor", () => {
 			h.tickAfter(1000 + 300);
 			expect(h.warns).toHaveLength(1);
 			expect(h.warns[0]).toContain("300");
-			expect(h.warns[0]).toContain("Event loop blocked");
+			expect(h.warns[0]).toContain("Event loop unresponsive");
 			expect(h.errors).toEqual([]);
 		});
 

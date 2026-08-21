@@ -28,7 +28,7 @@ const defaultLog = new Logger("EventLoopMonitor");
 
 /** How often the watchdog tick is scheduled. */
 export const EVENT_LOOP_TICK_INTERVAL_MS = 1000;
-/** Lag at or above this logs a WARN ("Event loop blocked for ~Xms"). */
+/** Lag at or above this logs a WARN ("Event loop unresponsive for ~Xms"). */
 export const EVENT_LOOP_WARN_THRESHOLD_MS = 250;
 /** Lag at or above this escalates to ERROR. */
 export const EVENT_LOOP_ERROR_THRESHOLD_MS = 2000;
@@ -177,11 +177,15 @@ export class EventLoopMonitor {
 			: null;
 
 		if (lagMs >= this.errorThresholdMs) {
+			// States the observation, not a cause. The loop being unresponsive is
+			// measured; that synchronous JS did it is an inference, and a wrong one
+			// when the process was descheduled or stopped inside the VM. The stall
+			// attribution line below is the only thing entitled to name a culprit.
 			this.log.error(
-				`Event loop blocked for ~${Math.round(lagMs)}ms (>= ${this.errorThresholdMs}ms) — synchronous work froze HTTP serving`,
+				`Event loop unresponsive for ~${Math.round(lagMs)}ms (>= ${this.errorThresholdMs}ms) — HTTP serving was frozen for that period`,
 			);
 		} else if (lagMs >= this.warnThresholdMs) {
-			this.log.warn(`Event loop blocked for ~${Math.round(lagMs)}ms`);
+			this.log.warn(`Event loop unresponsive for ~${Math.round(lagMs)}ms`);
 		}
 
 		// Attribution belongs to the tick that actually stalled: the samples just
