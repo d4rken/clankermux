@@ -1,4 +1,9 @@
-import { validateNumber } from "@clankermux/core";
+import {
+	enableStallProfiler,
+	isStallProfilerEnabled,
+	stallProfilerEnabledAt,
+	validateNumber,
+} from "@clankermux/core";
 import {
 	createAccountAddHandler,
 	createAccountAutoApplyResetCreditsHandler,
@@ -130,6 +135,64 @@ import { errorResponse } from "./utils/http-error";
 /**
  * API Router that handles all API endpoints
  */
+/**
+ * Start stall-attribution sampling. One-way by nature: JSC has no stop entry
+ * point, so this runs at ~22% CPU until the service restarts. The response says
+ * so explicitly rather than reporting a bare success, because the caller cannot
+ * undo it without a restart.
+ */
+const STALL_PROFILER_CONFIRM_HEADER = "x-clankermux-diagnostic";
+const STALL_PROFILER_CONFIRM_VALUE = "enable-stall-profiler";
+
+function stallProfilerHandler(req: Request): Response {
+	// Require a custom header, not because the management API authenticates
+	// (it does not — reaching the port is the trust boundary), but because this
+	// action is IRREVERSIBLE and the default bind is 0.0.0.0. A plain
+	// cross-origin <form> POST can hit any unauthenticated endpoint without
+	// reading the response; it cannot set a custom header without triggering a
+	// CORS preflight it will fail. That is the exact drive-by this blocks.
+	if (
+		req.headers.get(STALL_PROFILER_CONFIRM_HEADER) !==
+		STALL_PROFILER_CONFIRM_VALUE
+	) {
+		return Response.json(
+			{
+				enabled: false,
+				error: `refused: send ${STALL_PROFILER_CONFIRM_HEADER}: ${STALL_PROFILER_CONFIRM_VALUE} to confirm. This permanently costs ~22% CPU until the service restarts.`,
+			},
+			{ status: 428 },
+		);
+	}
+
+	const already = isStallProfilerEnabled();
+	const ok = enableStallProfiler();
+	if (!ok) {
+		return Response.json(
+			{
+				enabled: false,
+				error:
+					"sampling profiler unavailable on this runtime (bun:jsc startSamplingProfiler missing)",
+			},
+			{ status: 501 },
+		);
+	}
+	// Unconditional audit line: without it, only the caller ever learns that the
+	// process was permanently degraded.
+	if (!already) {
+		console.warn(
+			"[StallProfiler] Sampling ENABLED via /api/maintenance/stall-profiler — ~22% CPU until restart; every event-loop WARN now carries stack attribution.",
+		);
+	}
+	return Response.json({
+		enabled: true,
+		alreadyRunning: already,
+		enabledAt: stallProfilerEnabledAt(),
+		stopRequiresRestart: true,
+		approximateCpuOverheadPct: 22,
+		note: "Stall attribution now logged with every event-loop WARN. Restart the service to stop sampling.",
+	});
+}
+
 export class APIRouter {
 	private context: APIContext;
 	private handlers: Map<
@@ -400,6 +463,14 @@ export class APIRouter {
 			configHandlers.setUsageThrottling(req),
 		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
+
+		// Stall attribution: starts JSC's sampling profiler so every logged
+		// event-loop stall carries the stacks that were executing. Deliberately
+		// POST-only and one-way — JSC exposes no way to stop sampling, so this
+		// costs ~22% CPU until the service restarts. See stall-profiler.ts.
+		this.handlers.set("POST:/api/maintenance/stall-profiler", (req) =>
+			stallProfilerHandler(req),
+		);
 
 		// Payments ledger routes (summary reads dispatch through the read-only
 		// dashboard worker; DELETE /api/payments/:id is in the dynamic block)

@@ -224,7 +224,7 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 		// WAL while any reader (analytics worker, usage pollers) holds frames, the
 		// WAL grows large and each such checkpoint does hundreds of ms of
 		// synchronous I/O on the main thread — freezing the event loop (observed
-		// as ~250-290ms "Event loop blocked" WARNs). With autocheckpoint off, the
+		// as ~250-290ms "Event loop unresponsive" WARNs). With autocheckpoint off, the
 		// 5-minute off-thread optimize tick reclaims the WAL via
 		// wal_checkpoint(TRUNCATE) with busy_timeout=0, which never blocks the
 		// loop (see runOptimize in incremental-vacuum-worker.ts).
