@@ -18,6 +18,7 @@ import {
 	isBurstHoldEligible,
 } from "./burst-retry-policy";
 import { cacheBodyStore } from "./cache-body-store";
+import { isFamilyWeeklyMemoExhausted } from "./family-weekly-memo";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	createPinnedTargetUnavailableResponse,
@@ -617,8 +618,14 @@ async function handleIngestedProxy(
 		postThrottleAccounts,
 		initialComboInfo,
 	);
-	const accounts = gates.applySoftDemotionReorder(
-		gates.applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
+	// The memo demotion is applied LAST, after every gate and reorder — running
+	// it earlier lets the soft-demotion partition promote a 429-refused account
+	// back to the front (see applyFamilyMemoDemotion).
+	const accounts = gates.applyFamilyMemoDemotion(
+		gates.applySoftDemotionReorder(
+			gates.applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
+			initialComboInfo,
+		),
 		initialComboInfo,
 	);
 	if (requestMeta.routing) {
@@ -844,12 +851,26 @@ async function handleIngestedProxy(
 						usageCache.get(heldAccount.id),
 						heldCapacity,
 						Date.now(),
-					) !== null
+					) !== null ||
+					isFamilyWeeklyMemoExhausted(
+						heldAccount,
+						effectiveRequestModel,
+						Date.now(),
+					)
 				) {
 					// Held account's weekly quota for the REQUESTED family is exhausted
 					// (with unified headroom) — the family window won't clear within the
 					// hold budget, so fall through to normal failover (siblings) rather
 					// than pinning this request to an account that will only 429 again.
+					//
+					// The memo is consulted alongside the usage-derived check, for the
+					// same reason and on better evidence: this branch runs BEFORE the
+					// candidate list is built, so the memo demotion has not applied yet,
+					// and the memo exists precisely when the usage cache is lagging or
+					// absent — exactly when the check above returns null and would let
+					// the pin stand. Without it a burst marker, which stays active for
+					// up to two minutes, re-pins every request to the account a 429 just
+					// refused.
 					log.warn(
 						`Burst marker active but held account ${heldAccount.name} is weekly-exhausted for the requested family — NOT holding, falling through to normal failover`,
 					);
@@ -1212,8 +1233,10 @@ async function handleIngestedProxy(
 		// path. For pool liveness this is largely self-enforcing anyway: rule 4
 		// requires an absorbable peer, and on a degraded path there is none, so
 		// the reserve fails open regardless.)
-		fallbackAccounts = gates.applyContextWindowGate(
-			gates.applyFamilyWeeklyGate(filteredFallbackAccounts),
+		fallbackAccounts = gates.applyFamilyMemoDemotion(
+			gates.applyContextWindowGate(
+				gates.applyFamilyWeeklyGate(filteredFallbackAccounts),
+			),
 		);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =

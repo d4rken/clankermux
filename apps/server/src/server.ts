@@ -54,9 +54,11 @@ import {
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
 	createCodexResetCreditApplyScheduler,
+	createIdentityBoundRefusalResponse,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
 	handleProxy,
+	isIdentityBoundPath,
 	markCapacityRestoredProbePending,
 	type ProxyContext,
 	RequestRecorder,
@@ -1228,6 +1230,24 @@ export default async function startServer(options?: {
 					return apiResponse;
 				}
 
+				// Identity-bound endpoints are refused before ANY other routing.
+				// Ahead of the dashboard branch specifically: that branch decides by
+				// raw pathname, so an encoded spelling like `/%76%31/code/sessions`
+				// does not look like a `/v1/` proxy path to it and would be answered
+				// with the dashboard's index.html — no credential leaked, but not the
+				// deliberate, visible refusal this is supposed to give. Ahead of the
+				// auth gate too, which is fine: `policyFor` already treats `/api/*` as
+				// public, and declining to serve an endpoint needs no credential.
+				//
+				// The `/v1/code/…` half of the set is ALSO refused by the proxy's
+				// ingest prologue. Both call the same predicate, so the two entry
+				// points cannot drift, and the prologue is what guarantees no request
+				// reaching the proxy by another route can be served with a pooled
+				// token.
+				if (isIdentityBoundPath(url.pathname)) {
+					return createIdentityBoundRefusalResponse(url.pathname);
+				}
+
 				// Dashboard routes (only if enabled and assets are available)
 				if (withDashboard && dashboardManifest) {
 					// Serve dashboard static assets
@@ -1256,11 +1276,23 @@ export default async function startServer(options?: {
 					}
 				}
 
+				// Claude Code's own telemetry endpoints. These must reach the proxy's
+				// ingest prologue, which answers them with the 200 the client expects;
+				// dropping them into the 404 below (which is what happened while this
+				// passthrough was missing) leaves the CLI talking to something that
+				// visibly is not Anthropic.
+				const isClaudeCodeInternalPath =
+					url.pathname === "/api/event_logging/batch" ||
+					url.pathname === "/api/system/package-manager";
+
 				// Reject unmatched /api/* paths with 404 before falling through to the
 				// proxy. Without this, an unknown management URL like /api/not-a-route
 				// would be treated as a proxy path (it'd 404 deeper in the pipeline,
 				// but with confusing semantics and an account-selection round-trip).
-				if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+				if (
+					!isClaudeCodeInternalPath &&
+					(url.pathname === "/api" || url.pathname.startsWith("/api/"))
+				) {
 					return new Response(
 						JSON.stringify({
 							type: "error",

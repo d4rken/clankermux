@@ -38,6 +38,10 @@ import {
 	type RequestMeta,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
+import {
+	clearFamilyWeeklyExhausted,
+	recordFamilyWeeklyExhausted,
+} from "../family-weekly-memo";
 import { recordProtectedFamilyDemand } from "../protected-family-demand";
 import {
 	applyProviderOverloadCooldown,
@@ -1733,6 +1737,19 @@ export async function proxyWithAccount(
 				const familyExclusion = cacheFamilyExclusion ?? headerFamilyExclusion;
 				if (familyExclusion) {
 					const reason: RateLimitReason = "family_weekly_exhausted_429";
+					// Remember what this 429 just taught us, so the proactive gate can
+					// act on it before the usage poll catches up. Without this the
+					// finding died here: the next request re-derived eligibility from a
+					// cache still reporting headroom, picked this same account for this
+					// same family, and earned this same 429 — eighteen times in seven
+					// minutes on 2026-08-17. Family-scoped by construction, so it does
+					// not undo the deliberate no-account-wide-cooldown decision below.
+					recordFamilyWeeklyExhausted(
+						account.id,
+						familyExclusion.family,
+						familyExclusion.resetAt,
+						now,
+					);
 					// Persist the 429's unified-status header so the dashboard chip
 					// reflects the live value rather than the last success.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -2588,6 +2605,38 @@ export async function proxyWithAccount(
 		) {
 			recordProtectedFamilyDemand(account.id, Date.now());
 		}
+		// Same organic-success chokepoint, opposite purpose: a 2xx for this family
+		// is direct proof its weekly window is open, which outranks whatever a
+		// past 429 taught us. This is the memo's self-heal — without it a memo
+		// written from a misread 429 would keep this family sorted last on this
+		// account until its reset, which for a weekly window can be days.
+		//
+		// Keyed on activeUpstreamModel — the model that actually ANSWERED — so a
+		// cross-family fallback clears the family that really succeeded rather
+		// than the one that was asked for and did not. The memo is written under
+		// the LOGICAL family instead (the reactive rung and the gate both read
+		// the request's own model, unmapped), so on an account whose
+		// model_mappings rewrite that family the two keys differ and a success
+		// cannot clear it. Nothing forbids mappings on an Anthropic account —
+		// they are settable per account for every provider — so this is
+		// reachable, just not currently configured. It stays a comment rather
+		// than a fix because the consequence is now bounded to ORDERING: a memo
+		// that outlives its window sorts the account last for that family until
+		// `resetAt`, and never removes it from the pool.
+		//
+		// `requestMeta.timestamp` is this request's START, which is what the
+		// ordering guard inside the memo needs: a slow success admitted before
+		// the exhaustion must not erase a newer 429's finding.
+		if (response.ok) {
+			const servedFamily = getModelFamily(activeUpstreamModel ?? "");
+			if (servedFamily) {
+				clearFamilyWeeklyExhausted(
+					account.id,
+					servedFamily,
+					requestMeta.timestamp,
+				);
+			}
+		}
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
 		return forwardToClient(
@@ -2905,6 +2954,24 @@ export async function proxyForcedAccount(
 			req.headers,
 		);
 		liveForcedUpstream = response;
+
+		// A forced 2xx is the same direct evidence an organic one is: this family
+		// served on this account, so a past 429's memo about it is stale. Forced
+		// routing bypasses selection entirely and so never consults the memo —
+		// but that is exactly why it must still clear it, or an operator pinning
+		// a request to an account could not demonstrate the family had recovered.
+		// disableCooldown above suppresses COOLDOWN mutation on a forced 429; it
+		// says nothing about honouring a forced success.
+		if (response.ok) {
+			const forcedFamily = getModelFamily(requestMeta.requestedModel ?? "");
+			if (forcedFamily) {
+				clearFamilyWeeklyExhausted(
+					account.id,
+					forcedFamily,
+					requestMeta.timestamp,
+				);
+			}
+		}
 
 		// Forward to client for recording + streaming. disableCooldown:true keeps
 		// the mid-stream rate-limit sniffer from mutating cooldown state on a
