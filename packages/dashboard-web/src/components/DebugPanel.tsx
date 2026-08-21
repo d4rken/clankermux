@@ -78,7 +78,7 @@ export function DebugPanel() {
 	};
 
 	return (
-		<Card className="fixed bottom-4 right-4 w-96 max-h-96 z-50">
+		<Card className="fixed bottom-4 right-4 w-96 max-h-96 z-50 bg-surface-raised">
 			<CardHeader className="pb-2">
 				<div className="flex items-center justify-between">
 					<CardTitle className="text-sm">Debug Panel</CardTitle>

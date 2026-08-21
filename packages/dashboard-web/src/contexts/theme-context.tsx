@@ -17,7 +17,14 @@ type Theme = "dark" | "light" | "system";
  * styles/globals.css. `classic` is the palette that shipped before the
  * directions existed and is what an unknown or absent stored value resolves to.
  */
-export type Palette = "classic" | "signal" | "foundry" | "paper";
+export type Palette =
+	| "classic"
+	| "signal"
+	| "foundry"
+	| "paper"
+	| "ledger"
+	| "blueprint"
+	| "tape";
 
 export const DEFAULT_PALETTE: Palette = "classic";
 
@@ -51,6 +58,21 @@ export const PALETTES: PaletteOption[] = [
 		id: "paper",
 		label: "Paper Terminal",
 		description: "Clinical — ink on paper, deep teal",
+	},
+	{
+		id: "ledger",
+		label: "Ledger",
+		description: "Rules, not boxes — monochrome ink",
+	},
+	{
+		id: "blueprint",
+		label: "Blueprint",
+		description: "Drafting paper — faint grid, ink blue",
+	},
+	{
+		id: "tape",
+		label: "Tape",
+		description: "Dense dark terminal — mono figures",
 	},
 ];
 

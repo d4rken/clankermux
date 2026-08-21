@@ -2,6 +2,25 @@ import * as React from "react";
 
 import { cn } from "../../lib/utils";
 
+/**
+ * Surface primitive.
+ *
+ * Whether a panel reads as a BOX or as a RULE is a property of the visual
+ * direction, not of the component, so the geometry comes from tokens:
+ *
+ *   --card-border   full border shorthand. `1px solid var(--border)` for the
+ *                   box directions; `0` for the ones that separate with a rule
+ *                   and whitespace instead.
+ *   --card-top-rule top edge drawn on its own, so a borderless direction can
+ *                   still mark where a panel begins the way a printed
+ *                   statement does.
+ *   --card-shadow   `classic` keeps a 1px lift; every other direction is flat.
+ *   --card-pad      interior padding, which is the main density lever between
+ *                   the airy directions and the dense ones.
+ *
+ * There is deliberately no hover lift anywhere: geometry that moves under the
+ * cursor is noise on a page whose job is reporting throttling state.
+ */
 const Card = React.forwardRef<
 	HTMLDivElement,
 	React.HTMLAttributes<HTMLDivElement>
@@ -9,11 +28,7 @@ const Card = React.forwardRef<
 	<div
 		ref={ref}
 		className={cn(
-			// shadow-card is a per-palette token: `classic` keeps a 1px lift, the
-			// three directions set `none` and let the border do the separating.
-			// There is deliberately no hover lift — geometry that moves under the
-			// cursor is noise on a page reporting throttling state.
-			"rounded-lg border bg-card text-card-foreground shadow-card",
+			"rounded-lg bg-card text-card-foreground shadow-card surface-edge",
 			className,
 		)}
 		{...props}
@@ -27,7 +42,7 @@ const CardHeader = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<div
 		ref={ref}
-		className={cn("flex flex-col space-y-1.5 p-6", className)}
+		className={cn("flex flex-col space-y-1.5 surface-pad", className)}
 		{...props}
 	/>
 ));
@@ -39,10 +54,6 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<h3
 		ref={ref}
-		// display-face pulls the palette's display family, tracking and casing.
-		// It is where Foundry's condensed uppercase and Paper's serif actually
-		// show up; `classic` maps it back to the body stack, so it is a no-op
-		// there and the baseline is unchanged.
 		// No `tracking-tight` here: Tailwind utilities outrank the base layer, so
 		// it would pin letter-spacing and cancel each palette's own tracking.
 		// `classic` sets --display-tracking to the same -0.025em instead.
@@ -68,7 +79,7 @@ const CardContent = React.forwardRef<
 	HTMLDivElement,
 	React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-	<div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+	<div ref={ref} className={cn("surface-pad pt-0", className)} {...props} />
 ));
 CardContent.displayName = "CardContent";
 
@@ -78,7 +89,7 @@ const CardFooter = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<div
 		ref={ref}
-		className={cn("flex items-center p-6 pt-0", className)}
+		className={cn("flex items-center surface-pad pt-0", className)}
 		{...props}
 	/>
 ));

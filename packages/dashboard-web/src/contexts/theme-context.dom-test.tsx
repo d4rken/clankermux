@@ -135,6 +135,9 @@ describe("ThemeProvider palette axis", () => {
 			"signal",
 			"foundry",
 			"paper",
+			"ledger",
+			"blueprint",
+			"tape",
 		]);
 		for (const palette of PALETTES) {
 			expect(palette.label.length).toBeGreaterThan(0);

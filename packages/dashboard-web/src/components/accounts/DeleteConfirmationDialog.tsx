@@ -27,7 +27,11 @@ export function DeleteConfirmationDialog({
 }: DeleteConfirmationDialogProps) {
 	return (
 		<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-			<Card className="w-full max-w-md">
+			{/* bg-surface-raised rather than the default card surface: a
+			    direction that separates panels with rules sets --card to
+			    transparent, which would drop this dialog's text straight onto the
+			    dimmed page behind it. */}
+			<Card className="w-full max-w-md bg-surface-raised">
 				<CardHeader>
 					<CardTitle>Confirm Account Removal</CardTitle>
 					<CardDescription>This action cannot be undone.</CardDescription>

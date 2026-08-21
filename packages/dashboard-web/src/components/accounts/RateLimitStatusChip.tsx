@@ -12,8 +12,7 @@ const VARIANT_CLASSES: Record<NonNullable<BadgeVariant>, string> = {
 	default: "bg-primary text-primary-foreground",
 	secondary: "bg-secondary text-secondary-foreground",
 	success: "bg-success/15 text-success-strong",
-	warning:
-		"bg-warning/15 text-warning-strong",
+	warning: "bg-warning/15 text-warning-strong",
 	destructive: "bg-destructive/15 text-destructive-strong",
 	outline: "text-foreground",
 };

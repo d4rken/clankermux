@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/png" href="./logo.png" />
+    <link rel="icon" type="image/svg+xml" href="./logo.svg" />
     <title>ClankerMux Dashboard</title>
     <!--
       Palette selection happens before React mounts so the first paint is
@@ -15,7 +15,15 @@
     -->
     <script>
       (() => {
-        const known = ["classic", "signal", "foundry", "paper"];
+        const known = [
+          "classic",
+          "signal",
+          "foundry",
+          "paper",
+          "ledger",
+          "blueprint",
+          "tape",
+        ];
         const root = document.documentElement;
         let palette = "classic";
         // "system" is the provider's default for a missing, invalid or

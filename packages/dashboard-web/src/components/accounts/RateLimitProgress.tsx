@@ -856,9 +856,7 @@ export function RateLimitProgress({
 								value={isAvailable ? percentage : 0}
 								className="h-2"
 								indicatorClassName={
-									isWindowThrottled
-										? "bg-warning"
-										: undefined
+									isWindowThrottled ? "bg-warning" : undefined
 								}
 							/>
 							{expectedPct !== null && (

@@ -214,7 +214,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke="var(--border)"
 							/>
 							<text
@@ -241,7 +241,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke="var(--border)"
 							/>
 							<text
@@ -269,7 +269,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 								width="160"
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke={OUTCOME_COLORS[outcome] ?? "var(--border)"}
 							/>
 							<text

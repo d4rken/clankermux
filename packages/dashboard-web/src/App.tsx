@@ -57,8 +57,7 @@ export function App() {
 			{
 				path: "/",
 				element: <OverviewTab />,
-				title: "Dashboard Overview",
-				subtitle: "Monitor your ClankerMux performance and usage",
+				title: "Overview",
 			},
 			{
 				path: "/analytics",
@@ -68,7 +67,6 @@ export function App() {
 					</Suspense>
 				),
 				title: "Analytics",
-				subtitle: "Deep dive into your usage patterns and trends",
 			},
 			{
 				path: "/limits",
@@ -78,49 +76,41 @@ export function App() {
 					</Suspense>
 				),
 				title: "Usage",
-				subtitle: "Rate-limit usage, capacity, and spend",
 			},
 			{
 				path: "/requests",
 				element: <RequestsTab />,
-				title: "Request History",
-				subtitle: "View detailed request and response data",
+				title: "Requests",
 			},
 			{
 				path: "/accounts",
 				element: <AccountsTab />,
-				title: "Account Management",
-				subtitle: "Manage your OAuth accounts and settings",
+				title: "Accounts",
 			},
 			{
 				path: "/combos",
 				element: <CombosTab />,
 				title: "Routing Chains",
-				subtitle: "Define fallback chains for model families",
 			},
 			{
 				path: "/api-keys",
 				element: <ApiKeysTab />,
-				title: "API Key Management",
-				subtitle: "Generate and manage API keys for authentication",
+				title: "API Keys",
 			},
 			{
 				path: "/logs",
 				element: <LogsTab />,
-				title: "System Logs",
-				subtitle: "Real-time system logs and debugging information",
+				title: "Logs",
 			},
 			{
 				path: "/system",
 				element: <SystemTab />,
-				title: "System Health",
-				subtitle: "Process health, memory, storage integrity and recent errors",
+				title: "System",
 			},
 			{
 				path: "/settings",
 				element: <SettingsTab />,
 				title: "Settings",
-				subtitle: "Configure system behavior and data retention",
 			},
 		];
 	}, []);
@@ -157,23 +147,29 @@ export function App() {
 						<Navigation />
 
 						{/* Main Content */}
-						<main className="lg:pl-64">
+						<main className="lg:pl-48">
 							{/* Mobile spacer */}
 							<div className="h-16 lg:hidden" />
 
 							{/* Page Content */}
-							<div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
-								{/* Page Header */}
-								<div className="mb-8">
-									<h1 className="display-face text-3xl font-bold gradient-text">
+							{/* content-surface is where Blueprint paints its drafting
+							    grid; every other palette leaves --grid-line unset so the
+							    rule never applies. */}
+							<div className="content-surface p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
+								{/* One line, not three. The title used to be a gradient-filled
+								    3xl over a subtitle that restated it, and Overview then
+								    printed its own name a third time immediately below. The
+								    title now matches the sidebar label exactly, so a page has
+								    one name instead of three. */}
+								<div className="mb-6 border-b pb-3">
+									<h1 className="display-face text-2xl font-semibold">
 										{currentRoute.title}
 									</h1>
-									<p className="text-muted-foreground mt-2">
-										{currentRoute.subtitle}
-									</p>
 								</div>
 
-								<div className="animate-in fade-in-0 duration-200">
+								{/* No enter animation: a fade on every navigation is a delay
+								    between clicking and reading. */}
+								<div>
 									<Routes>
 										{routes.map((route) => (
 											<Route
