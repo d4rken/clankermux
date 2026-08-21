@@ -478,7 +478,7 @@ export function ApiKeysTab() {
 		return (
 			<Card>
 				<CardContent className="p-6">
-					<div className="flex items-center gap-2 text-destructive">
+					<div className="flex items-center gap-2 text-destructive-strong">
 						<AlertTriangle className="h-5 w-5" />
 						<span>Failed to load API keys. Please try again.</span>
 					</div>
@@ -504,7 +504,7 @@ export function ApiKeysTab() {
 						<CardTitle className="text-base font-medium">Active Keys</CardTitle>
 					</CardHeader>
 					<CardContent>
-						<div className="text-2xl font-bold text-green-600">
+						<div className="text-2xl font-bold text-success-strong">
 							{stats?.active || 0}
 						</div>
 					</CardContent>
@@ -640,8 +640,8 @@ export function ApiKeysTab() {
 												<div
 													className={`px-2 py-1 rounded text-xs font-medium ${
 														key.isActive
-															? "bg-green-100 text-green-800"
-															: "bg-gray-100 text-gray-600"
+															? "bg-success/15 text-success-strong"
+															: "bg-muted text-muted-foreground"
 													}`}
 												>
 													{key.isActive ? "Active" : "Disabled"}
@@ -735,7 +735,7 @@ export function ApiKeysTab() {
 												onClick={() => handleDeleteKey(key)}
 												disabled={deleteKeyMutation.isPending}
 											>
-												<Trash2 className="h-4 w-4 text-destructive" />
+												<Trash2 className="h-4 w-4 text-destructive-strong" />
 											</Button>
 										</div>
 									</div>
@@ -802,12 +802,12 @@ export function ApiKeysTab() {
 								/>
 							</div>
 						</div>
-						<div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-							<div className="flex items-center gap-2 text-yellow-800">
+						<div className="p-4 bg-warning/10 border border-warning/25 rounded-lg">
+							<div className="flex items-center gap-2 text-foreground">
 								<AlertTriangle className="h-5 w-5" />
 								<span className="font-medium">Important:</span>
 							</div>
-							<p className="text-sm text-yellow-700 mt-1">
+							<p className="text-sm text-muted-foreground mt-1">
 								Save this API key in a secure location. You won't be able to see
 								it again after closing this dialog.
 							</p>
@@ -849,7 +849,7 @@ export function ApiKeysTab() {
 						</p>
 						{regenerateKeyMutation.isError && (
 							<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-								<div className="flex items-start gap-2 text-destructive">
+								<div className="flex items-start gap-2 text-destructive-strong">
 									<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 									<span className="text-sm">
 										{regenerateKeyMutation.error?.message ??
@@ -917,12 +917,14 @@ export function ApiKeysTab() {
 									disabled={renameKeyMutation.isPending}
 								/>
 								{renameError && (
-									<p className="text-sm text-destructive">{renameError}</p>
+									<p className="text-sm text-destructive-strong">
+										{renameError}
+									</p>
 								)}
 							</div>
 							{renameKeyMutation.isError && (
 								<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-									<div className="flex items-start gap-2 text-destructive">
+									<div className="flex items-start gap-2 text-destructive-strong">
 										<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 										<span className="text-sm">
 											{renameKeyMutation.error?.message ??
@@ -1129,7 +1131,7 @@ function PinEditor({
 
 			{error && (
 				<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-					<div className="flex items-start gap-2 text-destructive">
+					<div className="flex items-start gap-2 text-destructive-strong">
 						<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 						<span className="text-sm">{error}</span>
 					</div>

@@ -128,7 +128,9 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 					<StatTile
 						label="Net"
 						value={liveLoading ? "—" : formatUsd(netUsd)}
-						valueClassName={netUsd >= 0 ? "text-green-600" : "text-destructive"}
+						valueClassName={
+							netUsd >= 0 ? "text-success-strong" : "text-destructive-strong"
+						}
 						sub={`${live?.warmResumes ?? 0} resumes · ${live?.failures ?? 0} failures`}
 					/>
 				</div>

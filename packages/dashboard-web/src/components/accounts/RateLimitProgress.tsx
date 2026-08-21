@@ -167,19 +167,16 @@ function computeProjectedMessage(
 	};
 }
 
-// Maps a projection tone to the correct color class for each render surface.
-// The two surfaces use different palettes: the inline line uses the semantic
-// destructive/success tokens, the hover tooltip (on a dark popover) uses the
-// fixed red-400/green-400 pair.
-function projectionToneClass(
-	tone: ProjectionTone,
-	surface: "inline" | "tooltip",
-): string {
+// Maps a projection tone to a semantic colour class.
+//
+// This used to branch on render surface, on the premise that the hover tooltip
+// sat on a dark popover and therefore needed a fixed red-400/green-400 pair.
+// The tooltip is `bg-popover`, which is white in every light mode — so the
+// fixed pair was washed out there rather than tuned for it. Both surfaces are
+// token-driven, so both take the semantic tokens.
+function projectionToneClass(tone: ProjectionTone): string {
 	if (tone === "neutral") return "text-muted-foreground";
-	if (surface === "inline") {
-		return tone === "danger" ? "text-destructive" : "text-success";
-	}
-	return tone === "danger" ? "text-red-400" : "text-green-400";
+	return tone === "danger" ? "text-destructive-strong" : "text-success-strong";
 }
 
 // Compact "time left until reset" for the caption bracket, showing the two
@@ -817,7 +814,7 @@ export function RateLimitProgress({
 											className={
 												(percentage ?? 0) <= 0
 													? "text-muted-foreground"
-													: projectionToneClass(projection.tone, "tooltip")
+													: projectionToneClass(projection.tone)
 											}
 										>
 											{projection.message}
@@ -873,7 +870,7 @@ export function RateLimitProgress({
 									"text-xs",
 									(percentage ?? 0) <= 0
 										? "text-muted-foreground"
-										: projectionToneClass(projection.tone, "inline"),
+										: projectionToneClass(projection.tone),
 								)}
 							>
 								{projection.message}

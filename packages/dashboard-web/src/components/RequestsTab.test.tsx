@@ -13,16 +13,16 @@ describe("costBadgeProps", () => {
 		});
 	});
 
-	it("renders orange for overage (real per-token money)", () => {
+	it("renders the warning tone for overage (real per-token money)", () => {
 		expect(costBadgeProps("overage")).toEqual({
-			className: "text-xs border-orange-500 text-orange-500",
+			className: "text-xs border-warning text-warning-strong",
 			title: "Pay-per-token",
 		});
 	});
 
-	it("renders orange for api billing (pay-as-you-go keys)", () => {
+	it("renders the warning tone for api billing (pay-as-you-go keys)", () => {
 		expect(costBadgeProps("api")).toEqual({
-			className: "text-xs border-orange-500 text-orange-500",
+			className: "text-xs border-warning text-warning-strong",
 			title: "Pay-per-token",
 		});
 	});

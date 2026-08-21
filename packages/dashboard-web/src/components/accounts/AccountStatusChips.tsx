@@ -59,7 +59,7 @@ interface AccountStatusChipsProps {
  * the reset-credit and renewal chip class maps so the two stay in sync.
  */
 const URGENCY_BASE_CLASSES = {
-	imminent: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+	imminent: "bg-destructive/15 text-destructive-strong",
 	soon: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
 } as const;
 
@@ -140,7 +140,7 @@ export function ResetCreditEventsPanel({
 	}
 	if (state.kind === "error") {
 		return (
-			<p className="text-xs text-destructive">
+			<p className="text-xs text-destructive-strong">
 				Failed to load reset events: {state.message}
 			</p>
 		);
@@ -183,7 +183,7 @@ export function ResetCreditEventsPanel({
 						)}
 					</div>
 					{event.errorMessage && (
-						<p className="text-destructive" title={event.errorMessage}>
+						<p className="text-destructive-strong" title={event.errorMessage}>
 							{event.errorMessage.length > MAX_EVENT_ERROR_CHARS
 								? `${event.errorMessage.slice(0, MAX_EVENT_ERROR_CHARS)}…`
 								: event.errorMessage}
@@ -282,7 +282,7 @@ export function ResetCreditApplyPanel({
 	if (state.kind === "error") {
 		return (
 			<div className="space-y-1.5">
-				<p className="text-xs text-destructive" title={state.message}>
+				<p className="text-xs text-destructive-strong" title={state.message}>
 					Failed to apply reset: {state.message}
 				</p>
 				<div className="flex items-center gap-2">
@@ -308,7 +308,7 @@ export function ResetCreditApplyPanel({
 			<p
 				className={`text-xs ${
 					state.outcome === "reset"
-						? "text-green-600 dark:text-green-400"
+						? "text-success-strong"
 						: "text-muted-foreground"
 				}`}
 			>
@@ -511,13 +511,13 @@ export function AccountStatusChips({
 			</StatusChip>
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
-					<AlertCircle className="h-4 w-4 text-yellow-600" />
+					<AlertCircle className="h-4 w-4 text-warning-strong" />
 				</span>
 			)}
 			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
 			{status.isSubscriptionExpired && (
 				<StatusChip
-					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					className="bg-destructive/15 text-destructive-strong"
 					title="The provider reports this account's subscription has lapsed (OAuth no longer allowed for the organization). The account was auto-paused and will auto-resume once usage data is reachable again after renewal."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -526,7 +526,7 @@ export function AccountStatusChips({
 			)}
 			{status.isNeedsReauth && (
 				<StatusChip
-					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					className="bg-destructive/15 text-destructive-strong"
 					title="This account's OAuth refresh token was rejected (invalid_grant). It was auto-paused and removed from rotation. Re-authenticate it from the Accounts tab — it will auto-resume on success."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -649,12 +649,12 @@ export function AccountStatusChips({
 				<StatusChip
 					className={
 						status.isPeak
-							? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-							: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+							? "bg-warning/15 text-warning-strong"
+							: "bg-success/15 text-success-strong"
 					}
 				>
 					<span
-						className={`h-1.5 w-1.5 rounded-full ${status.isPeak ? "bg-orange-500" : "bg-green-500"}`}
+						className={`h-1.5 w-1.5 rounded-full ${status.isPeak ? "bg-warning" : "bg-success"}`}
 					/>
 					{status.peakChipLabel}
 				</StatusChip>

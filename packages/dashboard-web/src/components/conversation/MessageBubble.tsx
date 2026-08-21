@@ -13,7 +13,7 @@ const MAX_CHARS_COLLAPSE = 300;
 const ROLE_BG_COLORS: Record<Role, string> = {
 	user: "bg-primary text-primary-foreground",
 	assistant: "bg-muted",
-	system: "bg-orange-100 dark:bg-orange-900",
+	system: "bg-warning/15 text-foreground",
 };
 
 function MessageBubbleComponent({ role, content }: MessageBubbleProps) {

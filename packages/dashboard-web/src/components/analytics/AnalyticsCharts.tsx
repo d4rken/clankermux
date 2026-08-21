@@ -17,6 +17,7 @@ import {
 	COLORS,
 	type TimeRange,
 } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatCompactCurrency,
 	formatCompactNumber,
@@ -92,6 +93,7 @@ export function MainMetricsChart({
 	modelBreakdown = false,
 	onModelBreakdownChange,
 }: MainMetricsChartProps) {
+	const series = useSeriesPalette();
 	// Process data for multi-model chart if model breakdown is enabled
 	const processedMultiModelData =
 		rawTimeSeries && modelBreakdown
@@ -267,12 +269,12 @@ export function MainMetricsChart({
 											>
 												<stop
 													offset="0%"
-													stopColor="#14b8a6"
+													stopColor={series.hue.mint}
 													stopOpacity={0.9}
 												/>
 												<stop
 													offset="100%"
-													stopColor="#14b8a6"
+													stopColor={series.hue.mint}
 													stopOpacity={0.1}
 												/>
 											</linearGradient>
@@ -285,12 +287,12 @@ export function MainMetricsChart({
 											>
 												<stop
 													offset="0%"
-													stopColor="#f97316"
+													stopColor={series.hue.peach}
 													stopOpacity={0.9}
 												/>
 												<stop
 													offset="100%"
-													stopColor="#f97316"
+													stopColor={series.hue.peach}
 													stopOpacity={0.1}
 												/>
 											</linearGradient>
@@ -324,7 +326,7 @@ export function MainMetricsChart({
 											type="monotone"
 											dataKey="planCost"
 											name="Plan Cost"
-											stroke="#14b8a6"
+											stroke={series.hue.mint}
 											strokeWidth={strokeW}
 											fillOpacity={1}
 											fill="url(#colorPlanCost)"
@@ -335,7 +337,7 @@ export function MainMetricsChart({
 											type="monotone"
 											dataKey="apiCost"
 											name="Token Cost"
-											stroke="#f97316"
+											stroke={series.hue.peach}
 											strokeWidth={strokeW}
 											fillOpacity={1}
 											fill="url(#colorApiCost)"

@@ -101,7 +101,9 @@ export function RateLimitInfo({
 						const hardLimited = isHardLimited(account);
 						const exhaustion = exhaustionDetail(account);
 						const bgClass = hardLimited ? "bg-destructive/10" : "bg-warning/10";
-						const iconColor = hardLimited ? "text-destructive" : "text-warning";
+						const iconColor = hardLimited
+							? "text-destructive-strong"
+							: "text-warning-strong";
 
 						return (
 							<div

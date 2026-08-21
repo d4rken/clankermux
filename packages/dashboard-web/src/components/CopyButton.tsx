@@ -122,7 +122,10 @@ export function CopyButton({
 			{loading ? (
 				<Loader2 className="h-4 w-4 animate-spin" />
 			) : errored ? (
-				<span className="animate-pulse text-destructive" title="Copy failed">
+				<span
+					className="animate-pulse text-destructive-strong"
+					title="Copy failed"
+				>
 					<AlertCircle className="h-4 w-4" />
 				</span>
 			) : copied ? (

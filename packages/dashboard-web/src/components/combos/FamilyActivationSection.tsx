@@ -83,7 +83,7 @@ export function FamilyActivationSection() {
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
-					<p className="text-sm text-destructive">
+					<p className="text-sm text-destructive-strong">
 						Failed to load family data.
 					</p>
 				</CardContent>

@@ -69,7 +69,9 @@ export function ErrorDetailsModal({
 		: null;
 	const isWarning = meta?.severity === "warning";
 	const Icon = isWarning ? AlertTriangle : XCircle;
-	const iconColor = isWarning ? "text-warning" : "text-destructive";
+	const iconColor = isWarning
+		? "text-warning-strong"
+		: "text-destructive-strong";
 
 	return (
 		<Dialog

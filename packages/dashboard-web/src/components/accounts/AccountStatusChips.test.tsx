@@ -427,7 +427,7 @@ describe("AccountStatusChips — reset-credit urgency colors", () => {
 		const html = render(
 			makeResetCreditAccount(new Date(NOW + 30 * 60_000).toISOString()),
 		);
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 		expect(html).not.toContain("bg-sky-100");
 	});
 
@@ -444,7 +444,7 @@ describe("AccountStatusChips — reset-credit urgency colors", () => {
 			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString()),
 		);
 		expect(html).toContain("bg-sky-100");
-		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-destructive/15");
 		expect(html).not.toContain("bg-amber-100");
 	});
 });
@@ -708,14 +708,14 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 				outcome: "reset",
 				message: "Reset applied — usage windows cleared",
 			}),
-		).toContain("text-green-600");
+		).toContain("text-success-strong");
 		expect(
 			renderPanel({
 				kind: "done",
 				outcome: "noCredit",
 				message: "No credit available",
 			}),
-		).not.toContain("text-green-600");
+		).not.toContain("text-success-strong");
 	});
 
 	it("renders a dismiss control in the done state (path back to idle)", () => {

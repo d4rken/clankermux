@@ -93,13 +93,15 @@ export function UpdateStatusPanel({
 						className={cn(
 							"h-4 w-4",
 							status === "checking" && "animate-spin",
-							restartPending && "text-warning",
-							!restartPending && status === "available" && "text-green-500",
+							restartPending && "text-warning-strong",
+							!restartPending &&
+								status === "available" &&
+								"text-success-strong",
 							!restartPending && status === "current" && "text-primary",
 							!restartPending &&
 								status === "unknown" &&
 								"text-muted-foreground",
-							status === "error" && "text-red-500",
+							status === "error" && "text-destructive-strong",
 						)}
 					/>
 					<span className="font-medium">
@@ -212,7 +214,7 @@ export function UpdateStatusPanel({
 			)}
 
 			{status === "error" && error && (
-				<p className="mt-1 text-xs text-destructive text-left break-words">
+				<p className="mt-1 text-xs text-destructive-strong text-left break-words">
 					{error}
 				</p>
 			)}

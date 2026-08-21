@@ -236,12 +236,12 @@ export function RequestDetailsModal({
 				</DialogHeader>
 
 				{executionError && (
-					<div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+					<div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive-strong">
 						Error: {executionError}
 					</div>
 				)}
 				{effective.meta?.synthetic && (
-					<div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 px-3 py-2 text-sm text-muted-foreground">
+					<div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">
 						Rejected locally before upstream dispatch
 						{effective.meta.providerName
 							? ` by the ${effective.meta.providerName} provider gate`
@@ -253,7 +253,7 @@ export function RequestDetailsModal({
 					</div>
 				)}
 				{payloadUnavailable && (
-					<div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 px-3 py-2 text-sm text-muted-foreground">
+					<div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">
 						{currentLoadError
 							? `Could not load the stored payload: ${currentLoadError}`
 							: "No payload was recorded for this request. Older local rejections and requests recorded while payload storage was disabled only have summary metadata."}
@@ -377,7 +377,7 @@ export function RequestDetailsModal({
 							<div className="text-center text-muted-foreground py-8">
 								{executionError ? (
 									<>
-										<p className="text-destructive font-medium">
+										<p className="text-destructive-strong font-medium">
 											Error: {executionError}
 										</p>
 										<p className="mt-2">No response data available</p>

@@ -87,7 +87,7 @@ export function RecentErrorsCard() {
 					// now, which is the opposite claim. React Query keeps the previous
 					// payload around after a later failure, so keying on the error alone
 					// stops stale (possibly empty) data from being shown as current.
-					<p role="alert" className="text-sm text-destructive">
+					<p role="alert" className="text-sm text-destructive-strong">
 						Could not load recent errors.
 					</p>
 				) : isLoading && !data ? (

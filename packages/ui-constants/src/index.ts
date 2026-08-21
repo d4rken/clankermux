@@ -49,13 +49,67 @@ export const MODEL_PALETTE = {
 	pink: "#FFAABB", // Tol light pink
 } as const;
 
-// Chart color sequence for multi-series charts
+/**
+ * Light-ground counterpart to MODEL_PALETTE.
+ *
+ * MODEL_PALETTE's hues are chosen to sit above L* 45 so they read on the
+ * near-black chart ground the dark palettes use. On a white card those same
+ * hues invert the problem: `#99DDFF`, `#EEDD88`, `#DDDDDD` and `#FFAABB` all
+ * fall under 1.5:1 against white and effectively disappear. This set mirrors
+ * the constraints for a light ground — every entry at or below L* 66 and at
+ * least 3:1 on white — while keeping the same keys, so a model's identity is
+ * the key and only the rendered value depends on the colour mode.
+ *
+ * Hues are drawn from Paul Tol's muted, dark and high-contrast schemes plus
+ * darkened Okabe-Ito entries. Separation is enforced by model-colors.test.ts
+ * across BOTH palettes; `scripts/check-light-palette.ts` is the design-time aid
+ * used to pick them.
+ */
+export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
+	blue: "#0F96C7", // L* 58 · 3.4:1
+	orange: "#A86538", // L* 49 · 4.6:1
+	green: "#496812", // L* 40 · 6.4:1
+	magenta: "#DF0CA0", // L* 50 · 4.5:1
+	skyBlue: "#077788", // L* 46 · 5.2:1
+	yellow: "#8C9457", // L* 59 · 3.2:1
+	red: "#7E2626", // L* 29 · 9.6:1
+	mint: "#73967E", // L* 59 · 3.3:1
+	purple: "#7B3BC4", // L* 40 · 6.4:1
+	pear: "#A88A38", // L* 59 · 3.3:1
+	peach: "#F33416", // L* 54 · 4.0:1
+	lightBlue: "#1A4961", // L* 29 · 9.7:1
+	olive: "#645F40", // L* 40 · 6.5:1
+	mauve: "#7B218C", // L* 32 · 8.6:1
+	grey: "#4C4343", // L* 29 · 9.6:1
+	rose: "#B62020", // L* 40 · 6.5:1
+	pink: "#A96560", // L* 50 · 4.5:1
+} as const;
+
+/**
+ * Fallback sequence for series that have no explicit model assignment.
+ *
+ * Drawn from MODEL_PALETTE rather than the semantic COLORS object: the old
+ * sequence was orange/blue/purple/pink/green straight out of COLORS, which put
+ * the brand hue and a non-colourblind-safe set on charts that sit next to
+ * MODEL_COLORS series using the curated palette. Two palettes disagreeing on
+ * the same axes is what made unknown models look like a different kind of
+ * thing entirely.
+ */
 export const CHART_COLORS = [
-	COLORS.primary,
-	COLORS.blue,
-	COLORS.purple,
-	COLORS.pink,
-	COLORS.success,
+	MODEL_PALETTE.blue,
+	MODEL_PALETTE.orange,
+	MODEL_PALETTE.green,
+	MODEL_PALETTE.magenta,
+	MODEL_PALETTE.mint,
+] as const;
+
+/** Light-ground counterpart to CHART_COLORS, same ordering. */
+export const CHART_COLORS_LIGHT = [
+	MODEL_PALETTE_LIGHT.blue,
+	MODEL_PALETTE_LIGHT.orange,
+	MODEL_PALETTE_LIGHT.green,
+	MODEL_PALETTE_LIGHT.magenta,
+	MODEL_PALETTE_LIGHT.mint,
 ] as const;
 
 // Time range options for analytics

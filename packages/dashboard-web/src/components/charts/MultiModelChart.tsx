@@ -16,11 +16,11 @@ import {
 	YAxis,
 } from "recharts";
 import { CHART_HEIGHTS, CHART_PROPS, type TimeRange } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatCompactCurrency,
 	formatCompactNumber,
 } from "../../lib/chart-utils";
-import { getModelColor } from "../../lib/model-colors";
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
@@ -112,6 +112,7 @@ export function MultiModelChart({
 	height = CHART_HEIGHTS.large,
 	timeRange = "24h",
 }: MultiModelChartProps) {
+	const series = useSeriesPalette();
 	if (loading || !data || data.length === 0) {
 		return (
 			<ChartContainer
@@ -145,12 +146,12 @@ export function MultiModelChart({
 						>
 							<stop
 								offset="0%"
-								stopColor={getModelColor(model, index)}
+								stopColor={series.forModel(model, index)}
 								stopOpacity={0.9}
 							/>
 							<stop
 								offset="100%"
-								stopColor={getModelColor(model, index)}
+								stopColor={series.forModel(model, index)}
 								stopOpacity={0.3}
 							/>
 						</linearGradient>
@@ -196,7 +197,7 @@ export function MultiModelChart({
 						type="monotone"
 						dataKey={model}
 						name={model}
-						stroke={getModelColor(model, index)}
+						stroke={series.forModel(model, index)}
 						strokeWidth={2}
 						dot={false}
 						activeDot={{ r: 6 }}

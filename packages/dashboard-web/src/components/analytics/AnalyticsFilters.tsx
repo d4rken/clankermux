@@ -149,7 +149,7 @@ export function AnalyticsFilters({
 									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.noAccount}
 											onChange={(e) =>
 												setFilters({ ...filters, noAccount: e.target.checked })
@@ -165,7 +165,7 @@ export function AnalyticsFilters({
 									>
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.accounts.includes(account.value)}
 											onChange={(e) => {
 												if (e.target.checked) {
@@ -202,7 +202,7 @@ export function AnalyticsFilters({
 									>
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.models.includes(model)}
 											onChange={(e) => {
 												if (e.target.checked) {
@@ -237,7 +237,7 @@ export function AnalyticsFilters({
 									>
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.apiKeys.includes(apiKey.value)}
 											onChange={(e) => {
 												if (e.target.checked) {
@@ -279,7 +279,7 @@ export function AnalyticsFilters({
 									<label className="flex items-center space-x-2 cursor-pointer hover:bg-muted/50 p-1 rounded">
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.noProject}
 											onChange={(e) =>
 												setFilters({ ...filters, noProject: e.target.checked })
@@ -295,7 +295,7 @@ export function AnalyticsFilters({
 									>
 										<input
 											type="checkbox"
-											className="rounded border-gray-300"
+											className="rounded border-input"
 											checked={filters.projects.includes(project)}
 											onChange={(e) => {
 												if (e.target.checked) {

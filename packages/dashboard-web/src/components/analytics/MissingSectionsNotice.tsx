@@ -37,7 +37,7 @@ export function MissingSectionsNotice({
 			role="alert"
 			className="flex items-start gap-3 px-4 py-3 text-sm bg-warning/10 border-warning/30"
 		>
-			<AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-warning" />
+			<AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-warning-strong" />
 			<div>
 				<p className="font-medium">Some panels are unavailable</p>
 				<p className="text-muted-foreground">

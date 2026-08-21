@@ -389,7 +389,7 @@ describe("RateLimitProgress", () => {
 		// legacy path was always internally consistent (safe ⟺ not over-pacing), so
 		// this only guards the render wiring — see the prediction-path test below
 		// for the actual regression case.
-		it("renders a legacy safe projection green (text-success)", () => {
+		it("renders a legacy safe projection green (text-success-strong)", () => {
 			const reset = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
 			const html = renderToStaticMarkup(
 				<RateLimitProgress
@@ -407,8 +407,8 @@ describe("RateLimitProgress", () => {
 			);
 
 			expect(html).toContain("On track to reset before running out");
-			expect(html).toContain("text-success");
-			expect(html).not.toContain("text-destructive");
+			expect(html).toContain("text-success-strong");
+			expect(html).not.toContain("text-destructive-strong");
 		});
 
 		// Regression for the reported bug, which lived ONLY on the server-prediction
@@ -450,8 +450,8 @@ describe("RateLimitProgress", () => {
 			);
 
 			expect(html).toContain("On track to reset before running out");
-			expect(html).toContain("text-success");
-			expect(html).not.toContain("text-destructive");
+			expect(html).toContain("text-success-strong");
+			expect(html).not.toContain("text-destructive-strong");
 		});
 	});
 

@@ -1,7 +1,7 @@
 import type { AccountResponse, UsageHistoryResponse } from "@clankermux/types";
 import { format } from "date-fns";
 import { useMemo } from "react";
-import { CHART_COLORS, COLORS } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import type { PoolWindow } from "../../lib/pool-usage";
 import { pickTimePattern } from "../../lib/usage-chart-format";
 import { computeWindowForecast } from "../../lib/usage-forecast";
@@ -81,6 +81,11 @@ function buildWindowChart(
 	accounts: AccountResponse[],
 	window: PoolWindow,
 	now: number,
+	// Passed in rather than read from a module constant: the qualitative hues
+	// differ between the light and dark chart grounds, and this builder has to
+	// stay a pure function so the useMemo below keeps working.
+	sequence: readonly string[],
+	poolStroke: string,
 ): WindowChart {
 	const pool = usageHistory?.pool ?? [];
 	const series = usageHistory?.series ?? [];
@@ -115,7 +120,7 @@ function buildWindowChart(
 	// lines share a color), then any forecast-only account (live usage but no
 	// history rows yet) continues the palette.
 	const colorByAccount = new Map<string, string>(
-		series.map((s, i) => [s.accountId, CHART_COLORS[i % CHART_COLORS.length]]),
+		series.map((s, i) => [s.accountId, sequence[i % sequence.length]]),
 	);
 	const nameById = new Map<string, string>(accounts.map((a) => [a.id, a.name]));
 
@@ -145,10 +150,7 @@ function buildWindowChart(
 			rowFor(point.ts)[forecastKey] = point.pct;
 		}
 		if (f.accountId && !colorByAccount.has(f.accountId)) {
-			colorByAccount.set(
-				f.accountId,
-				CHART_COLORS[nextColor % CHART_COLORS.length],
-			);
+			colorByAccount.set(f.accountId, sequence[nextColor % sequence.length]);
 			nextColor++;
 		}
 	}
@@ -161,12 +163,12 @@ function buildWindowChart(
 			dataKey: POOL_KEY,
 			name: "Pool (avg)",
 			strokeWidth: 3,
-			stroke: COLORS.primary,
+			stroke: poolStroke,
 		},
 		...series.map((s) => ({
 			dataKey: s.accountId,
 			name: s.name,
-			stroke: colorByAccount.get(s.accountId) ?? COLORS.primary,
+			stroke: colorByAccount.get(s.accountId) ?? poolStroke,
 		})),
 	];
 	// Dashed forecast twins (hidden from the legend so it doesn't double up):
@@ -178,7 +180,7 @@ function buildWindowChart(
 				dataKey: `${POOL_KEY}__fc`,
 				name: "Pool (projected)",
 				strokeWidth: 3,
-				stroke: COLORS.primary,
+				stroke: poolStroke,
 				strokeDasharray: FORECAST_DASH,
 				connectNulls: true,
 				legendType: "none",
@@ -188,7 +190,7 @@ function buildWindowChart(
 		lines.push({
 			dataKey: `${f.accountId}__fc`,
 			name: `${nameById.get(f.accountId) ?? f.accountId} (projected)`,
-			stroke: colorByAccount.get(f.accountId) ?? COLORS.primary,
+			stroke: colorByAccount.get(f.accountId) ?? poolStroke,
 			strokeDasharray: FORECAST_DASH,
 			connectNulls: true,
 			legendType: "none",
@@ -245,7 +247,7 @@ function WindowChartPanel({
 					referenceLines={[
 						{
 							y: 100,
-							stroke: COLORS.error,
+							stroke: "var(--destructive)",
 							strokeDasharray: "4 4",
 							label: "Limit",
 						},
@@ -264,13 +266,33 @@ export function UsageSawtoothChart({
 	range,
 	onRangeChange,
 }: UsageSawtoothChartProps) {
+	const palette = useSeriesPalette();
+	// The pool average is the emphasis line, so it takes the palette's own
+	// primary rather than a qualitative hue.
+	const poolStroke = "var(--primary)";
 	const fiveHour = useMemo(
-		() => buildWindowChart(usageHistory, accounts, "five_hour", now),
-		[usageHistory, accounts, now],
+		() =>
+			buildWindowChart(
+				usageHistory,
+				accounts,
+				"five_hour",
+				now,
+				palette.sequence,
+				poolStroke,
+			),
+		[usageHistory, accounts, now, palette.sequence],
 	);
 	const sevenDay = useMemo(
-		() => buildWindowChart(usageHistory, accounts, "seven_day", now),
-		[usageHistory, accounts, now],
+		() =>
+			buildWindowChart(
+				usageHistory,
+				accounts,
+				"seven_day",
+				now,
+				palette.sequence,
+				poolStroke,
+			),
+		[usageHistory, accounts, now, palette.sequence],
 	);
 
 	return (

@@ -352,7 +352,7 @@ export function DataRetentionCard() {
 				</div>
 
 				{cleanupNow.isError && (
-					<p className="text-xs text-destructive">
+					<p className="text-xs text-destructive-strong">
 						Operation timed out — for large databases this may take several
 						minutes. Check server logs.
 					</p>

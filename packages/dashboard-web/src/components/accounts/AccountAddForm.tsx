@@ -890,33 +890,33 @@ export function AccountAddForm({
 					{newAccount.mode === "codex" && (
 						<div className="space-y-3">
 							{codexStep === "idle" && (
-								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
-									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
+									<p className="text-sm text-foreground font-medium mb-1">
 										Device Code Authentication
 									</p>
-									<p className="text-xs text-blue-800 dark:text-blue-200">
+									<p className="text-xs text-muted-foreground">
 										Click the button below to start Codex authentication. A
 										browser tab will open for you to authorize.
 									</p>
 								</div>
 							)}
 							{codexStep === "pending" && (
-								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg space-y-2">
-									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-foreground font-medium">
 										Waiting for authorization...
 									</p>
-									<p className="text-xs text-blue-800 dark:text-blue-200">
+									<p className="text-xs text-muted-foreground">
 										Enter this code in the browser tab:
 									</p>
 									<div className="flex items-center gap-2">
-										<code className="text-lg font-mono font-bold tracking-widest bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-100 px-3 py-1 rounded">
+										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{codexUserCode}
 										</code>
 										<a
 											href={codexVerificationUrl}
 											target="_blank"
 											rel="noreferrer"
-											className="text-xs text-blue-700 dark:text-blue-300 underline"
+											className="text-xs text-primary underline"
 										>
 											Open browser
 										</a>
@@ -924,20 +924,18 @@ export function AccountAddForm({
 								</div>
 							)}
 							{codexStep === "complete" && (
-								<div className="bg-green-50 dark:bg-green-950 p-3 rounded-lg">
-									<p className="text-sm text-green-900 dark:text-green-100 font-medium">
+								<div className="bg-success/10 border border-success/25 p-3 rounded-lg">
+									<p className="text-sm text-foreground font-medium">
 										Authorization successful! Account added.
 									</p>
 								</div>
 							)}
 							{codexStep === "error" && (
-								<div className="bg-red-50 dark:bg-red-950 p-3 rounded-lg space-y-2">
-									<p className="text-sm text-red-900 dark:text-red-100 font-medium">
+								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-foreground font-medium">
 										Authentication failed
 									</p>
-									<p className="text-xs text-red-800 dark:text-red-200">
-										{codexError}
-									</p>
+									<p className="text-xs text-muted-foreground">{codexError}</p>
 									<Button
 										variant="outline"
 										size="sm"
@@ -955,33 +953,33 @@ export function AccountAddForm({
 					{newAccount.mode === "qwen" && (
 						<div className="space-y-3">
 							{qwenStep === "idle" && (
-								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
-									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
+									<p className="text-sm text-foreground font-medium mb-1">
 										Device Code Authentication
 									</p>
-									<p className="text-xs text-blue-800 dark:text-blue-200">
+									<p className="text-xs text-muted-foreground">
 										Click the button below to start Qwen authentication. A
 										browser tab will open for you to authorize.
 									</p>
 								</div>
 							)}
 							{qwenStep === "pending" && (
-								<div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg space-y-2">
-									<p className="text-sm text-blue-900 dark:text-blue-100 font-medium">
+								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-foreground font-medium">
 										Waiting for authorization...
 									</p>
-									<p className="text-xs text-blue-800 dark:text-blue-200">
+									<p className="text-xs text-muted-foreground">
 										Enter this code in the browser tab:
 									</p>
 									<div className="flex items-center gap-2">
-										<code className="text-lg font-mono font-bold tracking-widest bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-100 px-3 py-1 rounded">
+										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{qwenUserCode}
 										</code>
 										<a
 											href={qwenAuthUrl}
 											target="_blank"
 											rel="noreferrer"
-											className="text-xs text-blue-700 dark:text-blue-300 underline"
+											className="text-xs text-primary underline"
 										>
 											Open browser
 										</a>
@@ -989,20 +987,18 @@ export function AccountAddForm({
 								</div>
 							)}
 							{qwenStep === "complete" && (
-								<div className="bg-green-50 dark:bg-green-950 p-3 rounded-lg">
-									<p className="text-sm text-green-900 dark:text-green-100 font-medium">
+								<div className="bg-success/10 border border-success/25 p-3 rounded-lg">
+									<p className="text-sm text-foreground font-medium">
 										Authorization successful! Account added.
 									</p>
 								</div>
 							)}
 							{qwenStep === "error" && (
-								<div className="bg-red-50 dark:bg-red-950 p-3 rounded-lg space-y-2">
-									<p className="text-sm text-red-900 dark:text-red-100 font-medium">
+								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-2">
+									<p className="text-sm text-foreground font-medium">
 										Authentication failed
 									</p>
-									<p className="text-xs text-red-800 dark:text-red-200">
-										{qwenError}
-									</p>
+									<p className="text-xs text-muted-foreground">{qwenError}</p>
 									<Button
 										variant="outline"
 										size="sm"

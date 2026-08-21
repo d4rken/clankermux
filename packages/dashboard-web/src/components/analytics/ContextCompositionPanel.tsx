@@ -16,7 +16,7 @@ import {
 	YAxis,
 } from "recharts";
 import type { TimeRange } from "../../constants";
-import { CHART_COLORS, COLORS } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatCompactNumber,
 	type TooltipFormatter,
@@ -46,12 +46,15 @@ const NO_PROJECT_LABEL = "(no project)";
 // per-bucket token counts are unknowable without a tokenizer.
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
-const SEGMENT_COLORS: Record<string, string> = {
-	system: COLORS.blue,
-	tools: COLORS.purple,
-	messages: COLORS.success,
-	binary: COLORS.warning,
-};
+// Palette KEYS, not values: the segment colours are resolved against the ground
+// currently being painted (see useSeriesPalette), because the dark hue set is
+// chosen to sit on near-black and washes out on a white card.
+const SEGMENT_HUES = {
+	system: "blue",
+	tools: "purple",
+	messages: "green",
+	binary: "peach",
+} as const;
 
 const SEGMENT_LABELS: Record<string, string> = {
 	system: "System prompt",
@@ -109,6 +112,7 @@ function CompositionSplit({
 	totals: ContextComposition["totals"];
 	avgPerRequest: ContextComposition["avgPerRequest"];
 }) {
+	const palette = useSeriesPalette();
 	const totalChars =
 		totals.systemChars +
 		totals.toolsChars +
@@ -202,7 +206,7 @@ function CompositionSplit({
 							key={segment.key}
 							dataKey={segment.key}
 							stackId="composition"
-							fill={SEGMENT_COLORS[segment.key]}
+							fill={palette.hue[SEGMENT_HUES[segment.key]]}
 							name={segment.label}
 						/>
 					))}
@@ -213,7 +217,9 @@ function CompositionSplit({
 					<div key={segment.key} className="flex items-center gap-2">
 						<span
 							className="h-2.5 w-2.5 rounded-sm"
-							style={{ backgroundColor: SEGMENT_COLORS[segment.key] }}
+							style={{
+								backgroundColor: palette.hue[SEGMENT_HUES[segment.key]],
+							}}
 						/>
 						<span>{segment.label}</span>
 						<Badge variant="outline">
@@ -240,6 +246,7 @@ function GrowthChart({
 	growthCurve: ContextComposition["growthCurve"];
 	timeRange: TimeRange;
 }) {
+	const palette = useSeriesPalette();
 	const { data, series } = useMemo(() => {
 		// Stable series order: projects by total requests desc, so colors don't
 		// shuffle between refreshes. Series are keyed by projectKey (NULL bucket
@@ -288,7 +295,7 @@ function GrowthChart({
 				lines={series.map(({ key, label }, index) => ({
 					dataKey: key,
 					name: label,
-					stroke: CHART_COLORS[index % CHART_COLORS.length],
+					stroke: palette.sequence[index % palette.sequence.length],
 					connectNulls: true,
 				}))}
 				xAxisKey="time"

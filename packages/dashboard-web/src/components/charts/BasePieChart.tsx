@@ -7,11 +7,8 @@ import {
 	ResponsiveContainer,
 	Tooltip,
 } from "recharts";
-import {
-	CHART_COLORS,
-	type CHART_HEIGHTS,
-	type CHART_TOOLTIP_STYLE,
-} from "../../constants";
+import type { CHART_HEIGHTS, CHART_TOOLTIP_STYLE } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { ChartContainer } from "./ChartContainer";
 import { getChartHeight, getTooltipStyles } from "./chart-utils";
 import type { ChartClickHandler, TooltipFormatterFunction } from "./types";
@@ -29,6 +26,7 @@ interface BasePieChartProps {
 	paddingAngle?: number;
 	cx?: string | number;
 	cy?: string | number;
+	/** Overrides the palette. Omit to follow the active theme's chart ground. */
 	colors?: string[];
 	tooltipFormatter?: TooltipFormatterFunction;
 	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
@@ -55,7 +53,7 @@ export function BasePieChart({
 	paddingAngle = 0,
 	cx = "50%",
 	cy = "50%",
-	colors = [...CHART_COLORS],
+	colors,
 	tooltipFormatter,
 	tooltipStyle = "default",
 	animationDuration = 1000,
@@ -69,6 +67,11 @@ export function BasePieChart({
 	emptyState,
 	onPieClick,
 }: BasePieChartProps) {
+	// Not a parameter default: the fallback sequence depends on which ground is
+	// being painted, and a default expression has no access to the theme. An
+	// explicit `colors` prop still wins.
+	const series = useSeriesPalette();
+	const cellColors = colors ?? series.sequence;
 	const chartHeight = getChartHeight(height);
 	const isEmpty = !data || data.length === 0;
 	const tooltipStyles = getTooltipStyles(tooltipStyle);
@@ -100,7 +103,7 @@ export function BasePieChart({
 						{data.map((entry, index) => (
 							<Cell
 								key={`cell-${entry[nameKey]}`}
-								fill={colors[index % colors.length]}
+								fill={cellColors[index % cellColors.length]}
 							/>
 						))}
 					</Pie>

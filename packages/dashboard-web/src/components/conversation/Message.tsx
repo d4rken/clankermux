@@ -26,7 +26,7 @@ interface MessageProps {
 const ROLE_STYLES: Record<Role, { bg: string; Icon: LucideIcon }> = {
 	user: { bg: "bg-primary text-primary-foreground", Icon: User },
 	assistant: { bg: "bg-muted", Icon: Bot },
-	system: { bg: "bg-orange-100 dark:bg-orange-900", Icon: Bot },
+	system: { bg: "bg-warning/15 text-foreground", Icon: Bot },
 };
 
 function MessageComponent({

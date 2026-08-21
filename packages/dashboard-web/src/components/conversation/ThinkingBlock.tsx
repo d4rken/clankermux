@@ -16,11 +16,11 @@ function ThinkingBlockComponent({ content }: ThinkingBlockProps) {
 	);
 
 	return (
-		<div className="p-3 bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+		<div className="p-3 bg-warning/10 border border-warning/25 rounded-lg">
 			<div className="flex items-center justify-between mb-1">
 				<div className="flex items-center gap-2">
-					<MessageSquare className="w-3 h-3 text-yellow-600 dark:text-yellow-400" />
-					<span className="text-xs font-medium text-yellow-600 dark:text-yellow-400">
+					<MessageSquare className="w-3 h-3 text-warning-strong" />
+					<span className="text-xs font-medium text-warning-strong">
 						Thinking
 					</span>
 				</div>
@@ -35,7 +35,7 @@ function ThinkingBlockComponent({ content }: ThinkingBlockProps) {
 					</Button>
 				)}
 			</div>
-			<div className="text-xs text-yellow-700 dark:text-yellow-300 whitespace-pre overflow-x-auto">
+			<div className="text-xs text-muted-foreground whitespace-pre overflow-x-auto">
 				{display}
 			</div>
 		</div>

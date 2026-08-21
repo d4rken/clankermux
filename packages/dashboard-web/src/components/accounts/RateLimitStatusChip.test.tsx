@@ -28,7 +28,7 @@ describe("RateLimitStatusChip", () => {
 	it("maps hard-limit statuses to a destructive chip", () => {
 		const html = render("rate_limited (30m)");
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 		expect(html).toContain("30m");
 	});
 
@@ -62,10 +62,10 @@ describe("RateLimitStatusChip", () => {
 		expect(html).toContain("46h");
 	});
 
-	it("maps the provider's `rejected` status to a red 'Rate limited' chip", () => {
+	it("maps the provider's `rejected` status to a destructive 'Rate limited' chip", () => {
 		const html = render("rejected (30m)");
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 	});
 });
 
@@ -89,7 +89,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 		expect(html).toContain("1h 30m");
 	});
 
-	it("renders a red 'Rate limited' chip for a `rejected` provider status", () => {
+	it("renders a destructive 'Rate limited' chip for a `rejected` provider status", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitStatusChip
 				status="rate_limited (30m)"
@@ -100,7 +100,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 		expect(html).toContain("30m");
 	});
 
@@ -117,7 +117,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 		expect(html).toContain("Some New Status");
 		expect(html).not.toContain("Unknown status");
 		// Never red: an unrecognized status is not evidence of a block.
-		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-destructive/15");
 	});
 
 	it("falls back to a neutral 'Unknown status' chip when no raw value is available", () => {
@@ -130,7 +130,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Unknown status");
-		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-destructive/15");
 	});
 
 	it("omits the countdown when the cause has no known reset", () => {

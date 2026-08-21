@@ -64,7 +64,7 @@ export function StorageIntegritySection() {
 		badgeNode = <Badge variant="secondary">Running</Badge>;
 	} else if (status === "corrupt") {
 		tone = "danger";
-		icon = <XCircle className="h-5 w-5 text-destructive" />;
+		icon = <XCircle className="h-5 w-5 text-destructive-strong" />;
 		label = "Database corruption detected";
 		description = data?.last_integrity_error ?? "See server logs for details.";
 		badgeNode = <Badge variant="destructive">Corrupt</Badge>;
@@ -74,7 +74,7 @@ export function StorageIntegritySection() {
 		// reassure with the last VERIFIED verdict, so a slow full check on a
 		// huge DB never lights the red corruption UI.
 		tone = "warn";
-		icon = <AlertTriangle className="h-5 w-5 text-warning" />;
+		icon = <AlertTriangle className="h-5 w-5 text-warning-strong" />;
 		const skipReason =
 			data?.last_full_skip_reason ?? data?.last_quick_skip_reason ?? null;
 		const lastVerified =
@@ -95,7 +95,7 @@ export function StorageIntegritySection() {
 		badgeNode = <Badge variant="secondary">Skipped</Badge>;
 	} else if (status === "ok") {
 		tone = "ok";
-		icon = <CheckCircle className="h-5 w-5 text-success" />;
+		icon = <CheckCircle className="h-5 w-5 text-success-strong" />;
 		label = "Database integrity verified";
 		description =
 			data?.last_full_check_at != null
@@ -109,7 +109,7 @@ export function StorageIntegritySection() {
 		badgeNode = <Badge variant="success">Healthy</Badge>;
 	} else {
 		tone = "warn";
-		icon = <AlertTriangle className="h-5 w-5 text-warning" />;
+		icon = <AlertTriangle className="h-5 w-5 text-warning-strong" />;
 		label = "Integrity not yet verified";
 		description =
 			"Scheduler runs the first quick check 30 s after startup and a full check 30 min after startup.";
@@ -128,7 +128,7 @@ export function StorageIntegritySection() {
 	return isLoading ? (
 		<div className="text-sm text-muted-foreground">Loading…</div>
 	) : error ? (
-		<div className="text-sm text-destructive">
+		<div className="text-sm text-destructive-strong">
 			Failed to load storage status.
 		</div>
 	) : (
@@ -156,13 +156,13 @@ export function StorageIntegritySection() {
 								{/* Most recent attempt was a skip — show the ATTEMPT time so
 								    "(skipped)" doesn't sit next to a stale verified time. */}
 								{formatRelative(data?.last_quick_attempt_at ?? null)}
-								<span className="text-warning"> (skipped)</span>
+								<span className="text-warning-strong"> (skipped)</span>
 							</>
 						) : (
 							<>
 								{formatRelative(data?.last_quick_check_at ?? null)}
 								{data?.last_quick_result === "corrupt" ? (
-									<span className="text-destructive"> (corrupt)</span>
+									<span className="text-destructive-strong"> (corrupt)</span>
 								) : null}
 							</>
 						)}
@@ -175,13 +175,13 @@ export function StorageIntegritySection() {
 						data?.last_full_skip_reason ? (
 							<>
 								{formatRelative(data?.last_full_attempt_at ?? null)}
-								<span className="text-warning"> (skipped)</span>
+								<span className="text-warning-strong"> (skipped)</span>
 							</>
 						) : (
 							<>
 								{formatRelative(data?.last_full_check_at ?? null)}
 								{data?.last_full_result === "corrupt" ? (
-									<span className="text-destructive"> (corrupt)</span>
+									<span className="text-destructive-strong"> (corrupt)</span>
 								) : null}
 							</>
 						)}
@@ -211,7 +211,7 @@ export function StorageIntegritySection() {
 			</div>
 
 			{triggerCheck.isError ? (
-				<p role="alert" className="text-sm text-destructive">
+				<p role="alert" className="text-sm text-destructive-strong">
 					Could not trigger check:{" "}
 					{triggerCheck.error instanceof Error
 						? triggerCheck.error.message
@@ -243,7 +243,7 @@ export function StorageIntegrityBanner() {
 	if (isError && data === undefined) {
 		return (
 			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
-				<AlertCircle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status unavailable</p>
 					<p className="text-muted-foreground">
@@ -267,9 +267,9 @@ export function StorageIntegrityBanner() {
 				role="alert"
 				className="flex items-start gap-3 p-3 rounded-lg bg-destructive/15 border border-destructive/30"
 			>
-				<XCircle className="h-5 w-5 text-destructive mt-0.5 shrink-0" />
+				<XCircle className="h-5 w-5 text-destructive-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
-					<p className="font-medium text-destructive">
+					<p className="font-medium text-destructive-strong">
 						Database integrity check failed
 					</p>
 					<p className="text-muted-foreground">
@@ -289,7 +289,7 @@ export function StorageIntegrityBanner() {
 	if (staleNote) {
 		return (
 			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
-				<AlertCircle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status stale</p>
 					<p className="text-muted-foreground">{staleNote}</p>

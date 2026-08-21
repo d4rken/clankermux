@@ -1,7 +1,28 @@
 import { describe, expect, it } from "bun:test";
 import { CLAUDE_MODEL_IDS } from "@clankermux/core";
-import { CHART_COLORS, MODEL_PALETTE } from "../constants";
-import { getModelColor, MODEL_COLORS } from "./model-colors";
+import {
+	CHART_COLORS,
+	CHART_COLORS_LIGHT,
+	MODEL_PALETTE,
+	MODEL_PALETTE_LIGHT,
+} from "../constants";
+import {
+	type ColorMode,
+	getModelColor,
+	MODEL_COLOR_KEYS,
+} from "./model-colors";
+
+/**
+ * Both grounds are exercised by every separation check below. A hue set that is
+ * unique and separable on near-black says nothing about the same set on white:
+ * the light palette is a different 17 hues resolved through the same keys, so
+ * it needs its own pass or a collision there ships unnoticed.
+ */
+const MODES: ColorMode[] = ["dark", "light"];
+
+/** The palette backing a mode, for the "drawn from the palette" assertions. */
+const paletteFor = (mode: ColorMode) =>
+	mode === "light" ? MODEL_PALETTE_LIGHT : MODEL_PALETTE;
 
 // Legacy ids that predate the model registry. The "all" time range still plots
 // them, so they compete for colors with the current models and belong in the
@@ -46,19 +67,39 @@ function deltaE76(a: string, b: string): number {
 	return Math.hypot(l1 - l2, a1 - a2, b1 - b2);
 }
 
+/** WCAG relative-luminance contrast ratio between two opaque colors. */
+function contrastRatio(a: string, b: string): number {
+	const luminance = (hex: string): number => {
+		const h = hex.replace("#", "");
+		const toLinear = (channel: number): number =>
+			channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+		const r = toLinear(Number.parseInt(h.slice(0, 2), 16) / 255);
+		const g = toLinear(Number.parseInt(h.slice(2, 4), 16) / 255);
+		const blue = toLinear(Number.parseInt(h.slice(4, 6), 16) / 255);
+		return 0.2126 * r + 0.7152 * g + 0.0722 * blue;
+	};
+	const first = luminance(a) + 0.05;
+	const second = luminance(b) + 0.05;
+	return first > second ? first / second : second / first;
+}
+
 describe("getModelColor", () => {
 	it("gives every model a globally unique color", () => {
 		// AnalyticsCharts builds its series list from every distinct model in the
 		// time range, not per family, so Opus/Sonnet/Mythos are plotted on the same
 		// axes. A repeat anywhere — including across families — renders as two
 		// identical lines.
-		const seen = new Map<string, string>();
-		ALL_MODEL_IDS.forEach((modelId, index) => {
-			const color = getModelColor(modelId, index);
-			expect(seen.get(color) ?? modelId).toBe(modelId);
-			seen.set(color, modelId);
-		});
-		expect(seen.size).toBe(ALL_MODEL_IDS.length);
+		for (const mode of MODES) {
+			const seen = new Map<string, string>();
+			ALL_MODEL_IDS.forEach((modelId, index) => {
+				const color = getModelColor(modelId, index, mode);
+				expect(`${mode}:${seen.get(color) ?? modelId}`).toBe(
+					`${mode}:${modelId}`,
+				);
+				seen.set(color, modelId);
+			});
+			expect(seen.size).toBe(ALL_MODEL_IDS.length);
+		}
 	});
 
 	it("keeps every pair of model colors perceptually separable", () => {
@@ -67,20 +108,22 @@ describe("getModelColor", () => {
 		// palette's actual tightest pair (~20.9), so it flags a genuinely
 		// confusable addition without tripping on the existing assignments.
 		const MIN_DELTA_E = 15;
-		const colors = ALL_MODEL_IDS.map((modelId, index) =>
-			getModelColor(modelId, index),
-		);
 
 		// Collected rather than asserted in the loop so a failure names the
 		// offending model pair instead of just printing two numbers.
 		const tooClose: string[] = [];
-		for (let i = 0; i < colors.length; i++) {
-			for (let j = i + 1; j < colors.length; j++) {
-				const distance = deltaE76(colors[i], colors[j]);
-				if (distance < MIN_DELTA_E) {
-					tooClose.push(
-						`${ALL_MODEL_IDS[i]} vs ${ALL_MODEL_IDS[j]}: dE ${distance.toFixed(2)}`,
-					);
+		for (const mode of MODES) {
+			const colors = ALL_MODEL_IDS.map((modelId, index) =>
+				getModelColor(modelId, index, mode),
+			);
+			for (let i = 0; i < colors.length; i++) {
+				for (let j = i + 1; j < colors.length; j++) {
+					const distance = deltaE76(colors[i], colors[j]);
+					if (distance < MIN_DELTA_E) {
+						tooClose.push(
+							`[${mode}] ${ALL_MODEL_IDS[i]} vs ${ALL_MODEL_IDS[j]}: dE ${distance.toFixed(2)}`,
+						);
+					}
 				}
 			}
 		}
@@ -91,17 +134,38 @@ describe("getModelColor", () => {
 		// An explicit entry (matched via the model's short name) must win before
 		// the loose substring fallback, which otherwise collapses e.g. every
 		// claude-opus-4.x onto claude-opus-4's color.
-		const palette = new Set<string>(Object.values(MODEL_PALETTE));
-		for (const modelId of Object.values(CLAUDE_MODEL_IDS)) {
-			expect(palette.has(getModelColor(modelId, 0))).toBe(true);
+		for (const mode of MODES) {
+			const palette = new Set<string>(Object.values(paletteFor(mode)));
+			for (const modelId of Object.values(CLAUDE_MODEL_IDS)) {
+				expect(palette.has(getModelColor(modelId, 0, mode))).toBe(true);
+			}
 		}
 	});
 
-	it("draws MODEL_COLORS entirely from the model palette", () => {
-		const palette = new Set<string>(Object.values(MODEL_PALETTE));
-		for (const color of Object.values(MODEL_COLORS)) {
-			expect(palette.has(color)).toBe(true);
+	it("assigns every model a key both palettes define", () => {
+		// The two palettes share a key set on purpose: that is what lets a model
+		// keep its identity across a light/dark switch while changing hex. A key
+		// present in one and missing from the other would resolve to undefined in
+		// exactly one mode.
+		for (const key of Object.values(MODEL_COLOR_KEYS)) {
+			expect(MODEL_PALETTE[key]).toBeDefined();
+			expect(MODEL_PALETTE_LIGHT[key]).toBeDefined();
 		}
+		expect(Object.keys(MODEL_PALETTE_LIGHT).sort()).toEqual(
+			Object.keys(MODEL_PALETTE).sort(),
+		);
+	});
+
+	it("keeps every light-palette hue legible on a white card", () => {
+		// The mirror of the dark palette's L* 45 floor. MODEL_PALETTE's own hues
+		// include #99DDFF and #FFAABB, which sit under 1.5:1 on white — reusing
+		// them on a light ground is the defect this palette exists to avoid.
+		const faint: string[] = [];
+		for (const [name, hex] of Object.entries(MODEL_PALETTE_LIGHT)) {
+			const ratio = contrastRatio(hex, "#ffffff");
+			if (ratio < 3) faint.push(`${name} ${hex}: ${ratio.toFixed(2)}:1`);
+		}
+		expect(faint).toEqual([]);
 	});
 
 	it("keeps Opus 4.5 through 5 off Opus 4's color", () => {
@@ -136,6 +200,9 @@ describe("getModelColor", () => {
 
 	it("falls back to the chart color sequence for unknown models", () => {
 		expect(getModelColor("some-third-party-model", 1)).toBe(CHART_COLORS[1]);
+		expect(getModelColor("some-third-party-model", 1, "light")).toBe(
+			CHART_COLORS_LIGHT[1],
+		);
 	});
 
 	it("still resolves an unregistered model via substring matching", () => {

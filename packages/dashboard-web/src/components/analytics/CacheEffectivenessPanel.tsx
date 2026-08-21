@@ -64,7 +64,9 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 						label="Net (honest)"
 						value={isLoading ? "—" : formatUsd(netConservative)}
 						valueClassName={
-							netConservative >= 0 ? "text-green-600" : "text-destructive"
+							netConservative >= 0
+								? "text-success-strong"
+								: "text-destructive-strong"
 						}
 					/>
 					<StatTile

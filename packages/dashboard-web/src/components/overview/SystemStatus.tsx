@@ -63,11 +63,11 @@ export function SystemStatus() {
 
 		const icon =
 			status === "ok" ? (
-				<CheckCircle className="h-5 w-5 text-success" />
+				<CheckCircle className="h-5 w-5 text-success-strong" />
 			) : status === "degraded" ? (
-				<AlertTriangle className="h-5 w-5 text-warning" />
+				<AlertTriangle className="h-5 w-5 text-warning-strong" />
 			) : (
-				<XCircle className="h-5 w-5 text-destructive" />
+				<XCircle className="h-5 w-5 text-destructive-strong" />
 			);
 
 		const badge =
@@ -166,7 +166,7 @@ export function SystemStatus() {
 						<dt className="text-muted-foreground">Rate-limited</dt>
 						<dd className="font-medium tabular-nums">
 							{pool.rate_limited > 0 ? (
-								<span className="text-warning">{pool.rate_limited}</span>
+								<span className="text-warning-strong">{pool.rate_limited}</span>
 							) : (
 								pool.rate_limited
 							)}
@@ -176,7 +176,9 @@ export function SystemStatus() {
 						<dt className="text-muted-foreground">Usage exhausted</dt>
 						<dd className="font-medium tabular-nums">
 							{(pool.usage_exhausted ?? 0) > 0 ? (
-								<span className="text-warning">{pool.usage_exhausted}</span>
+								<span className="text-warning-strong">
+									{pool.usage_exhausted}
+								</span>
 							) : (
 								(pool.usage_exhausted ?? 0)
 							)}

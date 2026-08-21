@@ -32,7 +32,9 @@ export function RecentErrorRow({
 	const isWarning = meta.severity === "warning";
 	const Icon = isWarning ? AlertTriangle : XCircle;
 	const bgClass = isWarning ? "bg-warning/10" : "bg-destructive/10";
-	const iconColor = isWarning ? "text-warning" : "text-destructive";
+	const iconColor = isWarning
+		? "text-warning-strong"
+		: "text-destructive-strong";
 
 	const relativeTime = formatDistanceToNow(new Date(error.latestTimestamp), {
 		addSuffix: true,
