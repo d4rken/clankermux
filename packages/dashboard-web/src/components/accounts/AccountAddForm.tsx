@@ -115,6 +115,13 @@ export function AccountAddForm({
 	const [authStep, setAuthStep] = useState<"form" | "code">("form");
 	const [authCode, setAuthCode] = useState("");
 	const [sessionId, setSessionId] = useState("");
+	/**
+	 * Kept so the code step can render the authorization URL as a link.
+	 * `window.open` alone is not a way back to it: a popup blocker can eat the
+	 * tab, and the dashboard is often open on a different machine than the
+	 * browser that has to do the authorizing.
+	 */
+	const [authUrl, setAuthUrl] = useState("");
 	const [newAccount, setNewAccount] = useState({
 		name: "",
 		mode: "claude-oauth" as
@@ -722,12 +729,13 @@ export function AccountAddForm({
 		}
 
 		// Step 1: Initialize OAuth flow for Max/Console accounts
-		const { authUrl, sessionId } = await onAddAccount(accountParams);
-		setSessionId(sessionId);
+		const result = await onAddAccount(accountParams);
+		setSessionId(result.sessionId);
+		setAuthUrl(result.authUrl);
 
 		// Open auth URL in new tab
 		if (typeof window !== "undefined") {
-			window.open(authUrl, "_blank");
+			window.open(result.authUrl, "_blank");
 		}
 
 		// Move to code entry step
@@ -750,6 +758,7 @@ export function AccountAddForm({
 		setAuthStep("form");
 		setAuthCode("");
 		setSessionId("");
+		setAuthUrl("");
 		setNewAccount({
 			name: "",
 			mode: "claude-oauth",
@@ -789,6 +798,7 @@ export function AccountAddForm({
 		setAuthStep("form");
 		setAuthCode("");
 		setSessionId("");
+		setAuthUrl("");
 		setNewAccount({
 			name: "",
 			mode: "claude-oauth",
@@ -1549,6 +1559,16 @@ export function AccountAddForm({
 							A new browser tab has opened for authentication. After
 							authorizing, copy the code and paste it below.
 						</p>
+						{authUrl && (
+							<a
+								href={authUrl}
+								target="_blank"
+								rel="noopener noreferrer"
+								className="block text-sm text-primary underline break-all"
+							>
+								Open authorization page
+							</a>
+						)}
 						<Label htmlFor="code">Authorization Code</Label>
 						<Input
 							id="code"
