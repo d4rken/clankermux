@@ -455,6 +455,134 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
+	// The bar's fill carries the same tone as the projection line, so the run-out
+	// signal is readable without hovering. The pace tick is NOT the carrier — its
+	// position means clock time and nothing else — so every case below also
+	// asserts the tick's white treatment survives.
+	describe("progress bar fill tone", () => {
+		const HOUR = 60 * 60 * 1000;
+		const PACE_TICK_COLOR = "rgba(255,255,255,0.95)";
+
+		/** A five-hour window whose reset is `msFromNow` away. */
+		function fiveHourProps(utilization: number, msFromNow: number) {
+			const reset = new Date(Date.now() + msFromNow).toISOString();
+			return {
+				resetIso: reset,
+				usageUtilization: utilization,
+				usageWindow: "five_hour" as const,
+				usageData: {
+					five_hour: { utilization, resets_at: reset },
+					seven_day: null,
+				},
+				provider: "anthropic",
+				showWeekly: true,
+				inlineProjection: true,
+			};
+		}
+
+		/** A usable regression prediction exhausting `marginMs` before the reset. */
+		function predictionExhaustingBeforeReset(
+			resetMs: number,
+			marginMs: number,
+		) {
+			return {
+				fiveHour: {
+					state: "rising" as const,
+					slopePerHour: 20,
+					etaExhaustMs: resetMs - marginMs,
+					predictedAtReset: null,
+					resetsAtMs: resetMs,
+					willExhaustBeforeReset: true,
+					lowConfidence: false,
+				},
+				sevenDay: undefined,
+			};
+		}
+
+		it("leaves a safe window on the default fill", () => {
+			// 5% used an hour into a five-hour window: behind pace, resets first.
+			const html = renderToStaticMarkup(
+				<RateLimitProgress {...fiveHourProps(5, 4 * HOUR)} />,
+			);
+
+			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("bg-warning");
+			expect(html).toContain(PACE_TICK_COLOR);
+		});
+
+		it("paints a wide-margin regression projection red", () => {
+			const resetMs = Date.now() + HOUR;
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					{...fiveHourProps(90, HOUR)}
+					prediction={predictionExhaustingBeforeReset(resetMs, 45 * 60 * 1000)}
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-destructive");
+			expect(html).toContain(PACE_TICK_COLOR);
+		});
+
+		it("paints a thin-margin regression projection amber, not red", () => {
+			// 10m of margin on a five-hour window is inside the extrapolation's own
+			// error — the same shortfall a slightly flatter slope would erase.
+			const resetMs = Date.now() + HOUR;
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					{...fiveHourProps(90, HOUR)}
+					prediction={predictionExhaustingBeforeReset(resetMs, 10 * 60 * 1000)}
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).toContain(PACE_TICK_COLOR);
+		});
+
+		it("caps the legacy single-snapshot projection at amber", () => {
+			// No `prediction` prop, so this is the lifetime-average fallback: 80% used
+			// an hour into a five-hour window projects exhaustion hours early. That
+			// path can be an artefact of one early burst, so it never earns red.
+			const html = renderToStaticMarkup(
+				<RateLimitProgress {...fiveHourProps(80, 4 * HOUR)} />,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).not.toContain("bg-destructive");
+		});
+
+		it("lets a red projection outrank the throttled amber fill", () => {
+			const resetMs = Date.now() + HOUR;
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					{...fiveHourProps(90, HOUR)}
+					usageThrottledUntil={Date.now() + 10 * 60 * 1000}
+					usageThrottledWindows={["five_hour"]}
+					prediction={predictionExhaustingBeforeReset(resetMs, 45 * 60 * 1000)}
+				/>,
+			);
+
+			expect(html).toContain("bg-destructive");
+			expect(html).not.toContain("bg-warning");
+		});
+
+		it("keeps the throttled amber fill when the projection is safe", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					{...fiveHourProps(5, 4 * HOUR)}
+					usageThrottledUntil={Date.now() + 10 * 60 * 1000}
+					usageThrottledWindows={["five_hour"]}
+				/>,
+			);
+
+			expect(html).toContain("bg-warning");
+			expect(html).not.toContain("bg-destructive");
+		});
+	});
+
 	it("does not display a throttled-until time past reset for over-100% usage", () => {
 		const now = Date.now();
 		const resetAt = now + 30 * 1000;

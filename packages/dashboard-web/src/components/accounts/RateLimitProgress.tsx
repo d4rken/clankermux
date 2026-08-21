@@ -106,6 +106,23 @@ function computeExpectedPct(
 	return Math.min(100, Math.max(0, (elapsed / durationMs) * 100));
 }
 
+/**
+ * Full length of the window a reset belongs to, derived backwards from the reset
+ * the same way the pace tick derives its start. Null when the reset or the
+ * window name is missing or unparseable, which callers must read as "unknown"
+ * rather than substituting a default length.
+ */
+function computeWindowDurationMs(
+	resetMs: number | null,
+	window: string | null,
+): number | null {
+	if (resetMs === null || !Number.isFinite(resetMs) || !window) return null;
+	const startMs = computeWindowStartMs(resetMs, window);
+	if (startMs === null || !Number.isFinite(startMs)) return null;
+	const durationMs = resetMs - startMs;
+	return durationMs > 0 ? durationMs : null;
+}
+
 function computeWindowThrottleUntil(
 	resetTime: string | null,
 	window: string | null,
@@ -168,7 +185,15 @@ function computeProjectedMessage(
 	if (timeToExhaustMs < remaining) {
 		return {
 			message: `Runs out ${formatDuration(remaining - timeToExhaustMs)} before reset`,
-			tone: "danger",
+			// Amber, never red, no matter how large the projected shortfall. This
+			// path is a single-snapshot average over the whole elapsed window rather
+			// than a recent slope: a burst in the first ten minutes of a five-hour
+			// window projects confident exhaustion for an account that has since
+			// gone idle, and it stays projecting it until the window resets. It is
+			// what every non-Anthropic and every scoped-weekly window falls back to,
+			// so red here would be red almost everywhere. The regression path in
+			// `formatPredictionMessage` is the only source trusted with red.
+			tone: "warning",
 		};
 	}
 	return {
@@ -185,8 +210,38 @@ function computeProjectedMessage(
 // fixed pair was washed out there rather than tuned for it. Both surfaces are
 // token-driven, so both take the semantic tokens.
 function projectionToneClass(tone: ProjectionTone): string {
-	if (tone === "neutral") return "text-muted-foreground";
-	return tone === "danger" ? "text-destructive-strong" : "text-success-strong";
+	switch (tone) {
+		case "neutral":
+			return "text-muted-foreground";
+		case "danger":
+			return "text-destructive-strong";
+		case "warning":
+			return "text-warning-strong";
+		default:
+			return "text-success-strong";
+	}
+}
+
+// Fill colour for the progress bar itself, so the run-out signal is legible from
+// the bar alone rather than only from the projection line (which is a hover
+// tooltip on the Accounts page). The bar's FILL carries it, not the pace tick:
+// the tick's position encodes clock time and nothing else, so colouring it would
+// put two unrelated variables on one mark, and a 2px tick tinted amber would
+// vanish into an amber throttled fill. The tick stays white.
+//
+// Ordering is the precedence rule. A "danger" projection outranks the throttled
+// tint because it is the worse news and needs its own hue; below that, throttling
+// outranks a "warning" projection. Those two share `bg-warning` — they are the
+// same amber and near-always co-occur, since proactive throttling exists exactly
+// because an account is burning ahead of pace.
+function projectionFillClass(
+	tone: ProjectionTone | null,
+	isThrottled: boolean,
+): string | undefined {
+	if (tone === "danger") return "bg-destructive";
+	if (isThrottled) return "bg-warning";
+	if (tone === "warning") return "bg-warning";
+	return undefined;
 }
 
 // Compact "time left until reset" for the caption bracket, showing the two
@@ -771,16 +826,32 @@ export function RateLimitProgress({
 				const liveResetMs = usage.resetTime
 					? new Date(usage.resetTime).getTime()
 					: null;
+				// The window's full length, which the prediction needs to judge whether
+				// its projected shortfall is wide enough to be certain. Derived the same
+				// way the pace tick derives its start: backwards from the reset.
+				const windowDurationMs = computeWindowDurationMs(
+					liveResetMs,
+					usage.window,
+				);
 				const projection =
 					percentage !== null &&
 					isUsablePrediction(windowPrediction, liveResetMs)
-						? formatPredictionMessage(windowPrediction, liveResetMs, now)
+						? formatPredictionMessage(
+								windowPrediction,
+								liveResetMs,
+								now,
+								windowDurationMs,
+							)
 						: computeProjectedMessage(
 								usage.resetTime,
 								usage.window,
 								percentage ?? null,
 								now,
 							);
+				// A window sitting at 0% has nothing to warn about even if a stale
+				// prediction says otherwise, matching the tooltip's own 0% override.
+				const fillTone =
+					projection && (percentage ?? 0) > 0 ? projection.tone : null;
 
 				// Compact caption on a single row: window label (start), the reset
 				// status (center), utilization % (end). The reset status pairs the
@@ -855,9 +926,10 @@ export function RateLimitProgress({
 							<Progress
 								value={isAvailable ? percentage : 0}
 								className="h-2"
-								indicatorClassName={
-									isWindowThrottled ? "bg-warning" : undefined
-								}
+								indicatorClassName={projectionFillClass(
+									fillTone,
+									isWindowThrottled,
+								)}
 							/>
 							{expectedPct !== null && (
 								<div
