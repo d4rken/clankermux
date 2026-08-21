@@ -1,8 +1,14 @@
-import { createHash } from "node:crypto";
 import type { DatabaseOperations } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 import type { ApiKey, CryptoUtils } from "@clankermux/types";
-import { apiKeyLookupSuffix, NodeCryptoUtils } from "@clankermux/types";
+import {
+	apiKeyHashScheme,
+	apiKeyLookupSuffix,
+	NodeCryptoUtils,
+} from "@clankermux/types";
 import { extractApiKey } from "./extract-api-key";
+
+const logger = new Logger("Auth");
 
 export interface AuthenticationResult {
 	isAuthenticated: boolean;
@@ -31,46 +37,9 @@ function policyFor(path: string): AuthRequirement {
 	return "public";
 }
 
-/**
- * How many verified keys are remembered. Only a successful verification creates
- * an entry, so nobody without a valid key can grow this; the cap is there so a
- * long-lived process with churning keys cannot accumulate forever.
- */
-const MAX_REMEMBERED_KEYS = 512;
-
-/** What a past verification proved, and what must still hold for it to count. */
-interface RememberedKey {
-	id: string;
-	/** The stored hash the presented key was checked against. */
-	hashedKey: string;
-}
-
-/**
- * Index for the verified-key cache. Not a security boundary — the entry it
- * finds is re-checked against the live active set before it authenticates
- * anything.
- */
-function digestApiKey(apiKey: string): string {
-	return createHash("sha256").update(apiKey).digest("hex");
-}
-
 export class AuthService {
 	private crypto: CryptoUtils;
 	private dbOps: DatabaseOperations;
-
-	/**
-	 * Keys already verified this process, by SHA-256 of the presented key.
-	 *
-	 * Verification runs `scryptSync`, which is intentionally expensive — a
-	 * password KDF, ~35ms per call on the deployment host — and it ran on every
-	 * single proxied request. The stall profiler attributed 100% of a run of
-	 * 250-950ms event-loop freezes to that one frame.
-	 *
-	 * Digest rather than the key itself so the plaintext secret is not held in a
-	 * long-lived structure. SHA-256 is sound as the index because the entry only
-	 * survives the re-check in `validateApiKey`.
-	 */
-	private readonly rememberedKeys = new Map<string, RememberedKey>();
 
 	constructor(
 		dbOps: DatabaseOperations,
@@ -93,42 +62,98 @@ export class AuthService {
 	 * the request needs an api-key check and that auth is enabled.
 	 */
 	private async validateApiKey(apiKey: string): Promise<AuthenticationResult> {
-		// Always read the current active set. It is what decides the outcome, and
-		// it is also what expires a remembered verification: a key that has been
-		// deactivated, deleted or rotated is either absent here or carries a
-		// different hash, so no revocation event needs to be plumbed anywhere and
-		// no invalidation path can be forgotten.
-		const activeApiKeys = await this.dbOps.getActiveApiKeys();
+		// A stored hash is the unsalted SHA-256 of the key, so the record can be
+		// computed rather than searched for: one indexed lookup, no key hashing,
+		// and no cost that scales with how many keys exist. The query filters on
+		// is_active, so deactivating or deleting a key stops it here with no
+		// revocation event to plumb anywhere.
+		const lookupHash = await this.crypto.hashApiKey(apiKey);
+		const migrated = await this.dbOps.getApiKeyByHashedKey(lookupHash);
+		if (migrated) return this.accept(migrated);
 
-		const digest = digestApiKey(apiKey);
-		const remembered = this.rememberedKeys.get(digest);
-		if (remembered) {
-			const current = activeApiKeys.find(
-				(k) => k.id === remembered.id && k.hashedKey === remembered.hashedKey,
-			);
-			// A hit means: this exact key was once verified against this exact
-			// stored hash, and that hash is still active. Nothing weaker.
-			if (current) return this.accept(current);
-			this.rememberedKeys.delete(digest);
-		}
-
-		// Hash only the record this key could possibly be. The stored suffix is
-		// not a secret — the key-listing endpoint returns it so the UI can tell
-		// keys apart — so narrowing by it discloses nothing, and the full key
-		// still has to survive the hash comparison below.
+		// Miss. Either the key is wrong, or its row still holds a salted scrypt
+		// hash — which cannot be computed from the key, only checked against it.
 		const suffix = apiKeyLookupSuffix(apiKey);
-		for (const keyRecord of activeApiKeys) {
+		for (const keyRecord of await this.dbOps.getActiveApiKeys()) {
+			// The stored suffix is not a secret (the key-listing endpoint returns
+			// it so the UI can tell keys apart), so narrowing by it discloses
+			// nothing — and the full key still has to survive the check below.
 			if (keyRecord.prefixLast8 !== suffix) continue;
-			if (await this.crypto.verifyApiKey(apiKey, keyRecord.hashedKey)) {
-				this.remember(digest, keyRecord);
-				return this.accept(keyRecord);
+			// Only rows actually written in the old scheme can be checked here. An
+			// already-migrated row could only have matched the lookup above, and a
+			// row in neither scheme cannot authenticate anything; hashing either
+			// would cost ~35ms and could not change the answer.
+			if (apiKeyHashScheme(keyRecord.hashedKey) !== "scrypt-legacy") continue;
+			if (!(await this.crypto.verifyApiKey(apiKey, keyRecord.hashedKey))) {
+				continue;
 			}
+
+			// `void`, not `await`: see migrateStoredHash. Awaiting this can park an
+			// already-authenticated request for the adapter's ten-minute busy
+			// retry, and the request's outcome does not depend on the write.
+			void this.migrateStoredHash(keyRecord, lookupHash);
+			return this.accept(keyRecord);
 		}
 
 		return {
 			isAuthenticated: false,
 			error: "Invalid API key",
 		};
+	}
+
+	/** Key ids whose migration write has been started and has not finished. */
+	private readonly migrationsInFlight = new Set<string>();
+
+	/**
+	 * Rewrite a verified legacy row to the SHA-256 scheme.
+	 *
+	 * Verification is the only moment the plaintext key is in hand, so it is the
+	 * only moment this can be done — which is why every key migrates on first use
+	 * and none has to be re-issued.
+	 *
+	 * NOT awaited by the caller, and that is load-bearing. The database adapter
+	 * retries SQLITE_BUSY for up to ten minutes, so awaiting this would let write
+	 * contention hold an already-authenticated request open for that long. The
+	 * request does not depend on the outcome: possession was proved against a
+	 * hash that was active when it was read. Usage counting is unawaited for the
+	 * same reason.
+	 *
+	 * Single-flight per key, because not awaiting means a busy row could
+	 * otherwise accumulate one ten-minute retry loop per request. At most one
+	 * migration is ever in flight for a given key, so the ceiling is the number
+	 * of keys. Every failure path is swallowed here, so the unawaited promise can
+	 * never surface as an unhandled rejection.
+	 */
+	private async migrateStoredHash(
+		keyRecord: ApiKey,
+		newHashedKey: string,
+	): Promise<void> {
+		if (this.migrationsInFlight.has(keyRecord.id)) return;
+		this.migrationsInFlight.add(keyRecord.id);
+		try {
+			// Compare-and-swap on the hash we actually verified: a regenerate that
+			// landed in the window between the read and this write must not be
+			// clobbered with a hash of the secret it just replaced.
+			const swapped = await this.dbOps.rotateApiKeySecret(
+				keyRecord.id,
+				keyRecord.hashedKey,
+				newHashedKey,
+				keyRecord.prefixLast8,
+			);
+			if (!swapped) {
+				logger.debug(
+					`API key ${keyRecord.id} was modified while migrating its stored hash; leaving it as-is`,
+				);
+			}
+		} catch (error) {
+			logger.warn(
+				`Could not migrate the stored hash for API key ${keyRecord.id}; it will keep using the slow verification path: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		} finally {
+			this.migrationsInFlight.delete(keyRecord.id);
+		}
 	}
 
 	/** Record the usage hit and build the success result from the current row. */
@@ -139,18 +164,6 @@ export class AuthService {
 			apiKeyId: keyRecord.id,
 			apiKeyName: keyRecord.name,
 		};
-	}
-
-	private remember(digest: string, keyRecord: ApiKey): void {
-		if (this.rememberedKeys.size >= MAX_REMEMBERED_KEYS) {
-			// Map iterates in insertion order, so this drops the oldest entry.
-			const oldest = this.rememberedKeys.keys().next();
-			if (!oldest.done) this.rememberedKeys.delete(oldest.value);
-		}
-		this.rememberedKeys.set(digest, {
-			id: keyRecord.id,
-			hashedKey: keyRecord.hashedKey,
-		});
 	}
 
 	extractApiKey(req: Request): string | null {

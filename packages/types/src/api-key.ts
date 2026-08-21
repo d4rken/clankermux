@@ -93,6 +93,41 @@ export function apiKeyLookupSuffix(apiKey: string): string {
 	return apiKey.slice(-API_KEY_LOOKUP_SUFFIX_LENGTH);
 }
 
+/**
+ * Scheme marker on a stored hash, so old and new rows can coexist in one column
+ * without a migration. The legacy scrypt values are `hex-salt:hex-hash` and can
+ * never contain a `$`, which is what makes the two unambiguous.
+ */
+const API_KEY_HASH_PREFIX = "sha256$";
+
+/** `sha256$` followed by a SHA-256 digest. */
+const SHA256_STORED = /^sha256\$[0-9a-f]{64}$/;
+
+/**
+ * The old scheme, matched EXACTLY: a 16-byte hex salt, a colon, and a 64-byte
+ * hex scrypt output. Both halves come from `.toString("hex")`, so lowercase and
+ * these lengths are the only shape that was ever written.
+ */
+const SCRYPT_STORED = /^[0-9a-f]{32}:[0-9a-f]{128}$/;
+
+/**
+ * Which scheme a stored hash is written in.
+ *
+ * `unrecognised` is a real answer, not a fallback: a value that is neither
+ * shape cannot authenticate anything and must never be handed to a verifier.
+ * Treating unknown values as legacy instead would be measurably worse — the
+ * legacy parser splits on `:` and ignores trailing fields, so a corrupt or
+ * hand-edited row could be both more permissive than intended and cost a
+ * 35ms hash to reject.
+ */
+export type ApiKeyHashScheme = "sha256" | "scrypt-legacy" | "unrecognised";
+
+export function apiKeyHashScheme(hashedKey: string): ApiKeyHashScheme {
+	if (SHA256_STORED.test(hashedKey)) return "sha256";
+	if (SCRYPT_STORED.test(hashedKey)) return "scrypt-legacy";
+	return "unrecognised";
+}
+
 // Default implementation using Node.js crypto
 export class NodeCryptoUtils implements CryptoUtils {
 	// biome-ignore lint/suspicious/noExplicitAny: Dynamic require for Node.js crypto module compatibility
@@ -112,22 +147,68 @@ export class NodeCryptoUtils implements CryptoUtils {
 		return `btr-${key}`;
 	}
 
+	/**
+	 * The value stored in `hashed_key`: an unsalted SHA-256 of the key.
+	 *
+	 * Unsalted is deliberate, and it is what makes verification cheap: the
+	 * stored value can be computed from a presented key, so the matching record
+	 * is one indexed lookup rather than a scan that hashes every row.
+	 *
+	 * The security of that rests entirely on the INPUT being high-entropy —
+	 * `generateApiKey` above draws 32 characters from `randomBytes(32)`, far
+	 * beyond any dictionary or brute-force reach. A salt and a slow KDF defend a
+	 * secret a human chose; they buy nothing here. This must not be reused for
+	 * anything a user gets to pick.
+	 */
 	async hashApiKey(apiKey: string): Promise<string> {
-		const salt = this.crypto.randomBytes(16).toString("hex");
-		const hash = this.crypto.scryptSync(apiKey, salt, 64).toString("hex");
-		return `${salt}:${hash}`;
+		const digest = this.crypto
+			.createHash("sha256")
+			.update(apiKey)
+			.digest("hex");
+		return `${API_KEY_HASH_PREFIX}${digest}`;
 	}
 
 	async verifyApiKey(apiKey: string, hashedKey: string): Promise<boolean> {
 		try {
-			const [salt, hash] = hashedKey.split(":");
-			if (!salt || !hash) {
+			const scheme = apiKeyHashScheme(hashedKey);
+
+			if (scheme === "unrecognised") {
+				// Not a value this application ever wrote. Nothing can verify
+				// against it, so refuse without spending a hash on it.
 				return false;
 			}
 
-			const candidateHash = this.crypto
-				.scryptSync(apiKey, salt, 64)
-				.toString("hex");
+			if (scheme === "sha256") {
+				// Both sides are `sha256$` plus 64 hex characters, so the lengths
+				// always agree and timingSafeEqual cannot throw here.
+				return this.crypto.timingSafeEqual(
+					Buffer.from(await this.hashApiKey(apiKey), "utf8"),
+					Buffer.from(hashedKey, "utf8"),
+				);
+			}
+
+			// Legacy rows: salted scrypt, kept working indefinitely. Rows are
+			// rewritten to the scheme above the first time their key is presented,
+			// so this stays load-bearing only for keys that are never used again.
+			//
+			// ASYNCHRONOUS deliberately. scryptSync costs ~35ms of CPU and blocks
+			// the event loop for every millisecond of it, which is what froze the
+			// proxy; Bun runs the callback form on its threadpool, so the same work
+			// costs the loop nothing. That matters beyond migration: the stored
+			// lookup suffix is public, so anyone can force this path with a wrong
+			// key, and it must not be a way to stall request serving.
+			const [salt, hash] = hashedKey.split(":");
+
+			const derived: Buffer = await new Promise((resolve, reject) => {
+				this.crypto.scrypt(
+					apiKey,
+					salt,
+					64,
+					(err: Error | null, derivedKey: Buffer) =>
+						err ? reject(err) : resolve(derivedKey),
+				);
+			});
+			const candidateHash = derived.toString("hex");
 
 			// Length validation before timing-safe comparison
 			if (candidateHash.length !== hash.length) {
