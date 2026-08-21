@@ -55,7 +55,7 @@ function codexAccount(): Account {
 		session_start: null,
 		session_request_count: 0,
 		custom_endpoint: null,
-		model_mappings: null, // opus → gpt-5.6-sol (353k window)
+		model_mappings: null, // opus → gpt-5.6-sol (272k window)
 	} as unknown as Account;
 }
 
@@ -149,7 +149,7 @@ describe("image-bearing /v1/responses request through the context-window gate", 
  * untranslated `input_image` blocks landed inside an Anthropic `tool_result`,
  * where the measurement walk could not recognise them, so 668k base64 chars were
  * priced as prompt text and a ~76k-token request estimated at 430,847 — past
- * gpt-5.6-sol's 353k window, with no other backend eligible for Codex CLI
+ * gpt-5.6-sol's 272k window, with no other backend eligible for Codex CLI
  * traffic.
  */
 function responsesRequestWithToolResultImages(): ResponsesRequest & {
