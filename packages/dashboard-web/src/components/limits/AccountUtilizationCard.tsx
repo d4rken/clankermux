@@ -53,7 +53,9 @@ export function AccountUtilizationCard({
 				<CardTitle>Account Utilization</CardTitle>
 				<CardDescription>
 					Current 5-hour and 7-day quota per account, with reset countdowns and
-					a burn-rate projection. The tick marks the expected pace.
+					a burn-rate projection. The tick marks the expected pace; a bar turns
+					amber when it is projected to run out before its reset, and red once
+					that projection is well clear of the reset.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
