@@ -139,6 +139,11 @@ export {
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ScopedFamilyLimit,
 } from "./scoped-limits";
+export {
+	enableStallProfiler,
+	isStallProfilerEnabled,
+	stallProfilerEnabledAt,
+} from "./stall-profiler";
 export * from "./strategy";
 export {
 	computeWindowStartMs,
