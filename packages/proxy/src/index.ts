@@ -89,6 +89,11 @@ export {
 // depend on this package.
 export { createClientAbortResponse } from "./handlers/client-abort-response";
 export {
+	createIdentityBoundRefusalResponse,
+	IDENTITY_BOUND_PATH_PREFIXES,
+	isIdentityBoundPath,
+} from "./identity-bound-paths";
+export {
 	runIntegrityCheckOnDemand,
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,

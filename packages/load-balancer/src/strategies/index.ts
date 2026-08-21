@@ -129,14 +129,54 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			(!account.session_start ||
 				now - account.session_start >= this.sessionDurationMs);
 
-		// Check if the account's rate limit window has reset
-		// This helps Anthropic accounts better utilize their usage windows
-		// Usage windows: Anthropic accounts with proactive rate limit headers (usage-based accounts)
-		// No usage windows: Other account types or Anthropic console keys without usage windows
+		// An elapsed usage window ends the session EARLY, in addition to (not instead
+		// of) the fixed-duration clock above, so an account that has just regained
+		// capacity is re-selected rather than staying pinned until the local clock
+		// happens to run out.
+		//
+		// Limited to the two providers whose `rate_limit_reset` is maintained from
+		// real usage evidence: Anthropic's proactive rate-limit headers, and the
+		// `x-codex-*` usage headers that response-processor writes back on every
+		// Codex response. (Neither provider's 429 cooldown writes this column —
+		// applySuccessRateLimitClear documents that `rate_limit_reset` is left to
+		// the status-meta path — so an ordinary retry deadline cannot land here and
+		// masquerade as a rolled window.) Other session-tracked providers (zai) have
+		// no such feed and keep the fixed-duration clock alone rather than reacting
+		// to a value nothing refreshes.
+		//
+		// This matters more for Codex than for Anthropic: a Codex `session_start` is
+		// anchored to the first request through THIS proxy, while the real window
+		// starts at the account's first request anywhere (Codex CLI, ChatGPT,
+		// another proxy). The two rarely coincide and never do after a restart.
+		//
+		// The `session_start` comparison makes the branch one-shot per boundary.
+		// Resetting a session does not advance `rate_limit_reset` — only the next
+		// response carrying usage headers does — so without it every request in the
+		// gap between the boundary elapsing and that response re-resets the session,
+		// zeroing `session_request_count` repeatedly. A session that started past the
+		// boundary (plus the same skew buffer the eligibility test uses, so a session
+		// begun in that sliver is not miscounted as having consumed the boundary) has
+		// already consumed it.
+		//
+		// Two residual cases this does NOT cover, both strictly better than the
+		// unguarded behaviour that preceded it and both bounded by the
+		// fixed-duration clock above:
+		//   - Concurrent requests each hold their own Account row (`findAll` builds
+		//     fresh objects per selection), so two selections racing the same
+		//     boundary can both reset before either write lands. Costs a duplicate
+		//     `session_request_count` zeroing, never a wrong routing decision.
+		//   - If usage observations stop for long enough that `rate_limit_reset`
+		//     goes stale across more than one real window, a session restarted in
+		//     the meantime looks like it consumed the newer boundary too. Closing
+		//     that needs the handled boundary recorded explicitly rather than
+		//     inferred from `session_start`.
 		const rateLimitWindowReset =
-			account.provider === PROVIDER_NAMES.ANTHROPIC && // Explicit provider check for Anthropic usage windows
+			(account.provider === PROVIDER_NAMES.ANTHROPIC ||
+				account.provider === PROVIDER_NAMES.CODEX) &&
 			account.rate_limit_reset &&
-			account.rate_limit_reset < now - 1000; // 1 second buffer for clock skew protection
+			account.rate_limit_reset < now - 1000 && // 1 second buffer for clock skew protection
+			(!account.session_start ||
+				account.session_start < account.rate_limit_reset + 1000);
 
 		if (fixedDurationExpired || rateLimitWindowReset) {
 			// Reset session
