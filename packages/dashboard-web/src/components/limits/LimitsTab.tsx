@@ -104,7 +104,7 @@ export const LimitsTab = React.memo(() => {
 
 			{/* Per-account live utilization — grouped with the pool tiles above as the
 			    live, range-independent capacity view (no range selector). */}
-			<AccountUtilizationCard accounts={accountList} />
+			<AccountUtilizationCard accounts={accountList} now={now} />
 
 			{/* Recorded usage history + forecast; range picker lives in the card header. */}
 			<UsageSawtoothChart

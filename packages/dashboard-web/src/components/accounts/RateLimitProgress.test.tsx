@@ -1153,3 +1153,67 @@ describe("RateLimitProgress", () => {
 		});
 	});
 });
+
+describe("soonest-reset highlight", () => {
+	const fiveHourReset = () =>
+		new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+	const weeklyReset = () =>
+		new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+
+	function render(
+		resetIso: string,
+		soonestResets?: ReadonlyMap<string, number>,
+		compact = true,
+	): string {
+		return renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageData={{
+					five_hour: { utilization: 30, resets_at: resetIso },
+					seven_day: { utilization: 40, resets_at: weeklyReset() },
+				}}
+				provider="anthropic"
+				showWeekly
+				soonestResets={soonestResets}
+				compact={compact}
+			/>,
+		);
+	}
+
+	it("bolds the countdown of the window that resets first", () => {
+		const resetIso = fiveHourReset();
+		const html = render(
+			resetIso,
+			new Map([["window:5-hour", Date.parse(resetIso)]]),
+		);
+
+		expect(html).toMatch(/<span class="font-bold">\d+h \d+m<\/span>/);
+	});
+
+	it("bolds the countdown in the roomy layout too", () => {
+		const resetIso = fiveHourReset();
+		const html = render(
+			resetIso,
+			new Map([["window:5-hour", Date.parse(resetIso)]]),
+			false,
+		);
+
+		expect(html).toMatch(/<span class="font-bold">\d+h \d+m<\/span>/);
+		expect(html).toContain("Resets ");
+	});
+
+	it("leaves a window that is not the soonest unbolded", () => {
+		const resetIso = fiveHourReset();
+		const html = render(
+			resetIso,
+			// Another account's 5-hour window comes back a minute earlier.
+			new Map([["window:5-hour", Date.parse(resetIso) - 60_000]]),
+		);
+
+		expect(html).not.toContain("font-bold");
+	});
+
+	it("bolds nothing when there is no cross-account comparison", () => {
+		expect(render(fiveHourReset())).not.toContain("font-bold");
+	});
+});
