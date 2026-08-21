@@ -1212,7 +1212,10 @@ describe("CodexProvider.processResponse", () => {
 			.find((line) => line.includes('"type":"message_delta"'));
 
 		expect(messageDeltaLine).toContain('"context_window"');
-		expect(messageDeltaLine).toContain('"context_window_size":353000');
+		// gpt-5.6-sol's Codex-served window, read live from the account's own
+		// model listing (2026-08-21). The dated slug resolves through its base
+		// model, so the client gauge matches what the routing gate sized against.
+		expect(messageDeltaLine).toContain('"context_window_size":272000');
 	});
 
 	it("omits context_window when model metadata is unavailable", async () => {

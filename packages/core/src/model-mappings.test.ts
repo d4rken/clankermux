@@ -350,7 +350,7 @@ describe("resolveModelContextWindow", () => {
 	test("falls back to the base window for a trailing dated suffix", () => {
 		// A dated variant (e.g. the backend pins a release date) resolves to its
 		// base model's window rather than being treated as unknown.
-		expect(resolveModelContextWindow("gpt-5.6-sol-2026-05-13")).toBe(353_000);
+		expect(resolveModelContextWindow("gpt-5.6-sol-2026-05-13")).toBe(272_000);
 		expect(resolveModelContextWindow("gpt-5.5-2026-01-01")).toBe(272_000);
 	});
 
@@ -363,7 +363,7 @@ describe("resolveModelContextWindow", () => {
 	});
 
 	test("exact keys are unchanged by the dated fallback", () => {
-		expect(resolveModelContextWindow("gpt-5.6-sol")).toBe(353_000);
+		expect(resolveModelContextWindow("gpt-5.6-sol")).toBe(272_000);
 		expect(resolveModelContextWindow("gpt-5.4-mini")).toBe(272_000);
 	});
 });
@@ -524,7 +524,7 @@ describe("codexAccountFitsRequest", () => {
 
 	test("resolves the family default Codex model when no stored mapping exists", () => {
 		// No account mapping → opus resolves to the gpt-5.6-sol family default
-		// (353K window, threshold 342410), matching what the provider actually
+		// (272K window, threshold 263840), matching what the provider actually
 		// sends, so an oversized request is correctly excluded (not "fits").
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
@@ -536,16 +536,16 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-5.6-sol default (353K, threshold 342410).
+		// fable → gpt-5.6-sol default (272K, threshold 263840).
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 342_410)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_840)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 342_411)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_841)).toBe(
 			false,
 		);
 		// mythos resolves to the same fable family default.
-		expect(codexAccountFitsRequest(account, "claude-mythos-5", 342_411)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-mythos-5", 263_841)).toBe(
 			false,
 		);
 	});
@@ -616,7 +616,7 @@ describe("estimateContextWindowTokens", () => {
 		// 675,436 / 3.0 = 225,146 (ceil) + min(64000, 4000) = 229,146.
 		expect(est).toBe(229_146);
 		const account = makeCodexAccount({ model_mappings: null });
-		// Admitted by the gate (threshold floor(353000 * 0.97) = 342,410).
+		// Admitted by the gate (threshold floor(272000 * 0.97) = 263,840).
 		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
 	});
 
@@ -749,24 +749,24 @@ describe("estimateRequestTokens is unchanged (cache-warming promotion regression
 describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
 	test("admits up to the FULL window (the margin band is re-admitted)", () => {
 		const account = makeCodexAccount({ model_mappings: null }); // opus→gpt-5.6-sol
-		// In the (floor(353000*0.97)=342410, 353000] band: margined gate rejects,
+		// In the (floor(272000*0.97)=263840, 272000] band: margined gate rejects,
 		// unmargined admits.
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 350_000)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 270_000)).toBe(
 			false,
 		);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 350_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 270_000),
 		).toBe(true);
 		// Exactly at the window: admitted.
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
 		).toBe(true);
 	});
 
 	test("rejects beyond the full window", () => {
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_001),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
 		).toBe(false);
 	});
 
@@ -794,17 +794,17 @@ describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
 
 describe("codex gates apply the dated-suffix window fallback", () => {
 	test("margined gate resolves a dated target to its base window", () => {
-		// Account maps opus → a dated variant of gpt-5.6-sol (353k window). The
+		// Account maps opus → a dated variant of gpt-5.6-sol (272k window). The
 		// gate must resolve it via resolveModelContextWindow, not treat it as an
 		// unknown model (which would falsely "fit" any size).
 		const account = makeCodexAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
 		});
-		// floor(353000 * 0.97) = 342410 is the margined bound.
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 342_410)).toBe(
+		// floor(272000 * 0.97) = 263840 is the margined bound.
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 263_840)).toBe(
 			true,
 		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 342_411)).toBe(
+		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 263_841)).toBe(
 			false,
 		);
 	});
@@ -814,10 +814,10 @@ describe("codex gates apply the dated-suffix window fallback", () => {
 			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
 		});
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 353_001),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
 		).toBe(false);
 	});
 
@@ -918,11 +918,11 @@ describe("claude-opus-5 routing", () => {
 
 	test("stays capped at the Codex backend window despite a 1M source model", () => {
 		// Opus 5 advertises a 1M context window, but once the request is rewritten
-		// to gpt-5.6-sol the gate is bound by the CODEX backend window (353K), not
+		// to gpt-5.6-sol the gate is bound by the CODEX backend window (272K), not
 		// by the source model. Counterintuitive but correct: the request is served
 		// by Codex, so Codex's window is the constraint.
 		const account = makeCodexAccount({ model_mappings: null });
-		const boundary = Math.floor(353_000 * SAFETY_MARGIN);
+		const boundary = Math.floor(272_000 * SAFETY_MARGIN);
 		expect(codexAccountFitsRequest(account, "claude-opus-5", boundary)).toBe(
 			true,
 		);
@@ -930,10 +930,10 @@ describe("claude-opus-5 routing", () => {
 			codexAccountFitsRequest(account, "claude-opus-5", boundary + 1),
 		).toBe(false);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 353_000),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 272_000),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 353_001),
+			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 272_001),
 		).toBe(false);
 	});
 
