@@ -157,7 +157,7 @@ export function ResetCreditEventsPanel({
 		<ul className="space-y-item">
 			{state.events.map((event) => (
 				<li key={event.id} className="text-xs space-y-tight">
-					<div className="flex flex-wrap items-center gap-x-item gap-y-tight">
+					<div className="flex flex-wrap items-center gap-item">
 						<span className="text-muted-foreground whitespace-nowrap">
 							{formatEventTime(event.createdAt)}
 						</span>
@@ -500,7 +500,7 @@ export function AccountStatusChips({
 	const status = providedStatus ?? deriveAccountStatus(account);
 
 	return (
-		<div className="flex flex-wrap items-center gap-x-item gap-y-tight text-sm">
+		<div className="flex flex-wrap items-center gap-item text-sm">
 			{status.isPrimary && (
 				<StatusChip className="bg-primary text-primary-foreground">
 					Primary

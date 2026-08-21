@@ -219,8 +219,10 @@ export function TrafficTab(props: TrafficTabProps) {
 			{analytics && data.length > 0 && (
 				<section className="space-y-section">
 					<div className="border-t pt-6">
-						<h2 className="text-lg font-semibold">Cumulative Trends</h2>
-						<p className="text-sm text-muted-foreground">
+						<h2 data-slot="title" className="text-lg font-semibold">
+							Cumulative Trends
+						</h2>
+						<p data-slot="subtitle" className="text-sm text-muted-foreground">
 							Running totals across the selected time range
 						</p>
 					</div>

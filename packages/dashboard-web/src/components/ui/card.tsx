@@ -35,15 +35,24 @@ const Card = React.forwardRef<
 ));
 Card.displayName = "Card";
 
+/**
+ * Header block. Deliberately carries NO vertical spacing utility of its own.
+ *
+ * The gap that matters here is the one between a title and its description,
+ * and a `space-y-*` on this element cannot own it: two thirds of the headers in
+ * the app wrap the pair in a flex row so a range picker can sit beside them, and
+ * `space-y` only reaches DIRECT children — so those headers rendered the
+ * description flush against the title with no gap at all, while the unwrapped
+ * ones got a different one. The spacing now lives on the title→description
+ * adjacency itself (`@layer base` in globals.css, keyed on the `data-slot`
+ * attributes below), which is true at any wrapper depth and identical
+ * everywhere.
+ */
 const CardHeader = React.forwardRef<
 	HTMLDivElement,
 	React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-	<div
-		ref={ref}
-		className={cn("flex flex-col space-y-tight p-4", className)}
-		{...props}
-	/>
+	<div ref={ref} className={cn("flex flex-col p-4", className)} {...props} />
 ));
 CardHeader.displayName = "CardHeader";
 
@@ -53,6 +62,7 @@ const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<h3
 		ref={ref}
+		data-slot="title"
 		// No `tracking-tight` here: Tailwind utilities outrank the base layer, so
 		// it would pin letter-spacing and cancel the theme's own
 		// --display-tracking, which .display-face applies.
@@ -68,6 +78,7 @@ const CardDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<p
 		ref={ref}
+		data-slot="subtitle"
 		className={cn("text-sm text-muted-foreground", className)}
 		{...props}
 	/>

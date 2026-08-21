@@ -22,8 +22,13 @@ export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
 		<section className="space-y-section border-t pt-6">
 			<div>
-				<h2 className="text-lg font-semibold">Cache Keep-Alive</h2>
-				<p className="text-sm text-muted-foreground max-w-prose">
+				<h2 data-slot="title" className="text-lg font-semibold">
+					Cache Keep-Alive
+				</h2>
+				<p
+					data-slot="subtitle"
+					className="text-sm text-muted-foreground max-w-prose"
+				>
 					Live cache status, historical activity, and effectiveness. The
 					selected window applies to history and effectiveness; live counters
 					are cumulative since the last restart.

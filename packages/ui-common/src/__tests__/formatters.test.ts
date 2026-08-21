@@ -13,9 +13,32 @@ describe("formatUsd", () => {
 		expect(formatUsd(19.9)).toBe("$19.90");
 	});
 
-	it("rounds sub-cent amounts to two decimals", () => {
+	it("rounds fractional cents to the nearest cent", () => {
 		expect(formatUsd(3.456)).toBe("$3.46");
 		expect(formatUsd(3.451)).toBe("$3.45");
+	});
+
+	it("never renders a nonzero amount as zero", () => {
+		// A few tenths of a cent of API overage is a real charge; "$0.00" would
+		// claim there was none. Only an exact zero gets to say zero.
+		expect(formatUsd(0.004)).toBe("<$0.01");
+		expect(formatUsd(0.0001)).toBe("<$0.01");
+		expect(formatUsd(0)).toBe("$0.00");
+		// The boundary rounds up on its own, so it keeps the normal form.
+		expect(formatUsd(0.005)).toBe("$0.01");
+		expect(formatUsd(0.01)).toBe("$0.01");
+	});
+
+	it("puts the sign outside the symbol and mirrors the guard", () => {
+		// The cache-keepalive net tile goes negative and colours itself red when
+		// it does, so the sign has to survive — and a sub-cent net cost must not
+		// read as nothing just because it is on the other side of zero.
+		expect(formatUsd(-12.3)).toBe("-$12.30");
+		expect(formatUsd(-1234.5)).toBe("-$1,234.50");
+		expect(formatUsd(-0.004)).toBe("-<$0.01");
+		expect(formatUsd(-0.005)).toBe("-$0.01");
+		// A negative zero is a zero and does not wear a sign.
+		expect(formatUsd(-0)).toBe("$0.00");
 	});
 
 	it("groups thousands", () => {

@@ -31,10 +31,31 @@ export function formatCost(cost?: number): string {
 /**
  * Format a real-money USD amount with grouping and exactly 2 decimals:
  * 200 -> "$200.00", 1234.5 -> "$1,234.50". Use for ledger/subscription
- * payments; keep `formatCost` (4 decimals) for token-cost figures.
+ * payments and for aggregates of token cost; keep `formatCost` (4 decimals)
+ * for single-request figures, where a sub-cent difference is the whole point.
+ *
+ * An amount whose magnitude is nonzero but rounds to nothing reads as
+ * "<$0.01" rather than "$0.00". Several callers pass money derived from token
+ * costs — cache savings, a month's token spend, one account's API overage —
+ * where a few tenths of a cent is a real charge, and rendering it as a flat
+ * zero is not a rounding, it is a different claim. Exact zero still reads
+ * "$0.00", and nothing at or above a cent changes value.
+ *
+ * Negatives read "-$12.30" and "-<$0.01": the cache-keepalive net tile goes
+ * negative and colours itself red when it does, so the sign is load-bearing.
  */
 export function formatUsd(amount: number): string {
-	return `$${amount.toLocaleString("en-US", {
+	// Sign outside the symbol, and the guard applied to the magnitude, so a
+	// negative behaves as the mirror of a positive rather than as a separate
+	// case. Formatting the signed value directly puts the minus INSIDE
+	// ("$-12.30") and leaves -0.004 rendering as "$-0.00" — a nonzero net cost
+	// shown as nothing, which is the same defect this guard exists to stop.
+	// Object.is picks up a negative zero, which is a zero and must not wear a
+	// sign.
+	const sign = amount < 0 ? "-" : "";
+	const magnitude = Object.is(amount, -0) ? 0 : Math.abs(amount);
+	if (magnitude > 0 && magnitude < 0.005) return `${sign}<$0.01`;
+	return `${sign}$${magnitude.toLocaleString("en-US", {
 		minimumFractionDigits: 2,
 		maximumFractionDigits: 2,
 	})}`;

@@ -167,10 +167,15 @@ export function AccountListItem({
 			(!!onAutoApplyResetCreditsToggle ||
 				!!onAutoApplyResetOnWeeklyLimitToggle));
 
+	// Four groups, and the rhythm has to say so: identity, status, counts, quota.
+	// `space-y-row` between them, tighter steps inside each. A single
+	// `space-y-item` for everything gave the name→email pair — which is one
+	// group — exactly as much air as the boundary between two, so six of these
+	// cards read as one wall of text.
 	return (
-		<div className="p-3 border rounded-lg transition-colors space-y-item border-border hover:border-muted-foreground/50">
+		<div className="p-4 border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
-				<div className="flex flex-col min-w-0">
+				<div className="flex flex-col gap-tight min-w-0">
 					<div className="flex items-center gap-item min-w-0">
 						<p className="font-medium truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
@@ -535,69 +540,74 @@ export function AccountListItem({
 					</Button>
 				</div>
 			) : null}
-			<AccountStatusChips account={account} status={status} />
-			<div className="flex flex-wrap items-center gap-x-row gap-y-tight text-sm">
-				<span>{presenter.requestCount} requests</span>
-				{presenter.activeSessionCount > 0 && (
-					<span className="text-muted-foreground">
-						· {presenter.activeSessionCount} clients (
-						{ACTIVE_SESSION_WINDOW_MINUTES}m)
-					</span>
-				)}
-				{/* The session segments carry the token breakdown as their tooltip,
-				    so they take the help cursor to advertise that there is more
-				    behind them than the text shows. */}
-				<span
-					className={cn(
-						"text-muted-foreground",
-						sessionTokenSummary && "cursor-help",
+			{/* Status flags and the counts they qualify: one group, so they sit a
+			    step closer to each other than to the identity above or the quota
+			    bars below. */}
+			<div className="space-y-item">
+				<AccountStatusChips account={account} status={status} />
+				<div className="flex flex-wrap items-center gap-x-row gap-y-item text-sm">
+					<span>{presenter.requestCount} requests</span>
+					{presenter.activeSessionCount > 0 && (
+						<span className="text-muted-foreground">
+							· {presenter.activeSessionCount} clients (
+							{ACTIVE_SESSION_WINDOW_MINUTES}m)
+						</span>
 					)}
-					title={sessionTokenSummary ?? undefined}
-				>
-					{presenter.sessionInfo}
-				</span>
-				{sessionCosts.map(({ kind, usd }) => (
+					{/* The session segments carry the token breakdown as their tooltip,
+					    so they take the help cursor to advertise that there is more
+					    behind them than the text shows. */}
 					<span
-						key={kind}
-						className="cursor-help text-muted-foreground"
+						className={cn(
+							"text-muted-foreground",
+							sessionTokenSummary && "cursor-help",
+						)}
 						title={sessionTokenSummary ?? undefined}
 					>
-						· ${usd.toFixed(2)} {kind}
+						{presenter.sessionInfo}
 					</span>
-				))}
-				{status.reauthDeadlineMs !== null && (
-					// Always shown once known, not only inside the warning window: the
-					// point of capturing the deadline is that it stops being a
-					// surprise, and a date that only appears in its final week is
-					// still a surprise for the other eleven.
-					<span
-						className="text-muted-foreground"
-						title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
-					>
-						· re-auth by{" "}
-						{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
-							year: "numeric",
-							month: "short",
-							day: "numeric",
-						})}
-					</span>
-				)}
-				{status.showForceReset && (
-					<Button
-						variant="outline"
-						size="sm"
-						className="h-7 gap-tight text-xs"
-						onClick={() => onForceResetRateLimit(account)}
-						title={
-							status.staleLockDetected
-								? "Reset stale rate limit lock (usage shows capacity available)"
-								: "Force clear rate limit state from database"
-						}
-					>
-						<RefreshCw className="h-3.5 w-3.5" />
-						Force Reset
-					</Button>
-				)}
+					{sessionCosts.map(({ kind, usd }) => (
+						<span
+							key={kind}
+							className="cursor-help text-muted-foreground"
+							title={sessionTokenSummary ?? undefined}
+						>
+							· ${usd.toFixed(2)} {kind}
+						</span>
+					))}
+					{status.reauthDeadlineMs !== null && (
+						// Always shown once known, not only inside the warning window: the
+						// point of capturing the deadline is that it stops being a
+						// surprise, and a date that only appears in its final week is
+						// still a surprise for the other eleven.
+						<span
+							className="text-muted-foreground"
+							title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
+						>
+							· re-auth by{" "}
+							{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
+								year: "numeric",
+								month: "short",
+								day: "numeric",
+							})}
+						</span>
+					)}
+					{status.showForceReset && (
+						<Button
+							variant="outline"
+							size="sm"
+							className="h-7 gap-tight text-xs"
+							onClick={() => onForceResetRateLimit(account)}
+							title={
+								status.staleLockDetected
+									? "Reset stale rate limit lock (usage shows capacity available)"
+									: "Force clear rate limit state from database"
+							}
+						>
+							<RefreshCw className="h-3.5 w-3.5" />
+							Force Reset
+						</Button>
+					)}
+				</div>
 			</div>
 			{(account.rateLimitReset ||
 				account.usageData ||

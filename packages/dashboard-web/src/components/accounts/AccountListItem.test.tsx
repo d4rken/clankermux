@@ -89,7 +89,7 @@ const SESSION_STATS = {
  */
 function infoRow(html: string): string {
 	const marker =
-		'<div class="flex flex-wrap items-center gap-x-row gap-y-tight text-sm">';
+		'<div class="flex flex-wrap items-center gap-x-row gap-y-item text-sm">';
 	const start = html.indexOf(marker);
 	if (start === -1) throw new Error("info row not found");
 	// Walk to the matching close so a nested <span> cannot end the slice early.
@@ -125,11 +125,11 @@ describe("AccountListItem — session stats", () => {
 		expect(row).toContain("$98.15 plan");
 	});
 
-	it("tightens the card padding and uses the item step for block spacing", () => {
+	it("pads the card and separates its four groups by the row step", () => {
 		const html = render(makeAccount({}));
 
-		expect(html).toContain("p-3 border rounded-lg");
-		expect(html).toContain("space-y-item border-border");
+		expect(html).toContain("p-4 border rounded-lg");
+		expect(html).toContain("space-y-row border-border");
 	});
 
 	it("shows api cost alongside plan cost when both are non-zero", () => {
