@@ -135,9 +135,13 @@ function textWidth(text: string, size: number, mono = false): number {
 	if (mono) return text.length * size * 0.6;
 	let w = 0;
 	for (const ch of text) {
-		if (/[iljtfr.,:;'!|]/.test(ch)) w += size * 0.31;
+		// The wide pair is tested BEFORE the caps/digits class, which also matches
+		// M and W. Tested after, that branch is unreachable for uppercase and every
+		// "M"/"W" is measured a fifth too narrow — which is how "Max 20x" and
+		// "Weekly" were being under-allocated.
+		if (/[mwMW]/.test(ch)) w += size * 0.85;
+		else if (/[iljtfr.,:;'!|]/.test(ch)) w += size * 0.31;
 		else if (/[A-Z0-9]/.test(ch)) w += size * 0.62;
-		else if (/[mwMW]/.test(ch)) w += size * 0.85;
 		else w += size * 0.53;
 	}
 	return w;
@@ -219,6 +223,24 @@ function card(x: number, y: number, w: number, h: number, p: Palette): string {
 	return rect(x, y, w, h, { fill: p.card, stroke: p.border });
 }
 
+export interface Pill {
+	label: string;
+	boxLeft: number;
+	boxRight: number;
+	textLeft: number;
+	textRight: number;
+}
+
+/**
+ * Geometry of every pill drawn during the current render.
+ *
+ * Recorded here rather than recovered from the finished markup: a rect followed
+ * by a text element is not enough to identify a pill — a nav row is an icon
+ * square followed by its label and looks identical — so a test reading the SVG
+ * back cannot tell the two apart. This is the exact truth instead.
+ */
+let currentPills: Pill[] = [];
+
 /**
  * A chip. Returns the markup and the width it consumed, so callers can lay a
  * row of them out left to right without measuring twice.
@@ -227,18 +249,35 @@ function chip(
 	x: number,
 	y: number,
 	label: string,
-	o: { fill: string; text: string; stroke?: string; size?: number },
+	o: {
+		fill: string;
+		text: string;
+		stroke?: string;
+		size?: number;
+		mono?: boolean;
+		weight?: number;
+	},
 ): { svg: string; w: number } {
 	const size = o.size ?? 11;
 	const h = size + 9;
-	const w = textWidth(label, size) + 14;
+	const pad = 7;
+	const labelW = textWidth(label, size, o.mono);
+	const w = labelW + pad * 2;
 	const svg =
 		rect(x, y, w, h, { fill: o.fill, stroke: o.stroke, rx: 2 }) +
-		text(x + 7, y + h - Math.round(size * 0.42), label, {
+		text(x + pad, y + h - Math.round(size * 0.42), label, {
 			size,
 			fill: o.text,
-			weight: 500,
+			weight: o.weight ?? 500,
+			mono: o.mono,
 		});
+	currentPills.push({
+		label,
+		boxLeft: x,
+		boxRight: x + w,
+		textLeft: x + pad,
+		textRight: x + pad + labelW,
+	});
 	return { svg, w };
 }
 
@@ -864,32 +903,25 @@ function requests(p: Palette): string {
 				fill: p.mutedForeground,
 			}),
 		);
-		const sw = textWidth(String(r.status), 11.5, true) + 12;
+		const status = chip(rx + 72, ry - 13, String(r.status), {
+			fill: err
+				? tint(p.destructiveStrong, p.card, 0.16)
+				: tint(p.successStrong, p.card, 0.16),
+			text: err ? p.destructiveStrong : p.successStrong,
+			size: 11.5,
+			mono: true,
+			weight: 600,
+		});
+		out.push(status.svg);
 		out.push(
-			rect(rx + 72, ry - 12, sw, 17, {
-				fill: err
-					? tint(p.destructiveStrong, p.card, 0.16)
-					: tint(p.successStrong, p.card, 0.16),
-				rx: 2,
-			}),
-		);
-		out.push(
-			text(rx + 78, ry, String(r.status), {
-				size: 11.5,
-				mono: true,
-				weight: 600,
-				fill: err ? p.destructiveStrong : p.successStrong,
-			}),
-		);
-		out.push(
-			text(rx + 72 + sw + 12, ry, "POST", {
+			text(rx + 72 + status.w + 12, ry, "POST", {
 				size: 11.5,
 				weight: 600,
 				fill: p.foreground,
 			}),
 		);
 		out.push(
-			text(rx + 72 + sw + 56, ry, `via ${r.account}`, {
+			text(rx + 72 + status.w + 56, ry, `via ${r.account}`, {
 				size: 11.5,
 				fill: p.mutedForeground,
 			}),
@@ -1160,13 +1192,22 @@ export const VIEWS: Record<string, (p: Palette) => string> = {
 
 export const PALETTES = { light: LIGHT, dark: DARK } as const;
 
-/** Every file this script owns, as `{ name, svg }`. Exported for the test. */
-export function renderAll(): { name: string; svg: string }[] {
-	const files: { name: string; svg: string }[] = [];
+/**
+ * Every file this script owns, each with the pill geometry recorded while it was
+ * drawn. Exported for the test, which has no other way to know which rects are
+ * pills.
+ */
+export function renderAll(): { name: string; svg: string; pills: Pill[] }[] {
+	const files: { name: string; svg: string; pills: Pill[] }[] = [];
+	const one = (name: string, draw: () => string) => {
+		currentPills = [];
+		const svg = draw();
+		files.push({ name, svg, pills: currentPills });
+	};
 	for (const [mode, palette] of Object.entries(PALETTES)) {
-		files.push({ name: `logo-${mode}.svg`, svg: logo(palette) });
+		one(`logo-${mode}.svg`, () => logo(palette));
 		for (const [view, render] of Object.entries(VIEWS)) {
-			files.push({ name: `${view}-${mode}.svg`, svg: render(palette) });
+			one(`${view}-${mode}.svg`, () => render(palette));
 		}
 	}
 	return files;

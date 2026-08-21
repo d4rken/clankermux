@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CANVAS_WIDTH, renderAll, textWidth } from "./build-readme-media";
@@ -22,14 +22,28 @@ interface Span {
 	baseline: number;
 }
 
+/**
+ * Every number read out of the markup goes through here. A missing or malformed
+ * attribute yields NaN, and NaN fails every `>` and `<` comparison silently —
+ * so an `x="NaN"` would sail through an overflow check that looks strict.
+ */
+function num(attrs: string, name: string): number {
+	const raw = attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1];
+	const value = Number(raw);
+	if (!Number.isFinite(value)) {
+		throw new Error(`attribute ${name}="${raw}" is not a finite number`);
+	}
+	return value;
+}
+
 function textSpans(svg: string): Span[] {
 	const spans: Span[] = [];
 	for (const m of svg.matchAll(/<text ([^>]*)>([^<]*)<\/text>/g)) {
 		const [, attrs, body] = m;
 		const attr = (name: string) =>
 			attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1];
-		const x = Number(attr("x"));
-		const size = Number(attr("font-size"));
+		const x = num(attrs, "x");
+		const size = num(attrs, "font-size");
 		const mono = (attr("font-family") ?? "").includes("Geist Mono");
 		const anchor = attr("text-anchor") ?? "start";
 		const w = textWidth(body, size, mono);
@@ -38,11 +52,12 @@ function textSpans(svg: string): Span[] {
 			text: body,
 			left,
 			right: left + w,
-			baseline: Number(attr("y")),
+			baseline: num(attrs, "y"),
 		});
 	}
 	return spans;
 }
+
 
 function viewBoxHeight(svg: string): number {
 	const m = svg.match(/viewBox="0 0 \d+ (\d+)"/);
@@ -83,13 +98,49 @@ describe("README media", () => {
 
 	for (const f of files) {
 		describe(f.name, () => {
-			it("carries no CSS", () => {
+			it("carries no CSS and fetches nothing", () => {
 				// An <img>-referenced SVG renders in secure static mode and GitHub is
 				// free to sanitise what it proxies. Presentation attributes survive
-				// both; a <style> block is not guaranteed to.
+				// both; a <style> block, an inline style, or an external reference is
+				// not guaranteed to.
 				expect(f.svg).not.toContain("<style");
 				expect(f.svg).not.toContain("@media");
 				expect(f.svg).not.toContain("class=");
+				expect(f.svg).not.toMatch(/\sstyle="/);
+				expect(f.svg).not.toContain("<script");
+				expect(f.svg).not.toContain("<image");
+				expect(f.svg).not.toContain("xlink");
+				expect(f.svg).not.toContain("url(");
+				expect(f.svg).not.toContain("@font-face");
+				// The namespace URI is declared, never fetched; nothing else may be a
+				// URL at all.
+				expect([...f.svg.matchAll(/https?:\/\/[^"\s]*/g)].map((m) => m[0]))
+					.toEqual(["http://www.w3.org/2000/svg"]);
+			});
+
+			it("never draws a pill narrower than the label on it", () => {
+				// A global canvas bound cannot see this: a chip whose background is
+				// too small for its own text sits well inside the page and still
+				// clips. Lengthening a mock label is exactly what causes it.
+				const boxes = f.pills;
+				// Only two views draw chips; the logo and the two chart views draw
+				// none, and asserting a minimum there would just be a false alarm.
+				// Where chips ARE expected, the count is checked so that a pairing
+				// that silently stops finding them cannot pass as clean.
+				if (/^(accounts|requests)-/.test(f.name)) {
+					expect(boxes.length).toBeGreaterThan(0);
+				} else if (f.name.startsWith("logo-")) {
+					expect(boxes).toHaveLength(0);
+				}
+				for (const b of boxes) {
+					expect({ label: b.label, clipped: b.textLeft < b.boxLeft }).toEqual({
+						label: b.label,
+						clipped: false,
+					});
+					expect({ label: b.label, clipped: b.textRight > b.boxRight }).toEqual(
+						{ label: b.label, clipped: false },
+					);
+				}
 			});
 
 			it("keeps every glyph inside its card, not merely inside the canvas", () => {
@@ -117,22 +168,62 @@ describe("README media", () => {
 
 			it("keeps every shape inside the canvas", () => {
 				const height = viewBoxHeight(f.svg);
+				const vb = f.svg.match(/viewBox="0 0 (\d+) \d+"/);
+				const width = Number(vb?.[1]);
+				const inX = (v: number) => {
+					expect(v).toBeGreaterThanOrEqual(-0.5);
+					expect(v).toBeLessThanOrEqual(width + 0.5);
+				};
+				const inY = (v: number) => {
+					expect(v).toBeGreaterThanOrEqual(-0.5);
+					expect(v).toBeLessThanOrEqual(height + 0.5);
+				};
+
+				let shapes = 0;
 				for (const m of f.svg.matchAll(/<rect ([^>]*)\/>/g)) {
-					const attrs = m[1];
-					const n = (name: string) =>
-						Number(attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1]);
-					expect(n("x") + n("width")).toBeLessThanOrEqual(CANVAS_WIDTH + 0.5);
-					expect(n("y") + n("height")).toBeLessThanOrEqual(height + 0.5);
-					expect(n("x")).toBeGreaterThanOrEqual(-0.5);
-					expect(n("y")).toBeGreaterThanOrEqual(-0.5);
+					shapes++;
+					inX(num(m[1], "x"));
+					inX(num(m[1], "x") + num(m[1], "width"));
+					inY(num(m[1], "y"));
+					inY(num(m[1], "y") + num(m[1], "height"));
 				}
-				for (const m of f.svg.matchAll(/points="([^"]*)"/g)) {
-					for (const pt of m[1].split(" ")) {
-						const [px, py] = pt.split(",").map(Number);
-						expect(px).toBeLessThanOrEqual(CANVAS_WIDTH + 0.5);
-						expect(py).toBeLessThanOrEqual(height + 0.5);
+				for (const m of f.svg.matchAll(/<line ([^>]*)\/>/g)) {
+					shapes++;
+					inX(num(m[1], "x1"));
+					inX(num(m[1], "x2"));
+					inY(num(m[1], "y1"));
+					inY(num(m[1], "y2"));
+				}
+				for (const m of f.svg.matchAll(/<circle ([^>]*)\/>/g)) {
+					shapes++;
+					inX(num(m[1], "cx"));
+					inY(num(m[1], "cy"));
+				}
+				// Paths carry the brand mark, whose coordinates are absolute inside a
+				// 24-unit box; the logo files contain nothing else, so without this
+				// the shape check made no assertion about them whatsoever.
+				for (const m of f.svg.matchAll(/<path d="([^"]*)"/g)) {
+					shapes++;
+					const coords = m[1].match(/-?\d+(?:\.\d+)?/g) ?? [];
+					expect(coords.length).toBeGreaterThan(0);
+					for (const c of coords) {
+						expect(Number.isFinite(Number(c))).toBe(true);
+						expect(Math.abs(Number(c))).toBeLessThanOrEqual(24);
 					}
 				}
+				for (const m of f.svg.matchAll(/points="([^"]*)"/g)) {
+					shapes++;
+					for (const pt of m[1].split(" ")) {
+						const [px, py] = pt.split(",").map(Number);
+						expect(Number.isFinite(px)).toBe(true);
+						expect(Number.isFinite(py)).toBe(true);
+						inX(px);
+						inY(py);
+					}
+				}
+				// Guards the guard: a regex that stops matching would otherwise turn
+				// this whole test into a pass.
+				expect(shapes).toBeGreaterThan(0);
 			});
 		});
 	}
@@ -146,16 +237,40 @@ describe("README media", () => {
 		expect(light).not.toContain("#e8eff1");
 	});
 
-	it("is referenced by the README through <picture>, not a bare <img>", () => {
+	it("is referenced by the README through a closed <picture>, not a bare <img>", () => {
 		// A bare <img> would pin one theme's screenshot onto both GitHub themes.
+		// Matching the whole element rather than the two paths separately is what
+		// makes this a structural check: the substrings alone would also be
+		// satisfied by two unrelated images, or by an unclosed tag.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
-		for (const f of files) {
-			if (!f.name.endsWith("-dark.svg")) continue;
-			expect(readme).toContain(`srcset="docs/media/${f.name}"`);
-			expect(readme).toContain(
-				`src="docs/media/${f.name.replace("-dark", "-light")}"`,
+		const blocks = [
+			...readme.matchAll(
+				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="(docs\/media\/[^"]+)"><img src="(docs\/media\/[^"]+)"[^>]*><\/picture>/g,
+			),
+		];
+		const darkFiles = files
+			.filter((f) => f.name.endsWith("-dark.svg"))
+			.map((f) => f.name);
+		expect(blocks).toHaveLength(darkFiles.length);
+
+		for (const [, dark, light] of blocks) {
+			// The pair inside one <picture> must be the two halves of the SAME image.
+			expect(dark.replace("-dark.svg", "")).toBe(
+				light.replace("-light.svg", ""),
 			);
+			expect(existsSync(join(ROOT, dark))).toBe(true);
+			expect(existsSync(join(ROOT, light))).toBe(true);
 		}
+		expect(blocks.map((b) => b[1]).sort()).toEqual(
+			darkFiles.map((n) => `docs/media/${n}`).sort(),
+		);
+
+		// Nothing may reference the media outside a <picture>.
+		const stripped = readme.replace(
+			/<picture>.*?<\/picture>/g,
+			"",
+		);
+		expect(stripped).not.toContain("docs/media/");
 	});
 
 	it("gives every screenshot alt text describing what is in it", () => {
