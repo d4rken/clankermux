@@ -15,8 +15,10 @@
  * - It is `currentColor` throughout, so the mark takes the palette's own ink
  *   instead of pinning a brand hue that only suited one of them.
  *
- * `logo.svg` is the same geometry for the favicon, where no React tree exists
- * to supply a colour.
+ * The same two paths exist twice more, because neither place can import a React
+ * component: `logo.svg` is the favicon, where no React tree exists to supply a
+ * colour, and `scripts/build-readme-media.ts` draws it for the README. Change
+ * the geometry here and it has to change in both.
  */
 export function BrandMark({ className }: { className?: string }) {
 	return (
