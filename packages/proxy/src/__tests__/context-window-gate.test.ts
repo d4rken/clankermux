@@ -150,10 +150,10 @@ describe("context-window gate", () => {
 	});
 
 	it("gates a default-config codex account (no model_mappings) on its family-default window", async () => {
-		// No model_mappings → opus resolves to the gpt-5.6-sol family default (353K,
-		// threshold 342410), matching what the provider actually sends. An oversized
+		// No model_mappings → opus resolves to the gpt-5.6-sol family default (272K,
+		// threshold 263840), matching what the provider actually sends. An oversized
 		// request must be excluded by the gate rather than slipping through. Sized
-		// past the FULL 353K window so even the unmargined last-resort rejects it.
+		// past the FULL 272K window so even the unmargined last-resort rejects it.
 		const codexAccount = makeAccount({
 			id: "codex-default",
 			name: "Codex-default",

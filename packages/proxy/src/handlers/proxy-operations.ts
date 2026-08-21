@@ -3172,7 +3172,7 @@ export function createContextWindowExceededResponse(
 
 	// Say only what the flag establishes. It proves official Anthropic accounts
 	// were barred from selection; it does NOT prove any exist, or that one would
-	// have fit — Anthropic's 200k window is SMALLER than gpt-5.6-sol's 353k, so
+	// have fit — Anthropic's 200k window is SMALLER than gpt-5.6-sol's 272k, so
 	// claiming they are the larger-context option would be false here.
 	const largerContextReason = excludeOfficialAnthropic
 		? `Official Anthropic accounts are never eligible for Codex CLI traffic ` +

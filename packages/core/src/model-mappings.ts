@@ -487,16 +487,29 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.4": 272_000,
 	"gpt-5.4-mini": 272_000,
 	"gpt-5.3-codex-spark": 128_000,
-	// GPT-5.6 tiers — all three VERIFIED on a prolite plan (2026-07-10). The
-	// Codex TUI reports a 353K window for each (sol's session data shows the
-	// exact 353,400); the public API lists ~1.05M, but the Codex-served window
-	// is smaller — same story as gpt-5.5's 272K vs its 400K public figure. We
-	// store 353_000: it faithfully represents the TUI's "353K" and sits within
-	// the gate's 0.97 margin of the exact value. terra/luna availability was
-	// confirmed by direct probe (HTTP 200); their windows read 353K in the TUI.
-	"gpt-5.6-sol": 353_000,
-	"gpt-5.6-terra": 353_000,
-	"gpt-5.6-luna": 353_000,
+	// GPT-5.6 tiers. Read live from `GET /backend-api/codex/models` against a
+	// real account (2026-08-21): `context_window` is 272,000 for all three, and
+	// no value anywhere near 353K appears in the payload.
+	//
+	// This corrects an earlier 353_000 taken from the Codex TUI on 2026-07-10.
+	// Both readings were honest when made: codex-cli v0.144.6 (2026-07-18)
+	// corrected its bundled metadata to cap gpt-5.6 at 272K input tokens, and
+	// the specific 353,400 figure the old comment recorded matches the known
+	// oscillation bug (openai/codex#30875) where the effective window swung
+	// between 258,400 and 353,400 rather than settling.
+	//
+	// 272K is a BILLING threshold, not a hard model limit: prompts above it
+	// bill input at 2x and output at 1.5x for the whole session. So the gate
+	// admitting past this number does not produce an error the way an oversized
+	// request to a hard cap would — it silently doubles the bill, which is
+	// exactly the kind of unasked-for spend this pool exists to avoid.
+	//
+	// The same payload reports `max_context_window` of 872,000 for these three
+	// and 1,000,000 for gpt-5.4, both deliberately ignored: that is the raw
+	// payload ceiling, not the window the harness uses or prices normally.
+	"gpt-5.6-sol": 272_000,
+	"gpt-5.6-terra": 272_000,
+	"gpt-5.6-luna": 272_000,
 };
 
 /**
