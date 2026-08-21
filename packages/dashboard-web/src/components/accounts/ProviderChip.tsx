@@ -5,10 +5,11 @@ import { ProviderMarkIcon } from "./provider-marks";
  * One neutral pill for every provider. Provider identity is carried by the
  * brand mark and the label, not by a tint: filled per-provider tints sat right
  * next to the account status chips (rate-limited, paused, error) and read as
- * status themselves, which is exactly what they must not do.
+ * status themselves, which is exactly what they must not do. This is the same
+ * neutral fill unlisted providers already fell back to.
  */
 const CHIP_CLASSES =
-	"inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground";
+	"inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground";
 
 interface ProviderChipProps {
 	provider: string;

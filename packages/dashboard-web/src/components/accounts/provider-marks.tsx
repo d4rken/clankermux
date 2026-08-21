@@ -6,17 +6,21 @@
  * and are used here only to identify the account's upstream.
  *
  * Every path is authored against a 24x24 viewBox and is filled with a single
- * color, so a mark can be tinted by setting `fill`. `color` is the brand hex
- * where that hex stays legible on both a light and a dark card; brands whose
- * mark is near-black (OpenAI, Ollama, the Anthropic wordmark) leave it unset
- * and inherit the pill's text color instead.
+ * color, so a mark can be tinted by setting `fill`. Brands whose mark is
+ * near-black (OpenAI, Ollama, Z.ai, the Anthropic wordmark) leave the fill
+ * unset and inherit the pill's text color instead.
  */
 
 interface ProviderMark {
 	/** Single-path outline against a 24x24 viewBox. */
 	path: string;
-	/** Brand hex, or undefined to inherit the surrounding text color. */
-	color?: string;
+	/**
+	 * Tailwind fill utilities for the mark, as literal strings so the JIT keeps
+	 * them. A brand hex that drops below 3:1 against the pill on one of the two
+	 * themes gets a per-theme pair rather than a single value. Omitted for
+	 * monochrome brands, which inherit the pill's text color.
+	 */
+	fill?: string;
 }
 
 const CLAUDE_PATH =
@@ -47,28 +51,44 @@ const ZAI_PATH =
 	"M12.606 1.806l-1.677 2.388c-0.258 0.374-0.697 0.606-1.161 0.606h-9.162V1.794C0.594 1.806 12.606 1.806 12.606 1.806zM24 1.806L9.6 22.206 0 22.206 14.4 1.806zM11.394 22.206l1.69-2.4c0.258-0.374 0.697-0.606 1.161-0.606h9.149v3.006H11.394z";
 
 /**
+ * Claude coral only reaches 2.8:1 against the light pill, so light mode takes a
+ * deeper shade of it; the same trick keeps Qwen readable on the dark pill and
+ * Alibaba on the light one.
+ */
+const CLAUDE_FILL = "fill-[#CE6B4C] dark:fill-[#D97757]";
+
+/**
  * Provider key -> brand mark. Providers absent from this map (Kilo, and any
  * custom endpoint) have no published single-color logo we can vendor, so their
  * pill renders as text only.
  */
 const PROVIDER_MARKS: Record<string, ProviderMark> = {
-	anthropic: { path: CLAUDE_PATH, color: "#D97757" },
-	"claude-console-api": { path: CLAUDE_PATH, color: "#D97757" },
+	anthropic: { path: CLAUDE_PATH, fill: CLAUDE_FILL },
+	"claude-console-api": { path: CLAUDE_PATH, fill: CLAUDE_FILL },
 	"anthropic-compatible": { path: ANTHROPIC_PATH },
 	codex: { path: OPENAI_PATH },
 	"openai-compatible": { path: OPENAI_PATH },
-	qwen: { path: QWEN_PATH, color: "#6950EF" },
-	"alibaba-coding-plan": { path: ALIBABA_CLOUD_PATH, color: "#FF6A00" },
-	minimax: { path: MINIMAX_PATH, color: "#E73562" },
+	qwen: { path: QWEN_PATH, fill: "fill-[#6950EF] dark:fill-[#9182F5]" },
+	"alibaba-coding-plan": {
+		path: ALIBABA_CLOUD_PATH,
+		fill: "fill-[#E05500] dark:fill-[#FF6A00]",
+	},
+	minimax: { path: MINIMAX_PATH, fill: "fill-[#E73562]" },
 	zai: { path: ZAI_PATH },
 	openrouter: { path: OPENROUTER_PATH },
 	ollama: { path: OLLAMA_PATH },
 	"ollama-cloud": { path: OLLAMA_PATH },
 };
 
-/** Look up the brand mark for a provider key, if we have one. */
+/**
+ * Look up the brand mark for a provider key, if we have one. `Object.hasOwn`
+ * keeps inherited keys (`constructor`, `toString`) from resolving to something
+ * that is not a mark.
+ */
 export function getProviderMark(provider: string): ProviderMark | undefined {
-	return PROVIDER_MARKS[provider];
+	return Object.hasOwn(PROVIDER_MARKS, provider)
+		? PROVIDER_MARKS[provider]
+		: undefined;
 }
 
 interface ProviderMarkIconProps {
@@ -93,8 +113,7 @@ export function ProviderMarkIcon({
 			aria-hidden="true"
 			focusable="false"
 			viewBox="0 0 24 24"
-			className={className}
-			fill={mark.color ?? "currentColor"}
+			className={`${mark.fill ?? "fill-current"}${className ? ` ${className}` : ""}`}
 		>
 			<path d={mark.path} />
 		</svg>
