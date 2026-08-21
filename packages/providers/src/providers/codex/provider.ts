@@ -90,6 +90,53 @@ const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
 // version gate.
 export const CODEX_VERSION = "0.144.0";
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
+
+/**
+ * Exact SDK identity headers to drop before forwarding to the Codex backend.
+ *
+ * Deliberately an exact list rather than an `x-openai-client-` prefix sweep:
+ * only this family identifies the calling SDK. Other `x-openai-*` headers
+ * (`x-openai-internal-codex-responses-lite`, `x-openai-subagent`) are Codex
+ * protocol surface and have to survive.
+ */
+const SDK_FINGERPRINT_HEADERS: readonly string[] = [
+	"x-openai-client-arch",
+	"x-openai-client-id",
+	"x-openai-client-os",
+	"x-openai-client-user-agent",
+	"x-openai-client-version",
+];
+
+/**
+ * Prefix for the Stainless generator's header family. A prefix rather than a
+ * list because the suffixes are open-ended — the generator adds new ones
+ * (`-retry-count`, `-timeout`, `-helper-method` …) as the SDK evolves, and an
+ * enumeration would silently start leaking on the next SDK release.
+ */
+const SDK_FINGERPRINT_HEADER_PREFIX = "x-stainless-";
+
+/**
+ * Drop the calling SDK's identity headers from an outbound header set, in
+ * place. `x-codex-*` continuity headers are untouched: the native Responses
+ * passthrough forwards the Codex CLI's own turn/session state and the backend
+ * needs it.
+ */
+function stripSdkFingerprintHeaders(headers: Headers): void {
+	for (const name of SDK_FINGERPRINT_HEADERS) {
+		headers.delete(name);
+	}
+	// Collect before deleting — mutating a Headers object mid-iteration is not
+	// specified to be safe.
+	const stainless: string[] = [];
+	for (const [name] of headers) {
+		if (name.toLowerCase().startsWith(SDK_FINGERPRINT_HEADER_PREFIX)) {
+			stainless.push(name);
+		}
+	}
+	for (const name of stainless) {
+		headers.delete(name);
+	}
+}
 // Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
 // CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
 // silently breaks usage sampling ("Codex returned no usage headers (status
@@ -521,6 +568,17 @@ export class CodexProvider extends BaseProvider {
 		newHeaders.delete("anthropic-beta");
 		newHeaders.delete("x-api-key");
 		newHeaders.delete("host");
+
+		// Remove the calling SDK's identity fingerprint. Below we claim to be the
+		// Codex CLI (User-Agent + originator), but the client that got here is
+		// usually Claude Code on the Stainless-generated Anthropic SDK, which
+		// attaches the whole `x-stainless-*` family (see the header block in
+		// auto-refresh-scheduler.ts, copied from real CLI traffic). Forwarding it
+		// hands the backend two contradictory identities for one request: an
+		// `x-stainless-*` set is an SDK signal in its own right, so leaving it on
+		// is what makes the persona incoherent rather than merely redundant.
+		// Same applies to opencode and anything else on the ai-sdk.
+		stripSdkFingerprintHeaders(newHeaders);
 
 		// Set Codex-required headers
 		if (accessToken) {
