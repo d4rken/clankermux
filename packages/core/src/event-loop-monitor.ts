@@ -18,11 +18,6 @@
  */
 import { Logger } from "@clankermux/logger";
 import type { EventLoopLagStats } from "@clankermux/types";
-import {
-	drainStallSamples,
-	formatStallSamples,
-	isStallProfilerEnabled,
-} from "./stall-profiler";
 
 const defaultLog = new Logger("EventLoopMonitor");
 
@@ -166,36 +161,16 @@ export class EventLoopMonitor {
 		this.recentIndex = (this.recentIndex + 1) % this.recentLags.length;
 		if (this.recentFilled < this.recentLags.length) this.recentFilled++;
 
-		// Drain the stall profiler on EVERY tick, not just stalling ones. Reading
-		// is what clears JSC's sample buffer, so skipping quiet ticks would let a
-		// backlog build and then be misattributed to whichever stall reads next.
-		// No-op (and no allocation) unless someone deliberately enabled it.
-		// Pass the lag so attribution covers only the blocked window, not the
-		// whole inter-tick batch — see drainStallSamples().
-		const samples = isStallProfilerEnabled()
-			? drainStallSamples(lagMs >= this.warnThresholdMs ? lagMs : undefined)
-			: null;
-
 		if (lagMs >= this.errorThresholdMs) {
 			// States the observation, not a cause. The loop being unresponsive is
 			// measured; that synchronous JS did it is an inference, and a wrong one
-			// when the process was descheduled or stopped inside the VM. The stall
-			// attribution line below is the only thing entitled to name a culprit.
+			// whenever the process was merely descheduled or stopped inside the VM.
+			// CPU starvation produces bursts of these that no code change explains.
 			this.log.error(
 				`Event loop unresponsive for ~${Math.round(lagMs)}ms (>= ${this.errorThresholdMs}ms) — HTTP serving was frozen for that period`,
 			);
 		} else if (lagMs >= this.warnThresholdMs) {
 			this.log.warn(`Event loop unresponsive for ~${Math.round(lagMs)}ms`);
-		}
-
-		// Attribution belongs to the tick that actually stalled: the samples just
-		// drained cover the window that blocked. Reported at the same threshold
-		// as the WARN so every logged stall carries its stacks.
-		if (samples !== null && lagMs >= this.warnThresholdMs) {
-			const line = formatStallSamples(samples);
-			if (line !== null) {
-				this.log.warn(`Stall attribution (~${Math.round(lagMs)}ms): ${line}`);
-			}
 		}
 	}
 }
