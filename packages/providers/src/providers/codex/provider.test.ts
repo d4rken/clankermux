@@ -2869,6 +2869,9 @@ describe("parseCodexUsageHeaders", () => {
 	});
 
 	it("treats zero secondary window as an empty placeholder", () => {
+		// A zero-length window names no window at all, so it must not be slotted as
+		// five_hour just because 0 <= 5h. The reset timestamp is deliberately a real
+		// one: even a well-formed reset cannot resurrect a window of zero duration.
 		const headers = new Headers({
 			"x-codex-primary-used-percent": "11",
 			"x-codex-primary-window-minutes": "10080",
@@ -2881,14 +2884,37 @@ describe("parseCodexUsageHeaders", () => {
 		const usage = parseCodexUsageHeaders(headers);
 
 		expect(usage).toEqual({
-			five_hour: {
-				utilization: 0,
-				resets_at: new Date(1774600000 * 1000).toISOString(),
-			},
+			five_hour: null,
 			seven_day: {
 				utilization: 11,
 				resets_at: new Date(1775000000 * 1000).toISOString(),
 			},
+		});
+	});
+
+	it("emits five_hour: null for a live Pro header set that retired the 5h window", () => {
+		// Verbatim from a real Pro account response on 2026-08-21: OpenAI moved the
+		// weekly window into the PRIMARY slot and left secondary as an empty
+		// placeholder. Materializing that placeholder produced a phantom 5h window
+		// whose reset was always "now", which pinned accounts.rate_limit_reset to the
+		// current instant and made the scheduler prime the account every 6 minutes.
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "16",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1787816819",
+			"x-codex-primary-reset-after-seconds": "513665",
+			"x-codex-secondary-used-percent": "0",
+			"x-codex-secondary-window-minutes": "0",
+			"x-codex-secondary-reset-at": "",
+			"x-codex-secondary-reset-after-seconds": "0",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 16,
+			resets_at: new Date(1787816819 * 1000).toISOString(),
 		});
 	});
 
@@ -2947,6 +2973,30 @@ describe("parseCodexUsageHeaders reset-after handling", () => {
 		expect(usage?.five_hour?.resets_at).toBe(
 			new Date(baseTimeMs + 600_000).toISOString(),
 		);
+	});
+
+	it("keeps a zero reset-after on a window of real duration", () => {
+		// A zero offset on a 300-minute window means "resets within this second",
+		// not "no window". Discarding it would throw away the only boundary a live
+		// window reports when its absolute reset-at header is missing. The empty
+		// placeholder is rejected by its zero DURATION instead (see the
+		// five_hour-null cases above), which is the part that never self-corrects.
+		const baseTimeMs = Date.UTC(2026, 2, 27, 16, 0, 0);
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "95",
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-after-seconds": "0",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, {
+			baseTimeMs,
+			allowRelativeResetAfter: true,
+		});
+
+		expect(usage?.five_hour).toEqual({
+			utilization: 95,
+			resets_at: new Date(baseTimeMs).toISOString(),
+		});
 	});
 });
 
