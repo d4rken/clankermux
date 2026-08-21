@@ -74,6 +74,25 @@ export interface CryptoUtils {
 	verifyApiKey(apiKey: string, hashedKey: string): Promise<boolean>;
 }
 
+/**
+ * How many trailing characters of an API key are stored alongside its hash.
+ *
+ * The value is NOT secret — it is returned by the key-listing endpoint so the
+ * UI can tell keys apart — and it exists so a presented key can be matched to
+ * its record without hashing every record in turn.
+ */
+export const API_KEY_LOOKUP_SUFFIX_LENGTH = 8;
+
+/**
+ * The lookup suffix for a key, as stored in `prefix_last_8`.
+ *
+ * Minting and verification MUST derive this the same way; a mismatch would make
+ * a valid key unrecognisable. One exported function so the two cannot drift.
+ */
+export function apiKeyLookupSuffix(apiKey: string): string {
+	return apiKey.slice(-API_KEY_LOOKUP_SUFFIX_LENGTH);
+}
+
 // Default implementation using Node.js crypto
 export class NodeCryptoUtils implements CryptoUtils {
 	// biome-ignore lint/suspicious/noExplicitAny: Dynamic require for Node.js crypto module compatibility
