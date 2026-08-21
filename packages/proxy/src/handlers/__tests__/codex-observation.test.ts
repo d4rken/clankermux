@@ -477,6 +477,70 @@ describe("applyCodexObservation — genuine window roll", () => {
 		expect(writes).toHaveLength(1);
 		expect(writes[0]?.params[0]).toBe(nextResetMs);
 	});
+
+	it("does not reset again when the session already began after the old boundary", () => {
+		// SessionStrategy resets on the elapsed rate_limit_reset at dispatch; this
+		// detector sees the same roll when the response lands. Without the guard the
+		// second reset zeroes the in-flight request out of session_request_count and
+		// moves session_start from dispatch time to response time.
+		const passedResetMs = Date.now() - 60 * 1000;
+		const account = makeCodexAccount({
+			id: track("acct-roll-already-handled"),
+			// Session started after that boundary → already consumed.
+			session_start: passedResetMs + 5_000,
+			session_request_count: 1,
+		});
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 98,
+				resets_at: new Date(passedResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+
+		const { ctx, calls } = makeCtx();
+		const nextResetMs = Date.now() + 5 * 60 * 60 * 1000 + 456;
+		const result = applyCodexObservation(
+			account,
+			codexResponse(nextResetMs),
+			ctx,
+			baseOpts(),
+		);
+
+		expect(result.windowRolledOver).toBe(false);
+		expect(calls.resetAccountSession).toHaveLength(0);
+		// The usage bookkeeping itself must still run.
+		const writes = rateLimitResetWrites(calls.runSql);
+		expect(writes).toHaveLength(1);
+		expect(writes[0]?.params[0]).toBe(nextResetMs);
+	});
+
+	it("still rolls when the session predates the old boundary", () => {
+		const passedResetMs = Date.now() - 60 * 1000;
+		const account = makeCodexAccount({
+			id: track("acct-roll-stale-session"),
+			session_start: passedResetMs - 60 * 60 * 1000,
+			session_request_count: 40,
+		});
+		usageCache.set(account.id, {
+			five_hour: {
+				utilization: 98,
+				resets_at: new Date(passedResetMs).toISOString(),
+			},
+			seven_day: { utilization: 50, resets_at: null },
+		});
+
+		const { ctx, calls } = makeCtx();
+		const result = applyCodexObservation(
+			account,
+			codexResponse(Date.now() + 5 * 60 * 60 * 1000),
+			ctx,
+			baseOpts(),
+		);
+
+		expect(result.windowRolledOver).toBe(true);
+		expect(calls.resetAccountSession).toHaveLength(1);
+	});
 });
 
 describe("applyCodexObservation — cooldown application", () => {
