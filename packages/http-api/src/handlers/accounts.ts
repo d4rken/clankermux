@@ -806,16 +806,27 @@ export function createAccountsListHandler(
 			now,
 		);
 
-		// Fetch session-window token stats only for providers with session-based limits
+		// Fetch session-window token stats only for providers with session-based
+		// limits, and only while that window is still open. `session_start` is
+		// never cleared when a window elapses, so this repeats the freshness bound
+		// the `session_info` column above already applies; without it an account
+		// idle for days keeps reporting the spend of a window that closed, next to
+		// a `session_info` that reads "-".
 		const sessionStatsMap = await dbOps
 			.getStatsRepository()
 			.getSessionStats(
 				accounts
 					.filter((a) => requiresSessionDurationTracking(a.provider ?? ""))
-					.map((a) => ({
-						id: a.id,
-						session_start: a.session_start ? Number(a.session_start) : null,
-					})),
+					.map((a) => {
+						const startedAt = a.session_start ? Number(a.session_start) : null;
+						return {
+							id: a.id,
+							session_start:
+								startedAt !== null && now - startedAt < sessionDuration
+									? startedAt
+									: null,
+						};
+					}),
 			)
 			.catch(() => new Map());
 

@@ -819,4 +819,157 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("42%");
 		});
 	});
+	describe("compact layout", () => {
+		const future = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+		const anthropicUsage = () => ({
+			five_hour: { utilization: 12, resets_at: future() },
+			seven_day: { utilization: 42, resets_at: future() },
+		});
+
+		it("keeps the two-column wrapping grid by default", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={anthropicUsage()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain("sm:grid-cols-2");
+			expect(html).not.toContain("xl:grid-flow-col");
+			// Default card padding stays roomy.
+			expect(html).toContain("rounded-lg border p-3");
+		});
+
+		it("flows every window card into one row and tightens padding when compact", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={anthropicUsage()}
+					provider="anthropic"
+					showWeekly
+					compact
+				/>,
+			);
+
+			expect(html).toContain("xl:grid-flow-col");
+			expect(html).toContain("xl:auto-cols-fr");
+			expect(html).toContain("xl:grid-cols-none");
+			expect(html).toContain("rounded-lg border p-2");
+			expect(html).not.toContain("rounded-lg border p-3");
+		});
+
+		it("leads the caption with the countdown so truncation eats the date", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={anthropicUsage()}
+					provider="anthropic"
+					showWeekly
+					compact
+				/>,
+			);
+
+			// A fifth-of-a-row card truncates the centre caption, so the visible
+			// text puts the time-remaining first and the absolute stamp second.
+			expect(html).toMatch(/>\d+[hm] \d*[m]? ?· /);
+			expect(html).not.toMatch(/>Resets /);
+			// …and the untruncated sentence survives as a native tooltip.
+			expect(html).toMatch(/title="Resets [^"]+\(\d+[dhm][^"]*\)"/);
+		});
+
+		it("leaves the default caption wording untouched", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={anthropicUsage()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toMatch(/>Resets [^<]+\(\d+[dhm][^<]*\)</);
+		});
+
+		it("lets a long window label truncate instead of overflowing the card", () => {
+			// Codex's synthetic per-model weekly windows carry the full model name,
+			// which cannot fit beside a percentage in a fifth-of-a-row card. Only
+			// the centre caption can absorb a squeeze, so a `shrink-0` label would
+			// push the row past the card edge.
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={{
+						...anthropicUsage(),
+						limits: [
+							{
+								kind: "weekly_scoped",
+								percent: 63,
+								resets_at: future(),
+								scope: {
+									model: {
+										id: "gpt-5.3-codex-spark",
+										display_name: "GPT-5.3-Codex-Spark",
+									},
+								},
+							},
+						],
+					}}
+					provider="anthropic"
+					showWeekly
+					compact
+				/>,
+			);
+
+			// Anchored on the label text so the assertion is about that span, not
+			// the percentage span (which stays `shrink-0` in both modes).
+			expect(html).toContain(
+				'<span class="text-muted-foreground min-w-0 shrink truncate" title="GPT-5.3-Codex-Spark">GPT-5.3-Codex-Spark</span>',
+			);
+		});
+
+		it("keeps the label unshrinkable in the roomy default layout", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={anthropicUsage()}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+
+			expect(html).toContain(
+				'<span class="text-muted-foreground shrink-0">Weekly</span>',
+			);
+			expect(html).not.toContain("min-w-0 shrink truncate");
+		});
+
+		it("renders every window as its own card in compact mode", () => {
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageData={{
+						...anthropicUsage(),
+						limits: [
+							{
+								kind: "weekly_scoped",
+								percent: 63,
+								resets_at: future(),
+								scope: { model: { id: "fable", display_name: "Fable" } },
+							},
+						],
+					}}
+					provider="anthropic"
+					showWeekly
+					compact
+				/>,
+			);
+
+			expect(html).toContain("5-hour");
+			expect(html).toContain("Weekly");
+			expect(html).toContain("Fable");
+			expect((html.match(/rounded-lg border p-2/g) ?? []).length).toBe(3);
+		});
+	});
 });
