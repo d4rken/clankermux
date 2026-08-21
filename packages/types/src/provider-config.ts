@@ -103,7 +103,7 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 			"https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
 	},
 	[PROVIDER_NAMES.CODEX]: {
-		requiresSessionTracking: true, // Codex has 5h/7d usage windows like Anthropic OAuth
+		requiresSessionTracking: true, // Codex has a weekly usage window (the 5h one was retired 2026-07-12)
 		supportsUsageTracking: false, // Usage tracked via response headers, not a polling API
 		supportsOAuth: true, // Codex uses OpenAI OAuth with PKCE
 		defaultEndpoint: "https://chatgpt.com/backend-api/codex/responses",

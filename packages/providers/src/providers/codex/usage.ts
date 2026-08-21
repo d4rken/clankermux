@@ -83,6 +83,12 @@ function parseResetAfterSeconds(
 ): string | null {
 	if (!allowRelativeResetAfter || !Number.isFinite(baseTimeMs)) return null;
 	const parsed = parseNumber(value);
+	// A zero offset is kept deliberately: on a window of real duration it means
+	// "resets within this second", which is honest evidence and self-corrects on
+	// the next response. Only the SLOT rule below rejects the empty placeholder,
+	// because that one never changes — dropping zero offsets here as well would
+	// also discard the legitimate about-to-reset boundary of a live window whose
+	// absolute `reset-at` header is missing.
 	if (parsed === null) return null;
 	return toIsoString(baseTimeMs + parsed * 1000);
 }
@@ -102,11 +108,19 @@ function toUsageWindow(
  * Slot a Codex rate-limit window by its duration in SECONDS. Shared by the
  * legacy `x-codex-*` header path (which multiplies its minute values up first)
  * and the JSON `/wham/usage` parser so both agree on the 5h/7d boundaries.
+ *
+ * A window of zero (or negative) duration names no window at all — it is the
+ * placeholder Codex sends for an unused slot. It must NOT fall into `five_hour`
+ * on the strength of `0 <= FIVE_HOUR_WINDOW_SECONDS`: since OpenAI retired the
+ * rolling 5h limit for Plus/Business/Pro (2026-07-12) the weekly window moved
+ * into the primary slot and the secondary one is exactly this placeholder, so
+ * that arithmetic manufactured a 5h window for every account that no longer has
+ * one.
  */
 export function pickWindowSlot(
 	windowSeconds: number | null,
 ): "five_hour" | "seven_day" | null {
-	if (windowSeconds === null) return null;
+	if (windowSeconds === null || windowSeconds <= 0) return null;
 	if (windowSeconds <= FIVE_HOUR_WINDOW_SECONDS) return "five_hour";
 	if (windowSeconds >= SEVEN_DAY_WINDOW_SECONDS) return "seven_day";
 	return null;
