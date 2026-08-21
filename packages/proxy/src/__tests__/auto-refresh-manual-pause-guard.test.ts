@@ -89,6 +89,7 @@ function seedDb(): Database {
 			access_token TEXT,
 			expires_at INTEGER,
 			rate_limit_reset INTEGER,
+			session_start INTEGER,
 			custom_endpoint TEXT,
 			paused INTEGER,
 			auto_pause_on_overage_enabled INTEGER,
