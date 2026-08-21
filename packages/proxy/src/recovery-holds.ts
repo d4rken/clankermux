@@ -682,9 +682,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				const wakeComboInfo = requestMeta.comboName
 					? getComboSlotInfo(requestMeta)
 					: null;
-				const candidates = gates.applySoftDemotionReorder(
-					gates.applyContextWindowGate(
-						gates.applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+				const candidates = gates.applyFamilyMemoDemotion(
+					gates.applySoftDemotionReorder(
+						gates.applyContextWindowGate(
+							gates.applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
+							wakeComboInfo,
+						),
 						wakeComboInfo,
 					),
 					wakeComboInfo,
@@ -934,8 +937,11 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			// path. For pool liveness this is largely self-enforcing anyway: rule 4
 			// requires an absorbable peer, and on a degraded path there is none, so
 			// the reserve fails open regardless.)
-			const candidates = gates.applyFamilyWeeklyGate(
-				rePostThrottle.filter((a) => isEligible(a)),
+			const candidates = gates.applyFamilyMemoDemotion(
+				gates.applyFamilyWeeklyGate(
+					rePostThrottle.filter((a) => isEligible(a)),
+					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
+				),
 				requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 			);
 

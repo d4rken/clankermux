@@ -22,7 +22,7 @@ describe("RateLimitStatusChip", () => {
 		// 602 minutes -> 10h 2m
 		expect(html).toContain("10h 2m");
 		// warning variant uses the light amber tint shared by sibling chips
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 	});
 
 	it("maps hard-limit statuses to a destructive chip", () => {
@@ -58,7 +58,7 @@ describe("RateLimitStatusChip", () => {
 	it("maps a usage_exhausted status string to an amber 'Usage exhausted' chip", () => {
 		const html = render("usage_exhausted (2760m)");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("46h");
 	});
 
@@ -84,7 +84,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		// 90 minutes -> 1h 30m, taken from resetMs rather than the string.
 		expect(html).toContain("1h 30m");
 	});
@@ -170,7 +170,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 	it("explains a session binding as the 5-hour window", () => {
 		const html = renderExhausted("session");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("5-hour session quota is spent");
 		expect(html).not.toContain("Weekly usage quota");
 		// The countdown suffix still composes onto the description.
@@ -180,7 +180,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 	it("explains a weekly binding as the weekly window", () => {
 		const html = renderExhausted("weekly");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("Weekly usage quota is spent");
 		expect(html).not.toContain("5-hour session");
 	});

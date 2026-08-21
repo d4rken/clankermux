@@ -326,7 +326,7 @@ export function DataRetentionCard() {
 							pressure — token counts, costs, and analytics are always saved
 							regardless.
 						</p>
-						<p className="text-xs text-amber-500 mt-0.5">
+						<p className="text-xs text-warning-strong mt-0.5">
 							Warning: storing payloads can significantly grow the database size
 							over time.
 						</p>

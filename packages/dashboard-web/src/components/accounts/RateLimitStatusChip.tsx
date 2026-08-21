@@ -13,7 +13,7 @@ const VARIANT_CLASSES: Record<NonNullable<BadgeVariant>, string> = {
 	secondary: "bg-secondary text-secondary-foreground",
 	success: "bg-success/15 text-success-strong",
 	warning:
-		"bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+		"bg-warning/15 text-warning-strong",
 	destructive: "bg-destructive/15 text-destructive-strong",
 	outline: "text-foreground",
 };

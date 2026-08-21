@@ -6,7 +6,12 @@ import { cn } from "../../lib/utils";
  * Shared status pill used across the account chip cluster (Primary, Priority,
  * rate-limit, provider-overload, renewal, OAuth token health, …). One size and
  * shape for every status chip so they read as a uniform row. Callers supply the
- * color pair via `className` (e.g. "bg-amber-100 text-amber-700 dark:…").
+ * colour pair via `className`, and it must be a TOKEN pair rather than a literal
+ * Tailwind shade (e.g. "bg-warning/15 text-warning-strong", not
+ * "bg-amber-100 text-amber-700"): a literal follows no palette, so the chip
+ * keeps its old hue when the visual direction changes. On a tint, pair with the
+ * `-strong` variant — the `-foreground` half is for solid fills and is white in
+ * every light palette.
  *
  * forwardRef + prop spread so it can serve as a Radix `PopoverTrigger asChild`
  * child (the Codex reset-credit chip), which clones the element to inject a ref

@@ -275,6 +275,79 @@ describe("handleProxy ingress boundary", () => {
 		}
 	});
 
+	describe("§0a identity-bound endpoint refusal", () => {
+		// The guarantee under test is not the status code but the absence of an
+		// upstream call: these endpoints belong to one Anthropic identity, so a
+		// pooled account token must never be able to reach them. Asserting "no
+		// fetch, no recorder" is what proves the refusal happens before account
+		// selection rather than after it.
+		for (const pathname of [
+			"/v1/code",
+			"/v1/code/sessions",
+			"/v1/code/auth/refresh",
+			"/api/oauth/files",
+			"/api/oauth/files/file_abc123",
+			"/api/oauth/file_upload",
+			// Percent-escapes survive URL normalization, so these reach the proxy
+			// looking like ordinary `/v1/…` paths. They must be refused too, or
+			// the "never send a pooled token here" guarantee holds only for
+			// clients that spell the path the obvious way.
+			"/v1/code%2Fsessions",
+			"/v1/%63ode/sessions",
+		]) {
+			it(`refuses ${pathname} with 501, no upstream, no recorder`, async () => {
+				const calls: UpstreamCall[] = [];
+				globalThis.fetch = upstreamOnlyFetch(calls, () => ok200(MODEL));
+
+				const ctx = makeContext([makeAccount()]);
+				const recorder = ctx.requestRecorder as unknown as Record<
+					string,
+					ReturnType<typeof mock>
+				>;
+
+				const res = await callHandleProxy(
+					new Request(`https://proxy.local${pathname}`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ anything: true }),
+					}),
+					new URL(`https://proxy.local${pathname}`),
+					ctx,
+				);
+
+				expect(res.status).toBe(501);
+				expect(res.headers.get("x-clankermux-refusal")).toBe(
+					"identity-bound-endpoint",
+				);
+				expect(calls).toHaveLength(0);
+				expect(recorder.begin).not.toHaveBeenCalled();
+				expect(recorder.recordSynthetic).not.toHaveBeenCalled();
+				expect(recorder.finishTransport).not.toHaveBeenCalled();
+			});
+		}
+
+		it("still serves /v1/messages normally", async () => {
+			const calls: UpstreamCall[] = [];
+			globalThis.fetch = upstreamOnlyFetch(calls, () => ok200(MODEL));
+
+			const res = await callHandleProxy(
+				new Request("https://proxy.local/v1/messages", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						model: MODEL,
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				}),
+				new URL("https://proxy.local/v1/messages"),
+				makeContext([makeAccount()]),
+			);
+
+			expect(res.status).toBe(200);
+			expect(calls).toHaveLength(1);
+		});
+	});
+
 	describe("§3a /v1/messages body validation", () => {
 		it("rejects a parseable body without `messages` with a 400 invalid_request_error", async () => {
 			const calls: UpstreamCall[] = [];

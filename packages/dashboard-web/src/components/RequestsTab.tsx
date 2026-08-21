@@ -1216,7 +1216,7 @@ export function RequestsTab() {
 											{attributionChip && (
 												<Badge
 													variant="outline"
-													className="text-xs border-amber-500 text-amber-500"
+													className="text-xs border-warning text-warning-strong"
 													title={attributionChip.title}
 												>
 													{attributionChip.label}
@@ -1225,7 +1225,7 @@ export function RequestsTab() {
 											{summary?.comboName && (
 												<Badge
 													variant="outline"
-													className="text-xs border-purple-500 text-purple-500"
+													className="text-xs border-info/60 text-info"
 												>
 													Combo: {summary.comboName}
 												</Badge>

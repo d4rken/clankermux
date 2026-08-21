@@ -144,7 +144,7 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 									<div className="font-medium">{row.toolName}</div>
 									{lowSample && (
 										<div
-											className="text-xs text-amber-600"
+											className="text-xs text-warning-strong"
 											title="Few tool calls — error rate is noisy"
 										>
 											low sample

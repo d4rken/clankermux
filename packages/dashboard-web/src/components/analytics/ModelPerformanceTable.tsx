@@ -196,7 +196,7 @@ export function ModelPerformanceTable({
 										n={row.speedSampleCount.toLocaleString()}
 										{lowSample && row.speedSampleCount > 0 && (
 											<span
-												className="text-amber-600"
+												className="text-warning-strong"
 												title="Few speed samples"
 											>
 												{" "}

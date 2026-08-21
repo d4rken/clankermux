@@ -23,13 +23,13 @@ describe("StatusChip", () => {
 
 	it("merges a caller className alongside the base classes", () => {
 		const html = renderToStaticMarkup(
-			<StatusChip className="bg-amber-100 text-amber-700">
+			<StatusChip className="bg-warning/15 text-warning-strong">
 				Near limit
 			</StatusChip>,
 		);
 		// Custom color pair is present…
-		expect(html).toContain("bg-amber-100");
-		expect(html).toContain("text-amber-700");
+		expect(html).toContain("bg-warning/15");
+		expect(html).toContain("text-warning-strong");
 		// …and the base classes are still there.
 		expect(html).toContain("rounded-full");
 		expect(html).toContain("px-2");
