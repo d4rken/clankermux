@@ -6,7 +6,7 @@ import type {
 	UsagePrediction,
 } from "@clankermux/types";
 import { isUsablePrediction } from "@clankermux/types";
-import { useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import {
 	formatDuration,
 	formatPredictionMessage,
@@ -14,12 +14,12 @@ import {
 	type ProjectionTone,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "../../lib/format-prediction";
-import { getScopedWeeklyLimits } from "../../lib/secondary-limits";
-import { cn } from "../../lib/utils";
 import {
-	providerShowsCreditsBalance,
-	providerShowsWeeklyUsage,
-} from "../../utils/provider-utils";
+	classifyUsageCard,
+	usageWindowCategoryKey,
+	usageWindowLabel,
+} from "../../lib/usage-windows";
+import { cn } from "../../lib/utils";
 import { Progress } from "../ui/progress";
 
 interface RateLimitProgressProps {
@@ -38,6 +38,11 @@ interface RateLimitProgressProps {
 	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
 	compact?: boolean; // Tighter card padding and a single-row window strip on wide viewports
+	// Earliest still-future reset per window category across all accounts on the
+	// page, from `computeSoonestWindowResets`. A window whose reset matches its
+	// category's entry gets its countdown bolded as the next one to come back.
+	// Omitted when the card renders alone, where there is nothing to compare.
+	soonestResets?: ReadonlyMap<string, number>;
 }
 
 // Maps a render-loop window name to its server-computed prediction. Only the
@@ -53,8 +58,6 @@ function predictionForWindow(
 	if (window === "seven_day") return prediction.sevenDay;
 	return undefined;
 }
-
-const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours in milliseconds
 
 // How old a LIVE reading may get before its age is worth surfacing. Mirrors the
 // server's routing freshness TTL (USAGE_CACHE_TTL_MS in @clankermux/providers,
@@ -269,35 +272,6 @@ function isSecondaryWindow(window: string | null, label?: string): boolean {
 	);
 }
 
-// Format window name for display
-function formatWindowName(window: string | null): string {
-	if (!window) return "window";
-	switch (window) {
-		case "five_hour":
-			return "5-hour";
-		case "seven_day":
-			return "Weekly";
-		case "seven_day_opus":
-			return "Opus (Weekly)";
-		case "seven_day_sonnet":
-			return "Sonnet (Weekly)";
-		case "seven_day_scoped":
-			return "Weekly";
-		case "daily":
-			return "Daily";
-		case "weekly":
-			return "Weekly";
-		case "monthly":
-			return "Monthly";
-		case "time_limit":
-			return "Time Quota";
-		case "tokens_limit":
-			return "5-hour";
-		default:
-			return window.replace("_", " ");
-	}
-}
-
 function shouldShowResetDate(window: string | null): boolean {
 	return (
 		window === "seven_day" ||
@@ -395,13 +369,6 @@ function agedLiveUsageAsOf(
 	return formatAsOfText(usageAsOfIso, now);
 }
 
-interface UsageDisplay {
-	utilization: number | null;
-	window: string | null;
-	resetTime: string | null;
-	label?: string;
-}
-
 export function RateLimitProgress({
 	resetIso,
 	usageUtilization,
@@ -418,6 +385,7 @@ export function RateLimitProgress({
 	inlineProjection = false,
 	prediction = null,
 	compact = false,
+	soonestResets,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -437,37 +405,44 @@ export function RateLimitProgress({
 		return unregisterInterval;
 	}, [instanceId]);
 
-	// Allow null resetIso for providers that show usage data (e.g. PayG mode)
-	// but still render null if there's no resetIso and no usage data to show
-	if (!resetIso && !usageData && !staleUsage && !usageRateLimitedUntil)
-		return null;
-
 	// The live reading is real but no longer current (polling is healthy — the
 	// next refresh simply hasn't landed). Show the value as usual and state its
 	// age; the amber "unavailable" wording stays reserved for missing data.
-	// Computed BEFORE the provider-specific branches so every card that renders a
-	// live reading — including Kilo's credit balance, which returns early —
-	// discloses the same age. The server serves any provider's cached entry up to
-	// the UI horizon, so any of them can be aged.
+	// Computed BEFORE the card branches so every card that renders a live
+	// reading — including Kilo's credit balance — discloses the same age. The
+	// server serves any provider's cached entry up to the UI horizon, so any of
+	// them can be aged.
 	const agedAsOfText = agedLiveUsageAsOf(usageAsOfIso, now);
 
-	// Show explicit rate-limited state when the Anthropic usage API returned 429
-	// and we have NOTHING else to show. A persisted stale snapshot takes
-	// precedence over this bare note (it yields to the stale block below, which
-	// carries its own "usage API rate limited" line), so the last-known reading
-	// is never hidden by the rate-limited branch.
-	if (
-		usageRateLimitedUntil != null &&
-		!usageData &&
-		!staleUsage &&
-		(provider === "anthropic" || provider === "codex")
-	) {
-		const retryAfterDate = new Date(usageRateLimitedUntil);
-		const retryTimeText = retryAfterDate.toLocaleTimeString(undefined, {
-			hour: "2-digit",
-			minute: "2-digit",
-			hour12: false,
-		});
+	// Which of the five card shapes this account gets. The branch conditions live
+	// in `classifyUsageCard` alone so the cross-account "resets next" comparison
+	// in `computeSoonestWindowResets` sees exactly the windows rendered here.
+	const card = classifyUsageCard(
+		{
+			resetIso,
+			usageUtilization,
+			usageWindow,
+			usageData,
+			staleUsage,
+			usageRateLimitedUntil,
+			provider,
+			showWeekly,
+		},
+		now,
+	);
+
+	if (card.kind === "none") return null;
+
+	// The Anthropic usage API returned 429 and there is nothing else to show.
+	if (card.kind === "rate-limited") {
+		const retryTimeText = new Date(card.retryAfterMs).toLocaleTimeString(
+			undefined,
+			{
+				hour: "2-digit",
+				minute: "2-digit",
+				hour12: false,
+			},
+		);
 		return (
 			<div className={cn(primaryCardClass(compact), className)}>
 				<div className="flex items-center justify-between">
@@ -482,59 +457,44 @@ export function RateLimitProgress({
 		);
 	}
 
-	// Live usage data is gone (e.g. right after a restart before the poller warms
-	// the cache, or usage polling fails because the subscription lapsed) but a
-	// persisted snapshot still knows the last-sampled state. Show whichever
-	// windows the server carried: the 5-hour window only when the snapshot was
-	// fresh (server-gated), the weekly window whenever its reset is still future.
-	// Wording never implies the value is live — "last known as of HH:MM".
-	if (!usageData && staleUsage) {
+	// Live usage is gone but a persisted snapshot knows the last-sampled state.
+	// Show whichever windows the server carried: the 5-hour window only when the
+	// snapshot was fresh (server-gated), the weekly window whenever its reset is
+	// still future. Wording never implies the value is live — "last known as of
+	// HH:MM".
+	if (card.kind === "stale") {
+		const stale = card.staleUsage;
 		return (
 			<div className={cn(primaryCardClass(compact), className)}>
 				<div className="space-y-item">
-					{staleUsage.fiveHour && (
+					{stale.fiveHour && (
 						<>
-							<Progress
-								value={staleUsage.fiveHour.utilization}
-								className="h-2"
-							/>
+							<Progress value={stale.fiveHour.utilization} className="h-2" />
 							<div className="flex items-center justify-between gap-item text-xs">
 								<span className="min-w-0 flex-1 truncate text-muted-foreground">
-									5h: last known as of {formatAsOfText(staleUsage.asOfIso, now)}
+									5h: last known as of {formatAsOfText(stale.asOfIso, now)}
 								</span>
 								<span className="shrink-0 text-muted-foreground">
-									{formatResetText(
-										staleUsage.fiveHour.resetIso,
-										"five_hour",
-										now,
-									)}
+									{formatResetText(stale.fiveHour.resetIso, "five_hour", now)}
 								</span>
 								<span className="shrink-0 font-medium text-muted-foreground">
-									{staleUsage.fiveHour.utilization.toFixed(0)}%
+									{stale.fiveHour.utilization.toFixed(0)}%
 								</span>
 							</div>
 						</>
 					)}
-					{staleUsage.sevenDay && (
+					{stale.sevenDay && (
 						<>
-							<Progress
-								value={staleUsage.sevenDay.utilization}
-								className="h-2"
-							/>
+							<Progress value={stale.sevenDay.utilization} className="h-2" />
 							<div className="flex items-center justify-between gap-item text-xs">
 								<span className="min-w-0 flex-1 truncate text-muted-foreground">
-									Weekly: last known as of{" "}
-									{formatAsOfText(staleUsage.asOfIso, now)}
+									Weekly: last known as of {formatAsOfText(stale.asOfIso, now)}
 								</span>
 								<span className="shrink-0 text-muted-foreground">
-									{formatResetText(
-										staleUsage.sevenDay.resetIso,
-										"seven_day",
-										now,
-									)}
+									{formatResetText(stale.sevenDay.resetIso, "seven_day", now)}
 								</span>
 								<span className="shrink-0 font-medium text-muted-foreground">
-									{staleUsage.sevenDay.utilization.toFixed(0)}%
+									{stale.sevenDay.utilization.toFixed(0)}%
 								</span>
 							</div>
 						</>
@@ -549,202 +509,30 @@ export function RateLimitProgress({
 		);
 	}
 
-	// Kilo Gateway: show credit balance in USD instead of a utilization window
-	if (providerShowsCreditsBalance(provider) && usageData) {
-		const kiloData = usageData as {
-			remainingUsd?: number;
-			totalMicrodollarsAcquired?: number;
-		};
-		if (typeof kiloData.remainingUsd === "number") {
-			const hasCredits = (kiloData.totalMicrodollarsAcquired ?? 0) > 0;
-			return (
-				<div className={cn(primaryCardClass(compact), className)}>
-					<div className="flex items-center justify-between">
-						<span className="text-xs text-muted-foreground">
-							Kilo Gateway credits
-						</span>
-						<span className="text-xs font-medium text-muted-foreground">
-							{hasCredits
-								? `$${kiloData.remainingUsd.toFixed(2)} remaining`
-								: "No credits"}
-						</span>
-					</div>
-					{agedAsOfText && (
-						<p className="text-xs text-muted-foreground">
-							Live usage as of {agedAsOfText}
-						</p>
-					)}
+	// Kilo Gateway: credit balance in USD instead of a utilization window.
+	if (card.kind === "credits") {
+		return (
+			<div className={cn(primaryCardClass(compact), className)}>
+				<div className="flex items-center justify-between">
+					<span className="text-xs text-muted-foreground">
+						Kilo Gateway credits
+					</span>
+					<span className="text-xs font-medium text-muted-foreground">
+						{card.hasCredits
+							? `$${card.remainingUsd.toFixed(2)} remaining`
+							: "No credits"}
+					</span>
 				</div>
-			);
-		}
-	}
-
-	const resetTime = resetIso ? new Date(resetIso).getTime() : Date.now();
-
-	// Determine which usage windows to display
-	const usages: UsageDisplay[] = [];
-
-	// Check if this is Zai usage data (has 'time_limit' and 'tokens_limit' properties)
-	const isZaiData =
-		usageData && ("time_limit" in usageData || "tokens_limit" in usageData);
-
-	// Check if this is Alibaba Coding Plan usage data
-	const isAlibabaData =
-		usageData && "five_hour" in usageData && "weekly" in usageData;
-
-	// Anthropic-style quota data is shared by Anthropic and Codex; detect by shape, not provider name.
-	const hasAnthropicStyleData =
-		usageData &&
-		"five_hour" in usageData &&
-		"seven_day" in usageData &&
-		!isAlibabaData &&
-		!isZaiData;
-
-	if (isAlibabaData && showWeekly) {
-		const alibabaData = usageData as {
-			five_hour: { percentUsed: number; resetAt: number | null };
-			weekly: { percentUsed: number; resetAt: number | null };
-			monthly: { percentUsed: number; resetAt: number | null };
-		};
-		usages.push({
-			utilization: alibabaData.five_hour.percentUsed,
-			window: "five_hour",
-			resetTime: alibabaData.five_hour.resetAt
-				? new Date(alibabaData.five_hour.resetAt).toISOString()
-				: null,
-		});
-		usages.push({
-			utilization: alibabaData.weekly.percentUsed,
-			window: "weekly",
-			resetTime: alibabaData.weekly.resetAt
-				? new Date(alibabaData.weekly.resetAt).toISOString()
-				: null,
-		});
-		usages.push({
-			utilization: alibabaData.monthly.percentUsed,
-			window: "monthly",
-			resetTime: alibabaData.monthly.resetAt
-				? new Date(alibabaData.monthly.resetAt).toISOString()
-				: null,
-		});
-	} else if (isZaiData && showWeekly) {
-		// Zai usage data - show tokens_limit (5-hour token quota) and time_limit (peak-hour limit)
-		const zaiData = usageData as {
-			time_limit?: { percentage: number; resetAt: number } | null;
-			tokens_limit?: { percentage: number; resetAt: number } | null;
-		};
-
-		// Tokens limit usage (5-hour token quota)
-		if (zaiData.tokens_limit) {
-			usages.push({
-				utilization: zaiData.tokens_limit.percentage,
-				window: "tokens_limit",
-				resetTime: zaiData.tokens_limit.resetAt
-					? new Date(zaiData.tokens_limit.resetAt).toISOString()
-					: null,
-			});
-		}
-
-		// Time limit usage (peak-hour quota)
-		if (zaiData.time_limit) {
-			usages.push({
-				utilization: zaiData.time_limit.percentage,
-				window: "time_limit",
-				resetTime: zaiData.time_limit.resetAt
-					? new Date(zaiData.time_limit.resetAt).toISOString()
-					: null,
-			});
-		}
-	} else if (hasAnthropicStyleData && showWeekly) {
-		// Anthropic usage data - show 5-hour and weekly usage
-		const anthropicData = usageData as {
-			five_hour?: {
-				utilization: number | null;
-				resets_at: string | null;
-			} | null;
-			seven_day?: { utilization: number | null; resets_at: string | null };
-			seven_day_opus?: { utilization: number | null; resets_at: string | null };
-			seven_day_sonnet?: {
-				utilization: number | null;
-				resets_at: string | null;
-			};
-		};
-		// 5-hour card contract (0 vs null): a truthy `five_hour` object is a REAL
-		// window and always renders — even at 0% with a null reset (Anthropic emits
-		// exactly that for an idle-but-live 5h window). An explicit `null` means the
-		// window does not exist (Codex retired its 5h window) → render nothing. Only
-		// an omitted key falls back to the legacy most-restrictive-window display.
-		if (anthropicData?.five_hour) {
-			usages.push({
-				utilization: anthropicData.five_hour.utilization,
-				window: "five_hour",
-				resetTime: anthropicData.five_hour.resets_at,
-			});
-		} else if (anthropicData?.five_hour === undefined) {
-			// Legacy fallback: key omitted → use the most restrictive window data.
-			usages.push({
-				utilization: usageUtilization ?? null,
-				window: "five_hour",
-				resetTime: resetIso,
-			});
-		}
-		// else five_hour === null → Codex retired window, push nothing.
-
-		// Check if seven_day data exists and has valid utilization
-		if (
-			anthropicData &&
-			anthropicData.seven_day &&
-			anthropicData.seven_day.utilization !== null &&
-			anthropicData.seven_day.utilization !== undefined
-		) {
-			usages.push({
-				utilization: anthropicData.seven_day.utilization,
-				window: "seven_day",
-				resetTime: anthropicData.seven_day.resets_at,
-			});
-		} else {
-			// Add weekly usage as placeholder if data is not available
-			usages.push({
-				utilization: null,
-				window: "seven_day",
-				resetTime: null,
-			});
-		}
-
-		// Model-specific weekly windows (e.g. "Fable") always render as their own
-		// secondary cards when the payload carries them.
-		for (const limit of getScopedWeeklyLimits(usageData)) {
-			usages.push({
-				utilization: limit.utilization,
-				window: "seven_day_scoped",
-				resetTime: limit.resetsAt,
-				label: limit.label,
-			});
-		}
-	} else if (
-		providerShowsWeeklyUsage(provider) &&
-		usageUtilization !== null &&
-		usageUtilization !== undefined &&
-		usageWindow
-	) {
-		// Fallback: show only the most restrictive window
-		usages.push({
-			utilization: usageUtilization,
-			window: usageWindow,
-			resetTime: resetIso,
-		});
-	} else {
-		// Use time-based percentage for non-Anthropic or when no usage data is available
-		const percentage = Math.min(
-			100,
-			Math.max(0, ((now - (resetTime - WINDOW_MS)) / WINDOW_MS) * 100),
+				{agedAsOfText && (
+					<p className="text-xs text-muted-foreground">
+						Live usage as of {agedAsOfText}
+					</p>
+				)}
+			</div>
 		);
-		usages.push({
-			utilization: percentage as number | null,
-			window: null,
-			resetTime: resetIso,
-		});
 	}
+
+	const usages = card.usages;
 
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
@@ -811,9 +599,7 @@ export function RateLimitProgress({
 						)
 					: null;
 				const throttleDisplayUntil = windowThrottleUntil ?? usageThrottledUntil;
-				const windowLabel =
-					usage.label ??
-					(usage.window ? formatWindowName(usage.window) : "Rate limit");
+				const windowLabel = usageWindowLabel(usage);
 				const isSecondary = isSecondaryWindow(usage.window, usage.label);
 				// Prefer the server-computed regression prediction when it's
 				// trustworthy (recent slope, not lifetime average) AND we have a live
@@ -864,14 +650,17 @@ export function RateLimitProgress({
 				// absolute 24-hour reset time with the time remaining in brackets,
 				// e.g. "Resets Jul 26, 08:59 (2d 13h)".
 				//
-				// `resetStatus` is what renders; `resetStatusFull` is what the
-				// tooltip carries. They differ only in compact mode, where a card
+				// `resetStatusNode` is what renders (it can carry a bolded countdown,
+				// see below); `resetStatus` is its plain-text twin and
+				// `resetStatusFull` is what the tooltip carries. The latter two differ
+				// only in compact mode, where a card
 				// can be a fifth of the row wide and the caption truncates: there
 				// the countdown leads and the absolute stamp trails, so what gets
 				// cut is the date rather than the time-remaining most people are
 				// actually reading. The unabbreviated sentence stays on hover.
 				let resetStatus = "";
 				let resetStatusFull = "";
+				let resetStatusNode: ReactNode = null;
 				if (usage.resetTime) {
 					const resetMs = new Date(usage.resetTime).getTime();
 					if (resetMs <= now) {
@@ -881,6 +670,25 @@ export function RateLimitProgress({
 						const remaining = formatRemaining(resetMs - now);
 						resetStatusFull = `Resets ${stamp} (${remaining})`;
 						resetStatus = compact ? `${remaining} · ${stamp}` : resetStatusFull;
+						// Of every account on this page reporting this same kind of
+						// window, this one comes back first. Only the countdown is
+						// bolded — that is the quantity being compared; the absolute
+						// stamp beside it stays regular weight.
+						const countdown =
+							soonestResets?.get(usageWindowCategoryKey(usage)) === resetMs ? (
+								<span className="font-bold">{remaining}</span>
+							) : (
+								remaining
+							);
+						resetStatusNode = compact ? (
+							<>
+								{countdown} · {stamp}
+							</>
+						) : (
+							<>
+								Resets {stamp} ({countdown})
+							</>
+						);
 					}
 				} else if (
 					usage.window === "seven_day" ||
@@ -895,6 +703,7 @@ export function RateLimitProgress({
 								? "Usage data unavailable"
 								: "No reset data available";
 				}
+				resetStatusNode ??= resetStatus;
 
 				return (
 					<div
@@ -968,7 +777,7 @@ export function RateLimitProgress({
 									className="min-w-0 flex-1 truncate text-center text-muted-foreground"
 									title={resetStatusFull || resetStatus}
 								>
-									{resetStatus}
+									{resetStatusNode}
 								</span>
 							)}
 							<span

@@ -75,6 +75,9 @@ function formatSessionTokenSummary(stats: SessionStats): string {
 interface AccountListItemProps {
 	account: Account;
 	isForced?: boolean;
+	// Per-window-category earliest reset across the whole list; forwarded to the
+	// rate-limit card so it can bold the countdown that comes back first.
+	soonestResets?: ReadonlyMap<string, number>;
 	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
@@ -103,6 +106,7 @@ interface AccountListItemProps {
 export function AccountListItem({
 	account,
 	isForced = false,
+	soonestResets,
 	onForceAccount,
 	onPauseToggle,
 	onForceResetRateLimit,
@@ -627,6 +631,7 @@ export function AccountListItem({
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					prediction={account.prediction}
+					soonestResets={soonestResets}
 					compact
 				/>
 			)}

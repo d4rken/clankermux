@@ -1,5 +1,6 @@
 import type { AccountResponse } from "@clankermux/types";
 import { extractFiveHour, extractSevenDay } from "../../lib/pool-usage";
+import { computeSoonestWindowResets } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
 import { ProviderChip } from "../accounts/ProviderChip";
@@ -15,6 +16,9 @@ import {
 
 interface AccountUtilizationCardProps {
 	accounts: AccountResponse[];
+	/** Shared clock from the Limits tab, so the countdowns and the "resets next"
+	 *  comparison below advance together. */
+	now: number;
 }
 
 /** Highest of the account's 5h/7d utilization, for sort ordering (no data → -1). */
@@ -42,10 +46,28 @@ function hasWindowedUsage(account: AccountResponse): boolean {
  */
 export function AccountUtilizationCard({
 	accounts,
+	now,
 }: AccountUtilizationCardProps) {
 	const rows = accounts
 		.filter(hasWindowedUsage)
 		.sort((a, b) => maxUtilization(b) - maxUtilization(a));
+
+	// Built from `rows`, not `accounts`: an account filtered out of this card has
+	// no countdown here to bold, and letting it win a category would leave the
+	// category unmarked.
+	const soonestResets = computeSoonestWindowResets(
+		rows.map((account) => ({
+			resetIso: account.rateLimitReset,
+			usageUtilization: account.usageUtilization,
+			usageWindow: account.usageWindow,
+			usageData: account.usageData,
+			staleUsage: account.staleUsage,
+			usageRateLimitedUntil: account.usageRateLimitedUntil,
+			provider: account.provider,
+			showWeekly: providerShowsWeeklyUsage(account.provider),
+		})),
+		now,
+	);
 
 	return (
 		<Card>
@@ -97,6 +119,7 @@ export function AccountUtilizationCard({
 									usageThrottledWindows={account.usageThrottledWindows}
 									provider={account.provider}
 									showWeekly={providerShowsWeeklyUsage(account.provider)}
+									soonestResets={soonestResets}
 									inlineProjection
 								/>
 							</div>

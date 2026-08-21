@@ -1,4 +1,8 @@
+import { registerUIRefresh } from "@clankermux/core";
+import { useEffect, useMemo, useState } from "react";
 import type { Account } from "../../api";
+import { computeSoonestWindowResets } from "../../lib/usage-windows";
+import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountListItem } from "./AccountListItem";
 
 interface AccountListProps {
@@ -56,6 +60,41 @@ export function AccountList({
 	onAnthropicReauth,
 	onCodexReauth,
 }: AccountListProps) {
+	// The comparison below needs its own clock. React Query hands back the same
+	// `accounts` reference when a poll returns unchanged data, so keying the memo
+	// on the data alone would freeze the winner: once its reset passes, every
+	// card would show it as ready while the runner-up stayed unmarked, for as
+	// long as the pool sat idle. Same 30s cadence as the countdowns themselves.
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		return registerUIRefresh({
+			id: "account-list-soonest-resets",
+			callback: () => setNow(Date.now()),
+			seconds: 30,
+			description: "Accounts list soonest-reset comparison",
+		});
+	}, []);
+
+	// Which account's window in each category comes back first. Computed once for
+	// the whole list — a single card cannot know it.
+	const soonestResets = useMemo(
+		() =>
+			computeSoonestWindowResets(
+				(accounts ?? []).map((account) => ({
+					resetIso: account.rateLimitReset,
+					usageUtilization: account.usageUtilization,
+					usageWindow: account.usageWindow,
+					usageData: account.usageData,
+					staleUsage: account.staleUsage,
+					usageRateLimitedUntil: account.usageRateLimitedUntil,
+					provider: account.provider,
+					showWeekly: providerShowsWeeklyUsage(account.provider),
+				})),
+				now,
+			),
+		[accounts, now],
+	);
+
 	if (!accounts || accounts.length === 0) {
 		return <p className="text-muted-foreground">No accounts configured</p>;
 	}
@@ -70,6 +109,7 @@ export function AccountList({
 					key={account.name}
 					account={account}
 					isForced={account.id === forcedAccountId}
+					soonestResets={soonestResets}
 					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
 					onForceResetRateLimit={onForceResetRateLimit}
