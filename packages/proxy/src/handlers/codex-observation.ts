@@ -284,13 +284,35 @@ function applyCodexUsageBookkeeping(
 	// arrived (prevResetMs <= now) and the new reset is strictly later. Rejects
 	// sub-second forward drift of a still-future reset (which would otherwise churn
 	// session_start and flap the Primary badge).
+	//
+	// This watches the 5h window ONLY, so it stays silent for accounts whose 5h
+	// window OpenAI retired (Plus/Business/Pro since 2026-07-12) — there is no 5h
+	// roll to detect when there is no 5h window. That is not a gap to close here:
+	// a weekly rollover already ends the session through SessionStrategy, which
+	// reads the `rate_limit_reset` this function persists below. Do not widen this
+	// detector to the weekly window without removing that path first, or a single
+	// rollover would reset the session from both places.
+	//
+	// `alreadyHandled` is that same overlap for accounts that DO still report a 5h
+	// window: SessionStrategy resets on the elapsed boundary at dispatch, and this
+	// detector would reset again when the response reveals the new one, zeroing the
+	// in-flight request out of `session_request_count` and moving `session_start`
+	// from dispatch to response time. A session that started past the old boundary
+	// has consumed it. The +1s matches SessionStrategy's own skew buffer — it only
+	// resets once `now` is more than a second past the boundary, so a session IT
+	// created is always at least that far past, while a session that began inside
+	// the sliver is correctly not treated as having handled the roll.
+	//
+	// Best-effort by design: when `account` carries a stale `session_start` the
+	// guard does not fire and behaviour is what it was before.
 	const prevResetMs = toEpochMs(prevResetAt);
 	const newResetMs = toEpochMs(newResetAt);
-	const windowRolledOver = isGenuineWindowRoll(
-		prevResetMs,
-		newResetMs,
-		Date.now(),
-	);
+	const alreadyHandled =
+		prevResetMs !== null &&
+		account.session_start != null &&
+		account.session_start >= prevResetMs + 1000;
+	const windowRolledOver =
+		!alreadyHandled && isGenuineWindowRoll(prevResetMs, newResetMs, Date.now());
 
 	// Attach Codex credits state. Only overwrite when THIS observation carried
 	// credits; absence signals a non-credits-aware response, not "off credits", so

@@ -225,6 +225,165 @@ describe("SessionStrategy", () => {
 		expect(account.session_request_count).toBe(originalRequestCount);
 	});
 
+	// -------------------------------------------------------------------------
+	// A codex session_start is anchored to the first request through THIS proxy,
+	// while the account's real usage window starts at its first request anywhere
+	// (Codex CLI, ChatGPT, another proxy). The two rarely coincide and never do
+	// after a restart, so a fixed local 5h clock runs past the reported reset and
+	// keeps traffic pinned to an account that has already regained capacity.
+	// response-processor rewrites rate_limit_reset from the x-codex-* usage
+	// headers on every response, so it is the authoritative signal for codex the
+	// same way it is for anthropic.
+	// -------------------------------------------------------------------------
+
+	it("should reset session when the rate limit window has reset for codex accounts", () => {
+		const sessionStart = Date.now() - 2 * 60 * 60 * 1000;
+		const account = makeAccount({
+			id: "test-account-codex-window-reset",
+			name: "test-account-codex-window-reset",
+			provider: "codex",
+			session_start: sessionStart,
+			session_request_count: 5,
+			rate_limit_reset: Date.now() - 2000, // reset 2s ago (past the 1s buffer)
+		});
+
+		const result = strategy.select([account], meta);
+
+		expect(result[0]).toBe(account);
+
+		const resetCall = mockStore.getResetCall(account.id);
+		expect(resetCall).toBeDefined();
+		expect(account.session_start).toBeGreaterThan(sessionStart);
+		expect(account.session_request_count).toBe(0);
+	});
+
+	it("should not reset a codex session while its rate limit window is still open", () => {
+		const sessionStart = Date.now() - 2 * 60 * 60 * 1000;
+		const account = makeAccount({
+			id: "test-account-codex-window-open",
+			name: "test-account-codex-window-open",
+			provider: "codex",
+			session_start: sessionStart,
+			session_request_count: 5,
+			rate_limit_reset: Date.now() + 10_000,
+		});
+
+		const result = strategy.select([account], meta);
+
+		expect(result[0]).toBe(account);
+
+		expect(mockStore.getResetCall(account.id)).toBeUndefined();
+		expect(account.session_start).toBe(sessionStart);
+		expect(account.session_request_count).toBe(5);
+	});
+
+	it("resets once per elapsed boundary, not once per request", () => {
+		// Resetting a session does not advance rate_limit_reset — only the next
+		// response carrying usage headers does. Without an "already consumed" guard
+		// every request in that gap re-resets the session and zeroes the request
+		// count, which is worst exactly when responses are failing and therefore
+		// never refresh the boundary.
+		const now = Date.now();
+		const account = makeAccount({
+			id: "test-account-codex-one-shot",
+			name: "test-account-codex-one-shot",
+			provider: "codex",
+			session_start: now - 2 * 60 * 60 * 1000,
+			session_request_count: 5,
+			rate_limit_reset: now - 2000,
+		});
+
+		strategy.select([account], meta);
+
+		const firstReset = mockStore.getResetCall(account.id);
+		expect(firstReset).toBeDefined();
+		const sessionStartAfterFirst = account.session_start;
+		mockStore.clear();
+
+		// Second selection with the SAME stale boundary still on the account.
+		account.session_request_count = 3;
+		strategy.select([account], meta);
+
+		expect(mockStore.getResetCall(account.id)).toBeUndefined();
+		expect(account.session_start).toBe(sessionStartAfterFirst);
+		expect(account.session_request_count).toBe(3);
+	});
+
+	it("resets again once a NEW boundary elapses", () => {
+		const now = Date.now();
+		const sessionStart = now - 60 * 1000;
+		const account = makeAccount({
+			id: "test-account-codex-next-boundary",
+			name: "test-account-codex-next-boundary",
+			provider: "codex",
+			session_start: sessionStart,
+			session_request_count: 5,
+			// A boundary the current session already began after: consumed.
+			rate_limit_reset: now - 120 * 1000,
+		});
+
+		strategy.select([account], meta);
+		expect(mockStore.getResetCall(account.id)).toBeUndefined();
+		expect(account.session_start).toBe(sessionStart);
+
+		// The next window's boundary lands after session_start and then elapses.
+		account.rate_limit_reset = now - 1500;
+		strategy.select([account], meta);
+
+		expect(mockStore.getResetCall(account.id)).toBeDefined();
+		expect(account.session_start).toBeGreaterThan(sessionStart);
+		expect(account.session_request_count).toBe(0);
+	});
+
+	it("does not treat a session begun inside the skew buffer as having consumed the boundary", () => {
+		// The branch only becomes eligible more than 1s past the stored boundary, so
+		// a session that started within that second began before the upstream window
+		// actually rolled and has NOT consumed it. Matching the two thresholds keeps
+		// "handled" from being decided on a timestamp the buffer says is untrustworthy.
+		const now = Date.now();
+		const boundary = now - 5000;
+		const account = makeAccount({
+			id: "test-account-codex-skew-sliver",
+			name: "test-account-codex-skew-sliver",
+			provider: "codex",
+			session_start: boundary + 300, // inside the 1s buffer
+			session_request_count: 2,
+			rate_limit_reset: boundary,
+		});
+
+		strategy.select([account], meta);
+
+		expect(mockStore.getResetCall(account.id)).toBeDefined();
+		expect(account.session_start).toBeGreaterThan(boundary + 300);
+		expect(account.session_request_count).toBe(0);
+	});
+
+	it("should not extend window-reset expiry to other session-tracked providers", () => {
+		// zai tracks sessions but its rate_limit_reset is not maintained from
+		// per-response usage headers, so it keeps the fixed-duration clock alone.
+		const sessionStart = Date.now() - 2 * 60 * 60 * 1000;
+		const account = makeAccount({
+			id: "test-account-zai-window-reset",
+			name: "test-account-zai-window-reset",
+			provider: "zai",
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			session_start: sessionStart,
+			session_request_count: 5,
+			rate_limit_reset: Date.now() - 2000,
+		});
+
+		const result = strategy.select([account], meta);
+
+		expect(result[0]).toBe(account);
+
+		expect(mockStore.getResetCall(account.id)).toBeUndefined();
+		expect(account.session_start).toBe(sessionStart);
+		expect(account.session_request_count).toBe(5);
+	});
+
 	it("should reset session when both fixed duration and rate limit have expired for Anthropic accounts", () => {
 		const sessionStart = Date.now() - 6 * 60 * 60 * 1000;
 		const account = makeAccount({
