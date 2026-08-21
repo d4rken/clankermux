@@ -11,6 +11,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
+import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
 	type ContextWindowExcludedBackend,
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
@@ -103,6 +104,18 @@ export interface AdmissionGates {
 		} | null,
 	) => Account[];
 	applySoftDemotionReorder: (
+		candidates: Account[],
+		comboInfo?: {
+			slots: Array<{ accountId: string; modelOverride: string }>;
+		} | null,
+	) => Account[];
+	/**
+	 * Moves accounts a 429 already refused for this request's family to the back.
+	 * MUST be applied last, after every other gate and reorder — see the comment
+	 * on the implementation for why running it earlier lets a later partition
+	 * promote the refused account back to the front.
+	 */
+	applyFamilyMemoDemotion: (
 		candidates: Account[],
 		comboInfo?: {
 			slots: Array<{ accountId: string; modelOverride: string }>;
@@ -437,6 +450,64 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		return passed;
 	};
 
+	// 6c-bis. Family-weekly MEMO demotion — what a 429 already told us, applied
+	// as the LAST word on candidate order.
+	//
+	// The reactive rung learns "this account's weekly window for family F is
+	// spent" from a 429 and deliberately applies no account-wide cooldown, so
+	// without this the finding is lost: the proactive gate re-derives eligibility
+	// from a usage cache that still reports headroom, picks the same account, and
+	// earns the same 429 — eighteen times in seven minutes on 2026-08-17.
+	//
+	// DEMOTES, never excludes. The memo is inferred state, and the gates that run
+	// after the family gate can drop candidates of their own; an account removed
+	// here would shrink the pool those gates then filter, so a stale memo could
+	// empty it by proxy and produce a terminal — a false `context_window_exceeded`
+	// 400, say — that no upstream response asked for. Reordering cannot do that.
+	//
+	// Applied LAST, by every caller, for the reason `applySoftDemotionReorder`
+	// spells out above: stable partitions do not compose. Run before that reorder,
+	// this one's [K, M] can come back as [M, K] whenever liveness keeps the
+	// memo'd account and demotes the healthy sibling — promoting exactly the
+	// account a 429 just refused. Nothing may run after this.
+	//
+	// Combos are skipped for the same reason the soft reorder skips them: their
+	// slots are positional, and reordering desyncs the mapping.
+	const applyFamilyMemoDemotion = (
+		candidates: Account[],
+		comboInfo?: {
+			slots: Array<{ accountId: string; modelOverride: string }>;
+		} | null,
+	): Account[] => {
+		if (comboInfo) return candidates;
+		const now = Date.now();
+		const kept: Account[] = [];
+		const demoted: Account[] = [];
+		for (const account of candidates) {
+			const family =
+				account.provider === "anthropic"
+					? getModelFamily(effectiveRequestModel ?? "")
+					: null;
+			const resetAt = family
+				? getFamilyWeeklyExhaustedUntil(account.id, family, now)
+				: null;
+			if (resetAt !== null) {
+				demoted.push(account);
+				log.debug(
+					`Family-weekly memo: demoting "${account.name}" for family=${family} ` +
+						`(429-learned; usage cache reports headroom or is silent; ` +
+						`reset ${new Date(resetAt).toISOString()})`,
+				);
+				continue;
+			}
+			kept.push(account);
+		}
+		// Deliberately NOT recorded in `familyWeeklyExcludedAccounts`: that list is
+		// what the zero-accounts terminals report as the reason a request could not
+		// be served, and these accounts are still in the pool to be tried.
+		return demoted.length > 0 ? [...kept, ...demoted] : candidates;
+	};
+
 	// Why each demoted account was demoted, for the pre-attempt-loop DEBUG line.
 	// Rebuilt on every applySoftDemotionReorder() call so it always describes the
 	// order the attempt loop is actually about to follow (the strategy's own
@@ -618,6 +689,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		applyContextWindowGate,
 		applyFamilyWeeklyGate,
 		applySoftDemotionReorder,
+		applyFamilyMemoDemotion,
 		contextExcludedAccounts,
 		familyWeeklyExcludedAccounts,
 		get softDemotionReasons() {
