@@ -848,10 +848,16 @@ export function RateLimitProgress({
 								percentage ?? null,
 								now,
 							);
-				// A window sitting at 0% has nothing to warn about even if a stale
-				// prediction says otherwise, matching the tooltip's own 0% override.
-				const fillTone =
+				// The one tone every surface reads: the bar's fill, the hover tooltip
+				// and the inline line all derive from this, so none of them can
+				// disagree about how bad a window is. Null both when there is nothing
+				// to project and when the window sits at 0%, where even a stale
+				// prediction has nothing to warn about.
+				const displayTone =
 					projection && (percentage ?? 0) > 0 ? projection.tone : null;
+				const projectionTextClass = displayTone
+					? projectionToneClass(displayTone)
+					: "text-muted-foreground";
 
 				// Compact caption on a single row: window label (start), the reset
 				// status (center), utilization % (end). The reset status pairs the
@@ -911,13 +917,7 @@ export function RateLimitProgress({
 								>
 									<div className="mb-1 font-medium">{windowLabel} usage</div>
 									{projection && (
-										<div
-											className={
-												(percentage ?? 0) <= 0
-													? "text-muted-foreground"
-													: projectionToneClass(projection.tone)
-											}
-										>
+										<div className={projectionTextClass}>
 											{projection.message}
 										</div>
 									)}
@@ -927,7 +927,7 @@ export function RateLimitProgress({
 								value={isAvailable ? percentage : 0}
 								className="h-2"
 								indicatorClassName={projectionFillClass(
-									fillTone,
+									displayTone,
 									isWindowThrottled,
 								)}
 							/>
@@ -981,14 +981,7 @@ export function RateLimitProgress({
 							</span>
 						</div>
 						{inlineProjection && projection && (
-							<p
-								className={cn(
-									"text-xs",
-									(percentage ?? 0) <= 0
-										? "text-muted-foreground"
-										: projectionToneClass(projection.tone),
-								)}
-							>
+							<p className={cn("text-xs", projectionTextClass)}>
 								{projection.message}
 							</p>
 						)}

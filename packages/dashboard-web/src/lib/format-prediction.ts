@@ -3,8 +3,11 @@ import type { UsagePrediction } from "@clankermux/types";
 /**
  * Severity of a usage projection, keyed off what the projection actually means
  * rather than instantaneous pacing:
- *  - "danger":  the window will run out of quota before it resets, by a margin
- *               wide enough that the projection's own error cannot flip it.
+ *  - "danger":  the window has run out, or is projected to run out before it
+ *               resets by a margin wide enough that the projection's own error
+ *               cannot flip it. Having already run out is an observation rather
+ *               than an extrapolation, so it takes this tier with no margin
+ *               test — there is nothing left to be uncertain about.
  *  - "warning": the window is projected to run out early, but the claim rests on
  *               a thin margin or on the weaker of the two projection paths.
  *  - "safe":    the window resets before it would exhaust — the reassuring case.

@@ -521,6 +521,8 @@ describe("RateLimitProgress", () => {
 
 			expect(html).toContain("before reset");
 			expect(html).toContain("bg-destructive");
+			// The fill and the projection line read from one tone, so they agree.
+			expect(html).toContain("text-destructive-strong");
 			expect(html).toContain(PACE_TICK_COLOR);
 		});
 
@@ -537,7 +539,9 @@ describe("RateLimitProgress", () => {
 
 			expect(html).toContain("before reset");
 			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
 			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("text-destructive-strong");
 			expect(html).toContain(PACE_TICK_COLOR);
 		});
 
@@ -551,6 +555,54 @@ describe("RateLimitProgress", () => {
 
 			expect(html).toContain("before reset");
 			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("text-destructive-strong");
+		});
+
+		// The threshold is a fraction of the window, so it can only be wrong in a
+		// way a five-hour case would miss: a margin that is decisive over five hours
+		// is noise over seven days. This pins `computeWindowDurationMs` deriving the
+		// weekly length, not just the five-hour one.
+		it("holds a weekly window at amber for a margin that would be red at five hours", () => {
+			const now = Date.now();
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			const weeklyResetMs = now + 3 * 24 * HOUR;
+			const weeklyReset = new Date(weeklyResetMs).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						// Behind pace, so the 5-hour card contributes no fill class and
+						// every assertion below is about the weekly card.
+						five_hour: { utilization: 5, resets_at: fiveHourReset },
+						seven_day: { utilization: 70, resets_at: weeklyReset },
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+					prediction={{
+						fiveHour: undefined,
+						sevenDay: {
+							state: "rising",
+							slopePerHour: 1,
+							// Ten hours short of the reset: over 10% of a five-hour window,
+							// well under 10% of a seven-day one.
+							etaExhaustMs: weeklyResetMs - 10 * HOUR,
+							predictedAtReset: null,
+							resetsAtMs: weeklyResetMs,
+							willExhaustBeforeReset: true,
+							lowConfidence: false,
+						},
+					}}
+				/>,
+			);
+
+			expect(html).toContain("Runs out 10h 0m before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
 			expect(html).not.toContain("bg-destructive");
 		});
 

@@ -107,6 +107,21 @@ describe("formatPredictionMessage", () => {
 		).toMatchObject({ tone: "danger" });
 	});
 
+	// Pins the comparison as strictly-greater. A margin landing exactly on the
+	// threshold is the last amber one; `>=` would pass every other test here.
+	it("treats a margin exactly at the threshold as 'warning'", () => {
+		const reset = now + 3 * HOUR;
+		const eta = reset - 0.1 * FIVE_HOUR;
+		expect(
+			formatPredictionMessage(
+				pred({ etaExhaustMs: eta }),
+				reset,
+				now,
+				FIVE_HOUR,
+			),
+		).toMatchObject({ tone: "warning" });
+	});
+
 	it("scales the threshold with the window length", () => {
 		const reset = now + 3 * 24 * HOUR;
 		// Ten hours early is decisive on a five-hour window and noise on a weekly
