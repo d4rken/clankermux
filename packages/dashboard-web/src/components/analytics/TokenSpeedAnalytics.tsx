@@ -17,11 +17,11 @@ export function TokenSpeedAnalytics({
 	timeRange,
 }: TokenSpeedAnalyticsProps) {
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			{/* Output Speed Over Time — per-model trend lines */}
 			<Card>
 				<CardHeader>
-					<CardTitle className="flex items-center gap-2">
+					<CardTitle className="flex items-center gap-item">
 						<Activity className="h-5 w-5" />
 						Output Speed Over Time
 					</CardTitle>

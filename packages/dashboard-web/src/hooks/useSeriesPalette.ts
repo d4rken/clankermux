@@ -38,7 +38,7 @@ export interface SeriesPalette {
  *
  * Everything drawing a chart should take its colours from here rather than
  * importing MODEL_PALETTE directly, or it silently keeps the dark set under the
- * light directions.
+ * light mode.
  */
 export function useSeriesPalette(): SeriesPalette {
 	const mode = useColorMode();

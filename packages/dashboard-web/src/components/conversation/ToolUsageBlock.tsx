@@ -25,7 +25,7 @@ function ToolUsageBlockComponent({ toolName, input }: ToolUsageBlockProps) {
 	return (
 		<div className="p-3 bg-info/10 border border-info/25 rounded-lg">
 			<div className="flex items-center justify-between mb-1">
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-item">
 					<Terminal className="w-3 h-3 text-info" />
 					<span className="text-xs font-medium text-info">
 						Tool: {toolName}

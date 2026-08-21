@@ -2,7 +2,7 @@ import { Skeleton } from "./ui/skeleton";
 
 export function AnalyticsLoadingSkeleton() {
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			{/* Header */}
 			<div className="flex justify-between items-center">
 				<Skeleton className="h-8 w-32" />
@@ -10,14 +10,14 @@ export function AnalyticsLoadingSkeleton() {
 			</div>
 
 			{/* Controls */}
-			<div className="flex gap-4">
+			<div className="flex gap-group">
 				<Skeleton className="h-10 w-48" />
 				<Skeleton className="h-10 w-32" />
 				<Skeleton className="h-10 w-24" />
 			</div>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-group">
 				{Array.from({ length: 4 }, (_, i) => `metric-${i}`).map((key) => (
 					<div key={key} className="p-4 border rounded-lg">
 						<Skeleton className="h-6 w-24 mb-2" />
@@ -28,13 +28,13 @@ export function AnalyticsLoadingSkeleton() {
 			</div>
 
 			{/* Charts */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			<div className="grid grid-cols-1 lg:grid-cols-2 gap-section">
 				<Skeleton className="h-64 w-full" />
 				<Skeleton className="h-64 w-full" />
 			</div>
 
 			{/* Additional Charts */}
-			<div className="space-y-6">
+			<div className="space-y-section">
 				<Skeleton className="h-64 w-full" />
 				<Skeleton className="h-64 w-full" />
 			</div>

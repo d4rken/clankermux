@@ -89,7 +89,7 @@ export function MemoryUsageChart({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
+				<div className="flex items-center justify-between gap-group">
 					<div>
 						<CardTitle>Memory Usage</CardTitle>
 						<CardDescription>

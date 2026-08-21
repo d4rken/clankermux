@@ -39,7 +39,7 @@ function EmptyState({ loading }: { loading: boolean }) {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<Wrench className="h-5 w-5" />
 					Tool Errors
 				</CardTitle>
@@ -240,14 +240,14 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 				Most frequent error texts per tool — the actionable list for tuning
 				prompts and tool usage
 			</p>
-			<div className="space-y-2">
+			<div className="space-y-item">
 				{groups.map((group) => (
 					<details
 						key={group.toolName}
 						className="rounded-md border"
 						open={groups.length === 1}
 					>
-						<summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-sm hover:bg-muted/40">
+						<summary className="flex cursor-pointer items-center justify-between gap-item px-3 py-2 text-sm hover:bg-muted/40">
 							<span className="font-medium">{group.toolName}</span>
 							<Badge variant="outline">
 								{formatNumber(group.totalOccurrences)}{" "}
@@ -258,7 +258,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 							{group.messages.map((message) => (
 								<li
 									key={message.errorText}
-									className="flex items-start justify-between gap-3 border-b px-3 py-2 last:border-0"
+									className="flex items-start justify-between gap-row border-b px-3 py-2 last:border-0"
 								>
 									<code
 										className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
@@ -315,9 +315,9 @@ export function ToolErrorsPanel({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex flex-wrap items-start justify-between gap-3">
+				<div className="flex flex-wrap items-start justify-between gap-row">
 					<div>
-						<CardTitle className="flex items-center gap-2">
+						<CardTitle className="flex items-center gap-item">
 							<Wrench className="h-5 w-5" />
 							Tool Errors
 						</CardTitle>
@@ -332,7 +332,7 @@ export function ToolErrorsPanel({
 					</Badge>
 				</div>
 			</CardHeader>
-			<CardContent className="space-y-6">
+			<CardContent className="space-y-section">
 				<ToolErrorTable rows={toolCallErrors.byTool} />
 				<ErrorRateTrendChart
 					timeSeries={toolCallErrors.timeSeries}

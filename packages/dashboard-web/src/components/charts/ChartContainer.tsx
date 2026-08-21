@@ -30,7 +30,7 @@ export function ChartContainer({
 				className={`flex items-center justify-center ${className}`}
 				style={{ height: chartHeight }}
 			>
-				<div className="text-center space-y-2">
+				<div className="text-center space-y-item">
 					<p className="text-sm text-destructive-strong">
 						Error loading chart data
 					</p>

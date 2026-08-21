@@ -92,9 +92,9 @@ export function SpeedOverTimeChart({
 	};
 
 	return (
-		<div className="space-y-3">
+		<div className="space-y-row">
 			{allModels.length > 1 && (
-				<div className="flex flex-wrap gap-2">
+				<div className="flex flex-wrap gap-item">
 					{allModels.map((model) => (
 						<Button
 							key={model}

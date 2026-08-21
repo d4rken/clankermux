@@ -97,14 +97,14 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
+				<CardTitle className="flex items-center gap-item">
 					<Snowflake className="h-5 w-5" />
 					Live Status &amp; History
 				</CardTitle>
 			</CardHeader>
-			<CardContent className="space-y-4">
+			<CardContent className="space-y-group">
 				{/* Live headline tiles (cumulative since the last restart). */}
-				<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+				<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-row">
 					<StatTile label="Mode" value={modeLabel} />
 					<StatTile
 						label="Warm sessions"

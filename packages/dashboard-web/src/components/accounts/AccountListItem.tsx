@@ -168,10 +168,10 @@ export function AccountListItem({
 				!!onAutoApplyResetOnWeeklyLimitToggle));
 
 	return (
-		<div className="p-3 border rounded-lg transition-colors space-y-2 border-border hover:border-muted-foreground/50">
+		<div className="p-3 border rounded-lg transition-colors space-y-item border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
 				<div className="flex flex-col min-w-0">
-					<div className="flex items-center gap-2 min-w-0">
+					<div className="flex items-center gap-item min-w-0">
 						<p className="font-medium truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
 						<OAuthTokenStatusWithBoundary
@@ -181,13 +181,13 @@ export function AccountListItem({
 					</div>
 					<AccountIdentityLine account={account} className="truncate" />
 				</div>
-				<div className="flex items-center gap-1 shrink-0">
+				<div className="flex items-center gap-tight shrink-0">
 					{(account.provider === "anthropic" ||
 						account.provider === "codex") && (
 						<Button
 							variant="ghost"
 							size="sm"
-							className="h-8 gap-1 text-xs"
+							className="h-8 gap-tight text-xs"
 							disabled={isRefreshingUsage}
 							onClick={async () => {
 								setIsRefreshingUsage(true);
@@ -478,7 +478,7 @@ export function AccountListItem({
 				</div>
 			</div>
 			{isEditingNotes ? (
-				<div className="space-y-2">
+				<div className="space-y-item">
 					<Textarea
 						value={notesDraft}
 						onChange={(e) => setNotesDraft(e.target.value)}
@@ -486,7 +486,7 @@ export function AccountListItem({
 						disabled={isSavingNotes}
 						autoFocus
 					/>
-					<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
 						<Button
 							size="sm"
 							disabled={isSavingNotes}
@@ -516,7 +516,7 @@ export function AccountListItem({
 					</div>
 				</div>
 			) : account.notes ? (
-				<div className="flex items-center gap-1.5 text-sm text-muted-foreground min-w-0">
+				<div className="flex items-center gap-item text-sm text-muted-foreground min-w-0">
 					<StickyNote className="h-3.5 w-3.5 shrink-0" />
 					<span className="truncate" title={account.notes}>
 						{account.notes.split("\n")[0]}
@@ -536,7 +536,7 @@ export function AccountListItem({
 				</div>
 			) : null}
 			<AccountStatusChips account={account} status={status} />
-			<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+			<div className="flex flex-wrap items-center gap-x-row gap-y-tight text-sm">
 				<span>{presenter.requestCount} requests</span>
 				{presenter.activeSessionCount > 0 && (
 					<span className="text-muted-foreground">
@@ -586,7 +586,7 @@ export function AccountListItem({
 					<Button
 						variant="outline"
 						size="sm"
-						className="h-7 gap-1 text-xs"
+						className="h-7 gap-tight text-xs"
 						onClick={() => onForceResetRateLimit(account)}
 						title={
 							status.staleLockDetected

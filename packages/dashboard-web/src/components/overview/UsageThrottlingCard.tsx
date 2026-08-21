@@ -27,9 +27,9 @@ export function UsageThrottlingCard() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-4">
-					<div className="flex items-center justify-between gap-3">
-						<div className="space-y-1">
+				<div className="space-y-group">
+					<div className="flex items-center justify-between gap-row">
+						<div className="space-y-tight">
 							<div className="text-sm font-medium">5-hour window</div>
 							<div className="text-sm text-muted-foreground">
 								Throttle requests when 5-hour usage is ahead of its pacing line.
@@ -46,8 +46,8 @@ export function UsageThrottlingCard() {
 							}
 						/>
 					</div>
-					<div className="flex items-center justify-between gap-3">
-						<div className="space-y-1">
+					<div className="flex items-center justify-between gap-row">
+						<div className="space-y-tight">
 							<div className="text-sm font-medium">Weekly window</div>
 							<div className="text-sm text-muted-foreground">
 								Throttle requests when weekly usage is ahead of its pacing line.

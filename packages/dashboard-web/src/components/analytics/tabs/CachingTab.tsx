@@ -27,9 +27,9 @@ export function CachingTab({ range, onRangeChange }: CachingTabProps) {
 	});
 
 	return (
-		<div className="space-y-6">
-			<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
-				<div className="flex items-center gap-2 shrink-0">
+		<div className="space-y-section">
+			<div className="flex flex-col gap-row sm:flex-row sm:items-center sm:justify-end">
+				<div className="flex items-center gap-item shrink-0">
 					<span className="text-xs text-muted-foreground">Window</span>
 					<TimeRangeSelector
 						value={range}

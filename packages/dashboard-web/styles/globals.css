@@ -5,295 +5,62 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ══════════════════════════════════════════════════════════════════════════
-   THEME TOKENS
+   PAPER TERMINAL — the dashboard's theme.
 
-   Two independent axes:
+   Light and clinical: cool paper ground, ink type, one deep instrument teal,
+   hairline rules doing the work drop shadows used to. Density comes from
+   typography and a strict spacing scale rather than from boxes, because every
+   page here is figures first.
 
-     data-palette  classic | signal | foundry | paper |          (direction)
-                   ledger | blueprint | tape
-     .light/.dark  colour mode                          (unchanged behaviour)
+   This file briefly carried seven selectable directions behind a
+   `data-palette` attribute so they could be compared in the running app. That
+   axis is gone: Paper won, and a theme you cannot switch away from is a theme
+   whose values can actually be reasoned about. What survives from that work is
+   the ROLE discipline below, which is what made the comparison possible.
 
-   Every palette defines BOTH modes, so the mode toggle keeps working whichever
-   direction is selected. `classic` is the palette that shipped before the
-   directions existed and is the default when no attribute is set — an
-   unstyled/very-early paint therefore still gets a complete token set.
+   ── Colour roles ────────────────────────────────────────────────────────────
 
-   Token roles worth knowing before editing:
+   --primary          Brand and emphasis. Buttons, active nav, chart accents.
+   --accent           NOT a second brand colour. It is the hover/focus SURFACE,
+                      and its only consumers are dropdown and select items,
+                      ghost/outline buttons, and request rows
+                      (`hover:bg-accent`). Give it a saturated hue and every
+                      menu focus flashes. It belongs one step off --secondary.
+   --ring             Focus ring. The one place a saturated outline is wanted.
+   --surface-raised   Always opaque. Anything that floats above other content
+                      or occludes it — a dialog over its scrim, the debug
+                      panel, an SVG node label sitting on its own connector
+                      lines — uses this rather than --card.
 
-   --primary   The brand/emphasis colour. Buttons, active nav, chart accents.
-   --accent    NOT a second brand colour. It is the hover/focus SURFACE, and
-               its only consumers are dropdown-menu items, select items, ghost
-               and outline buttons, and request rows (`hover:bg-accent`).
-               Giving it a saturated hue makes every menu focus flash. It
-               belongs one step off --secondary.
-   --ring      Focus ring. Free to carry the brand hue; it is the one place a
-               saturated outline is wanted.
+   Semantic colour comes in TWO variants and they are not interchangeable:
 
-   Structure is a token too, not just colour: --card-border, --card-top-rule
-   and --card-pad decide whether a direction's panels read as BOXES or as
-   RULES, which is most of what separates Paper from Ledger.
+   --success          FILL hue, for a solid badge. Pairs with
+                      --success-foreground, which is a near-black/near-white
+                      partner rather than plain white: white on any of these
+                      mid-tones is well under 3:1.
+   --success-strong   TEXT hue, read against --card. What tinted chips
+                      (`bg-success/15 text-success-strong`) and status text
+                      use. Putting `-foreground` on a tint renders white text
+                      on a pale tint.
+
+   Same split for warning and destructive. theme-contrast.test.ts enforces all
+   of it in both colour modes.
+
+   ── Spacing and type ────────────────────────────────────────────────────────
+
+   Both are scales, defined once below. Do not invent intermediate values at
+   call sites: the whole point of a data-dense minimal layout is that vertical
+   rhythm is predictable, and one stray `gap-5` is visible.
    ══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Shared semantic scaffolding ──────────────────────────────────────────
-   warning/success carry a mid-tone value plus a near-black same-hue partner.
-   White on either shade is well under 3:1, which is why the -foreground half
-   is never simply #fff. Palettes below override the hue, never the pattern. */
-
 :root {
-	/* classic · light (the palette that shipped before this file grew axes) */
-	--background: hsl(0 0% 100%);
-	--foreground: hsl(240 10% 3.9%);
-	--card: hsl(0 0% 100%);
-	--card-foreground: hsl(240 10% 3.9%);
-	--popover: hsl(0 0% 100%);
-	--popover-foreground: hsl(240 10% 3.9%);
-	--primary: hsl(24 89% 56%); /* ClankerMux Orange #F38020 */
-	--primary-foreground: hsl(0 0% 100%);
-	--secondary: hsl(240 4.8% 95.9%);
-	--secondary-foreground: hsl(240 5.9% 10%);
-	--muted: hsl(240 4.8% 95.9%);
-	--muted-foreground: hsl(240 3.8% 46.1%);
-	/* Hover/focus surface — deliberately NOT --primary. See the role notes. */
-	--accent: hsl(240 4.8% 93.5%);
-	--accent-foreground: hsl(240 5.9% 10%);
-	--destructive: hsl(0 84.2% 60.2%);
-	--destructive-foreground: hsl(0 0% 98%);
-	--warning: oklch(68.1% 0.162 75.834);
-	--warning-foreground: oklch(21% 0.03 75.834);
-	--success: oklch(62.7% 0.194 149.214);
-	--success-foreground: oklch(21% 0.03 149.214);
-	--border: hsl(240 5.9% 90%);
-	--input: hsl(240 5.9% 90%);
-	--ring: hsl(24 89% 56%);
-	--radius: 0.375rem;
-	--card-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
-	--app-font-sans:
-		ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-	--app-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-	--app-font-display: var(--app-font-sans);
-	--display-tracking: -0.025em; /* matches Tailwind tracking-tight */
-	--display-transform: none;
-	--success-strong: #15803d;
-	--warning-strong: #a16207;
-	--destructive-strong: #b91c1c;
-	--info: #1d4ed8;
-	--info-foreground: #ffffff;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 1.5rem;
-	--surface-raised: hsl(0 0% 100%);
-}
-
-.dark {
-	/* classic · dark */
-	--background: hsl(220 13% 8%);
-	--foreground: hsl(0 0% 95%);
-	--card: hsl(220 13% 12%);
-	--card-foreground: hsl(0 0% 95%);
-	--popover: hsl(220 13% 12%);
-	--popover-foreground: hsl(0 0% 95%);
-	--primary: hsl(24 89% 56%);
-	--primary-foreground: hsl(0 0% 100%);
-	--secondary: hsl(220 13% 18%);
-	--secondary-foreground: hsl(0 0% 95%);
-	--muted: hsl(220 13% 18%);
-	--muted-foreground: hsl(220 9% 55%);
-	--accent: hsl(220 13% 21%);
-	--accent-foreground: hsl(0 0% 95%);
-	--destructive: hsl(0 84.2% 60.2%);
-	--destructive-foreground: hsl(0 0% 98%);
-	--warning: oklch(85.2% 0.199 91.936);
-	--warning-foreground: oklch(21% 0.03 91.936);
-	--success: oklch(79.2% 0.209 151.711);
-	--success-foreground: oklch(21% 0.03 151.711);
-	--border: hsl(220 13% 20%);
-	--input: hsl(220 13% 18%);
-	--ring: hsl(24 89% 56%);
-	--card-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.35);
-	--success-strong: #4ade80;
-	--warning-strong: #facc15;
-	--destructive-strong: #f87171;
-	--info: #7cb0f5;
-	--info-foreground: #0a1526;
-	--surface-raised: hsl(220 13% 12%);
-}
-
-/* ── A · SIGNAL ───────────────────────────────────────────────────────────
-   Instrument deck. Cold near-black with a blue-green bias, hairline borders
-   instead of shadows, 2px corners, every figure in mono. The cyan is
-   deliberately desaturated: it reads as "the thing you are looking at", and
-   success/warning/destructive keep the job of meaning state. */
-
-[data-palette="signal"] {
-	--background: #f4f8fa;
-	--foreground: #0d181d;
-	--card: #ffffff;
-	--card-foreground: #0d181d;
-	--popover: #ffffff;
-	--popover-foreground: #0d181d;
-	--primary: #10717f;
-	--primary-foreground: #ffffff;
-	--secondary: #e7eef1;
-	--secondary-foreground: #0d181d;
-	--muted: #e7eef1;
-	--muted-foreground: #56707a;
-	--accent: #dfe9ed;
-	--accent-foreground: #0d181d;
-	--destructive: #b3372e;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(66% 0.15 72);
-	--warning-foreground: oklch(21% 0.03 72);
-	--success: oklch(58% 0.14 160);
-	--success-foreground: oklch(98% 0.01 160);
-	--border: #d4e0e5;
-	--input: #d4e0e5;
-	--ring: #1591a4;
-	--radius: 2px;
-	--card-shadow: none;
-	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
-	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--display-tracking: 0.01em;
-	--display-transform: none;
-	--success-strong: #0f7a52;
-	--warning-strong: #8a5a09;
-	--destructive-strong: #b3372e;
-	--info: #0e6e8a;
-	--info-foreground: #ffffff;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 1.15rem;
-	--surface-raised: #ffffff;
-}
-
-[data-palette="signal"].dark {
-	--background: #0a0e11;
-	--foreground: #dee9ee;
-	--card: #0f151a;
-	--card-foreground: #dee9ee;
-	--popover: #0f151a;
-	--popover-foreground: #dee9ee;
-	--primary: #4fc3e8;
-	--primary-foreground: #06131a;
-	--secondary: #172127;
-	--secondary-foreground: #dee9ee;
-	--muted: #172127;
-	--muted-foreground: #71868f;
-	--accent: #1a262d;
-	--accent-foreground: #dee9ee;
-	--destructive: #e8635c;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(80% 0.13 78);
-	--warning-foreground: oklch(20% 0.03 78);
-	--success: oklch(76% 0.14 163);
-	--success-foreground: oklch(18% 0.03 163);
-	--border: #1e2a31;
-	--input: #1e2a31;
-	--ring: #4fc3e8;
-	--card-shadow: none;
-	--success-strong: #4fd8a6;
-	--warning-strong: #e0b155;
-	--destructive-strong: #f0857f;
-	--info: #7fd4f0;
-	--info-foreground: #06131a;
-	--surface-raised: #0f151a;
-}
-
-/* ── B · FOUNDRY ──────────────────────────────────────────────────────────
-   Warm industrial. Keeps the inherited orange but moves the ground from
-   blue-grey to charcoal so the hue sits in its own family instead of fighting
-   a cold background. --warning is pushed toward yellow (hue ~95 rather than
-   ~76) because amber and this orange are otherwise hard to tell apart on a
-   warm ground. */
-
-[data-palette="foundry"] {
-	--background: #f7f3ee;
-	--foreground: #1c1611;
-	--card: #ffffff;
-	--card-foreground: #1c1611;
-	--popover: #ffffff;
-	--popover-foreground: #1c1611;
-	--primary: #c1490b;
-	--primary-foreground: #ffffff;
-	--secondary: #efe8df;
-	--secondary-foreground: #1c1611;
-	--muted: #efe8df;
-	--muted-foreground: #6e6152;
-	--accent: #e9e0d4;
-	--accent-foreground: #1c1611;
-	--destructive: #a83226;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(64% 0.14 95);
-	--warning-foreground: oklch(21% 0.03 95);
-	--success: oklch(57% 0.12 140);
-	--success-foreground: oklch(98% 0.01 140);
-	--border: #e3d9cd;
-	--input: #e3d9cd;
-	--ring: #e2620f;
-	--radius: 2px;
-	--card-shadow: none;
-	--app-font-sans: "Saira", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "Spline Sans Mono", ui-monospace, SFMono-Regular, monospace;
-	--app-font-display: "Saira Condensed", "Saira", ui-sans-serif, sans-serif;
-	--display-tracking: 0.03em;
-	--display-transform: uppercase;
-	--success-strong: #3f7a3f;
-	--warning-strong: #86660c;
-	--destructive-strong: #a83226;
-	--info: #2c6e8f;
-	--info-foreground: #ffffff;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 1.25rem;
-	--surface-raised: #ffffff;
-}
-
-[data-palette="foundry"].dark {
-	--background: #151210;
-	--foreground: #f0e8e0;
-	--card: #211c18;
-	--card-foreground: #f0e8e0;
-	--popover: #211c18;
-	--popover-foreground: #f0e8e0;
-	--primary: #f2691c;
-	--primary-foreground: #1a0e06;
-	--secondary: #2a2420;
-	--secondary-foreground: #f0e8e0;
-	--muted: #2a2420;
-	--muted-foreground: #9a897a;
-	--accent: #322b25;
-	--accent-foreground: #f0e8e0;
-	--destructive: #d2564a;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(84% 0.15 98);
-	--warning-foreground: oklch(21% 0.03 98);
-	--success: oklch(76% 0.14 140);
-	--success-foreground: oklch(19% 0.03 140);
-	--border: #342c25;
-	--input: #342c25;
-	--ring: #f2691c;
-	--card-shadow: none;
-	--success-strong: #97c46e;
-	--warning-strong: #e6c35f;
-	--destructive-strong: #e8837a;
-	--info: #9fc4d9;
-	--info-foreground: #1a0e06;
-	--surface-raised: #211c18;
-}
-
-/* ── C · PAPER TERMINAL ───────────────────────────────────────────────────
-   Light and clinical: cool paper ground, ink type, one deep instrument teal,
-   hairline rules doing the work cards do elsewhere. Density comes from
-   typography rather than boxes, which is why this palette pairs a serif
-   display face with a tabular mono. */
-
-[data-palette="paper"] {
 	--background: #eef1f2;
 	--foreground: #0f1a20;
 	--card: #ffffff;
 	--card-foreground: #0f1a20;
 	--popover: #ffffff;
 	--popover-foreground: #0f1a20;
+	--surface-raised: #ffffff;
 	--primary: #0f6d74;
 	--primary-foreground: #ffffff;
 	--secondary: #e4eaec;
@@ -304,38 +71,60 @@
 	--accent-foreground: #0f1a20;
 	--destructive: #a82b22;
 	--destructive-foreground: #ffffff;
+	--destructive-strong: #a82b22;
 	--warning: oklch(60% 0.13 75);
 	--warning-foreground: oklch(98% 0.01 75);
+	--warning-strong: #8a5d00;
 	--success: oklch(52% 0.12 155);
 	--success-foreground: oklch(98% 0.01 155);
+	--success-strong: #14663f;
+	--info: #0f5b87;
+	--info-foreground: #ffffff;
 	--border: #d9e0e2;
 	--input: #d9e0e2;
 	--ring: #0f6d74;
+
+	/* Geometry. 3px reads as "machined" without becoming a pill; anything
+	   larger starts to look like a consumer app rather than an instrument. */
 	--radius: 3px;
 	--card-shadow: none;
+	--card-border: 1px solid var(--border);
+	--card-pad: 1.25rem;
+
+	/* Type. A serif display face against a humanist sans and a tabular mono:
+	   headings read as typography, figures read as data, and the two never get
+	   confused for each other. */
 	--app-font-sans: "Karla", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 	--app-font-display: "Fraunces", Georgia, "Times New Roman", serif;
 	--display-tracking: -0.015em;
-	--display-transform: none;
-	--success-strong: #14663f;
-	--warning-strong: #8a5d00;
-	--destructive-strong: #a82b22;
-	--info: #0f5b87;
-	--info-foreground: #ffffff;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 1.2rem;
-	--surface-raised: #ffffff;
+
+	/* Rhythm. Five steps, and every gap and stack in the app is one of them.
+	   Each value is the one already dominant at that role before the scale
+	   existed, so naming them was a rename rather than a re-measure — the
+	   inconsistency was never the values themselves, it was that nine of them
+	   were in use and nothing said which meant what.
+
+	     tight    binds a label to the value it labels, an icon to its text
+	     item     separates rows inside a panel
+	     row      separates inline clusters — button groups, chip rows
+	     group    separates related panels inside one page block
+	     section  separates top-level page blocks */
+	--space-tight: 0.25rem;
+	--space-item: 0.5rem;
+	--space-row: 0.75rem;
+	--space-group: 1rem;
+	--space-section: 1.5rem;
 }
 
-[data-palette="paper"].dark {
+.dark {
 	--background: #10171a;
 	--foreground: #e8eff1;
 	--card: #172125;
 	--card-foreground: #e8eff1;
 	--popover: #172125;
 	--popover-foreground: #e8eff1;
+	--surface-raised: #172125;
 	--primary: #4fb8be;
 	--primary-foreground: #04191b;
 	--secondary: #1d282c;
@@ -346,273 +135,19 @@
 	--accent-foreground: #e8eff1;
 	--destructive: #e0685e;
 	--destructive-foreground: #ffffff;
+	--destructive-strong: #ec8a80;
 	--warning: oklch(82% 0.14 80);
 	--warning-foreground: oklch(20% 0.03 80);
+	--warning-strong: #e3bd6a;
 	--success: oklch(76% 0.13 158);
 	--success-foreground: oklch(18% 0.03 158);
+	--success-strong: #62c79a;
+	--info: #7fc4e0;
+	--info-foreground: #04191b;
 	--border: #26343a;
 	--input: #26343a;
 	--ring: #4fb8be;
 	--card-shadow: none;
-	--success-strong: #62c79a;
-	--warning-strong: #e3bd6a;
-	--destructive-strong: #ec8a80;
-	--info: #7fc4e0;
-	--info-foreground: #04191b;
-	--surface-raised: #172125;
-}
-
-/* ── D · LEDGER ───────────────────────────────────────────────────────────
-   Paper with the boxes taken away. No panel is a card: separation is one rule
-   plus a column of whitespace, the way a printed statement separates its
-   sections. The accent is near-black, so colour appears only where a number
-   means something is wrong — which is why `--primary` here is ink rather than
-   a hue, and the semantic roles do all the talking. Densest of the light
-   directions. */
-
-[data-palette="ledger"] {
-	--background: #f2f1ed;
-	--foreground: #16150f;
-	--card: transparent;
-	--card-foreground: #16150f;
-	--popover: #faf9f6;
-	--popover-foreground: #16150f;
-	--primary: #1f1e17;
-	--primary-foreground: #f7f6f2;
-	--secondary: #e6e5dd;
-	--secondary-foreground: #16150f;
-	--muted: #e6e5dd;
-	--muted-foreground: #63625a;
-	--accent: #e2e1d8;
-	--accent-foreground: #16150f;
-	--destructive: #96271c;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(62% 0.12 82);
-	--warning-foreground: oklch(98% 0.01 82);
-	--success: oklch(50% 0.1 145);
-	--success-foreground: oklch(98% 0.01 145);
-	--border: #d3d2cb;
-	--input: #cbcac1;
-	--ring: #16150f;
-	--radius: 0px;
-	--card-shadow: none;
-	--card-border: 0 solid transparent;
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 0.9rem 0 1rem;
-	--app-font-sans: "Karla", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
-	--app-font-display: "Karla", ui-sans-serif, system-ui, sans-serif;
-	--display-tracking: 0.08em;
-	--display-transform: uppercase;
-	--success-strong: #2f5d33;
-	--warning-strong: #7a5a0b;
-	--destructive-strong: #96271c;
-	--info: #2f4f7a;
-	--info-foreground: #ffffff;
-	--surface-raised: #faf9f6;
-}
-
-[data-palette="ledger"].dark {
-	--background: #14140f;
-	--foreground: #eae8dd;
-	--card: transparent;
-	--card-foreground: #eae8dd;
-	--popover: #1e1e17;
-	--popover-foreground: #eae8dd;
-	--primary: #eae8dd;
-	--primary-foreground: #14140f;
-	--secondary: #23231b;
-	--secondary-foreground: #eae8dd;
-	--muted: #23231b;
-	--muted-foreground: #8d8b7e;
-	--accent: #292921;
-	--accent-foreground: #eae8dd;
-	--destructive: #d4675a;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(82% 0.13 85);
-	--warning-foreground: oklch(20% 0.03 85);
-	--success: oklch(74% 0.12 145);
-	--success-foreground: oklch(18% 0.03 145);
-	--border: #33322a;
-	--input: #33322a;
-	--ring: #eae8dd;
-	--card-shadow: none;
-	--success-strong: #8fbe84;
-	--warning-strong: #dbb75f;
-	--destructive-strong: #e8887c;
-	--info: #9db4d6;
-	--info-foreground: #101820;
-	--surface-raised: #1e1e17;
-}
-
-/* ── E · BLUEPRINT ────────────────────────────────────────────────────────
-   Cool drafting paper. A faint grid sits behind the content area (see
-   .blueprint-grid below) so panels rest ON a surface rather than floating,
-   which is the grouping work Ledger asks whitespace to do alone. Drafting-ink
-   blue, and every figure set in a technical mono. */
-
-[data-palette="blueprint"] {
-	--background: #eaeef1;
-	--foreground: #12222e;
-	--card: #fbfcfd;
-	--card-foreground: #12222e;
-	--popover: #fbfcfd;
-	--popover-foreground: #12222e;
-	--primary: #1a4e8a;
-	--primary-foreground: #ffffff;
-	--secondary: #dfe7ed;
-	--secondary-foreground: #12222e;
-	--muted: #dfe7ed;
-	--muted-foreground: #566d7e;
-	--accent: #dae4ec;
-	--accent-foreground: #12222e;
-	--destructive: #9c2f2f;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(62% 0.12 78);
-	--warning-foreground: oklch(98% 0.01 78);
-	--success: oklch(53% 0.11 160);
-	--success-foreground: oklch(98% 0.01 160);
-	--border: #c9d5dd;
-	--input: #c9d5dd;
-	--ring: #1a4e8a;
-	--radius: 1px;
-	--card-shadow: none;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 1.1rem;
-	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
-	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--display-tracking: 0.04em;
-	--display-transform: uppercase;
-	--success-strong: #1c5e4a;
-	--warning-strong: #7e5a12;
-	--destructive-strong: #9c2f2f;
-	--info: #1a4e8a;
-	--info-foreground: #ffffff;
-	--grid-line: #d5e0e8;
-	--surface-raised: #fbfcfd;
-}
-
-[data-palette="blueprint"].dark {
-	--background: #0d1620;
-	--foreground: #dbe6ef;
-	--card: #131f2b;
-	--card-foreground: #dbe6ef;
-	--popover: #131f2b;
-	--popover-foreground: #dbe6ef;
-	--primary: #6aa9e8;
-	--primary-foreground: #08131d;
-	--secondary: #1a2836;
-	--secondary-foreground: #dbe6ef;
-	--muted: #1a2836;
-	--muted-foreground: #7d94a9;
-	--accent: #1f2f3f;
-	--accent-foreground: #dbe6ef;
-	--destructive: #e0706b;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(82% 0.13 80);
-	--warning-foreground: oklch(20% 0.03 80);
-	--success: oklch(76% 0.13 162);
-	--success-foreground: oklch(18% 0.03 162);
-	--border: #24374a;
-	--input: #24374a;
-	--ring: #6aa9e8;
-	--card-shadow: none;
-	--success-strong: #63c9a4;
-	--warning-strong: #e2bb68;
-	--destructive-strong: #ef8c86;
-	--info: #8fc0ee;
-	--info-foreground: #08131d;
-	--grid-line: #17293a;
-	--surface-raised: #131f2b;
-}
-
-/* ── F · TAPE ─────────────────────────────────────────────────────────────
-   A dense dark trading terminal. Near-black with a blue bias, the tightest
-   padding of any direction, mono figures everywhere, and one electric accent.
-
-   The accent is deliberately BLUE: on a terminal, green and red are
-   load-bearing — they mean up and down — so an accent in either would compete
-   with the only colours on screen that carry data. Everything decorative is
-   given up so the numbers can be the brightest thing. */
-
-[data-palette="tape"] {
-	--background: #f4f6f8;
-	--foreground: #0b1119;
-	--card: #ffffff;
-	--card-foreground: #0b1119;
-	--popover: #ffffff;
-	--popover-foreground: #0b1119;
-	--primary: #1d62c7;
-	--primary-foreground: #ffffff;
-	--secondary: #e6eaf0;
-	--secondary-foreground: #0b1119;
-	--muted: #e6eaf0;
-	--muted-foreground: #566277;
-	--accent: #dfe5ed;
-	--accent-foreground: #0b1119;
-	--destructive: #a52a2a;
-	--destructive-foreground: #ffffff;
-	--warning: oklch(62% 0.13 74);
-	--warning-foreground: oklch(98% 0.01 74);
-	--success: oklch(52% 0.12 150);
-	--success-foreground: oklch(98% 0.01 150);
-	--border: #d2d9e2;
-	--input: #d2d9e2;
-	--ring: #1d62c7;
-	--radius: 2px;
-	--card-shadow: none;
-	--card-border: 1px solid var(--border);
-	--card-top-rule: 1px solid var(--border);
-	--card-pad: 0.75rem;
-	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
-	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
-	--display-tracking: 0.02em;
-	--display-transform: none;
-	--success-strong: #12724a;
-	--warning-strong: #855408;
-	--destructive-strong: #a52a2a;
-	--info: #1d62c7;
-	--info-foreground: #ffffff;
-	--surface-raised: #ffffff;
-}
-
-[data-palette="tape"].dark {
-	--background: #08090c;
-	--foreground: #e4e8ef;
-	--card: #0e1015;
-	--card-foreground: #e4e8ef;
-	--popover: #0e1015;
-	--popover-foreground: #e4e8ef;
-	--primary: #4c9eff;
-	--primary-foreground: #03080f;
-	--secondary: #161a22;
-	--secondary-foreground: #e4e8ef;
-	--muted: #161a22;
-	--muted-foreground: #78839a;
-	--accent: #1a1f29;
-	--accent-foreground: #e4e8ef;
-	--destructive: #f26d6d;
-	/* Near-black rather than white: on a dark ground the destructive fill is a
-	   light salmon, and white on it is 2.92:1. Same pairing logic the warning
-	   and success fills already use in every dark mode. */
-	--destructive-foreground: #1a0708;
-	--warning: oklch(83% 0.14 76);
-	--warning-foreground: oklch(20% 0.03 76);
-	--success: oklch(78% 0.16 152);
-	--success-foreground: oklch(16% 0.03 152);
-	--border: #1b1f27;
-	--input: #1b1f27;
-	--ring: #4c9eff;
-	--card-shadow: none;
-	--success-strong: #4ee39b;
-	--warning-strong: #e9b45c;
-	--destructive-strong: #ff8b8b;
-	--info: #7ab8ff;
-	--info-foreground: #03080f;
-	--surface-raised: #0e1015;
 }
 
 @theme inline {
@@ -622,6 +157,8 @@
 	--color-card-foreground: var(--card-foreground);
 	--color-popover: var(--popover);
 	--color-popover-foreground: var(--popover-foreground);
+	/* See the role notes: floating and occluding surfaces cannot use --card. */
+	--color-surface-raised: var(--surface-raised);
 	--color-primary: var(--primary);
 	--color-primary-foreground: var(--primary-foreground);
 	--color-secondary: var(--secondary);
@@ -632,61 +169,44 @@
 	--color-accent-foreground: var(--accent-foreground);
 	--color-destructive: var(--destructive);
 	--color-destructive-foreground: var(--destructive-foreground);
-	/* Registered like destructive so Tailwind generates the opacity modifiers
-	   (bg-warning/10, border-warning/30, …). A hand-written .bg-warning rule
-	   cannot: Tailwind v4 only emits `<utility>-<color>/<alpha>` for colors that
-	   exist in the theme. */
+	/* Registered as real theme colours so Tailwind emits the opacity modifiers
+	   (`bg-warning/10`, `border-warning/30`). A hand-written .bg-warning rule
+	   cannot: v4 only generates `<utility>-<color>/<alpha>` for theme colours. */
 	--color-warning: var(--warning);
 	--color-warning-foreground: var(--warning-foreground);
-	/* Same reason as warning: `bg-success/10` only exists once `success` is a
-	   real theme color. */
 	--color-success: var(--success);
 	--color-success-foreground: var(--success-foreground);
-	--color-border: var(--border);
-	--color-input: var(--input);
-	--color-ring: var(--ring);
-	/* Informational callouts ("here is your device code", tool-usage blocks)
-	   used to be hardcoded blue-50/blue-900 pairs, which never followed a theme
-	   change. `info` is its own hue rather than an alias of --primary: primary is
-	   picked to carry the brand on a BUTTON, and classic's orange is only 2.65:1
-	   on white, so aliasing it made 12px info text less legible than the
-	   blue-600 it replaced. */
-	/* Always opaque, whatever --card is doing.
-	   A panel that floats above other content — a confirmation dialog over its
-	   scrim, the debug panel over the page, an SVG node label sitting on top of
-	   its own connector lines — cannot use --card, because a direction that
-	   separates panels with rules instead of boxes sets --card to transparent
-	   and the content behind shows straight through. */
-	--color-surface-raised: var(--surface-raised);
-	--color-info: var(--info);
-	--color-info-foreground: var(--info-foreground);
-	/* On-surface text variants of the semantic roles.
-	   --success/--warning/--destructive are FILL hues, paired with a
-	   *-foreground for solid badges. On a 10-15% tint the fill hue's partner is
-	   the wrong colour entirely (white on a pale tint), and the fill hue itself
-	   is often too light to read as 12px text. `*-strong` is the same semantic
-	   tuned for text on --card, and is what tinted chips and status text use.
-	   Enforced by theme-contrast.test.ts. */
 	--color-success-strong: var(--success-strong);
 	--color-warning-strong: var(--warning-strong);
 	--color-destructive-strong: var(--destructive-strong);
-	/* Clamped at 0: the directions set --radius to 2-3px, and a bare
-	   `calc(2px - 4px)` yields -2px. A negative border-radius makes the whole
-	   declaration invalid, so `rounded-sm` would silently stop applying rather
-	   than resolve to a square corner. */
-	--radius-sm: max(0px, calc(var(--radius) - 4px));
-	--radius-md: max(0px, calc(var(--radius) - 2px));
+	--color-info: var(--info);
+	--color-info-foreground: var(--info-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	/* Clamped at 0: --radius is 3px, and a bare calc(3px - 4px) is a negative
+	   border-radius, which invalidates the declaration rather than squaring the
+	   corner. */
+	--radius-sm: max(0px, calc(var(--radius) - 2px));
+	--radius-md: var(--radius);
 	--radius-lg: var(--radius);
-	--radius-xl: calc(var(--radius) + 4px);
-	/* Per-palette so a direction can be shadowless without every Card needing
-	   a variant. `classic` keeps its 1px lift; the three directions set none. */
+	--radius-xl: calc(var(--radius) + 3px);
+
 	--shadow-card: var(--card-shadow);
-	/* Typeface is part of a direction, not a global constant. Registering the
-	   families here is what makes `font-sans`/`font-mono`/`font-display` follow
-	   the selected palette. */
+
 	--font-sans: var(--app-font-sans);
 	--font-mono: var(--app-font-mono);
 	--font-display: var(--app-font-display);
+
+	/* The rhythm scale, exposed as spacing so `gap-section`, `space-y-group`,
+	   `p-item` and friends exist as real utilities. */
+	--spacing-tight: var(--space-tight);
+	--spacing-item: var(--space-item);
+	--spacing-row: var(--space-row);
+	--spacing-group: var(--space-group);
+	--spacing-section: var(--space-section);
+
 	--animate-accordion-down: accordion-down 0.2s ease-out;
 	--animate-accordion-up: accordion-up 0.2s ease-out;
 
@@ -713,19 +233,19 @@
 	* {
 		@apply border-border outline-ring/50;
 	}
+
 	body {
 		@apply bg-background text-foreground antialiased;
 		font-feature-settings:
 			"rlig" 1,
 			"calt" 1;
 		/* Proportional figures make every live counter jitter as it updates, and
-		   this dashboard updates constantly. Lining figures become the default
-		   everywhere rather than being opted into per site; prose is unaffected
-		   because it has no digit columns to misalign. */
+		   this dashboard updates constantly. Lining figures are the default
+		   everywhere rather than an opt-in; prose is unaffected because it has no
+		   digit columns to misalign. */
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* Custom scrollbar */
 	::-webkit-scrollbar {
 		width: 10px;
 		height: 10px;
@@ -743,72 +263,104 @@
 		@apply bg-muted-foreground/30;
 	}
 
-	/* Charts custom styling */
 	.recharts-surface {
 		overflow: visible;
 	}
 
-	/* Glass morphism effects */
 	.glass {
 		@apply bg-background/80 backdrop-blur-md;
 	}
 
-	/* Gradient text. Derived from the palette rather than pinned to the
-	   Cloudflare orange, so it follows whichever direction is selected. */
-	.gradient-text {
-		background: linear-gradient(
-			135deg,
-			var(--primary) 0%,
-			color-mix(in oklab, var(--primary) 62%, var(--foreground)) 100%
-		);
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		background-clip: text;
-	}
-
-	/* Card hover: a border shift, not a lift. On a page whose job is reporting
-	   throttling state, geometry that moves under the cursor reads as noise. */
-	.card-hover {
-		@apply transition-colors duration-200 hover:border-primary/40;
-	}
-
-	/* Panel geometry, driven by tokens so a direction can be boxes or rules.
-	   Written as base-layer rules rather than Tailwind arbitrary values because
-	   `border-(--x)` in v4 resolves to border-COLOR and would drop the width.
-	   Base rules also lose to utilities, so a caller passing `p-4` still wins. */
+	/* Panel geometry. Written as base-layer rules rather than Tailwind
+	   arbitrary values because `border-(--x)` in v4 resolves to border-COLOR
+	   and would drop the width half of the shorthand. Base rules also lose to
+	   utilities, so a caller passing `p-4` still overrides. */
 	.surface-edge {
 		border: var(--card-border);
-		border-top: var(--card-top-rule);
 	}
 
 	.surface-pad {
 		padding: var(--card-pad);
 	}
 
-	/* Blueprint's drafting grid. Sits only behind the main content column, and
-	   only for that palette — every other direction leaves --grid-line unset,
-	   and the rule is skipped entirely rather than painting a transparent grid. */
-	[data-palette="blueprint"] .content-surface {
-		background-image:
-			linear-gradient(var(--grid-line) 1px, transparent 1px),
-			linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-		background-size: 22px 22px;
-		background-position: -1px -1px;
-	}
-
-	/* Headings that should take the palette's display face. Foundry sets
-	   uppercase and wide tracking here; signal and paper leave it alone. */
+	/* Section and panel headings take the display serif. Applied by CardTitle
+	   and the page header rather than sprinkled at call sites. */
 	.display-face {
 		font-family: var(--app-font-display);
 		letter-spacing: var(--display-tracking);
-		text-transform: var(--display-transform);
+	}
+
+	/* The one label style. Uppercase micro-caps in the sans, for column heads,
+	   panel eyebrows and metric labels — anything naming a value rather than
+	   being one. Replaces a dozen hand-rolled
+	   `text-xs uppercase tracking-wide text-muted-foreground` variants. */
+	.label-caps {
+		font-size: 0.6875rem;
+		line-height: 1.2;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+
+	/* ── Type scale ────────────────────────────────────────────────────────
+	   Three roles, and they must not borrow each other's sizes. Before this
+	   existed, `text-2xl font-bold` was doing duty as BOTH the page title and
+	   the headline metric numbers — so a heading and a measurement shared a
+	   size, weight and family, which is precisely what makes a data-dense
+	   layout read as undesigned. */
+
+	/* Page heading. The only display-serif line on a page. */
+	.page-title {
+		font-family: var(--app-font-display);
+		font-size: 1.5rem;
+		line-height: 1.15;
+		font-weight: 600;
+		letter-spacing: var(--display-tracking);
+	}
+
+	/* Figures: anything that is a measurement rather than prose. Mono and
+	   tabular, so columns line up and nothing jitters on update. */
+	.figure {
+		font-family: var(--app-font-mono);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* The headline number on a metric tile. Deliberately lighter than the old
+	   `font-bold`: at this size the mono face carries enough weight on its own,
+	   and bold made every tile shout at the same volume. */
+	.figure-xl {
+		font-family: var(--app-font-mono);
+		font-variant-numeric: tabular-nums;
+		font-size: 1.5rem;
+		/* An exact 1.75rem rather than a ratio: the loading skeleton that stands
+		   in for this number is `h-7`, and a fractional line box would let the
+		   tile change height the moment real data arrives. */
+		line-height: 1.75rem;
+		font-weight: 500;
+		letter-spacing: -0.02em;
+	}
+
+	/* Secondary figures: panel totals and inline measurements. */
+	.figure-lg {
+		font-family: var(--app-font-mono);
+		font-variant-numeric: tabular-nums;
+		font-size: 1.125rem;
+		line-height: 1.5rem; /* = h-6, same skeleton reasoning as figure-xl */
+		font-weight: 500;
+		letter-spacing: -0.01em;
+	}
+
+	/* Card hover is a border shift, not a lift: geometry that moves under the
+	   cursor is noise on a page reporting throttling state. */
+	.card-hover {
+		@apply transition-colors duration-200 hover:border-primary/40;
 	}
 
 	/* Theme switching used to be smoothed by a global
-	   `* { transition: background-color, border-color }`, which put a transition
-	   on every node in the app and made ordinary hovers feel a beat late. It is
-	   now armed only while a palette or mode change is applied, then disarmed
-	   (see theme-context). */
+	   `* { transition: … }`, which put a transition on every node in the app and
+	   made ordinary hovers feel a beat late. It is armed only while a mode
+	   change is applied, then disarmed (see theme-context). */
 	html.theme-switching,
 	html.theme-switching * {
 		transition:

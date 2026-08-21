@@ -36,7 +36,7 @@ export function SortHeaderButton({
 		<button
 			type="button"
 			onClick={onClick}
-			className="inline-flex items-center gap-1 hover:text-foreground text-muted-foreground"
+			className="inline-flex items-center gap-tight hover:text-foreground text-muted-foreground"
 		>
 			{label} <SortIcon active={active} dir={dir} />
 		</button>

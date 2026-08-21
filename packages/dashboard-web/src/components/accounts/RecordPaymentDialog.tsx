@@ -89,8 +89,8 @@ export function RecordPaymentDialog({
 						this for credit purchases or missed renewals.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-4 py-4">
-					<div className="grid grid-cols-4 items-center gap-4">
+				<div className="grid gap-group py-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="payment-kind" className="text-right">
 							Kind
 						</Label>
@@ -109,7 +109,7 @@ export function RecordPaymentDialog({
 							</SelectContent>
 						</Select>
 					</div>
-					<div className="grid grid-cols-4 items-center gap-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="payment-date" className="text-right">
 							Date
 						</Label>
@@ -121,7 +121,7 @@ export function RecordPaymentDialog({
 							className="col-span-3"
 						/>
 					</div>
-					<div className="grid grid-cols-4 items-center gap-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="payment-amount" className="text-right">
 							Amount USD
 						</Label>
@@ -136,7 +136,7 @@ export function RecordPaymentDialog({
 							className="col-span-3"
 						/>
 					</div>
-					<div className="grid grid-cols-4 items-center gap-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="payment-notes" className="text-right">
 							Notes
 						</Label>

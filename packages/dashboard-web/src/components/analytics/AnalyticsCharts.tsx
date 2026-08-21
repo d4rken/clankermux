@@ -182,8 +182,8 @@ export function MainMetricsChart({
 								: "Request volume and performance metrics over time"}
 						</CardDescription>
 					</div>
-					<div className="flex items-center gap-4">
-						<div className="flex items-center gap-2">
+					<div className="flex items-center gap-group">
+						<div className="flex items-center gap-item">
 							<Switch
 								id="model-breakdown"
 								checked={modelBreakdown}
@@ -446,12 +446,12 @@ export function TokenUsageBreakdown({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-4">
+				<div className="space-y-group">
 					{tokenBreakdown.map((item, index) => (
 						<div key={item.type}>
 							<div className="flex items-center justify-between mb-2">
 								<span className="text-sm font-medium">{item.type}</span>
-								<div className="flex items-center gap-2">
+								<div className="flex items-center gap-item">
 									<span className="text-sm text-muted-foreground">
 										{formatTokens(item.value)} tokens
 									</span>
@@ -505,9 +505,7 @@ export function CumulativeGrowthChart({
 	return (
 		<Card className="bg-gradient-to-br from-background to-muted/10 border-muted">
 			<CardHeader>
-				<CardTitle className="text-2xl font-bold">
-					Cumulative Growth Analysis
-				</CardTitle>
+				<CardTitle>Cumulative Growth Analysis</CardTitle>
 				<CardDescription>
 					Token usage vs. cost accumulation over time
 				</CardDescription>

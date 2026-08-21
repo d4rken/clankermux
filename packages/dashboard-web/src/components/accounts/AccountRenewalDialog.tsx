@@ -109,8 +109,8 @@ export function AccountRenewalDialog({
 						when it is imminent.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-4 py-4">
-					<div className="grid grid-cols-4 items-center gap-4">
+				<div className="grid gap-group py-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-anchor" className="text-right">
 							Date
 						</Label>
@@ -122,7 +122,7 @@ export function AccountRenewalDialog({
 							className="col-span-3"
 						/>
 					</div>
-					<div className="grid grid-cols-4 items-center gap-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-cadence" className="text-right">
 							Repeats
 						</Label>
@@ -140,7 +140,7 @@ export function AccountRenewalDialog({
 							</SelectContent>
 						</Select>
 					</div>
-					<div className="grid grid-cols-4 items-center gap-4">
+					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-price" className="text-right">
 							Price USD
 						</Label>

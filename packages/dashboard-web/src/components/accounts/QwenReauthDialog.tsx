@@ -107,7 +107,7 @@ export function QwenReauthDialog({
 					    Radix's `aria-describedby` announces it when the dialog opens, and
 					    a description rendered as the default `<p>` cannot contain it. */}
 					<DialogDescription asChild>
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<AccountIdentityPanel account={account} />
 							<span className="block">
 								All account metadata (usage stats, priority, settings) will be
@@ -126,12 +126,12 @@ export function QwenReauthDialog({
 					)}
 
 					{step === "pending" && (
-						<div className="space-y-3">
+						<div className="space-y-row">
 							<p className="text-sm text-muted-foreground">
 								Waiting for authorization in browser...
 							</p>
 							{userCode && (
-								<div className="flex items-center gap-2">
+								<div className="flex items-center gap-item">
 									<span className="text-sm text-muted-foreground">
 										User code:
 									</span>
@@ -160,7 +160,7 @@ export function QwenReauthDialog({
 					)}
 
 					{step === "error" && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<p className="text-sm text-destructive-strong">{error}</p>
 						</div>
 					)}

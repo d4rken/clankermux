@@ -88,12 +88,12 @@ export function DebugPanel() {
 				</div>
 			</CardHeader>
 			<CardContent className="pt-0">
-				<div className="space-y-1 max-h-64 overflow-y-auto text-xs font-mono">
+				<div className="space-y-tight max-h-64 overflow-y-auto text-xs font-mono">
 					{logs.length === 0 ? (
 						<p className="text-muted-foreground">No logs yet...</p>
 					) : (
 						logs.map((log) => (
-							<div key={log.id} className="flex gap-2">
+							<div key={log.id} className="flex gap-item">
 								<span className="text-muted-foreground">
 									{new Date(log.timestamp).toLocaleTimeString()}
 								</span>

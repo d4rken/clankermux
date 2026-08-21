@@ -20,7 +20,7 @@ import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
  */
 export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
-		<section className="space-y-6 border-t pt-6">
+		<section className="space-y-section border-t pt-6">
 			<div>
 				<h2 className="text-lg font-semibold">Cache Keep-Alive</h2>
 				<p className="text-sm text-muted-foreground max-w-prose">

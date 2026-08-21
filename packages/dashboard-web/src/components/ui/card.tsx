@@ -5,18 +5,18 @@ import { cn } from "../../lib/utils";
 /**
  * Surface primitive.
  *
- * Whether a panel reads as a BOX or as a RULE is a property of the visual
- * direction, not of the component, so the geometry comes from tokens:
+ * Panel geometry comes from tokens rather than from literal utilities here, so
+ * every panel in the app changes together:
  *
- *   --card-border   full border shorthand. `1px solid var(--border)` for the
- *                   box directions; `0` for the ones that separate with a rule
- *                   and whitespace instead.
- *   --card-top-rule top edge drawn on its own, so a borderless direction can
- *                   still mark where a panel begins the way a printed
- *                   statement does.
- *   --card-shadow   `classic` keeps a 1px lift; every other direction is flat.
- *   --card-pad      interior padding, which is the main density lever between
- *                   the airy directions and the dense ones.
+ *   --card-border  full border shorthand, `1px solid var(--border)`.
+ *   --card-shadow  none. Paper separates panels with a hairline, not a lift.
+ *   --card-pad     interior padding, and the app's main density lever.
+ *
+ * These are applied by `.surface-edge` / `.surface-pad` in the base layer
+ * rather than by Tailwind arbitrary-value utilities: `border-(--x)` in v4 maps
+ * to border-COLOR, which would silently drop the width half of the shorthand.
+ * Base-layer rules also lose to utilities, so a caller passing `p-4` still
+ * wins.
  *
  * There is deliberately no hover lift anywhere: geometry that moves under the
  * cursor is noise on a page whose job is reporting throttling state.
@@ -42,7 +42,7 @@ const CardHeader = React.forwardRef<
 >(({ className, ...props }, ref) => (
 	<div
 		ref={ref}
-		className={cn("flex flex-col space-y-1.5 surface-pad", className)}
+		className={cn("flex flex-col space-y-tight surface-pad", className)}
 		{...props}
 	/>
 ));
@@ -55,8 +55,8 @@ const CardTitle = React.forwardRef<
 	<h3
 		ref={ref}
 		// No `tracking-tight` here: Tailwind utilities outrank the base layer, so
-		// it would pin letter-spacing and cancel each palette's own tracking.
-		// `classic` sets --display-tracking to the same -0.025em instead.
+		// it would pin letter-spacing and cancel the theme's own
+		// --display-tracking, which .display-face applies.
 		className={cn("display-face font-semibold leading-none", className)}
 		{...props}
 	/>

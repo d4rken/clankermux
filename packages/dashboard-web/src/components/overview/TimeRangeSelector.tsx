@@ -23,7 +23,7 @@ const TIME_RANGES = [
 
 export function TimeRangeSelector({ value, onChange }: TimeRangeSelectorProps) {
 	return (
-		<div className="flex items-center gap-2">
+		<div className="flex items-center gap-item">
 			<Clock className="h-4 w-4 text-muted-foreground" />
 			<Select value={value} onValueChange={onChange}>
 				<SelectTrigger className="w-[150px]">

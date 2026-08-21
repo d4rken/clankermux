@@ -53,7 +53,7 @@ export function RecentErrorsCard() {
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-4">
+				<div className="flex items-center justify-between gap-group">
 					<div>
 						<CardTitle>Recent Errors</CardTitle>
 						<CardDescription>
@@ -103,7 +103,7 @@ export function RecentErrorsCard() {
 							: `No errors in ${WINDOW_PHRASES[windowKey]}.`}
 					</p>
 				) : (
-					<div className="space-y-2">
+					<div className="space-y-item">
 						{visibleErrors.map((error) => (
 							<RecentErrorRow
 								key={`${error.accountId ?? NO_ACCOUNT_ID}:${error.errorCode}:${error.latestRequestId}`}

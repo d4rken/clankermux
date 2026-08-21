@@ -34,7 +34,7 @@ export function SystemStatus() {
 	} else if (error || !data) {
 		statusBody = (
 			<div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
-				<div className="flex items-center gap-3">
+				<div className="flex items-center gap-row">
 					<AlertTriangle className="h-5 w-5 text-muted-foreground" />
 					<div>
 						<p className="font-medium">Status unavailable</p>
@@ -96,7 +96,7 @@ export function SystemStatus() {
 				<div
 					className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
 				>
-					<div className="flex items-center gap-3">
+					<div className="flex items-center gap-row">
 						{icon}
 						<div>
 							<p className="font-medium">{label}</p>
@@ -106,10 +106,10 @@ export function SystemStatus() {
 					{badge}
 				</div>
 
-				<div className="grid grid-cols-2 gap-4">
+				<div className="grid grid-cols-2 gap-group">
 					{/* Uptime */}
 					<div className="rounded-lg border p-3">
-						<div className="flex items-center gap-2 text-sm text-muted-foreground">
+						<div className="flex items-center gap-item text-sm text-muted-foreground">
 							<Clock className="h-4 w-4" />
 							Uptime
 						</div>
@@ -124,7 +124,7 @@ export function SystemStatus() {
 					    further down this page. */}
 					<div className="rounded-lg border p-3">
 						<div className="flex items-center justify-between text-sm text-muted-foreground">
-							<span className="flex items-center gap-2">
+							<span className="flex items-center gap-item">
 								<Activity className="h-4 w-4" />
 								Event loop
 							</span>
@@ -155,7 +155,7 @@ export function SystemStatus() {
 				    window has no cooldown lock, so without this cell a fully exhausted
 				    pool read "0 routable, 0 rate-limited, 0 paused" with no
 				    explanation. */}
-				<dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+				<dl className="grid grid-cols-2 gap-row text-sm sm:grid-cols-4">
 					<div>
 						<dt className="text-muted-foreground">Routable</dt>
 						<dd className="font-medium tabular-nums">
@@ -202,7 +202,7 @@ export function SystemStatus() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-4">{statusBody}</div>
+				<div className="space-y-group">{statusBody}</div>
 			</CardContent>
 		</Card>
 	);

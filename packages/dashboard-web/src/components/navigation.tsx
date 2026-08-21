@@ -20,7 +20,6 @@ import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { BrandMark } from "./BrandMark";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
-import { PalettePicker } from "./palette-picker";
 import { ThemeToggle } from "./theme-toggle";
 import {
 	RESTART_COMMAND,
@@ -161,12 +160,11 @@ export function Navigation() {
 		<>
 			{/* Mobile header */}
 			<div className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b px-4 flex items-center justify-between">
-				<div className="flex items-center gap-3">
+				<div className="flex items-center gap-row">
 					<BrandMark className="h-5 w-5 text-primary" />
 					<span className="display-face font-semibold text-lg">ClankerMux</span>
 				</div>
-				<div className="flex items-center gap-2">
-					<PalettePicker />
+				<div className="flex items-center gap-item">
 					<ThemeToggle />
 					<Button
 						variant="ghost"
@@ -204,7 +202,7 @@ export function Navigation() {
 				<div className="flex h-full flex-col">
 					{/* Logo */}
 					<div className="p-4 pb-3">
-						<div className="flex items-center gap-2.5">
+						<div className="flex items-center gap-row">
 							<BrandMark className="h-6 w-6 shrink-0 text-primary" />
 							<div>
 								<h1 className="display-face font-semibold text-lg">
@@ -218,7 +216,7 @@ export function Navigation() {
 					<Separator />
 
 					{/* Navigation */}
-					<nav className="flex-1 space-y-0.5 p-2">
+					<nav className="flex-1 space-y-tight p-2">
 						{NAV_ITEMS.map((item) => {
 							const Icon = item.icon;
 							const isActive = location.pathname === item.path;
@@ -228,7 +226,7 @@ export function Navigation() {
 									to={item.path}
 									onClick={() => setIsMobileMenuOpen(false)}
 								>
-									{/* px-2.5/gap-2.5 rather than the size variant's px-5/gap-3.
+									{/* px-2.5 and a tighter gap than the size variant's px-5.
 									    At the 192px sidebar the default padding leaves ~108px
 									    for the label, and "Routing Chains" needs more than that
 									    — with `whitespace-nowrap` from buttonVariants it would
@@ -237,7 +235,7 @@ export function Navigation() {
 									<Button
 										variant={isActive ? "secondary" : "ghost"}
 										className={cn(
-											"w-full justify-start gap-2.5 px-2.5 transition-all",
+											"w-full justify-start gap-row px-2.5 transition-all",
 											isActive &&
 												"bg-primary/10 text-primary hover:bg-primary/20",
 										)}
@@ -258,7 +256,7 @@ export function Navigation() {
 					<Separator />
 
 					{/* Footer */}
-					<div className="p-4 space-y-4">
+					<div className="p-4 space-y-group">
 						<SidebarStatus />
 
 						{/* Deployment status: repo freshness AND process freshness */}
@@ -275,15 +273,12 @@ export function Navigation() {
 								target="_blank"
 								rel="noopener noreferrer"
 								title="Open GitHub repository"
-								className="flex items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+								className="flex items-center gap-item text-xs text-muted-foreground transition-colors hover:text-foreground"
 							>
 								<GitBranch className="h-3 w-3" />
 								<span>{version}</span>
 							</a>
-							<div className="flex items-center">
-								<PalettePicker />
-								<ThemeToggle />
-							</div>
+							<ThemeToggle />
 						</div>
 					</div>
 				</div>

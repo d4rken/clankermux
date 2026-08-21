@@ -203,7 +203,7 @@ export const OverviewTab = React.memo(() => {
 	const projectBreakdownData = analytics?.projectBreakdown || [];
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			{/* Sticky corruption banner — only renders when /api/storage reports corrupt */}
 			<StorageIntegrityBanner />
 
@@ -237,7 +237,7 @@ export const OverviewTab = React.memo(() => {
 			/>
 
 			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-3 gap-group">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals?.requests || 0)}

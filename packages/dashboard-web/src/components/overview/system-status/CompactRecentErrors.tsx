@@ -58,7 +58,7 @@ export function CompactRecentErrors({
 
 	if (unavailable) {
 		return (
-			<Card className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
+			<Card className="flex items-center gap-item px-4 py-3 text-sm text-muted-foreground">
 				<AlertCircle className="h-4 w-4 shrink-0 text-warning-strong" />
 				Recent errors unavailable — the stats endpoint could not be read.
 			</Card>
@@ -73,7 +73,7 @@ export function CompactRecentErrors({
 
 	if (errors.length === 0) {
 		return (
-			<Card className="flex items-start gap-2 px-4 py-3 text-sm">
+			<Card className="flex items-start gap-item px-4 py-3 text-sm">
 				<Clock
 					className="mt-0.5 h-4 w-4 shrink-0 text-warning-strong"
 					aria-hidden="true"
@@ -96,14 +96,14 @@ export function CompactRecentErrors({
 		otherAccountsAvailable(accounts, errorAccountId);
 
 	return (
-		<Card className="p-4 space-y-3">
-			<div className="flex items-center justify-between gap-4">
+		<Card className="p-4 space-y-row">
+			<div className="flex items-center justify-between gap-group">
 				<div>
 					<p className="text-sm font-medium">Recent Errors</p>
 					{staleNote ? (
 						// The groups are real but the latest poll failed — say how old
 						// they are rather than presenting them as current.
-						<p className="flex items-center gap-1 text-xs text-muted-foreground">
+						<p className="flex items-center gap-tight text-xs text-muted-foreground">
 							<Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
 							Last hour · {staleNote}
 						</p>
@@ -119,7 +119,7 @@ export function CompactRecentErrors({
 				</Link>
 			</div>
 
-			<div className="space-y-2">
+			<div className="space-y-item">
 				{rows.map((error) => (
 					<RecentErrorRow
 						key={`${error.accountId ?? NO_ACCOUNT_ID}:${error.errorCode}:${error.latestRequestId}`}

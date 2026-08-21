@@ -25,7 +25,7 @@ export function ComboCard({
 	return (
 		<Card>
 			<CardHeader className="pb-3">
-				<div className="flex items-start justify-between gap-2">
+				<div className="flex items-start justify-between gap-item">
 					<div className="min-w-0 flex-1">
 						<CardTitle className="text-base leading-snug">
 							{combo.name}
@@ -41,7 +41,7 @@ export function ComboCard({
 			</CardHeader>
 			<CardContent className="pt-0">
 				<div className="flex items-center justify-between">
-					<div className="flex items-center gap-2">
+					<div className="flex items-center gap-item">
 						<span className="text-sm text-muted-foreground">
 							{slotCount} {slotCount === 1 ? "slot" : "slots"}
 						</span>
@@ -51,7 +51,7 @@ export function ComboCard({
 							</Badge>
 						)}
 					</div>
-					<div className="flex items-center gap-1">
+					<div className="flex items-center gap-tight">
 						<Button variant="ghost" size="sm" onClick={onEdit}>
 							<Edit className="h-4 w-4" />
 						</Button>

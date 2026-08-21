@@ -53,7 +53,7 @@ function ConversationViewComponent({
 
 	return (
 		<div className="h-[calc(65vh-10rem)] w-full overflow-hidden">
-			<div className="h-full w-full overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
+			<div className="h-full w-full overflow-y-auto overflow-x-hidden px-4 py-3 space-y-row">
 				{messages.map((message, index) => (
 					<Message
 						key={genMessageKey(message, index)}

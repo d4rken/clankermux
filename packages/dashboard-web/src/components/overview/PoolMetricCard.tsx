@@ -271,7 +271,7 @@ function PoolDetailSection({
 	const hasAtRisk = atRisk.length > 0;
 
 	return (
-		<div className="space-y-3">
+		<div className="space-y-row">
 			<div>
 				<div className="font-medium mb-1">Pool usage</div>
 				<div className="text-muted-foreground">
@@ -288,11 +288,11 @@ function PoolDetailSection({
 					<div className="font-medium mb-1">
 						Contributing ({contributing.length})
 					</div>
-					<ul className="space-y-0.5">
+					<ul className="space-y-tight">
 						{sortedContributing.map((c) => (
 							<li
 								key={c.name}
-								className="flex items-center justify-between gap-2"
+								className="flex items-center justify-between gap-item"
 							>
 								<span className="truncate" title={c.name}>
 									{c.name}
@@ -312,12 +312,12 @@ function PoolDetailSection({
 						Per-model weekly quota — can throttle one model while the pool looks
 						healthy.
 					</div>
-					<ul className="space-y-0.5">
+					<ul className="space-y-tight">
 						{familyWeekly.map((f) => {
 							const scope = familyScopeSummary(f);
 							return (
 								<li key={f.family}>
-									<div className="flex items-center justify-between gap-2">
+									<div className="flex items-center justify-between gap-item">
 										<span className="truncate" title={f.label}>
 											{f.label}
 										</span>
@@ -345,11 +345,11 @@ function PoolDetailSection({
 										resets {nextQuotaTimeLabel(scope.resetMs, "seven_day")}
 									</div>
 									{f.accounts.length > 1 && (
-										<ul className="ml-2 space-y-0.5">
+										<ul className="ml-2 space-y-tight">
 											{f.accounts.map((a) => (
 												<li
 													key={a.name}
-													className="flex items-center justify-between gap-2"
+													className="flex items-center justify-between gap-item"
 												>
 													<span className="truncate" title={a.name}>
 														{a.name}
@@ -373,11 +373,11 @@ function PoolDetailSection({
 					<div className="text-muted-foreground mb-1">
 						Projected to exhaust before their window resets.
 					</div>
-					<ul className="space-y-0.5">
+					<ul className="space-y-tight">
 						{sortedAtRisk.map((a) => (
 							<li
 								key={a.name}
-								className="flex items-center justify-between gap-2"
+								className="flex items-center justify-between gap-item"
 							>
 								<span className="truncate" title={a.name}>
 									{a.name}
@@ -395,13 +395,13 @@ function PoolDetailSection({
 					<div className="font-medium mb-1">
 						Unavailable ({exhausted.length})
 					</div>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						{exhaustedGroups.map(({ reason, items }) => (
 							<div key={reason}>
 								<div className="text-muted-foreground">
 									{REASON_LABELS[reason]} · counted as 100%
 								</div>
-								<ul className="ml-2 space-y-0.5">
+								<ul className="ml-2 space-y-tight">
 									{items.map((e) => (
 										<li key={e.name} className="truncate" title={e.name}>
 											{e.name}
@@ -416,13 +416,13 @@ function PoolDetailSection({
 			{hasExcluded && (
 				<div>
 					<div className="font-medium mb-1">Unknown ({excluded.length})</div>
-					<div className="space-y-2">
+					<div className="space-y-item">
 						{excludedGroups.map(({ reason, items }) => (
 							<div key={reason}>
 								<div className="text-muted-foreground">
 									{REASON_LABELS[reason]} · not counted
 								</div>
-								<ul className="ml-2 space-y-0.5">
+								<ul className="ml-2 space-y-tight">
 									{items.map((e) => (
 										<li key={e.name} className="truncate" title={e.name}>
 											{e.name}
@@ -440,7 +440,7 @@ function PoolDetailSection({
 					<div className="text-muted-foreground mb-1">
 						Pay-as-you-go capacity, not counted in this pool.
 					</div>
-					<ul className="space-y-0.5">
+					<ul className="space-y-tight">
 						{fallback.map((f) => (
 							<li
 								key={f.name}
@@ -513,7 +513,7 @@ export function PoolMetricCard({
 			<PopoverTrigger asChild>
 				<button
 					type="button"
-					className="flex items-center gap-1 shrink-0 text-xs text-muted-foreground cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+					className="flex items-center gap-tight shrink-0 text-xs text-muted-foreground cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
 				>
 					<span className="tabular-nums">
 						({contributing.length}/{eligibleTotal} active)
@@ -521,7 +521,7 @@ export function PoolMetricCard({
 					<Info className="h-3 w-3" />
 				</button>
 			</PopoverTrigger>
-			<PopoverContent className="w-72 text-xs space-y-3">
+			<PopoverContent className="w-72 text-xs space-y-row">
 				<PoolDetailSection result={result} window={window} />
 			</PopoverContent>
 		</Popover>
@@ -529,9 +529,9 @@ export function PoolMetricCard({
 
 	return (
 		<Card>
-			<CardContent className="p-4">
-				<div className="flex items-center justify-between gap-2 mb-1.5">
-					<div className="flex items-center gap-1.5 min-w-0">
+			<CardContent>
+				<div className="flex items-center justify-between gap-item mb-1.5">
+					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						<p className="text-sm text-muted-foreground truncate">{title}</p>
 					</div>
@@ -545,27 +545,28 @@ export function PoolMetricCard({
 						triggerNode
 					)}
 				</div>
-				<div className="space-y-1">
+				<div className="space-y-tight">
 					{unavailableReason ? (
 						<>
-							<p className="text-2xl font-bold text-muted-foreground/60">—</p>
-							<p className="flex items-center gap-1.5 text-xs text-warning-strong">
+							<p className="figure-xl text-muted-foreground/60">—</p>
+							<p className="flex items-center gap-item text-xs text-warning-strong">
 								<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 								{unavailableReason}
 							</p>
 						</>
 					) : pending ? (
-						// Same line box as the resolved headline, so the tile keeps its
-						// height when the accounts land.
-						<Skeleton className="h-8 w-20" />
+						// Same line box as the resolved headline (.figure-xl is a fixed
+						// 1.75rem = h-7), so the tile keeps its height when the accounts
+						// land.
+						<Skeleton className="h-7 w-20" />
 					) : (
-						<p className={cn("text-2xl font-bold", colorClass)}>{headline}</p>
+						<p className={cn("figure-xl", colorClass)}>{headline}</p>
 					)}
 					<p className="text-xs text-muted-foreground truncate">
 						capacity used
 					</p>
 					{resolved && staleNote && (
-						<p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+						<p className="flex items-center gap-item text-xs text-muted-foreground">
 							<Clock className="h-3.5 w-3.5 shrink-0" />
 							{staleNote}
 						</p>

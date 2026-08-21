@@ -53,7 +53,7 @@ export function RecentErrorRow({
 					onClick();
 				}
 			}}
-			className={`w-full text-left p-3 rounded-lg flex items-start gap-2 cursor-pointer transition-colors hover:bg-opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${bgClass}`}
+			className={`w-full text-left p-3 rounded-lg flex items-start gap-item cursor-pointer transition-colors hover:bg-opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${bgClass}`}
 		>
 			<Icon className={`h-4 w-4 mt-0.5 shrink-0 ${iconColor}`} />
 			<div className="flex-1 min-w-0">
@@ -64,7 +64,7 @@ export function RecentErrorRow({
 					{error.statusCode != null ? ` · ${error.statusCode}` : ""}
 				</p>
 			</div>
-			<div className="flex items-center gap-2 shrink-0">
+			<div className="flex items-center gap-item shrink-0">
 				{error.occurrenceCount > 1 && (
 					<Badge
 						variant="secondary"

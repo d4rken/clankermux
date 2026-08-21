@@ -154,15 +154,15 @@ export function ResetCreditEventsPanel({
 		);
 	}
 	return (
-		<ul className="space-y-2">
+		<ul className="space-y-item">
 			{state.events.map((event) => (
-				<li key={event.id} className="text-xs space-y-0.5">
-					<div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+				<li key={event.id} className="text-xs space-y-tight">
+					<div className="flex flex-wrap items-center gap-x-item gap-y-tight">
 						<span className="text-muted-foreground whitespace-nowrap">
 							{formatEventTime(event.createdAt)}
 						</span>
 						<span
-							className={`px-1.5 py-0 rounded-full text-[10px] font-medium uppercase ${
+							className={`px-1.5 py-0 rounded-md label-caps ${
 								event.trigger === "auto"
 									? "bg-info/15 text-info"
 									: "bg-secondary text-secondary-foreground"
@@ -255,12 +255,12 @@ export function ResetCreditApplyPanel({
 	}
 	if (state.kind === "confirm") {
 		return (
-			<div className="space-y-1.5">
+			<div className="space-y-item">
 				<p className="text-xs">
 					Consume 1 reset for <span className="font-medium">{accountName}</span>
 					?
 				</p>
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-item">
 					<Button size="sm" className="h-7 text-xs" onClick={onConfirm}>
 						Confirm
 					</Button>
@@ -281,11 +281,11 @@ export function ResetCreditApplyPanel({
 	}
 	if (state.kind === "error") {
 		return (
-			<div className="space-y-1.5">
+			<div className="space-y-item">
 				<p className="text-xs text-destructive-strong" title={state.message}>
 					Failed to apply reset: {state.message}
 				</p>
-				<div className="flex items-center gap-2">
+				<div className="flex items-center gap-item">
 					<Button size="sm" className="h-7 text-xs" onClick={onRetry}>
 						Retry
 					</Button>
@@ -304,7 +304,7 @@ export function ResetCreditApplyPanel({
 	// "done" — show the outcome plus a way back to idle, so the Apply-now
 	// button doesn't disappear permanently after a single use.
 	return (
-		<div className="space-y-1.5">
+		<div className="space-y-item">
 			<p
 				className={`text-xs ${
 					state.outcome === "reset"
@@ -460,7 +460,7 @@ function CodexUsageResetChip({
 					{label}
 				</StatusChip>
 			</PopoverTrigger>
-			<PopoverContent align="start" className="w-80 p-3 space-y-3">
+			<PopoverContent align="start" className="w-80 p-3 space-y-row">
 				<ResetCreditApplyPanel
 					accountName={account.name}
 					availableCount={summary.availableCount}
@@ -500,7 +500,7 @@ export function AccountStatusChips({
 	const status = providedStatus ?? deriveAccountStatus(account);
 
 	return (
-		<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+		<div className="flex flex-wrap items-center gap-x-item gap-y-tight text-sm">
 			{status.isPrimary && (
 				<StatusChip className="bg-primary text-primary-foreground">
 					Primary

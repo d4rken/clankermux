@@ -157,12 +157,12 @@ export function RequestDetailsModal({
 		<Dialog open={isOpen} onOpenChange={onClose}>
 			<DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
 				<DialogHeader>
-					<DialogTitle className="flex items-center gap-2">
+					<DialogTitle className="flex items-center gap-item">
 						<Eye className="h-5 w-5" />
 						Request Details
 					</DialogTitle>
 					<DialogDescription className="flex items-center justify-between">
-						<div className="flex items-center gap-2 flex-wrap">
+						<div className="flex items-center gap-item flex-wrap">
 							<span className="font-mono text-sm">
 								{formatTimestamp(request.meta.timestamp)}
 							</span>
@@ -222,7 +222,7 @@ export function RequestDetailsModal({
 								</Badge>
 							)}
 						</div>
-						<div className="flex items-center gap-2">
+						<div className="flex items-center gap-item">
 							<Label htmlFor="beautify-mode" className="text-sm">
 								Beautify
 							</Label>
@@ -278,7 +278,7 @@ export function RequestDetailsModal({
 
 					<TabsContent
 						value="request"
-						className="mt-4 space-y-4 overflow-y-auto max-h-[60vh]"
+						className="mt-4 space-y-group overflow-y-auto max-h-[60vh]"
 					>
 						{effective.request ? (
 							<>
@@ -327,7 +327,7 @@ export function RequestDetailsModal({
 
 					<TabsContent
 						value="response"
-						className="mt-4 space-y-4 overflow-y-auto max-h-[60vh]"
+						className="mt-4 space-y-group overflow-y-auto max-h-[60vh]"
 					>
 						{effective.response ? (
 							<>

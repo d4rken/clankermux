@@ -62,10 +62,10 @@ export function AccountUtilizationCard({
 						No windowed accounts reporting usage yet.
 					</p>
 				) : (
-					<div className="space-y-5">
+					<div className="space-y-section">
 						{rows.map((account) => (
-							<div key={account.id} className="space-y-2">
-								<div className="flex items-center justify-between gap-2">
+							<div key={account.id} className="space-y-item">
+								<div className="flex items-center justify-between gap-item">
 									<span
 										className="truncate text-sm font-medium"
 										title={account.name}

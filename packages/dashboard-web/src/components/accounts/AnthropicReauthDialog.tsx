@@ -93,7 +93,7 @@ export function AnthropicReauthDialog({
 					    Radix's `aria-describedby` announces it when the dialog opens, and
 					    a description rendered as the default `<p>` cannot contain it. */}
 					<DialogDescription asChild>
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<AccountIdentityPanel account={account} />
 							<span className="block">
 								All account metadata (usage stats, priority, settings) will be
@@ -113,7 +113,7 @@ export function AnthropicReauthDialog({
 					)}
 
 					{step === "awaiting-code" && (
-						<div className="space-y-4">
+						<div className="space-y-group">
 							<p className="text-sm text-muted-foreground">
 								A browser window has opened for authorization. After approving,
 								copy the authorization code and paste it below.
@@ -128,7 +128,7 @@ export function AnthropicReauthDialog({
 									Open authorization page
 								</a>
 							)}
-							<div className="space-y-2">
+							<div className="space-y-item">
 								<Label htmlFor="auth-code">Authorization Code</Label>
 								<Input
 									id="auth-code"
@@ -158,7 +158,7 @@ export function AnthropicReauthDialog({
 					)}
 
 					{step === "error" && (
-						<div className="space-y-2">
+						<div className="space-y-item">
 							<p className="text-sm text-destructive-strong">{error}</p>
 						</div>
 					)}

@@ -25,7 +25,7 @@ export const StatusChip = forwardRef<
 		<span
 			ref={ref}
 			className={cn(
-				"inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+				"inline-flex items-center gap-tight rounded-md px-2 py-0.5 text-xs font-medium whitespace-nowrap",
 				className,
 			)}
 			{...props}

@@ -478,7 +478,7 @@ export function ApiKeysTab() {
 		return (
 			<Card>
 				<CardContent className="p-6">
-					<div className="flex items-center gap-2 text-destructive-strong">
+					<div className="flex items-center gap-item text-destructive-strong">
 						<AlertTriangle className="h-5 w-5" />
 						<span>Failed to load API keys. Please try again.</span>
 					</div>
@@ -488,15 +488,15 @@ export function ApiKeysTab() {
 	}
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			{/* Statistics Cards */}
-			<div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+			<div className="grid grid-cols-1 md:grid-cols-3 gap-group">
 				<Card>
 					<CardHeader className="pb-2">
 						<CardTitle className="text-base font-medium">Total Keys</CardTitle>
 					</CardHeader>
 					<CardContent>
-						<div className="text-2xl font-bold">{stats?.total || 0}</div>
+						<div className="figure-xl">{stats?.total || 0}</div>
 					</CardContent>
 				</Card>
 				<Card>
@@ -504,7 +504,7 @@ export function ApiKeysTab() {
 						<CardTitle className="text-base font-medium">Active Keys</CardTitle>
 					</CardHeader>
 					<CardContent>
-						<div className="text-2xl font-bold text-success-strong">
+						<div className="figure-xl text-success-strong">
 							{stats?.active || 0}
 						</div>
 					</CardContent>
@@ -516,7 +516,7 @@ export function ApiKeysTab() {
 						</CardTitle>
 					</CardHeader>
 					<CardContent>
-						<div className="text-2xl font-bold text-muted-foreground">
+						<div className="figure-xl text-muted-foreground">
 							{stats?.inactive || 0}
 						</div>
 					</CardContent>
@@ -547,8 +547,8 @@ export function ApiKeysTab() {
 								only once, so save it securely.
 							</DialogDescription>
 						</DialogHeader>
-						<div className="space-y-4 py-4">
-							<div className="space-y-2">
+						<div className="space-y-group py-4">
+							<div className="space-y-item">
 								<Label htmlFor="name">Key Name</Label>
 								<Input
 									id="name"
@@ -581,7 +581,7 @@ export function ApiKeysTab() {
 			{/* API Keys List */}
 			<Card>
 				<CardHeader>
-					<div className="flex items-start justify-between gap-4">
+					<div className="flex items-start justify-between gap-group">
 						<div>
 							<CardTitle>Your API Keys</CardTitle>
 							<CardDescription className="mt-1.5">
@@ -591,7 +591,7 @@ export function ApiKeysTab() {
 							</CardDescription>
 						</div>
 						{apiKeys.length > 1 && (
-							<div className="flex items-center gap-2 shrink-0">
+							<div className="flex items-center gap-item shrink-0">
 								<Label
 									htmlFor="api-key-sort"
 									className="text-xs text-muted-foreground whitespace-nowrap"
@@ -627,15 +627,15 @@ export function ApiKeysTab() {
 							</p>
 						</div>
 					) : (
-						<div className="space-y-4">
+						<div className="space-y-group">
 							{sortedApiKeys.map((key) => (
 								<div
 									key={key.id}
-									className="flex flex-col gap-3 p-4 border rounded-lg"
+									className="flex flex-col gap-row p-4 border rounded-lg"
 								>
 									<div className="flex items-center justify-between">
 										<div className="flex-1">
-											<div className="flex items-center gap-2">
+											<div className="flex items-center gap-item">
 												<h3 className="font-medium">{key.name}</h3>
 												<div
 													className={`px-2 py-1 rounded text-xs font-medium ${
@@ -653,7 +653,7 @@ export function ApiKeysTab() {
 													{key.prefixLast8}
 												</code>
 											</div>
-											<div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+											<div className="text-xs text-muted-foreground mt-1 flex items-center gap-tight">
 												<Route className="h-3 w-3" />
 												<span>{describePinTarget(key, accounts)}</span>
 											</div>
@@ -674,7 +674,7 @@ export function ApiKeysTab() {
 												{key.usageCount !== 1 ? "s" : ""}
 											</div>
 										</div>
-										<div className="flex items-center gap-2">
+										<div className="flex items-center gap-item">
 											<Button
 												variant="outline"
 												size="sm"
@@ -787,10 +787,10 @@ export function ApiKeysTab() {
 								: "Your API key has been generated. Save it securely now - it won't be shown again."}
 						</DialogDescription>
 					</DialogHeader>
-					<div className="space-y-4 py-4">
-						<div className="space-y-2">
+					<div className="space-y-group py-4">
+						<div className="space-y-item">
 							<Label>API Key</Label>
-							<div className="flex items-center gap-2">
+							<div className="flex items-center gap-item">
 								<code className="flex-1 p-3 bg-muted rounded text-sm font-mono break-all">
 									{generatedKey?.apiKey}
 								</code>
@@ -803,7 +803,7 @@ export function ApiKeysTab() {
 							</div>
 						</div>
 						<div className="p-4 bg-warning/10 border border-warning/25 rounded-lg">
-							<div className="flex items-center gap-2 text-foreground">
+							<div className="flex items-center gap-item text-foreground">
 								<AlertTriangle className="h-5 w-5" />
 								<span className="font-medium">Important:</span>
 							</div>
@@ -841,7 +841,7 @@ export function ApiKeysTab() {
 							history will be preserved.
 						</DialogDescription>
 					</DialogHeader>
-					<div className="py-4 space-y-3">
+					<div className="py-4 space-y-row">
 						<p className="text-sm text-muted-foreground">
 							Use this when the original key has been lost. Any application or
 							script still using the old secret will start failing with 401
@@ -849,7 +849,7 @@ export function ApiKeysTab() {
 						</p>
 						{regenerateKeyMutation.isError && (
 							<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-								<div className="flex items-start gap-2 text-destructive-strong">
+								<div className="flex items-start gap-item text-destructive-strong">
 									<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 									<span className="text-sm">
 										{regenerateKeyMutation.error?.message ??
@@ -904,8 +904,8 @@ export function ApiKeysTab() {
 								Enter a new name for the API key "{selectedKey?.name}".
 							</DialogDescription>
 						</DialogHeader>
-						<div className="grid gap-4 py-4">
-							<div className="grid gap-2">
+						<div className="grid gap-group py-4">
+							<div className="grid gap-item">
 								<Label htmlFor="rename-key-name">New Name</Label>
 								<Input
 									id="rename-key-name"
@@ -924,7 +924,7 @@ export function ApiKeysTab() {
 							</div>
 							{renameKeyMutation.isError && (
 								<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-									<div className="flex items-start gap-2 text-destructive-strong">
+									<div className="flex items-start gap-item text-destructive-strong">
 										<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 										<span className="text-sm">
 											{renameKeyMutation.error?.message ??
@@ -1059,8 +1059,8 @@ function PinEditor({
 		(mode === "provider" && providers.length === 0);
 
 	return (
-		<div className="border-t pt-3 space-y-3">
-			<div className="space-y-2">
+		<div className="border-t pt-3 space-y-row">
+			<div className="space-y-item">
 				<Label className="text-xs">Routing mode</Label>
 				<Select value={mode} onValueChange={(v) => setMode(v as PinMode)}>
 					<SelectTrigger className="h-9">
@@ -1075,7 +1075,7 @@ function PinEditor({
 			</div>
 
 			{mode === "account" && (
-				<div className="space-y-2">
+				<div className="space-y-item">
 					<Label className="text-xs">Account</Label>
 					{accounts.length === 0 ? (
 						<p className="text-xs text-muted-foreground">
@@ -1102,18 +1102,18 @@ function PinEditor({
 			)}
 
 			{mode === "provider" && (
-				<div className="space-y-2">
+				<div className="space-y-item">
 					<Label className="text-xs">Provider classes</Label>
 					{availableProviders.length === 0 ? (
 						<p className="text-xs text-muted-foreground">
 							No providers configured.
 						</p>
 					) : (
-						<div className="flex flex-wrap gap-3">
+						<div className="flex flex-wrap gap-row">
 							{availableProviders.map((provider) => (
 								<label
 									key={provider}
-									className="flex items-center gap-2 text-sm cursor-pointer"
+									className="flex items-center gap-item text-sm cursor-pointer"
 								>
 									<input
 										type="checkbox"
@@ -1131,14 +1131,14 @@ function PinEditor({
 
 			{error && (
 				<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-					<div className="flex items-start gap-2 text-destructive-strong">
+					<div className="flex items-start gap-item text-destructive-strong">
 						<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
 						<span className="text-sm">{error}</span>
 					</div>
 				</div>
 			)}
 
-			<div className="flex items-center gap-2">
+			<div className="flex items-center gap-item">
 				<Button size="sm" onClick={handleSave} disabled={saveDisabled}>
 					{isPending ? "Saving..." : "Save"}
 				</Button>

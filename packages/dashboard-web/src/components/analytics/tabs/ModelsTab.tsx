@@ -54,7 +54,7 @@ export function ModelsTab(props: ModelsTabProps) {
 		) || [];
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-section">
 			<AnalyticsControls
 				timeRange={range}
 				setTimeRange={onRangeChange}

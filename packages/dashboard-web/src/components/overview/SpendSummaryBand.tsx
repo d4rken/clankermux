@@ -17,7 +17,7 @@ export function SpendSummaryBand() {
 		return (
 			<Card>
 				<CardContent className="p-6">
-					<div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+					<div className="grid grid-cols-2 md:grid-cols-4 gap-group">
 						{["month", "day", "week", "amortized-month"].map((key) => (
 							<div key={key}>
 								<Skeleton className="h-4 w-24 mb-2" />
@@ -53,12 +53,10 @@ export function SpendSummaryBand() {
 	return (
 		<Card>
 			<CardContent className="p-6">
-				<div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+				<div className="grid grid-cols-2 md:grid-cols-4 gap-group">
 					<div>
 						<p className="text-sm text-muted-foreground">Spend this month</p>
-						<p className="text-2xl font-bold">
-							{formatUsd(currentMonth.totalUsd)}
-						</p>
+						<p className="figure-xl">{formatUsd(currentMonth.totalUsd)}</p>
 						<p className="mt-1 text-xs text-muted-foreground">
 							{breakdownParts.join(" · ")}
 						</p>
@@ -66,7 +64,7 @@ export function SpendSummaryBand() {
 					{amortizedColumns.map((col) => (
 						<div key={col.label}>
 							<p className="text-sm text-muted-foreground">{col.label}</p>
-							<p className="text-2xl font-bold">{formatUsd(col.value)}</p>
+							<p className="figure-xl">{formatUsd(col.value)}</p>
 						</div>
 					))}
 				</div>

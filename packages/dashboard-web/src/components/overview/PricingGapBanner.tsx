@@ -15,7 +15,7 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 	return (
 		<div
 			role="alert"
-			className="flex items-start gap-3 p-3 rounded-lg bg-warning/15 border border-warning/30"
+			className="flex items-start gap-row p-3 rounded-lg bg-warning/15 border border-warning/30"
 		>
 			<AlertTriangle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 			<div className="text-sm min-w-0">
@@ -27,7 +27,7 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 					so their requests were recorded with no cost and are invisible in cost
 					analytics. Add or complete the pricing entry for each model.
 				</p>
-				<ul className="mt-2 space-y-1">
+				<ul className="mt-2 space-y-tight">
 					{gaps.map((gap) => (
 						// Keyed on the server-supplied identity, NOT on
 						// `provider/modelId`: both of those are sanitized, clipped display

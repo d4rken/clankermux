@@ -132,11 +132,11 @@ export function StorageIntegritySection() {
 			Failed to load storage status.
 		</div>
 	) : (
-		<div className="space-y-4">
+		<div className="space-y-group">
 			<div
 				className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
 			>
-				<div className="flex items-center gap-3">
+				<div className="flex items-center gap-row">
 					{icon}
 					<div>
 						<p className="font-medium">{label}</p>
@@ -146,7 +146,7 @@ export function StorageIntegritySection() {
 				{badgeNode}
 			</div>
 
-			<dl className="grid grid-cols-2 gap-3 text-sm">
+			<dl className="grid grid-cols-2 gap-row text-sm">
 				<div>
 					<dt className="text-muted-foreground">Last quick check</dt>
 					<dd>
@@ -189,7 +189,7 @@ export function StorageIntegritySection() {
 				</div>
 			</dl>
 
-			<div className="flex gap-2">
+			<div className="flex gap-item">
 				<Button
 					variant="outline"
 					size="sm"
@@ -242,7 +242,7 @@ export function StorageIntegrityBanner() {
 
 	if (isError && data === undefined) {
 		return (
-			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
+			<div className="flex items-start gap-row p-3 rounded-lg bg-warning/10 border border-warning/30">
 				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status unavailable</p>
@@ -265,7 +265,7 @@ export function StorageIntegrityBanner() {
 		return (
 			<div
 				role="alert"
-				className="flex items-start gap-3 p-3 rounded-lg bg-destructive/15 border border-destructive/30"
+				className="flex items-start gap-row p-3 rounded-lg bg-destructive/15 border border-destructive/30"
 			>
 				<XCircle className="h-5 w-5 text-destructive-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
@@ -288,7 +288,7 @@ export function StorageIntegrityBanner() {
 
 	if (staleNote) {
 		return (
-			<div className="flex items-start gap-3 p-3 rounded-lg bg-warning/10 border border-warning/30">
+			<div className="flex items-start gap-row p-3 rounded-lg bg-warning/10 border border-warning/30">
 				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status stale</p>
