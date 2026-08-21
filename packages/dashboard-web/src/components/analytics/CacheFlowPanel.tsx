@@ -247,7 +247,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke="var(--border)"
 							/>
 							<text
@@ -279,7 +279,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke={series.hue[STATUS_HUES[status]]}
 							/>
 							<text
@@ -307,7 +307,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								width={nodeWidth}
 								height="38"
 								rx="6"
-								fill="var(--card)"
+								fill="var(--surface-raised)"
 								stroke="var(--border)"
 							/>
 							<text

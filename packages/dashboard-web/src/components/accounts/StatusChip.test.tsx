@@ -14,7 +14,7 @@ describe("StatusChip", () => {
 		// One uniform size/shape for every status chip.
 		expect(html).toContain("inline-flex");
 		expect(html).toContain("items-center");
-		expect(html).toContain("rounded-full");
+		expect(html).toContain("rounded-md");
 		expect(html).toContain("px-2");
 		expect(html).toContain("py-0.5");
 		expect(html).toContain("text-xs");
@@ -31,7 +31,7 @@ describe("StatusChip", () => {
 		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("text-warning-strong");
 		// …and the base classes are still there.
-		expect(html).toContain("rounded-full");
+		expect(html).toContain("rounded-md");
 		expect(html).toContain("px-2");
 	});
 

@@ -159,6 +159,19 @@ function luminance(value: string): number {
 	return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
 }
 
+/**
+ * The surface text actually lands on.
+ *
+ * A direction that separates panels with rules instead of boxes sets
+ * `--card: transparent`, and transparent composites over the page background —
+ * so that, not the literal keyword, is what a contrast ratio has to be measured
+ * against.
+ */
+function surfaceOf(tokens: Tokens, name: string): string {
+	const value = tokens[name];
+	return value === "transparent" ? tokens["--background"] : value;
+}
+
 function contrast(a: string, b: string): number {
 	const first = luminance(a) + 0.05;
 	const second = luminance(b) + 0.05;
@@ -167,7 +180,15 @@ function contrast(a: string, b: string): number {
 
 // ── the checks ───────────────────────────────────────────────────────────────
 
-const PALETTES = ["classic", "signal", "foundry", "paper"] as const;
+const PALETTES = [
+	"classic",
+	"signal",
+	"foundry",
+	"paper",
+	"ledger",
+	"blueprint",
+	"tape",
+] as const;
 const MODES = ["light", "dark"] as const;
 
 const blocks = parseBlocks(readFileSync(CSS_PATH, "utf8"));
@@ -227,6 +248,7 @@ describe("theme token contrast", () => {
 					"--destructive-foreground",
 					"--destructive-strong",
 					"--info",
+					"--surface-raised",
 					"--border",
 				]) {
 					expect(`${palette}/${mode} ${required}`).toBe(
@@ -244,8 +266,29 @@ describe("theme token contrast", () => {
 				const t = resolve(blocks, palette, mode);
 				const pairs: Array<[string, string, string]> = [
 					["foreground on background", t["--foreground"], t["--background"]],
-					["card-foreground on card", t["--card-foreground"], t["--card"]],
-					["muted-foreground on card", t["--muted-foreground"], t["--card"]],
+					[
+						"card-foreground on card",
+						t["--card-foreground"],
+						surfaceOf(t, "--card"),
+					],
+					[
+						"muted-foreground on card",
+						t["--muted-foreground"],
+						surfaceOf(t, "--card"),
+					],
+					// --surface-raised is what floating panels and SVG occluders sit
+					// on, and it is a DIFFERENT colour from --card in any direction
+					// that makes cards transparent — so it needs its own check.
+					[
+						"foreground on surface-raised",
+						t["--foreground"],
+						t["--surface-raised"],
+					],
+					[
+						"muted-foreground on surface-raised",
+						t["--muted-foreground"],
+						t["--surface-raised"],
+					],
 					[
 						"muted-foreground on background",
 						t["--muted-foreground"],
@@ -275,7 +318,7 @@ describe("theme token contrast", () => {
 				const t = resolve(blocks, palette, mode);
 				for (const role of ["success", "warning", "destructive", "info"]) {
 					const token = role === "info" ? "--info" : `--${role}-strong`;
-					const ratio = contrast(t[token], t["--card"]);
+					const ratio = contrast(t[token], surfaceOf(t, "--card"));
 					if (ratio < TEXT_MIN) {
 						failures.push(
 							`${palette}/${mode} ${token} on --card: ${ratio.toFixed(2)}:1 (min ${TEXT_MIN})`,
@@ -331,7 +374,7 @@ describe("theme token contrast", () => {
 		for (const palette of PALETTES) {
 			for (const mode of MODES) {
 				const t = resolve(blocks, palette, mode);
-				const ratio = contrast(t["--border"], t["--card"]);
+				const ratio = contrast(t["--border"], surfaceOf(t, "--card"));
 				if (ratio < 1.15) {
 					failures.push(
 						`${palette}/${mode} --border on --card: ${ratio.toFixed(2)}:1`,

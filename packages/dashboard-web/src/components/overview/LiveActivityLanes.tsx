@@ -517,7 +517,10 @@ function Mark({
 	const r = markRadius(event.tokens);
 	// A 2px surface ring rather than a border, so overlapping marks stay
 	// separable without adding a second ink colour.
-	const ring = { stroke: "var(--card)", strokeWidth: 2 };
+	// Opaque by necessity: this ring separates overlapping lane dots by
+	// punching a hole in whatever sits behind them, so it cannot follow --card
+	// into transparency.
+	const ring = { stroke: "var(--surface-raised)", strokeWidth: 2 };
 	const label = `${event.project ?? "no project"} · ${STATUS_LABEL[event.status]}`;
 
 	const halo = selected ? (

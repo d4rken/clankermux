@@ -9,7 +9,8 @@
 
    Two independent axes:
 
-     data-palette  classic | signal | foundry | paper   (visual direction)
+     data-palette  classic | signal | foundry | paper |          (direction)
+                   ledger | blueprint | tape
      .light/.dark  colour mode                          (unchanged behaviour)
 
    Every palette defines BOTH modes, so the mode toggle keeps working whichever
@@ -27,6 +28,10 @@
                belongs one step off --secondary.
    --ring      Focus ring. Free to carry the brand hue; it is the one place a
                saturated outline is wanted.
+
+   Structure is a token too, not just colour: --card-border, --card-top-rule
+   and --card-pad decide whether a direction's panels read as BOXES or as
+   RULES, which is most of what separates Paper from Ledger.
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Shared semantic scaffolding ──────────────────────────────────────────
@@ -73,6 +78,10 @@
 	--destructive-strong: #b91c1c;
 	--info: #1d4ed8;
 	--info-foreground: #ffffff;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 1.5rem;
+	--surface-raised: hsl(0 0% 100%);
 }
 
 .dark {
@@ -106,6 +115,7 @@
 	--destructive-strong: #f87171;
 	--info: #7cb0f5;
 	--info-foreground: #0a1526;
+	--surface-raised: hsl(220 13% 12%);
 }
 
 /* ── A · SIGNAL ───────────────────────────────────────────────────────────
@@ -150,6 +160,10 @@
 	--destructive-strong: #b3372e;
 	--info: #0e6e8a;
 	--info-foreground: #ffffff;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 1.15rem;
+	--surface-raised: #ffffff;
 }
 
 [data-palette="signal"].dark {
@@ -182,6 +196,7 @@
 	--destructive-strong: #f0857f;
 	--info: #7fd4f0;
 	--info-foreground: #06131a;
+	--surface-raised: #0f151a;
 }
 
 /* ── B · FOUNDRY ──────────────────────────────────────────────────────────
@@ -227,6 +242,10 @@
 	--destructive-strong: #a83226;
 	--info: #2c6e8f;
 	--info-foreground: #ffffff;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 1.25rem;
+	--surface-raised: #ffffff;
 }
 
 [data-palette="foundry"].dark {
@@ -259,6 +278,7 @@
 	--destructive-strong: #e8837a;
 	--info: #9fc4d9;
 	--info-foreground: #1a0e06;
+	--surface-raised: #211c18;
 }
 
 /* ── C · PAPER TERMINAL ───────────────────────────────────────────────────
@@ -303,6 +323,10 @@
 	--destructive-strong: #a82b22;
 	--info: #0f5b87;
 	--info-foreground: #ffffff;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 1.2rem;
+	--surface-raised: #ffffff;
 }
 
 [data-palette="paper"].dark {
@@ -335,6 +359,260 @@
 	--destructive-strong: #ec8a80;
 	--info: #7fc4e0;
 	--info-foreground: #04191b;
+	--surface-raised: #172125;
+}
+
+/* ── D · LEDGER ───────────────────────────────────────────────────────────
+   Paper with the boxes taken away. No panel is a card: separation is one rule
+   plus a column of whitespace, the way a printed statement separates its
+   sections. The accent is near-black, so colour appears only where a number
+   means something is wrong — which is why `--primary` here is ink rather than
+   a hue, and the semantic roles do all the talking. Densest of the light
+   directions. */
+
+[data-palette="ledger"] {
+	--background: #f2f1ed;
+	--foreground: #16150f;
+	--card: transparent;
+	--card-foreground: #16150f;
+	--popover: #faf9f6;
+	--popover-foreground: #16150f;
+	--primary: #1f1e17;
+	--primary-foreground: #f7f6f2;
+	--secondary: #e6e5dd;
+	--secondary-foreground: #16150f;
+	--muted: #e6e5dd;
+	--muted-foreground: #63625a;
+	--accent: #e2e1d8;
+	--accent-foreground: #16150f;
+	--destructive: #96271c;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(62% 0.12 82);
+	--warning-foreground: oklch(98% 0.01 82);
+	--success: oklch(50% 0.1 145);
+	--success-foreground: oklch(98% 0.01 145);
+	--border: #d3d2cb;
+	--input: #cbcac1;
+	--ring: #16150f;
+	--radius: 0px;
+	--card-shadow: none;
+	--card-border: 0 solid transparent;
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 0.9rem 0 1rem;
+	--app-font-sans: "Karla", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Karla", ui-sans-serif, system-ui, sans-serif;
+	--display-tracking: 0.08em;
+	--display-transform: uppercase;
+	--success-strong: #2f5d33;
+	--warning-strong: #7a5a0b;
+	--destructive-strong: #96271c;
+	--info: #2f4f7a;
+	--info-foreground: #ffffff;
+	--surface-raised: #faf9f6;
+}
+
+[data-palette="ledger"].dark {
+	--background: #14140f;
+	--foreground: #eae8dd;
+	--card: transparent;
+	--card-foreground: #eae8dd;
+	--popover: #1e1e17;
+	--popover-foreground: #eae8dd;
+	--primary: #eae8dd;
+	--primary-foreground: #14140f;
+	--secondary: #23231b;
+	--secondary-foreground: #eae8dd;
+	--muted: #23231b;
+	--muted-foreground: #8d8b7e;
+	--accent: #292921;
+	--accent-foreground: #eae8dd;
+	--destructive: #d4675a;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(82% 0.13 85);
+	--warning-foreground: oklch(20% 0.03 85);
+	--success: oklch(74% 0.12 145);
+	--success-foreground: oklch(18% 0.03 145);
+	--border: #33322a;
+	--input: #33322a;
+	--ring: #eae8dd;
+	--card-shadow: none;
+	--success-strong: #8fbe84;
+	--warning-strong: #dbb75f;
+	--destructive-strong: #e8887c;
+	--info: #9db4d6;
+	--info-foreground: #101820;
+	--surface-raised: #1e1e17;
+}
+
+/* ── E · BLUEPRINT ────────────────────────────────────────────────────────
+   Cool drafting paper. A faint grid sits behind the content area (see
+   .blueprint-grid below) so panels rest ON a surface rather than floating,
+   which is the grouping work Ledger asks whitespace to do alone. Drafting-ink
+   blue, and every figure set in a technical mono. */
+
+[data-palette="blueprint"] {
+	--background: #eaeef1;
+	--foreground: #12222e;
+	--card: #fbfcfd;
+	--card-foreground: #12222e;
+	--popover: #fbfcfd;
+	--popover-foreground: #12222e;
+	--primary: #1a4e8a;
+	--primary-foreground: #ffffff;
+	--secondary: #dfe7ed;
+	--secondary-foreground: #12222e;
+	--muted: #dfe7ed;
+	--muted-foreground: #566d7e;
+	--accent: #dae4ec;
+	--accent-foreground: #12222e;
+	--destructive: #9c2f2f;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(62% 0.12 78);
+	--warning-foreground: oklch(98% 0.01 78);
+	--success: oklch(53% 0.11 160);
+	--success-foreground: oklch(98% 0.01 160);
+	--border: #c9d5dd;
+	--input: #c9d5dd;
+	--ring: #1a4e8a;
+	--radius: 1px;
+	--card-shadow: none;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 1.1rem;
+	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--display-tracking: 0.04em;
+	--display-transform: uppercase;
+	--success-strong: #1c5e4a;
+	--warning-strong: #7e5a12;
+	--destructive-strong: #9c2f2f;
+	--info: #1a4e8a;
+	--info-foreground: #ffffff;
+	--grid-line: #d5e0e8;
+	--surface-raised: #fbfcfd;
+}
+
+[data-palette="blueprint"].dark {
+	--background: #0d1620;
+	--foreground: #dbe6ef;
+	--card: #131f2b;
+	--card-foreground: #dbe6ef;
+	--popover: #131f2b;
+	--popover-foreground: #dbe6ef;
+	--primary: #6aa9e8;
+	--primary-foreground: #08131d;
+	--secondary: #1a2836;
+	--secondary-foreground: #dbe6ef;
+	--muted: #1a2836;
+	--muted-foreground: #7d94a9;
+	--accent: #1f2f3f;
+	--accent-foreground: #dbe6ef;
+	--destructive: #e0706b;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(82% 0.13 80);
+	--warning-foreground: oklch(20% 0.03 80);
+	--success: oklch(76% 0.13 162);
+	--success-foreground: oklch(18% 0.03 162);
+	--border: #24374a;
+	--input: #24374a;
+	--ring: #6aa9e8;
+	--card-shadow: none;
+	--success-strong: #63c9a4;
+	--warning-strong: #e2bb68;
+	--destructive-strong: #ef8c86;
+	--info: #8fc0ee;
+	--info-foreground: #08131d;
+	--grid-line: #17293a;
+	--surface-raised: #131f2b;
+}
+
+/* ── F · TAPE ─────────────────────────────────────────────────────────────
+   A dense dark trading terminal. Near-black with a blue bias, the tightest
+   padding of any direction, mono figures everywhere, and one electric accent.
+
+   The accent is deliberately BLUE: on a terminal, green and red are
+   load-bearing — they mean up and down — so an accent in either would compete
+   with the only colours on screen that carry data. Everything decorative is
+   given up so the numbers can be the brightest thing. */
+
+[data-palette="tape"] {
+	--background: #f4f6f8;
+	--foreground: #0b1119;
+	--card: #ffffff;
+	--card-foreground: #0b1119;
+	--popover: #ffffff;
+	--popover-foreground: #0b1119;
+	--primary: #1d62c7;
+	--primary-foreground: #ffffff;
+	--secondary: #e6eaf0;
+	--secondary-foreground: #0b1119;
+	--muted: #e6eaf0;
+	--muted-foreground: #566277;
+	--accent: #dfe5ed;
+	--accent-foreground: #0b1119;
+	--destructive: #a52a2a;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(62% 0.13 74);
+	--warning-foreground: oklch(98% 0.01 74);
+	--success: oklch(52% 0.12 150);
+	--success-foreground: oklch(98% 0.01 150);
+	--border: #d2d9e2;
+	--input: #d2d9e2;
+	--ring: #1d62c7;
+	--radius: 2px;
+	--card-shadow: none;
+	--card-border: 1px solid var(--border);
+	--card-top-rule: 1px solid var(--border);
+	--card-pad: 0.75rem;
+	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--display-tracking: 0.02em;
+	--display-transform: none;
+	--success-strong: #12724a;
+	--warning-strong: #855408;
+	--destructive-strong: #a52a2a;
+	--info: #1d62c7;
+	--info-foreground: #ffffff;
+	--surface-raised: #ffffff;
+}
+
+[data-palette="tape"].dark {
+	--background: #08090c;
+	--foreground: #e4e8ef;
+	--card: #0e1015;
+	--card-foreground: #e4e8ef;
+	--popover: #0e1015;
+	--popover-foreground: #e4e8ef;
+	--primary: #4c9eff;
+	--primary-foreground: #03080f;
+	--secondary: #161a22;
+	--secondary-foreground: #e4e8ef;
+	--muted: #161a22;
+	--muted-foreground: #78839a;
+	--accent: #1a1f29;
+	--accent-foreground: #e4e8ef;
+	--destructive: #f26d6d;
+	/* Near-black rather than white: on a dark ground the destructive fill is a
+	   light salmon, and white on it is 2.92:1. Same pairing logic the warning
+	   and success fills already use in every dark mode. */
+	--destructive-foreground: #1a0708;
+	--warning: oklch(83% 0.14 76);
+	--warning-foreground: oklch(20% 0.03 76);
+	--success: oklch(78% 0.16 152);
+	--success-foreground: oklch(16% 0.03 152);
+	--border: #1b1f27;
+	--input: #1b1f27;
+	--ring: #4c9eff;
+	--card-shadow: none;
+	--success-strong: #4ee39b;
+	--warning-strong: #e9b45c;
+	--destructive-strong: #ff8b8b;
+	--info: #7ab8ff;
+	--info-foreground: #03080f;
+	--surface-raised: #0e1015;
 }
 
 @theme inline {
@@ -373,6 +651,13 @@
 	   picked to carry the brand on a BUTTON, and classic's orange is only 2.65:1
 	   on white, so aliasing it made 12px info text less legible than the
 	   blue-600 it replaced. */
+	/* Always opaque, whatever --card is doing.
+	   A panel that floats above other content — a confirmation dialog over its
+	   scrim, the debug panel over the page, an SVG node label sitting on top of
+	   its own connector lines — cannot use --card, because a direction that
+	   separates panels with rules instead of boxes sets --card to transparent
+	   and the content behind shows straight through. */
+	--color-surface-raised: var(--surface-raised);
 	--color-info: var(--info);
 	--color-info-foreground: var(--info-foreground);
 	/* On-surface text variants of the semantic roles.
@@ -433,6 +718,11 @@
 		font-feature-settings:
 			"rlig" 1,
 			"calt" 1;
+		/* Proportional figures make every live counter jitter as it updates, and
+		   this dashboard updates constantly. Lining figures become the default
+		   everywhere rather than being opted into per site; prose is unaffected
+		   because it has no digit columns to misalign. */
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* Custom scrollbar */
@@ -480,6 +770,30 @@
 	   throttling state, geometry that moves under the cursor reads as noise. */
 	.card-hover {
 		@apply transition-colors duration-200 hover:border-primary/40;
+	}
+
+	/* Panel geometry, driven by tokens so a direction can be boxes or rules.
+	   Written as base-layer rules rather than Tailwind arbitrary values because
+	   `border-(--x)` in v4 resolves to border-COLOR and would drop the width.
+	   Base rules also lose to utilities, so a caller passing `p-4` still wins. */
+	.surface-edge {
+		border: var(--card-border);
+		border-top: var(--card-top-rule);
+	}
+
+	.surface-pad {
+		padding: var(--card-pad);
+	}
+
+	/* Blueprint's drafting grid. Sits only behind the main content column, and
+	   only for that palette — every other direction leaves --grid-line unset,
+	   and the rule is skipped entirely rather than painting a transparent grid. */
+	[data-palette="blueprint"] .content-surface {
+		background-image:
+			linear-gradient(var(--grid-line) 1px, transparent 1px),
+			linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+		background-size: 22px 22px;
+		background-position: -1px -1px;
 	}
 
 	/* Headings that should take the palette's display face. Foundry sets

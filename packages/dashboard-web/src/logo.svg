@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#0F1A20" stroke-linecap="round">
+  <!--
+    Favicon twin of components/BrandMark.tsx. Same geometry, but a literal
+    colour rather than currentColor: a favicon is rendered by the browser
+    chrome, outside any document that could supply one.
+
+    The ink flips with the OS scheme so the mark stays visible on both a light
+    and a dark browser tab strip. Media queries inside an SVG referenced by
+    <link rel="icon"> are honoured by Firefox and Safari; Chrome ignores them
+    and paints the light-mode ink, which still reads on its tab bar.
+  -->
+  <style>
+    @media (prefers-color-scheme: dark) {
+      path { stroke: #E8EFF1; }
+    }
+  </style>
+  <path d="M1.5 12h9" stroke-width="3.4"/>
+  <path d="M10.5 12c5 0 5-7.5 11-7.5M10.5 12h11M10.5 12c5 0 5 7.5 11 7.5" stroke-width="1.5"/>
+</svg>

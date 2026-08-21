@@ -210,10 +210,14 @@ export const OverviewTab = React.memo(() => {
 			{/* Only renders when /api/system/status reports unpriced models */}
 			<PricingGapBanner />
 
-			{/* The section heading stays FIRST so heading order runs h1 → h2 → the
-			    card's own h3. Putting the card above it inverted that, and screen
-			    reader heading navigation met a level 3 before its level-2 parent. */}
-			<h2 className="text-2xl font-semibold">Overview</h2>
+			{/* Visually hidden, but structurally load-bearing. The shell already
+			    renders the page's only visible title as an h1, so printing
+			    "Overview" here again was the page naming itself twice on screen.
+			    The heading itself has to stay: it keeps order at h1 → h2 → the
+			    card's own h3, and without it screen-reader heading navigation
+			    meets a level 3 before its level-2 parent. It now names the section
+			    rather than the page, which is what a level-2 heading is for. */}
+			<h2 className="sr-only">Pool activity and metrics</h2>
 
 			{/* Above the range selector, not below it: this card is live and
 			    carries its own minutes-scale window, which has nothing to do with

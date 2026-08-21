@@ -23,6 +23,9 @@ const SWATCHES: Record<string, [string, string, string]> = {
 	signal: ["#0a0e11", "#1e2a31", "#4fc3e8"],
 	foundry: ["#151210", "#342c25", "#f2691c"],
 	paper: ["#eef1f2", "#d9e0e2", "#0f6d74"],
+	ledger: ["#f2f1ed", "#d3d2cb", "#16150f"],
+	blueprint: ["#eaeef1", "#c9d5dd", "#1a4e8a"],
+	tape: ["#08090c", "#1b1f27", "#4c9eff"],
 };
 
 export function PalettePicker() {
