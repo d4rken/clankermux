@@ -156,11 +156,11 @@ export function LogsTab() {
 		if (!level) return "";
 		switch (level.toUpperCase()) {
 			case "ERROR":
-				return "text-destructive";
+				return "text-destructive-strong";
 			case "WARN":
-				return "text-yellow-600";
+				return "text-warning-strong";
 			case "INFO":
-				return "text-green-600";
+				return "text-success-strong";
 			case "DEBUG":
 				return "text-muted-foreground";
 			default:
@@ -212,7 +212,7 @@ export function LogsTab() {
 					{loading ? (
 						<p className="text-muted-foreground">Loading logs...</p>
 					) : error ? (
-						<p className="text-destructive">
+						<p className="text-destructive-strong">
 							Error: {error instanceof Error ? error.message : String(error)}
 						</p>
 					) : logs.length === 0 ? (
@@ -246,7 +246,7 @@ export function LogsTab() {
 						onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
 							setAutoScroll((e.target as HTMLInputElement).checked)
 						}
-						className="rounded border-gray-300"
+						className="rounded border-input"
 					/>
 					<label htmlFor="autoscroll" className="text-sm text-muted-foreground">
 						Auto-scroll to bottom

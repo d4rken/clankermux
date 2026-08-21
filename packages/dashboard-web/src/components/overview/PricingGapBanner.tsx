@@ -17,9 +17,9 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 			role="alert"
 			className="flex items-start gap-3 p-3 rounded-lg bg-warning/15 border border-warning/30"
 		>
-			<AlertTriangle className="h-5 w-5 text-warning mt-0.5 shrink-0" />
+			<AlertTriangle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
 			<div className="text-sm min-w-0">
-				<p className="font-medium text-warning">
+				<p className="font-medium text-warning-strong">
 					Requests recorded without pricing
 				</p>
 				<p className="text-muted-foreground">

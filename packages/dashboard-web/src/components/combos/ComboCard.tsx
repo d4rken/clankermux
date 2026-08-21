@@ -59,7 +59,7 @@ export function ComboCard({
 							variant="ghost"
 							size="sm"
 							onClick={onDelete}
-							className="text-destructive hover:text-destructive"
+							className="text-destructive-strong hover:text-destructive-strong"
 						>
 							<Trash2 className="h-4 w-4" />
 						</Button>

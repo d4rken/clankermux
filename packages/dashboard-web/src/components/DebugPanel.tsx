@@ -65,11 +65,11 @@ export function DebugPanel() {
 	const getLogColor = (level: string) => {
 		switch (level) {
 			case "error":
-				return "text-destructive";
+				return "text-destructive-strong";
 			case "warn":
-				return "text-yellow-600";
+				return "text-warning-strong";
 			case "info":
-				return "text-blue-600";
+				return "text-info";
 			case "debug":
 				return "text-muted-foreground";
 			default:

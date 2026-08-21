@@ -1,66 +1,100 @@
 import { getModelShortName } from "@clankermux/core";
-import { CHART_COLORS, MODEL_PALETTE } from "../constants";
+import {
+	CHART_COLORS,
+	CHART_COLORS_LIGHT,
+	MODEL_PALETTE,
+	MODEL_PALETTE_LIGHT,
+} from "../constants";
+
+/** Which chart ground the colour is being resolved for. */
+export type ColorMode = "light" | "dark";
 
 /**
- * Model-based chart color palette, keyed by the UI short name
+ * Model-based chart colour assignment, keyed by the UI short name
  * (`getModelShortName`) with a few legacy ids that predate the registry.
  *
- * Invariant: every id here has a GLOBALLY unique color — no two models share
- * one, regardless of family. Charts are not grouped per family: AnalyticsCharts
+ * The value is a PALETTE KEY, not a hex string. A model's identity is the key;
+ * the rendered value depends on the colour mode, because a hue that reads on
+ * the near-black chart ground of the dark palettes is close to invisible on the
+ * white card the light ones use, and vice versa. MODEL_PALETTE and
+ * MODEL_PALETTE_LIGHT share their key set precisely so this indirection works.
+ *
+ * Invariant: every id here has a GLOBALLY unique key — no two models share one,
+ * regardless of family. Charts are not grouped per family: AnalyticsCharts
  * builds its series list from every distinct model in the time range, so Opus,
  * Sonnet and Mythos are plotted side by side and a cross-family repeat is just
  * as unreadable as a within-family one. The "all" range can also surface the
  * pre-registry legacy ids alongside current ones, so they need stable
- * assignments too. Colors come from MODEL_PALETTE (curated colorblind-safe
- * hues) rather than the semantic COLORS object, which has too few entries to go
- * around.
+ * assignments too.
  *
  * Every registry model needs an explicit entry: the substring fallback below is
  * deliberately loose (`claude-opus-4-8` contains `claude-opus-4`), so a model
- * without an entry silently inherits an older model's color. Uniqueness and
- * perceptual separation are enforced by model-colors.test.ts.
+ * without an entry silently inherits an older model's colour. Uniqueness and
+ * perceptual separation are enforced by model-colors.test.ts, in BOTH modes.
  */
-export const MODEL_COLORS: Record<string, string> = {
-	"claude-3.5-sonnet": MODEL_PALETTE.rose,
-	"claude-3.5-haiku": MODEL_PALETTE.pink,
-	"claude-3-opus": MODEL_PALETTE.grey,
-	"claude-opus-4": MODEL_PALETTE.blue,
-	"claude-opus-4.1": MODEL_PALETTE.orange,
-	"claude-opus-4.5": MODEL_PALETTE.green,
-	"claude-opus-4.6": MODEL_PALETTE.magenta,
-	"claude-opus-4.7": MODEL_PALETTE.skyBlue,
-	"claude-opus-4.8": MODEL_PALETTE.yellow,
-	"claude-opus-5": MODEL_PALETTE.red,
-	"claude-sonnet-4": MODEL_PALETTE.mint,
-	"claude-sonnet-4.5": MODEL_PALETTE.purple,
-	"claude-sonnet-4.6": MODEL_PALETTE.pear,
-	"claude-sonnet-5": MODEL_PALETTE.peach,
-	"claude-haiku-4.5": MODEL_PALETTE.lightBlue,
-	"claude-fable-5": MODEL_PALETTE.olive,
-	"claude-mythos-5": MODEL_PALETTE.mauve,
+export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
+	"claude-3.5-sonnet": "rose",
+	"claude-3.5-haiku": "pink",
+	"claude-3-opus": "grey",
+	"claude-opus-4": "blue",
+	"claude-opus-4.1": "orange",
+	"claude-opus-4.5": "green",
+	"claude-opus-4.6": "magenta",
+	"claude-opus-4.7": "skyBlue",
+	"claude-opus-4.8": "yellow",
+	"claude-opus-5": "red",
+	"claude-sonnet-4": "mint",
+	"claude-sonnet-4.5": "purple",
+	"claude-sonnet-4.6": "pear",
+	"claude-sonnet-5": "peach",
+	"claude-haiku-4.5": "lightBlue",
+	"claude-fable-5": "olive",
+	"claude-mythos-5": "mauve",
 };
 
+/** Resolve a palette key to its value for the given ground. */
+export function paletteColor(
+	key: keyof typeof MODEL_PALETTE,
+	mode: ColorMode,
+): string {
+	return mode === "light" ? MODEL_PALETTE_LIGHT[key] : MODEL_PALETTE[key];
+}
+
 /**
- * Resolve the chart color for a model id: explicit short-name entry, then
+ * Resolve the chart colour for a model id: explicit short-name entry, then
  * explicit raw-id entry, then a loose substring match (so unregistered or
- * third-party variants borrow their base model's color), then the index-based
- * chart color sequence.
+ * third-party variants borrow their base model's colour), then the index-based
+ * fallback sequence.
+ *
+ * `mode` defaults to "dark" — the ground the dashboard used before light
+ * palettes existed — so a call site that has not been threaded through the
+ * colour mode keeps its previous behaviour instead of silently picking hues
+ * tuned for the wrong ground.
  */
-export function getModelColor(model: string, index: number): string {
-	// Try to find color by short name first
+export function getModelColor(
+	model: string,
+	index: number,
+	mode: ColorMode = "dark",
+): string {
+	const key = getModelColorKey(model);
+	if (key) return paletteColor(key, mode);
+
+	const sequence = mode === "light" ? CHART_COLORS_LIGHT : CHART_COLORS;
+	return sequence[index % sequence.length];
+}
+
+/** The palette key a model resolves to, or null if only the fallback applies. */
+export function getModelColorKey(
+	model: string,
+): keyof typeof MODEL_PALETTE | null {
 	const shortName = getModelShortName(model);
-	if (MODEL_COLORS[shortName]) return MODEL_COLORS[shortName];
+	if (MODEL_COLOR_KEYS[shortName]) return MODEL_COLOR_KEYS[shortName];
 
-	// Check for exact match
-	if (MODEL_COLORS[model]) return MODEL_COLORS[model];
+	if (MODEL_COLOR_KEYS[model]) return MODEL_COLOR_KEYS[model];
 
-	// Check for partial matches
-	for (const [key, color] of Object.entries(MODEL_COLORS)) {
-		if (model.includes(key) || key.includes(model)) {
-			return color;
-		}
+	for (const [candidate, key] of Object.entries(MODEL_COLOR_KEYS)) {
+		if (model.includes(candidate) || candidate.includes(model)) return key;
 	}
 
-	// Use chart colors array as fallback
-	return CHART_COLORS[index % CHART_COLORS.length];
+	return null;
 }

@@ -81,9 +81,9 @@ interface DefaultErrorFallbackProps {
 
 function DefaultErrorFallback({ error, reset }: DefaultErrorFallbackProps) {
 	return (
-		<div className="p-4 border border-red-200 rounded-lg bg-red-50 dark:bg-red-900/20 dark:border-red-800">
+		<div className="p-4 border border-destructive/30 rounded-lg bg-destructive/10">
 			<div className="flex flex-col items-center text-center">
-				<div className="text-red-600 dark:text-red-400 mb-2">
+				<div className="text-destructive-strong mb-2">
 					<svg
 						xmlns="http://www.w3.org/2000/svg"
 						className="h-8 w-8"
@@ -102,17 +102,17 @@ function DefaultErrorFallback({ error, reset }: DefaultErrorFallbackProps) {
 						/>
 					</svg>
 				</div>
-				<h3 className="text-lg font-semibold text-red-800 dark:text-red-200 mb-2">
+				<h3 className="text-lg font-semibold text-foreground mb-2">
 					Something went wrong
 				</h3>
-				<p className="text-red-600 dark:text-red-300 mb-4 max-w-md">
+				<p className="text-muted-foreground mb-4 max-w-md">
 					{error?.message ||
 						"An unexpected error occurred while loading this component."}
 				</p>
 				<button
 					type="button"
 					onClick={reset}
-					className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+					className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
 				>
 					Try again
 				</button>
@@ -126,7 +126,7 @@ function DefaultErrorFallback({ error, reset }: DefaultErrorFallbackProps) {
  */
 export function TokenStatusErrorFallback() {
 	return (
-		<span className="px-2 py-1 text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300 rounded-full">
+		<span className="px-2 py-1 text-xs font-medium bg-destructive/15 text-destructive-strong rounded-full">
 			Status unavailable
 		</span>
 	);

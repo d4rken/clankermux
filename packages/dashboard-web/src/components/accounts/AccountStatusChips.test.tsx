@@ -427,25 +427,25 @@ describe("AccountStatusChips — reset-credit urgency colors", () => {
 		const html = render(
 			makeResetCreditAccount(new Date(NOW + 30 * 60_000).toISOString()),
 		);
-		expect(html).toContain("bg-red-100");
-		expect(html).not.toContain("bg-sky-100");
+		expect(html).toContain("bg-destructive/15");
+		expect(html).not.toContain("bg-info/15");
 	});
 
 	it("uses amber classes when the soonest expiry is under 24 hours away", () => {
 		const html = render(
 			makeResetCreditAccount(new Date(NOW + 5 * 3_600_000).toISOString()),
 		);
-		expect(html).toContain("bg-amber-100");
-		expect(html).not.toContain("bg-sky-100");
+		expect(html).toContain("bg-warning/15");
+		expect(html).not.toContain("bg-info/15");
 	});
 
 	it("keeps the default sky classes when nothing expires soon", () => {
 		const html = render(
 			makeResetCreditAccount(new Date(NOW + 3 * 86_400_000).toISOString()),
 		);
-		expect(html).toContain("bg-sky-100");
-		expect(html).not.toContain("bg-red-100");
-		expect(html).not.toContain("bg-amber-100");
+		expect(html).toContain("bg-info/15");
+		expect(html).not.toContain("bg-destructive/15");
+		expect(html).not.toContain("bg-warning/15");
 	});
 });
 
@@ -708,14 +708,14 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 				outcome: "reset",
 				message: "Reset applied — usage windows cleared",
 			}),
-		).toContain("text-green-600");
+		).toContain("text-success-strong");
 		expect(
 			renderPanel({
 				kind: "done",
 				outcome: "noCredit",
 				message: "No credit available",
 			}),
-		).not.toContain("text-green-600");
+		).not.toContain("text-success-strong");
 	});
 
 	it("renders a dismiss control in the done state (path back to idle)", () => {
@@ -764,7 +764,7 @@ describe("AccountStatusChips — family-weekly exhausted chip", () => {
 			}),
 		);
 		expect(html).toContain("Fable weekly exhausted (48h)");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		// The account is routable for other families — no Force Reset offer.
 		expect(html).not.toContain("Force reset");
 	});

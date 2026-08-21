@@ -70,7 +70,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly exhausted on 1 of 6 accounts",
-			colorClass: "text-destructive",
+			colorClass: "text-destructive-strong",
 		});
 	});
 
@@ -80,7 +80,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly at 92% on 2 of 6 accounts",
-			colorClass: "text-warning",
+			colorClass: "text-warning-strong",
 		});
 	});
 
@@ -90,7 +90,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly exhausted on 3 of 3 accounts",
-			colorClass: "text-destructive",
+			colorClass: "text-destructive-strong",
 		});
 	});
 
@@ -100,7 +100,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly exhausted on 1 of 1 account",
-			colorClass: "text-destructive",
+			colorClass: "text-destructive-strong",
 		});
 	});
 
@@ -110,7 +110,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly exhausted on 1 of 5 accounts",
-			colorClass: "text-destructive",
+			colorClass: "text-destructive-strong",
 		});
 	});
 
@@ -126,7 +126,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "2 of 2 model limits elevated",
-			colorClass: "text-destructive",
+			colorClass: "text-destructive-strong",
 		});
 	});
 
@@ -142,7 +142,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "2 of 2 model limits elevated",
-			colorClass: "text-warning",
+			colorClass: "text-warning-strong",
 		});
 	});
 
@@ -165,7 +165,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "2 of 3 model limits elevated",
-			colorClass: "text-warning",
+			colorClass: "text-warning-strong",
 		});
 	});
 
@@ -182,7 +182,7 @@ describe("familyWeeklyBadge", () => {
 		];
 		expect(familyWeeklyBadge(families)).toEqual({
 			label: "Fable weekly at 92% on 1 of 6 accounts",
-			colorClass: "text-warning",
+			colorClass: "text-warning-strong",
 		});
 	});
 
@@ -195,7 +195,7 @@ describe("familyWeeklyBadge", () => {
 		const { label, colorClass } = familyWeeklyBadge(families);
 		expect(label).toBe("Fable weekly at 99% on 1 of 4 accounts");
 		expect(label).not.toContain("100%");
-		expect(colorClass).toBe("text-warning");
+		expect(colorClass).toBe("text-warning-strong");
 	});
 
 	test("a fractional pct below the elevated threshold does not display as elevated", () => {

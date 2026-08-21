@@ -3,7 +3,7 @@ import { formatNumber } from "@clankermux/ui-common";
 import { Wrench } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { TimeRange } from "../../constants";
-import { CHART_COLORS, COLORS } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatAxisTime,
 	makeTimeTooltipLabelFormatter,
@@ -144,7 +144,7 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 									<div className="font-medium">{row.toolName}</div>
 									{lowSample && (
 										<div
-											className="text-xs text-amber-600"
+											className="text-xs text-warning-strong"
 											title="Few tool calls — error rate is noisy"
 										>
 											low sample
@@ -166,7 +166,7 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 											className="h-full rounded-full transition-all"
 											style={{
 												width: `${barPct}%`,
-												backgroundColor: COLORS.error,
+												backgroundColor: "var(--destructive)",
 											}}
 										/>
 									</div>
@@ -187,6 +187,7 @@ function ErrorRateTrendChart({
 	timeSeries: ToolCallErrors["timeSeries"];
 	timeRange: TimeRange;
 }) {
+	const palette = useSeriesPalette();
 	const { data, series } = useMemo(() => {
 		const { rows, series } = buildToolErrorTrend(timeSeries);
 		// Compact axis label baked per point; the raw `ts` rides along so the
@@ -212,7 +213,7 @@ function ErrorRateTrendChart({
 				lines={series.map(({ key, label }, index) => ({
 					dataKey: key,
 					name: label,
-					stroke: CHART_COLORS[index % CHART_COLORS.length],
+					stroke: palette.sequence[index % palette.sequence.length],
 					connectNulls: true,
 				}))}
 				xAxisKey="time"

@@ -16,11 +16,11 @@ function ToolResultBlockComponent({ content }: ToolResultBlockProps) {
 	);
 
 	return (
-		<div className="p-3 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800 rounded-lg">
+		<div className="p-3 bg-success/10 border border-success/25 rounded-lg">
 			<div className="flex items-center justify-between mb-1">
 				<div className="flex items-center gap-2">
-					<FileText className="w-3 h-3 text-green-600 dark:text-green-400" />
-					<span className="text-xs font-medium text-green-600 dark:text-green-400">
+					<FileText className="w-3 h-3 text-success-strong" />
+					<span className="text-xs font-medium text-success-strong">
 						Tool Result
 					</span>
 				</div>
@@ -35,7 +35,7 @@ function ToolResultBlockComponent({ content }: ToolResultBlockProps) {
 					</Button>
 				)}
 			</div>
-			<div className="text-xs bg-green-100/50 dark:bg-green-900/20 p-2 rounded mt-1 overflow-hidden">
+			<div className="text-xs bg-muted p-2 rounded mt-1 overflow-hidden">
 				<pre
 					className={`overflow-x-auto whitespace-pre text-left ${
 						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-2" : ""

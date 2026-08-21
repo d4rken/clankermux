@@ -68,7 +68,7 @@ export function MetricCard({
 	const trendElement = !pending && trend !== "flat" && change !== undefined && (
 		<div
 			className={`flex items-center gap-1 text-sm font-medium ${
-				trend === "up" ? "text-success" : "text-destructive"
+				trend === "up" ? "text-success-strong" : "text-destructive-strong"
 			}`}
 		>
 			{trend === "up" ? (
@@ -112,7 +112,7 @@ export function MetricCard({
 				{unavailableReason ? (
 					<>
 						<p className="text-2xl font-bold text-muted-foreground/60">—</p>
-						<p className="mt-1 flex items-center gap-1.5 text-xs text-warning">
+						<p className="mt-1 flex items-center gap-1.5 text-xs text-warning-strong">
 							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 							{unavailableReason}
 						</p>

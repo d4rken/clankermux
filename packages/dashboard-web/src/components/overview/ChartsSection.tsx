@@ -1,7 +1,7 @@
 import { formatTokens } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
-import { CHART_COLORS } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import type { OverviewTimeSeriesRow } from "../../lib/overview-timeseries";
 import {
@@ -43,7 +43,7 @@ interface ChartsSectionProps {
 function ChartUnavailable({ height }: { height: string }) {
 	return (
 		<div
-			className={`flex items-center justify-center gap-1.5 text-xs text-warning ${height}`}
+			className={`flex items-center justify-center gap-1.5 text-xs text-warning-strong ${height}`}
 		>
 			<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 			Chart data unavailable
@@ -60,6 +60,7 @@ export function ChartsSection({
 	loading,
 	unavailable = false,
 }: ChartsSectionProps) {
+	const series = useSeriesPalette();
 	// Aggregate account-model usage into per-account totals for the donut chart
 	const accountUsageDonutData = useMemo(() => {
 		const totals = new Map<string, number>();
@@ -151,7 +152,7 @@ export function ChartsSection({
 											className="h-3 w-3 rounded-full"
 											style={{
 												backgroundColor:
-													CHART_COLORS[index % CHART_COLORS.length],
+													series.sequence[index % series.sequence.length],
 											}}
 										/>
 										<span className="text-muted-foreground">{model.name}</span>
@@ -196,7 +197,7 @@ export function ChartsSection({
 													className="h-3 w-3 rounded-full"
 													style={{
 														backgroundColor:
-															CHART_COLORS[index % CHART_COLORS.length],
+															series.sequence[index % series.sequence.length],
 													}}
 												/>
 												<span className="text-muted-foreground font-medium">
@@ -262,7 +263,7 @@ export function ChartsSection({
 											className="h-3 w-3 shrink-0 rounded-full"
 											style={{
 												backgroundColor:
-													CHART_COLORS[index % CHART_COLORS.length],
+													series.sequence[index % series.sequence.length],
 											}}
 										/>
 										<span className="text-muted-foreground truncate">

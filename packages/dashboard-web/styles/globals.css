@@ -4,7 +4,38 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ══════════════════════════════════════════════════════════════════════════
+   THEME TOKENS
+
+   Two independent axes:
+
+     data-palette  classic | signal | foundry | paper   (visual direction)
+     .light/.dark  colour mode                          (unchanged behaviour)
+
+   Every palette defines BOTH modes, so the mode toggle keeps working whichever
+   direction is selected. `classic` is the palette that shipped before the
+   directions existed and is the default when no attribute is set — an
+   unstyled/very-early paint therefore still gets a complete token set.
+
+   Token roles worth knowing before editing:
+
+   --primary   The brand/emphasis colour. Buttons, active nav, chart accents.
+   --accent    NOT a second brand colour. It is the hover/focus SURFACE, and
+               its only consumers are dropdown-menu items, select items, ghost
+               and outline buttons, and request rows (`hover:bg-accent`).
+               Giving it a saturated hue makes every menu focus flash. It
+               belongs one step off --secondary.
+   --ring      Focus ring. Free to carry the brand hue; it is the one place a
+               saturated outline is wanted.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Shared semantic scaffolding ──────────────────────────────────────────
+   warning/success carry a mid-tone value plus a near-black same-hue partner.
+   White on either shade is well under 3:1, which is why the -foreground half
+   is never simply #fff. Palettes below override the hue, never the pattern. */
+
 :root {
+	/* classic · light (the palette that shipped before this file grew axes) */
 	--background: hsl(0 0% 100%);
 	--foreground: hsl(240 10% 3.9%);
 	--card: hsl(0 0% 100%);
@@ -17,56 +48,293 @@
 	--secondary-foreground: hsl(240 5.9% 10%);
 	--muted: hsl(240 4.8% 95.9%);
 	--muted-foreground: hsl(240 3.8% 46.1%);
-	--accent: hsl(24 89% 56%); /* ClankerMux Orange */
-	--accent-foreground: hsl(0 0% 100%);
+	/* Hover/focus surface — deliberately NOT --primary. See the role notes. */
+	--accent: hsl(240 4.8% 93.5%);
+	--accent-foreground: hsl(240 5.9% 10%);
 	--destructive: hsl(0 84.2% 60.2%);
 	--destructive-foreground: hsl(0 0% 98%);
-	/* Amber warn tone. Same value Tailwind's yellow-600 resolves to, so the
-	   text-warning sites that used to @apply it are unchanged. */
 	--warning: oklch(68.1% 0.162 75.834);
-	/* Near-black warm: white on either amber shade is well under 3:1. */
 	--warning-foreground: oklch(21% 0.03 75.834);
-	/* Green success tone. Same value Tailwind's green-600 resolves to, so the
-	   text-success sites that used to @apply it are unchanged. */
 	--success: oklch(62.7% 0.194 149.214);
-	/* Near-black green: white on either green shade is well under 3:1. */
 	--success-foreground: oklch(21% 0.03 149.214);
 	--border: hsl(240 5.9% 90%);
 	--input: hsl(240 5.9% 90%);
-	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
+	--ring: hsl(24 89% 56%);
 	--radius: 0.375rem;
-	--cf-orange: #f38020;
+	--card-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+	--app-font-sans:
+		ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--app-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--app-font-display: var(--app-font-sans);
+	--display-tracking: -0.025em; /* matches Tailwind tracking-tight */
+	--display-transform: none;
+	--success-strong: #15803d;
+	--warning-strong: #a16207;
+	--destructive-strong: #b91c1c;
+	--info: #1d4ed8;
+	--info-foreground: #ffffff;
 }
 
 .dark {
-	--background: hsl(220 13% 8%); /* Dark background like ClankerMux */
+	/* classic · dark */
+	--background: hsl(220 13% 8%);
 	--foreground: hsl(0 0% 95%);
 	--card: hsl(220 13% 12%);
 	--card-foreground: hsl(0 0% 95%);
 	--popover: hsl(220 13% 12%);
 	--popover-foreground: hsl(0 0% 95%);
-	--primary: hsl(24 89% 56%); /* ClankerMux Orange */
+	--primary: hsl(24 89% 56%);
 	--primary-foreground: hsl(0 0% 100%);
 	--secondary: hsl(220 13% 18%);
 	--secondary-foreground: hsl(0 0% 95%);
 	--muted: hsl(220 13% 18%);
 	--muted-foreground: hsl(220 9% 55%);
-	--accent: hsl(24 89% 56%); /* ClankerMux Orange */
-	--accent-foreground: hsl(0 0% 100%);
+	--accent: hsl(220 13% 21%);
+	--accent-foreground: hsl(0 0% 95%);
 	--destructive: hsl(0 84.2% 60.2%);
 	--destructive-foreground: hsl(0 0% 98%);
-	/* yellow-400 — what text-warning resolved to in dark mode before the token
-	   existed. */
 	--warning: oklch(85.2% 0.199 91.936);
 	--warning-foreground: oklch(21% 0.03 91.936);
-	/* green-400 — what text-success resolved to in dark mode before the token
-	   existed. */
 	--success: oklch(79.2% 0.209 151.711);
 	--success-foreground: oklch(21% 0.03 151.711);
 	--border: hsl(220 13% 20%);
 	--input: hsl(220 13% 18%);
-	--ring: hsl(24 89% 56%); /* ClankerMux Orange */
-	--cf-orange: #f38020;
+	--ring: hsl(24 89% 56%);
+	--card-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.35);
+	--success-strong: #4ade80;
+	--warning-strong: #facc15;
+	--destructive-strong: #f87171;
+	--info: #7cb0f5;
+	--info-foreground: #0a1526;
+}
+
+/* ── A · SIGNAL ───────────────────────────────────────────────────────────
+   Instrument deck. Cold near-black with a blue-green bias, hairline borders
+   instead of shadows, 2px corners, every figure in mono. The cyan is
+   deliberately desaturated: it reads as "the thing you are looking at", and
+   success/warning/destructive keep the job of meaning state. */
+
+[data-palette="signal"] {
+	--background: #f4f8fa;
+	--foreground: #0d181d;
+	--card: #ffffff;
+	--card-foreground: #0d181d;
+	--popover: #ffffff;
+	--popover-foreground: #0d181d;
+	--primary: #10717f;
+	--primary-foreground: #ffffff;
+	--secondary: #e7eef1;
+	--secondary-foreground: #0d181d;
+	--muted: #e7eef1;
+	--muted-foreground: #56707a;
+	--accent: #dfe9ed;
+	--accent-foreground: #0d181d;
+	--destructive: #b3372e;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(66% 0.15 72);
+	--warning-foreground: oklch(21% 0.03 72);
+	--success: oklch(58% 0.14 160);
+	--success-foreground: oklch(98% 0.01 160);
+	--border: #d4e0e5;
+	--input: #d4e0e5;
+	--ring: #1591a4;
+	--radius: 2px;
+	--card-shadow: none;
+	--app-font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Archivo", ui-sans-serif, system-ui, sans-serif;
+	--display-tracking: 0.01em;
+	--display-transform: none;
+	--success-strong: #0f7a52;
+	--warning-strong: #8a5a09;
+	--destructive-strong: #b3372e;
+	--info: #0e6e8a;
+	--info-foreground: #ffffff;
+}
+
+[data-palette="signal"].dark {
+	--background: #0a0e11;
+	--foreground: #dee9ee;
+	--card: #0f151a;
+	--card-foreground: #dee9ee;
+	--popover: #0f151a;
+	--popover-foreground: #dee9ee;
+	--primary: #4fc3e8;
+	--primary-foreground: #06131a;
+	--secondary: #172127;
+	--secondary-foreground: #dee9ee;
+	--muted: #172127;
+	--muted-foreground: #71868f;
+	--accent: #1a262d;
+	--accent-foreground: #dee9ee;
+	--destructive: #e8635c;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(80% 0.13 78);
+	--warning-foreground: oklch(20% 0.03 78);
+	--success: oklch(76% 0.14 163);
+	--success-foreground: oklch(18% 0.03 163);
+	--border: #1e2a31;
+	--input: #1e2a31;
+	--ring: #4fc3e8;
+	--card-shadow: none;
+	--success-strong: #4fd8a6;
+	--warning-strong: #e0b155;
+	--destructive-strong: #f0857f;
+	--info: #7fd4f0;
+	--info-foreground: #06131a;
+}
+
+/* ── B · FOUNDRY ──────────────────────────────────────────────────────────
+   Warm industrial. Keeps the inherited orange but moves the ground from
+   blue-grey to charcoal so the hue sits in its own family instead of fighting
+   a cold background. --warning is pushed toward yellow (hue ~95 rather than
+   ~76) because amber and this orange are otherwise hard to tell apart on a
+   warm ground. */
+
+[data-palette="foundry"] {
+	--background: #f7f3ee;
+	--foreground: #1c1611;
+	--card: #ffffff;
+	--card-foreground: #1c1611;
+	--popover: #ffffff;
+	--popover-foreground: #1c1611;
+	--primary: #c1490b;
+	--primary-foreground: #ffffff;
+	--secondary: #efe8df;
+	--secondary-foreground: #1c1611;
+	--muted: #efe8df;
+	--muted-foreground: #6e6152;
+	--accent: #e9e0d4;
+	--accent-foreground: #1c1611;
+	--destructive: #a83226;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(64% 0.14 95);
+	--warning-foreground: oklch(21% 0.03 95);
+	--success: oklch(57% 0.12 140);
+	--success-foreground: oklch(98% 0.01 140);
+	--border: #e3d9cd;
+	--input: #e3d9cd;
+	--ring: #e2620f;
+	--radius: 2px;
+	--card-shadow: none;
+	--app-font-sans: "Saira", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "Spline Sans Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Saira Condensed", "Saira", ui-sans-serif, sans-serif;
+	--display-tracking: 0.03em;
+	--display-transform: uppercase;
+	--success-strong: #3f7a3f;
+	--warning-strong: #86660c;
+	--destructive-strong: #a83226;
+	--info: #2c6e8f;
+	--info-foreground: #ffffff;
+}
+
+[data-palette="foundry"].dark {
+	--background: #151210;
+	--foreground: #f0e8e0;
+	--card: #211c18;
+	--card-foreground: #f0e8e0;
+	--popover: #211c18;
+	--popover-foreground: #f0e8e0;
+	--primary: #f2691c;
+	--primary-foreground: #1a0e06;
+	--secondary: #2a2420;
+	--secondary-foreground: #f0e8e0;
+	--muted: #2a2420;
+	--muted-foreground: #9a897a;
+	--accent: #322b25;
+	--accent-foreground: #f0e8e0;
+	--destructive: #d2564a;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(84% 0.15 98);
+	--warning-foreground: oklch(21% 0.03 98);
+	--success: oklch(76% 0.14 140);
+	--success-foreground: oklch(19% 0.03 140);
+	--border: #342c25;
+	--input: #342c25;
+	--ring: #f2691c;
+	--card-shadow: none;
+	--success-strong: #97c46e;
+	--warning-strong: #e6c35f;
+	--destructive-strong: #e8837a;
+	--info: #9fc4d9;
+	--info-foreground: #1a0e06;
+}
+
+/* ── C · PAPER TERMINAL ───────────────────────────────────────────────────
+   Light and clinical: cool paper ground, ink type, one deep instrument teal,
+   hairline rules doing the work cards do elsewhere. Density comes from
+   typography rather than boxes, which is why this palette pairs a serif
+   display face with a tabular mono. */
+
+[data-palette="paper"] {
+	--background: #eef1f2;
+	--foreground: #0f1a20;
+	--card: #ffffff;
+	--card-foreground: #0f1a20;
+	--popover: #ffffff;
+	--popover-foreground: #0f1a20;
+	--primary: #0f6d74;
+	--primary-foreground: #ffffff;
+	--secondary: #e4eaec;
+	--secondary-foreground: #0f1a20;
+	--muted: #e4eaec;
+	--muted-foreground: #5c6d74;
+	--accent: #dde7e8;
+	--accent-foreground: #0f1a20;
+	--destructive: #a82b22;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(60% 0.13 75);
+	--warning-foreground: oklch(98% 0.01 75);
+	--success: oklch(52% 0.12 155);
+	--success-foreground: oklch(98% 0.01 155);
+	--border: #d9e0e2;
+	--input: #d9e0e2;
+	--ring: #0f6d74;
+	--radius: 3px;
+	--card-shadow: none;
+	--app-font-sans: "Karla", ui-sans-serif, system-ui, sans-serif;
+	--app-font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+	--app-font-display: "Fraunces", Georgia, "Times New Roman", serif;
+	--display-tracking: -0.015em;
+	--display-transform: none;
+	--success-strong: #14663f;
+	--warning-strong: #8a5d00;
+	--destructive-strong: #a82b22;
+	--info: #0f5b87;
+	--info-foreground: #ffffff;
+}
+
+[data-palette="paper"].dark {
+	--background: #10171a;
+	--foreground: #e8eff1;
+	--card: #172125;
+	--card-foreground: #e8eff1;
+	--popover: #172125;
+	--popover-foreground: #e8eff1;
+	--primary: #4fb8be;
+	--primary-foreground: #04191b;
+	--secondary: #1d282c;
+	--secondary-foreground: #e8eff1;
+	--muted: #1d282c;
+	--muted-foreground: #7c939b;
+	--accent: #223035;
+	--accent-foreground: #e8eff1;
+	--destructive: #e0685e;
+	--destructive-foreground: #ffffff;
+	--warning: oklch(82% 0.14 80);
+	--warning-foreground: oklch(20% 0.03 80);
+	--success: oklch(76% 0.13 158);
+	--success-foreground: oklch(18% 0.03 158);
+	--border: #26343a;
+	--input: #26343a;
+	--ring: #4fb8be;
+	--card-shadow: none;
+	--success-strong: #62c79a;
+	--warning-strong: #e3bd6a;
+	--destructive-strong: #ec8a80;
+	--info: #7fc4e0;
+	--info-foreground: #04191b;
 }
 
 @theme inline {
@@ -99,10 +367,41 @@
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
-	--radius-sm: calc(var(--radius) - 4px);
-	--radius-md: calc(var(--radius) - 2px);
+	/* Informational callouts ("here is your device code", tool-usage blocks)
+	   used to be hardcoded blue-50/blue-900 pairs, which never followed a theme
+	   change. `info` is its own hue rather than an alias of --primary: primary is
+	   picked to carry the brand on a BUTTON, and classic's orange is only 2.65:1
+	   on white, so aliasing it made 12px info text less legible than the
+	   blue-600 it replaced. */
+	--color-info: var(--info);
+	--color-info-foreground: var(--info-foreground);
+	/* On-surface text variants of the semantic roles.
+	   --success/--warning/--destructive are FILL hues, paired with a
+	   *-foreground for solid badges. On a 10-15% tint the fill hue's partner is
+	   the wrong colour entirely (white on a pale tint), and the fill hue itself
+	   is often too light to read as 12px text. `*-strong` is the same semantic
+	   tuned for text on --card, and is what tinted chips and status text use.
+	   Enforced by theme-contrast.test.ts. */
+	--color-success-strong: var(--success-strong);
+	--color-warning-strong: var(--warning-strong);
+	--color-destructive-strong: var(--destructive-strong);
+	/* Clamped at 0: the directions set --radius to 2-3px, and a bare
+	   `calc(2px - 4px)` yields -2px. A negative border-radius makes the whole
+	   declaration invalid, so `rounded-sm` would silently stop applying rather
+	   than resolve to a square corner. */
+	--radius-sm: max(0px, calc(var(--radius) - 4px));
+	--radius-md: max(0px, calc(var(--radius) - 2px));
 	--radius-lg: var(--radius);
 	--radius-xl: calc(var(--radius) + 4px);
+	/* Per-palette so a direction can be shadowless without every Card needing
+	   a variant. `classic` keeps its 1px lift; the three directions set none. */
+	--shadow-card: var(--card-shadow);
+	/* Typeface is part of a direction, not a global constant. Registering the
+	   families here is what makes `font-sans`/`font-mono`/`font-display` follow
+	   the selected palette. */
+	--font-sans: var(--app-font-sans);
+	--font-mono: var(--app-font-mono);
+	--font-display: var(--app-font-display);
 	--animate-accordion-down: accordion-down 0.2s ease-out;
 	--animate-accordion-up: accordion-up 0.2s ease-out;
 
@@ -159,28 +458,55 @@
 		overflow: visible;
 	}
 
-	/* Smooth transitions for theme switching */
-	* {
-		transition:
-			background-color 0.2s ease-in-out,
-			border-color 0.2s ease-in-out;
-	}
-
 	/* Glass morphism effects */
 	.glass {
 		@apply bg-background/80 backdrop-blur-md;
 	}
 
-	/* Gradient text */
+	/* Gradient text. Derived from the palette rather than pinned to the
+	   Cloudflare orange, so it follows whichever direction is selected. */
 	.gradient-text {
-		background: linear-gradient(135deg, var(--cf-orange) 0%, #f97316 100%);
+		background: linear-gradient(
+			135deg,
+			var(--primary) 0%,
+			color-mix(in oklab, var(--primary) 62%, var(--foreground)) 100%
+		);
 		-webkit-background-clip: text;
 		-webkit-text-fill-color: transparent;
 		background-clip: text;
 	}
 
-	/* Card hover effects */
+	/* Card hover: a border shift, not a lift. On a page whose job is reporting
+	   throttling state, geometry that moves under the cursor reads as noise. */
 	.card-hover {
-		@apply transition-all duration-200 hover:shadow-lg hover:scale-[1.02];
+		@apply transition-colors duration-200 hover:border-primary/40;
+	}
+
+	/* Headings that should take the palette's display face. Foundry sets
+	   uppercase and wide tracking here; signal and paper leave it alone. */
+	.display-face {
+		font-family: var(--app-font-display);
+		letter-spacing: var(--display-tracking);
+		text-transform: var(--display-transform);
+	}
+
+	/* Theme switching used to be smoothed by a global
+	   `* { transition: background-color, border-color }`, which put a transition
+	   on every node in the app and made ordinary hovers feel a beat late. It is
+	   now armed only while a palette or mode change is applied, then disarmed
+	   (see theme-context). */
+	html.theme-switching,
+	html.theme-switching * {
+		transition:
+			background-color 0.2s ease-in-out,
+			border-color 0.2s ease-in-out,
+			color 0.2s ease-in-out;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		html.theme-switching,
+		html.theme-switching * {
+			transition: none;
+		}
 	}
 }

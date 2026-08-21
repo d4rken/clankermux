@@ -31,7 +31,9 @@ export function ChartContainer({
 				style={{ height: chartHeight }}
 			>
 				<div className="text-center space-y-2">
-					<p className="text-sm text-destructive">Error loading chart data</p>
+					<p className="text-sm text-destructive-strong">
+						Error loading chart data
+					</p>
 					<p className="text-xs text-muted-foreground">{error.message}</p>
 				</div>
 			</div>

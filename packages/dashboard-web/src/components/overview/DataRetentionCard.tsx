@@ -326,7 +326,7 @@ export function DataRetentionCard() {
 							pressure — token counts, costs, and analytics are always saved
 							regardless.
 						</p>
-						<p className="text-xs text-amber-500 mt-0.5">
+						<p className="text-xs text-warning-strong mt-0.5">
 							Warning: storing payloads can significantly grow the database size
 							over time.
 						</p>
@@ -352,7 +352,7 @@ export function DataRetentionCard() {
 				</div>
 
 				{cleanupNow.isError && (
-					<p className="text-xs text-destructive">
+					<p className="text-xs text-destructive-strong">
 						Operation timed out — for large databases this may take several
 						minutes. Check server logs.
 					</p>

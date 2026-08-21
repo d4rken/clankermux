@@ -34,7 +34,7 @@ export function DeleteConfirmationDialog({
 				</CardHeader>
 				<CardContent className="space-y-4">
 					<div className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-						<div className="flex items-center gap-2 text-destructive">
+						<div className="flex items-center gap-2 text-destructive-strong">
 							<AlertCircle className="h-5 w-5" />
 							<p className="font-medium">Warning</p>
 						</div>

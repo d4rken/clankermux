@@ -54,7 +54,7 @@ export function CombosTab() {
 				)}
 
 				{combosQuery.isError && (
-					<p className="text-sm text-destructive">
+					<p className="text-sm text-destructive-strong">
 						Failed to load routing chains.
 					</p>
 				)}

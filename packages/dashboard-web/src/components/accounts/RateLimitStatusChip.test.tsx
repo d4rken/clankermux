@@ -22,13 +22,13 @@ describe("RateLimitStatusChip", () => {
 		// 602 minutes -> 10h 2m
 		expect(html).toContain("10h 2m");
 		// warning variant uses the light amber tint shared by sibling chips
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 	});
 
 	it("maps hard-limit statuses to a destructive chip", () => {
 		const html = render("rate_limited (30m)");
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 		expect(html).toContain("30m");
 	});
 
@@ -58,14 +58,14 @@ describe("RateLimitStatusChip", () => {
 	it("maps a usage_exhausted status string to an amber 'Usage exhausted' chip", () => {
 		const html = render("usage_exhausted (2760m)");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("46h");
 	});
 
-	it("maps the provider's `rejected` status to a red 'Rate limited' chip", () => {
+	it("maps the provider's `rejected` status to a destructive 'Rate limited' chip", () => {
 		const html = render("rejected (30m)");
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 	});
 });
 
@@ -84,12 +84,12 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		// 90 minutes -> 1h 30m, taken from resetMs rather than the string.
 		expect(html).toContain("1h 30m");
 	});
 
-	it("renders a red 'Rate limited' chip for a `rejected` provider status", () => {
+	it("renders a destructive 'Rate limited' chip for a `rejected` provider status", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitStatusChip
 				status="rate_limited (30m)"
@@ -100,7 +100,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Rate limited");
-		expect(html).toContain("bg-red-100");
+		expect(html).toContain("bg-destructive/15");
 		expect(html).toContain("30m");
 	});
 
@@ -117,7 +117,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 		expect(html).toContain("Some New Status");
 		expect(html).not.toContain("Unknown status");
 		// Never red: an unrecognized status is not evidence of a block.
-		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-destructive/15");
 	});
 
 	it("falls back to a neutral 'Unknown status' chip when no raw value is available", () => {
@@ -130,7 +130,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 			/>,
 		);
 		expect(html).toContain("Unknown status");
-		expect(html).not.toContain("bg-red-100");
+		expect(html).not.toContain("bg-destructive/15");
 	});
 
 	it("omits the countdown when the cause has no known reset", () => {
@@ -170,7 +170,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 	it("explains a session binding as the 5-hour window", () => {
 		const html = renderExhausted("session");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("5-hour session quota is spent");
 		expect(html).not.toContain("Weekly usage quota");
 		// The countdown suffix still composes onto the description.
@@ -180,7 +180,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 	it("explains a weekly binding as the weekly window", () => {
 		const html = renderExhausted("weekly");
 		expect(html).toContain("Usage exhausted");
-		expect(html).toContain("bg-amber-100");
+		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("Weekly usage quota is spent");
 		expect(html).not.toContain("5-hour session");
 	});

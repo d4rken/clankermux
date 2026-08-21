@@ -59,7 +59,7 @@ export function CompactRecentErrors({
 	if (unavailable) {
 		return (
 			<Card className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
-				<AlertCircle className="h-4 w-4 shrink-0 text-warning" />
+				<AlertCircle className="h-4 w-4 shrink-0 text-warning-strong" />
 				Recent errors unavailable — the stats endpoint could not be read.
 			</Card>
 		);
@@ -75,7 +75,7 @@ export function CompactRecentErrors({
 		return (
 			<Card className="flex items-start gap-2 px-4 py-3 text-sm">
 				<Clock
-					className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+					className="mt-0.5 h-4 w-4 shrink-0 text-warning-strong"
 					aria-hidden="true"
 				/>
 				<div>

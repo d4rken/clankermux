@@ -124,7 +124,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 				)}
 
 				{createCombo.isError && (
-					<p className="text-sm text-destructive">
+					<p className="text-sm text-destructive-strong">
 						Failed to create routing chain. Please try again.
 					</p>
 				)}

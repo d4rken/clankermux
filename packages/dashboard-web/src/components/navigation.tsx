@@ -20,6 +20,7 @@ import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import logoUrl from "../logo.png";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
+import { PalettePicker } from "./palette-picker";
 import { ThemeToggle } from "./theme-toggle";
 import {
 	RESTART_COMMAND,
@@ -166,9 +167,10 @@ export function Navigation() {
 						alt="ClankerMux logo"
 						className="h-6 w-6 rounded"
 					/>
-					<span className="font-semibold text-lg">ClankerMux</span>
+					<span className="display-face font-semibold text-lg">ClankerMux</span>
 				</div>
 				<div className="flex items-center gap-2">
+					<PalettePicker />
 					<ThemeToggle />
 					<Button
 						variant="ghost"
@@ -213,7 +215,9 @@ export function Navigation() {
 								className="h-10 w-10 rounded-lg"
 							/>
 							<div>
-								<h1 className="font-semibold text-lg">ClankerMux</h1>
+								<h1 className="display-face font-semibold text-lg">
+									ClankerMux
+								</h1>
 								<p className="text-xs text-muted-foreground">Rate-Unlimiter</p>
 							</div>
 						</div>
@@ -278,7 +282,10 @@ export function Navigation() {
 								<GitBranch className="h-3 w-3" />
 								<span>{version}</span>
 							</a>
-							<ThemeToggle />
+							<div className="flex items-center">
+								<PalettePicker />
+								<ThemeToggle />
+							</div>
 						</div>
 					</div>
 				</div>

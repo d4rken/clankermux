@@ -112,12 +112,14 @@ export function AccountCustomEndpointDialog({
 								setError(null);
 							}}
 							placeholder={defaultPlaceholder}
-							className={error ? "border-red-500" : ""}
+							className={error ? "border-destructive" : ""}
 						/>
 						<p className="text-xs text-muted-foreground">
 							Leave empty to use default endpoint ({defaultPlaceholder})
 						</p>
-						{error && <p className="text-xs text-red-500">{error}</p>}
+						{error && (
+							<p className="text-xs text-destructive-strong">{error}</p>
+						)}
 					</div>
 				</div>
 				<DialogFooter>

@@ -83,7 +83,9 @@ export function RenameAccountDialog({
 								autoFocus
 								disabled={isLoading}
 							/>
-							{error && <p className="text-sm text-destructive">{error}</p>}
+							{error && (
+								<p className="text-sm text-destructive-strong">{error}</p>
+							)}
 						</div>
 					</div>
 					<DialogFooter>

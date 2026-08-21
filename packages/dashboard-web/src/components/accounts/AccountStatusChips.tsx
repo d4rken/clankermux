@@ -59,8 +59,8 @@ interface AccountStatusChipsProps {
  * the reset-credit and renewal chip class maps so the two stay in sync.
  */
 const URGENCY_BASE_CLASSES = {
-	imminent: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-	soon: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+	imminent: "bg-destructive/15 text-destructive-strong",
+	soon: "bg-warning/15 text-warning-strong",
 } as const;
 
 /**
@@ -69,7 +69,7 @@ const URGENCY_BASE_CLASSES = {
  */
 const RESET_CREDIT_URGENCY_CLASSES: Record<ResetCreditUrgency, string> = {
 	...URGENCY_BASE_CLASSES,
-	none: "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400",
+	none: "bg-info/15 text-info",
 };
 
 const RESET_EVENT_STATUS_LABELS: Record<
@@ -140,7 +140,7 @@ export function ResetCreditEventsPanel({
 	}
 	if (state.kind === "error") {
 		return (
-			<p className="text-xs text-destructive">
+			<p className="text-xs text-destructive-strong">
 				Failed to load reset events: {state.message}
 			</p>
 		);
@@ -164,7 +164,7 @@ export function ResetCreditEventsPanel({
 						<span
 							className={`px-1.5 py-0 rounded-full text-[10px] font-medium uppercase ${
 								event.trigger === "auto"
-									? "bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+									? "bg-info/15 text-info"
 									: "bg-secondary text-secondary-foreground"
 							}`}
 						>
@@ -183,7 +183,7 @@ export function ResetCreditEventsPanel({
 						)}
 					</div>
 					{event.errorMessage && (
-						<p className="text-destructive" title={event.errorMessage}>
+						<p className="text-destructive-strong" title={event.errorMessage}>
 							{event.errorMessage.length > MAX_EVENT_ERROR_CHARS
 								? `${event.errorMessage.slice(0, MAX_EVENT_ERROR_CHARS)}…`
 								: event.errorMessage}
@@ -282,7 +282,7 @@ export function ResetCreditApplyPanel({
 	if (state.kind === "error") {
 		return (
 			<div className="space-y-1.5">
-				<p className="text-xs text-destructive" title={state.message}>
+				<p className="text-xs text-destructive-strong" title={state.message}>
 					Failed to apply reset: {state.message}
 				</p>
 				<div className="flex items-center gap-2">
@@ -308,7 +308,7 @@ export function ResetCreditApplyPanel({
 			<p
 				className={`text-xs ${
 					state.outcome === "reset"
-						? "text-green-600 dark:text-green-400"
+						? "text-success-strong"
 						: "text-muted-foreground"
 				}`}
 			>
@@ -511,13 +511,13 @@ export function AccountStatusChips({
 			</StatusChip>
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
-					<AlertCircle className="h-4 w-4 text-yellow-600" />
+					<AlertCircle className="h-4 w-4 text-warning-strong" />
 				</span>
 			)}
 			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
 			{status.isSubscriptionExpired && (
 				<StatusChip
-					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					className="bg-destructive/15 text-destructive-strong"
 					title="The provider reports this account's subscription has lapsed (OAuth no longer allowed for the organization). The account was auto-paused and will auto-resume once usage data is reachable again after renewal."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -526,7 +526,7 @@ export function AccountStatusChips({
 			)}
 			{status.isNeedsReauth && (
 				<StatusChip
-					className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+					className="bg-destructive/15 text-destructive-strong"
 					title="This account's OAuth refresh token was rejected (invalid_grant). It was auto-paused and removed from rotation. Re-authenticate it from the Accounts tab — it will auto-resume on success."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -537,7 +537,7 @@ export function AccountStatusChips({
 				status.reauthDeadlineMs !== null &&
 				status.reauthDaysRemaining !== null && (
 					<StatusChip
-						className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+						className="bg-warning/15 text-warning-strong"
 						title={`This account's OAuth refresh token expires on ${new Date(
 							status.reauthDeadlineMs,
 						).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`}
@@ -557,7 +557,7 @@ export function AccountStatusChips({
 			)}
 			{status.staleLockDetected && (
 				<span
-					className="text-amber-600"
+					className="text-warning-strong"
 					title="Stale lock detected: usage data shows available capacity but account is still rate-limited"
 				>
 					Stale lock detected
@@ -565,7 +565,7 @@ export function AccountStatusChips({
 			)}
 			{status.isUsageThrottled && (
 				<span
-					className="text-amber-600"
+					className="text-warning-strong"
 					title="Usage throttling is delaying requests for this account until pacing catches up"
 				>
 					Usage throttled
@@ -573,7 +573,7 @@ export function AccountStatusChips({
 			)}
 			{status.providerOverloadedUntil && (
 				<StatusChip
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-warning/15 text-warning-strong"
 					title={`Provider overload cooldown active until ${new Date(
 						status.providerOverloadedUntil,
 					).toLocaleString()}`}
@@ -584,7 +584,7 @@ export function AccountStatusChips({
 			)}
 			{status.isProviderProbing && (
 				<StatusChip
-					className="bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					className="bg-info/15 text-info"
 					title="Provider overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes"
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -594,7 +594,7 @@ export function AccountStatusChips({
 			{status.overloadedFamilies.map((entry) => (
 				<StatusChip
 					key={entry.family}
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-warning/15 text-warning-strong"
 					title={`Upstream overload for the ${formatFamilyLabel(entry.family)} model family — breaker open until ${new Date(
 						entry.until,
 					).toLocaleString()}. Other model families keep routing to this account.`}
@@ -606,7 +606,7 @@ export function AccountStatusChips({
 			{status.probingFamilies.map((family) => (
 				<StatusChip
 					key={family}
-					className="bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+					className="bg-info/15 text-info"
 					title={`${formatFamilyLabel(family)} overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
@@ -616,7 +616,7 @@ export function AccountStatusChips({
 			{status.exhaustedScopedFamilies.map((entry) => (
 				<StatusChip
 					key={entry.familyKey}
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-warning/15 text-warning-strong"
 					title={`The ${entry.label} model family's weekly quota is exhausted on this account until ${new Date(
 						entry.resetsAtMs,
 					).toLocaleString()}. Other model families keep routing to this account.`}
@@ -627,7 +627,7 @@ export function AccountStatusChips({
 			))}
 			{status.isOnCredits && (
 				<StatusChip
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-warning/15 text-warning-strong"
 					title={`Weekly limit reached — account is drawing on purchased credits.${
 						status.creditsBalance != null
 							? ` ${Math.round(status.creditsBalance)} credits remaining ≈ €${(
@@ -649,12 +649,12 @@ export function AccountStatusChips({
 				<StatusChip
 					className={
 						status.isPeak
-							? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-							: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+							? "bg-warning/15 text-warning-strong"
+							: "bg-success/15 text-success-strong"
 					}
 				>
 					<span
-						className={`h-1.5 w-1.5 rounded-full ${status.isPeak ? "bg-orange-500" : "bg-green-500"}`}
+						className={`h-1.5 w-1.5 rounded-full ${status.isPeak ? "bg-warning" : "bg-success"}`}
 					/>
 					{status.peakChipLabel}
 				</StatusChip>
@@ -664,7 +664,7 @@ export function AccountStatusChips({
 			)}
 			{status.isDuplicateAccount && (
 				<StatusChip
-					className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+					className="bg-warning/15 text-warning-strong"
 					title={`Shares provider identity with ${status.duplicateAccountIds.length} other account(s)`}
 				>
 					<Copy className="h-3.5 w-3.5" />

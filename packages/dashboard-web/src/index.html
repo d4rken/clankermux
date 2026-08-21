@@ -5,6 +5,61 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="./logo.png" />
     <title>ClankerMux Dashboard</title>
+    <!--
+      Palette selection happens before React mounts so the first paint is
+      already in the chosen direction. Without this the app flashes the classic
+      palette for a frame on every load, which is exactly the artifact that
+      makes a theme feel bolted on. Mirrors readStoredPalette() in
+      contexts/theme-context.tsx — the guard list must stay in step with the
+      PALETTES ids there.
+    -->
+    <script>
+      (() => {
+        const known = ["classic", "signal", "foundry", "paper"];
+        const root = document.documentElement;
+        let palette = "classic";
+        // "system" is the provider's default for a missing, invalid or
+        // unreadable value, so it has to be the default here too. Defaulting to
+        // light instead would paint light and then get corrected to dark by the
+        // provider one frame later, on exactly the machines least able to hide
+        // it — a dark-OS user with corrupt storage.
+        let theme = "system";
+        try {
+          const storedPalette = localStorage.getItem("palette");
+          if (known.indexOf(storedPalette) !== -1) palette = storedPalette;
+          const storedTheme = localStorage.getItem("theme");
+          if (
+            storedTheme === "dark" ||
+            storedTheme === "light" ||
+            storedTheme === "system"
+          ) {
+            theme = storedTheme;
+          }
+        } catch (_e) {
+          // Storage throws outright when site data is blocked; the defaults
+          // already assigned above are the correct fallback.
+        }
+        const dark =
+          theme === "dark" ||
+          (theme === "system" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        root.setAttribute("data-palette", palette);
+        root.classList.add(dark ? "dark" : "light");
+      })();
+    </script>
+    <!--
+      Typeface is per-palette (see --app-font-* in styles/globals.css), so every
+      direction's families are requested here and the unused ones simply never
+      get referenced by a rule. Once a direction is chosen, drop the others from
+      this link and self-host the winner rather than leaving the dashboard
+      dependent on an external host at load.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Saira:wght@400;500;600;700&family=Saira+Condensed:wght@500;600;700&family=Spline+Sans+Mono:wght@400;500;600&family=Karla:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap"
+    />
     <script type="module" src="./frontend.tsx" async></script>
   </head>
   <body>

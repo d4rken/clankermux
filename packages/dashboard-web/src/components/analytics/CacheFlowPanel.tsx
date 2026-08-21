@@ -2,7 +2,7 @@ import type { CacheFlowPoint } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Layers } from "lucide-react";
 import { useMemo } from "react";
-import { COLORS } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { formatCompactNumber, shortLabel } from "../../lib/chart-utils";
 import { Badge } from "../ui/badge";
 import {
@@ -23,11 +23,13 @@ const STATUS_LABELS: Record<CacheStatus, string> = {
 	uncached: "Uncached input",
 };
 
-// COLORS has no neutral/muted constant, so uncached uses a literal gray.
-const STATUS_COLORS: Record<CacheStatus, string> = {
-	read: COLORS.success,
-	write: COLORS.warning,
-	uncached: "#6b7280",
+// Palette KEYS rather than values: the three series are resolved against the
+// ground currently being painted (see useSeriesPalette), because the dark hue
+// set is chosen to sit on near-black and washes out on a white card.
+const STATUS_HUES: Record<CacheStatus, "green" | "peach" | "grey"> = {
+	read: "green",
+	write: "peach",
+	uncached: "grey",
 };
 
 function bucketTokens(row: CacheFlowPoint, status: CacheStatus): number {
@@ -66,6 +68,7 @@ function EmptyCacheFlowState({ loading }: { loading: boolean }) {
 }
 
 function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
+	const series = useSeriesPalette();
 	const graph = useMemo(() => {
 		const modelTotals = new Map<string, number>();
 		const accountTotals = new Map<string, number>();
@@ -200,7 +203,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								<path
 									d={`M ${leftX + nodeWidth} ${y1} C 300 ${y1}, 300 ${y2}, ${midX} ${y2}`}
 									fill="none"
-									stroke={STATUS_COLORS[status]}
+									stroke={series.hue[STATUS_HUES[status]]}
 									strokeLinecap="round"
 									strokeOpacity="0.32"
 									strokeWidth={strokeWidthFor(tokens)}
@@ -225,7 +228,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								<path
 									d={`M ${midX + nodeWidth} ${y1} C 660 ${y1}, 660 ${y2}, ${rightX} ${y2}`}
 									fill="none"
-									stroke={STATUS_COLORS[status]}
+									stroke={series.hue[STATUS_HUES[status]]}
 									strokeLinecap="round"
 									strokeOpacity="0.26"
 									strokeWidth={strokeWidthFor(tokens)}
@@ -277,7 +280,7 @@ function CacheFlowGraph({ flow }: { flow: CacheFlowPoint[] }) {
 								height="38"
 								rx="6"
 								fill="var(--card)"
-								stroke={STATUS_COLORS[status]}
+								stroke={series.hue[STATUS_HUES[status]]}
 							/>
 							<text
 								x="12"

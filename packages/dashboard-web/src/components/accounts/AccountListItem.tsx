@@ -224,7 +224,9 @@ export function AccountListItem({
 						<Button
 							variant="ghost"
 							size="sm"
-							className={isForced ? "text-destructive bg-destructive/10" : ""}
+							className={
+								isForced ? "text-destructive-strong bg-destructive/10" : ""
+							}
 							onClick={() => onForceAccount(account)}
 							title={
 								isForced

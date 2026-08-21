@@ -66,9 +66,9 @@ const REASON_ORDER: ExcludedReason[] = [
 
 function headlineColor(average: number | null): string | undefined {
 	if (average == null) return undefined;
-	if (average < 60) return "text-success";
-	if (average < 80) return "text-warning";
-	return "text-destructive";
+	if (average < 60) return "text-success-strong";
+	if (average < 80) return "text-warning-strong";
+	return "text-destructive-strong";
 }
 
 function groupExcluded(
@@ -139,7 +139,9 @@ function atRiskBadge(
 		return { label: null, colorClass: null };
 	}
 	const colorClass =
-		willRunOutCount >= capacityCount ? "text-destructive" : "text-warning";
+		willRunOutCount >= capacityCount
+			? "text-destructive-strong"
+			: "text-warning-strong";
 	return {
 		label: `${willRunOutCount} of ${capacityCount} will run out`,
 		colorClass,
@@ -175,7 +177,9 @@ export function familyWeeklyBadge(familyWeekly: FamilyWeeklyUsage[]): {
 	const elevated = familyWeekly.filter((f) => f.elevated);
 	if (elevated.length === 0) return { label: null, colorClass: null };
 	const anyExhausted = elevated.some((f) => f.worstPct >= 100);
-	const colorClass = anyExhausted ? "text-destructive" : "text-warning";
+	const colorClass = anyExhausted
+		? "text-destructive-strong"
+		: "text-warning-strong";
 	if (elevated.length === 1) {
 		const f = elevated[0];
 		const total = f.accounts.length;
@@ -321,9 +325,9 @@ function PoolDetailSection({
 											className={cn(
 												"tabular-nums",
 												f.worstPct >= 100
-													? "text-destructive"
+													? "text-destructive-strong"
 													: f.elevated
-														? "text-warning"
+														? "text-warning-strong"
 														: undefined,
 											)}
 											title={
@@ -545,7 +549,7 @@ export function PoolMetricCard({
 					{unavailableReason ? (
 						<>
 							<p className="text-2xl font-bold text-muted-foreground/60">—</p>
-							<p className="flex items-center gap-1.5 text-xs text-warning">
+							<p className="flex items-center gap-1.5 text-xs text-warning-strong">
 								<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 								{unavailableReason}
 							</p>

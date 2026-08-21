@@ -177,19 +177,16 @@ function computeProjectedMessage(
 	};
 }
 
-// Maps a projection tone to the correct color class for each render surface.
-// The two surfaces use different palettes: the inline line uses the semantic
-// destructive/success tokens, the hover tooltip (on a dark popover) uses the
-// fixed red-400/green-400 pair.
-function projectionToneClass(
-	tone: ProjectionTone,
-	surface: "inline" | "tooltip",
-): string {
+// Maps a projection tone to a semantic colour class.
+//
+// This used to branch on render surface, on the premise that the hover tooltip
+// sat on a dark popover and therefore needed a fixed red-400/green-400 pair.
+// The tooltip is `bg-popover`, which is white in every light mode — so the
+// fixed pair was washed out there rather than tuned for it. Both surfaces are
+// token-driven, so both take the semantic tokens.
+function projectionToneClass(tone: ProjectionTone): string {
 	if (tone === "neutral") return "text-muted-foreground";
-	if (surface === "inline") {
-		return tone === "danger" ? "text-destructive" : "text-success";
-	}
-	return tone === "danger" ? "text-red-400" : "text-green-400";
+	return tone === "danger" ? "text-destructive-strong" : "text-success-strong";
 }
 
 // Compact "time left until reset" for the caption bracket, showing the two
@@ -419,7 +416,7 @@ export function RateLimitProgress({
 		return (
 			<div className={cn(primaryCardClass(compact), className)}>
 				<div className="flex items-center justify-between">
-					<span className="text-xs text-amber-600 dark:text-amber-400">
+					<span className="text-xs text-warning-strong">
 						Rate limited — usage data unavailable
 					</span>
 					<span className="text-xs text-muted-foreground">
@@ -487,7 +484,7 @@ export function RateLimitProgress({
 							</div>
 						</>
 					)}
-					<p className="text-xs text-amber-600 dark:text-amber-400">
+					<p className="text-xs text-warning-strong">
 						{usageRateLimitedUntil != null
 							? "Usage API rate limited — showing last known data"
 							: "Live usage unavailable — showing last known data"}
@@ -847,7 +844,7 @@ export function RateLimitProgress({
 											className={
 												(percentage ?? 0) <= 0
 													? "text-muted-foreground"
-													: projectionToneClass(projection.tone, "tooltip")
+													: projectionToneClass(projection.tone)
 											}
 										>
 											{projection.message}
@@ -860,7 +857,7 @@ export function RateLimitProgress({
 								className="h-2"
 								indicatorClassName={
 									isWindowThrottled
-										? "bg-amber-500 dark:bg-amber-400"
+										? "bg-warning"
 										: undefined
 								}
 							/>
@@ -907,7 +904,7 @@ export function RateLimitProgress({
 							<span
 								className={cn(
 									"shrink-0 font-medium text-muted-foreground",
-									isWindowThrottled && "text-amber-600 dark:text-amber-400",
+									isWindowThrottled && "text-warning-strong",
 								)}
 							>
 								{isAvailable ? `${percentage?.toFixed(0)}%` : "N/A"}
@@ -919,7 +916,7 @@ export function RateLimitProgress({
 									"text-xs",
 									(percentage ?? 0) <= 0
 										? "text-muted-foreground"
-										: projectionToneClass(projection.tone, "inline"),
+										: projectionToneClass(projection.tone),
 								)}
 							>
 								{projection.message}
@@ -927,10 +924,10 @@ export function RateLimitProgress({
 						)}
 						{isWindowThrottled && throttleDisplayUntil && (
 							<div className="flex items-center justify-between gap-2 text-xs">
-								<span className="text-amber-600 dark:text-amber-400">
+								<span className="text-warning-strong">
 									Usage throttling enabled; requests are being delayed
 								</span>
-								<span className="text-amber-600 dark:text-amber-400">
+								<span className="text-warning-strong">
 									{(() => {
 										const throttledLabel = formatThrottledUntil(
 											throttleDisplayUntil,

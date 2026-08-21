@@ -97,7 +97,7 @@ export function costBadgeProps(billingType: string | null | undefined): {
 } {
 	if (billingType === "overage" || billingType === "api") {
 		return {
-			className: "text-xs border-orange-500 text-orange-500",
+			className: "text-xs border-warning text-warning-strong",
 			title: "Pay-per-token",
 		};
 	}
@@ -436,10 +436,10 @@ export function RequestsTab() {
 	};
 
 	const getStatusCodeColor = (code: number) => {
-		if (code >= 200 && code < 300) return "text-green-600";
-		if (code >= 400 && code < 500) return "text-yellow-600";
-		if (code >= 500) return "text-red-600";
-		return "text-gray-600";
+		if (code >= 200 && code < 300) return "text-success-strong";
+		if (code >= 400 && code < 500) return "text-warning-strong";
+		if (code >= 500) return "text-destructive-strong";
+		return "text-muted-foreground";
 	};
 
 	const clearAllFilters = () => {
@@ -490,7 +490,7 @@ export function RequestsTab() {
 			<CardContent>
 				{error && (
 					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
-						<p className="text-destructive text-sm">
+						<p className="text-destructive-strong text-sm">
 							Error: {error instanceof Error ? error.message : String(error)}
 						</p>
 						<Button
@@ -511,7 +511,7 @@ export function RequestsTab() {
 				    until someone asks again. */}
 				{byIdError != null && (
 					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
-						<p className="text-destructive text-sm">
+						<p className="text-destructive-strong text-sm">
 							Could not load the linked request:{" "}
 							{byIdError instanceof Error
 								? byIdError.message
@@ -1006,15 +1006,15 @@ export function RequestsTab() {
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
 							const statusClass = isError
-								? "bg-red-500/10 text-red-600 dark:text-red-400"
+								? "bg-destructive/10 text-destructive-strong"
 								: statusCode == null
 									? ""
 									: statusCode >= 200 && statusCode < 300
-										? "bg-green-500/10 text-green-600 dark:text-green-400"
+										? "bg-success/10 text-success-strong"
 										: statusCode >= 400 && statusCode < 500
-											? "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400"
+											? "bg-warning/10 text-warning-strong"
 											: statusCode >= 500
-												? "bg-red-500/10 text-red-600 dark:text-red-400"
+												? "bg-destructive/10 text-destructive-strong"
 												: "bg-muted text-muted-foreground";
 
 							return (
@@ -1216,7 +1216,7 @@ export function RequestsTab() {
 											{attributionChip && (
 												<Badge
 													variant="outline"
-													className="text-xs border-amber-500 text-amber-500"
+													className="text-xs border-warning text-warning-strong"
 													title={attributionChip.title}
 												>
 													{attributionChip.label}
@@ -1225,7 +1225,7 @@ export function RequestsTab() {
 											{summary?.comboName && (
 												<Badge
 													variant="outline"
-													className="text-xs border-purple-500 text-purple-500"
+													className="text-xs border-info/60 text-info"
 												>
 													Combo: {summary.comboName}
 												</Badge>
@@ -1311,7 +1311,7 @@ export function RequestsTab() {
 											{isZaiPeak && (
 												<Badge
 													variant="outline"
-													className="text-xs border-orange-500 text-orange-500"
+													className="text-xs border-warning text-warning-strong"
 												>
 													Peak
 												</Badge>
@@ -1320,7 +1320,7 @@ export function RequestsTab() {
 									)}
 
 									{request.error && (
-										<div className="text-xs text-destructive px-3 pb-2 pl-9 break-words">
+										<div className="text-xs text-destructive-strong px-3 pb-2 pl-9 break-words">
 											Error: {request.error}
 										</div>
 									)}

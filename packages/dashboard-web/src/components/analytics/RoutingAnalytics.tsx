@@ -14,7 +14,8 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_COLORS, COLORS, type TimeRange } from "../../constants";
+import { COLORS, type TimeRange } from "../../constants";
+import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { shortLabel } from "../../lib/chart-utils";
 import {
 	formatAxisTime,
@@ -302,6 +303,7 @@ export function RoutingAnalyticsPanel({
 	loading,
 	timeRange,
 }: RoutingAnalyticsPanelProps) {
+	const series = useSeriesPalette();
 	const timeline = useMemo(() => {
 		if (!routing?.timeline.length)
 			return { data: [], accounts: [] as string[] };
@@ -414,8 +416,8 @@ export function RoutingAnalyticsPanel({
 										type="monotone"
 										dataKey={account}
 										stackId="accounts"
-										stroke={CHART_COLORS[index % CHART_COLORS.length]}
-										fill={CHART_COLORS[index % CHART_COLORS.length]}
+										stroke={series.sequence[index % series.sequence.length]}
+										fill={series.sequence[index % series.sequence.length]}
 										fillOpacity={0.72}
 									/>
 								))}

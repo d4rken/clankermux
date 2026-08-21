@@ -123,8 +123,8 @@ export function SystemHealthStripView({
 										lagTone === "ok"
 											? ""
 											: lagTone === "degraded"
-												? "text-warning"
-												: "text-destructive"
+												? "text-warning-strong"
+												: "text-destructive-strong"
 									}`}
 									aria-hidden="true"
 								/>
@@ -147,10 +147,10 @@ export function SystemHealthStripView({
 									<Database
 										className={`h-3.5 w-3.5 ${
 											integrity === "corrupt"
-												? "text-destructive"
+												? "text-destructive-strong"
 												: integrity === "ok"
 													? ""
-													: "text-warning"
+													: "text-warning-strong"
 										}`}
 										aria-hidden="true"
 									/>

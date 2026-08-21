@@ -23,11 +23,11 @@ function ToolUsageBlockComponent({ toolName, input }: ToolUsageBlockProps) {
 	const hasInput = input && Object.keys(input).length > 0;
 
 	return (
-		<div className="p-3 bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800 rounded-lg">
+		<div className="p-3 bg-info/10 border border-info/25 rounded-lg">
 			<div className="flex items-center justify-between mb-1">
 				<div className="flex items-center gap-2">
-					<Terminal className="w-3 h-3 text-blue-600 dark:text-blue-400" />
-					<span className="text-xs font-medium text-blue-600 dark:text-blue-400">
+					<Terminal className="w-3 h-3 text-info" />
+					<span className="text-xs font-medium text-info">
 						Tool: {toolName}
 					</span>
 				</div>
@@ -44,7 +44,7 @@ function ToolUsageBlockComponent({ toolName, input }: ToolUsageBlockProps) {
 			</div>
 			{hasInput && (
 				<pre
-					className={`text-xs bg-blue-100/50 dark:bg-blue-900/20 p-2 rounded mt-1 overflow-x-auto whitespace-pre text-left ${
+					className={`text-xs bg-muted p-2 rounded mt-1 overflow-x-auto whitespace-pre text-left ${
 						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-2" : ""
 					}`}
 				>
