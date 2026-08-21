@@ -60,8 +60,11 @@ export function AccountList({
 		return <p className="text-muted-foreground">No accounts configured</p>;
 	}
 
+	// One step wider than the widest gap INSIDE a card (`space-y-row`), so the
+	// boundary between two accounts always reads as larger than any boundary
+	// within one. At the old `space-y-item` the hierarchy was inverted.
 	return (
-		<div className="space-y-item">
+		<div className="space-y-group">
 			{accounts.map((account) => (
 				<AccountListItem
 					key={account.name}

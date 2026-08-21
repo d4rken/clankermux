@@ -1172,14 +1172,19 @@ export function RequestsTab() {
 										</div>
 									</div>
 
-									{/* Row 2 "attribution": wraps freely — who/what triggered the request */}
+									{/* Row 2 "attribution": wraps freely — who/what triggered the
+									    request. Rows 2 and 3 share row 1's `px-3` left edge rather
+									    than hanging indented under it: the indent they used to
+									    carry lined up with nothing, since row 1 opens with a
+									    variable-width timestamp and not a fixed gutter, so one
+									    card read as three differently-aligned blocks. */}
 									{hasAttributionMetadata({
 										apiKeyName,
 										project,
 										comboName: summary?.comboName,
 										source: attributionSource,
 									}) && (
-										<div className="flex flex-wrap items-center gap-item px-3 pb-1.5 pl-9 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-3 pb-1.5 text-xs">
 											{apiKeyName && (
 												<button
 													type="button"
@@ -1242,7 +1247,7 @@ export function RequestsTab() {
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
 										isZaiPeak) && (
-										<div className="flex flex-wrap items-center gap-item px-3 pb-2 pl-9 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-3 pb-2 text-xs">
 											{(modelPresentation || summary?.reasoningEffort) && (
 												<Badge
 													variant="secondary"
@@ -1320,7 +1325,7 @@ export function RequestsTab() {
 									)}
 
 									{request.error && (
-										<div className="text-xs text-destructive-strong px-3 pb-2 pl-9 break-words">
+										<div className="text-xs text-destructive-strong px-3 pb-2 break-words">
 											Error: {request.error}
 										</div>
 									)}

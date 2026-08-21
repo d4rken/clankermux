@@ -2,7 +2,13 @@ import { formatNumber, formatTokens, formatUsd } from "@clankermux/ui-common";
 import { Gauge } from "lucide-react";
 import type { TimeRange } from "../../constants";
 import { useCacheEffectiveness } from "../../hooks/queries";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import {
+	Card,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from "../ui/card";
 
 /**
  * Small headline tile. Mirrors the compact stat-card idiom used by
@@ -50,12 +56,12 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 					<Gauge className="h-5 w-5" />
 					Effectiveness
 				</CardTitle>
-				<p className="text-xs text-muted-foreground mt-1 max-w-prose">
+				<CardDescription className="text-xs max-w-prose">
 					Measures whether keeping caches warm actually reduced quota pressure
 					over the window. Headline figures are the honest (conservative,
 					5-minute counterfactual) numbers — what the bridge saved versus Claude
 					Code's native behaviour with no bridge.
-				</p>
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-group">
 				{/* Honest headline tiles. */}

@@ -1,5 +1,5 @@
 import type { PaymentsSummary } from "@clankermux/types";
-import { formatCost, formatUsd } from "@clankermux/ui-common";
+import { formatUsd } from "@clankermux/ui-common";
 import { useMemo } from "react";
 import { COLORS } from "../../constants";
 import { BaseBarChart } from "../charts";
@@ -135,9 +135,15 @@ export function AccountPerformanceSection({
 				    windows and stay put when the range above changes; the amortized
 				    rows under Cost are likewise range-independent run rates. */}
 				<div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-4">
+					{/* Every figure in this card is a range AGGREGATE — hundreds to
+					    tens of thousands of dollars — so they all take the money
+					    formatter: two decimals, grouped. `formatCost`'s four decimals
+					    exist for per-request token costs, where a sub-cent difference is
+					    real; here they only produced "$16378.2839" sitting beside a
+					    "$600.00" that came from the other formatter. */}
 					<div>
 						<p className="text-sm text-muted-foreground">Plan Value</p>
-						<p className="figure-xl">{formatCost(costSummary.planCostUsd)}</p>
+						<p className="figure-xl">{formatUsd(costSummary.planCostUsd)}</p>
 						<div className="mt-2 space-y-tight text-xs">
 							{planAvgRows.map((row) => (
 								<div
@@ -148,7 +154,7 @@ export function AccountPerformanceSection({
 										{row.label}
 									</span>
 									<span className="font-medium tabular-nums">
-										{formatCost(row.value)}
+										{formatUsd(row.value)}
 									</span>
 								</div>
 							))}
@@ -238,13 +244,13 @@ export function AccountPerformanceSection({
 												{row.name}
 											</td>
 											<td className="px-3 py-2 text-right">
-												{formatCost(row.planCostUsd)}
+												{formatUsd(row.planCostUsd)}
 											</td>
 											<td className="px-3 py-2 text-right">
-												{formatCost(row.apiCostUsd)}
+												{formatUsd(row.apiCostUsd)}
 											</td>
 											<td className="px-3 py-2 text-right font-medium">
-												{formatCost(row.totalCostUsd)}
+												{formatUsd(row.totalCostUsd)}
 											</td>
 											<td className="px-3 py-2 text-right">
 												{subMonthly != null ? formatUsd(subMonthly) : "—"}
@@ -266,13 +272,13 @@ export function AccountPerformanceSection({
 									Total
 								</th>
 								<td className="px-3 py-2 text-right font-medium">
-									{formatCost(accountCostTotals.planCostUsd)}
+									{formatUsd(accountCostTotals.planCostUsd)}
 								</td>
 								<td className="px-3 py-2 text-right font-medium">
-									{formatCost(accountCostTotals.apiCostUsd)}
+									{formatUsd(accountCostTotals.apiCostUsd)}
 								</td>
 								<td className="px-3 py-2 text-right font-medium">
-									{formatCost(accountCostTotals.totalCostUsd)}
+									{formatUsd(accountCostTotals.totalCostUsd)}
 								</td>
 								<td className="px-3 py-2 text-right font-medium">
 									{paymentsSummary
