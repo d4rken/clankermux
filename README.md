@@ -1,4 +1,11 @@
-# ClankerMux <img src="packages/dashboard-web/src/logo.svg" alt="ClankerMux logo" height="32" />
+<!--
+  The mark is two files rather than one with a media query: an SVG behind an
+  <img> renders in the browser's secure static mode and GitHub proxies README
+  images through a sanitiser, so the theme has to be chosen outside the file.
+  <picture> is the mechanism GitHub documents for that. Both files, and every
+  screenshot below, come from `bun run build:readme-media`.
+-->
+# ClankerMux <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.svg"><img src="docs/media/logo-light.svg" alt="" height="30" align="center" /></picture>
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.2.8-000000?logo=bun&logoColor=white)](https://bun.sh)
@@ -42,6 +49,33 @@ Features:
 * Optional [Caddy front proxy](deploy/caddy/README.md) holds new connections across
   app restarts while in-flight agent streams drain.
 * Small dependency tree; memory-leak and stability hardening for long-running deployments.
+
+## The dashboard
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.svg"><img src="docs/media/overview-light.svg" alt="Overview: a health strip reading All Systems Operational, tiles for 24-hour requests, success rate, tokens and plan value, and a per-account throughput chart." /></picture>
+
+Pool health, the day's traffic, and what it was worth, in one glance.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.svg"><img src="docs/media/accounts-light.svg" alt="Accounts: three account cards, each with its provider, status chips, request counts and a row of quota windows showing 5-hour, weekly and per-family utilization." /></picture>
+
+Every account with its live quota windows. The bars turn amber near a limit and
+red at the ceiling, so an account about to drop out of rotation is visible
+before it does.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-dark.svg"><img src="docs/media/usage-light.svg" alt="Usage: a sawtooth chart of per-account utilization against the limit line, with dashed burn-rate projections, above headline figures for plan value, cost and value ratio." /></picture>
+
+Utilization over time per account. Solid lines are recorded history; dashed
+lines project the current burn rate forward to each window's reset, which is
+what tells you whether the pool lasts the week.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/requests-dark.svg"><img src="docs/media/requests-light.svg" alt="Request history: five request rows, each showing time, status, the account it was routed through, latency, and chips for the calling agent, project, model, token counts, throughput and cost." /></picture>
+
+Live request history, attributed to the client, project, model and account that
+served it, with token counts and cost per request.
+
+> These four are drawn to scale from the dashboard's own theme tokens rather
+> than captured, and the accounts in them are invented. A real capture would
+> carry live account addresses and spend into a public page.
 
 ## Related projects
 
