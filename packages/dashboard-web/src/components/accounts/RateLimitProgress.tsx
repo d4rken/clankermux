@@ -20,6 +20,7 @@ import {
 	usageWindowLabel,
 } from "../../lib/usage-windows";
 import { cn } from "../../lib/utils";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Progress } from "../ui/progress";
 
 interface RateLimitProgressProps {
@@ -35,14 +36,15 @@ interface RateLimitProgressProps {
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
-	inlineProjection?: boolean; // Render projection message as visible text instead of hover tooltip
+	inlineProjection?: boolean; // Render projection message as visible text instead of a click popover
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
 	compact?: boolean; // Tighter card padding and a single-row window strip on wide viewports
-	// Earliest still-future reset per window category across all accounts on the
-	// page, from `computeSoonestWindowResets`. A window whose reset matches its
-	// category's entry gets its countdown bolded as the next one to come back.
-	// Omitted when the card renders alone, where there is nothing to compare.
-	soonestResets?: ReadonlyMap<string, number>;
+	// Still-future reset endpoints per window category across all accounts on the
+	// page, from `computeWindowResetExtremes`. Matching countdowns are emphasized
+	// as the first (green) or last (red) capacity to return. Omitted when the card
+	// renders alone, where there is nothing to compare.
+	earliestResets?: ReadonlyMap<string, number>;
+	latestResets?: ReadonlyMap<string, number>;
 }
 
 // Maps a render-loop window name to its server-computed prediction. Only the
@@ -385,7 +387,8 @@ export function RateLimitProgress({
 	inlineProjection = false,
 	prediction = null,
 	compact = false,
-	soonestResets,
+	earliestResets,
+	latestResets,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -634,7 +637,7 @@ export function RateLimitProgress({
 								percentage ?? null,
 								now,
 							);
-				// The one tone every surface reads: the bar's fill, the hover tooltip
+				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can
 				// disagree about how bad a window is. Null both when there is nothing
 				// to project and when the window sits at 0%, where even a stale
@@ -650,7 +653,7 @@ export function RateLimitProgress({
 				// absolute 24-hour reset time with the time remaining in brackets,
 				// e.g. "Resets Jul 26, 08:59 (2d 13h)".
 				//
-				// `resetStatusNode` is what renders (it can carry a bolded countdown,
+				// `resetStatusNode` is what renders (it can carry an emphasized countdown,
 				// see below); `resetStatus` is its plain-text twin and
 				// `resetStatusFull` is what the tooltip carries. The latter two differ
 				// only in compact mode, where a card
@@ -671,15 +674,41 @@ export function RateLimitProgress({
 						resetStatusFull = `Resets ${stamp} (${remaining})`;
 						resetStatus = compact ? `${remaining} · ${stamp}` : resetStatusFull;
 						// Of every account on this page reporting this same kind of
-						// window, this one comes back first. Only the countdown is
-						// bolded — that is the quantity being compared; the absolute
-						// stamp beside it stays regular weight.
-						const countdown =
-							soonestResets?.get(usageWindowCategoryKey(usage)) === resetMs ? (
-								<span className="font-bold">{remaining}</span>
-							) : (
-								remaining
-							);
+						// window, call out both endpoints. Only the countdown carries
+						// the comparison treatment — the absolute stamp remains quiet.
+						const categoryKey = usageWindowCategoryKey(usage);
+						const earliestReset = earliestResets?.get(categoryKey);
+						const latestReset = latestResets?.get(categoryKey);
+						// When every compared account resets at the exact same moment there
+						// is no meaningful first/last distinction, so leave the tie neutral.
+						const isTiedEndpoint =
+							earliestReset !== undefined && earliestReset === latestReset;
+						const resetRank = isTiedEndpoint
+							? null
+							: earliestReset === resetMs
+								? "earliest"
+								: latestReset === resetMs
+									? "latest"
+									: null;
+						const countdown = resetRank ? (
+							<span
+								className={cn(
+									"font-bold",
+									resetRank === "earliest"
+										? "text-success-strong"
+										: "text-destructive-strong",
+								)}
+							>
+								{remaining}
+								<span className="sr-only">
+									{resetRank === "earliest"
+										? " — first reset among accounts"
+										: " — last reset among accounts"}
+								</span>
+							</span>
+						) : (
+							remaining
+						);
 						resetStatusNode = compact ? (
 							<>
 								{countdown} · {stamp}
@@ -718,20 +747,7 @@ export function RateLimitProgress({
 							cardSpacing,
 						)}
 					>
-						<div className={cn(!inlineProjection && "group", "relative")}>
-							{!inlineProjection && (
-								<div
-									className="pointer-events-none absolute bottom-full z-10 mb-2 hidden w-max max-w-xs -translate-x-1/2 rounded bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md group-hover:block"
-									style={{ left: `clamp(10%, ${expectedPct ?? 50}%, 90%)` }}
-								>
-									<div className="mb-1 font-medium">{windowLabel} usage</div>
-									{projection && (
-										<div className={projectionTextClass}>
-											{projection.message}
-										</div>
-									)}
-								</div>
-							)}
+						<div className="relative">
 							<Progress
 								value={isAvailable ? percentage : 0}
 								className="h-2"
@@ -763,15 +779,39 @@ export function RateLimitProgress({
 							    because only the centre caption can absorb the squeeze.
 							    In compact mode the label truncates too, keeping its full
 							    text on hover. */}
-							<span
-								className={cn(
-									"text-muted-foreground",
-									compact ? "min-w-0 shrink truncate" : "shrink-0",
-								)}
-								title={compact ? windowLabel : undefined}
-							>
-								{windowLabel}
-							</span>
+							{!inlineProjection && projection ? (
+								<Popover>
+									<PopoverTrigger asChild>
+										<button
+											type="button"
+											className={cn(
+												"cursor-pointer text-left text-muted-foreground underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+												compact ? "min-w-0 shrink truncate" : "shrink-0",
+											)}
+											aria-label={`Show ${windowLabel} usage details`}
+										>
+											{windowLabel}
+										</button>
+									</PopoverTrigger>
+									<PopoverContent
+										align="start"
+										className="w-auto max-w-xs p-3 text-xs"
+									>
+										<p className="mb-1 font-medium">{windowLabel} usage</p>
+										<p className={projectionTextClass}>{projection.message}</p>
+									</PopoverContent>
+								</Popover>
+							) : (
+								<span
+									className={cn(
+										"text-muted-foreground",
+										compact ? "min-w-0 shrink truncate" : "shrink-0",
+									)}
+									title={compact ? windowLabel : undefined}
+								>
+									{windowLabel}
+								</span>
+							)}
 							{resetStatus && (
 								<span
 									className="min-w-0 flex-1 truncate text-center text-muted-foreground"

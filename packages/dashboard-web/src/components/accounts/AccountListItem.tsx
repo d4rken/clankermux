@@ -18,10 +18,9 @@ import {
 	Unlink,
 	Zap,
 } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { Account } from "../../api";
 import { deriveAccountStatus } from "../../lib/account-status";
-import { cn } from "../../lib/utils";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -39,6 +38,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
 import { AccountStatusChips } from "./AccountStatusChips";
@@ -55,29 +55,78 @@ const ACTIVE_SESSION_WINDOW_MINUTES = Math.round(
 	TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS / 60000,
 );
 
-/**
- * The four token counts for the account's current session window, as a single
- * tooltip string. They used to occupy a whole visible row per account, which
- * cost a line of height on every card to show numbers that are only ever read
- * deliberately — and whose request count already appears in the info row as the
- * server-rendered "Active: N reqs". The cost stayed visible; the breakdown
- * moved here, so nothing was lost.
- */
-function formatSessionTokenSummary(stats: SessionStats): string {
-	return [
-		`Since this session window started: ↑${formatTokenCount(stats.inputTokens)} in`,
-		`✦${formatTokenCount(stats.cacheCreationInputTokens)} cache↑`,
-		`✦${formatTokenCount(stats.cacheReadInputTokens)} cache↓`,
-		`↓${formatTokenCount(stats.outputTokens)} out`,
-	].join(" · ");
+interface SessionCost {
+	kind: "plan" | "api";
+	usd: number;
+}
+
+/** Click-open detail for the compact active-session figure. */
+function SessionDetailsPopover({
+	stats,
+	costs,
+	children,
+}: {
+	stats: SessionStats;
+	costs: readonly SessionCost[];
+	children: ReactNode;
+}) {
+	const tokenRows = [
+		["Input", stats.inputTokens],
+		["Cache write", stats.cacheCreationInputTokens],
+		["Cache read", stats.cacheReadInputTokens],
+		["Output", stats.outputTokens],
+	] as const;
+
+	return (
+		<Popover>
+			<PopoverTrigger asChild>
+				<button
+					type="button"
+					className="cursor-pointer text-left font-medium tabular-nums text-foreground underline decoration-dotted underline-offset-4 transition-colors hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+					aria-label="Show active session details"
+				>
+					{children}
+				</button>
+			</PopoverTrigger>
+			<PopoverContent align="start" className="w-72 p-3 text-xs">
+				<p className="font-medium">Active session</p>
+				<p className="mt-1 text-muted-foreground">
+					Usage since the current session window started.
+				</p>
+				<dl className="mt-3 grid grid-cols-2 gap-row">
+					<div>
+						<dt className="text-muted-foreground">Requests</dt>
+						<dd className="font-medium tabular-nums">
+							{stats.requests.toLocaleString()}
+						</dd>
+					</div>
+					{tokenRows.map(([label, value]) => (
+						<div key={label}>
+							<dt className="text-muted-foreground">{label}</dt>
+							<dd className="font-medium tabular-nums">
+								{formatTokenCount(value)} tokens
+							</dd>
+						</div>
+					))}
+					{costs.map(({ kind, usd }) => (
+						<div key={kind}>
+							<dt className="capitalize text-muted-foreground">{kind} cost</dt>
+							<dd className="font-medium tabular-nums">${usd.toFixed(2)}</dd>
+						</div>
+					))}
+				</dl>
+			</PopoverContent>
+		</Popover>
+	);
 }
 
 interface AccountListItemProps {
 	account: Account;
 	isForced?: boolean;
-	// Per-window-category earliest reset across the whole list; forwarded to the
-	// rate-limit card so it can bold the countdown that comes back first.
-	soonestResets?: ReadonlyMap<string, number>;
+	// Per-window-category reset endpoints across the whole list; forwarded to the
+	// rate-limit card so it can distinguish the first and last capacity returns.
+	earliestResets?: ReadonlyMap<string, number>;
+	latestResets?: ReadonlyMap<string, number>;
 	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
@@ -106,7 +155,8 @@ interface AccountListItemProps {
 export function AccountListItem({
 	account,
 	isForced = false,
-	soonestResets,
+	earliestResets,
+	latestResets,
 	onForceAccount,
 	onPauseToggle,
 	onForceResetRateLimit,
@@ -139,9 +189,6 @@ export function AccountListItem({
 	// All per-account status chips — and the Force Reset gating below — are derived
 	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
 	const status = deriveAccountStatus(account);
-	const sessionTokenSummary = account.sessionStats
-		? formatSessionTokenSummary(account.sessionStats)
-		: null;
 	// Spend inside the current session window. Both kinds can be non-zero at
 	// once (a plan account that spilled into overage), and a zero is omitted
 	// rather than rendered as "$0.00" — an unused billing mode is not news.
@@ -549,68 +596,87 @@ export function AccountListItem({
 			    bars below. */}
 			<div className="space-y-item">
 				<AccountStatusChips account={account} status={status} />
-				<div className="flex flex-wrap items-center gap-x-row gap-y-item text-sm">
-					<span>{presenter.requestCount} requests</span>
-					{presenter.activeSessionCount > 0 && (
-						<span className="text-muted-foreground">
-							· {presenter.activeSessionCount} clients (
-							{ACTIVE_SESSION_WINDOW_MINUTES}m)
-						</span>
-					)}
-					{/* The session segments carry the token breakdown as their tooltip,
-					    so they take the help cursor to advertise that there is more
-					    behind them than the text shows. */}
-					<span
-						className={cn(
-							"text-muted-foreground",
-							sessionTokenSummary && "cursor-help",
+				<div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+					<div className="flex flex-wrap items-center gap-row">
+						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
+							<div className="flex items-baseline gap-tight">
+								<dt className="text-muted-foreground">Requests</dt>
+								<dd className="font-medium tabular-nums">
+									{presenter.requestCount.toLocaleString()}
+								</dd>
+							</div>
+							{presenter.activeSessionCount > 0 && (
+								<div className="flex items-baseline gap-tight">
+									<dt className="text-muted-foreground">
+										Clients · {ACTIVE_SESSION_WINDOW_MINUTES}m
+									</dt>
+									<dd className="font-medium tabular-nums">
+										{presenter.activeSessionCount.toLocaleString()}
+									</dd>
+								</div>
+							)}
+							<div className="flex min-w-0 items-baseline gap-tight">
+								<dt className="shrink-0 text-muted-foreground">Session</dt>
+								<dd className="min-w-0">
+									{account.sessionStats ? (
+										<SessionDetailsPopover
+											stats={account.sessionStats}
+											costs={sessionCosts}
+										>
+											<span>{presenter.sessionInfo}</span>
+											{sessionCosts.map(({ kind, usd }) => (
+												<span key={kind}>
+													· ${usd.toFixed(2)} {kind}
+												</span>
+											))}
+										</SessionDetailsPopover>
+									) : (
+										<span className="font-medium tabular-nums">
+											{presenter.sessionInfo}
+										</span>
+									)}
+								</dd>
+							</div>
+							{status.reauthDeadlineMs !== null && (
+								// Always shown once known, not only inside the warning window: the
+								// point of capturing the deadline is that it stops being a
+								// surprise, and a date that only appears in its final week is
+								// still a surprise for the other eleven.
+								<div
+									className="flex items-baseline gap-tight"
+									title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
+								>
+									<dt className="text-muted-foreground">Re-auth by</dt>
+									<dd className="font-medium tabular-nums">
+										{new Date(status.reauthDeadlineMs).toLocaleDateString(
+											undefined,
+											{
+												year: "numeric",
+												month: "short",
+												day: "numeric",
+											},
+										)}
+									</dd>
+								</div>
+							)}
+						</dl>
+						{status.showForceReset && (
+							<Button
+								variant="outline"
+								size="sm"
+								className="h-7 gap-tight text-xs"
+								onClick={() => onForceResetRateLimit(account)}
+								title={
+									status.staleLockDetected
+										? "Reset stale rate limit lock (usage shows capacity available)"
+										: "Force clear rate limit state from database"
+								}
+							>
+								<RefreshCw className="h-3.5 w-3.5" />
+								Force Reset
+							</Button>
 						)}
-						title={sessionTokenSummary ?? undefined}
-					>
-						{presenter.sessionInfo}
-					</span>
-					{sessionCosts.map(({ kind, usd }) => (
-						<span
-							key={kind}
-							className="cursor-help text-muted-foreground"
-							title={sessionTokenSummary ?? undefined}
-						>
-							· ${usd.toFixed(2)} {kind}
-						</span>
-					))}
-					{status.reauthDeadlineMs !== null && (
-						// Always shown once known, not only inside the warning window: the
-						// point of capturing the deadline is that it stops being a
-						// surprise, and a date that only appears in its final week is
-						// still a surprise for the other eleven.
-						<span
-							className="text-muted-foreground"
-							title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
-						>
-							· re-auth by{" "}
-							{new Date(status.reauthDeadlineMs).toLocaleDateString(undefined, {
-								year: "numeric",
-								month: "short",
-								day: "numeric",
-							})}
-						</span>
-					)}
-					{status.showForceReset && (
-						<Button
-							variant="outline"
-							size="sm"
-							className="h-7 gap-tight text-xs"
-							onClick={() => onForceResetRateLimit(account)}
-							title={
-								status.staleLockDetected
-									? "Reset stale rate limit lock (usage shows capacity available)"
-									: "Force clear rate limit state from database"
-							}
-						>
-							<RefreshCw className="h-3.5 w-3.5" />
-							Force Reset
-						</Button>
-					)}
+					</div>
 				</div>
 			</div>
 			{(account.rateLimitReset ||
@@ -631,7 +697,8 @@ export function AccountListItem({
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					prediction={account.prediction}
-					soonestResets={soonestResets}
+					earliestResets={earliestResets}
+					latestResets={latestResets}
 					compact
 				/>
 			)}
