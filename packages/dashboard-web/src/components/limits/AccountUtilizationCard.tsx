@@ -70,7 +70,7 @@ export function AccountUtilizationCard({
 	);
 
 	return (
-		<Card>
+		<Card id="account-utilization" className="scroll-mt-section">
 			<CardHeader>
 				<CardTitle>Account Utilization</CardTitle>
 				<CardDescription>
