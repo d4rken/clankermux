@@ -50,32 +50,16 @@ Features:
   app restarts while in-flight agent streams drain.
 * Small dependency tree; memory-leak and stability hardening for long-running deployments.
 
-## The dashboard
+## Screenshots
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.svg"><img src="docs/media/overview-light.svg" alt="Overview: a health strip reading All Systems Operational, tiles for 24-hour requests, success rate, tokens and plan value, and a per-account throughput chart." /></picture>
-
-Pool health, the day's traffic, and what it was worth, in one glance.
-
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.svg"><img src="docs/media/accounts-light.svg" alt="Accounts: three account cards, each with its provider, status chips, request counts and a row of quota windows showing 5-hour, weekly and per-family utilization." /></picture>
-
-Every account with its live quota windows. The bars turn amber near a limit and
-red at the ceiling, so an account about to drop out of rotation is visible
-before it does.
-
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-dark.svg"><img src="docs/media/usage-light.svg" alt="Usage: a sawtooth chart of per-account utilization against the limit line, with dashed burn-rate projections, above headline figures for plan value, cost and value ratio." /></picture>
-
-Utilization over time per account. Solid lines are recorded history; dashed
-lines project the current burn rate forward to each window's reset, which is
-what tells you whether the pool lasts the week.
-
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/requests-dark.svg"><img src="docs/media/requests-light.svg" alt="Request history: five request rows, each showing time, status, the account it was routed through, latency, and chips for the calling agent, project, model, token counts, throughput and cost." /></picture>
-
-Live request history, attributed to the client, project, model and account that
-served it, with token counts and cost per request.
-
-> These four are drawn to scale from the dashboard's own theme tokens rather
-> than captured, and the accounts in them are invented. A real capture would
-> carry live account addresses and spend into a public page.
+<table>
+<tr>
+<td width="25%"><a href="docs/media/overview-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.svg"><img src="docs/media/overview-light.svg" width="100%" alt="Overview: a health strip reading All Systems Operational, tiles for 24-hour requests, success rate, tokens and plan value, and a per-account throughput chart." /></picture></a></td>
+<td width="25%"><a href="docs/media/accounts-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.svg"><img src="docs/media/accounts-light.svg" width="100%" alt="Accounts: three account cards, each with its provider, status chips, request counts and a row of quota windows showing 5-hour, weekly and per-family utilization." /></picture></a></td>
+<td width="25%"><a href="docs/media/usage-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-dark.svg"><img src="docs/media/usage-light.svg" width="100%" alt="Usage: a sawtooth chart of per-account utilization against the limit line, with dashed burn-rate projections, above headline figures for plan value, cost and value ratio." /></picture></a></td>
+<td width="25%"><a href="docs/media/requests-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/requests-dark.svg"><img src="docs/media/requests-light.svg" width="100%" alt="Request history: five request rows, each showing time, status, the account it was routed through, latency, and chips for the calling agent, project, model, token counts, throughput and cost." /></picture></a></td>
+</tr>
+</table>
 
 ## Related projects
 
