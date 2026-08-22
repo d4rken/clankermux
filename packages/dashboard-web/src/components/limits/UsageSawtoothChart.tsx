@@ -17,16 +17,21 @@ import {
 	CardTitle,
 } from "../ui/card";
 
-interface UsageSawtoothChartProps {
+interface UsageWindowChartState {
 	usageHistory: UsageHistoryResponse | undefined;
+	loading: boolean;
+	/** Selected time range; also re-keys this window's usage-history query. */
+	range: string;
+	onRangeChange: (range: string) => void;
+}
+
+interface UsageSawtoothChartProps {
 	/** Live accounts (from /api/accounts) — drive the forward burn-rate forecast. */
 	accounts: AccountResponse[];
 	/** Current time (ms), ticked by the parent so the forecast anchor stays fresh. */
 	now: number;
-	loading: boolean;
-	/** Selected time range (controlled); also re-keys the parent's usage-history query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	fiveHour: UsageWindowChartState;
+	sevenDay: UsageWindowChartState;
 }
 
 /**
@@ -213,14 +218,27 @@ function WindowChartPanel({
 	label,
 	chart,
 	loading,
+	range,
+	onRangeChange,
+	selectorLabel,
 }: {
 	label: string;
 	chart: WindowChart;
 	loading: boolean;
+	range: string;
+	onRangeChange: (range: string) => void;
+	selectorLabel: string;
 }) {
 	return (
 		<div>
-			<p className="mb-2 text-xs font-medium text-muted-foreground">{label}</p>
+			<div className="mb-2 flex items-center justify-between gap-group">
+				<p className="text-xs font-medium text-muted-foreground">{label}</p>
+				<TimeRangeSelector
+					value={range}
+					onChange={onRangeChange}
+					ariaLabel={selectorLabel}
+				/>
+			</div>
 			{chart.isEmpty ? (
 				<div
 					className="flex items-center justify-center"
@@ -259,12 +277,10 @@ function WindowChartPanel({
 }
 
 export function UsageSawtoothChart({
-	usageHistory,
 	accounts,
 	now,
-	loading,
-	range,
-	onRangeChange,
+	fiveHour: fiveHourState,
+	sevenDay: sevenDayState,
 }: UsageSawtoothChartProps) {
 	const palette = useSeriesPalette();
 	// The pool average is the emphasis line, so it takes the palette's own
@@ -273,55 +289,56 @@ export function UsageSawtoothChart({
 	const fiveHour = useMemo(
 		() =>
 			buildWindowChart(
-				usageHistory,
+				fiveHourState.usageHistory,
 				accounts,
 				"five_hour",
 				now,
 				palette.sequence,
 				poolStroke,
 			),
-		[usageHistory, accounts, now, palette.sequence],
+		[fiveHourState.usageHistory, accounts, now, palette.sequence],
 	);
 	const sevenDay = useMemo(
 		() =>
 			buildWindowChart(
-				usageHistory,
+				sevenDayState.usageHistory,
 				accounts,
 				"seven_day",
 				now,
 				palette.sequence,
 				poolStroke,
 			),
-		[usageHistory, accounts, now, palette.sequence],
+		[sevenDayState.usageHistory, accounts, now, palette.sequence],
 	);
 
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-group">
-					<div>
-						<CardTitle>Usage Over Time</CardTitle>
-						<CardDescription>
-							Per-account utilization with the pool average. Solid lines are
-							recorded history; a paused or maxed-out account holds its last
-							value until its window rolls over, so it never silently drops out
-							of the pool average. Dashed lines project the current burn rate
-							forward to each window's reset.
-						</CardDescription>
-					</div>
-					<TimeRangeSelector value={range} onChange={onRangeChange} />
-				</div>
+				<CardTitle>Usage Over Time</CardTitle>
+				<CardDescription>
+					Per-account utilization with the pool average. Solid lines are
+					recorded history; a paused or maxed-out account holds its last value
+					until its window rolls over, so it never silently drops out of the
+					pool average. Dashed lines project the current burn rate forward to
+					each window's reset.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-section">
 				<WindowChartPanel
 					label="5-hour window"
 					chart={fiveHour}
-					loading={loading}
+					loading={fiveHourState.loading}
+					range={fiveHourState.range}
+					onRangeChange={fiveHourState.onRangeChange}
+					selectorLabel="5-hour graph time range"
 				/>
 				<WindowChartPanel
 					label="7-day window"
 					chart={sevenDay}
-					loading={loading}
+					loading={sevenDayState.loading}
+					range={sevenDayState.range}
+					onRangeChange={sevenDayState.onRangeChange}
+					selectorLabel="7-day graph time range"
 				/>
 			</CardContent>
 		</Card>

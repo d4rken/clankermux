@@ -26,7 +26,8 @@ const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
 export const LimitsTab = React.memo(() => {
 	// Each time-ranged card owns its own range now (the live pool tiles and
 	// utilization card below are range-independent and get no selector).
-	const [usageRange, setUsageRange] = useState("7d");
+	const [fiveHourUsageRange, setFiveHourUsageRange] = useState("24h");
+	const [sevenDayUsageRange, setSevenDayUsageRange] = useState("7d");
 	const [perfRange, setPerfRange] = useState("7d");
 
 	const { data: accounts, isLoading: accountsLoading } = useAccounts();
@@ -37,8 +38,10 @@ export const LimitsTab = React.memo(() => {
 		false,
 		{ sections: LIMITS_SECTIONS },
 	);
-	const { data: usageHistory, isLoading: usageHistoryLoading } =
-		useUsageHistory(usageRange);
+	const { data: fiveHourUsageHistory, isLoading: fiveHourUsageHistoryLoading } =
+		useUsageHistory(fiveHourUsageRange);
+	const { data: sevenDayUsageHistory, isLoading: sevenDayUsageHistoryLoading } =
+		useUsageHistory(sevenDayUsageRange);
 	// Payments-ledger spend summary follows the Account Performance card's range.
 	const { data: paymentsSummary } = usePaymentsSummary(perfRange);
 
@@ -106,14 +109,22 @@ export const LimitsTab = React.memo(() => {
 			    live, range-independent capacity view (no range selector). */}
 			<AccountUtilizationCard accounts={accountList} now={now} />
 
-			{/* Recorded usage history + forecast; range picker lives in the card header. */}
+			{/* Recorded usage history + forecast; each graph owns its range picker. */}
 			<UsageSawtoothChart
-				usageHistory={usageHistory}
 				accounts={accountList}
 				now={now}
-				loading={usageHistoryLoading}
-				range={usageRange}
-				onRangeChange={setUsageRange}
+				fiveHour={{
+					usageHistory: fiveHourUsageHistory,
+					loading: fiveHourUsageHistoryLoading,
+					range: fiveHourUsageRange,
+					onRangeChange: setFiveHourUsageRange,
+				}}
+				sevenDay={{
+					usageHistory: sevenDayUsageHistory,
+					loading: sevenDayUsageHistoryLoading,
+					range: sevenDayUsageRange,
+					onRangeChange: setSevenDayUsageRange,
+				}}
 			/>
 
 			{/* Account performance + folded-in Plan Value / Cost / Value Ratio summary;
