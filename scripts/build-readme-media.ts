@@ -28,6 +28,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	BRAND_MARK_CANDIDATE_PATH,
+	BRAND_MARK_CORE,
+	BRAND_MARK_SELECTED_PATH,
+	BRAND_MARK_STROKES,
+} from "../packages/dashboard-web/src/brand-mark-geometry";
 
 const OUT_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -281,14 +287,15 @@ function chip(
 	return { svg, w };
 }
 
-/** The brand mark: one thick inbound stream fanning into three thin outbound. */
+/** Candidate lanes passing through a core, with one selected route emphasized. */
 function brandMark(x: number, y: number, size: number, ink: string): string {
 	const s = size / 24;
 	return (
 		`<g transform="translate(${round(x)} ${round(y)}) scale(${round(s * 100) / 100})" ` +
-		`fill="none" stroke="${ink}" stroke-linecap="round">` +
-		`<path d="M1.5 12h9" stroke-width="3.4"/>` +
-		`<path d="M10.5 12c5 0 5-7.5 11-7.5M10.5 12h11M10.5 12c5 0 5 7.5 11 7.5" stroke-width="1.5"/>` +
+		`fill="none" stroke="${ink}" stroke-linecap="round" stroke-linejoin="round">` +
+		`<path d="${BRAND_MARK_CANDIDATE_PATH}" stroke-width="${BRAND_MARK_STROKES.candidate}"/>` +
+		`<rect x="${BRAND_MARK_CORE.x}" y="${BRAND_MARK_CORE.y}" width="${BRAND_MARK_CORE.width}" height="${BRAND_MARK_CORE.height}" rx="${BRAND_MARK_CORE.rx}" stroke-width="${BRAND_MARK_STROKES.core}"/>` +
+		`<path d="${BRAND_MARK_SELECTED_PATH}" stroke-width="${BRAND_MARK_STROKES.selected}"/>` +
 		`</g>`
 	);
 }
