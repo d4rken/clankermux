@@ -2,6 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	BRAND_MARK_CANDIDATE_PATH,
+	BRAND_MARK_CORE,
+	BRAND_MARK_SELECTED_PATH,
+	BRAND_MARK_STROKES,
+} from "../packages/dashboard-web/src/brand-mark-geometry";
 import { CANVAS_WIDTH, renderAll, textWidth } from "./build-readme-media";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,6 +99,31 @@ describe("README media", () => {
 			expect(`${f.name}: up to date`).toBe(
 				onDisk === f.svg ? `${f.name}: up to date` : `${f.name}: STALE`,
 			);
+		}
+	});
+
+	it("keeps the static favicon aligned with the shared routing-core geometry", () => {
+		const favicon = readFileSync(
+			join(ROOT, "packages", "dashboard-web", "src", "logo.svg"),
+			"utf8",
+		);
+		const readmeLogo = files.find((f) => f.name === "logo-light.svg")?.svg ?? "";
+		const copies = [favicon, readmeLogo];
+		const coreGeometry = [
+			`x="${BRAND_MARK_CORE.x}"`,
+			`y="${BRAND_MARK_CORE.y}"`,
+			`width="${BRAND_MARK_CORE.width}"`,
+			`height="${BRAND_MARK_CORE.height}"`,
+			`rx="${BRAND_MARK_CORE.rx}"`,
+		];
+
+		for (const svg of copies) {
+			expect(svg).toContain(`d="${BRAND_MARK_CANDIDATE_PATH}"`);
+			expect(svg).toContain(`stroke-width="${BRAND_MARK_STROKES.candidate}"`);
+			expect(svg).toContain(`d="${BRAND_MARK_SELECTED_PATH}"`);
+			expect(svg).toContain(`stroke-width="${BRAND_MARK_STROKES.selected}"`);
+			expect(svg).toContain(`stroke-width="${BRAND_MARK_STROKES.core}"`);
+			for (const attribute of coreGeometry) expect(svg).toContain(attribute);
 		}
 	});
 

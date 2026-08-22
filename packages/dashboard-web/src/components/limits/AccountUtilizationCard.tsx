@@ -1,6 +1,6 @@
 import type { AccountResponse } from "@clankermux/types";
 import { extractFiveHour, extractSevenDay } from "../../lib/pool-usage";
-import { computeSoonestWindowResets } from "../../lib/usage-windows";
+import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
 import { ProviderChip } from "../accounts/ProviderChip";
@@ -16,8 +16,8 @@ import {
 
 interface AccountUtilizationCardProps {
 	accounts: AccountResponse[];
-	/** Shared clock from the Limits tab, so the countdowns and the "resets next"
-	 *  comparison below advance together. */
+	/** Shared clock from the Limits tab, so countdowns and reset-endpoint
+	 *  comparisons advance together. */
 	now: number;
 }
 
@@ -53,9 +53,9 @@ export function AccountUtilizationCard({
 		.sort((a, b) => maxUtilization(b) - maxUtilization(a));
 
 	// Built from `rows`, not `accounts`: an account filtered out of this card has
-	// no countdown here to bold, and letting it win a category would leave the
-	// category unmarked.
-	const soonestResets = computeSoonestWindowResets(
+	// no countdown here to emphasize, and letting it define either endpoint
+	// would leave a visible category incorrectly marked.
+	const resetExtremes = computeWindowResetExtremes(
 		rows.map((account) => ({
 			resetIso: account.rateLimitReset,
 			usageUtilization: account.usageUtilization,
@@ -70,14 +70,15 @@ export function AccountUtilizationCard({
 	);
 
 	return (
-		<Card>
+		<Card id="account-utilization" className="scroll-mt-section">
 			<CardHeader>
 				<CardTitle>Account Utilization</CardTitle>
 				<CardDescription>
 					Current 5-hour and 7-day quota per account, with reset countdowns and
 					a burn-rate projection. The tick marks the expected pace; a bar turns
 					amber when it is projected to run out before its reset, and red once
-					that projection is well clear of the reset.
+					that projection is well clear of the reset. Green reset times come
+					back first; red reset times come back last.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -119,7 +120,8 @@ export function AccountUtilizationCard({
 									usageThrottledWindows={account.usageThrottledWindows}
 									provider={account.provider}
 									showWeekly={providerShowsWeeklyUsage(account.provider)}
-									soonestResets={soonestResets}
+									earliestResets={resetExtremes.earliest}
+									latestResets={resetExtremes.latest}
 									inlineProjection
 								/>
 							</div>

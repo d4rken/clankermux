@@ -3,6 +3,7 @@ import type { FullUsageData } from "@clankermux/types";
 import {
 	classifyUsageCard,
 	computeSoonestWindowResets,
+	computeWindowResetExtremes,
 	type UsageCardSource,
 	usageWindowCategoryKey,
 	usageWindowLabel,
@@ -320,5 +321,40 @@ describe("computeSoonestWindowResets", () => {
 			NOW,
 		);
 		expect(soonest.get("window:5-hour")).toBe(Date.parse(inHours(3)));
+	});
+});
+
+describe("computeWindowResetExtremes", () => {
+	it("picks both reset endpoints per category", () => {
+		const extremes = computeWindowResetExtremes(
+			[
+				anthropicAccount({
+					fiveHourResetsAt: inHours(4),
+					sevenDayResetsAt: inHours(20),
+				}),
+				anthropicAccount({
+					fiveHourResetsAt: inHours(1),
+					sevenDayResetsAt: inHours(44),
+				}),
+			],
+			NOW,
+		);
+
+		expect(extremes.earliest.get("window:5-hour")).toBe(Date.parse(inHours(1)));
+		expect(extremes.latest.get("window:5-hour")).toBe(Date.parse(inHours(4)));
+		expect(extremes.earliest.get("window:weekly")).toBe(
+			Date.parse(inHours(20)),
+		);
+		expect(extremes.latest.get("window:weekly")).toBe(Date.parse(inHours(44)));
+	});
+
+	it("omits both endpoints when only one account reports a category", () => {
+		const extremes = computeWindowResetExtremes(
+			[anthropicAccount({ scoped: [scopedEntry("Fable", inHours(30))] })],
+			NOW,
+		);
+
+		expect(extremes.earliest.has("scoped:fable")).toBe(false);
+		expect(extremes.latest.has("scoped:fable")).toBe(false);
 	});
 });

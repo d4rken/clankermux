@@ -38,7 +38,7 @@ interface PoolMetricCardProps {
 	unavailableReason?: string;
 	/**
 	 * Set when the pool is real but the most recent `/api/accounts` refresh
-	 * failed. The quota numbers, the next-quota line and the badges still render;
+	 * failed. The quota numbers, next-checkpoint line and badges still render;
 	 * the card says how old they are.
 	 */
 	staleNote?: string;
@@ -96,10 +96,7 @@ function groupExcluded(
 	return groups;
 }
 
-function nextQuotaTimeLabel(
-	earliestResetMs: number,
-	window: PoolWindow,
-): string {
+function windowTimeLabel(earliestResetMs: number, window: PoolWindow): string {
 	const date = new Date(earliestResetMs);
 	return window === "seven_day"
 		? date.toLocaleString(undefined, {
@@ -114,13 +111,13 @@ function nextQuotaTimeLabel(
 			});
 }
 
-function nextQuotaLabel(
+function checkpointLabel(
 	earliestResetMs: number,
 	accountName: string | null,
 	window: PoolWindow,
 ): string {
 	const name = accountName ?? "unknown";
-	return `${name} at ${nextQuotaTimeLabel(earliestResetMs, window)}`;
+	return `${name} at ${windowTimeLabel(earliestResetMs, window)}`;
 }
 
 function formatShortDuration(ms: number): string {
@@ -238,7 +235,7 @@ export function familyScopeSummary(f: FamilyWeeklyUsage): {
 	return { prefix: `${total} accounts · `, resetMs: f.earliestResetMs };
 }
 
-function PoolDetailSection({
+export function PoolDetailSection({
 	result,
 	window,
 }: {
@@ -273,20 +270,20 @@ function PoolDetailSection({
 	return (
 		<div className="space-y-row">
 			<div>
-				<div className="font-medium mb-1">Pool usage</div>
+				<div className="font-medium mb-1">Calculation</div>
 				<div className="text-muted-foreground">
 					Headline counts unavailable eligible accounts as 100% used.
 				</div>
 				{activeAverage != null && (
 					<div className="mt-1">
-						Active accounts average: {activeAverage.toFixed(0)}%
+						Reporting accounts average: {activeAverage.toFixed(0)}%
 					</div>
 				)}
 			</div>
 			{hasContributing && (
 				<div>
 					<div className="font-medium mb-1">
-						Contributing ({contributing.length})
+						Reporting ({contributing.length})
 					</div>
 					<ul className="space-y-tight">
 						{sortedContributing.map((c) => (
@@ -309,8 +306,8 @@ function PoolDetailSection({
 						Model limits ({familyWeekly.length})
 					</div>
 					<div className="text-muted-foreground mb-1">
-						Per-model weekly quota — can throttle one model while the pool looks
-						healthy.
+						Per-model weekly quota — can throttle one model while the
+						account-wide average remains low.
 					</div>
 					<ul className="space-y-tight">
 						{familyWeekly.map((f) => {
@@ -342,7 +339,7 @@ function PoolDetailSection({
 									</div>
 									<div className="text-muted-foreground">
 										{scope.prefix}
-										resets {nextQuotaTimeLabel(scope.resetMs, "seven_day")}
+										resets {windowTimeLabel(scope.resetMs, "seven_day")}
 									</div>
 									{f.accounts.length > 1 && (
 										<ul className="ml-2 space-y-tight">
@@ -436,9 +433,12 @@ function PoolDetailSection({
 			)}
 			{hasFallback && (
 				<div>
-					<div className="font-medium mb-1">Fallback ({fallback.length})</div>
+					<div className="font-medium mb-1">
+						Outside this window ({fallback.length})
+					</div>
 					<div className="text-muted-foreground mb-1">
-						Pay-as-you-go capacity, not counted in this pool.
+						Providers without this rolling window, including pay-as-you-go
+						accounts, are not included in the average.
 					</div>
 					<ul className="space-y-tight">
 						{fallback.map((f) => (
@@ -456,9 +456,9 @@ function PoolDetailSection({
 			)}
 			{earliestResetMs != null && (
 				<div>
-					<div className="font-medium mb-1">More quota</div>
+					<div className="font-medium mb-1">Next checkpoint</div>
 					<div>
-						{nextQuotaLabel(earliestResetMs, earliestResetAccountName, window)}
+						{checkpointLabel(earliestResetMs, earliestResetAccountName, window)}
 					</div>
 				</div>
 			)}
@@ -503,10 +503,10 @@ export function PoolMetricCard({
 	const showChip = resolved && eligibleTotal > 0;
 	const colorClass = headlineColor(average);
 	const headline = average != null ? formatPercentage(average, 0) : "—";
-	const nextQuotaText =
+	const nextCheckpointText =
 		!resolved || earliestResetMs == null
 			? null
-			: `more quota at ${nextQuotaTimeLabel(earliestResetMs, window)}`;
+			: `next checkpoint at ${windowTimeLabel(earliestResetMs, window)}`;
 
 	const triggerNode = showChip ? (
 		<Popover>
@@ -575,9 +575,9 @@ export function PoolMetricCard({
 							{staleNote}
 						</p>
 					)}
-					{nextQuotaText && (
+					{nextCheckpointText && (
 						<p className="text-xs text-muted-foreground truncate">
-							{nextQuotaText}
+							{nextCheckpointText}
 						</p>
 					)}
 					{resolved && willRunOutText && (

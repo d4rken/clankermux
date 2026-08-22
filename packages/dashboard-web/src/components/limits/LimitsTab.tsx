@@ -1,6 +1,5 @@
 import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
-import { BarChart3, Gauge } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
@@ -10,9 +9,9 @@ import {
 } from "../../hooks/queries";
 import { computePoolUsage } from "../../lib/pool-usage";
 import { LoadingSkeleton } from "../overview/LoadingSkeleton";
-import { PoolMetricCard } from "../overview/PoolMetricCard";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
+import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 import { PaymentsHistoryCard } from "./PaymentsHistoryCard";
 import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
@@ -80,30 +79,13 @@ export const LimitsTab = React.memo(() => {
 
 	return (
 		<div className="space-y-section">
-			{/* Large 5h & 7d pool tiles — the headline capacity view, full detail inline. */}
-			<div className="grid grid-cols-1 md:grid-cols-2 gap-group">
-				<PoolMetricCard
-					title="5h Pool"
-					icon={Gauge}
-					result={fiveHourPool}
-					window="five_hour"
-					inlineDetails
-				/>
-				<PoolMetricCard
-					title="7d Pool"
-					icon={BarChart3}
-					result={weeklyPool}
-					window="seven_day"
-					inlineDetails
-				/>
-			</div>
-
-			{/* Scope note — explains why the history may differ from untracked providers. */}
-			<p className="text-xs text-muted-foreground">
-				Limits cover Anthropic and Codex windowed accounts (5-hour and 7-day
-				rolling quotas). Pay-as-you-go and other providers without rolling
-				windows aren't tracked here.
-			</p>
+			{/* The two rolling windows share one visual hierarchy so their usage,
+			    reporting coverage and recovery timing can be compared at a glance. */}
+			<LimitsCapacityOverview
+				fiveHour={fiveHourPool}
+				sevenDay={weeklyPool}
+				now={now}
+			/>
 
 			{/* Per-account live utilization — grouped with the pool tiles above as the
 			    live, range-independent capacity view (no range selector). */}
