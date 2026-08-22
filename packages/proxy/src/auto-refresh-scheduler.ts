@@ -333,7 +333,7 @@ export class AutoRefreshScheduler {
 					auto_refresh_enabled = 1
 					AND provider IN ('anthropic', 'codex', 'zai')
 					-- NOTE: the 5-hour reset predicate that used to live here has moved
-					-- into the per-account fiveHourWindowGate()/shouldRefreshAccount()
+					-- into the per-account bindingWindowResetElapsed()/shouldRefreshAccount()
 					-- pass below. The base query now scans ALL eligible accounts so the
 					-- weekly-dormant priming pass can also see accounts whose 5h window
 					-- is still active (their 5h reset is in the future) — those would
@@ -383,7 +383,7 @@ export class AutoRefreshScheduler {
 			});
 
 			// Accounts the FIVE-HOUR reason OWNS this cycle: this is a NEW 5h window.
-			// The fiveHourWindowGate reproduces the predicate the base SQL used to
+			// bindingWindowResetElapsed reproduces the predicate the base SQL used to
 			// enforce (we removed it from the query so the weekly pass can see all
 			// accounts). It is REQUIRED: without it, a never-refreshed account whose
 			// 5h reset is still in the FUTURE would hit shouldRefreshAccount's first-time
@@ -1449,13 +1449,30 @@ export class AutoRefreshScheduler {
 	}
 
 	/**
-	 * Gate reproducing the 5-hour reset predicate the base eligibility SQL used to
-	 * enforce (before it was broadened for weekly priming). An account is in scope
-	 * for the 5h reason only when it has no known reset (rate_limit_reset == null)
-	 * or its reset is already at/in the past. This excludes accounts whose 5h reset
-	 * is still in the FUTURE — exactly what the old `rate_limit_reset <= ?` SQL did.
+	 * Gate reproducing the reset predicate the base eligibility SQL used to
+	 * enforce (before it was broadened for weekly priming): an account is in scope
+	 * only when it has no known reset (`rate_limit_reset == null`) or its reset is
+	 * already at/in the past — exactly what the old `rate_limit_reset <= ?` did.
+	 *
+	 * NOT a 5-hour window test, despite gating the reason we colloquially call the
+	 * "5h prime". `accounts.rate_limit_reset` holds the reset of whichever limit is
+	 * currently BINDING, not the 5h window's: `response-processor` writes it from
+	 * `parseRateLimit`, which for Anthropic reads the
+	 * `anthropic-ratelimit-unified-reset` header. When an account's weekly window
+	 * is the binding constraint — as it is for most of a weekly-bound pool — this
+	 * column holds the WEEKLY reset, days out, and the gate stays shut. Measured
+	 * 2026-08-22: four accounts at 77-96% weekly all had `rate_limit_reset` equal
+	 * to their weekly reset to the decimal, so the prime reason never owned them.
+	 *
+	 * That is correct behaviour, not a bug — priming an account whose binding limit
+	 * has not reset achieves nothing. But do not read a passing gate as "the 5h
+	 * window rolled", and do not build anything on this that assumes 5h semantics.
+	 * The previous name (`fiveHourWindowGate`) claimed exactly that and cost a
+	 * shipped-and-reverted feature; see the `rate-limiting` skill,
+	 * `references/routing-gates.md` § "The 5h window is a throttle NESTED inside
+	 * the weekly budget".
 	 */
-	private fiveHourWindowGate(
+	private bindingWindowResetElapsed(
 		account: { rate_limit_reset: number | null },
 		now: number,
 	): boolean {
@@ -1486,7 +1503,7 @@ export class AutoRefreshScheduler {
 		now: number,
 	): boolean {
 		return (
-			this.fiveHourWindowGate(account, now) &&
+			this.bindingWindowResetElapsed(account, now) &&
 			this.shouldRefreshAccount(account, now)
 		);
 	}
