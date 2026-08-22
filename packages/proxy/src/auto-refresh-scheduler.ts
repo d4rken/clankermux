@@ -3,7 +3,6 @@ import {
 	getClientVersion,
 	normalizeAnthropicUsage,
 	registerHeartbeat,
-	TIME_CONSTANTS,
 } from "@clankermux/core";
 import type { BunSqlAdapter } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
@@ -57,14 +56,6 @@ function isZaiPeakHour(ts = Date.now()): boolean {
 	const sgtHour = (d.getUTCHours() + d.getUTCMinutes() / 60 + 8) % 24;
 	return sgtHour >= 14 && sgtHour < 18;
 }
-
-/**
- * Length of the Anthropic rolling 5h usage window, which is the cycle the
- * stagger distributes accounts across. Aliased from the shared session-duration
- * constant rather than re-spelled as a literal so the stagger cannot drift away
- * from the duration the rest of the system uses for this same window.
- */
-const FIVE_HOUR_WINDOW_MS = TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT;
 
 /**
  * Total (never-throwing) usage summary for the post-prime log line: the session
@@ -207,31 +198,7 @@ export class AutoRefreshScheduler {
 	private readonly FIVE_HOUR_PRIME_COOLDOWN_MS = USAGE_CACHE_TTL_MS / 2;
 	// Maximum age of a cached usage datum we will trust when classifying a weekly
 	// window as dormant. Older than this → treat as unknown and skip (no prime).
-	// Also gates the 5h idleness read used by the stagger (isFiveHourIdle): same
-	// question — is this datum recent enough to spend real quota on?
 	private readonly WEEKLY_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
-	// How wide the stagger slot is. A tick is 60s, but a tick's WORK is not: the
-	// cleanup pass, the token-refresh queries and every preceding prime in the
-	// batch run first, so the moment we evaluate an account can land minutes
-	// after the tick fired. A slot narrower than that worst case would be
-	// stepped over entirely and the account would wait another full window.
-	//
-	// The release interval is half-open, [slot, slot+grace): an account evaluated
-	// exactly at slot+grace has missed this slot.
-	//
-	// Phase is a bounded sawtooth, not a fixed point, and the grace is what
-	// bounds it. A prime dispatches slightly after it is admitted, so the window
-	// opens slightly after the slot and resets slightly after the slot one cycle
-	// later; the next tick to observe it is later again. That lateness carries
-	// forward, so the phase creeps by roughly a tick per cycle until it exceeds
-	// the grace — at which point the account waits for the slot to come round and
-	// lands exactly back on it. Evaluating against fresh time (see the call site)
-	// keeps the per-cycle creep at tick granularity rather than
-	// however-long-this-tick's-work-took, which is what makes the teeth long. The
-	// cost of a tooth is one skipped window on an account that is idle by
-	// definition, so bounded creep is the right trade against the state a
-	// drift-free design would have to persist.
-	private readonly STAGGER_SLOT_GRACE_MS = 5 * 60 * 1000;
 	// The single authority for autonomous (scheduled-prime) Codex spend. Codex
 	// priming does NOT use the translated Haiku dummy dispatch — it flows through
 	// this coordinator, which owns the native `/responses` ping and ALL codex
@@ -349,7 +316,6 @@ export class AutoRefreshScheduler {
 				access_token: string | null;
 				expires_at: number | null;
 				rate_limit_reset: number | null;
-				session_start: number | null;
 				custom_endpoint: string | null;
 				paused: number;
 				auto_pause_on_overage_enabled: number;
@@ -358,7 +324,7 @@ export class AutoRefreshScheduler {
 				`
 				SELECT
 					id, name, provider, refresh_token, access_token,
-					expires_at, rate_limit_reset, session_start, custom_endpoint,
+					expires_at, rate_limit_reset, custom_endpoint,
 					COALESCE(paused, 0) as paused,
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					pause_reason
@@ -427,58 +393,12 @@ export class AutoRefreshScheduler {
 				this.fiveHourDue(account, now),
 			);
 
-			// The stagger cohort: every anthropic account this cycle considered, not
-			// just the due ones. Slot assignment must be a property of the POOL, so it
-			// has to be computed over a set that does not change with who happens to
-			// be due — deriving it from `fiveHourOwned` would reshuffle every account's
-			// offset each tick and no account would ever converge on a phase.
-			//
-			// The convergence this gives is approximate, not exact, and deliberately
-			// so. The query above drops accounts that are inside a cooldown or paused,
-			// so a transiently rate-limited account leaves the cohort and every other
-			// account's offset shifts while it is gone. That resolves itself — holds
-			// are re-evaluated every tick and each idle account re-anchors at its next
-			// reset — and on this pool the trigger is rare (tens of rate-limit
-			// responses a week against ~80k requests). A second query that ignored the
-			// transient filters would make the assignment exact, at the cost of a DB
-			// round trip every 60s to chase drift that heals on its own.
-			const staggerCohort = accounts
-				.filter((account) => account.provider === "anthropic")
-				.map((account) => account.id);
-
-			// Evaluate the stagger against FRESH time, not the cycle's `now`. `now` was
-			// captured before the cleanup pass, the token-refresh queries and the
-			// account query, so by the time we get here it can be minutes stale — and
-			// unlike the cooldown (where a stale `now` merely errs long), staleness
-			// here feeds straight into the phase: an account admitted on a stale
-			// reading opens its window later than the slot it was admitted for, and
-			// that lateness is what the next cycle inherits. Same reasoning as the
-			// `Date.now()` used when stamping lastFiveHourPrimeTime below.
-			//
-			// Decided ONCE, into a set, rather than recomputed for the log. The
-			// predicate reads the usage cache and is therefore time-sensitive: a
-			// second evaluation can cross the freshness ceiling and disagree with the
-			// decision that actually filtered the batch, which would make the debug
-			// line describe a different world than the one we acted on.
-			const staggerNow = Date.now();
-			const staggerHeldIds = new Set(
-				fiveHourOwned
-					.filter((account) =>
-						this.staggerDefersPrime(account, staggerNow, staggerCohort),
-					)
-					.map((account) => account.id),
-			);
-
-			// Of those, the ones not currently throttled and not waiting for their
-			// stagger slot — the sends we actually make.
+			// Of those, the ones not currently throttled — the sends we actually make.
 			// OWNERSHIP and DUE-NOW are deliberately separate: the weekly pass defers to
 			// ownership, so a throttled account is not simply re-primed under the other
-			// reason on the next cycle (which would defeat the cooldown entirely). The
-			// stagger hold rides the same seam for the same reason.
+			// reason on the next cycle (which would defeat the cooldown entirely).
 			const accountsToRefresh = fiveHourOwned.filter(
-				(account) =>
-					!this.isFiveHourPrimeCoolingDown(account.id, now) &&
-					!staggerHeldIds.has(account.id),
+				(account) => !this.isFiveHourPrimeCoolingDown(account.id, now),
 			);
 
 			if (accountsToRefresh.length > 0) {
@@ -486,32 +406,10 @@ export class AutoRefreshScheduler {
 					`Found ${accountsToRefresh.length} account(s) with new windows for auto-refresh`,
 				);
 			}
-			// Report the two hold reasons separately. They have different fixes — a
-			// cooldown clears on its own in minutes, a stagger hold waits for a slot
-			// that can be hours out — so collapsing them into one count would make an
-			// account that is quietly waiting for its phase indistinguishable from one
-			// that is merely throttled.
-			const cooling = fiveHourOwned.filter((account) =>
-				this.isFiveHourPrimeCoolingDown(account.id, now),
-			).length;
-			if (cooling > 0) {
+			const throttled = fiveHourOwned.length - accountsToRefresh.length;
+			if (throttled > 0) {
 				log.debug(
-					`${cooling} account(s) due for a 5h prime are inside the prime cooldown; deferring`,
-				);
-			}
-			for (const account of fiveHourOwned) {
-				if (
-					this.isFiveHourPrimeCoolingDown(account.id, now) ||
-					!staggerHeldIds.has(account.id)
-				) {
-					continue;
-				}
-				const offset = this.staggerSlotOffsetMs(account.id, staggerCohort) ?? 0;
-				const waitMs =
-					(offset - (staggerNow % FIVE_HOUR_WINDOW_MS) + FIVE_HOUR_WINDOW_MS) %
-					FIVE_HOUR_WINDOW_MS;
-				log.debug(
-					`5h stagger: holding ${account.name}'s prime for ${Math.round(waitMs / 60000)}m until its slot (offset ${Math.round(offset / 60000)}m of a ${Math.round(FIVE_HOUR_WINDOW_MS / 60000)}m cycle, cohort of ${new Set(staggerCohort).size})`,
+					`${throttled} account(s) due for a 5h prime are inside the prime cooldown; deferring`,
 				);
 			}
 
@@ -1654,135 +1552,6 @@ export class AutoRefreshScheduler {
 		const resetMs = toEpochMs(seven.resets_at);
 		if (resetMs === null) return false; // unparseable → unknown → skip
 		return resetMs <= now; // already reset and idle → dormant
-	}
-
-	/**
-	 * True when this account's FIVE-HOUR window is idle: it exists, and either it
-	 * has never been started or it has already reset. Deliberately mirrors
-	 * {@link isWeeklyDormant} — same cache, same freshness gate, same
-	 * fail-to-unknown posture — because it answers the same shape of question
-	 * about the other window.
-	 *
-	 * `five_hour` absent or explicitly null means the provider has no rolling 5h
-	 * window at all (Codex retired its own), which is NOT idleness and must not
-	 * be staggered. A real window reports `{utilization: 0, resets_at: null}`
-	 * while unstarted, which IS idleness and is exactly the account a stagger can
-	 * steer. Any other reading of a null reset ("no reset data") is unknown, and
-	 * unknown never authorizes spending quota.
-	 */
-	private isFiveHourIdle(accountId: string, now: number): boolean {
-		const entry = usageCache.get(accountId);
-		if (!entry) return false;
-
-		const age = usageCache.getAge(accountId);
-		if (age === null || age > this.WEEKLY_CACHE_MAX_AGE_MS) return false;
-
-		const five = (
-			entry as {
-				five_hour?: {
-					utilization?: number | null;
-					resets_at?: string | null;
-				} | null;
-			}
-		).five_hour;
-		if (!five) return false; // absent or null → no such window → not idle
-
-		const resets = five.resets_at ?? null;
-		if (resets == null) return five.utilization === 0;
-		const resetMs = toEpochMs(resets);
-		if (resetMs === null) return false; // unparseable → unknown → skip
-		return resetMs <= now;
-	}
-
-	/**
-	 * This account's assigned phase offset within the 5h cycle, or null when the
-	 * account has no slot to hold to.
-	 *
-	 * Slots are `index * (window / N)` over the cohort's ids sorted ascending, so
-	 * the assignment is a pure function of the cohort's membership: it does not
-	 * depend on query order, and it is stable across restarts without persisting
-	 * anything. Adding or removing an account reshuffles the offsets, which is
-	 * acceptable — the pool re-converges over the following cycles.
-	 *
-	 * Null for a cohort of one (there is nothing to stagger against) and for an
-	 * account outside the cohort (no basis to assign it a slot).
-	 */
-	private staggerSlotOffsetMs(
-		accountId: string,
-		cohort: string[],
-	): number | null {
-		const ids = [...new Set(cohort)].sort();
-		if (ids.length < 2) return null;
-		const index = ids.indexOf(accountId);
-		if (index < 0) return null;
-		return Math.floor((index * FIVE_HOUR_WINDOW_MS) / ids.length);
-	}
-
-	/**
-	 * True when the 5h prime for this account should WAIT for its slot.
-	 *
-	 * Applied where the existing prime cooldown is applied — filtering the sends,
-	 * never {@link fiveHourDue} — so a held account stays OWNED by the 5h reason
-	 * and the weekly pass keeps deferring to it. Moving this into `fiveHourDue`
-	 * would drop the account out of `fiveHourDueIds` and let the weekly reason
-	 * prime it on the next cycle, which defeats the hold entirely.
-	 *
-	 * Four things are never held:
-	 *  - non-anthropic accounts: only Anthropic still has a rolling 5h window to
-	 *    phase, and the codex prime doubles as its usage-freshness heartbeat
-	 *    (server.ts polls usage for anthropic only), so holding it would starve
-	 *    the cache the codex observation reads its baseline from;
-	 *  - genuinely new accounts: a fresh account needs two primes before it
-	 *    promotes out of the UNKNOWN routing bucket, and holding the first for up
-	 *    to a full window would strand it there. "New" requires ALL THREE of an
-	 *    empty process-local `lastRefreshResetTime`, a null `rate_limit_reset`
-	 *    and a null `session_start`.
-	 *
-	 *    The in-memory map alone would mean "not primed by THIS process", which
-	 *    every restart clears — and since this checkout rebuilds and restarts in
-	 *    place, that reading would exempt the entire pool on every restart, prime
-	 *    it in one batch, and re-cluster exactly the phases this mechanism exists
-	 *    to spread. Adding `rate_limit_reset` is not sufficient either:
-	 *    response-processor persists a null there whenever a unified status
-	 *    carries no reset header (the same footgun `selectWeeklyPrimeCandidate`
-	 *    documents), so an ESTABLISHED account can sit at null and would be
-	 *    misread as new on the next restart. `session_start` closes that: it is
-	 *    null only for an account that has never had a session at all, which a
-	 *    genuinely new account has not and an established one has, whatever its
-	 *    reset column currently says;
-	 *  - accounts whose window is not idle: traffic opens windows too, and on a
-	 *    busy pool it opens most of them. An account whose window traffic already
-	 *    started has its phase set by traffic, and holding a prime for it would
-	 *    achieve nothing while delaying the prime;
-	 *  - accounts with no assigned slot (lone account, or outside the cohort).
-	 */
-	private staggerDefersPrime(
-		account: {
-			id: string;
-			provider: string;
-			rate_limit_reset: number | null;
-			session_start: number | null;
-		},
-		now: number,
-		cohort: string[],
-	): boolean {
-		if (account.provider !== "anthropic") return false;
-		if (
-			!this.lastRefreshResetTime.has(account.id) &&
-			account.rate_limit_reset == null &&
-			account.session_start == null
-		) {
-			return false;
-		}
-		const offset = this.staggerSlotOffsetMs(account.id, cohort);
-		if (offset === null) return false;
-		if (!this.isFiveHourIdle(account.id, now)) return false;
-
-		const phase = now % FIVE_HOUR_WINDOW_MS;
-		const sinceSlot =
-			(((phase - offset) % FIVE_HOUR_WINDOW_MS) + FIVE_HOUR_WINDOW_MS) %
-			FIVE_HOUR_WINDOW_MS;
-		return sinceSlot >= this.STAGGER_SLOT_GRACE_MS;
 	}
 
 	/**
