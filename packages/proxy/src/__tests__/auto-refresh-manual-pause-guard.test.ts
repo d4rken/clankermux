@@ -128,7 +128,7 @@ function selectedNames(query: QueryCall): Set<string> {
 	try {
 		const now = Date.now();
 		// The base query was broadened for weekly-dormant priming: the 5h
-		// rate_limit_reset predicate moved into the per-account fiveHourWindowGate,
+		// rate_limit_reset predicate moved into the per-account bindingWindowResetElapsed,
 		// so the SQL now binds exactly ONE `now` placeholder (the rate_limited_until
 		// cooldown guard). The seeded rows all have rate_limit_reset = NULL, which
 		// the removed predicate matched anyway, so the pause/cooldown filtering

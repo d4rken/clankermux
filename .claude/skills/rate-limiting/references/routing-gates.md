@@ -161,10 +161,33 @@ capacity is therefore **not lost budget** — it is simply budget spent later.
 
 This is the reasoning that rules out adding a 5h term to HARVEST ranking: FEFO
 exists to stop unused *budget* expiring, and only the weekly window has a budget
-that expires. It is expensive to re-derive, and the wrong conclusion ("rank by
-soonest reset overall") was already shipped and reverted once — the 5h window
-always resets sooner, so it would win every comparison and FEFO would never
-actually target the expiring weekly quota.
+that expires. It is expensive to re-derive, and it has now been got wrong and
+reverted **twice**:
+
+1. *Ranking by soonest reset overall.* The 5h window always resets sooner, so it
+   won every comparison and FEFO never actually targeted the expiring weekly
+   quota.
+2. *Staggering the 5h window phase across idle accounts* (v2026.8.48, reverted
+   v2026.8.58). The premise was that pre-opening 5h windows at spread-out offsets
+   makes fresh capacity arrive steadily. It cannot: a CLOSED 5h window is already
+   the best state an account can be in — full rate allowance, released the instant
+   a request arrives, clock not running — so priming an idle account only starts
+   the clock early and the window expires unspent. Pre-opening does not create
+   capacity, it consumes window life. What priming actually buys is legibility
+   (an account with no reset timestamp sits in the UNKNOWN bucket because FEFO
+   needs a deadline to sort on), which argues for priming immediately, never for
+   delaying it.
+
+Both failures share one root: treating the 5h window as a budget to be harvested
+or scheduled. It is a rate limit. If a design's value depends on when a 5h window
+opens or closes, re-read this section before writing code.
+
+A related trap sits one layer down. `accounts.rate_limit_reset` holds the reset
+of whichever limit is BINDING (`response-processor` writes it from
+`anthropic-ratelimit-unified-reset`), so on a weekly-bound pool it holds the
+WEEKLY reset. The auto-refresh scheduler's prime gate reads that column; it is
+named `bindingWindowResetElapsed` for this reason, and was previously misnamed
+`fiveHourWindowGate`, which is part of how attempt 2 got as far as it did.
 
 The 5h window does still matter for **liveness** (an account whose 5h is spent
 cannot serve right now), which is why it appears in `minHeadroom`, in the

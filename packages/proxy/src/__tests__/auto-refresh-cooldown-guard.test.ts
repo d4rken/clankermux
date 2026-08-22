@@ -83,7 +83,7 @@ describe("AutoRefreshScheduler — SQL cooldown guard (PR #200 bug 1)", () => {
 
 		// The base query was broadened for weekly-dormant priming: the two
 		// rate_limit_reset placeholders were removed and the 5h reset predicate
-		// moved into the per-account fiveHourWindowGate. The only remaining bind
+		// moved into the per-account bindingWindowResetElapsed. The only remaining bind
 		// is the `now` used by the rate_limited_until <= ? cooldown guard.
 		expect(Array.isArray(mainQuery?.params)).toBe(true);
 		expect(mainQuery?.params.length).toBe(1);
