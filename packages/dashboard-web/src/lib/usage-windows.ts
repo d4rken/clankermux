@@ -328,21 +328,29 @@ export function usageWindowCategoryKey(usage: UsageDisplay): string {
 	return `window:${usageWindowLabel(usage).toLowerCase()}`;
 }
 
+export interface WindowResetExtremes {
+	/** Earliest still-future reset in each cross-account window category. */
+	earliest: Map<string, number>;
+	/** Latest still-future reset in each cross-account window category. */
+	latest: Map<string, number>;
+}
+
 /**
- * For each reset category, the earliest still-future reset across the given
- * accounts — but only where at least two accounts have one. A category only one
- * account reports has no "next to reset" worth marking; highlighting the sole
- * card would be noise rather than a comparison.
+ * For each reset category, the earliest and latest still-future resets across
+ * the given accounts — but only where at least two accounts have one. A
+ * category only one account reports has no useful cross-account comparison;
+ * highlighting its sole card would make every singleton look exceptional.
  *
  * Keys are {@link usageWindowCategoryKey} values, values are epoch ms. Pass the
  * accounts that actually render, in the same shape they render with (notably
- * the same `showWeekly`), or the winner may be a window nobody can see.
+ * the same `showWeekly`), or an endpoint may belong to a window nobody can see.
  */
-export function computeSoonestWindowResets(
+export function computeWindowResetExtremes(
 	sources: readonly UsageCardSource[],
 	now: number,
-): Map<string, number> {
-	const soonest = new Map<string, number>();
+): WindowResetExtremes {
+	const earliest = new Map<string, number>();
+	const latest = new Map<string, number>();
 	const counts = new Map<string, number>();
 	for (const source of sources) {
 		const card = classifyUsageCard(source, now);
@@ -361,12 +369,33 @@ export function computeSoonestWindowResets(
 				seenHere.add(key);
 				counts.set(key, (counts.get(key) ?? 0) + 1);
 			}
-			const current = soonest.get(key);
-			if (current === undefined || resetMs < current) soonest.set(key, resetMs);
+			const currentEarliest = earliest.get(key);
+			if (currentEarliest === undefined || resetMs < currentEarliest) {
+				earliest.set(key, resetMs);
+			}
+			const currentLatest = latest.get(key);
+			if (currentLatest === undefined || resetMs > currentLatest) {
+				latest.set(key, resetMs);
+			}
 		}
 	}
 	for (const [key, count] of counts) {
-		if (count < 2) soonest.delete(key);
+		if (count < 2) {
+			earliest.delete(key);
+			latest.delete(key);
+		}
 	}
-	return soonest;
+	return { earliest, latest };
+}
+
+/**
+ * Backwards-compatible convenience for consumers that only need the first
+ * reset. New comparison UIs should use {@link computeWindowResetExtremes} so
+ * the first and last endpoints are derived from the exact same candidate set.
+ */
+export function computeSoonestWindowResets(
+	sources: readonly UsageCardSource[],
+	now: number,
+): Map<string, number> {
+	return computeWindowResetExtremes(sources, now).earliest;
 }

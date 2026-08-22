@@ -1105,7 +1105,7 @@ describe("RateLimitProgress", () => {
 			// Anchored on the label text so the assertion is about that span, not
 			// the percentage span (which stays `shrink-0` in both modes).
 			expect(html).toContain(
-				'<span class="text-muted-foreground min-w-0 shrink truncate" title="GPT-5.3-Codex-Spark">GPT-5.3-Codex-Spark</span>',
+				'min-w-0 shrink truncate" aria-label="Show GPT-5.3-Codex-Spark usage details"',
 			);
 		});
 
@@ -1120,7 +1120,7 @@ describe("RateLimitProgress", () => {
 			);
 
 			expect(html).toContain(
-				'<span class="text-muted-foreground shrink-0">Weekly</span>',
+				'shrink-0" aria-label="Show Weekly usage details"',
 			);
 			expect(html).not.toContain("min-w-0 shrink truncate");
 		});
@@ -1154,7 +1154,7 @@ describe("RateLimitProgress", () => {
 	});
 });
 
-describe("soonest-reset highlight", () => {
+describe("reset endpoint highlights", () => {
 	const fiveHourReset = () =>
 		new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
 	const weeklyReset = () =>
@@ -1162,7 +1162,8 @@ describe("soonest-reset highlight", () => {
 
 	function render(
 		resetIso: string,
-		soonestResets?: ReadonlyMap<string, number>,
+		earliestResets?: ReadonlyMap<string, number>,
+		latestResets?: ReadonlyMap<string, number>,
 		compact = true,
 	): string {
 		return renderToStaticMarkup(
@@ -1174,7 +1175,8 @@ describe("soonest-reset highlight", () => {
 				}}
 				provider="anthropic"
 				showWeekly
-				soonestResets={soonestResets}
+				earliestResets={earliestResets}
+				latestResets={latestResets}
 				compact={compact}
 			/>,
 		);
@@ -1187,7 +1189,9 @@ describe("soonest-reset highlight", () => {
 			new Map([["window:5-hour", Date.parse(resetIso)]]),
 		);
 
-		expect(html).toMatch(/<span class="font-bold">\d+h \d+m<\/span>/);
+		expect(html).toMatch(
+			/<span class="font-bold text-success-strong">\d+h \d+m/,
+		);
 	});
 
 	it("bolds the countdown in the roomy layout too", () => {
@@ -1195,11 +1199,24 @@ describe("soonest-reset highlight", () => {
 		const html = render(
 			resetIso,
 			new Map([["window:5-hour", Date.parse(resetIso)]]),
+			new Map([["window:5-hour", Date.parse(resetIso) + 60_000]]),
 			false,
 		);
 
-		expect(html).toMatch(/<span class="font-bold">\d+h \d+m<\/span>/);
+		expect(html).toContain("font-bold text-success-strong");
 		expect(html).toContain("Resets ");
+	});
+
+	it("bolds and colors the countdown of the window that resets last red", () => {
+		const resetIso = fiveHourReset();
+		const html = render(
+			resetIso,
+			new Map([["window:5-hour", Date.parse(resetIso) - 60_000]]),
+			new Map([["window:5-hour", Date.parse(resetIso)]]),
+		);
+
+		expect(html).toContain("font-bold text-destructive-strong");
+		expect(html).toContain("last reset among accounts");
 	});
 
 	it("leaves a window that is not the soonest unbolded", () => {
@@ -1210,10 +1227,17 @@ describe("soonest-reset highlight", () => {
 			new Map([["window:5-hour", Date.parse(resetIso) - 60_000]]),
 		);
 
-		expect(html).not.toContain("font-bold");
+		expect(html).not.toContain("font-bold text-success-strong");
+		expect(html).not.toContain("font-bold text-destructive-strong");
 	});
 
 	it("bolds nothing when there is no cross-account comparison", () => {
 		expect(render(fiveHourReset())).not.toContain("font-bold");
+	});
+
+	it("leaves an exact first/last tie neutral", () => {
+		const resetIso = fiveHourReset();
+		const tied = new Map([["window:5-hour", Date.parse(resetIso)]]);
+		expect(render(resetIso, tied, tied)).not.toContain("font-bold");
 	});
 });

@@ -81,15 +81,10 @@ const SESSION_STATS = {
 	apiCostUsd: 0,
 };
 
-/**
- * The single wrapping row that carries request counts, session info, cost and
- * the re-auth deadline. Isolating it is what lets these tests assert
- * *placement* rather than mere presence: the cost strings existed before this
- * change too, just one row lower.
- */
+/** The inset panel carrying request, client, session, cost and re-auth figures. */
 function infoRow(html: string): string {
 	const marker =
-		'<div class="flex flex-wrap items-center gap-x-row gap-y-item text-sm">';
+		'<div class="rounded-md border border-border/60 bg-muted/30 px-3 py-2">';
 	const start = html.indexOf(marker);
 	if (start === -1) throw new Error("info row not found");
 	// Walk to the matching close so a nested <span> cannot end the slice early.
@@ -158,17 +153,14 @@ describe("AccountListItem — session stats", () => {
 		expect(row).not.toContain("api");
 	});
 
-	it("keeps the token breakdown reachable as a tooltip", () => {
+	it("advertises the token breakdown as a click-open detail", () => {
 		const html = render(makeAccount({ sessionStats: SESSION_STATS }));
 
-		// Nothing is lost — the four token counts move from a visible row into
-		// the title of the session segments.
-		expect(html).toContain("↑72.2k in");
-		expect(html).toContain("✦9.9M cache↑");
-		expect(html).toContain("✦61.3M cache↓");
-		expect(html).toContain("↓283.6k out");
-		// …and they only ever appear inside a title attribute, never as text.
-		expect(html).not.toMatch(/>[^<]*↑72\.2k in/);
+		// The dotted underline and button semantics make the hidden detail
+		// discoverable without relying on hover-only native title text.
+		expect(html).toContain('aria-label="Show active session details"');
+		expect(html).toContain("underline decoration-dotted");
+		expect(html).not.toContain("cursor-help");
 	});
 
 	it("renders no session segments at all without session stats", () => {
@@ -178,7 +170,24 @@ describe("AccountListItem — session stats", () => {
 		expect(html).not.toContain(" plan");
 		// With nothing behind it, the session text advertises no tooltip either.
 		expect(html).not.toContain("cursor-help");
-		expect(html).toContain("1204 requests");
+		expect(html).toContain("Requests</dt><dd");
+		expect(html).toContain(">1,204</dd>");
+	});
+
+	it("groups the headline figures in an inset metrics panel", () => {
+		const html = render(
+			makeAccount({
+				requestCount: 130_012,
+				activeSessionCount: 1,
+				sessionStats: SESSION_STATS,
+			}),
+		);
+
+		expect(html).toContain("bg-muted/30");
+		expect(html).toContain(">130,012</dd>");
+		expect(html).toContain("Clients · 15m");
+		expect(html).toContain("Active: 324 reqs");
+		expect(html).toContain("$98.15 plan");
 	});
 });
 

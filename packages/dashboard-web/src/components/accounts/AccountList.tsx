@@ -1,7 +1,7 @@
 import { registerUIRefresh } from "@clankermux/core";
 import { useEffect, useMemo, useState } from "react";
 import type { Account } from "../../api";
-import { computeSoonestWindowResets } from "../../lib/usage-windows";
+import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountListItem } from "./AccountListItem";
 
@@ -68,18 +68,18 @@ export function AccountList({
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
 		return registerUIRefresh({
-			id: "account-list-soonest-resets",
+			id: "account-list-reset-extremes",
 			callback: () => setNow(Date.now()),
 			seconds: 30,
-			description: "Accounts list soonest-reset comparison",
+			description: "Accounts list reset-endpoint comparison",
 		});
 	}, []);
 
-	// Which account's window in each category comes back first. Computed once for
-	// the whole list — a single card cannot know it.
-	const soonestResets = useMemo(
+	// Which account windows in each category come back first and last. Computed
+	// once for the whole list — a single card cannot know either endpoint.
+	const resetExtremes = useMemo(
 		() =>
-			computeSoonestWindowResets(
+			computeWindowResetExtremes(
 				(accounts ?? []).map((account) => ({
 					resetIso: account.rateLimitReset,
 					usageUtilization: account.usageUtilization,
@@ -109,7 +109,8 @@ export function AccountList({
 					key={account.name}
 					account={account}
 					isForced={account.id === forcedAccountId}
-					soonestResets={soonestResets}
+					earliestResets={resetExtremes.earliest}
+					latestResets={resetExtremes.latest}
 					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
 					onForceResetRateLimit={onForceResetRateLimit}
