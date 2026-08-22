@@ -112,15 +112,15 @@ function poolCard(props: Partial<Parameters<typeof PoolMetricCard>[0]> = {}) {
 }
 
 describe("PoolMetricCard loading and unavailable", () => {
-	it("renders the headline, chip and quota line once resolved", () => {
+	it("renders the headline, chip and checkpoint line once resolved", () => {
 		const html = poolCard();
 
 		expect(html).toContain("61%");
 		expect(html).toContain("1/1 active");
-		expect(html).toContain("more quota at");
+		expect(html).toContain("next checkpoint at");
 	});
 
-	it("hides the headline, chip, quota line and inline details while pending", () => {
+	it("hides the headline, chip, checkpoint line and inline details while pending", () => {
 		// `computePoolUsage([], …)` returns an all-empty result that is
 		// indistinguishable from "no accounts contribute", so a pending read must
 		// not render a pool at all.
@@ -128,7 +128,7 @@ describe("PoolMetricCard loading and unavailable", () => {
 
 		expect(html).not.toContain("61%");
 		expect(html).not.toContain("active)");
-		expect(html).not.toContain("more quota at");
+		expect(html).not.toContain("next checkpoint at");
 		expect(html).not.toContain("Pool usage");
 		expect(html).toContain("animate-pulse");
 	});
@@ -142,20 +142,20 @@ describe("PoolMetricCard loading and unavailable", () => {
 		expect(html).toContain("Account data unavailable");
 		expect(html).not.toContain("61%");
 		expect(html).not.toContain("active)");
-		expect(html).not.toContain("more quota at");
+		expect(html).not.toContain("next checkpoint at");
 		expect(html).not.toContain("Pool usage");
 		expect(html).not.toContain("animate-pulse");
 	});
 
 	it("ages the numbers when the latest accounts refresh failed", () => {
-		// The quota percentages, the next-quota line and the badges are all still
+		// The quota percentages, next-checkpoint line and badges are all still
 		// the last real reading, so they stay — but presenting them as current
 		// alongside tiles that DO carry an age note is the claim to avoid.
 		const html = poolCard({ staleNote: "Last updated 3m ago" });
 
 		expect(html).toContain("Last updated 3m ago");
 		expect(html).toContain("61%");
-		expect(html).toContain("more quota at");
+		expect(html).toContain("next checkpoint at");
 	});
 
 	it("does not age a tile that has no numbers yet", () => {
