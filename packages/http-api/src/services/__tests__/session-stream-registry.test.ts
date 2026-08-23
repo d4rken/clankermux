@@ -130,6 +130,34 @@ describe("periodic revalidation", () => {
 		expect(closed).toBeGreaterThan(0);
 	});
 
+	it("keeps a confirmed fail-open stream open well past that lifetime", async () => {
+		const store = new FakeStore();
+		let reads = 0;
+		store.getManagementPassword = async () => {
+			reads++;
+			return null;
+		};
+		const svc = new SessionAuthService(store);
+		// No password configured is the DEFAULT deployment, and both lanes stay
+		// connected for hours. A watchdog that fires anyway drops a healthy
+		// stream — and /api/logs/stream has no replay, so what it was carrying
+		// across the reconnect is simply gone.
+		const lifetimeMs = TICK_MS * 10;
+		const guard = createSessionStreamGuard(svc, TICK_MS, lifetimeMs);
+		let closed = 0;
+		const startedAt = Date.now();
+		const detach = guard.attach(streamRequest(), () => {
+			closed++;
+		});
+		await new Promise((r) => setTimeout(r, lifetimeMs * 2));
+		detach();
+		// Every one of those checks answered, and each answer re-armed the
+		// watchdog, so nothing bounded a connection nobody had lost track of.
+		expect(Date.now() - startedAt).toBeGreaterThan(lifetimeMs);
+		expect(reads).toBeGreaterThan(1);
+		expect(closed).toBe(0);
+	});
+
 	it("closes a stream past its bounded lifetime even with a live session", async () => {
 		const store = new FakeStore();
 		store.password = { verifier: "v", params: "{}", updatedAt: 0 };

@@ -23,6 +23,10 @@ export const SESSION_STREAM_REVALIDATE_MS = 60_000;
  * whether the deployment is gated at all. Browser `EventSource` reconnects
  * automatically, so a close is a re-handshake rather than a lost stream — and
  * re-handshaking is what re-runs the full auth check.
+ *
+ * For a stream running on an UNGATED deployment this is measured from the last
+ * revalidation that actually answered, not from the handshake: see the guard's
+ * docstring.
  */
 export const SESSION_STREAM_MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 
@@ -83,7 +87,18 @@ export interface StreamSessionGuard {
  *    timer rather than a comparison made after an await. The store's busy-retry
  *    can keep a single read pending for minutes; a ceiling that is only checked
  *    once that read returns is not a ceiling, and a connection whose
- *    revalidation never answers at all has nothing else left to bound it.
+ *    revalidation never answers at all has nothing else left to bound it. What
+ *    the timer bounds is the age of the last USABLE answer, not the connection:
+ *    a successfully completed `configured: false` re-arms it. So a stream on an
+ *    ungated deployment — the default, and the state right after this ships —
+ *    runs for as long as the reads keep confirming it, while a stream whose
+ *    reads stall or start failing still closes within one lifetime of the last
+ *    answer. Without the re-arm every healthy fail-open stream is dropped every
+ *    six hours; `/api/requests/stream` backfills on reconnect and survives that,
+ *    `/api/logs/stream` has no replay and simply loses the interval. A PROTECTED
+ *    stream's deadline is never re-armed: it presented a cookie, so bounding the
+ *    connection itself is the point — the re-handshake is what re-runs the auth
+ *    check.
  *  - Ticks are serialized. A revalidation slower than the interval would
  *    otherwise stack callbacks against the store it is already waiting on.
  *  - A revalidation that cannot COMPLETE closes the stream, whatever the last
@@ -114,9 +129,19 @@ export function createSessionStreamGuard(
 				close();
 			};
 
-			// Armed for every connection at the handshake: see the docstring.
-			const deadline = setTimeout(closeOnce, maxLifetimeMs);
-			deadline.unref?.();
+			// Armed for every connection at the handshake, and re-armed by every
+			// revalidation that completes with `configured: false`: see the
+			// docstring.
+			let deadline: ReturnType<typeof setTimeout> | undefined;
+			const armDeadline = () => {
+				clearTimeout(deadline);
+				// A tick resolving after teardown must not leave a live timer behind:
+				// detach has already cleared the one it knew about.
+				if (closed || detached) return;
+				deadline = setTimeout(closeOnce, maxLifetimeMs);
+				deadline.unref?.();
+			};
+			armDeadline();
 
 			// Handshake probe for a cookie-less stream. Nothing it reports keeps the
 			// connection alive — a gated deployment is caught by the first tick
@@ -150,8 +175,13 @@ export function createSessionStreamGuard(
 					try {
 						// Fail-open, and the only reading that leaves a stream running:
 						// nothing is configured, so nothing is revoked and the stream has
-						// no session to outlive.
-						if (!(await sessionAuth.isConfigured())) return;
+						// no session to outlive. It is also the only reading that re-arms
+						// the watchdog — the gate state is known AGAIN, as of now, which
+						// is exactly what the watchdog exists to notice the absence of.
+						if (!(await sessionAuth.isConfigured())) {
+							armDeadline();
+							return;
+						}
 						// A password exists but this stream never presented a cookie: it
 						// was opened while the deployment was still fail-open. It must not
 						// keep running now that it is not.
