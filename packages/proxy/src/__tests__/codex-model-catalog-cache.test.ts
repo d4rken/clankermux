@@ -253,6 +253,33 @@ describe("CodexModelCatalogCache", () => {
 		await flushMicrotasks();
 	});
 
+	// Every attempt abandoned at the deadline is still parked on the same hung
+	// token refresh. If it completes, they must not all pour into fetchCatalog
+	// at once — that burst is bearer-authenticated traffic whose results are
+	// discarded anyway.
+	test("does not call upstream with a token acquired after the budget expired", async () => {
+		const fetchCalls: string[] = [];
+		let clock = 1_000;
+		const cache = new CodexModelCatalogCache({
+			listAccounts: async () => [account()],
+			getApiKeyPin: async () => null,
+			getAccessToken: async () => {
+				// The refresh eventually returns, but far too late to be useful.
+				clock += 60_000;
+				return "token-late";
+			},
+			fetchCatalog: async ({ accessToken }) => {
+				fetchCalls.push(accessToken);
+				return { ok: true, bodyText: '{"models":[]}', etag: null };
+			},
+			now: () => clock,
+			lookupBudgetMs: 12_000,
+		});
+
+		expect(await cache.get(null)).toBeNull();
+		expect(fetchCalls).toEqual([]);
+	});
+
 	// One unreachable backend must not turn every request into another
 	// authenticated attempt.
 	test("holds off after a failure instead of retrying on every request", async () => {
@@ -428,6 +455,28 @@ describe("CodexModelCatalogCache", () => {
 			expect(fetchCalls).toHaveLength(0);
 		});
 
+		// Resolving the pin is a database read, and the SQLite adapter's busy
+		// retry can persist for minutes. Left outside the deadline it would stall
+		// even a request whose catalog is already cached.
+		test("fails closed when the pin lookup outlives the budget", async () => {
+			const cache = new CodexModelCatalogCache({
+				listAccounts: async () => [account()],
+				getApiKeyPin: () => new Promise(() => {}),
+				getAccessToken: async () => "token",
+				fetchCatalog: async () => ({
+					ok: true,
+					bodyText: '{"models":[]}',
+					etag: null,
+				}),
+				now: Date.now,
+				lookupBudgetMs: 50,
+			});
+
+			const started = Date.now();
+			expect(await cache.get("key-1")).toBeNull();
+			expect(Date.now() - started).toBeLessThan(2_000);
+		});
+
 		test("fails closed when the pin cannot be read at all", async () => {
 			const { cache, fetchCalls } = harness({
 				getApiKeyPin: async () => {
@@ -478,6 +527,37 @@ describe("CodexModelCatalogCache", () => {
 			await cache.get(null);
 
 			expect(fetchCalls).toHaveLength(1);
+		});
+
+		// An outage touching many scopes once would otherwise leave a failure
+		// marker per scope for the life of the process, past the bound this class
+		// claims to hold.
+		test("bounds failure markers too, not just cached catalogs", async () => {
+			const pins: Record<string, Pin> = {};
+			const scopeCount = CODEX_MODEL_CATALOG_MAX_ENTRIES + 5;
+			const { cache, fetchCalls, advance } = harness({
+				accounts: Array.from({ length: scopeCount }, (_, i) =>
+					account({ id: `codex-${i}` }),
+				),
+				getApiKeyPin: async (id) => pins[id] ?? null,
+				results: [{ ok: false }],
+			});
+
+			for (let i = 0; i < scopeCount; i++) {
+				pins[`key-${i}`] = {
+					pinnedAccountId: `codex-${i}`,
+					pinnedProviders: null,
+					malformed: false,
+				};
+				expect(await cache.get(`key-${i}`)).toBeNull();
+				advance(1);
+			}
+			const afterFill = fetchCalls.length;
+
+			// The earliest scope's marker was evicted, so it retries immediately
+			// rather than being held off — proving the map did not grow unbounded.
+			expect(await cache.get("key-0")).toBeNull();
+			expect(fetchCalls.length).toBeGreaterThan(afterFill);
 		});
 
 		test("bounds cached pin scopes, evicting least recently written", async () => {

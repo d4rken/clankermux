@@ -139,7 +139,15 @@ export class CodexModelCatalogCache {
 	 * budget of latency to receive a catalog we already had.
 	 */
 	async get(apiKeyId: string | null): Promise<CodexModelCatalogEntry | null> {
-		const scope = await this.resolveScope(apiKeyId);
+		// Bounded like the fetch, and for the same reason. Resolving the pin is a
+		// database read, and the SQLite adapter's busy-retry can persist for
+		// minutes; leaving this stage outside the deadline would let a busy
+		// database stall even a HOT catalog request long past the point the
+		// caller should have had its static fallback. Fails closed on timeout.
+		const scope = await this.withDeadline<PinScope>(
+			this.resolveScope(apiKeyId),
+			{ kind: "refused" },
+		);
 		if (scope.kind === "refused") return null;
 
 		const { key, pin } = scope;
@@ -250,12 +258,21 @@ export class CodexModelCatalogCache {
 		key: string,
 		pin: RoutingPin | null,
 	): Promise<CodexModelCatalogEntry | null> {
-		const fetched = await this.withDeadline(this.fetchFromAnyAccount(pin));
+		const fetched = await this.withDeadline<CodexModelCatalogEntry | null>(
+			this.fetchFromAnyAccount(pin),
+			null,
+		);
 		if (!fetched) {
+			this.retryAfter.delete(key);
 			this.retryAfter.set(
 				key,
 				this.deps.now() + CODEX_MODEL_CATALOG_RETRY_AFTER_MS,
 			);
+			// Bounded like `slots`. A marker is only removed when its own scope is
+			// asked for again, so an outage touching many scopes once would
+			// otherwise leave a marker per scope for the life of the process —
+			// past the bound this class claims to hold.
+			this.evictOverflowFrom(this.retryAfter);
 		}
 		if (fetched) {
 			// Delete before set so insertion order tracks write recency: Map keeps a
@@ -294,16 +311,14 @@ export class CodexModelCatalogCache {
 	 * simply discarded; it can never write to the cache, because the write
 	 * happens here, downstream of the race.
 	 */
-	private async withDeadline(
-		work: Promise<CodexModelCatalogEntry | null>,
-	): Promise<CodexModelCatalogEntry | null> {
+	private async withDeadline<T>(work: Promise<T>, fallback: T): Promise<T> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
-		const deadline = new Promise<null>((resolve) => {
+		const deadline = new Promise<T>((resolve) => {
 			timer = setTimeout(() => {
 				log.warn(
 					"Model-catalog lookup exceeded its budget; falling back for now",
 				);
-				resolve(null);
+				resolve(fallback);
 			}, this.deps.lookupBudgetMs);
 			// Never hold the process open for a catalog read.
 			(timer as { unref?: () => void }).unref?.();
@@ -317,7 +332,7 @@ export class CodexModelCatalogCache {
 				"Model-catalog lookup rejected:",
 				error instanceof Error ? error.message : String(error),
 			);
-			return null;
+			return fallback;
 		});
 
 		try {
@@ -333,11 +348,21 @@ export class CodexModelCatalogCache {
 	 * `refresh` keeps aligned with write recency by deleting before setting.
 	 */
 	private evictOverflow(): void {
-		while (this.slots.size > CODEX_MODEL_CATALOG_MAX_ENTRIES) {
-			const oldest = this.slots.keys().next();
-			if (oldest.done) return;
-			this.slots.delete(oldest.value);
+		const evicted = this.evictOverflowFrom(this.slots);
+		// A scope with no cached catalog has no reason to keep a failure marker.
+		for (const key of evicted) this.retryAfter.delete(key);
+	}
+
+	/** Trim `map` to the entry bound, returning the keys dropped. */
+	private evictOverflowFrom(map: Map<string, unknown>): string[] {
+		const evicted: string[] = [];
+		while (map.size > CODEX_MODEL_CATALOG_MAX_ENTRIES) {
+			const oldest = map.keys().next();
+			if (oldest.done) break;
+			map.delete(oldest.value);
+			evicted.push(oldest.value);
 		}
+		return evicted;
 	}
 
 	private async fetchFromAnyAccount(
@@ -404,6 +429,19 @@ export class CodexModelCatalogCache {
 					error instanceof Error ? error.message : String(error),
 				);
 				continue;
+			}
+
+			// Re-checked AFTER the token, not just before it. Token acquisition is
+			// the unbounded step: `getValidAccessToken` may join an OAuth refresh
+			// that hangs, and every attempt abandoned at the deadline is still
+			// parked on it. Without this, one refresh finally completing would
+			// release all of them into `fetchCatalog` at once — a burst of
+			// bearer-authenticated reads whose results are all discarded anyway.
+			if (this.deps.now() >= deadline) {
+				log.warn(
+					"Model-catalog budget expired while acquiring a token; dropping the attempt",
+				);
+				break;
 			}
 
 			// The real fetcher is fail-clean and returns `ok: false` rather than
