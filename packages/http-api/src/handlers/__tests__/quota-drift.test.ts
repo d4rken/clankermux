@@ -9,6 +9,10 @@
  *     per-sample tiers win over today's accounts row, an account whose recorded
  *     tier changes contributes each stretch of its history to the cohort that
  *     stretch belongs to, and ONE assumed member marks the whole cohort assumed.
+ *  1a. Tiering TAGS segments and never splits the builder's input. A flip from
+ *     an inferred tier to the same tier recorded is not a tier change, and a
+ *     split on it would cut one physical run into two bootstrap blocks —
+ *     independence manufactured out of bookkeeping.
  *  1b. The pooled `other` column stays inside the fit and off the wire.
  *  2. An account with no snapshots is ABSENT, not a zero-filled cohort member.
  *  3. The endpoint says `computing` until a pass has stored a row.
@@ -28,7 +32,11 @@ import {
 	it,
 	setSystemTime,
 } from "bun:test";
-import { buildSegments, type QuotaSegment } from "@clankermux/core";
+import {
+	buildSegments,
+	type QuotaSegment,
+	type WindowSample,
+} from "@clankermux/core";
 import { ensureSchema } from "@clankermux/database";
 import type { QuotaDriftResponse } from "@clankermux/types";
 import {
@@ -123,7 +131,7 @@ describe("quota-drift cohorting", () => {
 		// applying it backwards refiles the old history under a tier that was not
 		// in force then, hides the assumed-tier disclosure, and turns a real
 		// subscription change into a manufactured changepoint.
-		seedTieredAccount(db);
+		seedTieredAccount(db, { recordedPlanTier: "max" });
 
 		const cohorts = collectCohortSegments(db);
 		const earlier = cohorts.find((c) => c.key === COHORT_ASSUMED);
@@ -143,19 +151,51 @@ describe("quota-drift cohorting", () => {
 		expect(
 			Math.max(...segmentsIn(earlier).map((s) => s.t1)),
 		).toBeLessThanOrEqual(Math.min(...segmentsIn(later).map((s) => s.t0)));
-		// Run ids stay distinct across the split, so the bootstrap cannot treat
-		// two partitions' runs as one block.
-		const runIds = new Set(
-			[...segmentsIn(earlier), ...segmentsIn(later)].map((s) => s.runId),
-		);
-		expect(runIds.size).toBe(
-			new Set(segmentsIn(earlier).map((s) => s.runId)).size +
-				new Set(segmentsIn(later).map((s) => s.runId)).size,
-		);
+		// The tier really did move here (pro -> max), and the segment whose own
+		// span straddles the move is tagged by neither side: it is dropped, so the
+		// two cohorts' segments do not overlap in time.
+		expect(segmentsIn(earlier).some((s) => s.t1 > TIER_CHANGE_MS)).toBe(false);
+		expect(segmentsIn(later).some((s) => s.t0 < TIER_CHANGE_MS)).toBe(false);
 		// The cohort carrying inferred history has to say so; the other must not
 		// be downgraded by it.
 		expect(earlier?.tierProvenance).toBe("assumed");
 		expect(later?.tierProvenance).toBe("recorded");
+	});
+
+	it("does not split a run when only the tier's PROVENANCE changes", () => {
+		// The upgrade case that is NOT a tier change: the columns start carrying
+		// values midway through a monotone run, and the value they record is the
+		// one the accounts row was already supplying as the fallback. Splitting the
+		// builder's input on that flip turns one physical run into two bootstrap
+		// blocks, which is exactly what the single-run guard in `fitWithIntervals`
+		// counts — so a coefficient measured on ONE window instance would be
+		// reported with a narrow interval.
+		seedTieredAccount(db, { recordedPlanTier: "pro" });
+
+		const expected = buildSegments(
+			tieredAccountSamples(),
+			// No `runIdPrefix`: the compute path calls the builder once per account
+			// per window, so its run ids are the builder's own.
+			{ window: "seven_day", tokensFor: () => ({}) },
+		);
+		expect(expected.length).toBeGreaterThan(0);
+		expect(new Set(expected.map((s) => s.runId)).size).toBe(1);
+
+		const cohorts = collectCohortSegments(db);
+		const actual = cohorts.flatMap((c) =>
+			(c.segmentsByWindow.get("seven_day") ?? []).filter(
+				(s) => s.accountId === ACCOUNT_TIERED,
+			),
+		);
+
+		// Same boundaries AND the same single run as the core builder.
+		expect(actual.map(boundary)).toEqual(expected.map(boundary));
+		expect(new Set(actual.map((s) => s.runId)).size).toBe(1);
+		// One tier throughout, so one cohort — carrying the disclosure that part of
+		// its history had the tier inferred rather than recorded.
+		const owning = cohorts.filter((c) => c.accountIds.has(ACCOUNT_TIERED));
+		expect(owning.map((c) => c.key)).toEqual([COHORT_ASSUMED]);
+		expect(owning[0].tierProvenance).toBe("assumed");
 	});
 
 	it("omits an account with no snapshots rather than zero-filling it", () => {
@@ -235,11 +275,11 @@ describe("quota-drift segment assembly", () => {
 			const expected = buildSegments(fixtureWindowSamples(account, window), {
 				window,
 				tokensFor: () => ({}),
-				// This account recorded ONE tier throughout, so its history is a
-				// single tier partition and the compute path's run ids carry
-				// partition 0. Run ids are compared, not just boundaries: they are
-				// the bootstrap's resampling unit.
-				runIdPrefix: `${window}:0`,
+				// No `runIdPrefix`: the compute path calls the builder ONCE per
+				// account per window over the whole history, so its run ids are the
+				// builder's own. Run ids are compared, not just boundaries — they
+				// are the bootstrap's resampling unit and what the identifiability
+				// gate counts.
 			});
 			const actual = (
 				cohorts
@@ -470,24 +510,38 @@ function seedRareModelRequests(db: Database): void {
 	})();
 }
 
+const TIERED_STEP_MS = 5 * 60_000;
+/** 48h at 5-minute cadence. */
+const TIERED_SAMPLES = 576;
+const TIERED_START = FIXTURE_NOW - TIERED_SAMPLES * TIERED_STEP_MS;
+const TIERED_RESET = FIXTURE_NOW + 3 * 24 * 60 * 60_000;
+/** When {@link seedTieredAccount}'s tier columns start carrying values. */
+const TIER_CHANGE_MS = TIERED_START + (TIERED_SAMPLES / 2) * TIERED_STEP_MS;
+
 /**
  * Seed one account with 48h of weekly-window samples whose recorded tier
  * appears only halfway through: the exact shape an upgraded database has, where
  * the tier columns start carrying values at the restart that added them.
  *
+ * `recordedPlanTier` picks which of the two upgrade cases this is. `"max"` is a
+ * genuine tier change away from the accounts row's `pro`; `"pro"` records
+ * exactly what the fallback was already supplying, so only the PROVENANCE moves
+ * and the run must survive intact.
+ *
  * Only the weekly window is populated. A null 5h percentage is absence of
  * evidence, so it yields no runs and no segments at all, which keeps the
- * fixture to the one axis under test.
+ * fixture to the one axis under test. The percentage rises monotonically at a
+ * constant rate with a fixed reset, so the whole history is ONE run.
  */
-function seedTieredAccount(db: Database): void {
-	const STEP = 5 * 60_000;
-	const SAMPLES = 576; // 48h at 5-minute cadence
-	const start = FIXTURE_NOW - SAMPLES * STEP;
+function seedTieredAccount(
+	db: Database,
+	opts: { recordedPlanTier: "max" | "pro" },
+): void {
 	db.run(
 		`INSERT INTO accounts (id, name, provider, created_at,
 			identity_plan_tier, identity_rate_limit_tier)
 		 VALUES (?, ?, 'anthropic', ?, 'pro', NULL)`,
-		[ACCOUNT_TIERED, ACCOUNT_TIERED, start],
+		[ACCOUNT_TIERED, ACCOUNT_TIERED, TIERED_START],
 	);
 	const insert = db.prepare(
 		`INSERT INTO usage_snapshots (
@@ -495,21 +549,31 @@ function seedTieredAccount(db: Database): void {
 			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
 		) VALUES (?, 'anthropic', ?, NULL, NULL, ?, ?, ?, ?, ?)`,
 	);
-	const reset = FIXTURE_NOW + 3 * 24 * 60 * 60_000;
+	const rateLimitTier = opts.recordedPlanTier === "max" ? "20x" : null;
 	db.transaction(() => {
-		for (let i = 0; i < SAMPLES; i++) {
-			const sampledAt = start + i * STEP;
+		for (let i = 0; i < TIERED_SAMPLES; i++) {
+			const sampledAt = TIERED_START + i * TIERED_STEP_MS;
 			// The tier columns only start carrying values at the halfway point.
-			const recorded = i >= SAMPLES / 2;
+			const recorded = sampledAt >= TIER_CHANGE_MS;
 			insert.run(
 				ACCOUNT_TIERED,
 				sampledAt,
-				(i * 100) / SAMPLES,
-				reset,
+				(i * 100) / TIERED_SAMPLES,
+				TIERED_RESET,
 				sampledAt,
-				recorded ? "max" : null,
-				recorded ? "20x" : null,
+				recorded ? opts.recordedPlanTier : null,
+				recorded ? rateLimitTier : null,
 			);
 		}
 	})();
+}
+
+/** The weekly-window samples {@link seedTieredAccount} writes, as the builder sees them. */
+function tieredAccountSamples(): WindowSample[] {
+	return Array.from({ length: TIERED_SAMPLES }, (_, i) => ({
+		accountId: ACCOUNT_TIERED,
+		sampledAt: TIERED_START + i * TIERED_STEP_MS,
+		pct: (i * 100) / TIERED_SAMPLES,
+		resetAt: TIERED_RESET,
+	}));
 }

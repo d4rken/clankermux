@@ -46,12 +46,26 @@
  *
  * ## Which tier
  *
- * Tiers are resolved PER SAMPLE, and an account's ordered samples are split
- * wherever the resolved tier changes. One tier per account cannot be right: on
- * any upgraded database the tier columns are null until the restart that added
- * them, so a single resolution files pre-column history under a tier that was
- * not in force then. A subscription change would then look like a change in
+ * Tiers are resolved PER SAMPLE, because one tier per account cannot be right:
+ * on any upgraded database the tier columns are null until the restart that
+ * added them, so a single resolution files pre-column history under a tier that
+ * was not in force then. A subscription change would then look like a change in
  * what the subscription buys, which is the very thing being measured.
+ *
+ * Tiers are applied by TAGGING built segments, never by splitting the builder's
+ * input. Runs are the bootstrap's independent blocks and the unit the
+ * identifiability gate counts, so cutting the sample series before
+ * `buildSegments` turns one physical run into two and manufactures independence
+ * out of bookkeeping. That is not hypothetical: `plan_tier` starts being
+ * recorded partway through a monotone run and usually records exactly the value
+ * the accounts row was already supplying, so a split on PROVENANCE alone would
+ * fabricate a second run — and with it an interval — where the tier never moved.
+ *
+ * A segment is therefore tagged from every sample spanning `[t0, t1]`: agreeing
+ * tier values give the tag (marked `assumed` if any spanning sample had to fall
+ * back to the accounts row), and disagreeing values drop that ONE segment, which
+ * belongs to neither tier. Segments either side of the change keep their run id
+ * and stay in whichever cohort their own span supports.
  */
 
 import type { Database } from "bun:sqlite";
@@ -253,74 +267,73 @@ export function collectCohortSegments(db: Database): CohortSegments[] {
 		// for invites the reader to attribute the cohort's number to it.
 		if (rows.length === 0) continue;
 
-		// Segments are built PER TIER PARTITION, so a stretch of history recorded
-		// under one tier is never filed under another. The run id prefix carries
-		// the partition, because `buildSegments` numbers runs from 1 within each
-		// call and colliding ids would merge two partitions' runs into one
-		// bootstrap block.
-		const tagged: TaggedSegments[] = [];
-		for (const partition of partitionByTier(account, rows)) {
-			for (const window of WINDOWS) {
-				tagged.push({
-					window,
-					tier: partition.tier,
-					segments: buildSegments(
-						toSamples(account.id, partition.rows, window),
-						{
-							window,
-							tokensFor: NO_TOKENS,
-							runIdPrefix: `${window}:${partition.index}`,
-						},
-					),
-				});
-			}
-		}
-		if (tagged.every((entry) => entry.segments.length === 0)) continue;
-		// One request scan for the whole account, merged into every partition's
-		// lists at once: the lists are disjoint in time and each carries its own
-		// forward cursor, so re-scanning per partition would only cost I/O.
+		// ONE `buildSegments` call per window over the account's WHOLE history, so
+		// the runs the fit and the bootstrap see are the physical ones. Tiering is
+		// applied afterwards, by tagging; see "Which tier" at the top of the file
+		// for why splitting the input instead fabricates independent runs.
+		const built = WINDOWS.map((window) => ({
+			window,
+			segments: buildSegments(toSamples(account.id, rows, window), {
+				window,
+				tokensFor: NO_TOKENS,
+			}),
+		}));
+		if (built.every((entry) => entry.segments.length === 0)) continue;
+		// One request scan for the whole account, merged into both windows' lists
+		// at once: each list carries its own forward cursor, so scanning per window
+		// would only cost I/O.
 		attachRequestTokens(
 			requestScan,
 			account,
-			tagged.map((entry) => entry.segments),
+			built.map((entry) => entry.segments),
 		);
 
-		for (const entry of tagged) {
-			if (entry.segments.length === 0) continue;
-			const key = cohortKey(account.provider, entry.tier);
-			let cohort = cohorts.get(key);
-			if (!cohort) {
-				cohort = {
-					key,
-					provider: account.provider,
-					planTier: entry.tier.planTier,
-					rateLimitTier: entry.tier.rateLimitTier,
-					accountIds: new Set(),
-					tierProvenance: "recorded",
-					segmentsByWindow: new Map(),
-				};
-				cohorts.set(key, cohort);
+		// The sample clock, precomputed once: `resolveSpanTier` binary-searches it
+		// per segment, and `rows` is already ordered on it.
+		const clock = rows.map(effectiveMs);
+		for (const entry of built) {
+			for (const segment of entry.segments) {
+				const tier = resolveSpanTier(account, rows, clock, segment);
+				// A segment whose own span really does straddle a tier change belongs
+				// to neither tier, so it — and only it — is dropped.
+				if (tier === null) continue;
+				addSegmentToCohort(cohorts, account, entry.window, tier, segment);
 			}
-			cohort.accountIds.add(account.id);
-			// One assumed partition taints the cohort: the reader cannot tell which
-			// stretch of history was refiled, so the whole cohort has to say so.
-			if (entry.tier.provenance === "assumed") {
-				cohort.tierProvenance = "assumed";
-			}
-			const existing = cohort.segmentsByWindow.get(entry.window);
-			if (existing) existing.push(...entry.segments);
-			else cohort.segmentsByWindow.set(entry.window, [...entry.segments]);
 		}
 	}
 
 	return [...cohorts.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** One window's segments from one tier partition, before cohorting. */
-interface TaggedSegments {
-	window: QuotaWindowKind;
-	tier: ResolvedTier;
-	segments: QuotaSegment[];
+/** File one tagged segment under its cohort, creating the cohort on demand. */
+function addSegmentToCohort(
+	cohorts: Map<string, CohortSegments>,
+	account: ComputeAccount,
+	window: QuotaWindowKind,
+	tier: ResolvedTier,
+	segment: QuotaSegment,
+): void {
+	const key = cohortKey(account.provider, tier);
+	let cohort = cohorts.get(key);
+	if (!cohort) {
+		cohort = {
+			key,
+			provider: account.provider,
+			planTier: tier.planTier,
+			rateLimitTier: tier.rateLimitTier,
+			accountIds: new Set(),
+			tierProvenance: "recorded",
+			segmentsByWindow: new Map(),
+		};
+		cohorts.set(key, cohort);
+	}
+	cohort.accountIds.add(account.id);
+	// One assumed segment taints the cohort: the reader cannot tell which stretch
+	// of history was inferred, so the whole cohort has to say so.
+	if (tier.provenance === "assumed") cohort.tierProvenance = "assumed";
+	const existing = cohort.segmentsByWindow.get(window);
+	if (existing) existing.push(segment);
+	else cohort.segmentsByWindow.set(window, [segment]);
 }
 
 /** Stable cohort key: `provider|planTier|rateLimitTier`. */
@@ -553,46 +566,61 @@ export function resolveRowTier(
 	};
 }
 
-/** A maximal stretch of consecutive samples sharing one resolved tier. */
-export interface TierPartition {
-	/** Position in the account's history, from 0 — part of the run id prefix. */
-	index: number;
-	tier: ResolvedTier;
-	rows: SnapshotScanRow[];
-}
-
 /**
- * Split one account's ordered samples wherever the resolved tier changes.
+ * Which tier ONE BUILT SEGMENT was measured under, or null when its span
+ * straddles a tier change and it belongs to neither.
  *
- * Provenance is part of the partition key, not just the values: a stretch whose
- * tier had to be inferred from today's accounts row is not the same evidence as
- * a stretch that recorded the same tier, even when the two strings match. The
- * cohorts they land in may merge, but the merged cohort then has to disclose
- * that some of its history was assumed.
+ * The segment is tagged from every sample spanning `[t0, t1]` inclusive — both
+ * endpoints are anchor samples, and the samples between them are the evidence
+ * the segment's Δpct came from.
+ *
+ * Provenance is deliberately NOT part of the identity being compared. A stretch
+ * that recorded `max` and a stretch that inferred `max` from today's accounts
+ * row describe the same tier; the difference is in how well it is known, which
+ * is what `provenance: "assumed"` exists to say. Treating the difference as a
+ * tier CHANGE would split the run it happens in, and `plan_tier` starts being
+ * recorded partway through a run with the value the fallback was already
+ * supplying — so the split would be pure bookkeeping presented as independent
+ * evidence.
+ *
+ * `rows` and `clock` are the account's samples ordered on the effective clock,
+ * so the first spanning sample is found by binary search rather than a rescan.
  */
-export function partitionByTier(
+export function resolveSpanTier(
 	account: ComputeAccount,
 	rows: readonly SnapshotScanRow[],
-): TierPartition[] {
-	const partitions: TierPartition[] = [];
-	let current: TierPartition | null = null;
-	for (const row of rows) {
-		const tier = resolveRowTier(account, row);
-		if (current === null || !sameTier(current.tier, tier)) {
-			current = { index: partitions.length, tier, rows: [] };
-			partitions.push(current);
+	clock: readonly number[],
+	span: { t0: number; t1: number },
+): ResolvedTier | null {
+	let resolved: ResolvedTier | null = null;
+	let assumed = false;
+	for (let i = lowerBound(clock, span.t0); i < rows.length; i++) {
+		if (clock[i] > span.t1) break;
+		const tier = resolveRowTier(account, rows[i]);
+		if (resolved === null) {
+			resolved = tier;
+		} else if (
+			resolved.planTier !== tier.planTier ||
+			resolved.rateLimitTier !== tier.rateLimitTier
+		) {
+			return null;
 		}
-		current.rows.push(row);
+		if (tier.provenance === "assumed") assumed = true;
 	}
-	return partitions;
+	if (resolved === null) return null;
+	return assumed ? { ...resolved, provenance: "assumed" } : resolved;
 }
 
-function sameTier(a: ResolvedTier, b: ResolvedTier): boolean {
-	return (
-		a.planTier === b.planTier &&
-		a.rateLimitTier === b.rateLimitTier &&
-		a.provenance === b.provenance
-	);
+/** Index of the first entry of an ascending array that is `>= value`. */
+function lowerBound(values: readonly number[], value: number): number {
+	let lo = 0;
+	let hi = values.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (values[mid] < value) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
 }
 
 /**
