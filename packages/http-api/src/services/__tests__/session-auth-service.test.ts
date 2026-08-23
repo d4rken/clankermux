@@ -45,14 +45,14 @@ class FakeStore implements SessionAuthStore {
 	}
 	async createManagementSession(
 		record: AuthSessionRecord,
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	): Promise<number> {
 		// Same refusal the conditional INSERT performs: a session may not be
-		// issued for a verifier that is no longer the stored one.
+		// issued for a verifier that is no longer the stored one. There is no
+		// unbound form to fall through to, here or in the repository.
 		if (
-			boundTo &&
-			(this.password?.verifier !== boundTo.verifier ||
-				this.password?.params !== boundTo.params)
+			this.password?.verifier !== boundTo.verifier ||
+			this.password?.params !== boundTo.params
 		) {
 			return 0;
 		}
@@ -124,14 +124,20 @@ function makeService(over: { now?: () => number } = {}) {
 	return { store, hasher, svc };
 }
 
+/**
+ * Store a password and hand back the binding a login would have carried out of
+ * its verification. Every session in these tests is minted against it, because
+ * there is no other way to mint one.
+ */
 async function configure(
 	store: FakeStore,
 	hasher: CountingHasher,
 	password: string,
-) {
+): Promise<PasswordBinding> {
 	const { verifier, params } = await hasher.hash(password);
 	store.password = { verifier, params, updatedAt: 0 };
 	hasher.hashCalls = 0;
+	return { verifier, params };
 }
 
 function requestWithCookie(token?: string): Request {
@@ -223,6 +229,7 @@ describe("password verification", () => {
 		await configure(store, hasher, "hunter2");
 		const binding = await svc.verifyPassword("hunter2");
 		expect(binding).not.toBeNull();
+		if (!binding) throw new Error("verification produced no binding");
 		// The operator rotates out of process: new verifier, sessions gone.
 		await configure(store, hasher, "a new password");
 		store.sessions.clear();
@@ -243,8 +250,8 @@ describe("password verification", () => {
 describe("session validation costs no key derivation", () => {
 	it("performs zero derivations across many validations", async () => {
 		const { svc, store, hasher } = makeService();
-		await configure(store, hasher, "hunter2");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "hunter2");
+		const { token } = await svc.createSession(binding);
 		hasher.verifyCalls = 0;
 		for (let i = 0; i < 25; i++) {
 			expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(true);
@@ -255,8 +262,8 @@ describe("session validation costs no key derivation", () => {
 
 	it("stores only the token's hash, never the token", async () => {
 		const { svc, store, hasher } = makeService();
-		await configure(store, hasher, "hunter2");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "hunter2");
+		const { token } = await svc.createSession(binding);
 		expect([...store.sessions.keys()]).toEqual([hashSessionToken(token)]);
 		expect(JSON.stringify([...store.sessions.keys()])).not.toContain(token);
 	});
@@ -265,8 +272,8 @@ describe("session validation costs no key derivation", () => {
 describe("session lifetime", () => {
 	it("sets the absolute deadline 30 days out", async () => {
 		const { svc, store, hasher } = makeService({ now: () => 1_000 });
-		await configure(store, hasher, "pw");
-		const { expiresAt } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { expiresAt } = await svc.createSession(binding);
 		expect(expiresAt).toBe(1_000 + SESSION_ABSOLUTE_MAX_MS);
 		expect(SESSION_ABSOLUTE_MAX_MS).toBe(30 * 24 * 60 * 60 * 1000);
 	});
@@ -274,8 +281,8 @@ describe("session lifetime", () => {
 	it("rejects a session past its absolute deadline even when it was just used", async () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { token } = await svc.createSession(binding);
 		now += SESSION_ABSOLUTE_MAX_MS;
 		// Activity right up to the deadline does not extend it.
 		const row = store.sessions.get(hashSessionToken(token));
@@ -287,8 +294,8 @@ describe("session lifetime", () => {
 	it("rejects a session idle past 7 days while its absolute deadline is far away", async () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { token } = await svc.createSession(binding);
 		now += SESSION_IDLE_MAX_MS;
 		expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(false);
 		expect(SESSION_IDLE_MAX_MS).toBe(7 * 24 * 60 * 60 * 1000);
@@ -298,8 +305,8 @@ describe("session lifetime", () => {
 	it("deletes the row it just rejected rather than leaving it for the sweep", async () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { token } = await svc.createSession(binding);
 		now += SESSION_ABSOLUTE_MAX_MS;
 		await svc.authorizeRequest(requestWithCookie(token));
 		expect(store.sessions.size).toBe(0);
@@ -341,8 +348,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 		// must not reach the repository at all.
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const session = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const session = await svc.createSession(binding);
 		if (!session) throw new Error("no session");
 		store.touchCalls = [];
 		for (let i = 0; i < 8; i++) {
@@ -355,8 +362,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 	it("writes once, against an hour-old staleness bound, when the row IS stale", async () => {
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const session = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const session = await svc.createSession(binding);
 		if (!session) throw new Error("no session");
 		const row = store.sessions.get(hashSessionToken(session.token));
 		if (!row) throw new Error("session was not stored");
@@ -373,8 +380,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 	it("collapses concurrent stale requests into ONE write", async () => {
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const session = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const session = await svc.createSession(binding);
 		if (!session) throw new Error("no session");
 		const row = store.sessions.get(hashSessionToken(session.token));
 		if (!row) throw new Error("session was not stored");
@@ -398,8 +405,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 	it("leaves last_seen_at alone for a session touched moments ago", async () => {
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const session = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const session = await svc.createSession(binding);
 		if (!session) throw new Error("no session");
 		const before = store.sessions.get(
 			hashSessionToken(session.token),
@@ -414,8 +421,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 	it("still authenticates when the activity write fails", async () => {
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
-		await configure(store, hasher, "pw");
-		const session = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const session = await svc.createSession(binding);
 		if (!session) throw new Error("no session");
 		const row = store.sessions.get(hashSessionToken(session.token));
 		if (!row) throw new Error("session was not stored");
@@ -433,8 +440,8 @@ describe("activity touch is skipped outright, not just filtered in SQL", () => {
 describe("logout", () => {
 	it("removes the row and reports the hash it removed", async () => {
 		const { svc, store, hasher } = makeService();
-		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { token } = await svc.createSession(binding);
 		expect(await svc.destroySession(requestWithCookie(token))).toBe(
 			hashSessionToken(token),
 		);
@@ -448,8 +455,8 @@ describe("logout", () => {
 
 	it("invalidates the token for every later request", async () => {
 		const { svc, store, hasher } = makeService();
-		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const binding = await configure(store, hasher, "pw");
+		const { token } = await svc.createSession(binding);
 		await svc.destroySession(requestWithCookie(token));
 		expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(false);
 	});

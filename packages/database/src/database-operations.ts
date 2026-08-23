@@ -1348,13 +1348,14 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
-	 * Insert a session, optionally bound to the password that authorized it.
-	 * Returns the rows inserted: 0 means the verifier changed while the login
-	 * was hashing, so the session belongs to a password that no longer exists.
+	 * Insert a session bound to the password that authorized it. Returns the rows
+	 * inserted: 0 means the verifier changed while the login was hashing, so the
+	 * session belongs to a password that no longer exists. The binding is
+	 * required — there is no way to mint a session that names no password.
 	 */
 	async createManagementSession(
 		record: AuthSessionRecord,
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	): Promise<number> {
 		return this.auth.createSession(record, boundTo);
 	}

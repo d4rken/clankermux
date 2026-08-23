@@ -266,12 +266,15 @@ describe("--set", () => {
 		createDb();
 		const { repo, close } = openRepo();
 		await repo.setPassword("old", "{}", 1);
-		await repo.createSession({
-			tokenHash: "a",
-			createdAt: 1,
-			expiresAt: 2_000_000_000_000,
-			lastSeenAt: 1,
-		});
+		await repo.createSession(
+			{
+				tokenHash: "a",
+				createdAt: 1,
+				expiresAt: 2_000_000_000_000,
+				lastSeenAt: 1,
+			},
+			{ verifier: "old", params: "{}" },
+		);
 		close();
 
 		const out = io(["a new password", "a new password"]);
@@ -426,12 +429,15 @@ describe("--clear", () => {
 		createDb();
 		const { repo, close } = openRepo();
 		await repo.setPassword("v", "{}", 1);
-		await repo.createSession({
-			tokenHash: "a",
-			createdAt: 1,
-			expiresAt: 2_000_000_000_000,
-			lastSeenAt: 1,
-		});
+		await repo.createSession(
+			{
+				tokenHash: "a",
+				createdAt: 1,
+				expiresAt: 2_000_000_000_000,
+				lastSeenAt: 1,
+			},
+			{ verifier: "v", params: "{}" },
+		);
 		close();
 
 		const out = io([]);
@@ -460,12 +466,15 @@ describe("--clear", () => {
 		createDb();
 		const { repo, close } = openRepo();
 		await repo.setPassword("v", "{}", 1);
-		await repo.createSession({
-			tokenHash: "a",
-			createdAt: 1,
-			expiresAt: 2_000_000_000_000,
-			lastSeenAt: 1,
-		});
+		await repo.createSession(
+			{
+				tokenHash: "a",
+				createdAt: 1,
+				expiresAt: 2_000_000_000_000,
+				lastSeenAt: 1,
+			},
+			{ verifier: "v", params: "{}" },
+		);
 		close();
 
 		await runAuthPasswordCommand({ action: "clear", dbPath }, io([]));

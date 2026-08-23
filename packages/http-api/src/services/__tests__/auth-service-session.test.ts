@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import type {
 	AuthSessionRecord,
+	PasswordBinding,
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import type { ApiKey, CryptoUtils } from "@clankermux/types";
@@ -42,7 +43,10 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword() {
 		return this.password;
 	}
-	async createManagementSession(record: AuthSessionRecord) {
+	async createManagementSession(
+		record: AuthSessionRecord,
+		_boundTo: PasswordBinding,
+	) {
 		this.sessions.set(record.tokenHash, { ...record });
 		return 1;
 	}
@@ -133,8 +137,10 @@ describe("path policy maps the management surface to session", () => {
 	});
 
 	it("admits a gated path with a live session cookie", async () => {
-		store.password = { ...(await cheapHasher.hash("pw")), updatedAt: 0 };
-		const { token } = await sessionAuth.createSession();
+		const stored = await cheapHasher.hash("pw");
+		store.password = { ...stored, updatedAt: 0 };
+		// Minted the way a login mints it: against the pair that authorized it.
+		const { token } = await sessionAuth.createSession(stored);
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
 			"/api/accounts",
@@ -144,8 +150,10 @@ describe("path policy maps the management surface to session", () => {
 	});
 
 	it("refuses a gated path with a cookie whose session was deleted", async () => {
-		store.password = { ...(await cheapHasher.hash("pw")), updatedAt: 0 };
-		const { token } = await sessionAuth.createSession();
+		const stored = await cheapHasher.hash("pw");
+		store.password = { ...stored, updatedAt: 0 };
+		// Minted the way a login mints it: against the pair that authorized it.
+		const { token } = await sessionAuth.createSession(stored);
 		store.sessions.clear();
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
@@ -156,8 +164,10 @@ describe("path policy maps the management surface to session", () => {
 	});
 
 	it("carries no API key identity on a session-authenticated request", async () => {
-		store.password = { ...(await cheapHasher.hash("pw")), updatedAt: 0 };
-		const { token } = await sessionAuth.createSession();
+		const stored = await cheapHasher.hash("pw");
+		store.password = { ...stored, updatedAt: 0 };
+		// Minted the way a login mints it: against the pair that authorized it.
+		const { token } = await sessionAuth.createSession(stored);
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
 			"/api/accounts",

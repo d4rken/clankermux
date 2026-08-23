@@ -43,6 +43,27 @@ function session(
 	};
 }
 
+/**
+ * Insert a session bound to whatever password is currently stored, seeding one
+ * first when the test did not set its own.
+ *
+ * There is no unbound insert to fall back on: a session exists because a
+ * password authorized it, so every test that wants one has to name that
+ * password the way a login does.
+ */
+async function mintSession(record: ReturnType<typeof session>) {
+	let stored = await repo.getPassword();
+	if (!stored) {
+		await repo.setPassword("seeded", "{}", 1);
+		stored = await repo.getPassword();
+	}
+	if (!stored) throw new Error("no password was stored");
+	return repo.createSession(record, {
+		verifier: stored.verifier,
+		params: stored.params,
+	});
+}
+
 describe("password storage", () => {
 	it("reports no password on a fresh database", async () => {
 		expect(await repo.getPassword()).toBeNull();
@@ -84,8 +105,8 @@ describe("password storage", () => {
 
 describe("rotation invalidates sessions", () => {
 	it("deletes every session when the password is set", async () => {
-		await repo.createSession(session("a"));
-		await repo.createSession(session("b"));
+		await mintSession(session("a"));
+		await mintSession(session("b"));
 		const revoked = await repo.setPassword("new", "{}", 10);
 		expect(revoked).toBe(2);
 		expect(await repo.getSession("a")).toBeNull();
@@ -94,7 +115,7 @@ describe("rotation invalidates sessions", () => {
 
 	it("deletes every session when the password is cleared", async () => {
 		await repo.setPassword("old", "{}", 1);
-		await repo.createSession(session("a"));
+		await mintSession(session("a"));
 		const revoked = await repo.clearPassword();
 		expect(revoked).toBe(1);
 		expect(await repo.getSession("a")).toBeNull();
@@ -102,7 +123,7 @@ describe("rotation invalidates sessions", () => {
 
 	it("cannot reactivate pre-clear sessions via clear-then-set", async () => {
 		await repo.setPassword("old", "{}", 1);
-		await repo.createSession(session("a"));
+		await mintSession(session("a"));
 		await repo.clearPassword();
 		await repo.setPassword("new", "{}", 2);
 		expect(await repo.getSession("a")).toBeNull();
@@ -114,7 +135,7 @@ describe("rotation invalidates sessions", () => {
 	it("never lets a concurrent validation observe a half-applied rotation", async () => {
 		await repo.setPassword("old", "{}", 1);
 		for (const hash of ["a", "b", "c", "d"]) {
-			await repo.createSession(session(hash));
+			await mintSession(session(hash));
 		}
 
 		// Interleave reads with the rotation.
@@ -165,7 +186,7 @@ describe("rotation invalidates sessions", () => {
 
 	it("leaves neither half applied if the transaction cannot commit", async () => {
 		await repo.setPassword("old", "{}", 1);
-		await repo.createSession(session("a"));
+		await mintSession(session("a"));
 		// A CHECK violation inside the transaction: the verifier write fails, so
 		// the session delete that preceded it must roll back with it.
 		expect(() => {
@@ -229,16 +250,11 @@ describe("a session is bound to the password that authorized it", () => {
 			}),
 		).toBe(0);
 	});
-
-	it("still inserts unconditionally when no binding is given", async () => {
-		expect(await repo.createSession(session("a"))).toBe(1);
-		expect(await repo.getSession("a")).not.toBeNull();
-	});
 });
 
 describe("session lifecycle", () => {
 	it("round-trips a session by its token hash", async () => {
-		await repo.createSession(
+		await mintSession(
 			session("hash", { createdAt: 5, expiresAt: 500, lastSeenAt: 7 }),
 		);
 		expect(await repo.getSession("hash")).toEqual({
@@ -250,13 +266,13 @@ describe("session lifecycle", () => {
 	});
 
 	it("returns an expired row rather than filtering it — expiry is the caller's call", async () => {
-		await repo.createSession(session("hash", { expiresAt: 1 }));
+		await mintSession(session("hash", { expiresAt: 1 }));
 		expect(await repo.getSession("hash")).not.toBeNull();
 	});
 
 	it("deletes one session without touching the others", async () => {
-		await repo.createSession(session("a"));
-		await repo.createSession(session("b"));
+		await mintSession(session("a"));
+		await mintSession(session("b"));
 		expect(await repo.deleteSession("a")).toBe(1);
 		expect(await repo.getSession("a")).toBeNull();
 		expect(await repo.getSession("b")).not.toBeNull();
@@ -269,7 +285,7 @@ describe("session lifecycle", () => {
 
 describe("touch carries a staleness predicate — as a race guard, not a shield", () => {
 	it("updates the row when last_seen_at is older than the staleness bound", async () => {
-		await repo.createSession(session("a", { lastSeenAt: 1_000 }));
+		await mintSession(session("a", { lastSeenAt: 1_000 }));
 		const changed = await repo.touchSession("a", 9_000, 5_000);
 		expect(changed).toBe(1);
 		expect((await repo.getSession("a"))?.lastSeenAt).toBe(9_000);
@@ -281,7 +297,7 @@ describe("touch carries a staleness predicate — as a race guard, not a shield"
 		// It does NOT mean nothing was written: SQLite takes the writer slot for a
 		// zero-row UPDATE too, which is why SessionAuthService decides from the
 		// row it already read rather than calling this on every request.
-		await repo.createSession(session("a", { lastSeenAt: 8_000 }));
+		await mintSession(session("a", { lastSeenAt: 8_000 }));
 		const changed = await repo.touchSession("a", 9_000, 5_000);
 		expect(changed).toBe(0);
 		expect((await repo.getSession("a"))?.lastSeenAt).toBe(8_000);
@@ -290,19 +306,15 @@ describe("touch carries a staleness predicate — as a race guard, not a shield"
 
 describe("expiry sweep", () => {
 	it("removes rows past their absolute deadline", async () => {
-		await repo.createSession(
-			session("dead", { expiresAt: 500, lastSeenAt: 500 }),
-		);
-		await repo.createSession(
-			session("live", { expiresAt: 5_000, lastSeenAt: 900 }),
-		);
+		await mintSession(session("dead", { expiresAt: 500, lastSeenAt: 500 }));
+		await mintSession(session("live", { expiresAt: 5_000, lastSeenAt: 900 }));
 		expect(await repo.deleteExpiredSessions(1_000, 0)).toBe(1);
 		expect(await repo.getSession("dead")).toBeNull();
 		expect(await repo.getSession("live")).not.toBeNull();
 	});
 
 	it("removes rows idle past the idle cutoff even when the absolute deadline is far away", async () => {
-		await repo.createSession(
+		await mintSession(
 			session("idle", { expiresAt: 1_000_000, lastSeenAt: 100 }),
 		);
 		expect(await repo.deleteExpiredSessions(1_000, 500)).toBe(1);
@@ -310,9 +322,7 @@ describe("expiry sweep", () => {
 	});
 
 	it("keeps a row that satisfies both bounds", async () => {
-		await repo.createSession(
-			session("ok", { expiresAt: 1_000_000, lastSeenAt: 900 }),
-		);
+		await mintSession(session("ok", { expiresAt: 1_000_000, lastSeenAt: 900 }));
 		expect(await repo.deleteExpiredSessions(1_000, 500)).toBe(0);
 		expect(await repo.getSession("ok")).not.toBeNull();
 	});

@@ -190,7 +190,7 @@ export interface SessionAuthStore {
 	getManagementPassword(): Promise<StoredPasswordVerifier | null>;
 	createManagementSession(
 		record: AuthSessionRecord,
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	): Promise<number>;
 	getManagementSession(tokenHash: string): Promise<AuthSessionRecord | null>;
 	touchManagementSession(
@@ -269,13 +269,15 @@ export class SessionAuthService {
 	 * Mint a session. The token is 32 random bytes; only its SHA-256 is stored,
 	 * so a database read cannot reconstruct a usable cookie.
 	 *
-	 * `boundTo` is the password the caller was authorized by. The insert is
-	 * conditional on it still being the stored one, and null comes back when it
-	 * is not — a login that lost a race with a rotation must fail, not issue a
-	 * 30-day session from the verifier the operator just revoked.
+	 * `boundTo` is the password the caller was authorized by, and it is REQUIRED
+	 * down the whole chain to the INSERT. The insert is conditional on that pair
+	 * still being the stored one, and null comes back when it is not — a login
+	 * that lost a race with a rotation must fail, not issue a 30-day session from
+	 * the verifier the operator just revoked. Making it optional anywhere would
+	 * put an unbound mint back within one omitted argument.
 	 */
 	async createSession(
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	): Promise<{ token: string; expiresAt: number } | null> {
 		const token = randomBytes(32).toString("base64url");
 		const issuedAt = this.now();
@@ -287,7 +289,7 @@ export class SessionAuthService {
 				expiresAt,
 				lastSeenAt: issuedAt,
 			},
-			boundTo ?? null,
+			boundTo,
 		);
 		if (inserted === 0) return null;
 		return { token, expiresAt };

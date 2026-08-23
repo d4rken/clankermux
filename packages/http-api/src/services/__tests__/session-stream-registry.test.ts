@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type {
 	AuthSessionRecord,
+	PasswordBinding,
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import {
@@ -31,7 +32,10 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword() {
 		return this.password;
 	}
-	async createManagementSession(record: AuthSessionRecord) {
+	async createManagementSession(
+		record: AuthSessionRecord,
+		_boundTo: PasswordBinding,
+	) {
 		this.sessions.set(record.tokenHash, { ...record });
 		return 1;
 	}
@@ -50,6 +54,17 @@ class FakeStore implements SessionAuthStore {
 }
 
 const TICK_MS = 5;
+
+/** The stored password, and the binding every session here is minted against. */
+const PASSWORD: StoredPasswordVerifier = {
+	verifier: "v",
+	params: "{}",
+	updatedAt: 0,
+};
+const BINDING: PasswordBinding = {
+	verifier: PASSWORD.verifier,
+	params: PASSWORD.params,
+};
 
 /**
  * Wait for a revocation to land, polling rather than sleeping a fixed span.
@@ -101,9 +116,9 @@ describe("periodic revalidation", () => {
 
 	it("closes a stream whose session row has been deleted", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession();
+		const { token } = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -124,7 +139,7 @@ describe("periodic revalidation", () => {
 			closed++;
 		});
 		// The CLI sets a password out of process; the poll is what notices.
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		await waitFor(() => closed > 0);
 		detach();
 		expect(closed).toBeGreaterThan(0);
@@ -160,9 +175,9 @@ describe("periodic revalidation", () => {
 
 	it("closes a stream past its bounded lifetime even with a live session", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession();
+		const { token } = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS, 0);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -177,9 +192,9 @@ describe("periodic revalidation", () => {
 
 	it("keeps a live session's stream open", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession();
+		const { token } = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -192,9 +207,9 @@ describe("periodic revalidation", () => {
 
 	it("stops revalidating once the stream detaches", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession();
+		const { token } = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -210,14 +225,14 @@ describe("periodic revalidation", () => {
 describe("a revalidation that cannot answer fails CLOSED", () => {
 	function gatedStore(): FakeStore {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		return store;
 	}
 
 	it("closes a protected stream when the store rejects", async () => {
 		const store = gatedStore();
 		const svc = new SessionAuthService(store);
-		const session = await svc.createSession();
+		const session = await svc.createSession(BINDING);
 		if (!session) throw new Error("no session");
 		// SQLITE_BUSY, a corrupt read, anything: the answer to "is this session
 		// still live?" is now unknown, and unknown must not mean "keep streaming".
@@ -237,7 +252,7 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 	it("closes a protected stream whose revalidation NEVER resolves", async () => {
 		const store = gatedStore();
 		const svc = new SessionAuthService(store);
-		const session = await svc.createSession();
+		const session = await svc.createSession(BINDING);
 		if (!session) throw new Error("no session");
 		// The adapter retries a busy database for minutes, so a stalled read can
 		// outlast any deadline that is only checked AFTER it returns.
@@ -309,7 +324,7 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 		// noticed start failing (SQLITE_BUSY retries, a locked file). The gate is
 		// live and this connection is on the wrong side of it.
 		await new Promise((r) => setTimeout(r, TICK_MS));
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		store.getManagementPassword = async () => {
 			throw new Error("database is locked");
 		};
@@ -332,7 +347,7 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 			closed++;
 		});
 		await new Promise((r) => setTimeout(r, TICK_MS));
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		store.getManagementPassword = () => new Promise(() => {});
 		await waitFor(() => closed > 0);
 		detach();
@@ -342,7 +357,7 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 	it("never runs two revalidation ticks at once", async () => {
 		const store = gatedStore();
 		const svc = new SessionAuthService(store);
-		const session = await svc.createSession();
+		const session = await svc.createSession(BINDING);
 		if (!session) throw new Error("no session");
 		let inFlight = 0;
 		let peak = 0;
@@ -371,9 +386,9 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 describe("logout closes that session's streams immediately", () => {
 	it("closes every stream registered under the token hash", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession();
+		const { token } = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, 60_000);
 		let closedA = 0;
 		let closedB = 0;
@@ -392,10 +407,10 @@ describe("logout closes that session's streams immediately", () => {
 
 	it("leaves another session's streams running", async () => {
 		const store = new FakeStore();
-		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const mine = await svc.createSession();
-		const theirs = await svc.createSession();
+		const mine = await svc.createSession(BINDING);
+		const theirs = await svc.createSession(BINDING);
 		const guard = createSessionStreamGuard(svc, 60_000);
 		let closedTheirs = 0;
 		const detach = guard.attach(streamRequest(theirs.token), () => {

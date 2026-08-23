@@ -109,9 +109,15 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 	}
 
 	/**
-	 * Insert a session, optionally CONDITIONAL on the password it was authorized
-	 * by still being the stored one. Returns the rows inserted, so 0 means the
-	 * password changed under the caller and the session was NOT issued.
+	 * Insert a session, CONDITIONAL on the password it was authorized by still
+	 * being the stored one. Returns the rows inserted, so 0 means the password
+	 * changed under the caller and the session was NOT issued.
+	 *
+	 * The binding is required, and there is deliberately no unconditional form.
+	 * A session exists because a password authorized it, so a caller that cannot
+	 * name which one has nothing to issue a session for — and an optional
+	 * parameter is one forgotten argument away from reinstating exactly the race
+	 * this refuses.
 	 *
 	 * The condition is part of the INSERT rather than a read-then-write, because
 	 * a read-then-write is the same race one statement further down: SQLite
@@ -122,21 +128,8 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 	 */
 	async createSession(
 		record: AuthSessionRecord,
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	): Promise<number> {
-		if (!boundTo) {
-			await this.run(
-				`INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at)
-				 VALUES (?, ?, ?, ?)`,
-				[
-					record.tokenHash,
-					record.createdAt,
-					record.expiresAt,
-					record.lastSeenAt,
-				],
-			);
-			return 1;
-		}
 		return this.runWithChanges(
 			`INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at)
 			 SELECT ?, ?, ?, ?

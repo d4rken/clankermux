@@ -45,14 +45,14 @@ class FakeStore implements SessionAuthStore {
 	}
 	async createManagementSession(
 		record: AuthSessionRecord,
-		boundTo?: PasswordBinding | null,
+		boundTo: PasswordBinding,
 	) {
 		// Mirrors the conditional INSERT: a session may not be issued against a
-		// verifier that is no longer the stored one.
+		// verifier that is no longer the stored one, and there is no unbound form
+		// to fall through to.
 		if (
-			boundTo &&
-			(this.password?.verifier !== boundTo.verifier ||
-				this.password?.params !== boundTo.params)
+			this.password?.verifier !== boundTo.verifier ||
+			this.password?.params !== boundTo.params
 		) {
 			return 0;
 		}
@@ -100,9 +100,14 @@ beforeEach(() => {
 	svc = new SessionAuthService(store, hasher);
 });
 
-async function configure(password: string) {
+/**
+ * Store a password and return the binding a verified login would carry. Every
+ * session here is minted against it, because nothing can mint one without it.
+ */
+async function configure(password: string): Promise<PasswordBinding> {
 	const { verifier, params } = await hasher.hash(password);
 	store.password = { verifier, params, updatedAt: 0 };
+	return { verifier, params };
 }
 
 function loginRequest(body: unknown, raw?: string): Request {
@@ -440,8 +445,8 @@ describe("a login that races a password rotation", () => {
 
 describe("POST /api/auth/logout", () => {
 	it("deletes the session and clears the cookie", async () => {
-		await configure("hunter2");
-		const { token } = await svc.createSession();
+		const binding = await configure("hunter2");
+		const { token } = await svc.createSession(binding);
 		const res = await createAuthLogoutHandler(svc)(
 			new Request("http://localhost/api/auth/logout", {
 				method: "POST",
@@ -495,15 +500,15 @@ describe("GET /api/auth/status", () => {
 	});
 
 	it("reports a live session once one exists", async () => {
-		await configure("hunter2");
-		const { token } = await svc.createSession();
+		const binding = await configure("hunter2");
+		const { token } = await svc.createSession(binding);
 		const res = await createAuthStatusHandler(svc)(statusRequest(token));
 		expect(await res.json()).toEqual({ configured: true, authenticated: true });
 	});
 
 	it("stops reporting a session after logout", async () => {
-		await configure("hunter2");
-		const { token } = await svc.createSession();
+		const binding = await configure("hunter2");
+		const { token } = await svc.createSession(binding);
 		await svc.destroySession(statusRequest(token));
 		const res = await createAuthStatusHandler(svc)(statusRequest(token));
 		expect(await res.json()).toEqual({
