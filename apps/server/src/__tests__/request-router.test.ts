@@ -466,32 +466,34 @@ const dashboardConfigs: { name: string; options: Options }[] = [
 ];
 
 describe("the root no longer serves agent traffic", () => {
-	for (const { name, options } of dashboardConfigs) {
-		for (const path of LEGACY_ROOT_PATHS) {
-			it(`404s ${path} with ${name}`, async () => {
-				const { deps, calls } = makeDeps(options);
-				const res = await routeRequest(
-					makeRequest(path, { method: "POST", headers: withKey }),
-					deps,
-				);
+	for (const method of ["GET", "POST"] as const) {
+		for (const { name, options } of dashboardConfigs) {
+			for (const path of LEGACY_ROOT_PATHS) {
+				it(`404s ${method} ${path} with ${name}`, async () => {
+					const { deps, calls } = makeDeps(options);
+					const res = await routeRequest(
+						makeRequest(path, { method, headers: withKey }),
+						deps,
+					);
 
-				expect(res.status).toBe(404);
-				expect(res.headers.get("Content-Type")).toBe("application/json");
-				const body = (await res.json()) as { error: { message: string } };
-				expect(body.error.message).toContain("/wire/anthropic");
-				expect(body.error.message).toContain("/wire/openai");
+					expect(res.status).toBe(404);
+					expect(res.headers.get("Content-Type")).toBe("application/json");
+					const body = (await res.json()) as { error: { message: string } };
+					expect(body.error.message).toContain("/wire/anthropic");
+					expect(body.error.message).toContain("/wire/openai");
 
-				// Never the dashboard's index.html, in any mode.
-				expect(calls.dashboard).toEqual([]);
-				// The refusal is the FIRST thing the root does, so nothing behind
-				// it ran: not the management router, not the auth gate, and
-				// certainly nothing that dispatches.
-				expect(calls.api).toEqual([]);
-				expect(calls.auth).toEqual([]);
-				expect(calls.dispatch).toEqual([]);
-				expect(calls.responses).toEqual([]);
-				expect(calls.models).toBe(0);
-			});
+					// Never the dashboard's index.html, in any mode.
+					expect(calls.dashboard).toEqual([]);
+					// The refusal is the FIRST thing the root does, so nothing behind
+					// it ran: not the management router, not the auth gate, and
+					// certainly nothing that dispatches.
+					expect(calls.api).toEqual([]);
+					expect(calls.auth).toEqual([]);
+					expect(calls.dispatch).toEqual([]);
+					expect(calls.responses).toEqual([]);
+					expect(calls.models).toBe(0);
+				});
+			}
 		}
 	}
 
