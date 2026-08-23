@@ -432,7 +432,114 @@ describe("mounted authentication", () => {
 	});
 });
 
-describe("the legacy root flow is unchanged", () => {
+/**
+ * Everything the root used to proxy. Exactly the set the removed
+ * `isRootProxyPath` matched, spelled out so a narrowing of the predicate cannot
+ * quietly reopen part of the surface.
+ */
+const LEGACY_ROOT_PATHS = [
+	"/v1",
+	"/v1/",
+	"/v1/messages",
+	"/v1/messages/count_tokens",
+	"/v1/responses",
+	"/v1/models",
+	"/v1/code/sessions",
+	"/messages",
+	"/messages/",
+	"/messages/foo",
+] as const;
+
+/**
+ * The three ways the dashboard can be configured. The refusal has to be
+ * identical in all of them: it used to be the dashboard branch that decided
+ * whether an unrecognized root path was proxied, and that is exactly the kind
+ * of mode-dependence this rejection must not have.
+ */
+const dashboardConfigs: { name: string; options: Options }[] = [
+	{ name: "the dashboard on", options: {} },
+	{ name: "the dashboard off", options: { withDashboard: false } },
+	{
+		name: "the dashboard on but no assets built",
+		options: { withDashboard: true, dashboardManifest: null },
+	},
+];
+
+describe("the root no longer serves agent traffic", () => {
+	for (const { name, options } of dashboardConfigs) {
+		for (const path of LEGACY_ROOT_PATHS) {
+			it(`404s ${path} with ${name}`, async () => {
+				const { deps, calls } = makeDeps(options);
+				const res = await routeRequest(
+					makeRequest(path, { method: "POST", headers: withKey }),
+					deps,
+				);
+
+				expect(res.status).toBe(404);
+				expect(res.headers.get("Content-Type")).toBe("application/json");
+				const body = (await res.json()) as { error: { message: string } };
+				expect(body.error.message).toContain("/wire/anthropic");
+				expect(body.error.message).toContain("/wire/openai");
+
+				// Never the dashboard's index.html, in any mode.
+				expect(calls.dashboard).toEqual([]);
+				// The refusal is the FIRST thing the root does, so nothing behind
+				// it ran: not the management router, not the auth gate, and
+				// certainly nothing that dispatches.
+				expect(calls.api).toEqual([]);
+				expect(calls.auth).toEqual([]);
+				expect(calls.dispatch).toEqual([]);
+				expect(calls.responses).toEqual([]);
+				expect(calls.models).toBe(0);
+			});
+		}
+	}
+
+	// The rejection sits ahead of the auth gate, so a client with no key gets
+	// told where to point itself rather than being asked for a credential it
+	// would then spend on a 404.
+	it("404s an unauthenticated legacy request rather than 401ing it", async () => {
+		const { deps, calls } = makeDeps({ authenticated: false });
+		const res = await routeRequest(
+			makeRequest("/v1/messages", { method: "POST" }),
+			deps,
+		);
+
+		expect(res.status).toBe(404);
+		expect(calls.auth).toEqual([]);
+	});
+
+	// The identity-bound refusal exists to stop a pooled token reaching an
+	// endpoint bound to one account. At the root there is no dispatch left to
+	// stop, so `/v1/code/*` gets the same answer as every other removed path.
+	// The refusal keeps its job on the mount and in the proxy's ingest
+	// prologue.
+	it("404s root /v1/code/*, not the identity-bound 501", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(makeRequest("/v1/code/sessions"), deps);
+
+		expect(res.status).toBe(404);
+		expect(res.headers.get("x-clankermux-refusal")).toBeNull();
+		expect(calls.dispatch).toEqual([]);
+	});
+
+	// Same stem, one segment longer: never proxied, so the refusal must not
+	// claim them. A status check cannot tell the legacy 404 from the ordinary
+	// `Unknown route` 404 — both are 404s naming the mounts — so the assertion
+	// is that the request reached the branches BEHIND the refusal.
+	it("leaves same-stem neighbours to the ordinary root routing", async () => {
+		for (const path of ["/v10", "/messagesx"]) {
+			const { deps, calls } = makeDeps();
+			const res = await routeRequest(makeRequest(path), deps);
+
+			expect(res.status).toBe(200);
+			expect(calls.api.map((c) => c.pathname)).toEqual([path]);
+			expect(calls.dashboard.map((c) => c.assetPath)).toEqual(["/index.html"]);
+		}
+	});
+});
+
+describe("the root's management and dashboard surface", () => {
 	it("answers management routes from the API router", async () => {
 		const { deps, calls } = makeDeps({ apiRoutes: ["/api/system/status"] });
 		const res = await routeRequest(makeRequest("/api/system/status"), deps);
@@ -451,44 +558,40 @@ describe("the legacy root flow is unchanged", () => {
 		expect(calls.dispatch).toEqual([]);
 	});
 
-	it("passes Claude Code's own root telemetry paths to the proxy", async () => {
-		const { deps, calls } = makeDeps();
-		await routeRequest(
-			makeRequest("/api/event_logging/batch", { method: "POST" }),
-			deps,
-		);
-		await routeRequest(makeRequest("/api/system/package-manager"), deps);
-
-		expect(calls.dispatch.map((c) => c.pathname)).toEqual([
+	// Claude Code's own root telemetry paths are no longer special-cased here.
+	// They are answered under `/wire/anthropic`, which is where a client
+	// configured for this proxy sends them; at the root they are just
+	// management paths we do not serve.
+	it("404s Claude Code's root telemetry paths as unknown management routes", async () => {
+		for (const path of [
 			"/api/event_logging/batch",
 			"/api/system/package-manager",
-		]);
+		]) {
+			const { deps, calls } = makeDeps();
+			const res = await routeRequest(
+				makeRequest(path, { method: "POST" }),
+				deps,
+			);
+
+			expect(res.status).toBe(404);
+			const body = (await res.json()) as { error: { message: string } };
+			expect(body.error.message).toBe(`Unknown API route: ${path}`);
+			expect(calls.auth).toEqual([]);
+			expect(calls.dispatch).toEqual([]);
+		}
 	});
 
-	it("proxies root /v1 and /messages traffic", async () => {
-		const { deps, calls } = makeDeps();
-		await routeRequest(
-			makeRequest("/v1/messages", { method: "POST", headers: withKey }),
-			deps,
-		);
-		await routeRequest(
-			makeRequest("/messages", { method: "POST", headers: withKey }),
-			deps,
-		);
-
-		expect(calls.dispatch.map((c) => c.pathname)).toEqual([
-			"/v1/messages",
-			"/messages",
-		]);
-	});
-
-	it("refuses identity-bound endpoints at the root, before authenticating", async () => {
+	// Root `/api/oauth/*` is the half of the identity-bound set the management
+	// router does not own, and the refusal still has work to do there: it is
+	// reachable without a key, because root `/api/*` is genuinely public.
+	it("refuses identity-bound /api/oauth paths at the root, before authenticating", async () => {
 		const { deps, calls } = makeDeps({ authenticated: false });
-		const res = await routeRequest(makeRequest("/v1/code/sessions"), deps);
+		const res = await routeRequest(makeRequest("/api/oauth/profile"), deps);
 
-		// Root /api/* is genuinely public, so the refusal must stay reachable
-		// without a key — the opposite ordering from the mount.
 		expect(res.status).toBe(501);
+		expect(res.headers.get("x-clankermux-refusal")).toBe(
+			"identity-bound-endpoint",
+		);
 		expect(calls.auth).toEqual([]);
 		expect(calls.dispatch).toEqual([]);
 	});
@@ -503,15 +606,6 @@ describe("the legacy root flow is unchanged", () => {
 			"/index.html",
 		]);
 		expect(calls.dispatch).toEqual([]);
-	});
-
-	it("does not answer root /v1 traffic with the dashboard", async () => {
-		const { deps, calls } = makeDeps();
-		await routeRequest(
-			makeRequest("/v1/messages", { method: "POST", headers: withKey }),
-			deps,
-		);
-		expect(calls.dashboard).toEqual([]);
 	});
 });
 
@@ -539,15 +633,11 @@ describe("headless mode routes like dashboard mode", () => {
 		}
 	});
 
-	it("still proxies real agent traffic with the dashboard off", async () => {
+	it("still proxies mounted agent traffic with the dashboard off", async () => {
 		const { deps, calls } = makeDeps({
 			withDashboard: false,
 			dashboardManifest: null,
 		});
-		await routeRequest(
-			makeRequest("/v1/messages", { method: "POST", headers: withKey }),
-			deps,
-		);
 		await routeRequest(
 			makeRequest("/wire/anthropic/v1/messages", {
 				method: "POST",
@@ -556,9 +646,6 @@ describe("headless mode routes like dashboard mode", () => {
 			deps,
 		);
 
-		expect(calls.dispatch.map((c) => c.pathname)).toEqual([
-			"/v1/messages",
-			"/v1/messages",
-		]);
+		expect(calls.dispatch.map((c) => c.pathname)).toEqual(["/v1/messages"]);
 	});
 });

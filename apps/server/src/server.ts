@@ -1401,7 +1401,6 @@ Agent base URLs (the mount names the wire dialect the client speaks, not the acc
 - OpenAI Responses:   ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.openai}
 
 Available endpoints:
-- POST   ${protocol}://localhost:${serverInstance.port}/v1/*            → Proxy to Claude API (legacy root)
 - GET    ${protocol}://localhost:${serverInstance.port}/api/accounts    → List accounts
 - POST   ${protocol}://localhost:${serverInstance.port}/api/accounts    → Add account
 - DELETE ${protocol}://localhost:${serverInstance.port}/api/accounts/:id → Remove account
