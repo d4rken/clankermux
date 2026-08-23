@@ -28,6 +28,16 @@ export interface AuthenticationResult {
  */
 export type AuthRequirement = "public" | "api_key";
 
+/**
+ * The requirement a path carries when the caller states none.
+ *
+ * `/v1*` and `/messages*` stay gated even though the root router no longer
+ * routes them — it answers them with a 404 before any auth gate, so nothing
+ * reaches here by that route any more. They keep their `api_key` mapping
+ * because this is a general policy default, not a description of the router:
+ * demoting them to the public catch-all would turn any future caller that
+ * passes an unstripped agent path into a fail-open.
+ */
 function policyFor(path: string): AuthRequirement {
 	if (path === "/health") return "public";
 	// The agent-traffic mounts. A caller is expected to hand us the STRIPPED,

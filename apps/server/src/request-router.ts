@@ -100,8 +100,16 @@ function jsonError(status: number, type: string, message: string): Response {
 	);
 }
 
-/** Anthropic-style agent traffic at the root of the port. */
-function isRootProxyPath(pathname: string): boolean {
+/**
+ * The agent surface the root used to serve, and no longer does.
+ *
+ * Exactly the set the root proxy flow matched before the mounts became the only
+ * entry points: `/v1`, `/v1/*`, `/messages`, `/messages/*`. Segment-bounded, so
+ * `/v10` and `/messagesx` are ordinary root paths and still reach the dashboard
+ * or the catch-all 404 — this predicate claims only what genuinely used to be
+ * proxied.
+ */
+function isLegacyRootAgentPath(pathname: string): boolean {
 	return (
 		pathname === "/v1" ||
 		pathname.startsWith("/v1/") ||
@@ -112,24 +120,6 @@ function isRootProxyPath(pathname: string): boolean {
 
 function isApiPath(pathname: string): boolean {
 	return pathname === "/api" || pathname.startsWith("/api/");
-}
-
-/**
- * Claude Code's own telemetry endpoints, which reach us at the root when a
- * client is configured the old way (no mount). They must fall through to the
- * proxy's ingest prologue, which answers them with the 200 the client expects;
- * dropping them into the `/api/*` 404 leaves the CLI talking to something that
- * visibly is not Anthropic.
- *
- * This exact-match list is the thing the mounts make unnecessary: under
- * `/wire/anthropic` an unrecognized Anthropic path is simply forwarded, which
- * is why `/api/event_logging/v2/batch` works there and 404s here.
- */
-function isClaudeCodeInternalPath(pathname: string): boolean {
-	return (
-		pathname === "/api/event_logging/batch" ||
-		pathname === "/api/system/package-manager"
-	);
 }
 
 const RESPONSES_PATHS = new Set(["/v1/responses", "/v1/responses/compact"]);
@@ -251,42 +241,69 @@ async function routeMountedRequest(
 }
 
 /**
- * The legacy root flow: unchanged apart from where the proxy boundary is
- * enforced (see the comment on the 404 below).
+ * The root of the port: management REST, the dashboard, and 404s.
+ *
+ * The root dispatches no agent traffic at all. The paths it used to proxy are
+ * refused here FIRST, ahead of every other branch, which is what makes "the
+ * root never serves agent traffic" unconditional rather than a consequence of
+ * which branch happens to match first.
+ *
+ * The parameter type states the same thing at compile time: this function is
+ * handed only the management and dashboard dependencies, so reaching
+ * authentication or proxy dispatch from root code would take a deliberate
+ * widening of the type.
  */
 async function routeRootRequest(
 	req: Request,
 	url: URL,
-	deps: RequestRouterDeps,
+	deps: Pick<
+		RequestRouterDeps,
+		| "handleApiRequest"
+		| "withDashboard"
+		| "dashboardManifest"
+		| "serveDashboardFile"
+	>,
 ): Promise<Response> {
+	const p = url.pathname;
+
+	// The removed agent surface, refused BEFORE anything else runs.
+	//
+	// First position is the guarantee. Answered any later, the refusal would be
+	// conditional on the branches ahead of it — `/v1/code/…` would still
+	// collect the identity-bound 501 rather than this 404 — and a client left
+	// pointed at the old base URL would get an answer that varies by path
+	// instead of one that always says where to point it.
+	if (isLegacyRootAgentPath(p)) {
+		return jsonError(
+			HTTP_STATUS.NOT_FOUND,
+			"not_found",
+			`${p} is no longer served at the root. Point the client at ` +
+				`${WIRE_MOUNTS.anthropic} (Anthropic Messages) or ${WIRE_MOUNTS.openai} ` +
+				"(OpenAI Responses).",
+		);
+	}
+
 	// Try API routes first
 	const apiResponse = await deps.handleApiRequest(url, req);
 	if (apiResponse) {
 		return apiResponse;
 	}
 
-	// Identity-bound endpoints are refused before ANY other routing.
-	// Ahead of the dashboard branch specifically: that branch decides by
-	// raw pathname, so an encoded spelling like `/%76%31/code/sessions`
-	// does not look like a `/v1/` proxy path to it and would be answered
-	// with the dashboard's index.html — no credential leaked, but not the
-	// deliberate, visible refusal this is supposed to give. Ahead of the
-	// auth gate too, which is fine: `policyFor` already treats `/api/*` as
-	// public, and declining to serve an endpoint needs no credential.
+	// Identity-bound endpoints are refused before any remaining routing. At the
+	// root this arm covers `/api/oauth/*`, the part of the set the API router
+	// does not own. Ahead of the dashboard branch specifically: that branch
+	// decides by raw pathname, so an encoded spelling would be answered with the
+	// dashboard's index.html — no credential leaked, but not the deliberate,
+	// visible refusal this is supposed to give. Ahead of any auth gate too,
+	// which is fine: `policyFor` already treats `/api/*` as public, and
+	// declining to serve an endpoint needs no credential.
 	//
-	// The `/v1/code/…` half of the set is ALSO refused by the proxy's
-	// ingest prologue. Both call the same predicate, so the two entry
-	// points cannot drift, and the prologue is what guarantees no request
-	// reaching the proxy by another route can be served with a pooled
-	// token.
-	if (isIdentityBoundPath(url.pathname)) {
-		return createIdentityBoundRefusalResponse(url.pathname);
+	// The proxy's ingest prologue calls the same predicate, and that is what
+	// guarantees no request reaching the proxy by any route can be served with
+	// a pooled token.
+	if (isIdentityBoundPath(p)) {
+		return createIdentityBoundRefusalResponse(p);
 	}
-
-	const p = url.pathname;
-	// Anthropic-style clients POSTing to /messages or /messages/* (and /v1,
-	// /v1/*) must reach proxy dispatch. Mirrors the boundary `policyFor` uses.
-	const isProxyPath = isRootProxyPath(p);
 
 	// Dashboard routes (only if enabled and assets are available)
 	if (deps.withDashboard && deps.dashboardManifest) {
@@ -295,19 +312,20 @@ async function routeRootRequest(
 			return deps.serveDashboardFile(p, undefined, CACHE.CACHE_CONTROL_STATIC);
 		}
 
-		// For all non-API, non-proxy routes, serve the dashboard index.html
-		// (client-side routing). This allows React Router to handle all
-		// dashboard routes without maintaining a list.
-		if (!p.startsWith("/api/") && !isProxyPath) {
+		// For all non-API routes, serve the dashboard index.html (client-side
+		// routing). This allows React Router to handle all dashboard routes
+		// without maintaining a list.
+		if (!p.startsWith("/api/")) {
 			return deps.serveDashboardFile("/index.html", "text/html");
 		}
 	}
 
-	// Reject unmatched /api/* paths with 404 before falling through to the
-	// proxy. Without this, an unknown management URL like /api/not-a-route
-	// would be treated as a proxy path (it'd 404 deeper in the pipeline,
-	// but with confusing semantics and an account-selection round-trip).
-	if (!isClaudeCodeInternalPath(p) && isApiPath(p)) {
+	// Unmatched /api/* paths get the management 404 rather than the generic
+	// one, so an unknown management URL says which namespace it failed in.
+	// Claude Code's own root telemetry paths land here too: they are answered
+	// under `/wire/anthropic`, which is where a client configured for this
+	// proxy sends them.
+	if (isApiPath(p)) {
 		return jsonError(
 			HTTP_STATUS.NOT_FOUND,
 			"not_found",
@@ -315,65 +333,20 @@ async function routeRootRequest(
 		);
 	}
 
-	// Only agent traffic reaches the proxy from the root, in EVERY mode.
-	//
-	// This test used to live inside the dashboard branch above, so with the
-	// dashboard disabled it did not run at all and any unrecognized path fell
-	// through to authentication (public by default, at the root) and then
-	// upstream on a pooled account. Headless and dashboard deployments now route
-	// identically; with the dashboard on, this is unreachable, because the
-	// index.html branch already answered everything it covers.
-	if (!isProxyPath && !isClaudeCodeInternalPath(p)) {
-		return jsonError(
-			HTTP_STATUS.NOT_FOUND,
-			"not_found",
-			`Unknown route: ${p}. Agent traffic belongs under ${WIRE_MOUNTS.anthropic} ` +
-				`or ${WIRE_MOUNTS.openai}.`,
-		);
-	}
-
-	// All other paths go to proxy.
-	//
-	// Authenticate inside its OWN error boundary. A throw from THIS call is
-	// an auth-service failure, and answering 401 preserves the contract this
-	// endpoint has always had for that case. What changed is the SCOPE: the
-	// boundary now covers this call alone. Everything downstream of a
-	// successful authentication gets the separate boundary further down,
-	// because a failure there says nothing about the caller's credentials.
-	let authResult: AuthenticationResult;
-	try {
-		authResult = await deps.authenticate(req, p, req.method);
-	} catch (authError) {
-		return terminalForRequestError(req, authError, "auth", url.pathname);
-	}
-
-	if (!authResult.isAuthenticated) {
-		return jsonError(
-			401,
-			"authentication_error",
-			authResult.error || "Authentication failed",
-		);
-	}
-
-	// Everything past this point runs on an AUTHENTICATED request, so a
-	// failure here is a departed client or our own fault — never the
-	// caller's credentials. Its own boundary keeps it from being reported
-	// as an auth error, which is what this whole block used to do.
-	try {
-		return await serveAgentRequest(req, url, authResult, deps);
-	} catch (dispatchError) {
-		return terminalForRequestError(
-			req,
-			dispatchError,
-			"dispatch",
-			url.pathname,
-		);
-	}
+	// Everything else, in EVERY mode. With the dashboard on this is
+	// unreachable, because the index.html branch already answered everything it
+	// covers; headless and dashboard deployments otherwise answer identically.
+	return jsonError(
+		HTTP_STATUS.NOT_FOUND,
+		"not_found",
+		`Unknown route: ${p}. Agent traffic belongs under ${WIRE_MOUNTS.anthropic} ` +
+			`or ${WIRE_MOUNTS.openai}.`,
+	);
 }
 
 /**
- * The post-authentication chain, shared by both entry points so the mounted
- * and root paths cannot drift apart in what they dispatch.
+ * The post-authentication chain for mounted agent traffic. The root reaches
+ * nothing here: the mounts are the only entry point that dispatches.
  *
  * `url` is canonical here: root-relative, mount already stripped.
  */

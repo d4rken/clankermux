@@ -46,7 +46,10 @@ export type WireMatch =
 	| { kind: "mounted"; dialect: WireDialect; logicalPath: string }
 	/** Inside `/wire` but not a dialect we serve. Answered with a visible 404. */
 	| { kind: "reserved" }
-	/** Outside the namespace entirely; the legacy root flow handles it. */
+	/**
+	 * Outside the namespace entirely. The root handles it, and the root serves
+	 * management REST, the dashboard and 404s only — never agent traffic.
+	 */
 	| { kind: "unmounted" };
 
 /**
@@ -65,9 +68,9 @@ export type WireMatch =
  *
  * Literal, because a decoded match would create a second spelling of the mount
  * that only this function understands. `/%77ire/anthropic/...` does not match
- * and falls through to the root flow, which has its own answer for it (a JSON
- * 404 for anything that is not a known root proxy path). Nothing is admitted to
- * the mounted branch that did not spell the mount exactly.
+ * and falls through to the root flow, which has its own answer for it (the
+ * dashboard, or a JSON 404). Nothing is admitted to the mounted branch that did
+ * not spell the mount exactly.
  *
  * Everything else under `/wire` is `reserved` rather than `unmounted`: the
  * namespace is ours, so a misconfigured base URL has to fail visibly instead of
