@@ -2278,7 +2278,7 @@ describe("CodexProvider native Responses passthrough", () => {
 		}),
 	]);
 
-	it("forwards a native-flagged body with ONLY the 3 patches applied", async () => {
+	it("forwards a native-flagged body with ONLY the 3 transport patches applied", async () => {
 		const provider = new CodexProvider();
 		const transformed = await provider.transformRequestBody(
 			makeNativeRequest(),
@@ -2286,20 +2286,19 @@ describe("CodexProvider native Responses passthrough", () => {
 		);
 		const body = await transformed.json();
 
-		// The 3 patches: stream forced, store forced, previous_response_id dropped.
+		// The 3 transport patches: stream forced, store forced,
+		// previous_response_id dropped. This body carries none of the parameters
+		// the backend rejects, so the sanitation step is a no-op here.
 		expect(body.stream).toBe(true);
 		expect(body.store).toBe(false);
 		expect("previous_response_id" in body).toBe(false);
 
 		// Everything else is forwarded verbatim — no Anthropic→Codex translation,
-		// no model mapping, built-in tool types survive.
-		expect(body.model).toBe("gpt-5.5-codex");
-		expect(body.instructions).toBe("Be brief.");
-		expect(body.input).toEqual(nativeBody.input);
-		expect(body.tools).toEqual(nativeBody.tools);
-		expect(body.tool_choice).toBe("auto");
-		expect(body.parallel_tool_calls).toBe(false);
-		expect(body.reasoning).toEqual({ effort: "low" });
+		// no model mapping, built-in tool types survive. Asserted as WHOLE-OBJECT
+		// equality so the "ONLY" in the name is real: a future step that INJECTS a
+		// field fails here, which a field-by-field check would wave through.
+		const { previous_response_id: _dropped, ...forwarded } = nativeBody;
+		expect(body).toEqual({ ...forwarded, stream: true, store: false });
 
 		// Stream-intent header parity with the normal path.
 		expect(transformed.headers.get("x-clankermux-request-stream")).toBe("true");
@@ -2568,6 +2567,50 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		expect(body.input).toHaveLength(1);
 	});
 
+	it("strips temperature, metadata and user on the native path", async () => {
+		// Live-verified 2026-08-21 (issue #6 follow-up): each of these alone is a
+		// 400 `{"detail":"Unsupported parameter: <name>"}` from the ChatGPT
+		// backend, and the same request succeeds once it is removed.
+		const { body } = await nativeTransform({
+			temperature: 0.2,
+			metadata: { session: "s-1" },
+			user: "user-123",
+		});
+		expect("temperature" in body).toBe(false);
+		expect("metadata" in body).toBe(false);
+		expect("user" in body).toBe(false);
+		expect(body.stream).toBe(true);
+		expect(body.store).toBe(false);
+		expect(body.input).toHaveLength(1);
+	});
+
+	it("strips temperature: 0 (a real client choice, not an absent value)", async () => {
+		const { body } = await nativeTransform({ temperature: 0 });
+		expect("temperature" in body).toBe(false);
+	});
+
+	it("forwards Responses fields we do not recognise (denylist, not allowlist)", async () => {
+		// The lane's contract: only fields the backend is KNOWN to reject are
+		// removed, so a field it learns to accept before we learn it exists still
+		// reaches it. An unknown tools[].type stays too — that is a genuine
+		// client error the backend's own 400 names precisely.
+		const { body } = await nativeTransform({
+			include: ["reasoning.encrypted_content"],
+			service_tier: "priority",
+			text: { verbosity: "low" },
+			max_tokens: 100,
+			tools: [{ type: "web_search" }, { type: "not_a_real_tool" }],
+		});
+		expect(body.include).toEqual(["reasoning.encrypted_content"]);
+		expect(body.service_tier).toBe("priority");
+		expect(body.text).toEqual({ verbosity: "low" });
+		expect(body.max_tokens).toBe(100);
+		expect(body.tools).toEqual([
+			{ type: "web_search" },
+			{ type: "not_a_real_tool" },
+		]);
+	});
+
 	it("strips max_output_tokens on the native path with a model override applied", async () => {
 		// The proxy's prepareNativeBody rewrites `model` for a combo slot BEFORE
 		// the provider sees the body — sanitation must not be model-conditional.
@@ -2626,16 +2669,26 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		});
 	}
 
-	it("keeps max_output_tokens and the raw effort for a custom-endpoint account", async () => {
+	it("keeps every rejected param and the raw effort for a custom-endpoint account", async () => {
 		// A custom endpoint is not the ChatGPT backend: deleting a client's output
-		// cap there would silently uncap spend, and its effort vocabulary is its own.
+		// cap there would silently uncap spend, dropping its temperature would
+		// silently change sampling, and its effort vocabulary is its own.
 		const { body } = await nativeTransform(
-			{ max_output_tokens: 4096, reasoning: { effort: "minimal" } },
+			{
+				max_output_tokens: 4096,
+				temperature: 0.2,
+				metadata: { session: "s-1" },
+				user: "user-123",
+				reasoning: { effort: "minimal" },
+			},
 			codexAccount({
 				custom_endpoint: "https://my-openai-proxy.example.com/v1/responses",
 			}),
 		);
 		expect(body.max_output_tokens).toBe(4096);
+		expect(body.temperature).toBe(0.2);
+		expect(body.metadata).toEqual({ session: "s-1" });
+		expect(body.user).toBe("user-123");
 		expect(body.reasoning).toEqual({ effort: "minimal" });
 	});
 
