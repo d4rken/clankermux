@@ -1,3 +1,4 @@
+import type { PasswordBinding } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import {
@@ -95,23 +96,34 @@ export function createAuthLoginHandler(
 			});
 		}
 
-		let ok: boolean;
+		let binding: PasswordBinding | null;
 		try {
-			ok = await sessionAuth.verifyPassword(password);
+			binding = await sessionAuth.verifyPassword(password);
 		} finally {
 			claim.release();
 		}
 
-		if (!ok) {
+		if (!binding) {
 			// Deliberately no lockout and no attempt counter: on a single-user box
 			// a lockout is a self-DoS. The throttle above is the whole defence.
 			return jsonResponse({ error: "Invalid password" }, 401);
 		}
 
-		const { token } = await sessionAuth.createSession();
+		// The session is minted against the verifier the check actually ran on.
+		// Derivation takes ~35ms, and an operator rotating the password inside
+		// that window has already deleted every session; issuing one here anyway
+		// would hand the revoked password 30 more days of access.
+		const session = await sessionAuth.createSession(binding);
+		if (!session) {
+			log.warn(
+				"A login raced a password rotation; no session was issued for the replaced password",
+			);
+			return jsonResponse({ error: "Invalid password" }, 401);
+		}
+
 		log.info("Management session established");
 		return jsonResponse({ authenticated: true }, 200, {
-			"Set-Cookie": sessionCookieHeader(token),
+			"Set-Cookie": sessionCookieHeader(session.token),
 		});
 	};
 }

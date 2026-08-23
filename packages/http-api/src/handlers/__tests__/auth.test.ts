@@ -7,11 +7,16 @@
  * endpoint through it would make it report a live session to a browser that has
  * never logged in, and the dashboard would then never show its login screen.
  */
+import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import type {
-	AuthSessionRecord,
-	StoredPasswordVerifier,
+import {
+	AuthRepository,
+	type AuthSessionRecord,
+	BunSqlAdapter,
+	ensureSchema,
+	type PasswordBinding,
+	type StoredPasswordVerifier,
 } from "@clankermux/database";
 import { LoginThrottle } from "../../services/login-throttle";
 import {
@@ -35,8 +40,21 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword() {
 		return this.password;
 	}
-	async createManagementSession(record: AuthSessionRecord) {
+	async createManagementSession(
+		record: AuthSessionRecord,
+		boundTo?: PasswordBinding | null,
+	) {
+		// Mirrors the conditional INSERT: a session may not be issued against a
+		// verifier that is no longer the stored one.
+		if (
+			boundTo &&
+			(this.password?.verifier !== boundTo.verifier ||
+				this.password?.params !== boundTo.params)
+		) {
+			return 0;
+		}
 		this.sessions.set(record.tokenHash, { ...record });
+		return 1;
 	}
 	async getManagementSession(tokenHash: string) {
 		return this.sessions.get(tokenHash) ?? null;
@@ -183,6 +201,97 @@ describe("POST /api/auth/login", () => {
 		// The slot must be free again, or one failure would wedge the endpoint.
 		const claim = throttle.tryAcquire();
 		expect(claim.ok).toBe(true);
+	});
+});
+
+describe("a login that races a password rotation", () => {
+	/** SessionAuthStore over the real tables, so the SQL is what decides. */
+	function sqliteStore(repo: AuthRepository): SessionAuthStore {
+		return {
+			getManagementPassword: () => repo.getPassword(),
+			createManagementSession: (record, boundTo) =>
+				repo.createSession(record, boundTo),
+			getManagementSession: (tokenHash) => repo.getSession(tokenHash),
+			touchManagementSession: (tokenHash, now, staleBeforeMs) =>
+				repo.touchSession(tokenHash, now, staleBeforeMs),
+			deleteManagementSession: (tokenHash) => repo.deleteSession(tokenHash),
+			cleanupExpiredManagementSessions: (now, idleCutoff) =>
+				repo.deleteExpiredSessions(now, idleCutoff),
+		};
+	}
+
+	it("issues NOTHING when the rotation commits between verify and insert", async () => {
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const repo = new AuthRepository(new BunSqlAdapter(db));
+		const { verifier, params } = await new CountingHasher().hash("hunter2");
+		await repo.setPassword(verifier, params, 1);
+
+		// A barrier where scrypt's ~35ms would be. The attacker holds the window
+		// open by looping logins; the operator rotates inside it.
+		let verifyStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			verifyStarted = resolve;
+		});
+		let releaseVerify = () => {};
+		const held = new Promise<void>((resolve) => {
+			releaseVerify = resolve;
+		});
+		const barrierHasher: PasswordHasher = {
+			hash: async (password) => new CountingHasher().hash(password),
+			verify: async (password, storedVerifier) => {
+				verifyStarted();
+				await held;
+				return (
+					createHash("sha256").update(`x:${password}`).digest("hex") ===
+					storedVerifier
+				);
+			},
+		};
+
+		const service = new SessionAuthService(sqliteStore(repo), barrierHasher);
+		const pending = createAuthLoginHandler(service)(
+			loginRequest({ password: "hunter2" }),
+		);
+		await started;
+
+		// The CLI replaces the verifier and deletes every session. This COMMITS
+		// while the login is still inside its derivation.
+		const rotated = await new CountingHasher().hash("a new password");
+		await repo.setPassword(rotated.verifier, rotated.params, 2);
+
+		releaseVerify();
+		const res = await pending;
+
+		expect(res.status).toBe(401);
+		expect(res.headers.get("set-cookie")).toBeNull();
+		// The whole point: no 30-day session exists for the revoked password.
+		expect(db.query(`SELECT COUNT(*) AS n FROM auth_sessions`).get()).toEqual({
+			n: 0,
+		});
+		db.close();
+	});
+
+	it("still issues a session when no rotation happened", async () => {
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const repo = new AuthRepository(new BunSqlAdapter(db));
+		const { verifier, params } = await new CountingHasher().hash("hunter2");
+		await repo.setPassword(verifier, params, 1);
+
+		const service = new SessionAuthService(
+			sqliteStore(repo),
+			new CountingHasher(),
+		);
+		const res = await createAuthLoginHandler(service)(
+			loginRequest({ password: "hunter2" }),
+		);
+
+		expect(res.status).toBe(200);
+		expect(db.query(`SELECT COUNT(*) AS n FROM auth_sessions`).get()).toEqual({
+			n: 1,
+		});
+		db.close();
 	});
 });
 

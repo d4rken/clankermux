@@ -1,6 +1,7 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import type {
 	AuthSessionRecord,
+	PasswordBinding,
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
@@ -187,7 +188,10 @@ export function clearedSessionCookieHeader(): string {
 /** The persistence this service needs. `DatabaseOperations` satisfies it. */
 export interface SessionAuthStore {
 	getManagementPassword(): Promise<StoredPasswordVerifier | null>;
-	createManagementSession(record: AuthSessionRecord): Promise<void>;
+	createManagementSession(
+		record: AuthSessionRecord,
+		boundTo?: PasswordBinding | null,
+	): Promise<number>;
 	getManagementSession(tokenHash: string): Promise<AuthSessionRecord | null>;
 	touchManagementSession(
 		tokenHash: string,
@@ -240,27 +244,49 @@ export class SessionAuthService {
 	 * Check a password against the stored verifier. One scrypt call, and only
 	 * when a password is actually configured — an unconfigured deployment has
 	 * nothing to check against and must not burn the CPU pretending otherwise.
+	 *
+	 * Returns the EXACT verifier/params pair the check ran against, not a
+	 * boolean. The derivation takes ~35ms, and an operator rotating the password
+	 * in that window revokes the verifier this answer is about; handing the pair
+	 * back is what lets {@link createSession} refuse to mint a session for a
+	 * password that no longer exists.
 	 */
-	async verifyPassword(password: string): Promise<boolean> {
+	async verifyPassword(password: string): Promise<PasswordBinding | null> {
 		const stored = await this.store.getManagementPassword();
-		if (!stored) return false;
-		return this.hasher.verify(password, stored.verifier, stored.params);
+		if (!stored) return null;
+		const ok = await this.hasher.verify(
+			password,
+			stored.verifier,
+			stored.params,
+		);
+		return ok ? { verifier: stored.verifier, params: stored.params } : null;
 	}
 
 	/**
 	 * Mint a session. The token is 32 random bytes; only its SHA-256 is stored,
 	 * so a database read cannot reconstruct a usable cookie.
+	 *
+	 * `boundTo` is the password the caller was authorized by. The insert is
+	 * conditional on it still being the stored one, and null comes back when it
+	 * is not — a login that lost a race with a rotation must fail, not issue a
+	 * 30-day session from the verifier the operator just revoked.
 	 */
-	async createSession(): Promise<{ token: string; expiresAt: number }> {
+	async createSession(
+		boundTo?: PasswordBinding | null,
+	): Promise<{ token: string; expiresAt: number } | null> {
 		const token = randomBytes(32).toString("base64url");
 		const issuedAt = this.now();
 		const expiresAt = issuedAt + SESSION_ABSOLUTE_MAX_MS;
-		await this.store.createManagementSession({
-			tokenHash: hashSessionToken(token),
-			createdAt: issuedAt,
-			expiresAt,
-			lastSeenAt: issuedAt,
-		});
+		const inserted = await this.store.createManagementSession(
+			{
+				tokenHash: hashSessionToken(token),
+				createdAt: issuedAt,
+				expiresAt,
+				lastSeenAt: issuedAt,
+			},
+			boundTo ?? null,
+		);
+		if (inserted === 0) return null;
 		return { token, expiresAt };
 	}
 

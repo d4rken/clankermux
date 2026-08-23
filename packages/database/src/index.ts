@@ -36,6 +36,7 @@ export { AccountPaymentRepository } from "./repositories/account-payment.reposit
 export {
 	AuthRepository,
 	type AuthSessionRecord,
+	type PasswordBinding,
 	type StoredPasswordVerifier,
 } from "./repositories/auth.repository";
 export {

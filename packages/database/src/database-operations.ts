@@ -47,6 +47,7 @@ import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
 	AuthRepository,
 	type AuthSessionRecord,
+	type PasswordBinding,
 	type StoredPasswordVerifier,
 } from "./repositories/auth.repository";
 import {
@@ -1346,8 +1347,16 @@ OAuth tokens will need to be re-authenticated.
 		return this.auth.clearPassword();
 	}
 
-	async createManagementSession(record: AuthSessionRecord): Promise<void> {
-		return this.auth.createSession(record);
+	/**
+	 * Insert a session, optionally bound to the password that authorized it.
+	 * Returns the rows inserted: 0 means the verifier changed while the login
+	 * was hashing, so the session belongs to a password that no longer exists.
+	 */
+	async createManagementSession(
+		record: AuthSessionRecord,
+		boundTo?: PasswordBinding | null,
+	): Promise<number> {
+		return this.auth.createSession(record, boundTo);
 	}
 
 	async getManagementSession(

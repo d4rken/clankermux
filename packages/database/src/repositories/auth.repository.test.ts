@@ -181,6 +181,61 @@ describe("rotation invalidates sessions", () => {
 	});
 });
 
+describe("a session is bound to the password that authorized it", () => {
+	it("inserts when the stored password is still the one that was verified", async () => {
+		await repo.setPassword("v1", '{"n":1}', 1);
+		const inserted = await repo.createSession(session("a"), {
+			verifier: "v1",
+			params: '{"n":1}',
+		});
+		expect(inserted).toBe(1);
+		expect(await repo.getSession("a")).not.toBeNull();
+	});
+
+	it("inserts NOTHING when the verifier was replaced between verify and insert", async () => {
+		await repo.setPassword("v1", "{}", 1);
+		// The login read "v1", then spent ~35ms in scrypt. The operator rotated
+		// inside that window: a new verifier is stored and every session is gone.
+		await repo.setPassword("v2", "{}", 2);
+		const inserted = await repo.createSession(session("a"), {
+			verifier: "v1",
+			params: "{}",
+		});
+		expect(inserted).toBe(0);
+		expect(await repo.getSession("a")).toBeNull();
+	});
+
+	it("inserts nothing when the password was cleared entirely", async () => {
+		await repo.setPassword("v1", "{}", 1);
+		await repo.clearPassword();
+		expect(
+			await repo.createSession(session("a"), {
+				verifier: "v1",
+				params: "{}",
+			}),
+		).toBe(0);
+		expect(await repo.getSession("a")).toBeNull();
+	});
+
+	it("inserts nothing when only the cost parameters were rotated", async () => {
+		// Same secret re-hashed at a higher cost: the pair the login checked is no
+		// longer the stored pair, so its session must not be issued either.
+		await repo.setPassword("v1", '{"n":16384}', 1);
+		await repo.setPassword("v2", '{"n":32768}', 2);
+		expect(
+			await repo.createSession(session("a"), {
+				verifier: "v1",
+				params: '{"n":16384}',
+			}),
+		).toBe(0);
+	});
+
+	it("still inserts unconditionally when no binding is given", async () => {
+		expect(await repo.createSession(session("a"))).toBe(1);
+		expect(await repo.getSession("a")).not.toBeNull();
+	});
+});
+
 describe("session lifecycle", () => {
 	it("round-trips a session by its token hash", async () => {
 		await repo.createSession(

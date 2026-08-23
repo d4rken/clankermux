@@ -44,6 +44,7 @@ class FakeStore implements SessionAuthStore {
 	}
 	async createManagementSession(record: AuthSessionRecord) {
 		this.sessions.set(record.tokenHash, { ...record });
+		return 1;
 	}
 	async getManagementSession(tokenHash: string) {
 		return this.sessions.get(tokenHash) ?? null;

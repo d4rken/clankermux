@@ -16,6 +16,7 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import type {
 	AuthSessionRecord,
+	PasswordBinding,
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import {
@@ -42,8 +43,21 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword(): Promise<StoredPasswordVerifier | null> {
 		return this.password;
 	}
-	async createManagementSession(record: AuthSessionRecord): Promise<void> {
+	async createManagementSession(
+		record: AuthSessionRecord,
+		boundTo?: PasswordBinding | null,
+	): Promise<number> {
+		// Same refusal the conditional INSERT performs: a session may not be
+		// issued for a verifier that is no longer the stored one.
+		if (
+			boundTo &&
+			(this.password?.verifier !== boundTo.verifier ||
+				this.password?.params !== boundTo.params)
+		) {
+			return 0;
+		}
 		this.sessions.set(record.tokenHash, { ...record });
+		return 1;
 	}
 	async getManagementSession(
 		tokenHash: string,
@@ -148,7 +162,7 @@ describe("fail-open until a password is set", () => {
 
 	it("never verifies a password when none is stored", async () => {
 		const { svc, hasher } = makeService();
-		expect(await svc.verifyPassword("guess")).toBe(false);
+		expect(await svc.verifyPassword("guess")).toBeNull();
 		expect(hasher.verifyCalls).toBe(0);
 	});
 
@@ -163,8 +177,19 @@ describe("password verification", () => {
 	it("accepts the configured password and rejects everything else", async () => {
 		const { svc, store, hasher } = makeService();
 		await configure(store, hasher, "hunter2");
-		expect(await svc.verifyPassword("hunter2")).toBe(true);
-		expect(await svc.verifyPassword("hunter3")).toBe(false);
+		expect(await svc.verifyPassword("hunter2")).not.toBeNull();
+		expect(await svc.verifyPassword("hunter3")).toBeNull();
+	});
+
+	it("reports the exact stored pair it validated against", async () => {
+		const { svc, store, hasher } = makeService();
+		await configure(store, hasher, "hunter2");
+		// Not a boolean: the session insert has to name the verifier this answer
+		// is about, or a rotation landing during the derivation goes unnoticed.
+		expect(await svc.verifyPassword("hunter2")).toEqual({
+			verifier: store.password?.verifier ?? "",
+			params: store.password?.params ?? "",
+		});
 	});
 
 	it("round-trips through the real scrypt hasher", async () => {
@@ -173,21 +198,36 @@ describe("password verification", () => {
 		const { verifier, params } =
 			await scryptPasswordHasher.hash("correct horse");
 		store.password = { verifier, params, updatedAt: 0 };
-		expect(await svc.verifyPassword("correct horse")).toBe(true);
-		expect(await svc.verifyPassword("correct hors")).toBe(false);
+		expect(await svc.verifyPassword("correct horse")).toEqual({
+			verifier,
+			params,
+		});
+		expect(await svc.verifyPassword("correct hors")).toBeNull();
 	});
 
 	it("refuses rather than throws when the stored parameters are unusable", async () => {
 		const store = new FakeStore();
 		const svc = new SessionAuthService(store, scryptPasswordHasher);
 		store.password = { verifier: "aa", params: "not json", updatedAt: 0 };
-		expect(await svc.verifyPassword("anything")).toBe(false);
+		expect(await svc.verifyPassword("anything")).toBeNull();
 		store.password = {
 			verifier: "aa",
 			params: JSON.stringify({ kdf: "argon2" }),
 			updatedAt: 0,
 		};
-		expect(await svc.verifyPassword("anything")).toBe(false);
+		expect(await svc.verifyPassword("anything")).toBeNull();
+	});
+
+	it("mints nothing when the password rotated between verify and insert", async () => {
+		const { svc, store, hasher } = makeService();
+		await configure(store, hasher, "hunter2");
+		const binding = await svc.verifyPassword("hunter2");
+		expect(binding).not.toBeNull();
+		// The operator rotates out of process: new verifier, sessions gone.
+		await configure(store, hasher, "a new password");
+		store.sessions.clear();
+		expect(await svc.createSession(binding)).toBeNull();
+		expect(store.sessions.size).toBe(0);
 	});
 
 	it("carries the cost parameters that produced the verifier", async () => {

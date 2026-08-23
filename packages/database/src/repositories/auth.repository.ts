@@ -13,6 +13,21 @@ export interface StoredPasswordVerifier {
 	updatedAt: number;
 }
 
+/**
+ * The stored password a session may be bound to when it is created.
+ *
+ * A login reads the verifier, then spends ~35ms in scrypt before it can insert
+ * anything. An operator rotating the password in that window commits a NEW
+ * verifier and deletes every session; without this binding the insert that
+ * follows would mint a fresh 30-day session from the verifier that was just
+ * revoked. Carrying the exact pair the check ran against lets the insert refuse
+ * itself when the stored password is no longer that pair.
+ */
+export interface PasswordBinding {
+	verifier: string;
+	params: string;
+}
+
 /** One live management session. */
 export interface AuthSessionRecord {
 	/** Unsalted SHA-256 of the cookie value, hex. */
@@ -93,11 +108,50 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 		return revoked;
 	}
 
-	async createSession(record: AuthSessionRecord): Promise<void> {
-		await this.run(
+	/**
+	 * Insert a session, optionally CONDITIONAL on the password it was authorized
+	 * by still being the stored one. Returns the rows inserted, so 0 means the
+	 * password changed under the caller and the session was NOT issued.
+	 *
+	 * The condition is part of the INSERT rather than a read-then-write, because
+	 * a read-then-write is the same race one statement further down: SQLite
+	 * evaluates the `WHERE EXISTS` and the insert inside a single implicit
+	 * transaction, so a rotation either lands entirely before it (and the insert
+	 * finds no matching verifier) or entirely after it (and revokes the row it
+	 * just wrote).
+	 */
+	async createSession(
+		record: AuthSessionRecord,
+		boundTo?: PasswordBinding | null,
+	): Promise<number> {
+		if (!boundTo) {
+			await this.run(
+				`INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at)
+				 VALUES (?, ?, ?, ?)`,
+				[
+					record.tokenHash,
+					record.createdAt,
+					record.expiresAt,
+					record.lastSeenAt,
+				],
+			);
+			return 1;
+		}
+		return this.runWithChanges(
 			`INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at)
-			 VALUES (?, ?, ?, ?)`,
-			[record.tokenHash, record.createdAt, record.expiresAt, record.lastSeenAt],
+			 SELECT ?, ?, ?, ?
+			 WHERE EXISTS (
+				SELECT 1 FROM auth_password
+				WHERE id = 1 AND verifier = ? AND params = ?
+			 )`,
+			[
+				record.tokenHash,
+				record.createdAt,
+				record.expiresAt,
+				record.lastSeenAt,
+				boundTo.verifier,
+				boundTo.params,
+			],
 		);
 	}
 
