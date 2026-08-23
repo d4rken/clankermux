@@ -7,6 +7,8 @@ import {
 	NodeCryptoUtils,
 } from "@clankermux/types";
 import { extractApiKey } from "./extract-api-key";
+import { managementAuthRequirement } from "./management-auth-policy";
+import { SessionAuthService } from "./session-auth-service";
 
 const logger = new Logger("Auth");
 
@@ -18,15 +20,19 @@ export interface AuthenticationResult {
 }
 
 /**
- * Authentication policy: which surfaces require an API key.
+ * Authentication policy: what each surface requires.
  *
- * The model is intentionally narrow. API keys gate UPSTREAM AI TRAFFIC only
- * (/v1/* and /messages/*). The management surface (/api/*, /health) is
- * unauthenticated — trust boundary is "can you reach the port." Operators are
- * expected to bind ClankerMux to a loopback address or put it behind a
- * reverse proxy that enforces authentication.
+ * Two independent credentials, gating two independent things:
+ *
+ *  - `api_key` gates UPSTREAM AI TRAFFIC (`/v1/*`, `/messages/*`, and the
+ *    `/wire/*` mounts). Machine clients.
+ *  - `session` gates the MANAGEMENT API (`/api/*`) behind the app-level login,
+ *    and FAILS OPEN until an operator sets a password.
+ *
+ * `/health` and the read-only widget surface (`/public/v1/*`) are public by
+ * design; so is everything the dashboard serves as static assets.
  */
-export type AuthRequirement = "public" | "api_key";
+export type AuthRequirement = "public" | "api_key" | "session";
 
 function policyFor(path: string): AuthRequirement {
 	if (path === "/health") return "public";
@@ -36,7 +42,21 @@ function policyFor(path: string): AuthRequirement {
 	// anyway: the whole namespace is upstream AI traffic, and the alternative
 	// is the public catch-all at the bottom of this function.
 	if (path === "/wire" || path.startsWith("/wire/")) return "api_key";
-	if (path === "/api" || path.startsWith("/api/")) return "public";
+	// Read-only widget API for devices that cannot hold a credential. Public by
+	// construction — it is a sibling of `/wire/*`, deliberately OUTSIDE `/api/*`
+	// so the session gate never touches it.
+	if (path === "/public" || path.startsWith("/public/")) return "public";
+	// The management surface. The classification lives in one shared module so
+	// this policy and the router's own boundary cannot disagree about which
+	// `/api/*` paths are exempt (the auth endpoints, and the two Claude Code
+	// telemetry paths that reach the root of the port).
+	//
+	// DEFENSE IN DEPTH, not the primary mechanism: `routeRootRequest` gates
+	// `/api/*` explicitly before the API router ever runs, because the router
+	// returns its response without consulting this service at all.
+	if (path === "/api" || path.startsWith("/api/")) {
+		return managementAuthRequirement(path);
+	}
 	if (path === "/v1" || path.startsWith("/v1/")) return "api_key";
 	if (path === "/messages" || path.startsWith("/messages/")) return "api_key";
 	// Everything else (dashboard HTML, static assets, client-side routes) is public.
@@ -46,13 +66,21 @@ function policyFor(path: string): AuthRequirement {
 export class AuthService {
 	private crypto: CryptoUtils;
 	private dbOps: DatabaseOperations;
+	private sessionAuth: SessionAuthService;
 
 	constructor(
 		dbOps: DatabaseOperations,
 		crypto: CryptoUtils = new NodeCryptoUtils(),
+		/**
+		 * The management-session checker. Constructed from `dbOps` by default so
+		 * a `session` requirement can never silently degrade to "allowed" just
+		 * because a caller built this service the short way.
+		 */
+		sessionAuth: SessionAuthService = new SessionAuthService(dbOps),
 	) {
 		this.dbOps = dbOps;
 		this.crypto = crypto;
+		this.sessionAuth = sessionAuth;
 	}
 
 	/**
@@ -199,8 +227,21 @@ export class AuthService {
 		_method: string,
 		requirement?: AuthRequirement,
 	): Promise<AuthenticationResult> {
-		if ((requirement ?? policyFor(path)) === "public") {
+		const effective = requirement ?? policyFor(path);
+		if (effective === "public") {
 			return { isAuthenticated: true };
+		}
+
+		if (effective === "session") {
+			// FAIL-OPEN until a password is set, and one indexed lookup when one is.
+			// No key derivation on this path, ever.
+			if (await this.sessionAuth.authorizeRequest(req)) {
+				return { isAuthenticated: true };
+			}
+			return {
+				isAuthenticated: false,
+				error: "Sign in to use the management API",
+			};
 		}
 
 		// API-key-gated path. If no keys are configured at all, let everything
