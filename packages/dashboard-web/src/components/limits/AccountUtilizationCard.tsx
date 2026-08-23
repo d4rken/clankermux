@@ -1,5 +1,6 @@
 import { extractFiveHour, extractSevenDay } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
+import { AlertCircle } from "lucide-react";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
@@ -13,12 +14,24 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { Skeleton } from "../ui/skeleton";
 
 interface AccountUtilizationCardProps {
 	accounts: AccountResponse[];
 	/** Shared clock from the Limits tab, so countdowns and reset-endpoint
 	 *  comparisons advance together. */
 	now: number;
+	/**
+	 * Set while the first `/api/accounts` fetch is in flight and nothing is
+	 * cached. Without it an unread list renders the card's empty state, which
+	 * claims no account is reporting usage — a measurement the read never made.
+	 */
+	loading?: boolean;
+	/**
+	 * Set when that read FAILED with nothing cached. Precedence is
+	 * `unavailableReason` -> `loading` -> resolved.
+	 */
+	unavailableReason?: string;
 }
 
 /** Highest of the account's 5h/7d utilization, for sort ordering (no data → -1). */
@@ -47,7 +60,10 @@ function hasWindowedUsage(account: AccountResponse): boolean {
 export function AccountUtilizationCard({
 	accounts,
 	now,
+	loading = false,
+	unavailableReason,
 }: AccountUtilizationCardProps) {
+	const pending = loading && unavailableReason == null;
 	const rows = accounts
 		.filter(hasWindowedUsage)
 		.sort((a, b) => maxUtilization(b) - maxUtilization(a));
@@ -82,7 +98,23 @@ export function AccountUtilizationCard({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				{rows.length === 0 ? (
+				{unavailableReason != null ? (
+					<p className="flex items-center gap-item text-sm text-warning-strong">
+						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+						{unavailableReason}
+					</p>
+				) : pending ? (
+					<div className="space-y-section">
+						{/* Three placeholder rows: enough to say "accounts are coming"
+						    without claiming how many there are. */}
+						{[0, 1, 2].map((index) => (
+							<div key={index} className="space-y-item">
+								<Skeleton className="h-4 w-40" />
+								<Skeleton className="h-2.5 w-full" />
+							</div>
+						))}
+					</div>
+				) : rows.length === 0 ? (
 					<p className="text-sm text-muted-foreground">
 						No windowed accounts reporting usage yet.
 					</p>

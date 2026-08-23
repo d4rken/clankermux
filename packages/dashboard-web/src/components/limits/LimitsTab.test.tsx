@@ -40,6 +40,23 @@ function seedError(queryClient: QueryClient, key: readonly unknown[]): void {
 		});
 }
 
+/**
+ * First fetch in flight with nothing cached. A static render runs no effects, so
+ * a query left untouched sits at `fetchStatus: "idle"` and reads as unavailable
+ * rather than loading; the in-flight state has to be built explicitly.
+ */
+function seedPending(queryClient: QueryClient, key: readonly unknown[]): void {
+	queryClient
+		.getQueryCache()
+		.build(queryClient, { queryKey: key as unknown[] })
+		.setState({
+			status: "pending",
+			fetchStatus: "fetching",
+			data: undefined,
+			dataUpdatedAt: 0,
+		});
+}
+
 const analyticsKey = queryKeys.analytics(
 	"7d",
 	{ accounts: [], models: [], status: "all" },
@@ -112,7 +129,44 @@ describe("LimitsTab usage-history ranges", () => {
 	});
 });
 
-describe("LimitsTab runway panel gating", () => {
+describe("LimitsTab per-section gating", () => {
+	it("shows a resolved runway while the accounts and analytics reads are still in flight", () => {
+		// No page-wide skeleton: /api/analytics is the slowest read here, and a
+		// cold load must not hide a runway that has already landed behind it.
+		const queryClient = client();
+		seedPending(queryClient, queryKeys.accounts());
+		seedPending(queryClient, analyticsKey);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html).toContain("Quota runway");
+		expect(html).toContain("3d 2h");
+		expect(html).toContain("Backup weekly");
+		expect(html).toContain("Runs out");
+		// The sections that DO depend on those reads say so, rather than printing
+		// a measured-looking zero.
+		expect(html).toContain("Quota overview");
+		expect(html).toContain("Reading accounts");
+		expect(html).not.toContain("No reported account-wide average");
+		expect(html).not.toContain("$0.00");
+	});
+
+	it("keeps the runway readable when the analytics read fails outright", () => {
+		const queryClient = client(false);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		seedError(queryClient, analyticsKey);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html).toContain("3d 2h");
+		expect(html).toContain("Runs out");
+		expect(html).toContain("Account performance data unavailable");
+		expect(html).not.toContain("Runway data unavailable");
+		expect(html).not.toContain("$0.00");
+	});
+
 	it("keeps the runway readable when the accounts read fails outright", () => {
 		// The runway response carries the account names its causes and pin labels
 		// need, so the read that empties the two window panels beside it must not
@@ -128,6 +182,11 @@ describe("LimitsTab runway panel gating", () => {
 		expect(html).toContain("Backup weekly");
 		expect(html).toContain("Runs out");
 		expect(html).not.toContain("Runway data unavailable");
+		// The two window panels beside it, and the utilization card below, are the
+		// ones that go dark.
+		expect(html).toContain("Account data unavailable");
+		expect(html).not.toContain("No reported account-wide average");
+		expect(html).not.toContain("No windowed accounts reporting usage yet.");
 	});
 
 	it("says the runway is unavailable when its own read fails", () => {

@@ -1,5 +1,6 @@
 import type { PaymentsSummary } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
+import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
 import { COLORS } from "../../constants";
 import { BaseBarChart } from "../charts";
@@ -18,6 +19,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { Skeleton } from "../ui/skeleton";
 import {
 	amortizedMonthlyByAccountName,
 	formatValueRatio,
@@ -35,16 +37,26 @@ export type AccountPerformanceRow = AccountCostRow & {
  * Value / API Cost tiles). `planCostUsd` follows this card's range; the two
  * averages are server-computed over fixed 7-day / 30-day windows and do NOT
  * move with the selector. Cost / Value Ratio come from the payments summary.
+ *
+ * Every field is NULLABLE, and null renders as "—". A pending or failed
+ * analytics read has no figure to show, and `?? 0` there would print "$0.00" —
+ * indistinguishable from a range that genuinely cost nothing.
  */
 export interface AccountPerformanceCostSummary {
-	planCostUsd: number;
-	avgDailyPlanCostUsd: number;
-	avgWeeklyPlanCostUsd: number;
+	planCostUsd: number | null;
+	avgDailyPlanCostUsd: number | null;
+	avgWeeklyPlanCostUsd: number | null;
 }
 
 interface AccountPerformanceSectionProps {
 	accountPerformance: AccountPerformanceRow[];
 	loading: boolean;
+	/**
+	 * Set when the analytics read FAILED with nothing cached. Distinct from
+	 * `loading` and from a genuinely empty range: bars with no series read as "no
+	 * traffic in this range", a measurement claim a failed read never made.
+	 */
+	unavailable?: boolean;
 	/** Selected time range (controlled); re-keys the parent's analytics query. */
 	range: string;
 	onRangeChange: (range: string) => void;
@@ -62,6 +74,7 @@ interface AccountPerformanceSectionProps {
 export function AccountPerformanceSection({
 	accountPerformance,
 	loading,
+	unavailable = false,
 	range,
 	onRangeChange,
 	costSummary,
@@ -98,6 +111,11 @@ export function AccountPerformanceSection({
 			value: costSummary.avgWeeklyPlanCostUsd,
 		},
 	];
+
+	// The cost table foots up the rows it was handed, so an unread range would
+	// total to $0.00 — a measured-looking zero. Table and totals wait for a
+	// resolved read; precedence is `unavailable` -> `loading` -> resolved.
+	const analyticsResolved = !unavailable && !loading;
 
 	// Amortized subscription run rates shown under the Cost headline —
 	// range-independent, derived from configured renewal prices.
@@ -143,7 +161,11 @@ export function AccountPerformanceSection({
 					    "$600.00" that came from the other formatter. */}
 					<div>
 						<p className="text-sm text-muted-foreground">Plan Value</p>
-						<p className="figure-xl">{formatUsd(costSummary.planCostUsd)}</p>
+						<p className="figure-xl">
+							{costSummary.planCostUsd != null
+								? formatUsd(costSummary.planCostUsd)
+								: "—"}
+						</p>
 						<div className="mt-2 space-y-tight text-xs">
 							{planAvgRows.map((row) => (
 								<div
@@ -154,7 +176,7 @@ export function AccountPerformanceSection({
 										{row.label}
 									</span>
 									<span className="font-medium tabular-nums">
-										{formatUsd(row.value)}
+										{row.value != null ? formatUsd(row.value) : "—"}
 									</span>
 								</div>
 							))}
@@ -196,99 +218,118 @@ export function AccountPerformanceSection({
 						</p>
 					</div>
 				</div>
-				<BaseBarChart
-					data={accountPerformance as unknown as ChartDataPoint[]}
-					bars={[
-						{ dataKey: "requests", yAxisId: "left", name: "Requests" },
-						{
-							dataKey: "successRate",
-							yAxisId: "right",
-							fill: COLORS.success,
-							name: "Success %",
-						},
-					]}
-					xAxisKey="name"
-					loading={loading}
-					height="small"
-					secondaryYAxis={true}
-					showLegend={true}
-				/>
-				<div className="mt-4 border rounded-md overflow-hidden">
-					<table aria-label="Account cost breakdown" className="w-full text-sm">
-						<thead className="bg-muted/50">
-							<tr>
-								<th scope="col" className="text-left px-3 py-2">
-									Account
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Plan Value
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									API Value
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Total
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Sub / mo
-								</th>
-							</tr>
-						</thead>
-						<tbody>
-							{hasAnyAccountCostData(sortedAccountCostRows) ? (
-								sortedAccountCostRows.map((row) => {
-									const subMonthly = subMonthlyByName.get(row.name);
-									return (
-										<tr key={row.name} className="border-t">
-											<td className="px-3 py-2 text-muted-foreground">
-												{row.name}
-											</td>
-											<td className="px-3 py-2 text-right">
-												{formatUsd(row.planCostUsd)}
-											</td>
-											<td className="px-3 py-2 text-right">
-												{formatUsd(row.apiCostUsd)}
-											</td>
-											<td className="px-3 py-2 text-right font-medium">
-												{formatUsd(row.totalCostUsd)}
-											</td>
-											<td className="px-3 py-2 text-right">
-												{subMonthly != null ? formatUsd(subMonthly) : "—"}
-											</td>
-										</tr>
-									);
-								})
-							) : (
-								<tr className="border-t">
-									<td className="px-3 py-3 text-muted-foreground" colSpan={5}>
-										No cost data
+				{unavailable ? (
+					<div className="flex h-48 items-center justify-center gap-item text-xs text-warning-strong">
+						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+						Account performance data unavailable
+					</div>
+				) : (
+					<BaseBarChart
+						data={accountPerformance as unknown as ChartDataPoint[]}
+						bars={[
+							{ dataKey: "requests", yAxisId: "left", name: "Requests" },
+							{
+								dataKey: "successRate",
+								yAxisId: "right",
+								fill: COLORS.success,
+								name: "Success %",
+							},
+						]}
+						xAxisKey="name"
+						loading={loading}
+						height="small"
+						secondaryYAxis={true}
+						showLegend={true}
+					/>
+				)}
+				{!analyticsResolved && !unavailable && (
+					<div className="mt-4 space-y-item">
+						{[0, 1, 2].map((index) => (
+							<Skeleton key={index} className="h-8 w-full" />
+						))}
+					</div>
+				)}
+				{analyticsResolved && (
+					<div className="mt-4 border rounded-md overflow-hidden">
+						<table
+							aria-label="Account cost breakdown"
+							className="w-full text-sm"
+						>
+							<thead className="bg-muted/50">
+								<tr>
+									<th scope="col" className="text-left px-3 py-2">
+										Account
+									</th>
+									<th scope="col" className="text-right px-3 py-2">
+										Plan Value
+									</th>
+									<th scope="col" className="text-right px-3 py-2">
+										API Value
+									</th>
+									<th scope="col" className="text-right px-3 py-2">
+										Total
+									</th>
+									<th scope="col" className="text-right px-3 py-2">
+										Sub / mo
+									</th>
+								</tr>
+							</thead>
+							<tbody>
+								{hasAnyAccountCostData(sortedAccountCostRows) ? (
+									sortedAccountCostRows.map((row) => {
+										const subMonthly = subMonthlyByName.get(row.name);
+										return (
+											<tr key={row.name} className="border-t">
+												<td className="px-3 py-2 text-muted-foreground">
+													{row.name}
+												</td>
+												<td className="px-3 py-2 text-right">
+													{formatUsd(row.planCostUsd)}
+												</td>
+												<td className="px-3 py-2 text-right">
+													{formatUsd(row.apiCostUsd)}
+												</td>
+												<td className="px-3 py-2 text-right font-medium">
+													{formatUsd(row.totalCostUsd)}
+												</td>
+												<td className="px-3 py-2 text-right">
+													{subMonthly != null ? formatUsd(subMonthly) : "—"}
+												</td>
+											</tr>
+										);
+									})
+								) : (
+									<tr className="border-t">
+										<td className="px-3 py-3 text-muted-foreground" colSpan={5}>
+											No cost data
+										</td>
+									</tr>
+								)}
+							</tbody>
+							<tfoot className="bg-muted/30 border-t">
+								<tr>
+									<th scope="row" className="px-3 py-2 font-medium text-left">
+										Total
+									</th>
+									<td className="px-3 py-2 text-right font-medium">
+										{formatUsd(accountCostTotals.planCostUsd)}
+									</td>
+									<td className="px-3 py-2 text-right font-medium">
+										{formatUsd(accountCostTotals.apiCostUsd)}
+									</td>
+									<td className="px-3 py-2 text-right font-medium">
+										{formatUsd(accountCostTotals.totalCostUsd)}
+									</td>
+									<td className="px-3 py-2 text-right font-medium">
+										{paymentsSummary
+											? formatUsd(paymentsSummary.amortizedMonthlyUsd)
+											: "—"}
 									</td>
 								</tr>
-							)}
-						</tbody>
-						<tfoot className="bg-muted/30 border-t">
-							<tr>
-								<th scope="row" className="px-3 py-2 font-medium text-left">
-									Total
-								</th>
-								<td className="px-3 py-2 text-right font-medium">
-									{formatUsd(accountCostTotals.planCostUsd)}
-								</td>
-								<td className="px-3 py-2 text-right font-medium">
-									{formatUsd(accountCostTotals.apiCostUsd)}
-								</td>
-								<td className="px-3 py-2 text-right font-medium">
-									{formatUsd(accountCostTotals.totalCostUsd)}
-								</td>
-								<td className="px-3 py-2 text-right font-medium">
-									{paymentsSummary
-										? formatUsd(paymentsSummary.amortizedMonthlyUsd)
-										: "—"}
-								</td>
-							</tr>
-						</tfoot>
-					</table>
-				</div>
+							</tfoot>
+						</table>
+					</div>
+				)}
 			</CardContent>
 		</Card>
 	);
