@@ -1,4 +1,4 @@
-import { registerUIRefresh } from "@clankermux/core";
+import { RUNWAY_HORIZON_MS, registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge } from "lucide-react";
@@ -314,6 +314,7 @@ export const OverviewTab = React.memo(() => {
 				<RunwayCard
 					runways={runway?.keys ?? []}
 					accounts={runway?.accounts ?? []}
+					horizonMs={runway?.horizonMs ?? RUNWAY_HORIZON_MS}
 					now={now}
 					loading={runwayPending}
 					unavailableReason={

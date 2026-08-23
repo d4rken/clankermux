@@ -719,3 +719,252 @@ describe("GET /api/runway persisted Codex usage", () => {
 		expect(body.keys[0].outcome.kind).toBe("beyond-horizon");
 	});
 });
+
+describe("GET /api/runway persisted snapshot fallback", () => {
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	const COLD_IDS = ["cold-1", "warm-1"];
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		for (const id of COLD_IDS) usageCache.delete(id);
+	});
+
+	afterEach(() => {
+		for (const id of COLD_IDS) usageCache.delete(id);
+		nowSpy.mockRestore();
+	});
+
+	/** One persisted sample, `ageMs` before BASE. */
+	function snapshot(
+		accountId: string,
+		ageMs: number,
+		partial: Partial<UsageSnapshotSample> = {},
+	): UsageSnapshotSample {
+		return {
+			accountId,
+			provider: "anthropic",
+			sampledAt: BASE - ageMs,
+			fiveHourPct: 100,
+			fiveHourReset: BASE + 2 * HOUR_MS,
+			sevenDayPct: 20,
+			sevenDayReset: BASE + 6 * DAY_MS,
+			...partial,
+		};
+	}
+
+	it("projects a cache-cold account from a recent snapshot", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [snapshot("cold-1", 2 * MINUTE_MS)],
+			}),
+		);
+
+		// Without the fallback a restart-emptied cache leaves this key `unknown`
+		// and the tile built on it blank. The snapshot is two minutes old, well
+		// inside the routing bar a cache entry would be held to.
+		expect(body.keys[0].outcome.kind).toBe("out-now");
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 2 * MINUTE_MS);
+	});
+
+	it("never emits a prediction for a snapshot-restored account", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [
+					snapshot("cold-1", 6 * MINUTE_MS, { fiveHourPct: 40 }),
+					snapshot("cold-1", 4 * MINUTE_MS, { fiveHourPct: 50 }),
+					snapshot("cold-1", 2 * MINUTE_MS, { fiveHourPct: 60 }),
+				],
+			}),
+		);
+
+		// The prediction service appends its input stamped `t: now`, so a reading
+		// observed minutes ago would enter the regression claiming to be current.
+		// The utilization is restored; the projection falls back to the
+		// lifetime-average path.
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(60);
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
+			null,
+			null,
+		]);
+	});
+
+	it("keeps a live cache reading over a newer-looking snapshot", async () => {
+		usageCache.set("warm-1", HEALTHY());
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "warm-1", name: "Warm" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [snapshot("warm-1", 0)],
+			}),
+		);
+
+		// The snapshot is a FALLBACK for a read that produced nothing, never a
+		// competitor to one that produced something.
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(10);
+		expect(body.keys[0].outcome.kind).toBe("beyond-horizon");
+	});
+
+	it("shows a snapshot past the routing bar as evidence but does not project it", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [snapshot("cold-1", 20 * MINUTE_MS)],
+			}),
+		);
+
+		// The two views keep their existing relationship: 20 minutes is inside the
+		// display horizon and outside the routing one, so the reading is reported
+		// with its age while the scan calls the account unprojectable.
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 20 * MINUTE_MS);
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+	});
+
+	it("ignores a snapshot past the display horizon entirely", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [snapshot("cold-1", 45 * MINUTE_MS)],
+			}),
+		);
+
+		expect(body.accounts[0].windows[0].utilizationPct).toBeNull();
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+	});
+
+	it("drops a snapshot window whose reset has already passed", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [
+					snapshot("cold-1", 4 * MINUTE_MS, {
+						// Spent, and the window has ROLLED OVER since the row was
+						// written. `pct >= 100` is decided before the reset guards, so
+						// left in it would report `already-exhausted` with a stale reset
+						// and hold the account dead for the whole 14-day horizon —
+						// announcing "Out of quota" about quota that has replenished.
+						fiveHourPct: 100,
+						fiveHourReset: BASE - MINUTE_MS,
+						sevenDayPct: null,
+						sevenDayReset: null,
+					}),
+				],
+			}),
+		);
+
+		expect(body.keys[0].outcome.kind).not.toBe("out-now");
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+		// The evidence block still REPORTS it: an observation whose reset has
+		// since passed is a true statement about when it was taken.
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
+	});
+
+	it("rejects a snapshot stamped in the future", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				// Clock rollback across a restart. A negative age passes a bare
+				// `age <= max` test until the wall clock catches up.
+				snapshots: [snapshot("cold-1", -5 * MINUTE_MS)],
+			}),
+		);
+
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+	});
+
+	it("prefers a recent snapshot over a stale persisted Codex column", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "codex-1", name: "Codex", provider: "codex" }),
+				],
+				keys: [makeKey({ id: "k1" })],
+				codexColumns: [
+					{
+						id: "codex-1",
+						codex_usage_json: codexSnapshot(95, BASE + 6 * DAY_MS),
+						codex_usage_observed_at: BASE - 3 * DAY_MS,
+					},
+				],
+				snapshots: [
+					{
+						accountId: "codex-1",
+						provider: "codex",
+						sampledAt: BASE - 2 * MINUTE_MS,
+						fiveHourPct: null,
+						fiveHourReset: null,
+						sevenDayPct: 10,
+						sevenDayReset: BASE + 6 * DAY_MS,
+					},
+				],
+			}),
+		);
+
+		// Candidates are ranked by OBSERVATION TIME, not by source precedence, so
+		// a two-minute snapshot beats a three-day-old column. Ranking by source
+		// would have let the column derive a projection while the fresher reading
+		// sat unread.
+		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
+		expect(weekly?.utilizationPct).toBe(10);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 2 * MINUTE_MS);
+	});
+
+	it("still reports a stale Codex column when nothing fresher exists", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "codex-1", name: "Codex", provider: "codex" }),
+				],
+				keys: [makeKey({ id: "k1" })],
+				codexColumns: [
+					{
+						id: "codex-1",
+						codex_usage_json: codexSnapshot(95, BASE + 6 * DAY_MS),
+						codex_usage_observed_at: BASE - 3 * DAY_MS,
+					},
+				],
+			}),
+		);
+
+		// The evidence block applies no age bar of its own — the column is the one
+		// deliberately unbounded source, and barring it here would show LESS than
+		// /api/accounts for exactly the accounts it exists to cover.
+		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
+		expect(weekly?.utilizationPct).toBe(95);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 3 * DAY_MS);
+		// And it DOES still drive the scan. The persisted Codex column is this
+		// endpoint's one documented exception to the routing bar (an aged cache
+		// entry gets no such licence), because blanking every Codex-pinned key
+		// after a restart is what that exception exists to prevent. The reading is
+		// reported with its true age, so nothing here presents it as current.
+		expect(body.keys[0].outcome.kind).not.toBe("unknown");
+	});
+
+	it("serves the response when the snapshot read fails", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshotsThrow: true,
+			}),
+		);
+
+		// A fallback for evidence that is already missing must degrade to "no
+		// fallback", never take the endpoint down.
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+	});
+});

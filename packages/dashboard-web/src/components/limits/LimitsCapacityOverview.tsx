@@ -1,5 +1,5 @@
 import type { KeyRunway } from "@clankermux/core";
-import { effectiveRunwayOutcome, worstKeyRunway } from "@clankermux/core";
+import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
 import { formatPercentage } from "@clankermux/ui-common";
 import {
 	AlertCircle,
@@ -368,7 +368,12 @@ function RunwayPanel({
 	loading,
 	unavailableReason,
 }: RunwayPanelProps) {
-	const worst = worstKeyRunway(runways, now);
+	// Worst STATEABLE key, not the worst outright: a key with no readable window
+	// would otherwise replace a figure ten other keys have evidence for. The
+	// count it was measured over is rendered beside it below, because dropping a
+	// key can only make the surviving figure longer.
+	const headline = summarizeKeyRunways(runways, now);
+	const worst = headline.worst;
 	const activeRunways = runways.filter((runway) => runway.isActive);
 	// Three distinct states, kept apart on purpose:
 	//  - readBlocked: the backing read failed, or is still in flight. The parent
@@ -384,16 +389,30 @@ function RunwayPanel({
 	// never be presented as still loading, and neither may render a fallback 0.
 	const readBlocked = loading || unavailableReason != null;
 	const dataResolved = !readBlocked;
+	// `worst === null` now covers two different situations, because the headline
+	// ranks only the keys it can state: no active key AT ALL, or active keys none
+	// of which has quota evidence. Reporting the first when it is the second
+	// contradicts the per-key breakdown standing right underneath, which lists
+	// the keys this line just claimed do not exist.
 	const outcomeReason = dataResolved
 		? worst === null
-			? "No active API keys or accounts"
+			? headline.activeKeyCount === 0
+				? "No active API keys or accounts"
+				: "No quota evidence for any account"
 			: runwayUnavailableReason(worst.outcome)
 		: null;
 	const blockingReason = unavailableReason ?? outcomeReason;
 	const stated = dataResolved && worst !== null && outcomeReason == null;
 	const outlook = runwayOutlook(worst, blockingReason, loading, now);
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const value = worst && stated ? formatRunwayValue(worst.outcome, now) : null;
+	// Same reason as the Overview tile: the row-level `≥` asserts "at least this
+	// long", and a key set aside for want of evidence could run out sooner.
+	const value =
+		worst && stated
+			? formatRunwayValue(worst.outcome, now, {
+					suppressBound: headline.unobservedKeyCount > 0,
+				})
+			: null;
 	const qualifier =
 		worst && stated ? runwayQualifier(worst.outcome, now) : null;
 	const cause =
@@ -418,7 +437,14 @@ function RunwayPanel({
 					{blockingReason ??
 						(loading
 							? "Reading keys and accounts"
-							: (qualifier ?? "At the current pace"))}
+							: [
+									qualifier ?? "At the current pace",
+									headline.unobservedKeyCount > 0
+										? `${headline.unobservedKeyCount} key${headline.unobservedKeyCount === 1 ? "" : "s"} with no quota evidence`
+										: null,
+								]
+									.filter(Boolean)
+									.join(" · "))}
 				</p>
 			</div>
 
@@ -521,9 +547,17 @@ function runwayOutlook(
 	}
 	// Read the outcome AT `now`, so a served runway whose deadline has passed
 	// takes the out-of-quota chip rather than still reading "Runs out".
-	switch (effectiveRunwayOutcome(worst.outcome, now).kind) {
+	const effective = effectiveRunwayOutcome(worst.outcome, now);
+	switch (effective.kind) {
 		case "out-now":
-			return { label: "Out of quota", tone: "destructive" };
+			// Same hedge the figure takes: accounts with no readable window are
+			// dropped BEFORE the scan runs, so a pool that was not fully seen can
+			// read as spent while a dropped account is healthy. A destructive chip
+			// asserting a fact the evidence cannot support is worse than a warning
+			// that says what was actually observed.
+			return effective.unprojectableAccountIds.length > 0
+				? { label: "Spent, unconfirmed", tone: "warning" }
+				: { label: "Out of quota", tone: "destructive" };
 		case "runway":
 			return { label: "Runs out", tone: "warning" };
 		default:

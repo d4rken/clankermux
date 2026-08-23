@@ -27,6 +27,17 @@ export interface MetricCardProps {
 	subRows?: MetricCardSubRow[];
 	caption?: string;
 	/**
+	 * Rendered directly under the value, above the sub-row divider. For a visual
+	 * adornment the figure alone cannot carry — a scale it should be read
+	 * against, say.
+	 *
+	 * Gated on the SAME resolved branch as the value and the sub-rows, so it can
+	 * never appear beside a skeleton or an unavailable dash: anything drawn here
+	 * is derived from the same read the figure is, and a read that failed or has
+	 * not landed is entitled to draw neither.
+	 */
+	afterValue?: React.ReactNode;
+	/**
 	 * Set when the backing read FAILED and nothing is cached. Renders an
 	 * explicit "unavailable" state in place of the value and sub-rows — a metric
 	 * card must never present a fallback zero as a measurement.
@@ -58,6 +69,7 @@ export function MetricCard({
 	trendPeriod,
 	subRows,
 	caption,
+	afterValue,
 	unavailableReason,
 	staleNote,
 	loading = false,
@@ -134,7 +146,10 @@ export function MetricCard({
 					// arrives.
 					<Skeleton className="h-7 w-24" />
 				) : (
-					<p className="figure-xl">{value}</p>
+					<>
+						<p className="figure-xl">{value}</p>
+						{afterValue}
+					</>
 				)}
 				{pending && subRows && subRows.length > 0 && (
 					<div className="mt-3 pt-3 border-t border-border/50 space-y-tight">

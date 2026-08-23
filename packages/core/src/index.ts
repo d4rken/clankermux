@@ -10,6 +10,9 @@ export {
 	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
+	type RunwayHeadline,
+	type RunwayWindowObservations,
+	summarizeKeyRunways,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
