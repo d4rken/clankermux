@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { detectChanges, normalQuantile } from "../changepoint";
+import { mulberry32 } from "../fit";
+import type { QuotaSegment } from "../types";
 import { DAY_MS, makeSyntheticSegments, type Quantizer } from "./synthetic";
 
 const HOUR = 60 * 60 * 1000;
@@ -324,6 +326,37 @@ describe("changepoint detection", () => {
 		expect(result.changes).toEqual([]);
 	});
 
+	it("refuses a step whose difference bootstrap redrew the same dataset every time", () => {
+		// Two identical runs per side, and dpct generated EXACTLY from the weights,
+		// so every run-block resample rebuilds the same rows and all 1000 draws of
+		// the difference are bit-identical. There is a large, perfectly clean step
+		// here and the scan must still decline: with no measured spread the
+		// interval has zero width and excludes zero for free.
+		//
+		// The guard cannot be written on the spread. Summing 1000 identical values
+		// and dividing recovers a mean a few ulps off the value, so a two-pass
+		// deviation squares that rounding into ~1e-15 of "variance" and passes.
+		const segments = identicalRunSeries({
+			beforeWeight: 2.4,
+			afterWeight: 1.2,
+			seed: 1301,
+		});
+		const runs = new Set(segments.map((s) => s.runId));
+		expect(runs.size).toBe(4);
+
+		const result = detectChanges(segments, "claude-opus-5", {
+			bootstrapB: 1000,
+			seedParts: ["degenerate"],
+			maxDepth: 1,
+		});
+
+		expect(result.changes).toEqual([]);
+		// NOT `stable`: nothing was established about the difference, because the
+		// comparison never acquired an uncertainty to judge it against.
+		expect(result.verdict).toBe("insufficient-evidence");
+		expect(result.nCandidates).toBeGreaterThan(0);
+	});
+
 	it("still selects a boundary on an exactly flat series and calls it stable", () => {
 		// Un-quantized, so the fit is exact and every candidate scores exactly 0.
 		// A scan that only accepted a score strictly above 0 would select no
@@ -367,3 +400,54 @@ describe("normalQuantile", () => {
 		}
 	});
 });
+
+/** Segments per run in {@link identicalRunSeries}: 48 x 3h == exactly 6 days. */
+const IDENTICAL_RUN_SEGMENTS = 48;
+const IDENTICAL_SEGMENT_MS = 3 * HOUR;
+/** Runs start a whole week apart, so grid dates land in the inter-run gaps. */
+const IDENTICAL_RUN_STRIDE_MS = 7 * DAY_MS;
+
+/**
+ * Four runs of ONE account — two before a step, two after — in which every run
+ * carries the identical exposure pattern and `dpct` is generated exactly as
+ * `Σ w · Mtok` with no quantization.
+ *
+ * The point is a degenerate bootstrap, not a realistic series. Because the two
+ * runs on a side are bit-identical, drawing runs with replacement rebuilds the
+ * same row sequence whatever it draws, so every resampled difference is the same
+ * number and the bootstrap measures nothing at all. Each side still holds two
+ * distinct run ids, so the per-side interval gate does not intercept the case
+ * before the difference bootstrap is reached.
+ */
+function identicalRunSeries(opts: {
+	beforeWeight: number;
+	afterWeight: number;
+	seed: number;
+}): QuotaSegment[] {
+	const rand = mulberry32(opts.seed);
+	// One exposure pattern, reused verbatim by all four runs.
+	const pattern = Array.from({ length: IDENTICAL_RUN_SEGMENTS }, () => ({
+		"claude-opus-5": 2_000_000 * (0.2 + 1.6 * rand()),
+		"claude-sonnet-5": 2_000_000 * (0.2 + 1.6 * rand()),
+	}));
+
+	const segments: QuotaSegment[] = [];
+	for (let run = 0; run < 4; run++) {
+		const opus = run < 2 ? opts.beforeWeight : opts.afterWeight;
+		const runStart = START + run * IDENTICAL_RUN_STRIDE_MS;
+		for (let i = 0; i < IDENTICAL_RUN_SEGMENTS; i++) {
+			const tokens = pattern[i];
+			segments.push({
+				runId: `identical:${run}`,
+				accountId: "acct-a",
+				t0: runStart + i * IDENTICAL_SEGMENT_MS,
+				t1: runStart + (i + 1) * IDENTICAL_SEGMENT_MS,
+				dpct:
+					(opus * tokens["claude-opus-5"]) / 1e6 +
+					(0.9 * tokens["claude-sonnet-5"]) / 1e6,
+				eqTokensByModel: { ...tokens },
+			});
+		}
+	}
+	return segments;
+}

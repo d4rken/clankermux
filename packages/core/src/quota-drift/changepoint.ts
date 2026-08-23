@@ -295,10 +295,24 @@ function scanOnce(
 	// the test does not have. The run-block resampling still supplies the
 	// uncertainty; only the tail comes from the normal approximation, where the
 	// exact level costs nothing.
-	const bootstrapStdDev = sampleStdDev(diffs);
-	if (diffs.length === 0 || !(bootstrapStdDev > 0)) {
+	//
+	// The degenerate cases are rejected on the DRAWS, before any spread is
+	// computed, because the spread cannot see them. Recovering a mean by summing
+	// a thousand identical values and dividing does not return that value: the
+	// accumulated rounding leaves it a few ulps off, so the second pass squares a
+	// difference that is pure arithmetic error and reports it as variance.
+	// Measured: 1000 identical draws of -0.173 yield 1.39e-15 rather than 0, which
+	// clears a `> 0` test and hands back a zero-width interval that excludes zero
+	// for free.
+	if (diffs.length < 2 || new Set(diffs).size < 2) {
 		// No usable resamples, or every resample identical: the difference has no
-		// measured uncertainty, and a zero-width interval excludes zero for free.
+		// measured uncertainty at all.
+		return { change: null, viable: false, nCandidates: candidates.length };
+	}
+	const bootstrapStdDev = sampleStdDev(diffs);
+	if (!Number.isFinite(bootstrapStdDev) || bootstrapStdDev <= 0) {
+		// Covers +Infinity and NaN as well as a spread that still came out at zero;
+		// a non-finite half-width is not a measurement either.
 		return { change: null, viable: false, nCandidates: candidates.length };
 	}
 	const halfWidth = normalQuantile(1 - adjustedLevel / 2) * bootstrapStdDev;
@@ -412,18 +426,29 @@ function spanDays(segments: readonly QuotaSegment[]): number {
 }
 
 /**
- * Sample standard deviation (n - 1 denominator). NaN for fewer than two
- * values: one draw carries no spread, and returning 0 there would read as
- * "measured, and exactly zero".
+ * Sample standard deviation (n - 1 denominator), by Welford's online update.
+ *
+ * NaN for fewer than two values: one draw carries no spread, and returning 0
+ * there would read as "measured, and exactly zero".
+ *
+ * The two-pass form this replaced recovered the mean by summing every value and
+ * dividing, which on a degenerate sample lands a few ulps away from the value
+ * itself and turns that rounding into "variance". Welford never forms the total:
+ * each update takes the deviation from the running mean, so an unvarying sample
+ * leaves `m2` at exactly zero.
  */
 function sampleStdDev(values: readonly number[]): number {
 	if (values.length < 2) return Number.NaN;
-	let sum = 0;
-	for (const v of values) sum += v;
-	const mean = sum / values.length;
-	let ss = 0;
-	for (const v of values) ss += (v - mean) * (v - mean);
-	return Math.sqrt(ss / (values.length - 1));
+	let n = 0;
+	let mean = 0;
+	let m2 = 0;
+	for (const v of values) {
+		n += 1;
+		const delta = v - mean;
+		mean += delta / n;
+		m2 += delta * (v - mean);
+	}
+	return Math.sqrt(m2 / (n - 1));
 }
 
 // Acklam's rational approximation to the inverse standard-normal CDF.
