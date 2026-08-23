@@ -1,14 +1,13 @@
 import type { KeyRunway } from "@clankermux/core";
-import { worstKeyRunway } from "@clankermux/core";
+import { effectiveRunwayOutcome, worstKeyRunway } from "@clankermux/core";
 import { Hourglass } from "lucide-react";
-import { describePinTarget } from "../../lib/api-key-pin-label";
 import {
 	describeRunwayCause,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,
 } from "../../lib/runway-display";
-import { MetricCard, type MetricCardSubRow } from "./MetricCard";
+import { MetricCard } from "./MetricCard";
 
 interface RunwayCardProps {
 	/** Per-key runway rows, straight from `/api/runway`. */
@@ -38,6 +37,10 @@ interface RunwayCardProps {
  * This is QUOTA, not availability: pauses, rate-limit cooldowns, usage
  * throttling and the provider-overload breaker are deliberately not counted, so
  * the copy must never promise routability.
+ *
+ * Summary only, in proportion with the other Overview tiles: the per-key
+ * breakdown lives on the Usage page, behind the disclosure in
+ * `LimitsCapacityOverview`.
  */
 export function RunwayCard({
 	runways,
@@ -51,12 +54,14 @@ export function RunwayCard({
 	const activeRunways = runways.filter((runway) => runway.isActive);
 
 	// `unavailableReason` is reserved for BACKING-READ failures — the incoming
-	// prop, and a runway list with nothing active to speak for. MetricCard drops
-	// the sub-rows along with the value when it is set, so an outcome that merely
-	// cannot be STATED (unknown, no-accounts) must not travel through it: the
-	// other keys' definite figures have to stay reachable. Precedence in
-	// MetricCard is unavailable -> loading -> resolved, so a failed read is never
-	// dressed up as a pending one.
+	// prop, and a runway list with nothing active to speak for. It replaces the
+	// value with an explicit unavailable state, which is exactly right for a read
+	// that produced nothing and exactly wrong for an outcome that merely cannot
+	// be STATED (unknown, no-accounts): that read SUCCEEDED, so its reason goes
+	// in the caption beside a dash instead. The line the two sides of this split
+	// hold is that a value is never derived from a read that failed. Precedence
+	// in MetricCard is unavailable -> loading -> resolved, so a failed read is
+	// never dressed up as a pending one.
 	const unavailable =
 		unavailableReason ??
 		(worst === null ? "No active API keys or accounts" : undefined);
@@ -68,9 +73,24 @@ export function RunwayCard({
 
 	const captionParts: string[] = [];
 	if (worst && resolved) {
-		// With one route there is nothing to disambiguate, so the key name is only
-		// worth the width when several keys could be the limiting one.
-		if (activeRunways.length > 1) captionParts.push(worst.keyName);
+		// Read at `now`, like the headline: a served `runway` past its deadline is
+		// an `out-now`, and it still names the accounts that ran the pool out.
+		const effectiveKind = effectiveRunwayOutcome(worst.outcome, now).kind;
+		// Only an outcome that carries causes actually identifies a constraining
+		// key. When every key is beyond the horizon they all tie on severity and
+		// `worstKeyRunway` returns whichever row came first out of the database —
+		// naming that one would present row order as a finding. Nothing is
+		// constraining there, so the caption states the SCOPE the figure covers
+		// instead of a name.
+		if (effectiveKind === "runway" || effectiveKind === "out-now") {
+			// With one route there is nothing to disambiguate, so the key name is
+			// only worth the width when several keys could be the limiting one.
+			if (activeRunways.length > 1) captionParts.push(worst.keyName);
+		} else if (effectiveKind === "beyond-horizon") {
+			captionParts.push(
+				`${activeRunways.length} key${activeRunways.length === 1 ? "" : "s"}`,
+			);
+		}
 		// An unstateable outcome takes the "why" slot; the two are exclusive,
 		// since an outcome that names a cause is one that can be stated.
 		const cause =
@@ -81,14 +101,6 @@ export function RunwayCard({
 		if (qualifier) captionParts.push(qualifier);
 	}
 
-	const subRows: MetricCardSubRow[] = activeRunways.map((runway) => ({
-		label: runway.keyName,
-		value: formatRunwayValue(runway.outcome, now) ?? "—",
-		tooltip:
-			runwayUnavailableReason(runway.outcome) ??
-			describePinTarget(runway.pin, accounts),
-	}));
-
 	return (
 		<MetricCard
 			title="Quota Runway"
@@ -98,7 +110,6 @@ export function RunwayCard({
 			unavailableReason={unavailable}
 			staleNote={staleNote}
 			loading={loading}
-			subRows={subRows}
 		/>
 	);
 }
