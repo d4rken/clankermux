@@ -27,25 +27,56 @@ export interface AuthStatusResponse {
  * Read a bounded JSON body. Returns null when the body is absent, too large,
  * or not an object — every one of which must be refused BEFORE anything
  * expensive runs.
+ *
+ * The body is consumed INCREMENTALLY and the reader is cancelled the moment
+ * the cap is passed. `await req.text()` would buffer the whole thing first,
+ * which on an unauthenticated endpoint means any caller who can reach the port
+ * can make this process hold an arbitrary amount of memory — before the
+ * throttle is even claimed, and while the same process is serving AI traffic.
+ * Nothing over the cap is ever decoded, either: decoding is itself work
+ * proportional to what was sent.
  */
 async function readBoundedJson(
 	req: Request,
 	maxBytes: number,
 ): Promise<Record<string, unknown> | null> {
 	// A declared length over the cap is refused without reading the body at all.
+	// It is only a claim, though: it can lie, and a chunked body has none.
 	const declared = Number(req.headers.get("content-length"));
 	if (Number.isFinite(declared) && declared > maxBytes) return null;
-	let text: string;
+	if (!req.body) return null;
+
+	const reader = req.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
 	try {
-		text = await req.text();
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				// Cancelling propagates to the sender's side of the stream, so the
+				// rest of an oversized body is never pulled in at all.
+				await reader.cancel().catch(() => {});
+				return null;
+			}
+			chunks.push(value);
+		}
 	} catch {
+		await reader.cancel().catch(() => {});
 		return null;
 	}
-	// The declared length is a claim, not a guarantee (and may be absent on a
-	// chunked body), so the real size is checked too.
-	if (Buffer.byteLength(text, "utf8") > maxBytes) return null;
+
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
 	try {
-		const parsed = JSON.parse(text);
+		const parsed = JSON.parse(new TextDecoder().decode(body));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
 			? (parsed as Record<string, unknown>)
 			: null;
