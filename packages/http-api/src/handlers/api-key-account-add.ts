@@ -292,12 +292,18 @@ export function createApiKeyAccountAddHandler(
 			const token = spec.mirrorKeyToTokens ? apiKey : null;
 			const db = dbOps.getAdapter();
 
+			// auto_pause_on_overage_enabled is named explicitly rather than left to
+			// the table default: databases at or below the migration floor have
+			// DEFAULT 0 where a fresh install has DEFAULT 1, and no ALTER can change
+			// that, so inheriting it would silently give older installs accounts
+			// with overage auto-pause off.
 			await insertAccountUnique(
 				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings,
+					auto_pause_on_overage_enabled
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 				[
 					accountId,
 					name,

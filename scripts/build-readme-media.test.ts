@@ -296,11 +296,15 @@ describe("README media", () => {
 			darkFiles.map((n) => `docs/media/${n}`).sort(),
 		);
 
-		// Nothing may reference the media outside a <picture>.
-		const stripped = readme.replace(
-			/<picture>.*?<\/picture>/g,
-			"",
-		);
+		// Nothing may reference the media outside a <picture> — except the
+		// click-through link each screenshot's <picture> is wrapped in, whose
+		// href necessarily sits outside the element it wraps.
+		const stripped = readme
+			.replace(
+				/<a href="docs\/media\/[^"]+"><picture>.*?<\/picture><\/a>/g,
+				"",
+			)
+			.replace(/<picture>.*?<\/picture>/g, "");
 		expect(stripped).not.toContain("docs/media/");
 	});
 
