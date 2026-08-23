@@ -1,0 +1,359 @@
+/**
+ * The public request stream.
+ *
+ * Three behaviours are copied deliberately from the internal dashboard lane and
+ * each is asserted on its own, because each has a different failure:
+ *
+ *  - SUBSCRIBE-THEN-SNAPSHOT. Reversing it loses any request that settles in
+ *    between, and the client holds that request as pending until its
+ *    lost-timeout. A test that only checked "a snapshot arrives" would pass
+ *    against the broken order, so the ORDERING itself is what is asserted.
+ *  - The snapshot is sent unconditionally, empty included: its arrival is the
+ *    device's only signal that replay finished, and an empty one is what
+ *    retracts rows a reconnecting device still holds.
+ *  - The `server-shutdown` event name, which is how the device tells a clean
+ *    restart from a network failure and skips its backoff.
+ *
+ * Plus the property this whole surface exists for: the internal event
+ * discriminator never reaches the wire.
+ */
+import { afterEach, describe, expect, it } from "bun:test";
+import {
+	type RequestEvt,
+	requestEvents,
+	resetRequestEventRegistry,
+} from "@clankermux/core";
+import { closeAllSseStreams } from "../../../sse-registry";
+import { createPublicStreamHandler, toPublicStreamEvent } from "../stream";
+
+/** Publish on the internal bus, exactly as the proxy does. */
+function emit(evt: RequestEvt): void {
+	requestEvents.emit("event", evt);
+}
+
+/** Read SSE frames until `count` `data:` lines have arrived (or the stream ends). */
+async function readFrames(res: Response, count: number): Promise<string[]> {
+	const reader = res.body?.getReader();
+	if (!reader) throw new Error("no body");
+	const decoder = new TextDecoder();
+	const frames: string[] = [];
+	let buffer = "";
+	while (frames.length < count) {
+		const { value, done } = await reader.read();
+		if (done) break;
+		buffer += decoder.decode(value, { stream: true });
+		let index = buffer.indexOf("\n\n");
+		while (index !== -1) {
+			frames.push(buffer.slice(0, index));
+			buffer = buffer.slice(index + 2);
+			if (frames.length >= count) break;
+			index = buffer.indexOf("\n\n");
+		}
+	}
+	await reader.cancel().catch(() => {});
+	return frames;
+}
+
+function dataOf(frame: string): Record<string, unknown> | null {
+	const line = frame.split("\n").find((l) => l.startsWith("data: "));
+	if (!line) return null;
+	const body = line.slice(6);
+	try {
+		return JSON.parse(body);
+	} catch {
+		return null;
+	}
+}
+
+afterEach(() => {
+	// Closing the streams detaches their listeners; the module's own registry
+	// listener must survive, so `removeAllListeners` is deliberately not used.
+	closeAllSseStreams();
+	resetRequestEventRegistry();
+});
+
+describe("connect handshake", () => {
+	it("sends the snapshot unconditionally, even when nothing is in flight", async () => {
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		const frames = await readFrames(res, 2);
+		expect(frames[0]).toContain("event: connected");
+		const snapshot = dataOf(frames[1] ?? "");
+		expect(snapshot?.type).toBe("active.snapshot");
+		// An EMPTY snapshot is meaningful: it retracts rows the device still
+		// holds from before a reconnect.
+		expect(snapshot?.active).toEqual([]);
+	});
+
+	it("carries the schema on the snapshot so a device can pin the contract", async () => {
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		const frames = await readFrames(res, 2);
+		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.v1");
+	});
+
+	it("SUBSCRIBES BEFORE it builds the snapshot", async () => {
+		// The whole point. Both orders produce a snapshot frame, so a test that
+		// only checked "a snapshot arrives" passes against the broken one. What
+		// distinguishes them is whether the listener was already attached at the
+		// moment the replay was READ — with the reverse order a request that
+		// settles in that window is in neither the snapshot nor the stream, and
+		// the client holds it as pending until its lost-timeout.
+		const before = requestEvents.listenerCount("event");
+		let listenersWhenReplayRead = -1;
+
+		const res = createPublicStreamHandler(60_000, Date.now, () => {
+			listenersWhenReplayRead = requestEvents.listenerCount("event");
+			return [];
+		})(new Request("http://localhost/public/v1/stream"));
+		const frames = await readFrames(res, 2);
+
+		expect(dataOf(frames[1] ?? "")?.type).toBe("active.snapshot");
+		expect(listenersWhenReplayRead).toBe(before + 1);
+	});
+
+	it("replays what is in flight at connect time", async () => {
+		emit({
+			type: "ingress",
+			id: "req-live",
+			timestamp: 1_700_000_000_000,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+		});
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		const frames = await readFrames(res, 2);
+		const snapshot = dataOf(frames[1] ?? "");
+		expect(snapshot?.type).toBe("active.snapshot");
+		expect(snapshot?.active).toEqual([
+			{
+				id: "req-live",
+				startedAt: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				project: "clankermux",
+				model: "claude-opus-5",
+				phase: "pending",
+				accountId: null,
+				statusCode: null,
+			},
+		]);
+	});
+});
+
+describe("shutdown", () => {
+	it("names the farewell event server-shutdown so the device skips its backoff", async () => {
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		const reader = res.body?.getReader();
+		if (!reader) throw new Error("no body");
+		const decoder = new TextDecoder();
+		// Drain the handshake.
+		await reader.read();
+		closeAllSseStreams();
+		let text = "";
+		while (!text.includes("server-shutdown")) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			text += decoder.decode(value, { stream: true });
+		}
+		expect(text).toContain("event: server-shutdown");
+		await reader.cancel().catch(() => {});
+	});
+});
+
+describe("event translation", () => {
+	it("never forwards the internal discriminator", () => {
+		const internalTypes = [
+			"snapshot",
+			"ingress",
+			"ingress-end",
+			"start",
+			"summary",
+		];
+		const mapped = [
+			toPublicStreamEvent({ type: "snapshot", active: [] }, 0),
+			toPublicStreamEvent(
+				{
+					type: "ingress",
+					id: "a",
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				0,
+			),
+			toPublicStreamEvent({ type: "ingress-end", id: "a", statusCode: 400 }, 0),
+			toPublicStreamEvent(
+				{
+					type: "start",
+					id: "a",
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					accountId: "acct",
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				0,
+			),
+		];
+		for (const event of mapped) {
+			expect(event).not.toBeNull();
+			expect(internalTypes).not.toContain(event?.type ?? "");
+		}
+	});
+
+	it("maps each internal event to its public name", () => {
+		expect(toPublicStreamEvent({ type: "snapshot", active: [] }, 0)?.type).toBe(
+			"active.snapshot",
+		);
+		expect(
+			toPublicStreamEvent(
+				{
+					type: "ingress",
+					id: "a",
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				0,
+			)?.type,
+		).toBe("request.opened");
+		expect(
+			toPublicStreamEvent({ type: "ingress-end", id: "a", statusCode: null }, 0)
+				?.type,
+		).toBe("request.dropped");
+		expect(
+			toPublicStreamEvent(
+				{
+					type: "start",
+					id: "a",
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					accountId: null,
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				0,
+			)?.type,
+		).toBe("request.upstream");
+	});
+
+	it("drops an event this surface does not carry rather than forwarding it raw", () => {
+		expect(
+			toPublicStreamEvent(
+				// biome-ignore lint/suspicious/noExplicitAny: modelling a future bus event
+				{ type: "something-new", secret: "leak" } as any,
+				0,
+			),
+		).toBeNull();
+	});
+
+	it("keeps project and model — full DATA parity with the internal lane", () => {
+		const event = toPublicStreamEvent(
+			{
+				type: "ingress",
+				id: "a",
+				timestamp: 5,
+				method: "POST",
+				path: "/v1/messages",
+				project: "clankermux",
+				model: "claude-opus-5",
+			},
+			0,
+		);
+		expect(event).toEqual({
+			type: "request.opened",
+			id: "a",
+			at: 5,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+		});
+	});
+
+	it("uses accountId on every event that names an account", () => {
+		const start = toPublicStreamEvent(
+			{
+				type: "start",
+				id: "a",
+				timestamp: 1,
+				method: "GET",
+				path: "/p",
+				accountId: "acct-1",
+				statusCode: 200,
+				project: null,
+				model: null,
+			},
+			0,
+		);
+		const done = toPublicStreamEvent(
+			{
+				type: "summary",
+				payload: {
+					id: "a",
+					timestamp: new Date(1).toISOString(),
+					method: "GET",
+					path: "/p",
+					accountUsed: "acct-1",
+					statusCode: 200,
+					success: true,
+					errorMessage: null,
+					responseTimeMs: 1,
+					failoverAttempts: 0,
+				},
+			},
+			0,
+		);
+		expect(start && "accountId" in start).toBe(true);
+		expect(done && "accountId" in done).toBe(true);
+		expect(JSON.stringify(done)).not.toContain("accountUsed");
+	});
+});
+
+describe("live events reach the wire", () => {
+	it("forwards an event emitted after connect", async () => {
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		const reader = res.body?.getReader();
+		if (!reader) throw new Error("no body");
+		const decoder = new TextDecoder();
+		// connected + snapshot
+		await reader.read();
+
+		emit({
+			type: "ingress",
+			id: "req-later",
+			timestamp: 1_700_000_000_001,
+			method: "POST",
+			path: "/v1/messages",
+			project: null,
+			model: null,
+		});
+
+		let text = "";
+		while (!text.includes("request.opened")) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			text += decoder.decode(value, { stream: true });
+		}
+		expect(text).toContain("req-later");
+		await reader.cancel().catch(() => {});
+	});
+});

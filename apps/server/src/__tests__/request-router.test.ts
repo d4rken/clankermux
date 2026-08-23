@@ -23,6 +23,7 @@ import { routeRequest } from "../request-router";
 
 interface Calls {
 	api: { pathname: string }[];
+	publicApi: { pathname: string; method: string }[];
 	dispatch: { pathname: string; search: string; apiKeyId?: string | null }[];
 	responses: { pathname: string; search: string }[];
 	models: number;
@@ -37,6 +38,8 @@ interface Options {
 	dashboardManifest?: Record<string, string> | null;
 	/** Present a valid key. Absent means the request carries none. */
 	authenticated?: boolean;
+	/** Paths the read-only widget router claims. */
+	publicRoutes?: string[];
 }
 
 function makeDeps(options: Options = {}): {
@@ -48,10 +51,12 @@ function makeDeps(options: Options = {}): {
 		withDashboard = true,
 		dashboardManifest = { "/assets/app.js": "/assets/app.js" },
 		authenticated = true,
+		publicRoutes = ["/public/v1/status"],
 	} = options;
 
 	const calls: Calls = {
 		api: [],
+		publicApi: [],
 		dispatch: [],
 		responses: [],
 		models: 0,
@@ -64,6 +69,15 @@ function makeDeps(options: Options = {}): {
 			calls.api.push({ pathname: url.pathname });
 			return apiRoutes.includes(url.pathname)
 				? new Response(JSON.stringify({ handler: "management" }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					})
+				: null;
+		},
+		async handlePublicRequest(req, url) {
+			calls.publicApi.push({ pathname: url.pathname, method: req.method });
+			return publicRoutes.includes(url.pathname)
+				? new Response(JSON.stringify({ handler: "public" }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
 					})

@@ -28,6 +28,7 @@ import { routeRequest } from "../request-router";
 
 interface Calls {
 	api: { pathname: string; method: string }[];
+	publicApi: { pathname: string; method: string }[];
 	dispatch: { pathname: string }[];
 	auth: { path: string; method: string; requirement?: AuthRequirement }[];
 }
@@ -53,13 +54,22 @@ function makeDeps(options: Options = {}): {
 		withDashboard = false,
 	} = options;
 
-	const calls: Calls = { api: [], dispatch: [], auth: [] };
+	const calls: Calls = { api: [], publicApi: [], dispatch: [], auth: [] };
 
 	const deps: RequestRouterDeps = {
 		async handleApiRequest(url, req) {
 			calls.api.push({ pathname: url.pathname, method: req.method });
 			return apiRoutes.includes(url.pathname)
 				? new Response(JSON.stringify({ handler: "management" }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					})
+				: null;
+		},
+		async handlePublicRequest(req, url) {
+			calls.publicApi.push({ pathname: url.pathname, method: req.method });
+			return url.pathname === "/public/v1/status"
+				? new Response(JSON.stringify({ handler: "public" }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
 					})
@@ -290,6 +300,24 @@ describe("surfaces outside the management namespace stay ungated", () => {
 		);
 		expect(res.status).toBe(200);
 		expect(calls.auth.map((c) => c.requirement)).toEqual(["api_key"]);
+	});
+
+	it("serves the widget API on a gated deployment, with no cookie", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(request("/public/v1/status"), deps);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ handler: "public" });
+		// The gate must not even have been consulted: `/public/*` is a sibling of
+		// the wire mounts, not a carve-out inside `/api/*`.
+		expect(calls.auth).toEqual([]);
+		expect(calls.api).toEqual([]);
+	});
+
+	it("404s an unknown widget route instead of leaking it to the proxy or the shell", async () => {
+		const { deps, calls } = makeDeps({ withDashboard: true });
+		const res = await routeRequest(request("/public/v1/nope"), deps);
+		expect(res.status).toBe(404);
+		expect(calls.dispatch).toEqual([]);
 	});
 
 	it("serves the dashboard shell for a client-side route", async () => {

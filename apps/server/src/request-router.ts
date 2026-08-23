@@ -55,6 +55,12 @@ import {
 export interface RequestRouterDeps {
 	/** The management REST surface. Returns null when no route matched. */
 	handleApiRequest(url: URL, req: Request): Promise<Response | null>;
+	/**
+	 * The read-only widget surface at `/public/*`. Returns null when no route
+	 * matched, so this router owns the namespace's 404 rather than leaking the
+	 * path into proxy dispatch.
+	 */
+	handlePublicRequest(req: Request, url: URL): Promise<Response | null>;
 	authenticate(
 		req: Request,
 		path: string,
@@ -104,6 +110,11 @@ function isRootProxyPath(pathname: string): boolean {
 
 function isApiPath(pathname: string): boolean {
 	return pathname === "/api" || pathname.startsWith("/api/");
+}
+
+/** The read-only widget namespace. A sibling of the wire mounts, not of `/api`. */
+function isPublicApiPath(pathname: string): boolean {
+	return pathname === "/public" || pathname.startsWith("/public/");
 }
 
 /**
@@ -278,6 +289,26 @@ async function routeRootRequest(
 	// token.
 	if (isIdentityBoundPath(url.pathname)) {
 		return createIdentityBoundRefusalResponse(url.pathname);
+	}
+
+	// The read-only widget surface. Its own namespace, checked BEFORE the
+	// management gate and before the dashboard branch.
+	//
+	// Outside `/api/*` on purpose: the session gate is a path-prefix decision,
+	// so putting a credential-free surface underneath it would mean the
+	// exemption list is the only thing keeping a desk panel working. As a
+	// sibling of the wire mounts it is unreachable from the gate by
+	// construction. The 404 for an unknown `/public/*` path is answered here so
+	// the namespace never falls through to the dashboard shell or to proxy
+	// dispatch.
+	if (isPublicApiPath(url.pathname)) {
+		const publicResponse = await deps.handlePublicRequest(req, url);
+		if (publicResponse) return publicResponse;
+		return jsonError(
+			HTTP_STATUS.NOT_FOUND,
+			"not_found",
+			`Unknown public API route: ${url.pathname}`,
+		);
 	}
 
 	// The management gate, and it has to be HERE — above `handleApiRequest`,

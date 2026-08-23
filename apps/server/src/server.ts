@@ -31,6 +31,7 @@ import {
 	APIRouter,
 	AuthService,
 	closeAllSseStreams,
+	PublicRouter,
 	SessionAuthService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
@@ -809,6 +810,12 @@ export default async function startServer(options?: {
 		getEventLoopLag: () => getEventLoopStats(),
 	});
 
+	// The read-only widget API. Its own router, mounted as a sibling of the wire
+	// mounts rather than under `/api/*`, so the management session gate cannot
+	// reach it and no exemption list has to keep a credential-less device
+	// working.
+	const publicRouter = new PublicRouter({ dbOps, config });
+
 	// Initialize AuthService for proxy authentication. It also answers the
 	// front door's `session` requirement for `/api/*`, so it is handed the same
 	// SessionAuthService the API router uses.
@@ -1240,6 +1247,7 @@ export default async function startServer(options?: {
 	// from a test instead of living inside a Bun.serve closure.
 	const routerDeps: RequestRouterDeps = {
 		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
+		handlePublicRequest: (req, url) => publicRouter.handle(req, url),
 		authenticate: (req, path, method, requirement) =>
 			authService.authenticateRequest(req, path, method, requirement),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
