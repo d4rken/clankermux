@@ -206,6 +206,38 @@ describe("POST /api/auth/login", () => {
 		expect(oversizeBody.limit).toBe(LOGIN_MAX_BODY_BYTES);
 	});
 
+	it("refuses a DECLARED Content-Length over the cap without consuming the body", async () => {
+		// The other size tests all reach the cap by COUNTING bytes as they arrive.
+		// This is the other branch, and the only one that can answer before the
+		// body exists: the header alone settles it, and the handler never takes a
+		// reader — which is what leaves the stream unlocked below.
+		await configure("hunter2");
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.enqueue(new TextEncoder().encode("x".repeat(1_024)));
+			},
+		});
+		const req = new Request("http://localhost/api/auth/login", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"content-length": String(LOGIN_MAX_BODY_BYTES + 1),
+			},
+			body,
+			duplex: "half",
+		} as RequestInit & { duplex: "half" });
+
+		const res = await createAuthLoginHandler(svc)(req);
+
+		expect(res.status).toBe(413);
+		expect(await res.json()).toEqual({
+			error: "Request body too large",
+			limit: LOGIN_MAX_BODY_BYTES,
+		});
+		expect(req.body?.locked).toBe(false);
+		expect(hasher.verifyCalls).toBe(0);
+	});
+
 	it("STOPS READING an oversized body instead of buffering it first", async () => {
 		// The endpoint is unauthenticated and the process also serves AI traffic,
 		// so "reject after buffering" is the whole problem: a chunked body, or one
