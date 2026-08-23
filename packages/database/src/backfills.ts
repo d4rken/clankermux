@@ -43,14 +43,24 @@ const AUTO_PAUSE_OVERAGE_MARKER = "backfill:auto-pause-overage-default";
  * re-enable it behind their back, every restart, forever.
  */
 function backfillAutoPauseOverageDefault(db: Database): void {
-	const alreadyApplied =
-		db
-			.prepare(`SELECT name FROM strategies WHERE name = ?`)
-			.get(AUTO_PAUSE_OVERAGE_MARKER) != null;
-	if (alreadyApplied) return;
-
+	let claimed = false;
 	let updated = 0;
 	const tx = db.transaction(() => {
+		// Claiming the marker is the FIRST statement, inside the transaction, so
+		// the check and the write are atomic against another connection. Two
+		// processes opening the same database before the marker exists would both
+		// pass a pre-check outside the transaction, and the loser would then hit
+		// `UNIQUE constraint failed: strategies.name` on an unconditional INSERT
+		// and take the whole startup down with it.
+		claimed =
+			db
+				.prepare(
+					`INSERT OR IGNORE INTO strategies (name, config, updated_at)
+					 VALUES (?, ?, ?)`,
+				)
+				.run(AUTO_PAUSE_OVERAGE_MARKER, "{}", Date.now()).changes > 0;
+		if (!claimed) return;
+
 		updated = db
 			.prepare(
 				`UPDATE accounts SET auto_pause_on_overage_enabled = 1
@@ -60,14 +70,16 @@ function backfillAutoPauseOverageDefault(db: Database): void {
 
 		const now = Date.now();
 		db.prepare(
-			`INSERT INTO strategies (name, config, updated_at) VALUES (?, ?, ?)`,
+			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,
 		).run(
-			AUTO_PAUSE_OVERAGE_MARKER,
 			JSON.stringify({ accountsUpdated: updated, appliedAt: now }),
 			now,
+			AUTO_PAUSE_OVERAGE_MARKER,
 		);
 	});
 	tx();
+
+	if (!claimed) return;
 
 	log.info(
 		`Backfill ${AUTO_PAUSE_OVERAGE_MARKER}: enabled overage auto-pause on ${updated} account(s)`,

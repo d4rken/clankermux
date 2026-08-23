@@ -121,6 +121,27 @@ describe("auto-pause-on-overage default backfill", () => {
 		}
 	});
 
+	it("leaves the data alone when another connection already claimed the marker", () => {
+		// The marker claim is an INSERT OR IGNORE inside the transaction, so the
+		// process that loses the race sees changes = 0 and returns instead of
+		// throwing `UNIQUE constraint failed: strategies.name` out of the
+		// DatabaseOperations constructor and failing its own startup.
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			runOneShotBackfills(db);
+			const claimed = marker(db);
+
+			insertAccount(db, "later-acct", 0);
+
+			expect(() => runOneShotBackfills(db)).not.toThrow();
+			expect(autoPause(db, "later-acct")).toBe(0);
+			expect(marker(db)?.config).toBe(claimed?.config ?? "");
+		} finally {
+			db.close();
+		}
+	});
+
 	it("is a no-op on a database whose accounts are all enabled", () => {
 		const db = new Database(dbPath, { create: true });
 		try {
