@@ -193,13 +193,22 @@ interface ApiKeysListResponse {
 	count: number;
 }
 
+/**
+ * The one `/api/api-keys` fetcher. Exported because ApiKeysTab keeps its own
+ * observer (it suspends the request while the generated-key dialog is up) yet
+ * shares `queryKeys.apiKeys()`: one cache key with two hand-written queryFns
+ * would let whichever observer fetched first decide the cached SHAPE, so the
+ * other reader silently gets something it cannot parse.
+ */
+export async function fetchApiKeys(): Promise<ApiKeyResponse[]> {
+	const res = await api.get<ApiKeysListResponse>("/api/api-keys");
+	return res.data ?? [];
+}
+
 export const useApiKeys = () => {
 	return useQuery({
 		queryKey: queryKeys.apiKeys(),
-		queryFn: async () => {
-			const res = await api.get<ApiKeysListResponse>("/api/api-keys");
-			return res.data ?? [];
-		},
+		queryFn: fetchApiKeys,
 		staleTime: 60000,
 		gcTime: 5 * 60 * 1000,
 	});
