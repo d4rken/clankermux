@@ -111,6 +111,58 @@ describe("rotation invalidates sessions", () => {
 		});
 	});
 
+	it("never lets a concurrent validation observe a half-applied rotation", async () => {
+		await repo.setPassword("old", "{}", 1);
+		for (const hash of ["a", "b", "c", "d"]) {
+			await repo.createSession(session(hash));
+		}
+
+		// Interleave reads with the rotation.
+		//
+		// A validator is NOT one query — it reads the password, then the session
+		// row — so it can straddle the rotation, and the pairing it lands on is
+		// what matters. Exactly one pairing is unsafe: a NEW password beside a
+		// session issued under the old one, which is "rotation happened and the
+		// stolen cookie still works". That one is impossible because the delete
+		// and the verifier write share a transaction whose callback runs
+		// synchronously, so nothing can be scheduled between them.
+		//
+		// The mirror pairing (old verifier, sessions already gone) is reachable
+		// and harmless: the validator finds no session and refuses.
+		const observations: Array<{ verifier: string | null; live: number }> = [];
+		const observe = async () => {
+			const password = await repo.getPassword();
+			let live = 0;
+			for (const hash of ["a", "b", "c", "d"]) {
+				if (await repo.getSession(hash)) live++;
+			}
+			observations.push({ verifier: password?.verifier ?? null, live });
+		};
+
+		await Promise.all([
+			observe(),
+			repo.setPassword("new", "{}", 2),
+			observe(),
+			observe(),
+		]);
+		await observe();
+
+		for (const seen of observations) {
+			if (seen.verifier === "new") {
+				expect(seen.live).toBe(0);
+			}
+			// A pre-rotation reading must have seen all four or none — never a
+			// partially-emptied table, which is what a non-transactional delete
+			// would produce.
+			if (seen.verifier === "old") {
+				expect([0, 4]).toContain(seen.live);
+			}
+		}
+		// And the end state is unambiguous.
+		expect((await repo.getPassword())?.verifier).toBe("new");
+		expect(await repo.getSession("a")).toBeNull();
+	});
+
 	it("leaves neither half applied if the transaction cannot commit", async () => {
 		await repo.setPassword("old", "{}", 1);
 		await repo.createSession(session("a"));
