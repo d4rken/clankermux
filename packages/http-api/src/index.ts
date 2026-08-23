@@ -2,6 +2,12 @@
 
 // Export handlers
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
+export {
+	__setQuotaDriftWorkerFactoryForTests,
+	QUOTA_DRIFT_PASS_TIMEOUT_MS,
+	type QuotaDriftPassResult,
+	runQuotaDriftPass,
+} from "./handlers/quota-drift-precompute";
 export * from "./handlers/storage";
 export { APIRouter } from "./router";
 // Export admin service functions (account + API-key management)

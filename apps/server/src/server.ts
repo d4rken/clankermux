@@ -95,6 +95,7 @@ import {
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
+import { QuotaDriftScheduler } from "./quota-drift-scheduler";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -253,6 +254,7 @@ let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
 	null;
+let quotaDriftScheduler: QuotaDriftScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1576,6 +1578,17 @@ Available endpoints:
 	});
 	cacheKeepaliveSnapshotSampler.start();
 
+	// Start the quota-drift scheduler: recomputes the implied per-model cost of
+	// each usage window (the Analytics "Quota" tab) every 30 minutes. The fit
+	// runs on its own read-only worker; only the resulting row is written here,
+	// because that worker's connection is query_only. Purely a read-side
+	// projection — it never touches routing, cooldowns or account selection.
+	quotaDriftScheduler = new QuotaDriftScheduler({
+		getDbPath: () => dbOps.getResolvedDbPath(),
+		storeResult: (row) => dbOps.insertQuotaDriftResult(row),
+	});
+	quotaDriftScheduler.start();
+
 	// Start the subscription-payment auto-recorder: books each subscription
 	// account's renewal due dates into the account_payments ledger (immediate
 	// catch-up tick for due dates missed while down, then hourly).
@@ -1739,6 +1752,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (codexResetCreditApplyScheduler) {
 			codexResetCreditApplyScheduler.stop();
 			codexResetCreditApplyScheduler = null;
+		}
+		if (quotaDriftScheduler) {
+			quotaDriftScheduler.stop();
+			quotaDriftScheduler = null;
 		}
 
 		// Stop memory monitoring
