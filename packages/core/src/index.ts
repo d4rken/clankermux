@@ -188,7 +188,12 @@ export {
 	type NormalizedUsageWindow,
 	normalizeAnthropicUsage,
 } from "./usage-normalizer";
-export { computeUsagePrediction } from "./usage-prediction";
+export {
+	computeUsagePrediction,
+	isFitBoundary,
+	isResetBoundary,
+	splitSeries,
+} from "./usage-prediction";
 export {
 	type ExtractedValue,
 	extractFiveHour,
