@@ -275,6 +275,27 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 		expect(closed).toBe(1);
 	});
 
+	it("closes a cookie-less stream from the HANDSHAKE probe alone", async () => {
+		const store = new FakeStore();
+		store.getManagementPassword = async () => {
+			throw new Error("database is locked");
+		};
+		const svc = new SessionAuthService(store);
+		// A minute between ticks and an hour of lifetime: neither can fire inside
+		// this test, so the attach-time catch is the ONLY thing left that can
+		// close the stream. The other tests here run a tick every few
+		// milliseconds, which observes the same rejection and closes for its own
+		// reason — with them alone, deleting the handshake catch changes nothing.
+		const guard = createSessionStreamGuard(svc, 60_000, 60 * 60_000);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(), () => {
+			closed++;
+		});
+		await waitFor(() => closed > 0);
+		detach();
+		expect(closed).toBe(1);
+	});
+
 	it("closes a stream opened fail-open when the read that would notice the new password REJECTS", async () => {
 		const store = new FakeStore();
 		const svc = new SessionAuthService(store);
