@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
 	openBacktestDatabase,
 	parseCliArgs,
 	runBacktest,
+	shellQuoteArg,
 } from "./prediction-backtest";
 
 const MIN_MS = 60_000;
@@ -17,6 +18,7 @@ const T0 = Date.parse("2026-06-01T00:00:00.000Z");
 
 const tempDir = mkdtempSync(join(tmpdir(), "prediction-backtest-"));
 const dbPath = join(tempDir, "fixture.db");
+const boundaryDbPath = join(tempDir, "boundary.db");
 
 afterAll(() => {
 	rmSync(tempDir, { recursive: true, force: true });
@@ -31,12 +33,11 @@ interface SnapshotFixture {
 }
 
 /**
- * Builds the fixture database ONCE. Schema copied from
- * `packages/database/src/migrations.ts` for the two tables this tool reads
- * (without the accounts foreign key, which is irrelevant to a read-only tool).
+ * Schema copied from `packages/database/src/migrations.ts` for the two tables
+ * this tool reads (without the accounts foreign key, which is irrelevant to a
+ * read-only tool).
  */
-function buildFixtureDb(): void {
-	const db = new Database(dbPath, { create: true });
+function createTables(db: Database): void {
 	db.run(`
 		CREATE TABLE usage_snapshots (
 			account_id TEXT NOT NULL,
@@ -59,6 +60,29 @@ function buildFixtureDb(): void {
 			status_code INTEGER
 		)
 	`);
+}
+
+function insertSnapshots(db: Database, rows: SnapshotFixture[]): void {
+	const insert = db.prepare(
+		`INSERT INTO usage_snapshots
+		 (account_id, provider, sampled_at, five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset)
+		 VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+	);
+	for (const r of rows) {
+		insert.run(
+			r.accountId,
+			r.provider,
+			r.sampledAt,
+			r.fiveHourPct,
+			r.fiveHourReset,
+		);
+	}
+}
+
+/** Builds the fixture database ONCE. */
+function buildFixtureDb(): void {
+	const db = new Database(dbPath, { create: true });
+	createTables(db);
 
 	const rows: SnapshotFixture[] = [];
 	const push = (
@@ -119,20 +143,7 @@ function buildFixtureDb(): void {
 		push("codex-1", codexStart2 + i * 10 * MIN_MS, 1 + i, codexReset2);
 	}
 
-	const insert = db.prepare(
-		`INSERT INTO usage_snapshots
-		 (account_id, provider, sampled_at, five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset)
-		 VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
-	);
-	for (const r of rows) {
-		insert.run(
-			r.accountId,
-			r.provider,
-			r.sampledAt,
-			r.fiveHourPct,
-			r.fiveHourReset,
-		);
-	}
+	insertSnapshots(db, rows);
 
 	const insertRequest = db.prepare(
 		`INSERT INTO requests (id, timestamp, method, path, account_used, status_code)
@@ -147,6 +158,57 @@ function buildFixtureDb(): void {
 }
 
 buildFixtureDb();
+
+/**
+ * Instants whose outcome lands EXACTLY on a range end. Ranges are half-open, so
+ * such an outcome belongs to the next range and must not label this one — and
+ * real resets land on exact clock boundaries, which is how a report split at
+ * midnight UTC meets this case.
+ */
+const EXHAUST_AT = T0 + 3 * HOUR_MS;
+const SURVIVE_END = T0 + 8 * HOUR_MS;
+
+function buildBoundaryDb(): void {
+	const db = new Database(boundaryDbPath, { create: true });
+	createTables(db);
+
+	const rows: SnapshotFixture[] = [];
+	const push = (
+		accountId: string,
+		sampledAt: number,
+		pct: number,
+		reset: number,
+	) =>
+		rows.push({
+			accountId,
+			provider: "anthropic",
+			sampledAt,
+			fiveHourPct: pct,
+			fiveHourReset: reset,
+		});
+
+	// "edge-exh": rises to 100% exactly at EXHAUST_AT and stays there.
+	const exhReset = T0 + 5 * HOUR_MS;
+	for (let i = 0; i <= 29; i++) {
+		const t = T0 + i * 10 * MIN_MS;
+		push("edge-exh", t, t < EXHAUST_AT ? Math.min(99, 30 + 2 * i) : 100, exhReset);
+	}
+
+	// "edge-surv": a flat window whose reset AND whose successor's first sample
+	// both land exactly on SURVIVE_END, so its survival boundary is that instant.
+	for (let t = T0 + 5 * MIN_MS; t <= SURVIVE_END - 5 * MIN_MS; t += 10 * MIN_MS) {
+		push("edge-surv", t, 10, SURVIVE_END);
+	}
+	const nextReset = SURVIVE_END + 5 * HOUR_MS;
+	for (let i = 0; i <= 5; i++) {
+		push("edge-surv", SURVIVE_END + i * 10 * MIN_MS, 4 + i, nextReset);
+	}
+
+	insertSnapshots(db, rows);
+	db.close();
+}
+
+buildBoundaryDb();
 
 const FULL_RANGE = {
 	label: "All",
@@ -314,6 +376,49 @@ describe("runBacktest", () => {
 		expect(records.some((r) => r.accountId === "exhauster")).toBe(false);
 	});
 
+	test("label horizon: an exhaustion landing exactly on the range end is dropped", () => {
+		const olsRecords = (toMs: number) =>
+			runBacktest(boundaryDbPath, {
+				ranges: [{ label: "Edge", fromMs: T0, toMs }],
+				stepMinutes: 10,
+				windows: ["five_hour"],
+			}).ranges[0].windows[0].recordsByEstimator.get("ols") ?? [];
+
+		// The range is half-open, so an outcome at `toMs` is held-out evidence.
+		const onBoundary = olsRecords(EXHAUST_AT);
+		expect(onBoundary.some((r) => r.accountId === "edge-exh")).toBe(false);
+		// One millisecond wider and the same instants are labelled: the drop above
+		// is the horizon rule, not an empty fixture.
+		const justPast = olsRecords(EXHAUST_AT + 1).filter(
+			(r) => r.accountId === "edge-exh",
+		);
+		expect(justPast.length).toBeGreaterThan(0);
+		expect(
+			justPast.every(
+				(r) =>
+					r.outcome.kind === "exhausted" &&
+					(r.outcome as { atMs: number }).atMs === EXHAUST_AT,
+			),
+		).toBe(true);
+	});
+
+	test("label horizon: a survival boundary landing exactly on the range end is dropped", () => {
+		const olsRecords = (toMs: number) =>
+			runBacktest(boundaryDbPath, {
+				ranges: [{ label: "Edge", fromMs: T0, toMs }],
+				stepMinutes: 10,
+				windows: ["five_hour"],
+			}).ranges[0].windows[0].recordsByEstimator.get("ols") ?? [];
+
+		const onBoundary = olsRecords(SURVIVE_END);
+		expect(onBoundary.some((r) => r.accountId === "edge-surv")).toBe(false);
+		const justPast = olsRecords(SURVIVE_END + 1).filter(
+			(r) => r.accountId === "edge-surv",
+		);
+		expect(justPast.length).toBeGreaterThan(0);
+		expect(justPast.every((r) => r.outcome.kind === "survived")).toBe(true);
+	});
+
 	test("all estimators produce a record for every instant", () => {
 		const window = run().ranges[0].windows[0];
 		const counts = [...window.recordsByEstimator.values()].map((r) => r.length);
@@ -429,5 +534,43 @@ describe("assertSafeOutPath", () => {
 		expect(() =>
 			assertSafeOutPath(join(tempDir, "report.md"), dbPath),
 		).not.toThrow();
+		const existing = join(tempDir, "existing-report.md");
+		writeFileSync(existing, "# old report\n");
+		expect(() => assertSafeOutPath(existing, dbPath)).not.toThrow();
+	});
+
+	test("refuses a symlink that points at the database", () => {
+		const link = join(tempDir, "innocent-report.md");
+		symlinkSync(dbPath, link);
+		expect(() => assertSafeOutPath(link, dbPath)).toThrow(/database path/);
+	});
+
+	test("refuses a hard link to the database", () => {
+		const alias = join(tempDir, "hardlink-report.md");
+		linkSync(dbPath, alias);
+		expect(() => assertSafeOutPath(alias, dbPath)).toThrow(/hard link/);
+	});
+});
+
+describe("shellQuoteArg", () => {
+	test("leaves ordinary flag arguments bare", () => {
+		expect(shellQuoteArg("--from=2026-06-02T00:00:00Z")).toBe(
+			"--from=2026-06-02T00:00:00Z",
+		);
+		expect(shellQuoteArg("--out=docs/prediction-backtest-baseline.md")).toBe(
+			"--out=docs/prediction-backtest-baseline.md",
+		);
+	});
+
+	test("quotes whitespace and shell metacharacters", () => {
+		expect(shellQuoteArg("--db=/tmp/my db.sqlite")).toBe(
+			"'--db=/tmp/my db.sqlite'",
+		);
+		expect(shellQuoteArg("--db=$(rm -rf /)")).toBe("'--db=$(rm -rf /)'");
+		expect(shellQuoteArg("")).toBe("''");
+	});
+
+	test("closes and reopens the quote around an embedded single quote", () => {
+		expect(shellQuoteArg("--db=/tmp/it's.db")).toBe("'--db=/tmp/it'\\''s.db'");
 	});
 });

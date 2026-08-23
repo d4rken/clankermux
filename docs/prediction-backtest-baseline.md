@@ -1,6 +1,6 @@
 # ClankerMux usage-prediction backtest
 
-Generated: 2026-08-23T15:15:54.715Z
+Generated: 2026-08-23T15:59:49.086Z
 
 Reproduce with:
 
@@ -23,11 +23,11 @@ bun scripts/prediction-backtest.ts --from=2026-06-02T00:00:00Z --split=2026-08-0
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 154868 |
+| usage_snapshots rows | 154993 |
 | accounts | 6 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-08-23T15:12:02.510Z |
+| last sample | 2026-08-23T15:56:43.787Z |
 
 ## Methodology
 
@@ -433,4 +433,4 @@ Count of `requests` rows with `status_code = 429` falling inside windows this ha
 ## Notes
 
 - Codex accounts contribute `five_hour` instants, but OpenAI retired that window: the stored `five_hour_reset` moves forward on every poll (stamped ~2 min in the PAST) while the percent stays 0. Each poll therefore forms its own one-sample window, which inflates codex's five-hour instant and survived-window counts. Those instants carry no exhaustion signal; codex drops out of the five-hour common cohort on its own because the lifetime baseline cannot answer at 0%.
-- Replay took 3.7 s; scoring and bootstrap 113.1 s.
+- Replay took 4.0 s; scoring and bootstrap 138.0 s.

@@ -22,7 +22,8 @@
  */
 
 import { Database } from "bun:sqlite";
-import { resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
 	type BacktestRecord,
 	type BacktestWindowKind,
@@ -330,9 +331,11 @@ function accountContributions(
  * instant whose newest reading is already at the cap is skipped: there is
  * nothing left to predict.
  *
- * A candidate is dropped when its outcome region would extend past the end of
- * the scoring range (the LABEL HORIZON): otherwise a tuning-range instant
- * would be labelled with evidence from the held-out range.
+ * A candidate is dropped when its outcome region reaches the end of the scoring
+ * range (the LABEL HORIZON): otherwise a tuning-range instant would be labelled
+ * with evidence from the held-out range. Ranges are half-open `[from, to)`, so
+ * an outcome landing exactly ON `to` already belongs to the next range, and
+ * resets routinely land on exact clock boundaries.
  */
 function replayWindow(
 	windowKind: BacktestWindowKind,
@@ -381,7 +384,7 @@ function replayWindow(
 								resetAtMs ?? Number.POSITIVE_INFINITY,
 								nextWindowStartsMs ?? Number.POSITIVE_INFINITY,
 							);
-				if (!(outcomeEndMs <= range.toMs)) continue;
+				if (outcomeEndMs >= range.toMs) continue;
 				if (outcome.kind === "survived") sawSurvivor = true;
 
 				const lo = lowerBound(all, T - spec.lookbackMs);
@@ -702,18 +705,100 @@ function dataQualityNotes(result: BacktestRunResult): string[] {
 	return notes;
 }
 
-/** Refuse to write the report anywhere near the database file. */
-export function assertSafeOutPath(outPath: string, dbPath: string): void {
-	const out = resolve(outPath);
-	const db = resolve(dbPath);
-	if (out === db) {
-		throw new Error(`--out refuses to write to the database path: ${out}`);
+const DB_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
+
+/** Canonical path of an EXISTING file, or null when it is not there. */
+function canonicalExisting(path: string): string | null {
+	try {
+		return realpathSync(path);
+	} catch {
+		return null;
 	}
-	for (const suffix of ["-wal", "-shm", "-journal"]) {
-		if (out === `${db}${suffix}`) {
-			throw new Error(`--out refuses to write to a database sidecar: ${out}`);
+}
+
+/**
+ * Canonical form of a path that need not exist yet: resolve the file itself
+ * when it does, otherwise resolve its DIRECTORY and re-attach the basename, so
+ * a symlinked parent cannot hide the real target either.
+ */
+function canonicalTarget(path: string): string {
+	const existing = canonicalExisting(path);
+	if (existing != null) return existing;
+	const absolute = resolve(path);
+	const parent = canonicalExisting(dirname(absolute));
+	return parent != null ? join(parent, basename(absolute)) : absolute;
+}
+
+/** `dev:ino` of an existing file, or null. Two paths sharing one is an alias. */
+function fileIdentity(path: string): string | null {
+	try {
+		const stats = statSync(path);
+		return `${stats.dev}:${stats.ino}`;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Refuse to write the report anywhere near the database file.
+ *
+ * A lexical comparison is not enough. `Bun.write` follows symlinks and truncates
+ * whatever is on the other end, and a hard link gives one inode two paths that
+ * never converge no matter how they are resolved. So this compares CANONICAL
+ * paths (which defeats symlinks, including a symlinked parent directory) and,
+ * when the target already exists, its `(dev, ino)` pair against the database and
+ * every sidecar present (which defeats hard links).
+ */
+export function assertSafeOutPath(outPath: string, dbPath: string): void {
+	const dbBases = [canonicalTarget(dbPath), resolve(dbPath)];
+	const out = canonicalTarget(outPath);
+
+	// Canonical path -> how the refusal should describe it.
+	const forbidden = new Map<string, string>();
+	for (const base of dbBases) {
+		if (!forbidden.has(base)) forbidden.set(base, "the database path");
+		for (const suffix of DB_SIDECAR_SUFFIXES) {
+			// A sidecar may be absent right now (SQLite creates and removes them),
+			// so guard the name next to the database as well as, when it IS there,
+			// its own canonical path.
+			forbidden.set(`${base}${suffix}`, "a database sidecar");
+			const real = canonicalExisting(`${base}${suffix}`);
+			if (real != null) forbidden.set(real, "a database sidecar");
 		}
 	}
+	const named = forbidden.get(out);
+	if (named != null) {
+		throw new Error(`--out refuses to write to ${named}: ${out}`);
+	}
+
+	const outIdentity = fileIdentity(out);
+	if (outIdentity == null) return;
+	for (const base of dbBases) {
+		if (fileIdentity(base) === outIdentity) {
+			throw new Error(
+				`--out refuses to write to a hard link of the database: ${out}`,
+			);
+		}
+		for (const suffix of DB_SIDECAR_SUFFIXES) {
+			if (fileIdentity(`${base}${suffix}`) === outIdentity) {
+				throw new Error(
+					`--out refuses to write to a hard link of a database sidecar: ${out}`,
+				);
+			}
+		}
+	}
+}
+
+const SHELL_SAFE_ARG = /^[A-Za-z0-9_./:=,@+-]+$/;
+
+/**
+ * Quote one argument for a POSIX shell so the recorded command can be pasted
+ * back verbatim. Bare when it holds only characters no shell touches, otherwise
+ * single-quoted, with each embedded quote closed and reopened.
+ */
+export function shellQuoteArg(arg: string): string {
+	if (SHELL_SAFE_ARG.test(arg)) return arg;
+	return `'${arg.replaceAll("'", "'\\''")}'`;
 }
 
 async function main(): Promise<void> {
@@ -764,9 +849,10 @@ async function main(): Promise<void> {
 	const reportRanges = buildRanges(result, options.seed, ["ols"]);
 	const elapsedMs = Date.now() - started;
 
-	const command = ["bun scripts/prediction-backtest.ts", ...process.argv.slice(2)]
-		.join(" ")
-		.replace(dbPath, options.dbPath ? dbPath : "<resolveDbPath()>");
+	const command = [
+		"bun scripts/prediction-backtest.ts",
+		...process.argv.slice(2).map(shellQuoteArg),
+	].join(" ");
 
 	const markdown = formatBacktestReport({
 		title: "ClankerMux usage-prediction backtest",
