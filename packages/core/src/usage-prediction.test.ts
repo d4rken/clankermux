@@ -1,8 +1,43 @@
 import { describe, expect, test } from "bun:test";
 import type { PredictionPoint } from "@clankermux/types";
-import { computeUsagePrediction } from "./usage-prediction";
+import {
+	computeUsagePrediction,
+	isFitBoundary,
+	isResetBoundary,
+	splitSeries,
+} from "./usage-prediction";
 
 const HOUR_MS = 3_600_000;
+
+const FIXTURE_T0 = 1_780_000_000_000;
+const FIXTURE_RESET_1 = FIXTURE_T0 + 4 * HOUR_MS;
+const FIXTURE_RESET_2 = FIXTURE_T0 + 9 * HOUR_MS;
+const fixturePoint = (
+	minutes: number,
+	utilization: number,
+	resetsAt: number | null,
+): PredictionPoint => ({
+	t: FIXTURE_T0 + minutes * 60_000,
+	utilization,
+	resetsAt,
+});
+
+/** Idle -> active -> jitter -> refund drop -> real reset change. */
+const MULTI_BOUNDARY_FIXTURE: PredictionPoint[] = [
+	fixturePoint(0, 10, null),
+	fixturePoint(10, 12, null),
+	fixturePoint(20, 20, FIXTURE_RESET_1),
+	fixturePoint(30, 26, FIXTURE_RESET_1 + 900),
+	fixturePoint(40, 33, FIXTURE_RESET_1 - 800),
+	fixturePoint(50, 12, FIXTURE_RESET_1),
+	fixturePoint(60, 18, FIXTURE_RESET_1),
+	fixturePoint(70, 25, FIXTURE_RESET_1),
+	fixturePoint(80, 31, FIXTURE_RESET_1),
+	fixturePoint(90, 4, FIXTURE_RESET_2),
+	fixturePoint(100, 9, FIXTURE_RESET_2),
+	fixturePoint(110, 15, FIXTURE_RESET_2),
+	fixturePoint(120, 22, FIXTURE_RESET_2),
+];
 
 /**
  * Tests for the pure least-squares usage-exhaustion predictor
@@ -187,6 +222,41 @@ describe("computeUsagePrediction", () => {
 		expect(pred.predictedAtReset).toBeNull();
 	});
 
+	test("multi-boundary fixture: refactor is behaviour-identical", () => {
+		// Frozen expectations captured from the pre-refactor implementation. The
+		// fixture crosses every boundary kind: idle (null reset) points, a
+		// null->value transition, sub-tolerance jitter, a refund drop inside one
+		// window, and a real reset change.
+		const pred = computeUsagePrediction(MULTI_BOUNDARY_FIXTURE);
+		expect(pred).toEqual({
+			slopePerHour: 36,
+			etaExhaustMs: 1780015000000,
+			predictedAtReset: 100,
+			resetsAtMs: 1780032400000,
+			willExhaustBeforeReset: true,
+			lowConfidence: false,
+			state: "rising",
+		});
+		expect(computeUsagePrediction(MULTI_BOUNDARY_FIXTURE.slice(0, 9))).toEqual({
+			slopePerHour: 38.39999999999999,
+			etaExhaustMs: 1780011268750,
+			predictedAtReset: 100,
+			resetsAtMs: 1780014400000,
+			willExhaustBeforeReset: true,
+			lowConfidence: false,
+			state: "rising",
+		});
+		expect(computeUsagePrediction(MULTI_BOUNDARY_FIXTURE.slice(0, 5))).toEqual({
+			slopePerHour: 38.99999999999999,
+			etaExhaustMs: 1780008584615,
+			predictedAtReset: 100,
+			resetsAtMs: 1780014399200,
+			willExhaustBeforeReset: true,
+			lowConfidence: false,
+			state: "rising",
+		});
+	});
+
 	test("idle filtering: null-reset points excluded when latest reset known", () => {
 		const t0 = 1_000_000_000_000;
 		const reset = t0 + 100 * HOUR_MS;
@@ -205,5 +275,89 @@ describe("computeUsagePrediction", () => {
 		// Active-only slope is +20pp/h; if idle points were mixed in it would be
 		// far shallower.
 		expect(pred.slopePerHour).toBeCloseTo(20, 5);
+	});
+});
+
+describe("isResetBoundary / isFitBoundary", () => {
+	const p = (
+		utilization: number,
+		resetsAt: number | null,
+	): PredictionPoint => ({
+		t: FIXTURE_T0,
+		utilization,
+		resetsAt,
+	});
+
+	test("both resets null -> not a boundary", () => {
+		expect(isResetBoundary(p(10, null), p(20, null))).toBe(false);
+	});
+
+	test("null <-> value transition counts as changed, both directions", () => {
+		expect(isResetBoundary(p(10, null), p(20, FIXTURE_RESET_1))).toBe(true);
+		expect(isResetBoundary(p(10, FIXTURE_RESET_1), p(20, null))).toBe(true);
+	});
+
+	test("reset jitter within tolerance -> not a boundary", () => {
+		expect(
+			isResetBoundary(p(10, FIXTURE_RESET_1), p(20, FIXTURE_RESET_1 + 60_000)),
+		).toBe(false);
+		expect(
+			isResetBoundary(p(10, FIXTURE_RESET_1), p(20, FIXTURE_RESET_1 - 60_000)),
+		).toBe(false);
+	});
+
+	test("reset change beyond tolerance -> boundary", () => {
+		expect(
+			isResetBoundary(p(10, FIXTURE_RESET_1), p(20, FIXTURE_RESET_1 + 60_001)),
+		).toBe(true);
+	});
+
+	test("a refund drop is a FIT boundary but NOT a window boundary", () => {
+		const prev = p(70, FIXTURE_RESET_1);
+		const cur = p(50, FIXTURE_RESET_1);
+		expect(isResetBoundary(prev, cur)).toBe(false);
+		expect(isFitBoundary(prev, cur)).toBe(true);
+	});
+
+	test("a drop of exactly the threshold is neither (strictly-greater rule)", () => {
+		expect(isFitBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1))).toBe(
+			false,
+		);
+	});
+
+	test("isFitBoundary inherits every reset boundary", () => {
+		expect(isFitBoundary(p(10, null), p(20, FIXTURE_RESET_1))).toBe(true);
+	});
+});
+
+describe("splitSeries", () => {
+	test("empty input -> no segments", () => {
+		expect(splitSeries([], isResetBoundary)).toEqual([]);
+	});
+
+	test("single point -> one segment", () => {
+		expect(
+			splitSeries([fixturePoint(0, 5, null)], isResetBoundary),
+		).toHaveLength(1);
+	});
+
+	test("window split keeps a refunded window whole; fit split does not", () => {
+		const windows = splitSeries(MULTI_BOUNDARY_FIXTURE, isResetBoundary);
+		// idle pair | reset-1 window (including the refund drop) | reset-2 window
+		expect(windows.map((w) => w.length)).toEqual([2, 7, 4]);
+		expect(windows[1][0].utilization).toBe(20);
+		expect(windows[1][3].utilization).toBe(12); // the refund stayed inside
+
+		const fits = splitSeries(MULTI_BOUNDARY_FIXTURE, isFitBoundary);
+		expect(fits.map((f) => f.length)).toEqual([2, 3, 4, 4]);
+	});
+
+	test("no idle filtering: null-reset points are kept in their segment", () => {
+		const series: PredictionPoint[] = [
+			fixturePoint(0, 5, null),
+			fixturePoint(10, 6, null),
+			fixturePoint(20, 7, null),
+		];
+		expect(splitSeries(series, isResetBoundary)).toEqual([series]);
 	});
 });
