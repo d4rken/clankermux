@@ -27,6 +27,10 @@ import type {
 } from "@clankermux/types";
 import { listApiKeys } from "../services/admin/api-keys";
 import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
+import {
+	getCachedOrPersistedCodexUsage,
+	loadPersistedCodexUsageColumns,
+} from "../services/resolve-codex-usage";
 
 /**
  * `GET /api/runway` — the quota runway per API key, plus the account evidence it
@@ -46,8 +50,10 @@ import { buildPredictionsForAccounts } from "../services/build-account-predictio
  * its documented views, because it carries two different kinds of thing:
  *
  *  - The runway SCAN and the per-window PREDICTION take the ROUTING-fresh view
- *    (10 min). Both DERIVE a value modelling "now", and a derived value must
- *    not be built on a reading that stopped being worth routing on. This is a
+ *    (10 min) — the scan for every provider except Codex, which resolves
+ *    through the persisted snapshot described below. Both DERIVE a value
+ *    modelling "now", and a derived value must not be built on a reading that
+ *    stopped being worth routing on. This is a
  *    deliberate semantic change from what the browser used to do — it computed
  *    the runway from `AccountResponse.usageData`, the display view. When the
  *    difference bites (usage-fetch failure backoff, long poll intervals, Codex
@@ -68,6 +74,29 @@ import { buildPredictionsForAccounts } from "../services/build-account-predictio
  * null, so no prediction is emitted and the scan reports the account as
  * unprojectable. There is no case where a served utilization and a served
  * prediction come from different readings.
+ *
+ * CODEX — the usage cache is in-memory, so after any restart a Codex account
+ * has nothing in it until Codex traffic repopulates it. `/api/accounts` has
+ * always resolved through `getCachedOrPersistedCodexUsage` (cache, then the
+ * persisted `accounts.codex_usage_json` column, then the stored-payload scan),
+ * and the browser used to compute the runway from exactly that resolved
+ * reading. Serving the composition here without it turned every Codex account
+ * blank after a restart, which then poisoned every Codex-pinned key to
+ * `unknown`. The resolved reading therefore feeds BOTH the evidence block and
+ * the runway scan.
+ *
+ * That resolver documents a `"column"` reading as DISPLAY-ONLY, and this is not
+ * a violation of it: the constraint exists because only the `"cache"` and
+ * `"payload"` sources are reflected in the live usage cache, i.e. it protects
+ * anything describing what the PROXY can see and do (routing, the throttle
+ * claim). The runway is a display projection and never feeds routing, so
+ * display-only data is a valid input to it. Do not "fix" this back.
+ *
+ * It deliberately does NOT feed the PREDICTIONS, which stay routing-fresh-only:
+ * `buildPredictionsForAccounts` appends the live reading as a data point stamped
+ * `t: now`, so a column reading observed hours ago would enter the regression
+ * claiming to be current. A restored Codex account therefore reports its
+ * utilization with an honest `usageAsOfMs` and `prediction: null`.
  *
  * Runs INLINE rather than through a dashboard read worker: the worker exists
  * for multi-second `requests` scans and cannot see `usageCache`, which is
@@ -156,6 +185,16 @@ function accountSummary(
 	};
 }
 
+/**
+ * A Codex account's usage after the cache/column/payload resolution, with the
+ * only stamp that honestly describes it (null when the winning source cannot
+ * say when it was observed).
+ */
+interface ResolvedCodexUsage {
+	data: FullUsageData | null;
+	sampledAtMs: number | null;
+}
+
 export function createRunwayHandler(
 	dbOps: DatabaseOperations,
 ): () => Promise<Response> {
@@ -168,12 +207,12 @@ export function createRunwayHandler(
 
 		// One non-evicting cache read per account, split into the two documented
 		// views exactly as /api/accounts splits them:
-		//  - routing-fresh (10 min) feeds BOTH the prediction inputs AND the
-		//    utilization the runway scan reads, because the runway derives a value
-		//    modelling "now".
+		//  - routing-fresh (10 min) feeds the prediction inputs and, for every
+		//    non-Codex provider, the utilization the runway scan reads.
 		//  - the display reading (up to 30 min) and its sample time are what the
-		//    `accounts[]` evidence block REPORTS. Neither is ever substituted into
-		//    the scan or the projection.
+		//    `accounts[]` evidence block REPORTS, and are the cache candidate the
+		//    Codex resolution below starts from. Neither is ever substituted into
+		//    the projection.
 		const entryByAccount = new Map(
 			accounts.map((a) => [a.id, usageCache.peekWithAge(a.id)] as const),
 		);
@@ -187,6 +226,10 @@ export function createRunwayHandler(
 			}),
 		);
 
+		// Routing-fresh ONLY, deliberately: the prediction appends its input as a
+		// data point stamped `t: now`, so the persisted Codex resolution below must
+		// not reach it. A Codex account restored from the column reports its
+		// utilization with `prediction: null`.
 		const predictionByAccount = await buildPredictionsForAccounts(
 			dbOps,
 			accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),
@@ -194,10 +237,60 @@ export function createRunwayHandler(
 			now,
 		);
 
+		// Codex only: resolve through the cache, then `accounts.codex_usage_json`,
+		// then the stored-payload scan — the same resolution `/api/accounts` runs,
+		// so a restart cannot blank one endpoint while the other still reads. Fed
+		// the DISPLAY entry as its cache candidate for the same reason
+		// `/api/accounts` does: it is what an observation-with-an-age means, and
+		// passing the routing-fresh view instead would let an hours-old column beat
+		// a cache reading that is merely 12 minutes old.
+		const codexAccounts = accounts.filter((a) => a.provider === "codex");
+		const codexUsageByAccount = new Map<string, ResolvedCodexUsage>();
+		if (codexAccounts.length > 0) {
+			// `getAllAccounts()` does not select the persisted columns (an unbounded
+			// TEXT blob on a hot query), so load them here for codex ids only.
+			const db = dbOps.getAdapter();
+			const columnsByAccount = await loadPersistedCodexUsageColumns(
+				db,
+				codexAccounts.map((a) => a.id),
+			);
+			await Promise.all(
+				codexAccounts.map(async (account) => {
+					const entry = entryByAccount.get(account.id) ?? null;
+					const columns = columnsByAccount.get(account.id) ?? null;
+					const resolved = await getCachedOrPersistedCodexUsage(
+						db,
+						account.id,
+						account.name,
+						(entry?.data ?? null) as FullUsageData | null,
+						columns?.persistedJson ?? null,
+						columns?.persistedObservedAtMs ?? null,
+						account.last_used != null ? Number(account.last_used) : null,
+					);
+					codexUsageByAccount.set(account.id, {
+						data: resolved.data,
+						// Only two sources can honestly stamp a reading: the live cache
+						// entry's own write time, and the column's recorded observation
+						// time. A payload-reconstructed reading gets null rather than a
+						// borrowed timestamp — the same rule `/api/accounts` applies.
+						sampledAtMs:
+							resolved.source === "cache"
+								? (entry?.sampledAtMs ?? null)
+								: resolved.source === "column"
+									? resolved.observedAtMs
+									: null,
+					});
+				}),
+			);
+		}
+
 		const usageDataByAccount = new Map<string, FullUsageData | null>(
 			accounts.map((a) => [
 				a.id,
-				(routingFreshUsageByAccount.get(a.id) ?? null) as FullUsageData | null,
+				a.provider === "codex"
+					? (codexUsageByAccount.get(a.id)?.data ?? null)
+					: ((routingFreshUsageByAccount.get(a.id) ??
+							null) as FullUsageData | null),
 			]),
 		);
 
@@ -219,17 +312,27 @@ export function createRunwayHandler(
 			keys: runways,
 			// The DISPLAY reading, not the routing-fresh one: this block reports an
 			// observation with its age, and `peekWithAge` exists to serve exactly
-			// that. Only `sources` and the predictions above are held to the routing
-			// TTL, because only they derive a value modelling "now".
-			accounts: accounts.map((account) =>
-				accountSummary(
+			// that. Only the predictions above are held to the routing TTL, because
+			// only they derive a value modelling "now". For Codex the display
+			// reading is the resolved one (cache / column / payload), which is also
+			// what `sources` above scans.
+			accounts: accounts.map((account) => {
+				const resolvedCodex =
+					account.provider === "codex"
+						? (codexUsageByAccount.get(account.id) ?? null)
+						: null;
+				return accountSummary(
 					account,
-					(entryByAccount.get(account.id)?.data ??
-						null) as FullUsageData | null,
-					entryByAccount.get(account.id)?.sampledAtMs ?? null,
+					resolvedCodex
+						? resolvedCodex.data
+						: ((entryByAccount.get(account.id)?.data ??
+								null) as FullUsageData | null),
+					resolvedCodex
+						? resolvedCodex.sampledAtMs
+						: (entryByAccount.get(account.id)?.sampledAtMs ?? null),
 					predictionByAccount.get(account.id),
-				),
-			),
+				);
+			}),
 		};
 
 		return jsonResponse(response);

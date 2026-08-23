@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { UsageData } from "@clankermux/providers";
 import type { AnthropicLimitEntry } from "@clankermux/types";
-import { normalizeCodexUsageData } from "../accounts";
+import { normalizeCodexUsageData } from "../resolve-codex-usage";
 
 const future = () =>
 	new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
