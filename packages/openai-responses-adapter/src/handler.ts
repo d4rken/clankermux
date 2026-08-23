@@ -23,45 +23,48 @@ const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 /**
  * Reads at most `MAX_ERROR_BODY_BYTES` of a response body as UTF-8, returning
- * "" when the body is missing or the stream fails partway.
+ * "" when the body is missing or nothing arrived before the stream failed.
  *
  * A stream that errors after the headers arrived must not reject the whole
  * request: the status code is still meaningful and the caller can fall back to
  * its generic message, which is what happened before this branch read the body
  * at all for non-JSON responses.
+ *
+ * Bytes are copied straight into one fixed-size buffer rather than collected as
+ * chunks and merged. A stream may hand back a chunk of any size, so holding
+ * whole chunks would let a single oversized one defeat the cap twice over —
+ * once retained, once copied — for a string that gets truncated to a few
+ * hundred characters anyway.
  */
 async function readBoundedText(resp: Response): Promise<string> {
 	if (!resp.body) return "";
 	const reader = resp.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
+	let buffer: Uint8Array | null = null;
+	let filled = 0;
 	try {
-		while (total < MAX_ERROR_BODY_BYTES) {
+		while (filled < MAX_ERROR_BODY_BYTES) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			if (!value) continue;
-			chunks.push(value);
-			total += value.byteLength;
+			if (!value || value.byteLength === 0) continue;
+			if (!buffer) buffer = new Uint8Array(MAX_ERROR_BODY_BYTES);
+			const room = MAX_ERROR_BODY_BYTES - filled;
+			const take = value.byteLength <= room ? value : value.subarray(0, room);
+			buffer.set(take, filled);
+			filled += take.byteLength;
 		}
 	} catch (err) {
+		// Keep whatever arrived before the failure: a truncated envelope simply
+		// fails to parse and the caller falls back to its generic message.
 		log.warn(`Failed to read upstream error body: ${String(err)}`);
 	} finally {
-		// Release the lock without waiting on cancel() — the caller is done with
-		// this response either way and an awaited cancel can hang on a stalled
-		// upstream.
+		// Signal we are done without awaiting: the response is discarded either
+		// way, and an awaited cancel can hang on a stalled upstream. cancel()
+		// rejects on an already-errored stream, hence the swallowed catch.
 		void reader.cancel().catch(() => {});
 	}
 
-	if (chunks.length === 0) return "";
-	const merged = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		merged.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return new TextDecoder().decode(
-		merged.subarray(0, Math.min(total, MAX_ERROR_BODY_BYTES)),
-	);
+	if (!buffer || filled === 0) return "";
+	return new TextDecoder().decode(buffer.subarray(0, filled));
 }
 
 export async function handleResponsesRequest(

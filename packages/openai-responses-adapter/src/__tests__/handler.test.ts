@@ -645,12 +645,11 @@ describe("handleResponsesRequest", () => {
 			expect(body.error.type).toBe("invalid_request_error");
 		});
 
-		test("a body stream that fails mid-read still yields the upstream status", async () => {
+		test("a body stream that fails before any bytes still yields the upstream status", async () => {
 			// The status code is meaningful on its own; a broken body must not turn
 			// into a rejected promise out of the handler.
 			const failing = new ReadableStream<Uint8Array>({
 				start(controller) {
-					controller.enqueue(new TextEncoder().encode('{"detail":"partial'));
 					controller.error(new Error("connection reset"));
 				},
 			});
@@ -662,6 +661,51 @@ describe("handleResponsesRequest", () => {
 			);
 
 			expect(resp.status).toBe(502);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("a stream that errors after delivering a partial envelope falls back", async () => {
+			// One chunk is delivered on the first pull and the stream errors on the
+			// next, so the handler really does hold a truncated body. It must not
+			// throw, and the unparseable fragment must not reach the client.
+			let pulls = 0;
+			const failing = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					pulls++;
+					if (pulls === 1) {
+						controller.enqueue(
+							new TextEncoder().encode('{"detail":"Unsupported par'),
+						);
+						return;
+					}
+					controller.error(new Error("connection reset"));
+				},
+			});
+			const resp = await translate(
+				new Response(failing, {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+			expect(resp.status).toBe(400);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("a single oversized chunk is truncated rather than buffered whole", async () => {
+			// A stream may hand back a chunk of any size; the read has to copy only
+			// what fits so one huge chunk cannot defeat the cap.
+			const huge = new Uint8Array(512 * 1024).fill(0x61); // 512KB of "a"
+			const resp = await translate(
+				new Response(huge, {
+					status: 500,
+					headers: { "Content-Type": "text/plain" },
+				}),
+			);
+
+			expect(resp.status).toBe(500);
 			const body = await resp.json();
 			expect(body.error.message).toBe("Unknown error");
 		});
