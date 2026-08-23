@@ -225,6 +225,20 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_request_payloads_timestamp ON request_payloads(timestamp)`,
 	);
 
+	// The payload-size covering index. Column order matters: `timestamp` first
+	// serves both the ORDER BY timestamp DESC running-sum and the cutoff delete;
+	// including `bytes` makes the window query index-only (SUM over an integer
+	// column scales with row count, not with the multi-MB blobs).
+	//
+	// Unconditional, and safe on an upgraded DB: runMigrations() applies
+	// ADDITIVE_COLUMNS BEFORE ensureSchema(), so `bytes` exists by the time this
+	// runs. It used to be guarded and deferred to a post-transaction call
+	// because the order was the other way round.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_payloads_size
+		   ON request_payloads(timestamp, bytes)`,
+	);
+
 	// Create oauth_sessions table for secure PKCE verifier storage
 	db.run(`
 		CREATE TABLE IF NOT EXISTS oauth_sessions (
@@ -483,38 +497,6 @@ export function ensureSchema(db: Database): void {
 
 	// Performance indexes (covering/partial indexes for hot query paths)
 	addPerformanceIndexes(db);
-
-	// Guarded: on an upgraded DB `bytes` does not exist yet at this point (see
-	// createPayloadSizeIndex). runMigrations() creates it after the ALTERs.
-	createPayloadSizeIndex(db);
-}
-
-/**
- * The payload-size covering index. Guarded because it references a column added
- * via ADDITIVE_COLUMNS: runMigrations() runs ensureSchema() FIRST (and
- * addPerformanceIndexes() is ensureSchema()'s last statement), so on an upgraded
- * DB both of those execute before `bytes` exists and an unconditional CREATE
- * INDEX there would throw `no such column: bytes` at startup. Fresh DBs get the
- * column from CREATE TABLE and satisfy the guard immediately; upgraded DBs fail
- * it here and get the index from the post-tx() call in runMigrations().
- * `CREATE INDEX IF NOT EXISTS` makes the double call idempotent.
- *
- * Column order matters: `timestamp` first serves both the ORDER BY timestamp
- * DESC running-sum and the cutoff delete; including `bytes` makes the window
- * query index-only (SUM over an integer column scales with row count, not with
- * the multi-MB blobs).
- */
-function createPayloadSizeIndex(db: Database): void {
-	const hasBytes = (
-		db.prepare(`PRAGMA table_info(request_payloads)`).all() as Array<{
-			name: string;
-		}>
-	).some((c) => c.name === "bytes");
-	if (!hasBytes) return;
-	db.run(
-		`CREATE INDEX IF NOT EXISTS idx_request_payloads_size
-		   ON request_payloads(timestamp, bytes)`,
-	);
 }
 
 /**
@@ -524,13 +506,106 @@ function createPayloadSizeIndex(db: Database): void {
  * ensureSchema() AND append one entry here.
  *
  * Additive ALTER TABLE ADD COLUMN only — no destructive rebuilds, data
- * backfills, or renames. (Those were one-time legacy upgrades, now removed.)
+ * backfills, or renames. (Those were one-time legacy upgrades, now removed.
+ * One-shot data backfills live in backfills.ts, outside migrations.)
+ *
+ * Entries are NEVER removed: an entry is the only thing that can carry a column
+ * onto a database created before it existed, and the supported floor only ever
+ * moves by a deliberate decision (see schema-floor.fixture.ts).
+ *
+ * Exported so schema-invariant.test.ts can assert that this list plus the
+ * historical baselines reconstruct the current schema exactly.
  */
-const ADDITIVE_COLUMNS: ReadonlyArray<{
+export const ADDITIVE_COLUMNS: ReadonlyArray<{
 	table: string; // e.g. "accounts"
 	column: string; // e.g. "my_field"
 	ddl: string; // full statement, e.g. "ALTER TABLE accounts ADD COLUMN my_field TEXT"
 }> = [
+	// ---------------------------------------------------------------------
+	// Restored 2026-08-23. These eight entries were deleted by 35b993f0
+	// ("remove legacy DB migration code"), which emptied this array on the
+	// premise that only two populations exist: this deployment (fully migrated)
+	// and fresh installs (born complete). A third population was missed — the
+	// repository went public on 2026-05-13, so anyone who cloned between then
+	// and the refactor has a ClankerMux-created database that runMigrations()
+	// could no longer bring forward.
+	//
+	// The supported floor is therefore the schema a fresh install produced from
+	// the newest migrations.ts available when the repository went public
+	// (0e4ad752, 2026-05-04), not the refactor's schema. The first seven columns
+	// below are exactly the gap between that floor and the current schema; the
+	// other 39 deleted columns need a database predating the public repository
+	// (private pre-public ClankerMux, or upstream better-ccflare / ccflare) and
+	// stay dropped, as the refactor intended.
+	//
+	// DDL is copied verbatim from 35b993f0^ — never re-derived from the
+	// CREATE TABLE, whose types and defaults may have moved since.
+	// ---------------------------------------------------------------------
+	// Priority carried through the OAuth handshake so the account created on
+	// callback lands at the priority the operator picked when starting it.
+	// oauth.repository.ts INSERTs it by name, so a floor DB fails to add ANY
+	// OAuth account without this.
+	{
+		table: "oauth_sessions",
+		column: "priority",
+		ddl: "ALTER TABLE oauth_sessions ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+	},
+	// Consecutive 429s observed for the account, used by the rate-limit
+	// escalation logic. NOT NULL DEFAULT 0 — existing rows read 0, i.e. "no
+	// streak recorded", which is also the value a successful request writes.
+	{
+		table: "accounts",
+		column: "consecutive_rate_limits",
+		ddl: "ALTER TABLE accounts ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0",
+	},
+	// Free-text per-account operator notes. NULL = no notes.
+	{
+		table: "accounts",
+		column: "notes",
+		ddl: "ALTER TABLE accounts ADD COLUMN notes TEXT",
+	},
+	// Manually-entered subscription renewal date (YYYY-MM-DD, local calendar).
+	// NULL = renewal tracking off for the account.
+	{
+		table: "accounts",
+		column: "renewal_anchor",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_anchor TEXT",
+	},
+	// Renewal recurrence ('monthly' | 'yearly' | 'none'); NULL when there is no
+	// anchor to recur from.
+	{
+		table: "accounts",
+		column: "renewal_cadence",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_cadence TEXT",
+	},
+	// Pins an API key to one backend account for routing (takes precedence over
+	// pinned_providers). NULL = no constraint. Named in five SELECTs in
+	// api-key.repository.ts, so a floor DB fails EVERY API-key lookup without it.
+	{
+		table: "api_keys",
+		column: "pinned_account_id",
+		ddl: "ALTER TABLE api_keys ADD COLUMN pinned_account_id TEXT",
+	},
+	// JSON array string of provider names an API key may route to, consulted
+	// only when pinned_account_id is NULL. NULL = no constraint.
+	{
+		table: "api_keys",
+		column: "pinned_providers",
+		ddl: "ALTER TABLE api_keys ADD COLUMN pinned_providers TEXT",
+	},
+	// Committed JS heap at sample time; memory_snapshots first shipped with only
+	// rss/heap_used. Defensive rather than reachable from the floor — the table
+	// postdates it and the window in which a DB could be created without this
+	// column was ten minutes on 2026-06-03 — but the entry costs nothing and
+	// keeps the "every post-baseline column has an entry" invariant total
+	// (see schema-invariant.test.ts), exactly like the
+	// codex_reset_credit_events.cause entry below.
+	{
+		table: "memory_snapshots",
+		column: "heap_total_bytes",
+		ddl: "ALTER TABLE memory_snapshots ADD COLUMN heap_total_bytes INTEGER",
+	},
+	// ---------------------------------------------------------------------
 	// 1 when output_tokens_per_second came from the implausible-streaming-window
 	// → total-request-duration fallback (rendered "~N tok/s"), NULL otherwise.
 	{
@@ -771,39 +846,67 @@ const ADDITIVE_COLUMNS: ReadonlyArray<{
 	},
 ];
 
-export function runMigrations(db: Database): void {
-	// Ensure base schema exists first (creates tables on a fresh DB).
-	ensureSchema(db);
-
+/**
+ * Apply the ADDITIVE_COLUMNS ALTERs to a pre-existing database.
+ *
+ * Runs entirely before ensureSchema(), so every column an index may reference
+ * exists by the time any CREATE INDEX runs. Entries whose table does not exist
+ * yet are skipped, not an error: on a fresh database there are no tables at all
+ * (ensureSchema() creates them complete a moment later), and on an upgraded one
+ * a table introduced after that database was created is likewise absent until
+ * ensureSchema() adds it — with the current CREATE TABLE, which already has the
+ * column.
+ */
+function applyAdditiveColumns(db: Database): void {
 	if (ADDITIVE_COLUMNS.length === 0) return;
 
 	const tx = db.transaction(() => {
-		const cache = new Map<string, Set<string>>();
-		const cols = (table: string): Set<string> => {
+		const tableExists = db.prepare(
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		);
+		// null marks "table absent" so a missing table is probed once, not once
+		// per entry.
+		const cache = new Map<string, Set<string> | null>();
+		const cols = (table: string): Set<string> | null => {
 			let s = cache.get(table);
-			if (!s) {
-				s = new Set(
-					(
-						db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
-							name: string;
-						}>
-					).map((c) => c.name),
-				);
+			if (s === undefined) {
+				s = tableExists.get(table)
+					? new Set(
+							(
+								db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+									name: string;
+								}>
+							).map((c) => c.name),
+						)
+					: null;
 				cache.set(table, s);
 			}
 			return s;
 		};
 		for (const { table, column, ddl } of ADDITIVE_COLUMNS) {
-			if (!cols(table).has(column)) {
-				db.prepare(ddl).run();
-				cols(table).add(column);
-				log.info(`Added column ${table}.${column}`);
-			}
+			const existing = cols(table);
+			if (existing === null || existing.has(column)) continue;
+			db.prepare(ddl).run();
+			existing.add(column);
+			log.info(`Added column ${table}.${column}`);
 		}
 	});
 	tx();
+}
 
-	// Only now can the payload-size index exist on an upgraded DB: its `bytes`
-	// column was just added by the ALTERs above.
-	createPayloadSizeIndex(db);
+export function runMigrations(db: Database): void {
+	// Additive ALTERs FIRST, then the base schema. The order is load-bearing:
+	// ensureSchema() creates indexes (its own, plus addPerformanceIndexes()) and
+	// an index over a column that only ADDITIVE_COLUMNS can supply would throw
+	// `no such column` at startup on every upgraded DB if it ran first. That has
+	// already happened once, to idx_request_payloads_size over
+	// request_payloads.bytes. Doing the ALTERs first removes the whole class of
+	// failure instead of guarding one index at a time.
+	//
+	// Safe on a fresh DB: no tables exist yet, so every entry is skipped and
+	// ensureSchema() still sees an empty database (its leading
+	// `PRAGMA auto_vacuum = INCREMENTAL` only takes effect there).
+	applyAdditiveColumns(db);
+
+	ensureSchema(db);
 }
