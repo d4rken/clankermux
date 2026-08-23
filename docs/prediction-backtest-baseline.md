@@ -856,24 +856,33 @@ by two earlier, separate invocations, in this order:
    bun scripts/prediction-backtest.ts --from=2026-06-02T00:00:00Z --to=2026-08-01T00:00:00Z --estimators=ols,lifetime,naive,endpoint-seg-30m,endpoint-seg-1h,endpoint-seg-2h,ols-1h,trailing-3d,trailing-7d,dow-seasonal
    ```
 
-2. **The held-out gate — a separate baselines-plus-winner invocation.** The
-   three baselines and the locked winner, over the split range, scoring the
-   acceptance criteria on the held-out side. Both locked winners were themselves
-   baselines, so the estimator list reduced to the three baselines. The gate
-   used:
+2. **A held-out cross-check — an unlocked standalone invocation.** The three
+   baselines over the held-out range on its own, scoring the acceptance
+   criteria there. Both locked winners were themselves baselines, so the
+   estimator list reduced to the three baselines. The cross-check used:
 
    ```
    bun scripts/prediction-backtest.ts --from=2026-08-01T00:00:00Z --to=2026-08-23T00:00:00Z --estimators=ols,lifetime,naive
    ```
 
+   This command carries no `--split`, so the held-out range is the whole run and
+   the harness locks its winner on that range itself. Its in-range winner came
+   out equal to the tuning-locked one, which is the reassurance the check was
+   run for, but the invocation does not mechanically reproduce the blind
+   protocol: with a single range there is nothing for it to carry a winner
+   forward from. Read it as a confirmation, not as the locked gate.
+
 Both ran at commit `ab6e3455`, read-only against the live DB, and stdout-only
 (no `--out`), which is why neither has a report file of its own.
 
-The order matters and the separation is the point: the harness locks the winner
-on the first range and carries it forward, so a held-out range can never pick
-its own winner. Read the combined tables above the same way — where a candidate
-scores better on the held-out range than the locked winner does (`trailing-7d`
-on `seven_day`), that is a number the decision could not and did not use.
+**The blind locked-winner protocol's artifact is the combined run at the top of
+this report** — one invocation, all ten estimators, `--split=2026-08-01T00:00:00Z`.
+There the order and the separation are mechanical: the harness scores the tuning
+range, locks the winner on it, and carries that winner into the held-out range,
+so a held-out range can never pick its own winner. It agrees with the lock from
+step 1. Read the combined tables above the same way — where a candidate scores
+better on the held-out range than the locked winner does (`trailing-7d` on
+`seven_day`), that is a number the decision could not and did not use.
 
 **Baseline figures shifted against the v2026.8.70 report** (`ols`, `lifetime`
 and `naive` on the same range and the same data). The estimators did not change;
