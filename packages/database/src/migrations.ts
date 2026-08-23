@@ -383,22 +383,28 @@ export function ensureSchema(db: Database): void {
 	// provider ever scopes a weekly window per generation, the family column
 	// alone could not tell them apart, and history cannot be backfilled.
 	//
+	// display_name is therefore part of the KEY, and NOT NULL. Keyed on
+	// (account, tick, family) alone, one response carrying scoped limits for two
+	// generations of one family would insert the first row and then overwrite it
+	// with the second, losing a whole scoped series irrecoverably — the exact
+	// loss the column exists to prevent.
+	//
 	// account_id CASCADE: deleting an account removes its history.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS usage_scoped_snapshots (
 			account_id TEXT NOT NULL,
 			sampled_at INTEGER NOT NULL,
 			family TEXT NOT NULL,
-			display_name TEXT,
+			display_name TEXT NOT NULL,
 			pct REAL,
 			reset_at INTEGER,
-			PRIMARY KEY (account_id, sampled_at, family),
+			PRIMARY KEY (account_id, sampled_at, family, display_name),
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
 	`);
 
-	// Index on sampled_at for retention pruning; (account_id, sampled_at, family)
-	// lookups are served by the primary key.
+	// Index on sampled_at for retention pruning; (account_id, sampled_at, family,
+	// display_name) lookups are served by the primary key.
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_usage_scoped_snapshots_sampled_at ON usage_scoped_snapshots(sampled_at)`,
 	);

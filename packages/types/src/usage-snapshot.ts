@@ -101,7 +101,10 @@ export interface UsageSnapshotSample {
  * `family` is the ROUTING family (opus/sonnet/haiku/fable). `displayName` is the
  * provider's own scope label ("Claude Opus 5") kept beside it because the family
  * mapping is lossy across generations — two generations of the same family are
- * indistinguishable from `family` alone, and history cannot be backfilled.
+ * indistinguishable from `family` alone, and history cannot be backfilled. It is
+ * part of the stored row's KEY for that reason, and therefore required: without
+ * it in the key, one tick scoping both "Claude Opus 4.8" and "Claude Opus 5"
+ * would overwrite the first row with the second.
  *
  * `pct`/`resetAt` are nullable for the same reason the account-wide windows are:
  * absence of evidence is null, never a concrete 0.
@@ -112,8 +115,11 @@ export interface ScopedUsageSnapshotRow {
 	sampledAt: number;
 	/** Routing family the provider's scope label resolved to. */
 	family: string;
-	/** The provider's scope model display name, or null when it had none. */
-	displayName: string | null;
+	/**
+	 * The provider's scope model display name — the label the family was
+	 * resolved FROM, so a scoped window always has one. Part of the row key.
+	 */
+	displayName: string;
 	/** Reported utilization % for this family's weekly window, or null. */
 	pct: number | null;
 	/** Window reset time, ms since epoch, or null when unknown. */
@@ -132,7 +138,7 @@ export interface ScopedUsageSnapshotSample {
 	/** epoch ms — the real sample time, not a bucket. */
 	sampledAt: number;
 	family: string;
-	displayName: string | null;
+	displayName: string;
 	pct: number | null;
 	resetAt: number | null;
 }
