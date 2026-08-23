@@ -332,14 +332,37 @@ describe("session lifetime", () => {
 	});
 });
 
-describe("activity touch is conditional and never blocking", () => {
-	it("asks for a write only against an hour-old staleness bound", async () => {
+describe("activity touch is skipped outright, not just filtered in SQL", () => {
+	it("does NOT call the store at all for a freshly-seen session", async () => {
+		// A zero-row UPDATE is still a write transaction: it takes SQLite's
+		// single writer slot and fails under a concurrent BEGIN IMMEDIATE, where
+		// a SELECT succeeds. So "the predicate matches nothing" is not the same
+		// as "no write was attempted", and the dashboard's ~8 concurrent polls
+		// must not reach the repository at all.
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
 		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
 		store.touchCalls = [];
-		await svc.authorizeRequest(requestWithCookie(token));
+		for (let i = 0; i < 8; i++) {
+			await svc.authorizeRequest(requestWithCookie(session.token));
+		}
+		await Promise.resolve();
+		expect(store.touchCalls).toEqual([]);
+	});
+
+	it("writes once, against an hour-old staleness bound, when the row IS stale", async () => {
+		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
+		const { svc, store, hasher } = makeService({ now: () => now });
+		await configure(store, hasher, "pw");
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		const row = store.sessions.get(hashSessionToken(session.token));
+		if (!row) throw new Error("session was not stored");
+		row.lastSeenAt = now - 2 * SESSION_TOUCH_INTERVAL_MS;
+		store.touchCalls = [];
+		await svc.authorizeRequest(requestWithCookie(session.token));
 		await Promise.resolve();
 		expect(store.touchCalls).toHaveLength(1);
 		expect(store.touchCalls[0]?.staleBefore).toBe(
@@ -347,27 +370,63 @@ describe("activity touch is conditional and never blocking", () => {
 		);
 	});
 
+	it("collapses concurrent stale requests into ONE write", async () => {
+		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
+		const { svc, store, hasher } = makeService({ now: () => now });
+		await configure(store, hasher, "pw");
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		const row = store.sessions.get(hashSessionToken(session.token));
+		if (!row) throw new Error("session was not stored");
+		row.lastSeenAt = now - 2 * SESSION_TOUCH_INTERVAL_MS;
+		// The write is deliberately still pending while the other seven arrive.
+		let issued = 0;
+		const originalTouch = store.touchManagementSession.bind(store);
+		store.touchManagementSession = async (hash, at, staleBefore) => {
+			issued++;
+			await new Promise((r) => setTimeout(r, 10));
+			return originalTouch(hash, at, staleBefore);
+		};
+		await Promise.all(
+			Array.from({ length: 8 }, () =>
+				svc.authorizeRequest(requestWithCookie(session.token)),
+			),
+		);
+		expect(issued).toBe(1);
+	});
+
 	it("leaves last_seen_at alone for a session touched moments ago", async () => {
 		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
 		const { svc, store, hasher } = makeService({ now: () => now });
 		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
-		const before = store.sessions.get(hashSessionToken(token))?.lastSeenAt;
-		await svc.authorizeRequest(requestWithCookie(token));
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		const before = store.sessions.get(
+			hashSessionToken(session.token),
+		)?.lastSeenAt;
+		await svc.authorizeRequest(requestWithCookie(session.token));
 		await Promise.resolve();
-		expect(store.sessions.get(hashSessionToken(token))?.lastSeenAt).toBe(
-			before,
-		);
+		expect(
+			store.sessions.get(hashSessionToken(session.token))?.lastSeenAt,
+		).toBe(before);
 	});
 
 	it("still authenticates when the activity write fails", async () => {
-		const { svc, store, hasher } = makeService();
+		const now = 10 * SESSION_TOUCH_INTERVAL_MS;
+		const { svc, store, hasher } = makeService({ now: () => now });
 		await configure(store, hasher, "pw");
-		const { token } = await svc.createSession();
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		const row = store.sessions.get(hashSessionToken(session.token));
+		if (!row) throw new Error("session was not stored");
+		// Stale, so the write is genuinely attempted and genuinely fails.
+		row.lastSeenAt = now - 2 * SESSION_TOUCH_INTERVAL_MS;
 		store.touchManagementSession = async () => {
 			throw new Error("database is locked");
 		};
-		expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(true);
+		expect(await svc.authorizeRequest(requestWithCookie(session.token))).toBe(
+			true,
+		);
 	});
 });
 

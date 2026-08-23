@@ -229,6 +229,9 @@ export interface SessionCheck {
  * in v2026.8.41.
  */
 export class SessionAuthService {
+	/** Activity writes currently running, keyed by session token hash. */
+	private readonly touchesInFlight = new Map<string, Promise<void>>();
+
 	constructor(
 		private readonly store: SessionAuthStore,
 		private readonly hasher: PasswordHasher = scryptPasswordHasher,
@@ -291,22 +294,68 @@ export class SessionAuthService {
 	}
 
 	/**
-	 * Is this token hash still a live session? Both ceilings apply, and an
+	 * The live session row for `tokenHash`, or null. Both ceilings apply, and an
 	 * expired row is deleted on the way out so a dead session does not linger
 	 * until the next sweep.
+	 *
+	 * Returns the ROW rather than a verdict because the caller needs its
+	 * `lastSeenAt` to decide whether an activity write is due — reading it here
+	 * and asking the database again would be the write this exists to avoid.
 	 */
-	async isSessionLive(tokenHash: string): Promise<boolean> {
+	private async loadLiveSession(
+		tokenHash: string,
+	): Promise<AuthSessionRecord | null> {
 		const session = await this.store.getManagementSession(tokenHash);
-		if (!session) return false;
+		if (!session) return null;
 		const now = this.now();
 		if (
 			session.expiresAt <= now ||
 			now - session.lastSeenAt >= SESSION_IDLE_MAX_MS
 		) {
 			await this.store.deleteManagementSession(tokenHash).catch(() => 0);
-			return false;
+			return null;
 		}
-		return true;
+		return session;
+	}
+
+	/** Is this token hash still a live session? */
+	async isSessionLive(tokenHash: string): Promise<boolean> {
+		return (await this.loadLiveSession(tokenHash)) !== null;
+	}
+
+	/**
+	 * Rewrite `last_seen_at`, but only when the row we already read says it is
+	 * due, and only once per token at a time.
+	 *
+	 * The staleness test CANNOT live only in the SQL predicate. A zero-row
+	 * UPDATE is still a write transaction: it takes SQLite's single writer slot
+	 * and fails with "database is locked" under a concurrent `BEGIN IMMEDIATE`,
+	 * where a SELECT under the same contention succeeds. With the dashboard
+	 * polling ~8 endpoints, an unconditional call would put every protected GET
+	 * into contention with live proxy traffic and pile up busy-retry promises.
+	 * The predicate stays in the statement, but only as a race guard for two
+	 * validations that both read the same stale row.
+	 */
+	private touchIfStale(tokenHash: string, session: AuthSessionRecord): void {
+		const now = this.now();
+		const staleBefore = now - SESSION_TOUCH_INTERVAL_MS;
+		if (session.lastSeenAt > staleBefore) return;
+		// Single-flight per token: concurrent stale requests issue ONE write.
+		if (this.touchesInFlight.has(tokenHash)) return;
+		const write = this.store
+			.touchManagementSession(tokenHash, now, staleBefore)
+			.then(() => {})
+			.catch((error) => {
+				log.debug(
+					`Could not refresh session activity: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			})
+			.finally(() => {
+				this.touchesInFlight.delete(tokenHash);
+			});
+		this.touchesInFlight.set(tokenHash, write);
 	}
 
 	/**
@@ -325,25 +374,14 @@ export class SessionAuthService {
 			return { configured: true, authenticated: false, tokenHash: null };
 		}
 		const tokenHash = hashSessionToken(token);
-		if (!(await this.isSessionLive(tokenHash))) {
+		const session = await this.loadLiveSession(tokenHash);
+		if (!session) {
 			return { configured: true, authenticated: false, tokenHash: null };
 		}
-		// Best-effort, conditional, and never awaited into the decision: the
-		// caller's access does not depend on this write landing, and the write is
-		// skipped outright unless the stored value is already an hour stale.
-		void this.store
-			.touchManagementSession(
-				tokenHash,
-				this.now(),
-				this.now() - SESSION_TOUCH_INTERVAL_MS,
-			)
-			.catch((error) => {
-				log.debug(
-					`Could not refresh session activity: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			});
+		// Best-effort and never awaited into the decision: the caller's access
+		// does not depend on this write landing, and in the common case the row
+		// we just read says no write is due at all.
+		this.touchIfStale(tokenHash, session);
 		return { configured: true, authenticated: true, tokenHash };
 	}
 

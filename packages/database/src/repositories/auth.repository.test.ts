@@ -267,15 +267,20 @@ describe("session lifecycle", () => {
 	});
 });
 
-describe("touch is conditional", () => {
-	it("writes when last_seen_at is older than the staleness bound", async () => {
+describe("touch carries a staleness predicate — as a race guard, not a shield", () => {
+	it("updates the row when last_seen_at is older than the staleness bound", async () => {
 		await repo.createSession(session("a", { lastSeenAt: 1_000 }));
 		const changed = await repo.touchSession("a", 9_000, 5_000);
 		expect(changed).toBe(1);
 		expect((await repo.getSession("a"))?.lastSeenAt).toBe(9_000);
 	});
 
-	it("writes nothing when the stored value is already recent", async () => {
+	it("changes NO ROW when the stored value is already recent", async () => {
+		// Note what this does and does not prove. It proves the predicate holds,
+		// so two validations that read the same stale row cannot both rewrite it.
+		// It does NOT mean nothing was written: SQLite takes the writer slot for a
+		// zero-row UPDATE too, which is why SessionAuthService decides from the
+		// row it already read rather than calling this on every request.
 		await repo.createSession(session("a", { lastSeenAt: 8_000 }));
 		const changed = await repo.touchSession("a", 9_000, 5_000);
 		expect(changed).toBe(0);
