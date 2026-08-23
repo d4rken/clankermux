@@ -351,9 +351,11 @@ describe("GET /api/runway", () => {
 });
 
 /**
- * The runway DERIVES a value modelling "now", so it reads the ROUTING-fresh
- * view of the usage cache (10 min) rather than the 30-minute display horizon
- * the accounts endpoint renders from. These cases pin that boundary.
+ * The response reads the usage cache through BOTH documented views. The runway
+ * scan and the predictions DERIVE a value modelling "now", so they take the
+ * ROUTING-fresh view (10 min); the reported `accounts[]` evidence is an
+ * OBSERVATION, so it takes the display view (30 min) with its age. These cases
+ * pin both boundaries, and the fact that they cannot contradict each other.
  */
 describe("GET /api/runway usage freshness", () => {
 	let nowSpy: ReturnType<typeof spyOn>;
@@ -368,10 +370,40 @@ describe("GET /api/runway usage freshness", () => {
 		nowSpy.mockRestore();
 	});
 
-	it("treats a reading past the routing TTL as no evidence at all", async () => {
+	it("reports a reading past the routing TTL but shows no projection for it", async () => {
 		usageCache.set("aged-1", SPENT()); // stamped at BASE
 		// 15 minutes on: past the 10-min routing TTL, inside the 30-min UI horizon.
 		nowSpy.mockReturnValue(BASE + 15 * MINUTE_MS);
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "aged-1", name: "Aged" })],
+				keys: [makeKey({ id: "k1" })],
+			}),
+		);
+
+		// The evidence block is an observation with an age: the cache is still
+		// willing to show it, so a widget on this endpoint sees what /api/accounts
+		// shows, labelled with when it was taken.
+		expect(body.accounts[0].windows.map((w) => w.utilizationPct)).toEqual([
+			100, 20,
+		]);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE);
+		expect(body.generatedAt).toBe(BASE + 15 * MINUTE_MS);
+		// Nothing DERIVED comes off it: no prediction, and the scan cannot see the
+		// account at all, so the key's outcome is unknown rather than "out now".
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
+			null,
+			null,
+		]);
+		expect(body.keys[0].outcome).toEqual({ kind: "unknown" });
+	});
+
+	it("reports nothing at all once the reading is past the display horizon", async () => {
+		usageCache.set("aged-1", SPENT()); // stamped at BASE
+		// 31 minutes on: `peekWithAge` stops serving it, so there is no observation
+		// left to report either.
+		nowSpy.mockReturnValue(BASE + 31 * MINUTE_MS);
 
 		const body = await runway(
 			makeDbOps({

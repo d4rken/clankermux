@@ -42,16 +42,32 @@ import { buildPredictionsForAccounts } from "../services/build-account-predictio
  * the provider-overload breaker are deliberately not read. Copy built on this
  * must say "quota", never "available".
  *
- * FRESHNESS — a deliberate semantic change from what the browser used to do.
- * The dashboard computed the runway from `AccountResponse.usageData`, the
- * DISPLAY view, which is served up to 30 minutes old and can include
- * DB-restored Codex usage. Utilization here comes from the ROUTING-fresh view
- * (10 min), because the runway DERIVES a value modelling "now" — the same rule
- * that keeps the exhaustion prediction off the display view. The difference is
- * reachable (usage-fetch failure backoff, long poll intervals, Codex restart
- * recovery), and when it bites, an outcome moves from `beyond-horizon` to
- * `unknown`, or to a shorter lower bound driven by the accounts still fresh.
- * That is the honest answer, not a regression.
+ * FRESHNESS — the response deliberately reads the usage cache through BOTH of
+ * its documented views, because it carries two different kinds of thing:
+ *
+ *  - The runway SCAN and the per-window PREDICTION take the ROUTING-fresh view
+ *    (10 min). Both DERIVE a value modelling "now", and a derived value must
+ *    not be built on a reading that stopped being worth routing on. This is a
+ *    deliberate semantic change from what the browser used to do — it computed
+ *    the runway from `AccountResponse.usageData`, the display view. When the
+ *    difference bites (usage-fetch failure backoff, long poll intervals, Codex
+ *    restart recovery), an outcome moves from `beyond-horizon` to `unknown`, or
+ *    to a shorter lower bound driven by the accounts still fresh. That is the
+ *    honest answer, not a regression.
+ *  - The reported account EVIDENCE (`accounts[].windows[].utilizationPct` /
+ *    `resetsAtMs`, stamped by `usageAsOfMs`) takes the DISPLAY view
+ *    (`peekWithAge`, 30 min) with its age. An observation is not a derived
+ *    value: a reading 12 minutes old is live data with an age, which is exactly
+ *    what `/api/accounts` renders "as of HH:MM", and a widget reading this
+ *    endpoint must not be shown less than the dashboard beside it. It is also
+ *    what makes `usageAsOfMs` mean anything — sourced from routing-fresh data it
+ *    could never exceed 10 minutes.
+ *
+ * The two cannot disagree. Inside 10 minutes the display entry and the
+ * routing-fresh entry are the same object; past it the routing-fresh side is
+ * null, so no prediction is emitted and the scan reports the account as
+ * unprojectable. There is no case where a served utilization and a served
+ * prediction come from different readings.
  *
  * Runs INLINE rather than through a dashboard read worker: the worker exists
  * for multi-second `requests` scans and cannot see `usageCache`, which is
@@ -155,8 +171,9 @@ export function createRunwayHandler(
 		//  - routing-fresh (10 min) feeds BOTH the prediction inputs AND the
 		//    utilization the runway scan reads, because the runway derives a value
 		//    modelling "now".
-		//  - the display reading's sample time is REPORTED as `usageAsOfMs`. It is
-		//    never substituted into the projection.
+		//  - the display reading (up to 30 min) and its sample time are what the
+		//    `accounts[]` evidence block REPORTS. Neither is ever substituted into
+		//    the scan or the projection.
 		const entryByAccount = new Map(
 			accounts.map((a) => [a.id, usageCache.peekWithAge(a.id)] as const),
 		);
@@ -200,10 +217,15 @@ export function createRunwayHandler(
 			horizonMs: RUNWAY_HORIZON_MS,
 			worstKeyId: worst?.keyId ?? null,
 			keys: runways,
+			// The DISPLAY reading, not the routing-fresh one: this block reports an
+			// observation with its age, and `peekWithAge` exists to serve exactly
+			// that. Only `sources` and the predictions above are held to the routing
+			// TTL, because only they derive a value modelling "now".
 			accounts: accounts.map((account) =>
 				accountSummary(
 					account,
-					usageDataByAccount.get(account.id) ?? null,
+					(entryByAccount.get(account.id)?.data ??
+						null) as FullUsageData | null,
 					entryByAccount.get(account.id)?.sampledAtMs ?? null,
 					predictionByAccount.get(account.id),
 				),
