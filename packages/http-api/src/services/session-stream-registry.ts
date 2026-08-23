@@ -19,10 +19,10 @@ const log = new Logger("SessionStreams");
 export const SESSION_STREAM_REVALIDATE_MS = 60_000;
 
 /**
- * Hard ceiling on one protected stream's connection, independent of the
- * session's own lifetime. Browser `EventSource` reconnects automatically, so a
- * close is a re-handshake rather than a lost stream — and re-handshaking is
- * what re-runs the full auth check.
+ * Hard ceiling on ONE connection, independent of any session's lifetime and of
+ * whether the deployment is gated at all. Browser `EventSource` reconnects
+ * automatically, so a close is a re-handshake rather than a lost stream — and
+ * re-handshaking is what re-runs the full auth check.
  */
 export const SESSION_STREAM_MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 
@@ -74,22 +74,26 @@ export interface StreamSessionGuard {
 }
 
 /**
- * The production guard. When no password is configured the deployment is
- * fail-open, so a stream is left alone entirely — no lifetime cap, no
- * revalidation, nothing to revalidate against.
+ * The production guard.
  *
  * Three properties keep revocation from failing OPEN, which is the only way
  * this whole mechanism can be worse than useless:
  *
- *  - The hard lifetime is its OWN timer, not a comparison made after an await.
- *    The store's busy-retry can keep a single read pending for minutes, and a
- *    ceiling that is only checked once that read returns is not a ceiling.
+ *  - EVERY stream gets the hard lifetime, cookie or not, and it is its OWN
+ *    timer rather than a comparison made after an await. The store's busy-retry
+ *    can keep a single read pending for minutes; a ceiling that is only checked
+ *    once that read returns is not a ceiling, and a connection whose
+ *    revalidation never answers at all has nothing else left to bound it.
  *  - Ticks are serialized. A revalidation slower than the interval would
  *    otherwise stack callbacks against the store it is already waiting on.
- *  - A revalidation ERROR closes a protected stream. Whether a stream is
- *    protected is captured at the HANDSHAKE, so the answer never comes from the
- *    call that just failed. A SUCCESSFUL `configured: false` is the fail-open
- *    case and is the only reading that leaves a stream running.
+ *  - A revalidation that cannot COMPLETE closes the stream, whatever the last
+ *    successful read said and whether or not a cookie was presented. An
+ *    operator gates a fail-open deployment from the CLI at a moment of their
+ *    choosing, so "it was unconfigured when we last managed to look" is not an
+ *    answer about now — it is the previous answer to a question we can no
+ *    longer ask, and it is the wrong one precisely during the transition this
+ *    exists to enforce. Only a SUCCESSFULLY COMPLETED `configured: false`
+ *    leaves a stream running.
  */
 export function createSessionStreamGuard(
 	sessionAuth: SessionAuthService,
@@ -103,7 +107,6 @@ export function createSessionStreamGuard(
 
 			let detached = false;
 			let closed = false;
-			let deadline: ReturnType<typeof setTimeout> | null = null;
 
 			const closeOnce = () => {
 				if (closed || detached) return;
@@ -111,32 +114,18 @@ export function createSessionStreamGuard(
 				close();
 			};
 
-			const armDeadline = () => {
-				if (deadline || detached || closed) return;
-				deadline = setTimeout(closeOnce, maxLifetimeMs);
-				deadline.unref?.();
-			};
+			// Armed for every connection at the handshake: see the docstring.
+			const deadline = setTimeout(closeOnce, maxLifetimeMs);
+			deadline.unref?.();
 
-			// Handshake state. A stream that presented a cookie is protected by
-			// definition; one that did not may still have been opened on a gated
-			// deployment, and that is read ONCE, here, rather than re-derived on
-			// every tick. A handshake read that fails leaves the stream in the
-			// fail-open state it was opened under — the first SUCCESSFUL tick that
-			// reports a configured deployment closes it anyway.
-			let isProtected = tokenHash !== null;
-			if (isProtected) {
-				armDeadline();
-			} else {
-				void sessionAuth
-					.isConfigured()
-					.then((configured) => {
-						if (!configured) return;
-						isProtected = true;
-						armDeadline();
-					})
-					.catch(() => {
-						// Unknown at the handshake; see above.
-					});
+			// Handshake probe for a cookie-less stream. Nothing it reports keeps the
+			// connection alive — a gated deployment is caught by the first tick
+			// anyway — but a read that FAILS here means the gate state was never
+			// known for this connection, and unknown is not fail-open.
+			if (!tokenHash) {
+				void sessionAuth.isConfigured().catch(() => {
+					closeOnce();
+				});
 			}
 
 			if (tokenHash) {
@@ -159,11 +148,10 @@ export function createSessionStreamGuard(
 				revalidating = true;
 				void (async () => {
 					try {
-						// Fail-open: nothing is configured, so nothing is revoked and the
-						// stream has no session to outlive.
+						// Fail-open, and the only reading that leaves a stream running:
+						// nothing is configured, so nothing is revoked and the stream has
+						// no session to outlive.
 						if (!(await sessionAuth.isConfigured())) return;
-						isProtected = true;
-						armDeadline();
 						// A password exists but this stream never presented a cookie: it
 						// was opened while the deployment was still fail-open. It must not
 						// keep running now that it is not.
@@ -177,9 +165,10 @@ export function createSessionStreamGuard(
 							}`,
 						);
 						// Fail CLOSED. The stream carries management events and we no
-						// longer know whether its session exists; closing costs a browser
-						// reconnect, which re-runs the full handshake check.
-						if (isProtected) closeOnce();
+						// longer know whether the deployment is gated, let alone whether
+						// this session exists; closing costs a browser reconnect, which
+						// re-runs the full handshake check.
+						closeOnce();
 					} finally {
 						revalidating = false;
 					}
@@ -191,10 +180,7 @@ export function createSessionStreamGuard(
 			return () => {
 				detached = true;
 				clearInterval(timer);
-				if (deadline) {
-					clearTimeout(deadline);
-					deadline = null;
-				}
+				clearTimeout(deadline);
 				if (!tokenHash) return;
 				const closers = streamsBySession.get(tokenHash);
 				if (!closers) return;

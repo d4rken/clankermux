@@ -224,7 +224,7 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 		expect(closed).toBe(1);
 	});
 
-	it("leaves a fail-open stream alone when the store starts failing", async () => {
+	it("closes a COOKIE-LESS stream when the store starts failing", async () => {
 		const store = new FakeStore();
 		const svc = new SessionAuthService(store);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
@@ -233,14 +233,61 @@ describe("a revalidation that cannot answer fails CLOSED", () => {
 			closed++;
 		});
 		// The handshake read succeeded and said "unconfigured"; the store breaks
-		// only afterwards. Nothing was ever protected here, so nothing is revoked.
+		// only afterwards. That earlier answer must NOT be reused: an operator
+		// gates a fail-open deployment from the CLI at a moment of their choosing,
+		// so "unconfigured when we last managed to look" says nothing about now.
+		// Keeping the connection on the strength of it is fail-OPEN across exactly
+		// the transition this mechanism exists to enforce.
 		await new Promise((r) => setTimeout(r, TICK_MS));
 		store.getManagementPassword = async () => {
 			throw new Error("database is locked");
 		};
-		await settle();
+		await waitFor(() => closed > 0);
 		detach();
-		expect(closed).toBe(0);
+		expect(closed).toBe(1);
+	});
+
+	it("closes a stream opened fail-open when the read that would notice the new password REJECTS", async () => {
+		const store = new FakeStore();
+		const svc = new SessionAuthService(store);
+		const guard = createSessionStreamGuard(svc, TICK_MS);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(), () => {
+			closed++;
+		});
+		// The exact operator sequence: a cookie-less client connects to an open
+		// deployment, the CLI then sets a password, and the reads that would have
+		// noticed start failing (SQLITE_BUSY retries, a locked file). The gate is
+		// live and this connection is on the wrong side of it.
+		await new Promise((r) => setTimeout(r, TICK_MS));
+		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.getManagementPassword = async () => {
+			throw new Error("database is locked");
+		};
+		await waitFor(() => closed > 0);
+		detach();
+		expect(closed).toBe(1);
+	});
+
+	it("closes a stream opened fail-open when that read NEVER RESOLVES", async () => {
+		const store = new FakeStore();
+		const svc = new SessionAuthService(store);
+		// A stalled read reaches neither the answer nor the error path, and ticks
+		// are serialized so nothing runs behind it either. The lifetime ceiling is
+		// what bounds a connection nobody can revalidate — which is why it is armed
+		// for every stream at the handshake, not only for the ones known to be
+		// protected at that moment.
+		const guard = createSessionStreamGuard(svc, TICK_MS, TICK_MS * 4);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(), () => {
+			closed++;
+		});
+		await new Promise((r) => setTimeout(r, TICK_MS));
+		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		store.getManagementPassword = () => new Promise(() => {});
+		await waitFor(() => closed > 0);
+		detach();
+		expect(closed).toBe(1);
 	});
 
 	it("never runs two revalidation ticks at once", async () => {
