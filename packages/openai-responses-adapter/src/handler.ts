@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Logger } from "@clankermux/logger";
 import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	parseUpstreamError,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import { translateRequestToAnthropic } from "./request-translator";
@@ -178,40 +179,54 @@ export async function handleResponsesRequest(
 
 	// 7. Translate non-200 Anthropic errors to OpenAI error shape
 	if (anthropicResp.status !== 200) {
-		let errorBody: { error: { message: string; type: string; code: string } };
+		// The proxy forwards a failed upstream response VERBATIM, so this body is
+		// not necessarily an Anthropic envelope: on a codex account it is whatever
+		// the ChatGPT backend raised, typically FastAPI's
+		// `{"detail":"Unsupported parameter: max_output_tokens"}`. Reading only
+		// `error.message` reduced every one of those to the constant
+		// "Unknown error" and destroyed the sole copy of the diagnostic the
+		// client ever sees (issue #5).
+		//
+		// Read the body as text and parse it twice: once for the typed
+		// `error.type`, and once through the shared envelope parser for the
+		// message. `error.message` still wins when present so an Anthropic error
+		// reaches the client exactly as before, unprefixed by its type.
+		// parseUpstreamError is used rather than a raw-body excerpt deliberately:
+		// it emits only what upstream put in a recognized error field, never
+		// arbitrary bytes, so tokens or echoed prompt text in an unrecognized
+		// body cannot be relayed to the caller.
+		const rawErrorBody = await anthropicResp.text();
+		let errType = "api_error";
+		let message: string | null = null;
+
 		const contentType = anthropicResp.headers.get("content-type") ?? "";
 		if (contentType.includes("application/json")) {
 			try {
-				const anthropicError = (await anthropicResp.json()) as {
+				const anthropicError = JSON.parse(rawErrorBody) as {
 					type?: string;
 					error?: { type?: string; message?: string };
 				};
-				const errType = anthropicError?.error?.type ?? "api_error";
-				errorBody = {
-					error: {
-						message: anthropicError?.error?.message ?? "Unknown error",
-						type: errType,
-						code: errType,
-					},
-				};
+				// Blank values count as absent: an empty `error.message` used to
+				// win over the fallback and emit an error with no text at all.
+				if (anthropicError?.error?.type?.trim()) {
+					errType = anthropicError.error.type.trim();
+				}
+				if (anthropicError?.error?.message?.trim()) {
+					message = anthropicError.error.message;
+				}
 			} catch {
-				errorBody = {
-					error: {
-						message: "Unknown error",
-						type: "api_error",
-						code: "api_error",
-					},
-				};
+				// Malformed JSON — fall through to the shared parser, which is
+				// tolerant of anything and returns null when it recognizes nothing.
 			}
-		} else {
-			errorBody = {
-				error: {
-					message: "Unknown error",
-					type: "api_error",
-					code: "api_error",
-				},
-			};
 		}
+
+		const errorBody = {
+			error: {
+				message: message ?? parseUpstreamError(rawErrorBody) ?? "Unknown error",
+				type: errType,
+				code: errType,
+			},
+		};
 		return new Response(JSON.stringify(errorBody), {
 			status: anthropicResp.status,
 			headers: { "Content-Type": "application/json" },
