@@ -14,8 +14,11 @@ const log = new Logger("AccountPredictions");
 
 /**
  * How far back to pull stored usage snapshots when computing the per-account
- * exhaustion prediction. 24h gives the 7-day-window regression a recent pace
- * while `buildAccountUsagePredictions` internally caps the 5h window to 6h.
+ * exhaustion prediction. `buildAccountUsagePredictions` caps the points it fits
+ * to the last 6h, so this is the wider bound of the two and the query returns
+ * some rows the fit then drops. It stays at 24h: the snapshot rows are small,
+ * one query serves the whole account set, and a lookback that hugs the fit
+ * window leaves nothing to widen it with.
  * Inline named constant (no env knobs, per project rule).
  */
 const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
@@ -64,7 +67,10 @@ export async function buildPredictionsForAccounts(
 		const fiveHour = (live as AnthropicUsageData).five_hour;
 		const sevenDay = (live as AnthropicUsageData).seven_day;
 		// Skip accounts with neither window (e.g. non-Anthropic-shaped cache
-		// data) — they fall through to no prediction.
+		// data) — they fall through to no prediction. Only the 5-hour reading is
+		// carried forward (the weekly window has no regression any more), but an
+		// account showing just a weekly reading still enters: its 5-hour history
+		// may be in the snapshots even when the live payload has no 5h block.
 		if (!fiveHour && !sevenDay) continue;
 		inputs.push({
 			accountId: account.id,
@@ -72,12 +78,6 @@ export async function buildPredictionsForAccounts(
 				? {
 						utilization: fiveHour.utilization ?? null,
 						resetsAtMs: isoToMs(fiveHour.resets_at),
-					}
-				: null,
-			sevenDay: sevenDay
-				? {
-						utilization: sevenDay.utilization ?? null,
-						resetsAtMs: isoToMs(sevenDay.resets_at),
 					}
 				: null,
 		});

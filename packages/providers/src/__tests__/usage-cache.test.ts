@@ -592,6 +592,8 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 				data: sample,
 				ageMs: 45_000,
 				sampledAtMs: BASE,
+				// A live write, so the two instants coincide.
+				observedAtMs: BASE,
 			});
 		});
 
@@ -621,6 +623,7 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 				data: sample,
 				ageMs: TTL_MS + 90_000,
 				sampledAtMs: BASE,
+				observedAtMs: BASE,
 			});
 			// Repeat reads keep seeing it — no eviction side effect...
 			expect(usageCache.peekWithAge(ACCOUNT)).toEqual(first);
@@ -648,11 +651,70 @@ describe("UsageCache - non-evicting peek()/peekAge()", () => {
 				data: sample,
 				ageMs: UI_HORIZON_MS,
 				sampledAtMs: BASE,
+				observedAtMs: BASE,
 			});
 		});
 
 		it("returns null for a missing account", () => {
 			expect(usageCache.peekWithAge("no-such-account")).toBeNull();
+		});
+	});
+
+	// Observation provenance vs write time. They coincide for every live fetch,
+	// which is exactly why a consumer reading the write time looks correct until a
+	// RECONSTRUCTED reading is re-read: the Codex stored-payload recovery re-seeds
+	// this cache with headers that may predate the write by hours, and the write
+	// stamp would then present that reconstruction as a confident observation made
+	// at the recovery instant.
+	describe("observation provenance (set vs setUntimed)", () => {
+		it("keeps a live write's observation time anchored across later reads", () => {
+			usageCache.set(ACCOUNT, sample); // observed AND written at BASE
+
+			nowSpy.mockReturnValue(BASE + 5 * 60_000);
+			expect(usageCache.peekWithAge(ACCOUNT)?.observedAtMs).toBe(BASE);
+			// Still the observation instant once the entry is past the routing TTL —
+			// an aged live reading is aged, not unobserved.
+			nowSpy.mockReturnValue(BASE + TTL_MS + 60_000);
+			expect(usageCache.peekWithAge(ACCOUNT)?.observedAtMs).toBe(BASE);
+		});
+
+		it("keeps an untimed write's observation time null across later reads", () => {
+			usageCache.setUntimed(ACCOUNT, sample);
+
+			// Immediately: no observation time, even though the entry was just
+			// written and is as fresh as an entry can be.
+			expect(usageCache.peekWithAge(ACCOUNT)?.observedAtMs).toBeNull();
+
+			nowSpy.mockReturnValue(BASE + 5 * 60_000);
+			const later = usageCache.peekWithAge(ACCOUNT);
+			expect(later?.observedAtMs).toBeNull();
+			// The insertion instant is still available as the WRITE time — it just
+			// never masquerades as an observation.
+			expect(later?.sampledAtMs).toBe(BASE);
+			expect(later?.ageMs).toBe(5 * 60_000);
+		});
+
+		it("gives an untimed entry the same freshness/TTL behaviour as a live one", () => {
+			usageCache.setUntimed(ACCOUNT, sample);
+
+			// Unknown observation time is a statement about PROVENANCE, not about
+			// freshness: the proxy has been re-seeded and may route on this entry for
+			// exactly as long as any other.
+			nowSpy.mockReturnValue(BASE + TTL_MS - 1);
+			expect(usageCache.peek(ACCOUNT)).toEqual(sample);
+			expect(usageCache.getAge(ACCOUNT)).toBe(TTL_MS - 1);
+
+			nowSpy.mockReturnValue(BASE + TTL_MS + 1);
+			expect(usageCache.peek(ACCOUNT)).toBeNull();
+			expect(usageCache.get(ACCOUNT)).toBeNull();
+		});
+
+		it("lets a live write replace an untimed one's provenance", () => {
+			usageCache.setUntimed(ACCOUNT, sample);
+			nowSpy.mockReturnValue(BASE + 60_000);
+			usageCache.set(ACCOUNT, sample); // a real observation has now landed
+
+			expect(usageCache.peekWithAge(ACCOUNT)?.observedAtMs).toBe(BASE + 60_000);
 		});
 	});
 
