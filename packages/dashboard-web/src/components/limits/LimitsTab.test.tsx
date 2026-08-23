@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { AnalyticsResponse, RunwayResponse } from "@clankermux/types";
+import type {
+	AnalyticsResponse,
+	RunwayResponse,
+	UsageHistoryResponse,
+} from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { canonicalSections } from "../../lib/analytics-sections";
@@ -187,6 +191,64 @@ describe("LimitsTab per-section gating", () => {
 		expect(html).toContain("Account data unavailable");
 		expect(html).not.toContain("No reported account-wide average");
 		expect(html).not.toContain("No windowed accounts reporting usage yet.");
+	});
+
+	it("does not claim usage history is still being collected while it is in flight", () => {
+		// "Collecting data" asserts that no history EXISTS. With both window reads
+		// pending on a cold load, a deployment with months of snapshots would be
+		// told the opposite of the truth.
+		const queryClient = client();
+		seedPending(queryClient, queryKeys.usageHistory("24h"));
+		seedPending(queryClient, queryKeys.usageHistory("7d"));
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		queryClient.setQueryData(analyticsKey, {} as AnalyticsResponse);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html).toContain("Usage Over Time");
+		expect(html).not.toContain("Collecting data");
+		expect(html).not.toContain("Usage history unavailable");
+	});
+
+	it("says usage history is unavailable when its reads fail outright", () => {
+		const queryClient = client(false);
+		seedError(queryClient, queryKeys.usageHistory("24h"));
+		seedError(queryClient, queryKeys.usageHistory("7d"));
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		queryClient.setQueryData(analyticsKey, {} as AnalyticsResponse);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html).not.toContain("Collecting data");
+		expect(html.match(/Usage history unavailable/g)).toHaveLength(2);
+		// The runway beside it is unaffected.
+		expect(html).toContain("3d 2h");
+	});
+
+	it("still says usage history is being collected once the reads resolve empty", () => {
+		const queryClient = client();
+		queryClient.setQueryData(queryKeys.usageHistory("24h"), {
+			range: "24h",
+			bucketMs: 60_000,
+			series: [],
+			pool: [],
+		} as UsageHistoryResponse);
+		queryClient.setQueryData(queryKeys.usageHistory("7d"), {
+			range: "7d",
+			bucketMs: 60_000,
+			series: [],
+			pool: [],
+		} as UsageHistoryResponse);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		queryClient.setQueryData(analyticsKey, {} as AnalyticsResponse);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html.match(/Collecting data/g)).toHaveLength(2);
+		expect(html).not.toContain("Usage history unavailable");
 	});
 
 	it("says the runway is unavailable when its own read fails", () => {

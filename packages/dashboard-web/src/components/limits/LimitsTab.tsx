@@ -48,10 +48,13 @@ export const LimitsTab = React.memo(() => {
 		{ sections: LIMITS_SECTIONS },
 	);
 	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
+	// One query per window: each graph states the availability of its OWN read.
+	const fiveHourUsageQuery = useUsageHistory(fiveHourUsageRange);
 	const { data: fiveHourUsageHistory, isLoading: fiveHourUsageHistoryLoading } =
-		useUsageHistory(fiveHourUsageRange);
+		fiveHourUsageQuery;
+	const sevenDayUsageQuery = useUsageHistory(sevenDayUsageRange);
 	const { data: sevenDayUsageHistory, isLoading: sevenDayUsageHistoryLoading } =
-		useUsageHistory(sevenDayUsageRange);
+		sevenDayUsageQuery;
 	// Payments-ledger spend summary follows the Account Performance card's range.
 	const paymentsQuery = usePaymentsSummary(perfRange);
 	const { data: paymentsSummary, isLoading: paymentsLoading } = paymentsQuery;
@@ -91,6 +94,15 @@ export const LimitsTab = React.memo(() => {
 	const analyticsUnavailable =
 		dataAvailability(analyticsQuery, analyticsLoading).state === "unavailable";
 	const analyticsPending = analyticsLoading && !analytics;
+	// The sawtooth graphs claim "Collecting data" when they have no rows, which
+	// asserts that no history EXISTS. That claim is only true once the read has
+	// resolved, so each window carries its own pending/unavailable state.
+	const fiveHourUsageUnavailable =
+		dataAvailability(fiveHourUsageQuery, fiveHourUsageHistoryLoading).state ===
+		"unavailable";
+	const sevenDayUsageUnavailable =
+		dataAvailability(sevenDayUsageQuery, sevenDayUsageHistoryLoading).state ===
+		"unavailable";
 	const paymentsUnavailable =
 		dataAvailability(paymentsQuery, paymentsLoading).state === "unavailable";
 	const paymentsPending = paymentsLoading && !paymentsSummary;
@@ -149,13 +161,19 @@ export const LimitsTab = React.memo(() => {
 				now={now}
 				fiveHour={{
 					usageHistory: fiveHourUsageHistory,
-					loading: fiveHourUsageHistoryLoading,
+					loading: fiveHourUsageHistoryLoading && !fiveHourUsageHistory,
+					unavailableReason: fiveHourUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
 					range: fiveHourUsageRange,
 					onRangeChange: setFiveHourUsageRange,
 				}}
 				sevenDay={{
 					usageHistory: sevenDayUsageHistory,
-					loading: sevenDayUsageHistoryLoading,
+					loading: sevenDayUsageHistoryLoading && !sevenDayUsageHistory,
+					unavailableReason: sevenDayUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
 					range: sevenDayUsageRange,
 					onRangeChange: setSevenDayUsageRange,
 				}}
