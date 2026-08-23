@@ -86,6 +86,11 @@ function renderOverview(
 	);
 }
 
+/** How many times `needle` appears in `haystack` (non-overlapping). */
+function countOccurrences(haystack: string, needle: string): number {
+	return haystack.split(needle).length - 1;
+}
+
 function renderRunway(
 	runwayProps: {
 		runways?: KeyRunway[];
@@ -407,5 +412,61 @@ describe("LimitsCapacityOverview runway panel", () => {
 		});
 
 		expect(html).toContain(UNAUTHENTICATED_POOL_KEY_NAME);
+	});
+
+	it("states nothing at all while the key read is in flight", () => {
+		// The tab computes runways from `apiKeys ?? []`, so a pending key read
+		// still yields a full-looking row. None of it may be shown next to the
+		// panel's own "Reading keys and accounts" subtext.
+		const html = renderRunway({ runwaysLoading: true });
+
+		expect(html).toContain("Reading keys and accounts");
+		expect(html).toContain("Loading");
+		// No figure, no eligible-account count, no pin label, no breakdown.
+		expect(html).not.toContain("∞");
+		expect(html).not.toContain("no run-out within 14d");
+		// ">2 accounts<" is the runway panel's own cell; the window panels render
+		// "2 of 2 accounts".
+		expect(html).not.toContain(">2 accounts<");
+		expect(html).not.toContain("Unpinned");
+		expect(html).not.toContain("prod");
+		expect(html).toContain("Not reported");
+		// Only the two window panels disclose a breakdown.
+		expect(countOccurrences(html, "Full breakdown")).toBe(2);
+		expect(html).not.toContain(">0<");
+	});
+
+	it("keeps the breakdown under an unknown headline", () => {
+		// `unknown` poisons the headline but is a RESOLVED outcome: the other
+		// key's definite runway has to stay reachable.
+		const html = renderRunway({
+			runways: [
+				keyRunway({
+					keyId: "k1",
+					keyName: "prod",
+					outcome: { kind: "unknown" },
+				}),
+				keyRunway({
+					keyId: "k2",
+					keyName: "codex-only",
+					pinLabel: "Pinned → codex",
+					eligibleAccountCount: 1,
+					outcome: {
+						kind: "runway",
+						exhaustsAtMs: NOW + 4 * HOUR,
+						durationMs: 4 * HOUR,
+						causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
+						unprojectableAccountIds: [],
+					},
+				}),
+			],
+		});
+
+		expect(html).toContain("No quota evidence for any account");
+		expect(html).toContain("codex-only");
+		expect(html).toContain("Pinned → codex");
+		expect(html).toContain("4h");
+		expect(countOccurrences(html, "Full breakdown")).toBe(3);
+		expect(html).not.toContain(">0<");
 	});
 });

@@ -309,25 +309,33 @@ function RunwayPanel({
 }: RunwayPanelProps) {
 	const worst = worstKeyRunway(runways);
 	const activeRunways = runways.filter((runway) => runway.isActive);
+	// Three distinct states, kept apart on purpose:
+	//  - readBlocked: the backing read failed, or is still in flight. The parent
+	//    computes runways from `apiKeys ?? []` either way, so `worst` is a
+	//    SYNTHETIC row then — commonly the unauthenticated-pool one, whose
+	//    outcome would render as a real figure. Nothing derived from it may be
+	//    shown while this holds.
+	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
+	//    replaces the figure, yet leaves the per-key breakdown standing, because
+	//    one key's missing evidence must not hide another key's definite runway.
+	//  - otherwise the outcome speaks for itself.
 	// Precedence is unavailable -> loading -> resolved: a read that failed must
 	// never be presented as still loading, and neither may render a fallback 0.
-	const blockingReason =
-		unavailableReason ??
-		(loading
-			? null
-			: worst === null
-				? "No active API keys or accounts"
-				: runwayUnavailableReason(worst.outcome));
+	const readBlocked = loading || unavailableReason != null;
+	const dataResolved = !readBlocked;
+	const outcomeReason = dataResolved
+		? worst === null
+			? "No active API keys or accounts"
+			: runwayUnavailableReason(worst.outcome)
+		: null;
+	const blockingReason = unavailableReason ?? outcomeReason;
+	const stated = dataResolved && worst !== null && outcomeReason == null;
 	const outlook = runwayOutlook(worst, blockingReason, loading);
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const value =
-		worst && !blockingReason ? formatRunwayValue(worst.outcome) : null;
-	const qualifier =
-		worst && !blockingReason ? runwayQualifier(worst.outcome) : null;
+	const value = worst && stated ? formatRunwayValue(worst.outcome) : null;
+	const qualifier = worst && stated ? runwayQualifier(worst.outcome) : null;
 	const cause =
-		worst && !blockingReason
-			? describeRunwayCause(worst.outcome, accounts)
-			: null;
+		worst && stated ? describeRunwayCause(worst.outcome, accounts) : null;
 
 	return (
 		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
@@ -357,16 +365,14 @@ function RunwayPanel({
 					<dt className="label-caps">Eligible accounts</dt>
 					<dd className="mt-tight min-w-0">
 						<span className="block truncate text-sm font-medium">
-							{worst === null || blockingReason != null
-								? "—"
-								: `${worst.eligibleAccountCount} ${
+							{worst && stated
+								? `${worst.eligibleAccountCount} ${
 										worst.eligibleAccountCount === 1 ? "account" : "accounts"
-									}`}
+									}`
+								: "—"}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{worst === null || blockingReason != null
-								? "Not reported"
-								: worst.pinLabel}
+							{worst && stated ? worst.pinLabel : "Not reported"}
 						</span>
 					</dd>
 				</div>
@@ -377,13 +383,17 @@ function RunwayPanel({
 							{cause ?? "—"}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{cause == null ? "No run-out projected" : "First to run out"}
+							{stated
+								? cause == null
+									? "No run-out projected"
+									: "First to run out"
+								: "Not reported"}
 						</span>
 					</dd>
 				</div>
 			</dl>
 
-			{activeRunways.length > 0 && blockingReason == null && (
+			{activeRunways.length > 0 && dataResolved && (
 				<div className="mt-auto pt-group">
 					<details className="group border-t border-border/60 pt-item">
 						<summary className="flex cursor-pointer list-none items-center justify-between gap-item rounded-sm py-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
