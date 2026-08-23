@@ -336,10 +336,11 @@ describe("changepoint detection", () => {
 		// The guard cannot be written on the spread. Summing 1000 identical values
 		// and dividing recovers a mean a few ulps off the value, so a two-pass
 		// deviation squares that rounding into ~1e-15 of "variance" and passes.
-		const segments = identicalRunSeries({
+		const segments = exactLinearRunSeries({
 			beforeWeight: 2.4,
 			afterWeight: 1.2,
 			seed: 1301,
+			sharedPattern: true,
 		});
 		const runs = new Set(segments.map((s) => s.runId));
 		expect(runs.size).toBe(4);
@@ -353,6 +354,44 @@ describe("changepoint detection", () => {
 		expect(result.changes).toEqual([]);
 		// NOT `stable`: nothing was established about the difference, because the
 		// comparison never acquired an uncertainty to judge it against.
+		expect(result.verdict).toBe("insufficient-evidence");
+		expect(result.nCandidates).toBeGreaterThan(0);
+	});
+
+	it("refuses a step whose difference bootstrap varied only by solver noise", () => {
+		// The near-degenerate case, which neither of the guards this replaced can
+		// see. The runs are DISTINCT, so the resamples genuinely rebuild different
+		// datasets and the draws are not bit-identical — but `dpct` is generated
+		// exactly as the weighted sum, so every one of those datasets is solved by
+		// the same coefficients and the draws differ only in the last bits of the
+		// solve. Measured here: 16 distinct values across 1000 resamples, standard
+		// deviation 5.4e-15 against a coefficient scale of 1.8.
+		//
+		// A spread that small is not uncertainty, and a 1.2-versus-2.4 difference
+		// judged against it clears the interval by more than ten orders of
+		// magnitude. The scan must decline, as it does on the bit-identical case.
+		const segments = exactLinearRunSeries({
+			beforeWeight: 2.4,
+			afterWeight: 1.2,
+			seed: 2602,
+			sharedPattern: false,
+		});
+		const runs = new Set(segments.map((s) => s.runId));
+		expect(runs.size).toBe(4);
+		// The runs really do differ, so a guard written on draw equality passes.
+		const firstRun = segments.filter((s) => s.runId === "exact-linear:0");
+		const secondRun = segments.filter((s) => s.runId === "exact-linear:1");
+		expect(firstRun.map((s) => s.dpct)).not.toEqual(
+			secondRun.map((s) => s.dpct),
+		);
+
+		const result = detectChanges(segments, "claude-opus-5", {
+			bootstrapB: 1000,
+			seedParts: ["near-degenerate"],
+			maxDepth: 1,
+		});
+
+		expect(result.changes).toEqual([]);
 		expect(result.verdict).toBe("insufficient-evidence");
 		expect(result.nCandidates).toBeGreaterThan(0);
 	});
@@ -401,47 +440,56 @@ describe("normalQuantile", () => {
 	});
 });
 
-/** Segments per run in {@link identicalRunSeries}: 48 x 3h == exactly 6 days. */
-const IDENTICAL_RUN_SEGMENTS = 48;
-const IDENTICAL_SEGMENT_MS = 3 * HOUR;
+/** Segments per run in {@link exactLinearRunSeries}: 48 x 3h == exactly 6 days. */
+const EXACT_RUN_SEGMENTS = 48;
+const EXACT_SEGMENT_MS = 3 * HOUR;
 /** Runs start a whole week apart, so grid dates land in the inter-run gaps. */
-const IDENTICAL_RUN_STRIDE_MS = 7 * DAY_MS;
+const EXACT_RUN_STRIDE_MS = 7 * DAY_MS;
 
 /**
- * Four runs of ONE account — two before a step, two after — in which every run
- * carries the identical exposure pattern and `dpct` is generated exactly as
- * `Σ w · Mtok` with no quantization.
+ * Four runs of ONE account — two before a step, two after — in which `dpct` is
+ * generated exactly as `Σ w · Mtok` with no quantization, so every subset of the
+ * rows is solved by the same coefficients.
  *
- * The point is a degenerate bootstrap, not a realistic series. Because the two
- * runs on a side are bit-identical, drawing runs with replacement rebuilds the
- * same row sequence whatever it draws, so every resampled difference is the same
- * number and the bootstrap measures nothing at all. Each side still holds two
- * distinct run ids, so the per-side interval gate does not intercept the case
- * before the difference bootstrap is reached.
+ * The point is a bootstrap that measures nothing, not a realistic series, and
+ * `sharedPattern` picks which flavour of that:
+ *
+ * - `true`: all four runs carry the identical exposure pattern, so drawing runs
+ *   with replacement rebuilds the same row sequence whatever it draws and every
+ *   resampled difference is bit-identical.
+ * - `false`: each run gets its own pattern, so the resamples really are
+ *   different datasets and the draws differ — but only in the last bits of the
+ *   solve, because the exact-linear rows pin the coefficients regardless.
+ *
+ * Each side holds two distinct run ids either way, so the per-side interval gate
+ * does not intercept the case before the difference bootstrap is reached.
  */
-function identicalRunSeries(opts: {
+function exactLinearRunSeries(opts: {
 	beforeWeight: number;
 	afterWeight: number;
 	seed: number;
+	sharedPattern: boolean;
 }): QuotaSegment[] {
 	const rand = mulberry32(opts.seed);
-	// One exposure pattern, reused verbatim by all four runs.
-	const pattern = Array.from({ length: IDENTICAL_RUN_SEGMENTS }, () => ({
-		"claude-opus-5": 2_000_000 * (0.2 + 1.6 * rand()),
-		"claude-sonnet-5": 2_000_000 * (0.2 + 1.6 * rand()),
-	}));
+	const drawPattern = () =>
+		Array.from({ length: EXACT_RUN_SEGMENTS }, () => ({
+			"claude-opus-5": 2_000_000 * (0.2 + 1.6 * rand()),
+			"claude-sonnet-5": 2_000_000 * (0.2 + 1.6 * rand()),
+		}));
+	const shared = opts.sharedPattern ? drawPattern() : null;
 
 	const segments: QuotaSegment[] = [];
 	for (let run = 0; run < 4; run++) {
+		const pattern = shared ?? drawPattern();
 		const opus = run < 2 ? opts.beforeWeight : opts.afterWeight;
-		const runStart = START + run * IDENTICAL_RUN_STRIDE_MS;
-		for (let i = 0; i < IDENTICAL_RUN_SEGMENTS; i++) {
+		const runStart = START + run * EXACT_RUN_STRIDE_MS;
+		for (let i = 0; i < EXACT_RUN_SEGMENTS; i++) {
 			const tokens = pattern[i];
 			segments.push({
-				runId: `identical:${run}`,
+				runId: `exact-linear:${run}`,
 				accountId: "acct-a",
-				t0: runStart + i * IDENTICAL_SEGMENT_MS,
-				t1: runStart + (i + 1) * IDENTICAL_SEGMENT_MS,
+				t0: runStart + i * EXACT_SEGMENT_MS,
+				t1: runStart + (i + 1) * EXACT_SEGMENT_MS,
 				dpct:
 					(opus * tokens["claude-opus-5"]) / 1e6 +
 					(0.9 * tokens["claude-sonnet-5"]) / 1e6,

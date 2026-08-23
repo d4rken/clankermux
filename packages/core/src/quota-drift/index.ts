@@ -12,6 +12,7 @@ export {
 	type ChangepointResult,
 	detectChanges,
 	MAX_DEPTH,
+	MIN_RELATIVE_BOOTSTRAP_SD,
 	MIN_RELATIVE_CHANGE,
 	MIN_SIDE_DAYS,
 	MIN_SIDE_SEGMENTS,

@@ -52,6 +52,26 @@ export const NOMINAL_LEVEL = 0.05;
 /** Recursion depth of the binary segmentation. */
 export const MAX_DEPTH = 2;
 
+/**
+ * Smallest bootstrap standard deviation, RELATIVE to the coefficient scale, that
+ * counts as measured uncertainty rather than solver noise.
+ *
+ * `bootstrapStdDev > 0` cannot tell the two apart. A rejection written on the
+ * draws catches only resamples that are bit-identical; runs that are merely
+ * highly regular rebuild datasets whose fitted coefficients are mathematically
+ * identical and differ only in the last few bits of the solve. Measured on the
+ * regression that covers this: 16 distinct values across 1000 resamples with a
+ * standard deviation of 5.4e-15 against a coefficient scale of 1.8 — strictly
+ * positive, entirely numerical, and narrow enough that a difference of 1.2
+ * clears the interval by more than ten orders of magnitude.
+ *
+ * 1e-10 matches the solver's own tolerances (`DUAL_TOLERANCE`,
+ * `CHOLESKY_JITTER`) and sits many orders of magnitude below any uncertainty
+ * that integer-percentage source data could express, so it cannot suppress a
+ * real measurement.
+ */
+export const MIN_RELATIVE_BOOTSTRAP_SD = 1e-10;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface ChangepointOptions {
@@ -313,6 +333,15 @@ function scanOnce(
 	if (!Number.isFinite(bootstrapStdDev) || bootstrapStdDev <= 0) {
 		// Covers +Infinity and NaN as well as a spread that still came out at zero;
 		// a non-finite half-width is not a measurement either.
+		return { change: null, viable: false, nCandidates: candidates.length };
+	}
+	// Near-degenerate is the same failure as degenerate, and neither an
+	// exact-equality check on the draws nor a `> 0` check on the spread can see
+	// it: highly regular runs resample into datasets whose fits agree to within
+	// solver noise, leaving a spread that is positive but purely numerical.
+	// Judging a difference against that spread is judging it against nothing.
+	const coefficientScale = (Math.abs(before) + Math.abs(after)) / 2;
+	if (bootstrapStdDev <= coefficientScale * MIN_RELATIVE_BOOTSTRAP_SD) {
 		return { change: null, viable: false, nCandidates: candidates.length };
 	}
 	const halfWidth = normalQuantile(1 - adjustedLevel / 2) * bootstrapStdDev;
