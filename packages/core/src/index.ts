@@ -159,6 +159,9 @@ export {
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
+// The quota-drift estimator. `@clankermux/core` exposes only its root entry, so
+// an unexported module here is unreachable from http-api.
+export * from "./quota-drift";
 export * from "./rate-limit-status";
 export * from "./request-events";
 export {

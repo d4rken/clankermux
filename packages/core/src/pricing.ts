@@ -1507,6 +1507,14 @@ export const __pricingTestHooks = {
 	getPricing(): Promise<unknown> {
 		return PriceCatalogue.get().getPricing();
 	},
+	/**
+	 * The bundled fallback price table, exposed so the quota-drift eq-token
+	 * weights can be re-derived from it on every run: a provider re-pricing a
+	 * token class then fails a test instead of silently shifting the estimator.
+	 */
+	bundledPricing(): Readonly<ApiResponse> {
+		return BUNDLED_PRICING;
+	},
 	loadPricing(): Promise<unknown> {
 		return PriceCatalogue.get().loadPricingForTests();
 	},
