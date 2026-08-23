@@ -174,7 +174,9 @@ function readPersistedCodexUsageColumn(
  * Three channels, newest wins, each reported under its own `source` so callers
  * can tell them apart:
  *   1. `"cache"` — the live usage cache, the only source the response may label
- *      with the cache entry's own sample time;
+ *      with the cache entry's own OBSERVATION time (`peekWithAge().observedAtMs`,
+ *      never its write time — an entry seeded by tier 3 below carries a write
+ *      time and no observation time at all);
  *   2. `"column"` — `accounts.codex_usage_json`, written by every Codex
  *      observation and stamped with `codex_usage_observed_at`;
  *   3. `"payload"` — the legacy scan over stored request payloads, whose headers
@@ -265,7 +267,14 @@ export async function getCachedOrPersistedCodexUsage(
 	}
 
 	if (payloadCandidate) {
-		usageCache.set(accountId, payloadCandidate.data);
+		// Re-seeded so the PROXY can see the reading (that is what the payload
+		// channel is for), but seeded UNTIMED: the headers come from whatever
+		// request payload was retained and can predate this write by hours. A plain
+		// `set()` would stamp the entry with the recovery instant, and the very next
+		// refresh would classify it as a live cache reading with a confident
+		// observation time — the same reading gaining full confidence between two
+		// refetches with no new provider evidence behind it.
+		usageCache.setUntimed(accountId, payloadCandidate.data);
 		log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
 		return {
 			data: payloadCandidate.data as FullUsageData,

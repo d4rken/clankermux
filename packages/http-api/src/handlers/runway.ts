@@ -237,7 +237,7 @@ function accountSummary(
  */
 interface ResolvedCodexUsage {
 	data: FullUsageData | null;
-	sampledAtMs: number | null;
+	observedAtMs: number | null;
 }
 
 /**
@@ -371,14 +371,23 @@ export function createRunwayHandler(
 						account.last_used != null ? Number(account.last_used) : null,
 					);
 					codexUsageByAccount.set(account.id, {
+						// Only two sources can honestly stamp a reading: the cache entry's
+						// own OBSERVATION time, and the column's recorded observation time.
+						// A payload-reconstructed reading gets null rather than a borrowed
+						// timestamp — the same rule `/api/accounts` applies.
+						//
+						// The cache branch reads `observedAtMs`, NEVER the entry's write
+						// time: the payload recovery re-seeds this cache, so on the next
+						// refresh that same reconstruction comes back through the `"cache"`
+						// branch. Taking the write time there would hand it the recovery
+						// instant as an observation time and promote it from the degraded
+						// estimate to a full-confidence one, with no new provider evidence
+						// behind the change. An untimed entry carries null through every
+						// later read instead.
 						data: resolved.data,
-						// Only two sources can honestly stamp a reading: the live cache
-						// entry's own write time, and the column's recorded observation
-						// time. A payload-reconstructed reading gets null rather than a
-						// borrowed timestamp — the same rule `/api/accounts` applies.
-						sampledAtMs:
+						observedAtMs:
 							resolved.source === "cache"
-								? (entry?.sampledAtMs ?? null)
+								? (entry?.observedAtMs ?? null)
 								: resolved.source === "column"
 									? resolved.observedAtMs
 									: null,
@@ -440,9 +449,12 @@ export function createRunwayHandler(
 				if (live) {
 					candidates.push({
 						windows: live,
+						// The entry's OBSERVATION time, not its write time — they differ
+						// for exactly one kind of entry (a payload-recovered reading, which
+						// carries none) and that is the one this must not misreport.
 						observedAtMs: resolvedCodex
-							? resolvedCodex.sampledAtMs
-							: (entry?.sampledAtMs ?? null),
+							? resolvedCodex.observedAtMs
+							: (entry?.observedAtMs ?? null),
 						// Every Codex reading is labelled `codex-persisted`, including
 						// one that actually came from the cache. That is exact rather
 						// than sloppy: a cache-sourced reading inside the bar wins on its
