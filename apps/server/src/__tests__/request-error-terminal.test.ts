@@ -21,16 +21,40 @@
  * that use it; this outer handler was simply never swept into that work.
  */
 import { describe, expect, it } from "bun:test";
+import { logBus } from "@clankermux/logger";
 import { terminalForRequestError } from "../request-error-terminal";
 
-/** A Request whose abort signal is in the given state. */
-function makeRequest(aborted: boolean): Request {
+/**
+ * A Request whose abort signal is in the given state.
+ *
+ * `url` is the RAW request URL, mount prefix and all — the classifier must never
+ * read the path back off it.
+ */
+function makeRequest(
+	aborted: boolean,
+	url = "http://localhost/v1/messages",
+): Request {
 	const controller = new AbortController();
 	if (aborted) controller.abort();
-	return new Request("http://localhost/v1/messages", {
+	return new Request(url, {
 		method: "POST",
 		signal: controller.signal,
 	});
+}
+
+/** Collects the messages logged at `level` while `run` executes. */
+function messagesLoggedDuring(level: string, run: () => void): string[] {
+	const lines: string[] = [];
+	const listener = (event: { level: string; msg: string }): void => {
+		if (event.level === level) lines.push(event.msg);
+	};
+	logBus.on("log", listener);
+	try {
+		run();
+	} finally {
+		logBus.off("log", listener);
+	}
+	return lines;
 }
 
 async function bodyOf(response: Response): Promise<{
@@ -51,6 +75,7 @@ describe("terminalForRequestError", () => {
 					makeRequest(true),
 					new Error("The connection was closed."),
 					stage,
+					"/v1/messages",
 				);
 
 				expect(response.status).toBe(499);
@@ -71,6 +96,7 @@ describe("terminalForRequestError", () => {
 				makeRequest(true),
 				new TypeError("undefined is not a function"),
 				"dispatch",
+				"/v1/messages",
 			);
 
 			expect(response.status).toBe(499);
@@ -78,8 +104,12 @@ describe("terminalForRequestError", () => {
 
 		it("classifies on the signal even when the error is not an Error", () => {
 			expect(
-				terminalForRequestError(makeRequest(true), "just a string", "dispatch")
-					.status,
+				terminalForRequestError(
+					makeRequest(true),
+					"just a string",
+					"dispatch",
+					"/v1/messages",
+				).status,
 			).toBe(499);
 		});
 	});
@@ -90,6 +120,7 @@ describe("terminalForRequestError", () => {
 				makeRequest(false),
 				new Error("auth backend unreachable"),
 				"auth",
+				"/v1/messages",
 			);
 
 			expect(response.status).toBe(401);
@@ -108,6 +139,7 @@ describe("terminalForRequestError", () => {
 				makeRequest(false),
 				new Error("upstream exploded"),
 				"dispatch",
+				"/v1/messages",
 			);
 
 			expect(response.status).toBe(500);
@@ -122,9 +154,51 @@ describe("terminalForRequestError", () => {
 				makeRequest(false),
 				new Error(secret),
 				"dispatch",
+				"/v1/messages",
 			);
 
 			expect(JSON.stringify(await bodyOf(response))).not.toContain(secret);
+		});
+	});
+
+	/**
+	 * The path in the log is the LOGICAL one the pipeline actually routed on.
+	 *
+	 * `routeRequest` strips `/wire/<dialect>` before anything downstream sees the
+	 * URL, but `req.url` still carries it. Re-deriving the path here would print
+	 * a path that no predicate downstream ever matched and that does not line up
+	 * with the request history — so the caller states it, and the mount is
+	 * reported separately as the ingress fact it is.
+	 */
+	describe("path reporting", () => {
+		it("appends the wire mount for a mounted request", () => {
+			const lines = messagesLoggedDuring("ERROR", () => {
+				terminalForRequestError(
+					makeRequest(false, "http://localhost/wire/anthropic/v1/messages"),
+					new Error("upstream exploded"),
+					"dispatch",
+					"/v1/messages",
+					"/wire/anthropic",
+				);
+			});
+
+			expect(lines).toEqual([
+				"Unhandled error serving POST /v1/messages (via /wire/anthropic):",
+			]);
+		});
+
+		it("logs the bare path for a root request", () => {
+			const lines = messagesLoggedDuring("ERROR", () => {
+				terminalForRequestError(
+					makeRequest(false),
+					new Error("upstream exploded"),
+					"dispatch",
+					"/v1/messages",
+				);
+			});
+
+			expect(lines).toEqual(["Unhandled error serving POST /v1/messages:"]);
+			expect(lines[0]).not.toContain("via");
 		});
 	});
 
@@ -135,6 +209,7 @@ describe("terminalForRequestError", () => {
 					makeRequest(aborted),
 					new Error("x"),
 					stage,
+					"/v1/messages",
 				);
 				expect(response.headers.get("Content-Type")).toBe("application/json");
 				await expect(bodyOf(response)).resolves.toBeTruthy();

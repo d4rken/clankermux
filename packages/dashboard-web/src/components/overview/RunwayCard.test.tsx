@@ -164,10 +164,11 @@ describe("RunwayCard", () => {
 		expect(html).not.toContain("no run-out within 14d");
 	});
 
-	it("keeps the other keys' figures reachable under an unknown headline", () => {
+	it("states an unknown headline as a resolved dash, not as unavailable", () => {
 		// `unknown` outranks a finite runway for the headline, but it is a
-		// RESOLVED outcome: routing it through MetricCard's unavailable slot would
-		// take the whole per-key breakdown down with it.
+		// RESOLVED outcome: the read succeeded and simply cannot be stated.
+		// Routing it through MetricCard's unavailable slot would present a
+		// successful read as a failed one.
 		const html = render({
 			runways: [
 				row({ keyId: "k1", keyName: "prod", outcome: { kind: "unknown" } }),
@@ -186,13 +187,14 @@ describe("RunwayCard", () => {
 		});
 
 		expect(html).toContain("No quota evidence for any account");
-		expect(html).toContain("codex-only");
-		expect(html).toContain("4h");
 		expect(html).toContain("—");
+		// The reason rides in the caption; the warning styling belongs to a
+		// backing-read failure alone.
+		expect(html).not.toContain("text-warning-strong");
 		expect(html).not.toContain(">0<");
 	});
 
-	it("still suppresses the breakdown when a backing read failed", () => {
+	it("presents a failed backing read as unavailable, value and all", () => {
 		const html = render({
 			unavailableReason: "API key data unavailable",
 			runways: [
@@ -202,11 +204,29 @@ describe("RunwayCard", () => {
 		});
 
 		expect(html).toContain("API key data unavailable");
-		expect(html).not.toContain("codex-only");
+		// A value derived from a read that failed must never render.
+		expect(html).toContain("text-warning-strong");
 		expect(html).not.toContain("∞");
 	});
 
-	it("lists one sub-row per active key and names the limiting one", () => {
+	it("renders no per-key rows, only the summary", () => {
+		// The Overview tile is a summary in proportion with its neighbours; the
+		// per-key breakdown lives on the Usage page.
+		const html = render({
+			runways: [
+				row({ keyId: "k1", keyName: "prod" }),
+				row({ keyId: "k2", keyName: "codex-only" }),
+				row({ keyId: "k3", keyName: "retired", isActive: false }),
+			],
+		});
+
+		expect(html).not.toContain("prod");
+		expect(html).not.toContain("codex-only");
+		expect(html).not.toContain("retired");
+		expect(html).toContain("∞");
+	});
+
+	it("names the limiting key when a finite runway identifies one", () => {
 		const html = render({
 			runways: [
 				row({ keyId: "k1", keyName: "prod" }),
@@ -226,13 +246,53 @@ describe("RunwayCard", () => {
 			],
 		});
 
-		expect(html).toContain("prod");
-		expect(html).toContain("codex-only");
-		// Inactive keys describe no traffic, so they stay out of the breakdown.
-		expect(html).not.toContain("retired");
 		// The worst active key drives the headline and is named in the caption.
 		expect(html).toContain("4h");
 		expect(html).toContain("codex-only · Primary 5-hour");
+		// Only the limiting key is named; the rest are not listed.
+		expect(html).not.toContain("prod");
+		expect(html).not.toContain("retired");
+	});
+
+	it("names no key when every key is beyond the horizon", () => {
+		// All beyond-horizon keys tie on severity, so the "worst" is whichever
+		// row came first out of the database. Nothing is constraining, so naming
+		// that row would present database order as a finding. State the scope
+		// the figure covers instead.
+		const html = render({
+			runways: [
+				row({ keyId: "k1", keyName: "prod" }),
+				row({ keyId: "k2", keyName: "codex-only" }),
+				row({ keyId: "k3", keyName: "scratch" }),
+				row({ keyId: "k4", keyName: "retired", isActive: false }),
+			],
+		});
+
+		expect(html).toContain("3 keys · no run-out within 14d");
+		expect(html).not.toContain("prod");
+		expect(html).not.toContain("codex-only");
+		expect(html).not.toContain("retired");
+	});
+
+	it("counts a single active key in the singular", () => {
+		expect(render()).toContain("1 key · no run-out within 14d");
+	});
+
+	it("names no key when the sole outcome cannot be stated", () => {
+		const html = render({
+			runways: [
+				row({ keyId: "k1", keyName: "prod", outcome: { kind: "unknown" } }),
+				row({
+					keyId: "k2",
+					keyName: "codex-only",
+					outcome: { kind: "unknown" },
+				}),
+			],
+		});
+
+		expect(html).toContain("No quota evidence for any account");
+		expect(html).not.toContain("prod");
+		expect(html).not.toContain("codex-only");
 	});
 
 	it("counts a served runway down against its own clock", () => {
@@ -260,11 +320,15 @@ describe("RunwayCard", () => {
 		expect(expired).not.toContain(">0<");
 	});
 
-	it("labels the synthetic row when authentication is off", () => {
+	it("summarises the synthetic row when authentication is off", () => {
+		// With auth off there is a single synthetic key, so there is nothing to
+		// disambiguate and its name is never worth the width.
 		const html = render({
 			runways: [row({ keyId: null, keyName: UNAUTHENTICATED_POOL_KEY_NAME })],
 		});
 
-		expect(html).toContain(UNAUTHENTICATED_POOL_KEY_NAME);
+		expect(html).toContain("∞");
+		expect(html).toContain("1 key · no run-out within 14d");
+		expect(html).not.toContain(UNAUTHENTICATED_POOL_KEY_NAME);
 	});
 });

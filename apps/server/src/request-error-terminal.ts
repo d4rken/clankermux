@@ -59,14 +59,24 @@ export function terminalForRequestError(
 	req: Request,
 	error: unknown,
 	stage: RequestStage,
+	logicalPath: string,
+	wireMount?: string,
 ): Response {
+	// The path is passed in, never re-derived from `req.url`. On a wire mount the
+	// raw URL still carries the `/wire/<dialect>` prefix that `routeRequest`
+	// stripped, so re-parsing here would print a path that no downstream
+	// predicate ever saw and that does not match the request history. The mount
+	// is not lost, it is reported as what it is: an ingress fact appended after
+	// the canonical path.
+	const where = wireMount ? `${logicalPath} (via ${wireMount})` : logicalPath;
+
 	if (req.signal.aborted) {
 		// Nobody is reading this body. It exists only because fetch must return a
 		// Response; 499 keeps the logs and request history honest about WHY the
 		// request ended, instead of attributing it to the server or to bad
 		// credentials. Debug, not error — the client hanging up is not a fault.
 		log.debug(
-			`Client disconnected during ${stage} of ${req.method} ${new URL(req.url).pathname}; returning 499`,
+			`Client disconnected during ${stage} of ${req.method} ${where}; returning 499`,
 		);
 		return createClientAbortResponse();
 	}
@@ -85,10 +95,7 @@ export function terminalForRequestError(
 	// Past authentication, so this is ours, not the caller's. The message stays
 	// generic on purpose: the detail is in the log, and the response goes to an
 	// untrusted client that must not learn about internal hosts or stack shapes.
-	log.error(
-		`Unhandled error serving ${req.method} ${new URL(req.url).pathname}:`,
-		error,
-	);
+	log.error(`Unhandled error serving ${req.method} ${where}:`, error);
 	return jsonResponse(
 		HTTP_STATUS.INTERNAL_SERVER_ERROR,
 		"internal_error",

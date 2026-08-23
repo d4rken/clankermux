@@ -61,6 +61,27 @@ function makeAccount(partial: Partial<Account>): Account {
 	} as Account;
 }
 
+/**
+ * One row of the persisted Codex usage pair. `getAllAccounts()` does not select
+ * these columns, so the handler loads them separately through the adapter.
+ */
+interface CodexColumnRow {
+	id: string;
+	codex_usage_json: string | null;
+	codex_usage_observed_at: number | null;
+}
+
+/** A persisted Codex snapshot: no 5h window (Codex retired it), a live 7d one. */
+function codexSnapshot(sevenPct: number, sevenResetMs: number): string {
+	return JSON.stringify({
+		five_hour: null,
+		seven_day: {
+			utilization: sevenPct,
+			resets_at: new Date(sevenResetMs).toISOString(),
+		},
+	});
+}
+
 function makeKey(partial: Partial<ApiKey>): ApiKey {
 	return {
 		id: "k1",
@@ -78,19 +99,35 @@ function makeKey(partial: Partial<ApiKey>): ApiKey {
 }
 
 /**
- * The handler calls `getAllAccounts()` and (through `listApiKeys`)
- * `getApiKeys()` directly — NOT `getAdapter().query`, so a SQL-substring
- * fixture would hand it nothing at all.
+ * The handler takes its accounts and keys from `getAllAccounts()` and (through
+ * `listApiKeys`) `getApiKeys()` directly, so a SQL-substring fixture would hand
+ * it nothing at all. `getAdapter().query` is used for ONE thing: the persisted
+ * Codex columns (`codex_usage_json`, which `getAllAccounts()` deliberately does
+ * not select) and the stored-payload scan behind them. `codexColumns` /
+ * `payloads` feed those two queries, and `adapterQueries` records every SQL the
+ * handler actually issued so a test can assert a query never ran.
  */
 function makeDbOps(options: {
 	accounts?: Account[];
 	keys?: ApiKey[];
 	snapshots?: UsageSnapshotSample[];
 	snapshotsThrow?: boolean;
+	codexColumns?: CodexColumnRow[];
+	payloads?: Array<{ json: string; timestamp: number }>;
+	adapterQueries?: string[];
 }): DatabaseOperations {
 	return {
 		getAllAccounts: async () => options.accounts ?? [],
 		getApiKeys: async () => options.keys ?? [],
+		getAdapter: () => ({
+			query: async (sql: string) => {
+				options.adapterQueries?.push(sql);
+				if (sql.includes("request_payloads")) return options.payloads ?? [];
+				if (sql.includes("FROM accounts")) return options.codexColumns ?? [];
+				return [];
+			},
+			get: async () => null,
+		}),
 		getRecentUsageSnapshotsForAccounts: async (accountIds: string[]) => {
 			if (options.snapshotsThrow) throw new Error("snapshot read failed");
 			return (options.snapshots ?? []).filter((s) =>
@@ -463,10 +500,10 @@ describe("GET /api/runway usage freshness", () => {
 		expect(body.keys[0].outcome.kind).toBe("out-now");
 	});
 
-	it("does not resurrect a Codex reading the cache no longer holds", async () => {
-		// /api/accounts can fall back to a DB-restored payload for display. The
-		// runway deliberately does not: an unrestored account is unknown, and the
-		// key's outcome says so rather than reporting a stale figure as current.
+	it("reports a Codex account with no cached and no persisted reading as unknown", async () => {
+		// The cache is cold AND the persisted column is empty AND no stored payload
+		// carries usage headers: every channel is exhausted, so the account is
+		// genuinely unread. Not "0% used" — unknown, and the key's outcome says so.
 		const body = await runway(
 			makeDbOps({
 				accounts: [
@@ -482,5 +519,203 @@ describe("GET /api/runway usage freshness", () => {
 		]);
 		expect(body.accounts[0].usageAsOfMs).toBeNull();
 		expect(body.keys[0].outcome).toEqual({ kind: "unknown" });
+	});
+});
+
+/**
+ * The usage cache is in-memory, so a restart leaves every Codex account with
+ * nothing in it until Codex traffic lands again. `/api/accounts` has always
+ * resolved through the persisted `accounts.codex_usage_json` column in that
+ * gap, and the browser computed the runway from exactly that reading before
+ * this endpoint existed. Serving it without the persisted resolution turned
+ * every Codex account blank after a restart and poisoned every Codex-pinned key
+ * to `unknown`; these cases pin the restored path, its honest stamp, and the
+ * fact that it stops short of the prediction.
+ */
+describe("GET /api/runway persisted Codex usage", () => {
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		for (const id of SEEDED_IDS) usageCache.delete(id);
+	});
+
+	afterEach(() => {
+		for (const id of SEEDED_IDS) usageCache.delete(id);
+		nowSpy.mockRestore();
+	});
+
+	const OBSERVED_AT = BASE - 3 * HOUR_MS;
+	const SEVEN_RESET = BASE + 4 * DAY_MS;
+
+	function restoredCodex(options: { adapterQueries?: string[] } = {}) {
+		return makeDbOps({
+			accounts: [
+				makeAccount({
+					id: "codex-1",
+					name: "Codex",
+					provider: "codex",
+					// Nothing has been routed since the observation, so the column is
+					// definitively the newest reading and the payload scan is skipped.
+					last_used: null,
+				}),
+			],
+			keys: [
+				makeKey({ id: "k1", name: "codex-only", pinnedProviders: ["codex"] }),
+			],
+			codexColumns: [
+				{
+					id: "codex-1",
+					codex_usage_json: codexSnapshot(45, SEVEN_RESET),
+					codex_usage_observed_at: OBSERVED_AT,
+				},
+			],
+			adapterQueries: options.adapterQueries,
+		});
+	}
+
+	it("serves the persisted column when the usage cache is cold", async () => {
+		const body = await runway(restoredCodex());
+
+		const sevenDay = body.accounts[0].windows.find(
+			(w) => w.kind === "seven_day",
+		);
+		expect(sevenDay?.utilizationPct).toBe(45);
+		expect(sevenDay?.resetsAtMs).toBe(SEVEN_RESET);
+		// Codex retired its 5h window, so that one is present-but-null: "no such
+		// reading", never "0% used".
+		expect(
+			body.accounts[0].windows.find((w) => w.kind === "five_hour")
+				?.utilizationPct,
+		).toBeNull();
+	});
+
+	it("stamps the restored reading with the column's observation time", async () => {
+		const body = await runway(restoredCodex());
+
+		// NOT the handler clock and NOT a cache sample time (there is no cache
+		// entry at all) — the moment that observation was actually made.
+		expect(body.accounts[0].usageAsOfMs).toBe(OBSERVED_AT);
+		expect(body.generatedAt).toBe(BASE);
+	});
+
+	it("gives a Codex-pinned key a real outcome instead of unknown", async () => {
+		const body = await runway(restoredCodex());
+
+		expect(body.keys[0].eligibleAccountIds).toEqual(["codex-1"]);
+		const outcome = body.keys[0].outcome;
+		expect(outcome.kind).not.toBe("unknown");
+		if (outcome.kind === "unknown" || outcome.kind === "no-accounts") {
+			throw new Error("unreachable");
+		}
+		// The account is IN the pool: the scan could read it, so it is not
+		// reported as one the projection had to skip.
+		expect(outcome.unprojectableAccountIds).toEqual([]);
+	});
+
+	it("serves no prediction off a restored reading", async () => {
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({
+						id: "codex-1",
+						name: "Codex",
+						provider: "codex",
+						last_used: null,
+					}),
+				],
+				keys: [makeKey({ id: "k1" })],
+				codexColumns: [
+					{
+						id: "codex-1",
+						codex_usage_json: codexSnapshot(45, SEVEN_RESET),
+						codex_usage_observed_at: OBSERVED_AT,
+					},
+				],
+				// A full trend history exists — the prediction is withheld because of
+				// where the CURRENT reading came from, not for want of samples.
+				snapshots: [3, 2, 1].map((hoursAgo, index) => ({
+					accountId: "codex-1",
+					provider: "codex",
+					sampledAt: BASE - hoursAgo * HOUR_MS,
+					fiveHourPct: null,
+					fiveHourReset: null,
+					sevenDayPct: 10 * (index + 1),
+					sevenDayReset: SEVEN_RESET,
+				})),
+			}),
+		);
+
+		// The regression appends its input stamped `t: now`. A reading observed 3
+		// hours ago must never enter it claiming to be current, so the restored
+		// account reports its utilization and no projection at all.
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
+			null,
+			null,
+		]);
+		expect(
+			body.accounts[0].windows.find((w) => w.kind === "seven_day")
+				?.utilizationPct,
+		).toBe(45);
+	});
+
+	it("prefers a live cache entry over the persisted column", async () => {
+		usageCache.set("codex-1", usage(0, BASE + HOUR_MS, 12, SEVEN_RESET));
+
+		const body = await runway(restoredCodex());
+
+		const sevenDay = body.accounts[0].windows.find(
+			(w) => w.kind === "seven_day",
+		);
+		expect(sevenDay?.utilizationPct).toBe(12);
+		// Stamped by the cache entry's own write time, not the column's.
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE);
+	});
+
+	it("leaves non-Codex accounts on the cache alone", async () => {
+		// A persisted row exists under this id, and it must not be consulted: the
+		// column is written by Codex observations only, so reading it for an
+		// Anthropic account would serve a snapshot nothing maintains.
+		const adapterQueries: string[] = [];
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "anthropic-1", name: "Claude" })],
+				keys: [makeKey({ id: "k1" })],
+				codexColumns: [
+					{
+						id: "anthropic-1",
+						codex_usage_json: codexSnapshot(45, SEVEN_RESET),
+						codex_usage_observed_at: OBSERVED_AT,
+					},
+				],
+				adapterQueries,
+			}),
+		);
+
+		expect(body.accounts[0].windows.map((w) => w.utilizationPct)).toEqual([
+			null,
+			null,
+		]);
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+		expect(body.keys[0].outcome).toEqual({ kind: "unknown" });
+		// With no Codex account in the pool the persisted-column query never runs.
+		expect(adapterQueries).toEqual([]);
+	});
+
+	it("still resolves an Anthropic account from the usage cache", async () => {
+		usageCache.set("anthropic-1", HEALTHY());
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "anthropic-1", name: "Claude" })],
+				keys: [makeKey({ id: "k1" })],
+			}),
+		);
+
+		expect(body.accounts[0].windows.map((w) => w.utilizationPct)).toEqual([
+			10, 5,
+		]);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE);
+		expect(body.keys[0].outcome.kind).toBe("beyond-horizon");
 	});
 });
