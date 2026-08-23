@@ -1208,7 +1208,8 @@ export default async function startServer(options?: {
 	// upstream-valid token. Best-effort throughout: `getCatalog` returning null
 	// puts the route back on the static list it served before.
 	const codexModelCatalog = new CodexModelCatalogCache({
-		listCodexAccounts: () => proxyContext.dbOps.getAllAccounts(),
+		listAccounts: () => proxyContext.dbOps.getAllAccounts(),
+		getApiKeyPin: (apiKeyId) => proxyContext.dbOps.getApiKeyPin(apiKeyId),
 		getAccessToken: (account) => getValidAccessToken(account, proxyContext),
 		fetchCatalog: fetchCodexModelCatalog,
 	});
@@ -1232,11 +1233,15 @@ export default async function startServer(options?: {
 				apiKeyId,
 				apiKeyName,
 			),
-		handleModels: (url) =>
-			handleModelsRoute(url, {
-				getCatalog: (clientVersion) => codexModelCatalog.get(clientVersion),
-				staticModels: handleModelsRequest,
-			}),
+		handleModels: (url, apiKeyId) =>
+			handleModelsRoute(
+				url,
+				{
+					getCatalog: (keyId) => codexModelCatalog.get(keyId),
+					staticModels: handleModelsRequest,
+				},
+				apiKeyId ?? null,
+			),
 		withDashboard,
 		dashboardManifest,
 		serveDashboardFile,

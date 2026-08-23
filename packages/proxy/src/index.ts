@@ -24,6 +24,7 @@ export {
 export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export {
+	CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS,
 	CODEX_MODEL_CATALOG_MAX_ENTRIES,
 	CODEX_MODEL_CATALOG_TTL_MS,
 	CodexModelCatalogCache,

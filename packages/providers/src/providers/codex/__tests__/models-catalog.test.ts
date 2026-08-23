@@ -3,6 +3,7 @@ import {
 	CODEX_MODEL_CATALOG_URL,
 	fetchCodexModelCatalog,
 } from "../models-catalog";
+import { CODEX_USER_AGENT, CODEX_VERSION } from "../provider";
 
 // A payload shaped like the real thing: one field, `models`, whose entries
 // carry far more keys than anything here reads. The point of every assertion
@@ -39,12 +40,11 @@ function okFetch(
 }
 
 describe("fetchCodexModelCatalog", () => {
-	test("calls the fixed ChatGPT backend URL with the client version", async () => {
+	test("calls the fixed ChatGPT backend URL", async () => {
 		const { impl, calls } = okFetch();
 		const result = await fetchCodexModelCatalog({
 			accessToken: "token-abc",
 			chatgptAccountId: null,
-			clientVersion: "0.149.0",
 			fetchImpl: impl,
 		});
 
@@ -54,20 +54,38 @@ describe("fetchCodexModelCatalog", () => {
 		expect(`${requested.origin}${requested.pathname}`).toBe(
 			CODEX_MODEL_CATALOG_URL,
 		);
-		expect(requested.searchParams.get("client_version")).toBe("0.149.0");
 	});
 
-	test("omits the query parameter when no client version is given", async () => {
+	// The catalog must describe what this proxy can actually SERVE. Every
+	// inference request is stamped with the pinned CODEX_VERSION, so asking for
+	// the catalog as a newer client would list models the backend then rejects
+	// as requiring a newer client.
+	test("asks as our pinned CODEX_VERSION, matching what inference sends", async () => {
 		const { impl, calls } = okFetch();
 		await fetchCodexModelCatalog({
 			accessToken: "token-abc",
 			chatgptAccountId: null,
-			clientVersion: null,
 			fetchImpl: impl,
 		});
-		expect(new URL(calls[0].url).searchParams.has("client_version")).toBe(
-			false,
-		);
+
+		const requested = new URL(calls[0].url);
+		expect(requested.searchParams.get("client_version")).toBe(CODEX_VERSION);
+
+		const headers = new Headers(calls[0].init?.headers);
+		expect(headers.get("Version")).toBe(CODEX_VERSION);
+		expect(headers.get("User-Agent")).toBe(CODEX_USER_AGENT);
+	});
+
+	// This bearer has exactly one valid destination; say so structurally rather
+	// than relying on fetch stripping Authorization across origins.
+	test("refuses to follow redirects", async () => {
+		const { impl, calls } = okFetch();
+		await fetchCodexModelCatalog({
+			accessToken: "token-abc",
+			chatgptAccountId: null,
+			fetchImpl: impl,
+		});
+		expect(calls[0].init?.redirect).toBe("error");
 	});
 
 	test("sends the bearer, Codex originator, and account id headers", async () => {
@@ -75,7 +93,6 @@ describe("fetchCodexModelCatalog", () => {
 		await fetchCodexModelCatalog({
 			accessToken: "token-abc",
 			chatgptAccountId: "  acct-42  ",
-			clientVersion: "0.149.0",
 			fetchImpl: impl,
 		});
 
@@ -91,7 +108,6 @@ describe("fetchCodexModelCatalog", () => {
 		await fetchCodexModelCatalog({
 			accessToken: "token-abc",
 			chatgptAccountId: "   ",
-			clientVersion: "0.149.0",
 			fetchImpl: impl,
 		});
 		expect(new Headers(calls[0].init?.headers).has("ChatGPT-Account-ID")).toBe(
@@ -107,7 +123,6 @@ describe("fetchCodexModelCatalog", () => {
 		const result = await fetchCodexModelCatalog({
 			accessToken: "token-abc",
 			chatgptAccountId: null,
-			clientVersion: "0.149.0",
 			fetchImpl: impl,
 		});
 
@@ -126,7 +141,6 @@ describe("fetchCodexModelCatalog", () => {
 		const withEtag = await fetchCodexModelCatalog({
 			accessToken: "t",
 			chatgptAccountId: null,
-			clientVersion: "0.149.0",
 			fetchImpl: okFetch(REAL_SHAPED_BODY, { etag: 'W/"abc123"' }).impl,
 		});
 		expect(withEtag.ok && withEtag.etag).toBe('W/"abc123"');
@@ -134,10 +148,44 @@ describe("fetchCodexModelCatalog", () => {
 		const withoutEtag = await fetchCodexModelCatalog({
 			accessToken: "t",
 			chatgptAccountId: null,
-			clientVersion: "0.149.0",
 			fetchImpl: okFetch().impl,
 		});
 		expect(withoutEtag.ok && withoutEtag.etag).toBeNull();
+	});
+
+	// Accepting one of these would cache an undeserializable body for hours and
+	// recreate exactly the silent failure this module exists to end: Codex
+	// cannot parse it, says nothing, and falls back to its built-in catalog.
+	test("rejects a 200 whose entries are not usable model objects", async () => {
+		for (const body of [
+			JSON.stringify({ models: [null] }),
+			JSON.stringify({ models: ["gpt-5.6-sol"] }),
+			JSON.stringify({ models: [[]] }),
+			JSON.stringify({ models: [{ display_name: "no slug here" }] }),
+			JSON.stringify({ models: [{ slug: "" }] }),
+			JSON.stringify({ models: [{ slug: 42 }] }),
+			JSON.stringify({ models: [{ slug: "ok" }, null] }),
+		]) {
+			const result = await fetchCodexModelCatalog({
+				accessToken: "t",
+				chatgptAccountId: null,
+				fetchImpl: okFetch(body).impl,
+			});
+			expect(result.ok).toBe(false);
+		}
+	});
+
+	test("accepts entries carrying only a slug plus unknown fields", async () => {
+		const body = JSON.stringify({
+			models: [{ slug: "gpt-5.6-sol", something_new: true }],
+		});
+		const result = await fetchCodexModelCatalog({
+			accessToken: "t",
+			chatgptAccountId: null,
+			fetchImpl: okFetch(body).impl,
+		});
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.bodyText).toBe(body);
 	});
 
 	test("rejects a 200 whose body is not a models envelope", async () => {
@@ -150,7 +198,6 @@ describe("fetchCodexModelCatalog", () => {
 			const result = await fetchCodexModelCatalog({
 				accessToken: "t",
 				chatgptAccountId: null,
-				clientVersion: "0.149.0",
 				fetchImpl: okFetch(body).impl,
 			});
 			expect(result.ok).toBe(false);
@@ -162,7 +209,6 @@ describe("fetchCodexModelCatalog", () => {
 			const result = await fetchCodexModelCatalog({
 				accessToken: "t",
 				chatgptAccountId: null,
-				clientVersion: "0.149.0",
 				fetchImpl: okFetch(REAL_SHAPED_BODY, { status }).impl,
 			});
 			expect(result.ok).toBe(false);
@@ -175,7 +221,6 @@ describe("fetchCodexModelCatalog", () => {
 		const result = await fetchCodexModelCatalog({
 			accessToken: "t",
 			chatgptAccountId: null,
-			clientVersion: "0.149.0",
 			fetchImpl: (async () => {
 				throw new Error("ECONNREFUSED");
 			}) as unknown as typeof fetch,
@@ -189,7 +234,6 @@ describe("fetchCodexModelCatalog", () => {
 			fetchCodexModelCatalog({
 				accessToken: "  ",
 				chatgptAccountId: null,
-				clientVersion: "0.149.0",
 				fetchImpl: okFetch().impl,
 			}),
 		).rejects.toThrow(/access token/i);

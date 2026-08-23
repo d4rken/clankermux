@@ -26,8 +26,12 @@ interface Calls {
 	dispatch: { pathname: string; search: string; apiKeyId?: string | null }[];
 	responses: { pathname: string; search: string }[];
 	models: number;
-	/** The URLs `handleModels` was handed, so the query string can be asserted. */
-	modelUrls: { pathname: string; search: string }[];
+	/** What `handleModels` was handed: the URL, and the authenticated key id. */
+	modelUrls: {
+		pathname: string;
+		search: string;
+		apiKeyId?: string | null;
+	}[];
 	dashboard: { assetPath: string }[];
 	auth: { path: string; method: string; requirement?: AuthRequirement }[];
 }
@@ -110,9 +114,13 @@ function makeDeps(options: Options = {}): {
 				status: 200,
 			});
 		},
-		async handleModels(url) {
+		async handleModels(url, apiKeyId) {
 			calls.models++;
-			calls.modelUrls.push({ pathname: url.pathname, search: url.search });
+			calls.modelUrls.push({
+				pathname: url.pathname,
+				search: url.search,
+				apiKeyId,
+			});
 			return new Response(JSON.stringify({ handler: "models" }), {
 				status: 200,
 			});
@@ -248,9 +256,31 @@ describe("mounted agent traffic", () => {
 		);
 
 		expect(calls.modelUrls).toEqual([
-			{ pathname: "/v1/models", search: "?client_version=0.149.0" },
-			{ pathname: "/v1/models", search: "?client_version=0.149.0" },
+			{
+				pathname: "/v1/models",
+				search: "?client_version=0.149.0",
+				apiKeyId: "key-1",
+			},
+			{
+				pathname: "/v1/models",
+				search: "?client_version=0.149.0",
+				apiKeyId: "key-1",
+			},
 		]);
+	});
+
+	// Which catalog a key may be shown depends on that key's routing pin, so the
+	// authenticated identity has to survive the hop into the handler.
+	it("hands the authenticated API key id to the models handler", async () => {
+		const { deps, calls } = makeDeps();
+
+		await routeRequest(
+			makeRequest("/wire/openai/v1/models", { headers: withKey }),
+			deps,
+		);
+
+		expect(calls.modelUrls).toHaveLength(1);
+		expect(calls.modelUrls[0].apiKeyId).toBe("key-1");
 	});
 
 	it("rejects a WebSocket upgrade on the mounted Responses path", async () => {

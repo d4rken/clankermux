@@ -6,31 +6,17 @@ const log = new Logger("ModelsRoute");
  * The parameter that tells the two clients of `GET /v1/models` apart.
  *
  * Codex's models-manager sends it on every fetch; OpenAI-format clients
- * (opencode, ohmypi) do not send it at all. Its PRESENCE selects the reply
- * shape; its VALUE is only what we forward upstream, because the catalog is
- * version-gated there (`minimal_client_version`).
+ * (opencode, ohmypi) do not send it at all. Only its PRESENCE is read.
+ *
+ * Its VALUE is deliberately ignored. An earlier revision forwarded it upstream,
+ * which was wrong twice over: it would have asked OpenAI for a catalog at a
+ * version this proxy does not speak (see CODEX_MODEL_CATALOG_URL), and it made
+ * a client-controlled string into a cache key, where varying it would mint an
+ * unbounded number of misses — each one a fresh authenticated call to
+ * chatgpt.com on a real account's OAuth bearer. Reading presence only removes
+ * both problems at the source rather than validating the value.
  */
 const CLIENT_VERSION_PARAM = "client_version";
-
-/**
- * What we are willing to treat as a client version: a dotted numeric release
- * like `0.149.0`, nothing else.
- *
- * This is not cosmetic validation. The value becomes a cache key AND is
- * forwarded upstream, so an unconstrained one lets a caller mint an unbounded
- * number of distinct keys — each a cache miss, and each a fresh authenticated
- * call to chatgpt.com carrying one of OUR accounts' OAuth bearers. A client
- * looping on a varying parameter would turn this route into sustained
- * automated traffic against a real account, which is the ban-shaped pattern,
- * not merely a memory leak. Anything unrecognised is treated as "no version":
- * still a Codex-shaped request, served from the shared unversioned entry.
- */
-const CLIENT_VERSION_PATTERN = /^\d{1,4}(\.\d{1,4}){0,3}$/;
-
-function sanitizeClientVersion(raw: string | null): string | null {
-	if (!raw) return null;
-	return CLIENT_VERSION_PATTERN.test(raw) ? raw : null;
-}
 
 export interface CodexModelCatalogBody {
 	bodyText: string;
@@ -38,10 +24,12 @@ export interface CodexModelCatalogBody {
 }
 
 export interface ModelsRouteDeps {
-	/** The per-account Codex catalog, or null when the pool cannot read one. */
-	getCatalog(
-		clientVersion: string | null,
-	): Promise<CodexModelCatalogBody | null>;
+	/**
+	 * The Codex catalog this API key may be shown, or null when the pool cannot
+	 * read one. Takes the key because entitlement is per-subscription and a
+	 * pinned key must not be shown a catalog from outside its pin.
+	 */
+	getCatalog(apiKeyId: string | null): Promise<CodexModelCatalogBody | null>;
 	/** The static OpenAI Models-list reply. */
 	staticModels(): Response;
 }
@@ -60,18 +48,15 @@ export interface ModelsRouteDeps {
 export async function handleModelsRoute(
 	url: URL,
 	deps: ModelsRouteDeps,
+	apiKeyId: string | null = null,
 ): Promise<Response> {
 	if (!url.searchParams.has(CLIENT_VERSION_PARAM)) {
 		return deps.staticModels();
 	}
 
-	const clientVersion = sanitizeClientVersion(
-		url.searchParams.get(CLIENT_VERSION_PARAM),
-	);
-
 	let catalog: CodexModelCatalogBody | null = null;
 	try {
-		catalog = await deps.getCatalog(clientVersion);
+		catalog = await deps.getCatalog(apiKeyId);
 	} catch (error) {
 		// Defensive: the cache is written to swallow its own failures, so reaching
 		// here means something unforeseen. Still not a reason to fail the request.

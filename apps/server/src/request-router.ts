@@ -78,8 +78,12 @@ export interface RequestRouterDeps {
 	 * a `client_version` parameter marks a Codex models-manager fetch, which
 	 * wants the per-account `{"models": […]}` catalog, and its absence marks an
 	 * ordinary OpenAI-format client, which wants `{"object":"list","data":[…]}`.
+	 *
+	 * Takes the API key id because WHICH catalog is not a free choice: model
+	 * entitlement is per-subscription, so a pinned key must be shown a catalog
+	 * from inside its own pin, exactly as its requests are routed inside it.
 	 */
-	handleModels(url: URL): Promise<Response>;
+	handleModels(url: URL, apiKeyId?: string | null): Promise<Response>;
 	withDashboard: boolean;
 	dashboardManifest: Record<string, string> | null;
 	serveDashboardFile(
@@ -411,7 +415,7 @@ async function serveAgentRequest(
 	// handle path: /v1/models") on every Codex startup. The reply shape depends
 	// on the query string; see RequestRouterDeps.handleModels.
 	if (req.method === "GET" && url.pathname === "/v1/models") {
-		return await deps.handleModels(url);
+		return await deps.handleModels(url, authResult.apiKeyId);
 	}
 
 	return await deps.dispatchProxy(

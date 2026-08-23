@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
+	CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS,
 	CODEX_MODEL_CATALOG_MAX_ENTRIES,
 	CODEX_MODEL_CATALOG_TTL_MS,
 	CodexModelCatalogCache,
 } from "../codex-model-catalog-cache";
+
+/** Let a background refresh run to completion without advancing the clock. */
+async function flushMicrotasks(turns = 20): Promise<void> {
+	for (let i = 0; i < turns; i++) await Promise.resolve();
+}
 
 function account(overrides: Partial<Account> = {}): Account {
 	return {
@@ -16,12 +22,21 @@ function account(overrides: Partial<Account> = {}): Account {
 	} as Account;
 }
 
+type Pin = {
+	pinnedAccountId: string | null;
+	pinnedProviders: string[] | null;
+	malformed: boolean;
+};
+
 interface HarnessOptions {
 	accounts?: Account[];
 	getAccessToken?: (acct: Account) => Promise<string>;
+	getApiKeyPin?: (apiKeyId: string) => Promise<Pin | null>;
 	results?: Array<
 		{ ok: true; bodyText: string; etag: string | null } | { ok: false }
 	>;
+	/** Simulated wall-clock cost of each upstream attempt, in ms. */
+	fetchCostMs?: number;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -29,20 +44,17 @@ function harness(options: HarnessOptions = {}) {
 	const results = options.results ?? [
 		{ ok: true, bodyText: '{"models":[]}', etag: 'W/"1"' },
 	];
-	const fetchCalls: Array<{ token: string; clientVersion: string | null }> = [];
-	const tokenCalls: string[] = [];
+	const fetchCalls: Array<{ token: string }> = [];
 	let clock = 1_000;
 
 	const cache = new CodexModelCatalogCache({
-		listCodexAccounts: async () => accounts,
+		listAccounts: async () => accounts,
+		getApiKeyPin: options.getApiKeyPin ?? (async () => null),
 		getAccessToken:
-			options.getAccessToken ??
-			(async (acct: Account) => {
-				tokenCalls.push(acct.id);
-				return `token-${acct.id}`;
-			}),
-		fetchCatalog: async ({ accessToken, clientVersion }) => {
-			fetchCalls.push({ token: accessToken, clientVersion });
+			options.getAccessToken ?? (async (acct: Account) => `token-${acct.id}`),
+		fetchCatalog: async ({ accessToken }) => {
+			fetchCalls.push({ token: accessToken });
+			clock += options.fetchCostMs ?? 0;
 			const next = results[Math.min(fetchCalls.length - 1, results.length - 1)];
 			return next.ok
 				? { ok: true as const, bodyText: next.bodyText, etag: next.etag }
@@ -54,7 +66,6 @@ function harness(options: HarnessOptions = {}) {
 	return {
 		cache,
 		fetchCalls,
-		tokenCalls,
 		advance: (ms: number) => {
 			clock += ms;
 		},
@@ -69,61 +80,52 @@ describe("CodexModelCatalogCache", () => {
 			],
 		});
 
-		const result = await cache.get("0.149.0");
-		expect(result).not.toBeNull();
+		const result = await cache.get(null);
 		expect(result?.bodyText).toBe('{"models":[{"slug":"x"}]}');
 		expect(result?.etag).toBeNull();
 		expect(fetchCalls).toHaveLength(1);
 		expect(fetchCalls[0].token).toBe("token-codex-1");
-		expect(fetchCalls[0].clientVersion).toBe("0.149.0");
 	});
 
 	test("serves a second caller from cache within the TTL", async () => {
 		const { cache, fetchCalls, advance } = harness();
 
-		await cache.get("0.149.0");
+		await cache.get(null);
 		advance(CODEX_MODEL_CATALOG_TTL_MS - 1);
-		const second = await cache.get("0.149.0");
-
-		expect(second).not.toBeNull();
+		expect(await cache.get(null)).not.toBeNull();
 		expect(fetchCalls).toHaveLength(1);
 	});
 
-	test("refetches once the TTL has elapsed", async () => {
-		const { cache, fetchCalls, advance } = harness();
+	// Blocking a client on a refresh would charge it the whole lookup budget to
+	// receive a catalog we already hold.
+	test("serves an expired copy immediately and refreshes behind it", async () => {
+		const { cache, fetchCalls, advance } = harness({
+			results: [
+				{ ok: true, bodyText: '{"models":["first"]}', etag: null },
+				{ ok: true, bodyText: '{"models":["second"]}', etag: null },
+			],
+		});
 
-		await cache.get("0.149.0");
+		await cache.get(null);
 		advance(CODEX_MODEL_CATALOG_TTL_MS + 1);
-		await cache.get("0.149.0");
 
+		// The stale body comes back rather than the fresh one the refresh will
+		// fetch — that difference is the proof it did not wait.
+		expect((await cache.get(null))?.bodyText).toBe('{"models":["first"]}');
+
+		// The refresh it kicked off then installs the new copy for the next caller.
+		await flushMicrotasks();
 		expect(fetchCalls).toHaveLength(2);
+		expect((await cache.get(null))?.bodyText).toBe('{"models":["second"]}');
 	});
 
-	// The catalog is version-gated upstream (`minimal_client_version`), so two
-	// client versions are two different documents and must not share an entry.
-	test("caches per client version", async () => {
-		const { cache, fetchCalls } = harness();
-
-		await cache.get("0.149.0");
-		await cache.get("0.150.0");
-		await cache.get("0.149.0");
-
-		expect(fetchCalls).toHaveLength(2);
-		expect(fetchCalls.map((c) => c.clientVersion)).toEqual([
-			"0.149.0",
-			"0.150.0",
-		]);
-	});
-
-	// Several Codex processes start at once on a shared proxy; they must not fan
-	// out into one upstream call each.
 	test("single-flights concurrent callers into one upstream call", async () => {
 		const { cache, fetchCalls } = harness();
 
 		const [a, b, c] = await Promise.all([
-			cache.get("0.149.0"),
-			cache.get("0.149.0"),
-			cache.get("0.149.0"),
+			cache.get(null),
+			cache.get(null),
+			cache.get(null),
 		]);
 
 		expect(fetchCalls).toHaveLength(1);
@@ -131,7 +133,7 @@ describe("CodexModelCatalogCache", () => {
 		expect(b?.bodyText).toBe(c?.bodyText);
 	});
 
-	test("serves the stale entry when a refresh fails", async () => {
+	test("keeps the previous copy when a refresh fails", async () => {
 		const { cache, advance } = harness({
 			results: [
 				{ ok: true, bodyText: '{"models":["fresh"]}', etag: null },
@@ -139,21 +141,19 @@ describe("CodexModelCatalogCache", () => {
 			],
 		});
 
-		await cache.get("0.149.0");
+		await cache.get(null);
 		advance(CODEX_MODEL_CATALOG_TTL_MS + 1);
-		const afterFailure = await cache.get("0.149.0");
-
-		expect(afterFailure?.bodyText).toBe('{"models":["fresh"]}');
+		expect((await cache.get(null))?.bodyText).toBe('{"models":["fresh"]}');
 	});
 
 	test("returns null when every Codex account fails", async () => {
 		const { cache } = harness({ results: [{ ok: false }] });
-		expect(await cache.get("0.149.0")).toBeNull();
+		expect(await cache.get(null)).toBeNull();
 	});
 
 	test("returns null when there is no Codex account at all", async () => {
 		const { cache, fetchCalls } = harness({ accounts: [] });
-		expect(await cache.get("0.149.0")).toBeNull();
+		expect(await cache.get(null)).toBeNull();
 		expect(fetchCalls).toHaveLength(0);
 	});
 
@@ -166,7 +166,7 @@ describe("CodexModelCatalogCache", () => {
 			],
 		});
 
-		await cache.get("0.149.0");
+		await cache.get(null);
 		expect(fetchCalls).toHaveLength(1);
 		expect(fetchCalls[0].token).toBe("token-live");
 	});
@@ -180,10 +180,8 @@ describe("CodexModelCatalogCache", () => {
 			},
 		});
 
-		const result = await cache.get("0.149.0");
-		expect(result).not.toBeNull();
-		expect(fetchCalls).toHaveLength(1);
-		expect(fetchCalls[0].token).toBe("token-live");
+		expect(await cache.get(null)).not.toBeNull();
+		expect(fetchCalls.map((c) => c.token)).toEqual(["token-live"]);
 	});
 
 	test("moves to the next account when one returns an unusable catalog", async () => {
@@ -195,59 +193,37 @@ describe("CodexModelCatalogCache", () => {
 			],
 		});
 
-		const result = await cache.get("0.149.0");
-		expect(result?.bodyText).toBe('{"models":["second"]}');
+		expect((await cache.get(null))?.bodyText).toBe('{"models":["second"]}');
 		expect(fetchCalls.map((c) => c.token)).toEqual([
 			"token-first",
 			"token-second",
 		]);
 	});
 
-	// A failure must not be cached as an answer: the next caller retries rather
-	// than inheriting a "no catalog" verdict for the rest of the TTL.
-	test("does not cache a failure", async () => {
+	// The fetcher's timeout bounds ONE call. Without a budget over the loop, a
+	// hanging backend costs that timeout per account before the caller gets the
+	// 200 fallback it was promised — and Codex would give up first.
+	test("stops trying accounts once the lookup budget is spent", async () => {
 		const { cache, fetchCalls } = harness({
-			results: [
-				{ ok: false },
-				{ ok: true, bodyText: '{"models":[]}', etag: null },
-			],
+			accounts: Array.from({ length: 10 }, (_, i) =>
+				account({ id: `codex-${i}` }),
+			),
+			results: [{ ok: false }],
+			fetchCostMs: CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS / 2,
 		});
 
-		expect(await cache.get("0.149.0")).toBeNull();
-		expect(await cache.get("0.149.0")).not.toBeNull();
-		expect(fetchCalls.length).toBeGreaterThanOrEqual(2);
+		expect(await cache.get(null)).toBeNull();
+		expect(fetchCalls.length).toBeLessThan(10);
 	});
 
-	// The key comes from a request parameter. A cache that only holds its bound
-	// while its caller sanitizes does not hold its bound.
-	test("bounds the number of cached versions, evicting the least recently written", async () => {
-		const { cache, fetchCalls, advance } = harness();
-
-		for (let i = 0; i < CODEX_MODEL_CATALOG_MAX_ENTRIES + 3; i++) {
-			await cache.get(`0.${i}.0`);
-			advance(1);
-		}
-		const fetchesAfterFill = fetchCalls.length;
-
-		// The three oldest were evicted, so they miss and refetch...
-		await cache.get("0.0.0");
-		expect(fetchCalls.length).toBe(fetchesAfterFill + 1);
-
-		// ...while a recent one is still resident and costs nothing.
-		const recent = `0.${CODEX_MODEL_CATALOG_MAX_ENTRIES + 2}.0`;
-		await cache.get(recent);
-		expect(fetchCalls.length).toBe(fetchesAfterFill + 1);
-	});
-
-	// The class promises callers a value or null. It must keep that promise
-	// itself rather than relying on the fetcher's own fail-clean discipline.
 	test("a throwing fetcher degrades to the next account, then to null", async () => {
 		const attempted: string[] = [];
 		const cache = new CodexModelCatalogCache({
-			listCodexAccounts: async () => [
+			listAccounts: async () => [
 				account({ id: "first" }),
 				account({ id: "second" }),
 			],
+			getApiKeyPin: async () => null,
 			getAccessToken: async (acct) => `token-${acct.id}`,
 			fetchCatalog: async ({ accessToken }) => {
 				attempted.push(accessToken);
@@ -256,20 +232,171 @@ describe("CodexModelCatalogCache", () => {
 			now: () => 0,
 		});
 
-		expect(await cache.get("0.149.0")).toBeNull();
+		expect(await cache.get(null)).toBeNull();
 		expect(attempted).toEqual(["token-first", "token-second"]);
 	});
 
 	test("a listing failure degrades to null rather than throwing", async () => {
 		const cache = new CodexModelCatalogCache({
-			listCodexAccounts: async () => {
+			listAccounts: async () => {
 				throw new Error("database is down");
 			},
+			getApiKeyPin: async () => null,
 			getAccessToken: async () => "token",
 			fetchCatalog: async () => ({ ok: true, bodyText: "{}", etag: null }),
 			now: () => 0,
 		});
 
-		expect(await cache.get("0.149.0")).toBeNull();
+		expect(await cache.get(null)).toBeNull();
+	});
+
+	describe("routing pins", () => {
+		const pinned = (pin: Pin) => ({
+			accounts: [account({ id: "a" }), account({ id: "b" })],
+			getApiKeyPin: async () => pin,
+		});
+
+		// Entitlement is per-subscription, so a catalog from outside the pin can
+		// advertise a model the request is then routed away from and fails on.
+		test("reads the catalog only from the pinned account", async () => {
+			const { cache, fetchCalls } = harness(
+				pinned({
+					pinnedAccountId: "b",
+					pinnedProviders: null,
+					malformed: false,
+				}),
+			);
+
+			await cache.get("key-1");
+			expect(fetchCalls.map((c) => c.token)).toEqual(["token-b"]);
+		});
+
+		test("honours a provider-class pin", async () => {
+			const { cache, fetchCalls } = harness({
+				accounts: [
+					account({ id: "anthropic-1", provider: "anthropic" }),
+					account({ id: "codex-a" }),
+				],
+				getApiKeyPin: async () => ({
+					pinnedAccountId: null,
+					pinnedProviders: ["codex"],
+					malformed: false,
+				}),
+			});
+
+			await cache.get("key-1");
+			expect(fetchCalls.map((c) => c.token)).toEqual(["token-codex-a"]);
+		});
+
+		test("returns null when the pin excludes every Codex account", async () => {
+			const { cache, fetchCalls } = harness({
+				accounts: [account({ id: "codex-a" })],
+				getApiKeyPin: async () => ({
+					pinnedAccountId: "not-in-pool",
+					pinnedProviders: null,
+					malformed: false,
+				}),
+			});
+
+			expect(await cache.get("key-1")).toBeNull();
+			expect(fetchCalls).toHaveLength(0);
+		});
+
+		// The routing layer fails closed on a corrupt pin; serving a pooled
+		// catalog here would be the same mistake one step earlier.
+		test("fails closed on a malformed pin", async () => {
+			const { cache, fetchCalls } = harness(
+				pinned({
+					pinnedAccountId: null,
+					pinnedProviders: null,
+					malformed: true,
+				}),
+			);
+
+			expect(await cache.get("key-1")).toBeNull();
+			expect(fetchCalls).toHaveLength(0);
+		});
+
+		test("fails closed when the pin cannot be read at all", async () => {
+			const { cache, fetchCalls } = harness({
+				getApiKeyPin: async () => {
+					throw new Error("database is down");
+				},
+			});
+
+			expect(await cache.get("key-1")).toBeNull();
+			expect(fetchCalls).toHaveLength(0);
+		});
+
+		test("does not share a cache entry between differently pinned keys", async () => {
+			const pins: Record<string, Pin> = {
+				"key-a": {
+					pinnedAccountId: "a",
+					pinnedProviders: null,
+					malformed: false,
+				},
+				"key-b": {
+					pinnedAccountId: "b",
+					pinnedProviders: null,
+					malformed: false,
+				},
+			};
+			const { cache, fetchCalls } = harness({
+				accounts: [account({ id: "a" }), account({ id: "b" })],
+				getApiKeyPin: async (id) => pins[id] ?? null,
+			});
+
+			await cache.get("key-a");
+			await cache.get("key-b");
+			await cache.get("key-a");
+
+			expect(fetchCalls.map((c) => c.token)).toEqual(["token-a", "token-b"]);
+		});
+
+		test("unpinned keys share the pool-wide entry", async () => {
+			const { cache, fetchCalls } = harness({
+				getApiKeyPin: async () => ({
+					pinnedAccountId: null,
+					pinnedProviders: [],
+					malformed: false,
+				}),
+			});
+
+			await cache.get("key-a");
+			await cache.get("key-b");
+			await cache.get(null);
+
+			expect(fetchCalls).toHaveLength(1);
+		});
+
+		test("bounds cached pin scopes, evicting least recently written", async () => {
+			const pins: Record<string, Pin> = {};
+			const { cache, fetchCalls, advance } = harness({
+				accounts: Array.from(
+					{ length: CODEX_MODEL_CATALOG_MAX_ENTRIES + 3 },
+					(_, i) => account({ id: `codex-${i}` }),
+				),
+				getApiKeyPin: async (id) => pins[id] ?? null,
+			});
+
+			for (let i = 0; i < CODEX_MODEL_CATALOG_MAX_ENTRIES + 3; i++) {
+				pins[`key-${i}`] = {
+					pinnedAccountId: `codex-${i}`,
+					pinnedProviders: null,
+					malformed: false,
+				};
+				await cache.get(`key-${i}`);
+				advance(1);
+			}
+			const afterFill = fetchCalls.length;
+
+			// The oldest scope was evicted, so it misses and refetches...
+			await cache.get("key-0");
+			expect(fetchCalls.length).toBe(afterFill + 1);
+
+			// ...while a recent one is still resident and costs nothing.
+			await cache.get(`key-${CODEX_MODEL_CATALOG_MAX_ENTRIES + 2}`);
+			expect(fetchCalls.length).toBe(afterFill + 1);
+		});
 	});
 });

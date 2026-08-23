@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import { CODEX_VERSION } from "./provider";
+import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
 
 const log = new Logger("CodexModelCatalog");
 
@@ -32,6 +32,25 @@ export const CODEX_MODEL_CATALOG_URL =
 	"https://chatgpt.com/backend-api/codex/models";
 
 /**
+ * The catalog is fetched as OUR pinned {@link CODEX_VERSION}, never as the
+ * requesting client's version, even though the client sends one.
+ *
+ * The catalog is version-gated: entries carry `minimal_client_version` and
+ * OpenAI filters on the `client_version` parameter. Every inference request
+ * this proxy makes is stamped with the pinned `CODEX_VERSION`
+ * (`provider.ts` → `Version` / `User-Agent`), so asking as a NEWER client
+ * would return models we then cannot use: Codex would list one, send it, and
+ * the backend would reject it as requiring a newer client — the failure mode
+ * already recorded for this repo's version gate.
+ *
+ * A catalog fetched at the version we actually speak is therefore the correct
+ * answer, not a degraded one. It is narrower than a newer client would receive
+ * talking to OpenAI directly, and that narrowness is the point: it describes
+ * what this proxy can serve. Raising it is one edit — bump `CODEX_VERSION` —
+ * and that bump moves catalog and inference together, which is the invariant.
+ */
+
+/**
  * Bounded so a slow or hanging backend cannot stall a Codex startup. Shorter
  * than the 15s used for background polls because a client is waiting on this
  * one; on timeout the caller serves a stale or static list instead.
@@ -43,16 +62,6 @@ export interface FetchCodexModelCatalogArgs {
 	accessToken: string;
 	/** From the token's JWT claims; sent as `ChatGPT-Account-ID` when present. */
 	chatgptAccountId: string | null;
-	/**
-	 * The requesting client's own version, forwarded verbatim.
-	 *
-	 * The catalog is version-gated — entries carry `minimal_client_version`, and
-	 * OpenAI filters on this parameter — so forwarding the caller's version is
-	 * what makes the reply the same catalog it would have received talking to
-	 * OpenAI directly. Substituting our own {@link CODEX_VERSION} would hand a
-	 * 0.149 client the narrower catalog a 0.144 client is served.
-	 */
-	clientVersion: string | null;
 	fetchImpl?: typeof fetch;
 }
 
@@ -63,17 +72,12 @@ export type CodexModelCatalogResult =
 function buildHeaders(
 	accessToken: string,
 	chatgptAccountId: string | null,
-	clientVersion: string | null,
 ): Headers {
-	// Keep the whole request internally consistent: if we claim a client version
-	// in the query string, the version-bearing headers claim the same one rather
-	// than announcing 0.144 alongside a `client_version=0.149` parameter.
-	const version = clientVersion ?? CODEX_VERSION;
 	const headers = new Headers({
 		Authorization: `Bearer ${accessToken}`,
 		Accept: "application/json",
-		Version: version,
-		"User-Agent": `codex-cli/${version} (Windows 10.0.26100; x64)`,
+		Version: CODEX_VERSION,
+		"User-Agent": CODEX_USER_AGENT,
 		originator: "codex_cli_rs",
 	});
 	const accountId = chatgptAccountId?.trim();
@@ -84,12 +88,18 @@ function buildHeaders(
 /**
  * True when the body is the envelope Codex's deserializer expects.
  *
- * We check the shape but return the ORIGINAL text, never a re-serialisation.
+ * We INSPECT the shape but return the ORIGINAL text, never a re-serialisation.
  * Codex requires ~18 fields per entry and falls back to its built-in catalog
  * without surfacing a parse failure to the user, so a body we rebuilt and
- * quietly truncated would look exactly like success from here. The check exists
- * only to stop an HTML error page or a challenge interstitial being cached and
- * served as a catalog.
+ * quietly truncated would look exactly like success from here. Reading fields
+ * without rebuilding the body cannot drop the ones we do not know about.
+ *
+ * Entries are checked individually, not just the array: `{"models":[null]}` and
+ * `{"models":["gpt-5"]}` are both arrays, and accepting either would cache an
+ * undeserializable body for hours — recreating precisely the silent failure
+ * this module exists to end. `slug` is the one field every consumer needs, so
+ * it stands in as the discriminator; everything beyond it is deliberately not
+ * our business.
  */
 function isModelsEnvelope(bodyText: string): boolean {
 	let parsed: unknown;
@@ -101,7 +111,16 @@ function isModelsEnvelope(bodyText: string): boolean {
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 		return false;
 	}
-	return Array.isArray((parsed as { models?: unknown }).models);
+	const models = (parsed as { models?: unknown }).models;
+	if (!Array.isArray(models)) return false;
+	return models.every(
+		(entry) =>
+			typeof entry === "object" &&
+			entry !== null &&
+			!Array.isArray(entry) &&
+			typeof (entry as { slug?: unknown }).slug === "string" &&
+			(entry as { slug: string }).slug.length > 0,
+	);
 }
 
 /**
@@ -115,19 +134,14 @@ function isModelsEnvelope(bodyText: string): boolean {
 export async function fetchCodexModelCatalog(
 	args: FetchCodexModelCatalogArgs,
 ): Promise<CodexModelCatalogResult> {
-	const {
-		accessToken,
-		chatgptAccountId,
-		clientVersion,
-		fetchImpl = fetch,
-	} = args;
+	const { accessToken, chatgptAccountId, fetchImpl = fetch } = args;
 
 	if (!accessToken || accessToken.trim() === "") {
 		throw new Error("fetchCodexModelCatalog requires a non-empty access token");
 	}
 
 	const url = new URL(CODEX_MODEL_CATALOG_URL);
-	if (clientVersion) url.searchParams.set("client_version", clientVersion);
+	url.searchParams.set("client_version", CODEX_VERSION);
 
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -135,7 +149,11 @@ export async function fetchCodexModelCatalog(
 		const response = await fetchImpl(url.toString(), {
 			method: "GET",
 			signal: controller.signal,
-			headers: buildHeaders(accessToken, chatgptAccountId, clientVersion),
+			// A cross-origin redirect would strip Authorization per the fetch spec,
+			// but say so structurally rather than relying on that: this bearer has
+			// exactly one valid destination.
+			redirect: "error",
+			headers: buildHeaders(accessToken, chatgptAccountId),
 		});
 
 		if (!response.ok) {

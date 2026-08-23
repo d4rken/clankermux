@@ -1,3 +1,8 @@
+import {
+	isAccountAllowedByPin,
+	isPinActive,
+	type RoutingPin,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	type fetchCodexModelCatalog,
@@ -11,23 +16,29 @@ const log = new Logger("CodexModelCatalogCache");
  * How long a fetched catalog is served before a refresh is attempted.
  *
  * The catalog changes when OpenAI ships or retires a model — a scale of days —
- * so six hours is already far tighter than the data moves. The cost of being
- * stale is bounded anyway: a model absent from the catalog still works, because
- * the responses adapter forwards model names verbatim.
+ * so six hours is already far tighter than the data moves. Staleness is cheap
+ * here anyway: a model absent from the catalog still works, because the
+ * responses adapter forwards model names verbatim.
  */
 export const CODEX_MODEL_CATALOG_TTL_MS = 6 * 60 * 60 * 1_000;
 
 /**
- * Most distinct client versions kept at once, oldest evicted first.
+ * Whole-lookup budget for a COLD read, across every account tried.
  *
- * The key originates in a request parameter, so this is a self-defence bound,
- * not a tuning knob: without it a caller varying the version could grow the map
- * indefinitely and, worse, force a fresh authenticated upstream call per novel
- * value. Callers are expected to sanitize too (see apps/server/models-route),
- * but a cache that only holds its bound when its caller behaves does not hold
- * it. Real deployments see one or two versions; a handful is generous.
+ * The per-request timeout in the fetcher bounds one call, not the loop: with
+ * several Codex accounts and a hanging backend, trying them in turn would hold
+ * the client for the sum of those timeouts. A Codex startup would give up
+ * waiting long before we returned the 200 we promise it, so the loop needs its
+ * own ceiling rather than inheriting N times the fetcher's.
  */
-export const CODEX_MODEL_CATALOG_MAX_ENTRIES = 8;
+export const CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS = 12_000;
+
+/**
+ * Most distinct pin scopes cached at once, least recently written evicted
+ * first. Keys derive from API-key pins in the database, not from anything a
+ * caller sends, so this is a modest safety bound rather than a defence.
+ */
+export const CODEX_MODEL_CATALOG_MAX_ENTRIES = 16;
 
 export interface CodexModelCatalogEntry {
 	bodyText: string;
@@ -35,8 +46,17 @@ export interface CodexModelCatalogEntry {
 }
 
 export interface CodexModelCatalogCacheDeps {
-	/** Every account in the pool; filtering to usable Codex accounts is ours. */
-	listCodexAccounts: () => Promise<readonly Account[]>;
+	/** Every account in the pool; narrowing to usable candidates is ours. */
+	listAccounts: () => Promise<readonly Account[]>;
+	/**
+	 * The routing pin for an API key, or null when the key has no pin row.
+	 * Mirrors `DatabaseOperations.getApiKeyPin`.
+	 */
+	getApiKeyPin: (apiKeyId: string) => Promise<{
+		pinnedAccountId: string | null;
+		pinnedProviders: string[] | null;
+		malformed: boolean;
+	} | null>;
 	getAccessToken: (account: Account) => Promise<string>;
 	fetchCatalog: typeof fetchCodexModelCatalog;
 	now?: () => number;
@@ -47,20 +67,29 @@ interface CacheSlot {
 	fetchedAt: number;
 }
 
+/** Resolution of an API key to the accounts whose catalog it may be shown. */
+type PinScope =
+	| { kind: "allowed"; key: string; pin: RoutingPin | null }
+	/** Malformed pin: fail closed, exactly as the routing layer does. */
+	| { kind: "refused" };
+
 /**
  * Serves the Codex model catalog on behalf of the pool.
  *
- * The catalog is per-subscription, so this reads it from one of our own Codex
- * accounts rather than relaying the client's credential — our clients
- * authenticate with a ClankerMux API key and hold no upstream-valid token.
- * Serving account A's catalog to a request that may later route to account B is
- * a theoretical mismatch and strictly better than the hardcoded list it
- * replaces; nothing downstream gates on it, because model names are forwarded
- * verbatim.
+ * The catalog is per-subscription, so it is read from one of OUR Codex accounts
+ * rather than relayed from the client: clients authenticate with a ClankerMux
+ * API key and hold no upstream-valid credential.
+ *
+ * Which account is not arbitrary. A key pinned to one account — or to a
+ * provider class — must not be shown a different account's catalog: entitlement
+ * differs by subscription (`available_in_plans` gates entries), so a catalog
+ * from outside the pin can advertise a model the request will then be routed
+ * away from and fail on. Candidates are therefore filtered by the same pin
+ * predicate the router enforces, and cached per pin scope.
  *
  * Everything here is best-effort. A failure means we could not LEARN the
- * catalog, never that an account is unhealthy, so no failure recorded here is
- * counted against an account.
+ * catalog, never that an account is unhealthy, so nothing here is counted
+ * against an account.
  */
 export class CodexModelCatalogCache {
 	private readonly deps: Required<CodexModelCatalogCacheDeps>;
@@ -76,40 +105,94 @@ export class CodexModelCatalogCache {
 	}
 
 	/**
-	 * The catalog for `clientVersion`, or `null` when the pool cannot produce
-	 * one. Never throws and never rejects: the caller's fallback is a static
-	 * list, which is what shipped before this existed.
+	 * The catalog this API key may be shown, or `null` when the pool cannot
+	 * produce one. Never throws and never rejects: the caller's fallback is the
+	 * static list, which is what shipped before this existed.
+	 *
+	 * A cached-but-expired copy is returned IMMEDIATELY and refreshed in the
+	 * background. Blocking a client on a refresh would hand it the full lookup
+	 * budget of latency to receive a catalog we already had.
 	 */
-	async get(
-		clientVersion: string | null,
-	): Promise<CodexModelCatalogEntry | null> {
-		// The catalog is version-gated upstream, so two client versions are two
-		// different documents.
-		const key = clientVersion ?? "";
+	async get(apiKeyId: string | null): Promise<CodexModelCatalogEntry | null> {
+		const scope = await this.resolveScope(apiKeyId);
+		if (scope.kind === "refused") return null;
+
+		const { key, pin } = scope;
 		const slot = this.slots.get(key);
-		if (slot && this.deps.now() - slot.fetchedAt < CODEX_MODEL_CATALOG_TTL_MS) {
+		if (slot) {
+			const age = this.deps.now() - slot.fetchedAt;
+			if (age < CODEX_MODEL_CATALOG_TTL_MS) return slot.entry;
+			// Stale-while-revalidate. The refresh is deliberately not awaited; its
+			// rejection cannot escape because refresh() resolves rather than throws.
+			void this.startRefresh(key, pin);
 			return slot.entry;
 		}
 
+		return this.startRefresh(key, pin);
+	}
+
+	/** Join the in-flight refresh for `key`, or start one. */
+	private startRefresh(
+		key: string,
+		pin: RoutingPin | null,
+	): Promise<CodexModelCatalogEntry | null> {
 		const existing = this.inFlight.get(key);
 		if (existing) return existing;
 
-		const refresh = this.refresh(key, clientVersion).finally(() => {
+		const refresh = this.refresh(key, pin).finally(() => {
 			this.inFlight.delete(key);
 		});
 		this.inFlight.set(key, refresh);
 		return refresh;
 	}
 
+	/**
+	 * Which accounts this key may see a catalog from, and the cache key for that
+	 * scope. Unpinned keys share one entry; pinned keys get their own.
+	 */
+	private async resolveScope(apiKeyId: string | null): Promise<PinScope> {
+		if (!apiKeyId) return { kind: "allowed", key: "", pin: null };
+
+		let raw: Awaited<ReturnType<CodexModelCatalogCacheDeps["getApiKeyPin"]>>;
+		try {
+			raw = await this.deps.getApiKeyPin(apiKeyId);
+		} catch (error) {
+			// Unknown pin state. Fail closed rather than guess "unpinned" — that
+			// guess is what could show a Codex-pinned key another pool's catalog.
+			log.warn(
+				"Could not resolve an API key's routing pin for a model-catalog read:",
+				error instanceof Error ? error.message : String(error),
+			);
+			return { kind: "refused" };
+		}
+
+		if (!raw) return { kind: "allowed", key: "", pin: null };
+		// A pin we cannot parse is corruption; the routing layer fails closed on
+		// it and so does this. Serving a pooled catalog here would be the same
+		// mistake one step earlier.
+		if (raw.malformed) return { kind: "refused" };
+
+		const pin: RoutingPin = {
+			accountId: raw.pinnedAccountId,
+			providers: raw.pinnedProviders,
+		};
+		if (!isPinActive(pin)) return { kind: "allowed", key: "", pin: null };
+
+		const key = pin.accountId
+			? `account:${pin.accountId}`
+			: `providers:${[...(pin.providers ?? [])].sort().join(",")}`;
+		return { kind: "allowed", key, pin };
+	}
+
 	private async refresh(
 		key: string,
-		clientVersion: string | null,
+		pin: RoutingPin | null,
 	): Promise<CodexModelCatalogEntry | null> {
-		const fetched = await this.fetchFromAnyAccount(clientVersion);
+		const fetched = await this.fetchFromAnyAccount(pin);
 		if (fetched) {
-			// Delete before set so insertion order tracks write recency: Map keeps
-			// a re-`set` key in its original position, which would make eviction
-			// drop the entry written longest ago rather than the one least recently
+			// Delete before set so insertion order tracks write recency: Map keeps a
+			// re-`set` key in its original position, which would make eviction drop
+			// the entry written longest ago rather than the least recently
 			// refreshed.
 			this.slots.delete(key);
 			this.slots.set(key, { entry: fetched, fetchedAt: this.deps.now() });
@@ -117,14 +200,14 @@ export class CodexModelCatalogCache {
 			return fetched;
 		}
 
-		// Expired but present beats nothing: a catalog that is hours old still
-		// describes the models correctly, whereas the static fallback is a shape
-		// Codex cannot parse at all. The failure itself is NOT cached, so the next
-		// caller retries instead of inheriting this verdict for a whole TTL.
+		// Expired but present beats nothing: an hours-old catalog still describes
+		// the models correctly, whereas the static fallback is a shape Codex
+		// cannot parse at all. The failure itself is NOT cached, so the next
+		// caller retries rather than inheriting this verdict for a whole TTL.
 		const stale = this.slots.get(key);
 		if (stale) {
 			log.warn(
-				"Could not refresh the Codex model catalog; serving the previous copy",
+				"Could not refresh the Codex model catalog; keeping the previous copy",
 			);
 			return stale.entry;
 		}
@@ -145,11 +228,11 @@ export class CodexModelCatalogCache {
 	}
 
 	private async fetchFromAnyAccount(
-		clientVersion: string | null,
+		pin: RoutingPin | null,
 	): Promise<CodexModelCatalogEntry | null> {
 		let accounts: readonly Account[];
 		try {
-			accounts = await this.deps.listCodexAccounts();
+			accounts = await this.deps.listAccounts();
 		} catch (error) {
 			log.warn(
 				"Could not list accounts for a model-catalog read:",
@@ -159,11 +242,23 @@ export class CodexModelCatalogCache {
 		}
 
 		const candidates = accounts.filter(
-			(account) => account.provider === "codex" && !account.paused,
+			(account) =>
+				account.provider === "codex" &&
+				!account.paused &&
+				isAccountAllowedByPin(pin, account),
 		);
 		if (candidates.length === 0) return null;
 
+		const deadline = this.deps.now() + CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS;
+
 		for (const account of candidates) {
+			if (this.deps.now() >= deadline) {
+				log.warn(
+					"Model-catalog lookup ran out of time before every account was tried",
+				);
+				break;
+			}
+
 			let accessToken: string;
 			try {
 				accessToken = await this.deps.getAccessToken(account);
@@ -184,7 +279,6 @@ export class CodexModelCatalogCache {
 				const result = await this.deps.fetchCatalog({
 					accessToken,
 					chatgptAccountId: readChatgptAccountIdSafe(accessToken),
-					clientVersion,
 				});
 				if (result.ok) {
 					return { bodyText: result.bodyText, etag: result.etag };
