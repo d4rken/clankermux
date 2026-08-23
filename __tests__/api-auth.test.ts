@@ -118,13 +118,23 @@ describe("AuthService", () => {
 			});
 		});
 
-		describe("/v1/* and /messages/* require an API key", () => {
+		describe("/v1/*, /messages/* and /wire/** require an API key", () => {
+			// The `/wire/**` rows are defense in depth. The router strips the mount
+			// before calling authenticateRequest and passes the requirement
+			// explicitly, so these paths should never reach `policyFor` at all —
+			// but if one ever does, it has to fail CLOSED rather than land in the
+			// public catch-all (which is what `/some-client-route` above pins).
 			test.each([
 				["/v1/messages", "POST"],
 				["/v1/models", "GET"],
 				["/v1/anthropic/version", "GET"],
 				["/messages", "POST"],
 				["/messages/123", "POST"],
+				["/wire", "POST"],
+				["/wire/anthropic/v1/messages", "POST"],
+				["/wire/anthropic/api/event_logging/v2/batch", "POST"],
+				["/wire/openai/v1/responses", "POST"],
+				["/wire/gemini/anything", "GET"],
 			])("%s %s rejects requests without a key", async (path, method) => {
 				const req = makeRequest({ url: `http://localhost:8080${path}` });
 				const result = await authService.authenticateRequest(req, path, method);

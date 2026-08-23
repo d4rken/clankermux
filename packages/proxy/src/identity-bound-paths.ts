@@ -3,7 +3,8 @@
  * refusal we answer them with.
  *
  * `/api/oauth/files/…` and `/api/oauth/file_upload` carry attachments, which
- * belong to the account that uploaded them. `/v1/code/…` is the Remote Control
+ * belong to the account that uploaded them. `/api/oauth/profile` answers with
+ * the identity of whoever asked. `/v1/code/…` is the Remote Control
  * surface, bound to the claude.ai session the client paired with — it even
  * carries its own token refresh (`/v1/code/auth/refresh`) separate from
  * `/v1/oauth/token`, because it does not use the API credential at all.
@@ -44,9 +45,17 @@ export const IDENTITY_BOUND_PATH_PREFIXES: readonly string[] = [
 /**
  * Identity-bound paths that have no sub-path and so are matched exactly rather
  * than as a namespace root.
+ *
+ * `/api/oauth/profile` describes WHO the caller is — email, organization,
+ * subscription. Answering it from a pooled account would tell the client it is
+ * talking to whichever account happened to be selected: a cross-account
+ * disclosure, and an answer that changes from one request to the next. Our own
+ * identity backfill still reads it, but it calls api.anthropic.com directly
+ * with one specific account's credential, so it never passes through here.
  */
 const IDENTITY_BOUND_EXACT_PATHS: readonly string[] = [
 	"/api/oauth/file_upload",
+	"/api/oauth/profile",
 ];
 
 /** Decoding rounds allowed before giving up. Bounded so a `%25`-chain cannot
@@ -68,8 +77,14 @@ function matchesLiterally(pathname: string): boolean {
  * normalizations is something some hop between us and Anthropic might perform.
  *
  * Returns the raw pathname unchanged when nothing needed rewriting.
+ *
+ * Exported because every other exact-match path gate faces the same problem: an
+ * `===` comparison against a raw pathname is defeated by a trailing slash, a
+ * doubled separator or a percent-encoded letter. Sharing this function is how
+ * those gates stay consistent with the refusal below instead of each inventing
+ * its own weaker normalization.
  */
-function canonicalize(pathname: string): string {
+export function canonicalize(pathname: string): string {
 	let decoded = pathname;
 	for (let round = 0; round < MAX_DECODE_ROUNDS; round++) {
 		if (!decoded.includes("%")) break;

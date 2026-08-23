@@ -26,10 +26,16 @@ export interface AuthenticationResult {
  * expected to bind ClankerMux to a loopback address or put it behind a
  * reverse proxy that enforces authentication.
  */
-type AuthRequirement = "public" | "api_key";
+export type AuthRequirement = "public" | "api_key";
 
 function policyFor(path: string): AuthRequirement {
 	if (path === "/health") return "public";
+	// The agent-traffic mounts. A caller is expected to hand us the STRIPPED,
+	// canonical path together with an explicit `api_key` requirement, so a
+	// `/wire/…` path arriving here means someone forgot to strip it. Gate it
+	// anyway: the whole namespace is upstream AI traffic, and the alternative
+	// is the public catch-all at the bottom of this function.
+	if (path === "/wire" || path.startsWith("/wire/")) return "api_key";
 	if (path === "/api" || path.startsWith("/api/")) return "public";
 	if (path === "/v1" || path.startsWith("/v1/")) return "api_key";
 	if (path === "/messages" || path.startsWith("/messages/")) return "api_key";
@@ -176,13 +182,24 @@ export class AuthService {
 	 * Public paths return authenticated without checking for a key. API-key
 	 * paths require a valid key when at least one is configured; when none are
 	 * configured, authentication is effectively disabled.
+	 *
+	 * `requirement` lets a caller that already classified the route say so
+	 * outright, and it OVERRIDES `policyFor` entirely. The mounted agent
+	 * namespace needs this: the router strips `/wire/<dialect>` before anything
+	 * downstream runs, so what arrives here is a canonical path like
+	 * `/api/event_logging/v2/batch` — which `policyFor` reads as public
+	 * management surface, while the request is in fact upstream AI traffic that
+	 * has to present a key. The classification is the router's to make; inferring
+	 * it a second time from a path that no longer carries the mount can only get
+	 * it wrong.
 	 */
 	async authenticateRequest(
 		req: Request,
 		path: string,
 		_method: string,
+		requirement?: AuthRequirement,
 	): Promise<AuthenticationResult> {
-		if (policyFor(path) === "public") {
+		if ((requirement ?? policyFor(path)) === "public") {
 			return { isAuthenticated: true };
 		}
 

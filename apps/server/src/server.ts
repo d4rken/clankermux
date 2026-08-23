@@ -54,11 +54,9 @@ import {
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
 	createCodexResetCreditApplyScheduler,
-	createIdentityBoundRefusalResponse,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
 	handleProxy,
-	isIdentityBoundPath,
 	markCapacityRestoredProbePending,
 	type ProxyContext,
 	RequestRecorder,
@@ -97,11 +95,12 @@ import {
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
-import { terminalForRequestError } from "./request-error-terminal";
+import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
+import { WIRE_MOUNTS } from "./wire-mounts";
 
 /**
  * Build a load-balancing strategy from its enum name. Add new strategies here
@@ -1199,6 +1198,31 @@ export default async function startServer(options?: {
 		// hot-reload of the flag takes effect on the next request automatically.
 	});
 
+	// Everything the front door needs, bound once. `fetch` is a thin wrapper
+	// around routeRequest so the routing itself — which namespace a request
+	// belongs to, whether it needs a key, which handler owns it — is reachable
+	// from a test instead of living inside a Bun.serve closure.
+	const routerDeps: RequestRouterDeps = {
+		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
+		authenticate: (req, path, method, requirement) =>
+			authService.authenticateRequest(req, path, method, requirement),
+		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
+			dispatchProxyRequest(req, url, proxyContext, apiKeyId, apiKeyName),
+		handleResponses: (req, url, apiKeyId, apiKeyName) =>
+			handleResponsesRequest(
+				req,
+				url,
+				handleProxy as Parameters<typeof handleResponsesRequest>[2],
+				proxyContext,
+				apiKeyId,
+				apiKeyName,
+			),
+		handleModels: handleModelsRequest,
+		withDashboard,
+		dashboardManifest,
+		serveDashboardFile,
+	};
+
 	// Main server
 	// Build server configuration with optional TLS and hostname binding
 	const hostname = readEnv("HOST") || "0.0.0.0"; // Allow binding configuration
@@ -1222,193 +1246,7 @@ export default async function startServer(options?: {
 				// connection's idle timer via server.timeout(req, N). Assigned here
 				// (not just after serve()) so it's set even on the very first request.
 				proxyContext.server = server;
-				const url = new URL(req.url);
-
-				// Try API routes first
-				const apiResponse = await apiRouter.handleRequest(url, req);
-				if (apiResponse) {
-					return apiResponse;
-				}
-
-				// Identity-bound endpoints are refused before ANY other routing.
-				// Ahead of the dashboard branch specifically: that branch decides by
-				// raw pathname, so an encoded spelling like `/%76%31/code/sessions`
-				// does not look like a `/v1/` proxy path to it and would be answered
-				// with the dashboard's index.html — no credential leaked, but not the
-				// deliberate, visible refusal this is supposed to give. Ahead of the
-				// auth gate too, which is fine: `policyFor` already treats `/api/*` as
-				// public, and declining to serve an endpoint needs no credential.
-				//
-				// The `/v1/code/…` half of the set is ALSO refused by the proxy's
-				// ingest prologue. Both call the same predicate, so the two entry
-				// points cannot drift, and the prologue is what guarantees no request
-				// reaching the proxy by another route can be served with a pooled
-				// token.
-				if (isIdentityBoundPath(url.pathname)) {
-					return createIdentityBoundRefusalResponse(url.pathname);
-				}
-
-				// Dashboard routes (only if enabled and assets are available)
-				if (withDashboard && dashboardManifest) {
-					// Serve dashboard static assets
-					if (dashboardManifest[url.pathname]) {
-						return serveDashboardFile(
-							url.pathname,
-							undefined,
-							CACHE.CACHE_CONTROL_STATIC,
-						);
-					}
-
-					// For all non-API, non-proxy routes, serve the dashboard index.html
-					// (client-side routing). This allows React Router to handle all
-					// dashboard routes without maintaining a list. Anthropic-style
-					// clients POSTing to /messages or /messages/* (and /v1, /v1/*) must
-					// NOT receive index.html — they need to fall through to the proxy
-					// dispatch below. Mirrors the boundary `policyFor` uses.
-					const p = url.pathname;
-					const isProxyPath =
-						p === "/v1" ||
-						p.startsWith("/v1/") ||
-						p === "/messages" ||
-						p.startsWith("/messages/");
-					if (!p.startsWith("/api/") && !isProxyPath) {
-						return serveDashboardFile("/index.html", "text/html");
-					}
-				}
-
-				// Claude Code's own telemetry endpoints. These must reach the proxy's
-				// ingest prologue, which answers them with the 200 the client expects;
-				// dropping them into the 404 below (which is what happened while this
-				// passthrough was missing) leaves the CLI talking to something that
-				// visibly is not Anthropic.
-				const isClaudeCodeInternalPath =
-					url.pathname === "/api/event_logging/batch" ||
-					url.pathname === "/api/system/package-manager";
-
-				// Reject unmatched /api/* paths with 404 before falling through to the
-				// proxy. Without this, an unknown management URL like /api/not-a-route
-				// would be treated as a proxy path (it'd 404 deeper in the pipeline,
-				// but with confusing semantics and an account-selection round-trip).
-				if (
-					!isClaudeCodeInternalPath &&
-					(url.pathname === "/api" || url.pathname.startsWith("/api/"))
-				) {
-					return new Response(
-						JSON.stringify({
-							type: "error",
-							error: {
-								type: "not_found",
-								message: `Unknown API route: ${url.pathname}`,
-							},
-						}),
-						{
-							status: HTTP_STATUS.NOT_FOUND,
-							headers: { "Content-Type": "application/json" },
-						},
-					);
-				}
-
-				// All other paths go to proxy.
-				//
-				// Authenticate inside its OWN error boundary. A throw from THIS call is
-				// an auth-service failure, and answering 401 preserves the contract this
-				// endpoint has always had for that case. What changed is the SCOPE: the
-				// boundary now covers this call alone. Everything downstream of a
-				// successful authentication gets the separate boundary further down,
-				// because a failure there says nothing about the caller's credentials.
-				let authResult: Awaited<ReturnType<AuthService["authenticateRequest"]>>;
-				try {
-					authResult = await authService.authenticateRequest(
-						req,
-						url.pathname,
-						req.method,
-					);
-				} catch (authError) {
-					return terminalForRequestError(req, authError, "auth");
-				}
-
-				if (!authResult.isAuthenticated) {
-					return new Response(
-						JSON.stringify({
-							type: "error",
-							error: {
-								type: "authentication_error",
-								message: authResult.error || "Authentication failed",
-							},
-						}),
-						{
-							status: 401,
-							headers: { "Content-Type": "application/json" },
-						},
-					);
-				}
-
-				// Everything past this point runs on an AUTHENTICATED request, so a
-				// failure here is a departed client or our own fault — never the
-				// caller's credentials. Its own boundary keeps it from being reported
-				// as an auth error, which is what this whole block used to do.
-				try {
-					// Codex CLI first tries WebSocket transport for /v1/responses.
-					// We only support HTTP — reject the upgrade cleanly so Codex
-					// falls back to HTTPS without hitting the proxy with an empty body.
-					if (
-						req.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-						(url.pathname === "/v1/responses" ||
-							url.pathname === "/v1/responses/compact")
-					) {
-						return new Response(
-							JSON.stringify({
-								type: "error",
-								error: {
-									type: "not_supported_error",
-									message:
-										"WebSocket transport is not supported. Codex will retry over HTTPS automatically.",
-								},
-							}),
-							{
-								status: 503,
-								headers: { "Content-Type": "application/json" },
-							},
-						);
-					}
-
-					// Codex CLI speaks the OpenAI Responses API; translate
-					// /v1/responses(/compact) to Anthropic /v1/messages and run it
-					// through the normal proxy pipeline via handleProxy.
-					if (
-						req.method === "POST" &&
-						(url.pathname === "/v1/responses" ||
-							url.pathname === "/v1/responses/compact")
-					) {
-						return await handleResponsesRequest(
-							req,
-							url,
-							handleProxy as Parameters<typeof handleResponsesRequest>[2],
-							proxyContext,
-							authResult.apiKeyId,
-							authResult.apiKeyName,
-						);
-					}
-
-					// Codex CLI probes GET /v1/models to list/validate models. ClankerMux
-					// has no models route, so without this it falls through to the proxy
-					// and 400s ("Provider cannot handle path: /v1/models") on every Codex
-					// startup. Serve a static OpenAI-format model list (advisory — model
-					// names are forwarded verbatim by the responses adapter).
-					if (req.method === "GET" && url.pathname === "/v1/models") {
-						return handleModelsRequest();
-					}
-
-					return await dispatchProxyRequest(
-						req,
-						url,
-						proxyContext,
-						authResult.apiKeyId,
-						authResult.apiKeyName,
-					);
-				} catch (dispatchError) {
-					return terminalForRequestError(req, dispatchError, "dispatch");
-				}
+				return await routeRequest(req, routerDeps);
 			},
 		};
 
@@ -1519,8 +1357,12 @@ ${tlsEnabled ? "🔒 TLS: enabled" : ""}
 📊 Dashboard: ${dashboardStatus}
 🔗 API Base: ${protocol}://${displayHost}:${serverInstance.port}/api
 
+Agent base URLs (the mount names the wire dialect the client speaks, not the account pool):
+- Anthropic Messages: ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.anthropic}
+- OpenAI Responses:   ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.openai}
+
 Available endpoints:
-- POST   ${protocol}://localhost:${serverInstance.port}/v1/*            → Proxy to Claude API
+- POST   ${protocol}://localhost:${serverInstance.port}/v1/*            → Proxy to Claude API (legacy root)
 - GET    ${protocol}://localhost:${serverInstance.port}/api/accounts    → List accounts
 - POST   ${protocol}://localhost:${serverInstance.port}/api/accounts    → Add account
 - DELETE ${protocol}://localhost:${serverInstance.port}/api/accounts/:id → Remove account

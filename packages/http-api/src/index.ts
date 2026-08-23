@@ -8,7 +8,11 @@ export { APIRouter } from "./router";
 export * from "./services/admin/accounts";
 export * from "./services/admin/api-keys";
 // Export services
-export { AuthService } from "./services/auth-service";
+export {
+	type AuthenticationResult,
+	type AuthRequirement,
+	AuthService,
+} from "./services/auth-service";
 // Export SSE shutdown registry (used by server shutdown to close endless
 // dashboard streams before the HTTP drain)
 export { closeAllSseStreams, registerSseCloser } from "./sse-registry";
