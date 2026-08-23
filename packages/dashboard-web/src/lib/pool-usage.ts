@@ -1,6 +1,7 @@
 import type { ModelFamily } from "@clankermux/core";
 import {
 	computeWindowStartMs,
+	estimateWindowExhaustion,
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
 } from "@clankermux/core";
@@ -8,6 +9,7 @@ import type {
 	AccountResponse,
 	AnthropicUsageData,
 	FullUsageData,
+	UsagePrediction,
 } from "@clankermux/types";
 
 export type PoolWindow = "five_hour" | "seven_day";
@@ -22,6 +24,8 @@ export type ExcludedReason =
 	| "no_usage_data";
 
 export interface PoolUsageContribution {
+	/** Stable join key. Names are user-set and need not be unique. */
+	accountId: string;
 	name: string;
 	pct: number;
 	resetMs: number | null;
@@ -105,14 +109,21 @@ export interface PoolUsageResult {
 	familyWeekly: FamilyWeeklyUsage[];
 }
 
-const FIVE_HOUR_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
+/**
+ * Providers whose accounts report an account-wide 5-hour quota window. Exported
+ * because capacity projections outside this module (the API-key runway) need the
+ * same eligibility rule: a provider in neither set has no account-wide quota
+ * window at all and must not be treated as an unreadable account.
+ */
+export const FIVE_HOUR_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
 	"anthropic",
 	"codex",
 	"alibaba-coding-plan",
 	"zai",
 ]);
 
-const SEVEN_DAY_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
+/** Providers whose accounts report an account-wide weekly quota window. */
+export const SEVEN_DAY_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
 	"anthropic",
 	"codex",
 	"alibaba-coding-plan",
@@ -399,6 +410,10 @@ export function computePoolUsage(
 	const exhausted: PoolUsageExclusion[] = [];
 	const excluded: PoolUsageExclusion[] = [];
 	const fallback: PoolUsageFallback[] = [];
+	// Captured while iterating the accounts so the at-risk projection below can
+	// reach each contribution's server-side prediction. Keyed by account id —
+	// NEVER by name, which is user-set and need not be unique.
+	const predictions = new Map<string, UsagePrediction | undefined>();
 
 	const eligible = eligibleProvidersFor(window);
 
@@ -448,10 +463,17 @@ export function computePoolUsage(
 		}
 
 		contributing.push({
+			accountId: account.id,
 			name: account.name,
 			pct: extracted.pct,
 			resetMs: extracted.resetMs,
 		});
+		predictions.set(
+			account.id,
+			window === "five_hour"
+				? account.prediction?.fiveHour
+				: account.prediction?.sevenDay,
+		);
 	}
 
 	const activeAverage =
@@ -495,27 +517,33 @@ export function computePoolUsage(
 			: (resetCandidates.find((c) => c.resetMs === earliestResetMs)?.name ??
 				null);
 
+	// At-risk projection, via the shared estimator: regression-backed when the
+	// server prediction for this window is trustworthy, lifetime-average
+	// otherwise. That makes this list agree with the per-account progress bars
+	// and the forecast lines, which already prefer the regression.
 	const atRisk: PoolUsageProjection[] = [];
 	for (const c of contributing) {
 		if (c.resetMs == null) continue;
-		const startMs = computeWindowStartMs(c.resetMs, window);
-		if (startMs == null) continue;
-		const elapsed = now - startMs;
-		const remainingMs = c.resetMs - now;
-		if (elapsed <= 0 || remainingMs <= 0) continue;
-		const f = c.pct / 100;
-		if (f <= 0 || f >= 1) continue;
-		const timeToExhaustMs = ((1 - f) / f) * elapsed;
-		if (timeToExhaustMs < remainingMs) {
-			atRisk.push({
-				name: c.name,
-				pct: c.pct,
-				resetMs: c.resetMs,
-				exhaustsAtMs: now + timeToExhaustMs,
-				timeToExhaustMs,
-				remainingMs,
-			});
-		}
+		const estimate = estimateWindowExhaustion(
+			{
+				utilizationPct: c.pct,
+				resetsAtMs: c.resetMs,
+				windowStartMs: computeWindowStartMs(c.resetMs, window),
+				prediction: predictions.get(c.accountId),
+			},
+			now,
+		);
+		if (estimate.exhaustsAtMs == null) continue;
+		if (estimate.exhaustsAtMs >= c.resetMs) continue;
+		atRisk.push({
+			accountId: c.accountId,
+			name: c.name,
+			pct: c.pct,
+			resetMs: c.resetMs,
+			exhaustsAtMs: estimate.exhaustsAtMs,
+			timeToExhaustMs: estimate.exhaustsAtMs - now,
+			remainingMs: c.resetMs - now,
+		});
 	}
 
 	const familyWeekly =

@@ -4,9 +4,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
 	useAnalytics,
+	useApiKeys,
 	usePaymentsSummary,
 	useUsageHistory,
 } from "../../hooks/queries";
+import { computeApiKeyRunways } from "../../lib/api-key-runway";
+import { dataAvailability } from "../../lib/data-availability";
 import { computePoolUsage } from "../../lib/pool-usage";
 import { LoadingSkeleton } from "../overview/LoadingSkeleton";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
@@ -29,7 +32,12 @@ export const LimitsTab = React.memo(() => {
 	const [sevenDayUsageRange, setSevenDayUsageRange] = useState("7d");
 	const [perfRange, setPerfRange] = useState("7d");
 
-	const { data: accounts, isLoading: accountsLoading } = useAccounts();
+	const accountsQuery = useAccounts();
+	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
+	// The runway panel is per API key, so this tab owns that query and hands the
+	// computed rows down; LimitsCapacityOverview stays a pure view component.
+	const apiKeysQuery = useApiKeys();
+	const { data: apiKeys, isLoading: apiKeysLoading } = apiKeysQuery;
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
@@ -62,6 +70,21 @@ export const LimitsTab = React.memo(() => {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
+	const keyRunways = useMemo(
+		() => computeApiKeyRunways(apiKeys ?? [], accounts ?? [], now),
+		[apiKeys, accounts, now],
+	);
+	// Both reads are load-bearing: an empty key list would otherwise read as
+	// "authentication is off", and empty accounts as "nothing to route to".
+	const accountsUnavailable =
+		dataAvailability(accountsQuery, accountsLoading).state === "unavailable";
+	const apiKeysUnavailable =
+		dataAvailability(apiKeysQuery, apiKeysLoading).state === "unavailable";
+	const runwaysUnavailableReason = accountsUnavailable
+		? "Account data unavailable"
+		: apiKeysUnavailable
+			? "API key data unavailable"
+			: undefined;
 
 	const loading = accountsLoading || analyticsLoading;
 	const ready = accounts && analytics;
@@ -85,6 +108,10 @@ export const LimitsTab = React.memo(() => {
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
 				now={now}
+				runways={keyRunways}
+				accounts={accountList}
+				runwaysLoading={apiKeysLoading && !apiKeys}
+				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>
 
 			{/* Per-account live utilization — grouped with the pool tiles above as the

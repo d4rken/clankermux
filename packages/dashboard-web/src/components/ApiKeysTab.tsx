@@ -13,7 +13,9 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { type Account, api } from "../api";
-import { useAccounts } from "../hooks/queries";
+import { fetchApiKeys, useAccounts } from "../hooks/queries";
+import { describePinTarget } from "../lib/api-key-pin-label";
+import { queryKeys } from "../lib/query-keys";
 import { CopyButton } from "./CopyButton";
 import { Button } from "./ui/button";
 import {
@@ -52,28 +54,6 @@ interface ApiKey {
 	isActive: boolean;
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
-}
-
-/**
- * Human-readable summary of a key's routing pin, shown in the key row. Pure and
- * exported so it can be unit-tested without mounting the whole tab.
- *   - pinned account  -> "Pinned → <accountName>" (falls back to the id when the
- *     account no longer exists)
- *   - pinned providers -> "Pinned → <providers joined with ', '>"
- *   - neither          -> "Unpinned" (normal load-balancing)
- */
-export function describePinTarget(
-	key: Pick<ApiKey, "pinnedAccountId" | "pinnedProviders">,
-	accounts: Pick<Account, "id" | "name">[],
-): string {
-	if (key.pinnedAccountId) {
-		const account = accounts.find((a) => a.id === key.pinnedAccountId);
-		return `Pinned → ${account?.name ?? key.pinnedAccountId}`;
-	}
-	if (key.pinnedProviders && key.pinnedProviders.length > 0) {
-		return `Pinned → ${key.pinnedProviders.join(", ")}`;
-	}
-	return "Unpinned";
 }
 
 /**
@@ -172,12 +152,6 @@ export function sortApiKeys<
 
 type PinMode = "unpinned" | "account" | "provider";
 
-interface ApiKeysResponse {
-	success: boolean;
-	data: ApiKey[];
-	count: number;
-}
-
 interface ApiKeyStatsResponse {
 	success: boolean;
 	data: {
@@ -254,16 +228,17 @@ export function ApiKeysTab() {
 			enabled: !generatedKey, // Don't fetch while showing generated key
 		});
 
-	// Fetch API keys - only when not showing the generated key dialog
+	// Fetch API keys - only when not showing the generated key dialog.
+	// Shares `queryKeys.apiKeys()` and the shared fetcher with `useApiKeys`, so
+	// the runway surfaces on Overview and Usage see every create/enable/disable/
+	// delete/rename/re-pin performed here. Two caches for one resource drift.
 	const {
-		data: apiKeysResponse,
+		data: apiKeysList,
 		isLoading: isLoadingKeys,
 		error: keysError,
-	} = useQuery<ApiKeysResponse>({
-		queryKey: ["api-keys"],
-		queryFn: async () => {
-			return api.get<ApiKeysResponse>("/api/api-keys");
-		},
+	} = useQuery({
+		queryKey: queryKeys.apiKeys(),
+		queryFn: fetchApiKeys,
 		enabled: !generatedKey, // Don't fetch while showing generated key
 	});
 
@@ -279,7 +254,7 @@ export function ApiKeysTab() {
 			setGeneratedKey({ apiKey: data.apiKey, source: "created" });
 			setNewKeyName("");
 			setIsCreateDialogOpen(false);
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 		onError: (error: Error) => {
@@ -300,7 +275,7 @@ export function ApiKeysTab() {
 			return api.post(endpoint);
 		},
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 	});
@@ -313,7 +288,7 @@ export function ApiKeysTab() {
 		onSuccess: () => {
 			setSelectedKey(null);
 			setIsDeleteDialogOpen(false);
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 	});
@@ -333,7 +308,7 @@ export function ApiKeysTab() {
 			setSelectedKey(null);
 			setIsRegenerateDialogOpen(false);
 			setGeneratedKey({ apiKey: data.apiKey, source: "regenerated" });
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 		},
 		onError: (error: Error) => {
 			// Inline error UI shows mutation.error in the regenerate dialog body;
@@ -358,7 +333,7 @@ export function ApiKeysTab() {
 			setIsRenameDialogOpen(false);
 			setSelectedKey(null);
 			setRenameValue("");
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 			// counts don't change on rename → intentionally NOT invalidating
 			// ["api-keys-stats"]
 		},
@@ -386,7 +361,7 @@ export function ApiKeysTab() {
 		},
 		onSuccess: () => {
 			setEditingPinKeyId(null);
-			queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 		},
 		onError: (error: Error) => {
 			// Inline error UI surfaces mutation.error next to the editor's Save
@@ -459,7 +434,7 @@ export function ApiKeysTab() {
 	};
 
 	const stats = statsResponse?.data;
-	const apiKeys = apiKeysResponse?.data || [];
+	const apiKeys = apiKeysList ?? [];
 	const sortedApiKeys = sortApiKeys(apiKeys, sortMode);
 
 	// Client-side rename validation, computed once for both the inline error

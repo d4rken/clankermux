@@ -2,6 +2,7 @@ import {
 	consumeRequestStarted,
 	getModelFamily,
 	isDebugEnabled,
+	isPinActive,
 	requestEvents,
 	ServiceUnavailableError,
 } from "@clankermux/core";
@@ -405,15 +406,17 @@ async function handleIngestedProxy(
 					message:
 						"The API key routing pin is stored in an invalid form. Refusing to route to avoid violating the pin.",
 				};
-			} else if (
-				pin &&
-				(pin.pinnedAccountId ||
-					(pin.pinnedProviders && pin.pinnedProviders.length > 0))
-			) {
-				requestMeta.pin = {
+			} else if (pin) {
+				// One shared activation rule with the selector (see isPinActive):
+				// a pin only constrains routing when it names an account or a
+				// non-empty provider class.
+				const routingPin = {
 					accountId: pin.pinnedAccountId,
 					providers: pin.pinnedProviders,
 				};
+				if (isPinActive(routingPin)) {
+					requestMeta.pin = routingPin;
+				}
 			}
 		} catch (err) {
 			log.error(

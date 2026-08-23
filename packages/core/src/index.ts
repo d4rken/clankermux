@@ -1,6 +1,11 @@
 // Re-export only used items from each module
 
 export {
+	isAccountAllowedByPin,
+	isPinActive,
+	type RoutingPin,
+} from "./api-key-pin";
+export {
 	// Test-only handle (forget the captured boot commit). NOT a runtime API:
 	// re-capturing at runtime would erase the restart signal.
 	__bootProvenanceTestHooks,
@@ -10,6 +15,18 @@ export {
 	getBootProvenance,
 	isRestartPending,
 } from "./boot-provenance";
+export {
+	computeCapacityRunway,
+	estimateWindowExhaustion,
+	RUNWAY_HORIZON_MS,
+	type RunwayAccountInput,
+	type RunwayCause,
+	type RunwayOutcome,
+	type RunwayWindowInput,
+	type WindowExhaustion,
+	type WindowExhaustionInput,
+	type WindowExhaustionSource,
+} from "./capacity-runway";
 export {
 	BUFFER_SIZES,
 	CACHE,

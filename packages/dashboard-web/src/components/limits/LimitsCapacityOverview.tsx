@@ -4,10 +4,20 @@ import {
 	BarChart3,
 	ChevronDown,
 	Gauge,
+	Hourglass,
 	Info,
 } from "lucide-react";
 import type { ComponentType } from "react";
+import type { KeyRunway } from "../../lib/api-key-runway";
+import { worstKeyRunway } from "../../lib/api-key-runway";
+import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
+import {
+	describeRunwayCause,
+	formatRunwayValue,
+	runwayQualifier,
+	runwayUnavailableReason,
+} from "../../lib/runway-display";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import {
@@ -86,18 +96,6 @@ function quotaOutlook(result: PoolUsageResult): Outlook {
 	return everyReportingAccountCanBeProjected
 		? { label: "On pace", tone: "success" }
 		: { label: "Low usage", tone: "success" };
-}
-
-function formatDuration(ms: number): string {
-	const totalMinutes = Math.max(1, Math.ceil(ms / 60_000));
-	const days = Math.floor(totalMinutes / (24 * 60));
-	const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-	const minutes = totalMinutes % 60;
-	const parts: string[] = [];
-	if (days > 0) parts.push(`${days}d`);
-	if (hours > 0) parts.push(`${hours}h`);
-	if (minutes > 0 && days === 0) parts.push(`${minutes}m`);
-	return parts.join(" ");
 }
 
 function formatCheckpointStamp(resetMs: number, window: PoolWindow): string {
@@ -226,7 +224,7 @@ function WindowPanel({
 						<span className="block truncate text-sm font-medium">
 							{checkpointRemaining == null
 								? "—"
-								: `in ${formatDuration(checkpointRemaining)}`}
+								: `in ${formatDurationDhm(checkpointRemaining)}`}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
 							{result.earliestResetMs == null
@@ -287,10 +285,192 @@ function WindowPanel({
 	);
 }
 
+interface RunwayPanelProps {
+	runways: KeyRunway[];
+	accounts: { id: string; name: string }[];
+	loading: boolean;
+	/** Set when a backing read failed and nothing is cached. */
+	unavailableReason?: string;
+}
+
+/**
+ * How long the pool can keep going at the current pace before an API key has no
+ * account with quota left, worst active key first.
+ *
+ * QUOTA, not availability: pauses, cooldowns, usage throttling and the
+ * provider-overload breaker are deliberately not counted, so the copy here must
+ * never promise routability.
+ */
+function RunwayPanel({
+	runways,
+	accounts,
+	loading,
+	unavailableReason,
+}: RunwayPanelProps) {
+	const worst = worstKeyRunway(runways);
+	const activeRunways = runways.filter((runway) => runway.isActive);
+	// Three distinct states, kept apart on purpose:
+	//  - readBlocked: the backing read failed, or is still in flight. The parent
+	//    computes runways from `apiKeys ?? []` either way, so `worst` is a
+	//    SYNTHETIC row then — commonly the unauthenticated-pool one, whose
+	//    outcome would render as a real figure. Nothing derived from it may be
+	//    shown while this holds.
+	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
+	//    replaces the figure, yet leaves the per-key breakdown standing, because
+	//    one key's missing evidence must not hide another key's definite runway.
+	//  - otherwise the outcome speaks for itself.
+	// Precedence is unavailable -> loading -> resolved: a read that failed must
+	// never be presented as still loading, and neither may render a fallback 0.
+	const readBlocked = loading || unavailableReason != null;
+	const dataResolved = !readBlocked;
+	const outcomeReason = dataResolved
+		? worst === null
+			? "No active API keys or accounts"
+			: runwayUnavailableReason(worst.outcome)
+		: null;
+	const blockingReason = unavailableReason ?? outcomeReason;
+	const stated = dataResolved && worst !== null && outcomeReason == null;
+	const outlook = runwayOutlook(worst, blockingReason, loading);
+	const toneClasses = TONE_CLASSES[outlook.tone];
+	const value = worst && stated ? formatRunwayValue(worst.outcome) : null;
+	const qualifier = worst && stated ? runwayQualifier(worst.outcome) : null;
+	const cause =
+		worst && stated ? describeRunwayCause(worst.outcome, accounts) : null;
+
+	return (
+		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
+			<div className="flex items-center justify-between gap-row">
+				<div className="flex min-w-0 items-center gap-item">
+					<Hourglass className="h-4 w-4 shrink-0 text-muted-foreground" />
+					<h4 className="truncate text-sm font-medium">Quota runway</h4>
+				</div>
+				<StatusChip className={toneClasses.chip}>{outlook.label}</StatusChip>
+			</div>
+
+			<div className="mt-group">
+				<div className="flex items-baseline justify-between gap-row">
+					<p className={cn("figure-xl", toneClasses.figure)}>{value ?? "—"}</p>
+					<p className="text-xs text-muted-foreground">Until a key runs dry</p>
+				</div>
+				<p className="mt-tight text-xs text-muted-foreground">
+					{blockingReason ??
+						(loading
+							? "Reading keys and accounts"
+							: (qualifier ?? "At the current pace"))}
+				</p>
+			</div>
+
+			<dl className="mt-group grid grid-cols-2 divide-x rounded-md border bg-muted/20">
+				<div className="min-w-0 p-row">
+					<dt className="label-caps">Eligible accounts</dt>
+					<dd className="mt-tight min-w-0">
+						<span className="block truncate text-sm font-medium">
+							{worst && stated
+								? `${worst.eligibleAccountCount} ${
+										worst.eligibleAccountCount === 1 ? "account" : "accounts"
+									}`
+								: "—"}
+						</span>
+						<span className="mt-tight block truncate text-xs text-muted-foreground">
+							{worst && stated ? worst.pinLabel : "Not reported"}
+						</span>
+					</dd>
+				</div>
+				<div className="min-w-0 p-row">
+					<dt className="label-caps">Binding window</dt>
+					<dd className="mt-tight min-w-0" title={cause ?? undefined}>
+						<span className="block truncate text-sm font-medium">
+							{cause ?? "—"}
+						</span>
+						<span className="mt-tight block truncate text-xs text-muted-foreground">
+							{stated
+								? cause == null
+									? "No run-out projected"
+									: "First to run out"
+								: "Not reported"}
+						</span>
+					</dd>
+				</div>
+			</dl>
+
+			{activeRunways.length > 0 && dataResolved && (
+				<div className="mt-auto pt-group">
+					<details className="group border-t border-border/60 pt-item">
+						<summary className="flex cursor-pointer list-none items-center justify-between gap-item rounded-sm py-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+							Full breakdown
+							<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+						</summary>
+						<div className="mt-item border-t border-border/50 pt-row text-xs">
+							<ul className="space-y-tight">
+								{activeRunways.map((runway) => (
+									<li
+										key={runway.keyId ?? runway.keyName}
+										className="flex items-baseline justify-between gap-item"
+									>
+										<span className="min-w-0 truncate">
+											<span className="font-medium">{runway.keyName}</span>
+											<span className="text-muted-foreground">
+												{" · "}
+												{runway.pinLabel}
+												{" · "}
+												{runway.eligibleAccountCount}{" "}
+												{runway.eligibleAccountCount === 1
+													? "account"
+													: "accounts"}
+											</span>
+										</span>
+										<span className="shrink-0 tabular-nums">
+											{formatRunwayValue(runway.outcome) ??
+												runwayUnavailableReason(runway.outcome) ??
+												"—"}
+										</span>
+									</li>
+								))}
+							</ul>
+						</div>
+					</details>
+				</div>
+			)}
+		</section>
+	);
+}
+
+/**
+ * Chip for the runway panel, in the same idiom as {@link quotaOutlook}: a
+ * projected run-out inside the modelled horizon is worth watching, no projected
+ * run-out is the reassuring case, and anything unreadable stays neutral rather
+ * than borrowing a severity it has not earned.
+ */
+function runwayOutlook(
+	worst: KeyRunway | null,
+	blockingReason: string | null,
+	loading: boolean,
+): Outlook {
+	if (loading && blockingReason == null) {
+		return { label: "Loading", tone: "neutral" };
+	}
+	if (blockingReason != null || worst === null) {
+		return { label: "Runway unknown", tone: "neutral" };
+	}
+	switch (worst.outcome.kind) {
+		case "out-now":
+			return { label: "Out of quota", tone: "destructive" };
+		case "runway":
+			return { label: "Runs out", tone: "warning" };
+		default:
+			return { label: "No run-out projected", tone: "success" };
+	}
+}
+
 interface LimitsCapacityOverviewProps {
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
 	now: number;
+	/** Per-key quota runways from `computeApiKeyRunways`. */
+	runways: KeyRunway[];
+	accounts: { id: string; name: string }[];
+	runwaysLoading: boolean;
+	runwaysUnavailableReason?: string;
 }
 
 /**
@@ -302,6 +482,10 @@ export function LimitsCapacityOverview({
 	fiveHour,
 	sevenDay,
 	now,
+	runways,
+	accounts,
+	runwaysLoading,
+	runwaysUnavailableReason,
 }: LimitsCapacityOverviewProps) {
 	return (
 		<Card>
@@ -343,7 +527,9 @@ export function LimitsCapacityOverview({
 				</div>
 			</CardHeader>
 			<CardContent>
-				<div className="grid overflow-hidden rounded-md border divide-y md:grid-cols-2 md:divide-x md:divide-y-0">
+				{/* Three panels: stacked and full-width on narrow viewports, side by
+				    side once there is room for them. */}
+				<div className="grid overflow-hidden rounded-md border divide-y lg:grid-cols-3 lg:divide-x lg:divide-y-0">
 					<WindowPanel
 						title="5-hour window"
 						icon={Gauge}
@@ -357,6 +543,12 @@ export function LimitsCapacityOverview({
 						result={sevenDay}
 						window="seven_day"
 						now={now}
+					/>
+					<RunwayPanel
+						runways={runways}
+						accounts={accounts}
+						loading={runwaysLoading}
+						unavailableReason={runwaysUnavailableReason}
 					/>
 				</div>
 				<div className="mt-row flex justify-end">

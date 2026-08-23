@@ -16,7 +16,9 @@ function poolResult(): PoolUsageResult {
 		average: 25,
 		activeAverage: 25,
 		worst: { name: "alpha", pct: 25 },
-		contributing: [{ name: "alpha", pct: 25, resetMs: null }],
+		contributing: [
+			{ accountId: "acc-1", name: "alpha", pct: 25, resetMs: null },
+		],
 		exhausted: [],
 		excluded: [],
 		fallback: [],
@@ -45,6 +47,9 @@ describe("LimitsCapacityOverview calculation help", () => {
 					fiveHour={poolResult()}
 					sevenDay={poolResult()}
 					now={Date.UTC(2026, 7, 22, 12, 0, 0)}
+					runways={[]}
+					accounts={[{ id: "acc-1", name: "alpha" }]}
+					runwaysLoading={false}
 				/>,
 			);
 		});

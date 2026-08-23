@@ -1,4 +1,9 @@
-import { getModelFamily, isAccountAvailable } from "@clankermux/core";
+import {
+	getModelFamily,
+	isAccountAllowedByPin,
+	isAccountAvailable,
+	isPinActive,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type {
@@ -293,10 +298,7 @@ async function selectWithPin(
 	headerForcedId: string | null,
 ): Promise<Account[]> {
 	const affinity = getRoutingAffinity(meta);
-	const isAllowed = (acc: Account): boolean =>
-		pin.accountId
-			? acc.id === pin.accountId
-			: (pin.providers ?? []).includes(acc.provider);
+	const isAllowed = (acc: Account): boolean => isAccountAllowedByPin(pin, acc);
 	// Operator-readable description of what this key is pinned to.
 	const pinDesc = pin.accountId
 		? `account ${pin.accountId}`
@@ -496,7 +498,8 @@ async function selectCandidates(
 
 	// A pin is active when it names a specific account OR a non-empty provider
 	// allow-list. When active, enforce it strictly (header may narrow within).
-	if (pin && (pin.accountId || (pin.providers && pin.providers.length > 0))) {
+	// Same rule as the resolution site in proxy.ts, so the two cannot drift.
+	if (isPinActive(pin) && pin) {
 		return selectWithPin(meta, ctx, model, pin, headerForcedId);
 	}
 
