@@ -14,6 +14,7 @@ import {
 import { useState } from "react";
 import { type Account, api } from "../api";
 import { useAccounts } from "../hooks/queries";
+import { describePinTarget } from "../lib/api-key-pin-label";
 import { CopyButton } from "./CopyButton";
 import { Button } from "./ui/button";
 import {
@@ -52,28 +53,6 @@ interface ApiKey {
 	isActive: boolean;
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
-}
-
-/**
- * Human-readable summary of a key's routing pin, shown in the key row. Pure and
- * exported so it can be unit-tested without mounting the whole tab.
- *   - pinned account  -> "Pinned → <accountName>" (falls back to the id when the
- *     account no longer exists)
- *   - pinned providers -> "Pinned → <providers joined with ', '>"
- *   - neither          -> "Unpinned" (normal load-balancing)
- */
-export function describePinTarget(
-	key: Pick<ApiKey, "pinnedAccountId" | "pinnedProviders">,
-	accounts: Pick<Account, "id" | "name">[],
-): string {
-	if (key.pinnedAccountId) {
-		const account = accounts.find((a) => a.id === key.pinnedAccountId);
-		return `Pinned → ${account?.name ?? key.pinnedAccountId}`;
-	}
-	if (key.pinnedProviders && key.pinnedProviders.length > 0) {
-		return `Pinned → ${key.pinnedProviders.join(", ")}`;
-	}
-	return "Unpinned";
 }
 
 /**

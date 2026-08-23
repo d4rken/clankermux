@@ -2,11 +2,13 @@ import { describe, expect, it } from "bun:test";
 import type { UsagePrediction } from "@clankermux/types";
 import {
 	formatDuration,
+	formatDurationDhm,
 	formatPredictionMessage,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "./format-prediction";
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const FIVE_HOUR = 5 * HOUR;
 const SEVEN_DAY = 7 * 24 * HOUR;
 
@@ -30,6 +32,31 @@ describe("formatDuration", () => {
 
 	it("formats minutes only under an hour", () => {
 		expect(formatDuration(45 * 60 * 1000)).toBe("45m");
+	});
+});
+
+describe("formatDurationDhm", () => {
+	it("drops minutes once a span reaches a day", () => {
+		expect(formatDurationDhm(3 * DAY + 4 * HOUR + 30 * 60 * 1000)).toBe(
+			"3d 4h",
+		);
+	});
+
+	it("keeps hours and minutes below a day", () => {
+		expect(formatDurationDhm(HOUR + 30 * 60 * 1000)).toBe("1h 30m");
+	});
+
+	it("keeps minutes only under an hour", () => {
+		expect(formatDurationDhm(20 * 60 * 1000)).toBe("20m");
+	});
+
+	it("never reports a zero span", () => {
+		expect(formatDurationDhm(0)).toBe("1m");
+		expect(formatDurationDhm(1)).toBe("1m");
+	});
+
+	it("omits an empty hours part on a whole number of days", () => {
+		expect(formatDurationDhm(2 * DAY)).toBe("2d");
 	});
 });
 

@@ -1,5 +1,9 @@
 import { HttpError } from "@clankermux/http-common";
-import type { AnalyticsSection, RetentionSetRequest } from "@clankermux/types";
+import type {
+	AnalyticsSection,
+	ApiKeyResponse,
+	RetentionSetRequest,
+} from "@clankermux/types";
 import {
 	useInfiniteQuery,
 	useMutation,
@@ -180,19 +184,12 @@ export const useForcedAccount = () => {
 	});
 };
 
-interface ApiKeyListItem {
-	id: string;
-	name: string;
-	prefixLast8: string;
-	createdAt: string;
-	lastUsed: string | null;
-	usageCount: number;
-	isActive: boolean;
-}
-
+// The wire type verbatim. A hand-written local copy used to drop the routing-pin
+// fields the endpoint has always sent, which made per-key capacity projection
+// impossible to write against this hook.
 interface ApiKeysListResponse {
 	success: boolean;
-	data: ApiKeyListItem[];
+	data: ApiKeyResponse[];
 	count: number;
 }
 

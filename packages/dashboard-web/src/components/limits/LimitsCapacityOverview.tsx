@@ -7,6 +7,7 @@ import {
 	Info,
 } from "lucide-react";
 import type { ComponentType } from "react";
+import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
@@ -86,18 +87,6 @@ function quotaOutlook(result: PoolUsageResult): Outlook {
 	return everyReportingAccountCanBeProjected
 		? { label: "On pace", tone: "success" }
 		: { label: "Low usage", tone: "success" };
-}
-
-function formatDuration(ms: number): string {
-	const totalMinutes = Math.max(1, Math.ceil(ms / 60_000));
-	const days = Math.floor(totalMinutes / (24 * 60));
-	const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-	const minutes = totalMinutes % 60;
-	const parts: string[] = [];
-	if (days > 0) parts.push(`${days}d`);
-	if (hours > 0) parts.push(`${hours}h`);
-	if (minutes > 0 && days === 0) parts.push(`${minutes}m`);
-	return parts.join(" ");
 }
 
 function formatCheckpointStamp(resetMs: number, window: PoolWindow): string {
@@ -226,7 +215,7 @@ function WindowPanel({
 						<span className="block truncate text-sm font-medium">
 							{checkpointRemaining == null
 								? "—"
-								: `in ${formatDuration(checkpointRemaining)}`}
+								: `in ${formatDurationDhm(checkpointRemaining)}`}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
 							{result.earliestResetMs == null

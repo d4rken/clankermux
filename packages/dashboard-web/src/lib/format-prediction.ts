@@ -49,6 +49,25 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * Formats a positive millisecond duration as the two largest meaningful units:
+ * "Xd Yh" from a day up, "Xh Ym" below that, "Ym" under an hour. Distinct from
+ * {@link formatDuration}, whose callers depend on the unbounded-hours shape;
+ * this one is for spans that routinely run into days (quota runway, next
+ * checkpoint).
+ */
+export function formatDurationDhm(ms: number): string {
+	const totalMinutes = Math.max(1, Math.ceil(ms / 60_000));
+	const days = Math.floor(totalMinutes / (24 * 60));
+	const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+	const minutes = totalMinutes % 60;
+	const parts: string[] = [];
+	if (days > 0) parts.push(`${days}d`);
+	if (hours > 0) parts.push(`${hours}h`);
+	if (minutes > 0 && days === 0) parts.push(`${minutes}m`);
+	return parts.join(" ");
+}
+
+/**
  * How far projected exhaustion must fall short of the reset before a "runs out
  * early" projection is treated as certain enough to render red rather than
  * amber, as a fraction of the window's own length.
