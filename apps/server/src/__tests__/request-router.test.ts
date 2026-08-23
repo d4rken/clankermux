@@ -240,14 +240,11 @@ describe("mounted agent traffic", () => {
 	// Codex's models-manager identifies itself with `?client_version=`, and the
 	// handler picks the reply SHAPE from it. If the mount strip dropped the query
 	// string, every Codex fetch would silently get the OpenAI list shape instead
-	// of a catalog — the exact failure this route was changed to fix.
-	it("preserves the models query string through both mounts", async () => {
+	// of a catalog. `GET /v1/models` is served under `/wire/openai` only:
+	// `isDialectAllowed` rejects it on the Anthropic mount.
+	it("preserves the models query string through the OpenAI mount", async () => {
 		const { deps, calls } = makeDeps();
 
-		await routeRequest(
-			makeRequest("/v1/models?client_version=0.149.0", { headers: withKey }),
-			deps,
-		);
 		await routeRequest(
 			makeRequest("/wire/openai/v1/models?client_version=0.149.0", {
 				headers: withKey,
@@ -256,11 +253,6 @@ describe("mounted agent traffic", () => {
 		);
 
 		expect(calls.modelUrls).toEqual([
-			{
-				pathname: "/v1/models",
-				search: "?client_version=0.149.0",
-				apiKeyId: "key-1",
-			},
 			{
 				pathname: "/v1/models",
 				search: "?client_version=0.149.0",
