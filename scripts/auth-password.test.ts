@@ -14,7 +14,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative as relativePath } from "node:path";
 import {
@@ -145,6 +145,38 @@ describe("the resolved path is always reported", () => {
 		const out = io([]);
 		await runAuthPasswordCommand({ action: "status", dbPath }, out);
 		expect(out.lines[0]).toBe(`Database: ${dbPath}`);
+	});
+
+	it("names the file a symlink points AT when the command succeeds", async () => {
+		// The operator's confirmation of which deployment they just changed. A
+		// link named on the command line is not that file: `~/db.sqlite` can point
+		// anywhere, and a stale link points at a database nobody is serving from.
+		createDb();
+		const link = join(dir, "link-to.db");
+		symlinkSync(dbPath, link);
+		const out = io([]);
+		expect(
+			await runAuthPasswordCommand({ action: "status", dbPath: link }, out),
+		).toBe(0);
+		expect(out.lines[0]).toBe(`Database: ${link}`);
+		expect(out.lines.join("\n")).toContain(
+			`Resolved through symlinks to: ${dbPath}`,
+		);
+	});
+
+	it("names it through a symlink when the command REFUSES too", async () => {
+		// The refusal message is the one an operator reads while something is
+		// already wrong, so it has to name the file that was actually inspected.
+		await Bun.write(dbPath, "");
+		const link = join(dir, "link-to.db");
+		symlinkSync(dbPath, link);
+		const out = io(["a new password", "a new password"]);
+		expect(
+			await runAuthPasswordCommand({ action: "set", dbPath: link }, out),
+		).toBe(1);
+		const output = out.lines.join("\n");
+		expect(output).toContain(`Resolved through symlinks to: ${dbPath}`);
+		expect(output).toContain(`Checked: ${dbPath}`);
 	});
 });
 
@@ -327,6 +359,33 @@ describe("a file that is not a ClankerMux database is refused, not adopted", () 
 		const { code, output } = await attemptSet();
 		expect(code).toBe(1);
 		expect(output).toContain('Its "accounts" table is missing');
+	});
+
+	it("refuses when only the SECOND required table is wrong", async () => {
+		// A plausible near-miss: something that really does have our accounts
+		// table (a partial copy, a half-finished restore) but not our requests
+		// table. Checking the first table and stopping would adopt it, run the
+		// migrations, and report a password set on a database no server reads.
+		const db = new Database(dbPath, { create: true });
+		db.run(
+			"CREATE TABLE accounts (id TEXT PRIMARY KEY, name TEXT, provider TEXT, api_key TEXT)",
+		);
+		db.run("CREATE TABLE requests (id TEXT PRIMARY KEY, timestamp INTEGER)");
+		db.close();
+
+		const { code, output } = await attemptSet();
+		expect(code).toBe(1);
+		expect(output).toContain('Its "requests" table is missing: method, path.');
+
+		// Nothing was migrated into it: the two tables it had are the two it has.
+		const after = new Database(dbPath, { readwrite: true, create: false });
+		const tables = (
+			after
+				.query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+				.all() as Array<{ name: string }>
+		).map((row) => row.name);
+		after.close();
+		expect(tables.sort()).toEqual(["accounts", "requests"]);
 	});
 
 	it("never prompts for a password it is not going to store", async () => {
