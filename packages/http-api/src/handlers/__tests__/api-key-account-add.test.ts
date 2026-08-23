@@ -1,7 +1,8 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
-import { DatabaseFactory } from "@clankermux/database";
+import { DatabaseFactory, ensureSchema } from "@clankermux/database";
 import {
 	API_KEY_PROVIDERS,
 	createApiKeyAccountAddHandler,
@@ -390,5 +391,87 @@ describe("createApiKeyAccountAddHandler", () => {
 			const providers = Object.values(API_KEY_PROVIDERS).map((s) => s.provider);
 			expect(new Set(providers).size).toBe(providers.length);
 		});
+	});
+});
+
+/**
+ * Databases created before c20d32c3 (2026-06-23) — including every database at
+ * the supported migration floor, and this deployment's own — have
+ * `accounts.auto_pause_on_overage_enabled INTEGER DEFAULT 0`, where a fresh
+ * install has DEFAULT 1. No ALTER can change an existing column's default, so
+ * an INSERT that leaves the column out creates accounts with overage
+ * auto-pause OFF there and ON here, forever.
+ */
+describe("createApiKeyAccountAddHandler on a database with the old default", () => {
+	const LEGACY_DB_PATH = "/tmp/test-api-key-account-add-legacy-default.db";
+	let dbOps: DatabaseOperations;
+
+	/**
+	 * Build the accounts table from the CURRENT DDL with only the default
+	 * reverted, then let DatabaseFactory open it: `CREATE TABLE IF NOT EXISTS`
+	 * leaves the existing table, and its default, alone.
+	 */
+	function seedLegacyDefaultDb(): void {
+		const template = new Database(":memory:");
+		ensureSchema(template);
+		const { sql } = template
+			.prepare(
+				`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'`,
+			)
+			.get() as { sql: string };
+		template.close();
+
+		const legacy = sql.replace(
+			"auto_pause_on_overage_enabled INTEGER DEFAULT 1",
+			"auto_pause_on_overage_enabled INTEGER DEFAULT 0",
+		);
+		if (legacy === sql) {
+			throw new Error(
+				"accounts DDL no longer carries the DEFAULT 1 this fixture reverts",
+			);
+		}
+
+		const db = new Database(LEGACY_DB_PATH, { create: true });
+		db.run(legacy);
+		db.close();
+	}
+
+	beforeEach(() => {
+		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
+		seedLegacyDefaultDb();
+		DatabaseFactory.initialize(LEGACY_DB_PATH);
+		dbOps = DatabaseFactory.getInstance();
+	});
+
+	afterEach(() => {
+		DatabaseFactory.reset();
+		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
+	});
+
+	it("enables overage auto-pause explicitly instead of inheriting the default", async () => {
+		const columnDefault = dbOps
+			.getDatabase()
+			.query<{ dflt_value: string | null }, []>(
+				`SELECT dflt_value FROM pragma_table_xinfo('accounts')
+				 WHERE name = 'auto_pause_on_overage_enabled'`,
+			)
+			.get();
+		// Without this the test would pass for the wrong reason.
+		expect(columnDefault?.dflt_value).toBe("0");
+
+		const handler = createApiKeyAccountAddHandler(
+			dbOps,
+			API_KEY_PROVIDERS.kilo,
+		);
+		const res = await handler(post({ name: "acct", apiKey: "k" }));
+		expect(res.status).toBe(200);
+
+		const stored = dbOps
+			.getDatabase()
+			.query<{ auto_pause_on_overage_enabled: number }, [string]>(
+				`SELECT auto_pause_on_overage_enabled FROM accounts WHERE name = ?`,
+			)
+			.get("acct");
+		expect(stored?.auto_pause_on_overage_enabled).toBe(1);
 	});
 });
