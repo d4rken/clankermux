@@ -61,6 +61,10 @@ import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
+	QuotaDriftResultRepository,
+	type QuotaDriftResultRow,
+} from "./repositories/quota-drift-result.repository";
+import {
 	type RequestData,
 	RequestRepository,
 	type RequestRoutingData,
@@ -393,6 +397,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
 	private codexResetCreditEvents: CodexResetCreditEventRepository;
+	private quotaDriftResults: QuotaDriftResultRepository;
 
 	constructor(
 		dbPath?: string,
@@ -475,6 +480,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.usageScopedSnapshots = retrying(
 			new UsageScopedSnapshotRepository(this.adapter),
 			"usageScopedSnapshots",
+		);
+		this.quotaDriftResults = retrying(
+			new QuotaDriftResultRepository(this.adapter),
+			"quotaDriftResults",
 		);
 		this.memorySnapshots = retrying(
 			new MemorySnapshotRepository(this.adapter),
@@ -2242,6 +2251,22 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Precomputed quota-drift results ───────────────────────────────────────
+
+	/**
+	 * Store one completed quota-drift precompute pass. Written from the MAIN
+	 * thread: the pass itself runs on a read-only worker connection, which
+	 * cannot write.
+	 */
+	async insertQuotaDriftResult(row: QuotaDriftResultRow): Promise<void> {
+		await this.quotaDriftResults.insertResult(row);
+	}
+
+	/** The newest stored quota-drift payload, or null before the first pass. */
+	async getLatestQuotaDriftResult(): Promise<QuotaDriftResultRow | null> {
+		return this.quotaDriftResults.getLatest();
 	}
 
 	// ── Memory snapshot operations delegated to repository ─────────────────────

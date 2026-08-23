@@ -47,6 +47,10 @@ export {
 	type CodexResetCreditEventRow,
 } from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
+export {
+	QuotaDriftResultRepository,
+	type QuotaDriftResultRow,
+} from "./repositories/quota-drift-result.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
