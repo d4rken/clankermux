@@ -3,6 +3,8 @@ import type { QueryClient } from "@tanstack/react-query";
 
 export const queryKeys = {
 	all: ["clankermux"] as const,
+	/** The management login gate. Public by policy, so it answers even signed out. */
+	authStatus: () => [...queryKeys.all, "auth-status"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
 	// Server-computed per-key quota runway. Derived from BOTH the account state
 	// and the API-key set (with their routing pins), so it is invalidated
