@@ -8,7 +8,7 @@
 # ClankerMux <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.svg"><img src="docs/media/logo-light.svg" alt="" height="30" align="center" /></picture>
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
-[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.2.8-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
@@ -67,7 +67,11 @@ Features:
 
 ## Build from source
 
-Requires [Bun](https://bun.sh).
+Requires [Bun](https://bun.sh) 1.4.0 or newer. On older runtimes a client
+aborting a streaming response segfaults the process
+([oven-sh/bun#32111](https://github.com/oven-sh/bun/issues/32111)), which is
+routine traffic for a proxy, so ClankerMux refuses to start on them. The exact
+version CI builds and tests against is pinned in `.bun-version`.
 
 ```bash
 git clone https://github.com/d4rken/clankermux

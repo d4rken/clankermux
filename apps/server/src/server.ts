@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Config, type RuntimeConfig } from "@clankermux/config";
 import {
+	assertBunRuntimeFloor,
+	BunRuntimeFloorError,
 	CACHE,
 	captureBootProvenance,
 	DEFAULT_STRATEGY,
@@ -611,6 +613,18 @@ export default async function startServer(options?: {
 			},
 		};
 	}
+
+	// Refuse an unsupported runtime before anything else runs. Below the floor
+	// the proxy segfaults natively whenever a client aborts a streaming
+	// response (oven-sh/bun#32111) — uncatchable, so this string comparison is
+	// the only chance to say why. See packages/core/src/bun-runtime-floor.ts
+	// for the trade this makes and why only a positively-parsed low version
+	// refuses.
+	//
+	// This is the earliest point in *our* code, not the earliest point in the
+	// process: the whole import graph above already executed. A runtime too old
+	// to parse this file is beyond anything we can report on.
+	assertBunRuntimeFloor();
 
 	// Stamp the commit this process boots on, before anything else can spend
 	// time. The checkout IS the deployment, so HEAD moves under us whenever work
@@ -1870,6 +1884,20 @@ if (import.meta.main) {
 		process.env.SSL_CERT_PATH = sslCertPath;
 	}
 
-	// Start the server asynchronously
-	void startServer({ port, sslKeyPath, sslCertPath });
+	// Start the server asynchronously. This is the only boundary allowed to end
+	// the process: startServer() is also an exported programmatic entrypoint, so
+	// everything below it reports failure by throwing, never by exiting.
+	// Previously this was a bare `void` call, which surfaced a startup failure
+	// as an unhandled rejection with no exit code we could give meaning to.
+	startServer({ port, sslKeyPath, sslCertPath }).catch((error: unknown) => {
+		if (error instanceof BunRuntimeFloorError) {
+			// A configuration error a restart cannot fix. The distinct status
+			// lets systemd stop retrying — see
+			// deploy/systemd/clankermux.service.d/runtime-floor.conf.
+			console.error(error.message);
+			process.exit(error.exitCode);
+		}
+		console.error("❌ Server failed to start:", error);
+		process.exit(1);
+	});
 }

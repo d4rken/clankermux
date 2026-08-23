@@ -27,6 +27,15 @@ export {
 	isRestartPending,
 } from "./boot-provenance";
 export {
+	assertBunRuntimeFloor,
+	type BunRuntimeCheck,
+	BunRuntimeFloorError,
+	type BunRuntimeVerdict,
+	evaluateBunRuntime,
+	MIN_BUN_VERSION,
+	UNSUPPORTED_RUNTIME_EXIT_CODE,
+} from "./bun-runtime-floor";
+export {
 	computeCapacityRunway,
 	estimateWindowExhaustion,
 	RUNWAY_HORIZON_MS,
