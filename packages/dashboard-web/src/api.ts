@@ -17,6 +17,7 @@ import type {
 	MemoryHistoryResponse,
 	PaymentKind,
 	PaymentsSummary,
+	QuotaDriftResponse,
 	RequestPayload,
 	RequestResponse,
 	RetentionGetResponse,
@@ -950,6 +951,27 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<UsageHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Precomputed quota-drift analysis for the Analytics "Quota" tab. Takes no
+	// params: the pass fits the whole retained history, so there is no range to
+	// pass, and `status: "computing"` is a normal answer before the first pass.
+	async getQuotaDrift(): Promise<QuotaDriftResponse> {
+		const startTime = Date.now();
+		const url = "/api/analytics/quota-drift";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<QuotaDriftResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
