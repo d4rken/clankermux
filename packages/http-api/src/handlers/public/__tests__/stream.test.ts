@@ -24,7 +24,13 @@ import {
 	resetRequestEventRegistry,
 } from "@clankermux/core";
 import { closeAllSseStreams } from "../../../sse-registry";
-import { createPublicStreamHandler, toPublicStreamEvent } from "../stream";
+import {
+	createPublicStreamHandler,
+	PUBLIC_STREAM_MAX_CONNECTIONS,
+	PUBLIC_STREAM_MAX_QUEUED_FRAMES,
+	publicStreamConnectionCount,
+	toPublicStreamEvent,
+} from "../stream";
 
 /** Publish on the internal bus, exactly as the proxy does. */
 function emit(evt: RequestEvt): void {
@@ -143,6 +149,77 @@ describe("connect handshake", () => {
 				statusCode: null,
 			},
 		]);
+	});
+});
+
+describe("the surface is unauthenticated, so it bounds itself", () => {
+	function connect(handler: (req: Request) => Response): Response {
+		return handler(new Request("http://localhost/public/v1/stream"));
+	}
+
+	it("refuses past the connection cap with 503 and Retry-After", async () => {
+		// Every connection is a listener the proxy's own request traffic is
+		// fanned out to, so the connection count multiplies the cost of ordinary
+		// AI requests. Nothing else limits it: setMaxListeners only moves a
+		// warning threshold.
+		expect(publicStreamConnectionCount()).toBe(0);
+		const handler = createPublicStreamHandler(60_000);
+		const open: Response[] = [];
+		for (let i = 0; i < PUBLIC_STREAM_MAX_CONNECTIONS; i++) {
+			const res = connect(handler);
+			expect(res.status).toBe(200);
+			open.push(res);
+		}
+		expect(publicStreamConnectionCount()).toBe(PUBLIC_STREAM_MAX_CONNECTIONS);
+
+		const refused = connect(handler);
+		expect(refused.status).toBe(503);
+		expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+		// A refused connection must not have installed anything.
+		expect(publicStreamConnectionCount()).toBe(PUBLIC_STREAM_MAX_CONNECTIONS);
+
+		// Teardown frees exactly one slot per connection. A double decrement here
+		// would raise the effective cap for the life of the process.
+		closeAllSseStreams();
+		expect(publicStreamConnectionCount()).toBe(0);
+		for (const res of open) {
+			await res.body?.cancel().catch(() => {});
+		}
+		expect(publicStreamConnectionCount()).toBe(0);
+
+		expect(connect(handler).status).toBe(200);
+	});
+
+	it("drops a consumer that has stopped reading", async () => {
+		const before = requestEvents.listenerCount("event");
+		const res = connect(createPublicStreamHandler(60_000));
+		expect(requestEvents.listenerCount("event")).toBe(before + 1);
+		expect(publicStreamConnectionCount()).toBe(1);
+
+		// Nobody reads this stream. Frames accumulate on OUR heap, and every
+		// proxied request adds one more.
+		for (let i = 0; i < PUBLIC_STREAM_MAX_QUEUED_FRAMES * 2; i++) {
+			emit({
+				type: "ingress",
+				id: `req-${i}`,
+				timestamp: 1_700_000_000_000 + i,
+				method: "POST",
+				path: "/v1/messages",
+				project: null,
+				model: null,
+			});
+		}
+
+		expect(requestEvents.listenerCount("event")).toBe(before);
+		expect(publicStreamConnectionCount()).toBe(0);
+
+		// The connection is finished, not merely detached: its body ends.
+		const reader = res.body?.getReader();
+		if (!reader) throw new Error("no body");
+		let done = false;
+		while (!done) {
+			done = (await reader.read()).done;
+		}
 	});
 });
 

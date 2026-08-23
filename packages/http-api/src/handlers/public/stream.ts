@@ -4,6 +4,8 @@ import {
 	type RequestStreamEvt,
 	requestEvents,
 } from "@clankermux/core";
+import { jsonResponse } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
 import { registerSseCloser } from "../../sse-registry";
 import {
 	PUBLIC_SCHEMA,
@@ -12,10 +14,49 @@ import {
 	truncateUtf8,
 } from "./dto";
 
+const log = new Logger("PublicStream");
+
 // Periodic SSE comment so the socket never sits idle long enough for
 // Bun.serve's idleTimeout (255s) to kill a quiet widget stream overnight.
 // EventSource ignores comment lines; they only reset the server idle timer.
 const SSE_HEARTBEAT_INTERVAL_MS = 30_000;
+
+/**
+ * Concurrent connections this surface will serve, process-wide.
+ *
+ * This lane is unauthenticated BY DESIGN and permanently so, which means it
+ * cannot borrow the management gate's protection. Every connection installs a
+ * bus listener and a heartbeat, and every proxied AI request is then translated
+ * and enqueued once PER listener — so connection count is a multiplier on the
+ * CPU and heap cost of ordinary proxy traffic. `setMaxListeners(200)` moves a
+ * warning threshold and limits nothing.
+ *
+ * Thirty-two is far above the real consumer set (a desk panel, a panel applet,
+ * a browser tab or two) and far below a count that could disturb the proxy
+ * sharing this process.
+ */
+export const PUBLIC_STREAM_MAX_CONNECTIONS = 32;
+
+/** What a refused caller is told to wait before trying again. */
+const PUBLIC_STREAM_RETRY_AFTER_SECONDS = 30;
+
+/**
+ * Frames allowed to sit unread on one connection before it is dropped.
+ *
+ * A device that stops reading (asleep, wedged, or deliberately silent) does not
+ * stop us producing: its frames accumulate in the stream's queue, on OUR heap.
+ * A consumer this far behind is not going to catch up, and the widget protocol
+ * is snapshot-first, so reconnecting costs it nothing but a fresh snapshot.
+ */
+export const PUBLIC_STREAM_MAX_QUEUED_FRAMES = 64;
+
+/** Live connections. Incremented on accept, decremented exactly once on teardown. */
+let openStreams = 0;
+
+/** Test hook: how many connections this process currently holds open. */
+export function publicStreamConnectionCount(): number {
+	return openStreams;
+}
 
 function str(value: string | null | undefined): string | null {
 	return value == null ? null : truncateUtf8(value);
@@ -118,12 +159,26 @@ export function createPublicStreamHandler(
 	readActive: () => ActiveRequestEntry[] = getActiveRequests,
 ) {
 	return (req: Request): Response => {
+		if (openStreams >= PUBLIC_STREAM_MAX_CONNECTIONS) {
+			return jsonResponse(
+				{
+					schema: PUBLIC_SCHEMA,
+					error: "too_many_streams",
+					message: `At most ${PUBLIC_STREAM_MAX_CONNECTIONS} concurrent stream connections are served.`,
+				},
+				503,
+				{ "Retry-After": String(PUBLIC_STREAM_RETRY_AFTER_SECONDS) },
+			);
+		}
+		openStreams++;
+
 		let writeHandler: ((data: RequestStreamEvt) => void) | null = null;
 		let heartbeat: ReturnType<typeof setInterval> | null = null;
 		let isClosed = false;
 		let streamController: ReadableStreamDefaultController<Uint8Array> | null =
 			null;
 		let unregisterCloser: (() => void) | null = null;
+		let counted = true;
 
 		const cleanup = () => {
 			isClosed = true;
@@ -139,11 +194,44 @@ export function createPublicStreamHandler(
 				unregisterCloser();
 				unregisterCloser = null;
 			}
+			// Exactly once, whichever teardown path got here first — cancel, abort,
+			// shutdown, or a consumer dropped for backpressure. A double decrement
+			// would let the cap drift upward for the life of the process.
+			if (counted) {
+				counted = false;
+				openStreams--;
+			}
 		};
 
 		const stream = new ReadableStream({
 			start(controller) {
 				const encoder = new TextEncoder();
+
+				/**
+				 * Frames sitting unread on this connection. The default queuing
+				 * strategy counts CHUNKS with a high-water mark of one, so
+				 * `desiredSize` is one minus the backlog; null means the stream is
+				 * already closed or errored and there is no backlog to speak of.
+				 */
+				const queuedFrames = (): number => {
+					const desired = controller.desiredSize;
+					if (desired === null) return 0;
+					return Math.max(0, 1 - desired);
+				};
+
+				/** Drop a consumer that has stopped draining us. */
+				const dropForBackpressure = () => {
+					if (isClosed) return;
+					log.debug(
+						`Dropping a public stream consumer with ${queuedFrames()} unread frames`,
+					);
+					cleanup();
+					try {
+						controller.close();
+					} catch {
+						// Already closed/errored.
+					}
+				};
 
 				writeHandler = (data: RequestStreamEvt) => {
 					if (isClosed) return;
@@ -155,6 +243,10 @@ export function createPublicStreamHandler(
 						);
 					} catch {
 						cleanup();
+						return;
+					}
+					if (queuedFrames() > PUBLIC_STREAM_MAX_QUEUED_FRAMES) {
+						dropForBackpressure();
 					}
 				};
 
@@ -173,6 +265,12 @@ export function createPublicStreamHandler(
 						controller.enqueue(encoder.encode(": ping\n\n"));
 					} catch {
 						cleanup();
+						return;
+					}
+					// A silent stream still accrues heartbeats against a consumer that
+					// is not reading; the backlog is what matters, not the traffic.
+					if (queuedFrames() > PUBLIC_STREAM_MAX_QUEUED_FRAMES) {
+						dropForBackpressure();
 					}
 				}, heartbeatIntervalMs);
 
