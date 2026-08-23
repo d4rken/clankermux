@@ -12,6 +12,26 @@ const log = new Logger("ModelsRoute");
  */
 const CLIENT_VERSION_PARAM = "client_version";
 
+/**
+ * What we are willing to treat as a client version: a dotted numeric release
+ * like `0.149.0`, nothing else.
+ *
+ * This is not cosmetic validation. The value becomes a cache key AND is
+ * forwarded upstream, so an unconstrained one lets a caller mint an unbounded
+ * number of distinct keys — each a cache miss, and each a fresh authenticated
+ * call to chatgpt.com carrying one of OUR accounts' OAuth bearers. A client
+ * looping on a varying parameter would turn this route into sustained
+ * automated traffic against a real account, which is the ban-shaped pattern,
+ * not merely a memory leak. Anything unrecognised is treated as "no version":
+ * still a Codex-shaped request, served from the shared unversioned entry.
+ */
+const CLIENT_VERSION_PATTERN = /^\d{1,4}(\.\d{1,4}){0,3}$/;
+
+function sanitizeClientVersion(raw: string | null): string | null {
+	if (!raw) return null;
+	return CLIENT_VERSION_PATTERN.test(raw) ? raw : null;
+}
+
 export interface CodexModelCatalogBody {
 	bodyText: string;
 	etag: string | null;
@@ -45,7 +65,9 @@ export async function handleModelsRoute(
 		return deps.staticModels();
 	}
 
-	const clientVersion = url.searchParams.get(CLIENT_VERSION_PARAM) || null;
+	const clientVersion = sanitizeClientVersion(
+		url.searchParams.get(CLIENT_VERSION_PARAM),
+	);
 
 	let catalog: CodexModelCatalogBody | null = null;
 	try {

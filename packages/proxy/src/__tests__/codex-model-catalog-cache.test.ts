@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
+	CODEX_MODEL_CATALOG_MAX_ENTRIES,
 	CODEX_MODEL_CATALOG_TTL_MS,
 	CodexModelCatalogCache,
 } from "../codex-model-catalog-cache";
@@ -215,6 +216,27 @@ describe("CodexModelCatalogCache", () => {
 		expect(await cache.get("0.149.0")).toBeNull();
 		expect(await cache.get("0.149.0")).not.toBeNull();
 		expect(fetchCalls.length).toBeGreaterThanOrEqual(2);
+	});
+
+	// The key comes from a request parameter. A cache that only holds its bound
+	// while its caller sanitizes does not hold its bound.
+	test("bounds the number of cached versions, evicting the least recently written", async () => {
+		const { cache, fetchCalls, advance } = harness();
+
+		for (let i = 0; i < CODEX_MODEL_CATALOG_MAX_ENTRIES + 3; i++) {
+			await cache.get(`0.${i}.0`);
+			advance(1);
+		}
+		const fetchesAfterFill = fetchCalls.length;
+
+		// The three oldest were evicted, so they miss and refetch...
+		await cache.get("0.0.0");
+		expect(fetchCalls.length).toBe(fetchesAfterFill + 1);
+
+		// ...while a recent one is still resident and costs nothing.
+		const recent = `0.${CODEX_MODEL_CATALOG_MAX_ENTRIES + 2}.0`;
+		await cache.get(recent);
+		expect(fetchCalls.length).toBe(fetchesAfterFill + 1);
 	});
 
 	// The class promises callers a value or null. It must keep that promise

@@ -109,6 +109,54 @@ describe("handleModelsRoute", () => {
 		expect(((await resp.json()) as { object?: string }).object).toBe("list");
 	});
 
+	// The value becomes a cache key and is forwarded upstream on an authenticated
+	// call to chatgpt.com, so an unconstrained one lets a caller mint unlimited
+	// distinct keys — every one a cache miss and a fresh upstream request on a
+	// real account's OAuth bearer.
+	test("refuses to forward a client_version that is not a dotted release", async () => {
+		const { deps: d, versions } = deps(async () => ({
+			bodyText: CATALOG_BODY,
+			etag: null,
+		}));
+
+		for (const bogus of [
+			"0.149.0; DROP",
+			"../../etc/passwd",
+			"9".repeat(4096),
+			"latest",
+			"0.149.0-beta",
+			"v0.149.0",
+			"0.0.0.0.0",
+		]) {
+			await handleModelsRoute(
+				new URL(
+					`http://proxy.local/v1/models?client_version=${encodeURIComponent(bogus)}`,
+				),
+				d,
+			);
+		}
+
+		// Still Codex-shaped requests — they just collapse onto the shared
+		// unversioned entry instead of each minting a key of their own.
+		expect(versions).toEqual([null, null, null, null, null, null, null]);
+	});
+
+	test("forwards well-formed release numbers unchanged", async () => {
+		const { deps: d, versions } = deps(async () => ({
+			bodyText: CATALOG_BODY,
+			etag: null,
+		}));
+
+		for (const good of ["0.149.0", "1", "0.149", "2026.8.69"]) {
+			await handleModelsRoute(
+				new URL(`http://proxy.local/v1/models?client_version=${good}`),
+				d,
+			);
+		}
+
+		expect(versions).toEqual(["0.149.0", "1", "0.149", "2026.8.69"]);
+	});
+
 	// Presence selects the shape; the value is only what gets forwarded upstream.
 	// An empty parameter is still a Codex-shaped request.
 	test("treats an empty client_version as present but forwards no version", async () => {

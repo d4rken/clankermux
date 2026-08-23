@@ -17,6 +17,18 @@ const log = new Logger("CodexModelCatalogCache");
  */
 export const CODEX_MODEL_CATALOG_TTL_MS = 6 * 60 * 60 * 1_000;
 
+/**
+ * Most distinct client versions kept at once, oldest evicted first.
+ *
+ * The key originates in a request parameter, so this is a self-defence bound,
+ * not a tuning knob: without it a caller varying the version could grow the map
+ * indefinitely and, worse, force a fresh authenticated upstream call per novel
+ * value. Callers are expected to sanitize too (see apps/server/models-route),
+ * but a cache that only holds its bound when its caller behaves does not hold
+ * it. Real deployments see one or two versions; a handful is generous.
+ */
+export const CODEX_MODEL_CATALOG_MAX_ENTRIES = 8;
+
 export interface CodexModelCatalogEntry {
 	bodyText: string;
 	etag: string | null;
@@ -95,7 +107,13 @@ export class CodexModelCatalogCache {
 	): Promise<CodexModelCatalogEntry | null> {
 		const fetched = await this.fetchFromAnyAccount(clientVersion);
 		if (fetched) {
+			// Delete before set so insertion order tracks write recency: Map keeps
+			// a re-`set` key in its original position, which would make eviction
+			// drop the entry written longest ago rather than the one least recently
+			// refreshed.
+			this.slots.delete(key);
 			this.slots.set(key, { entry: fetched, fetchedAt: this.deps.now() });
+			this.evictOverflow();
 			return fetched;
 		}
 
@@ -111,6 +129,19 @@ export class CodexModelCatalogCache {
 			return stale.entry;
 		}
 		return null;
+	}
+
+	/**
+	 * Hold at most {@link CODEX_MODEL_CATALOG_MAX_ENTRIES}, dropping the least
+	 * recently written first. Relies on Map iterating in insertion order, which
+	 * `refresh` keeps aligned with write recency by deleting before setting.
+	 */
+	private evictOverflow(): void {
+		while (this.slots.size > CODEX_MODEL_CATALOG_MAX_ENTRIES) {
+			const oldest = this.slots.keys().next();
+			if (oldest.done) return;
+			this.slots.delete(oldest.value);
+		}
 	}
 
 	private async fetchFromAnyAccount(
