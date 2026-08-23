@@ -29,24 +29,39 @@ import {
 	type BacktestWindowKind,
 	bootstrapDelta,
 	commonCohort,
+	deploymentCohort,
 	deriveOutcome,
 	type Estimator,
+	evaluateHeldOutGate,
 	FIVE_HOUR_WINDOW_MS,
 	formatBacktestReport,
+	type GateEstimatorMetrics,
 	type ReportAccountContribution,
 	type ReportBootstrapEntry,
 	type ReportDatasetSummary,
 	type ReportEstimatorMetrics,
+	type ReportGateRow,
 	type ReportProviderMetrics,
 	type ReportRange,
 	type ReportRateLimitDiagnosticRow,
+	type ReportRedRuleRow,
+	type ReportSelectionBlock,
+	type ReportSelectionRow,
 	type ReportWindowBlock,
 	SEVEN_DAY_WINDOW_MS,
 	lifetimeAverageEstimator,
 	macroAverageByAccount,
+	makeDowSeasonalEstimator,
+	makeEndpointSlopeEstimator,
 	makeOlsEstimator,
+	makeTrailingBurnEstimator,
 	naivePersistenceEstimator,
+	scoreForSelection,
 	scoreRecords,
+	scoreRedRule,
+	selectTuningWinner,
+	toSelectionRecords,
+	usableCoverage,
 } from "../packages/core/src/prediction-backtest";
 import { isResetBoundary, splitSeries } from "../packages/core/src/usage-prediction";
 import { resolveDbPath } from "../packages/database/src/paths";
@@ -70,6 +85,13 @@ const WINDOW_SPECS: Record<
 
 /** Widest production lookback: rows this far before a range still feed its first instant. */
 const LOAD_PAD_BEFORE_MS = 24 * HOUR_MS;
+/**
+ * Pad for estimators that learn from weeks rather than hours. A day-of-week
+ * profile needs every weekday seen at least once before it can answer, so a run
+ * padded by a day would spend its whole first week abstaining and the estimator
+ * would be measured mostly on its own warm-up.
+ */
+const DEEP_HISTORY_PAD_BEFORE_MS = 28 * 24 * HOUR_MS;
 /** Longest window plus slack: enough to see the end of any window a candidate sits in. */
 const LOAD_PAD_AFTER_MS = 8 * 24 * HOUR_MS;
 
@@ -77,6 +99,145 @@ const DEFAULT_SEED = 20260823;
 const BOOTSTRAP_ITERATIONS = 1000;
 
 export const BASELINE_ESTIMATORS = ["ols", "lifetime", "naive"] as const;
+
+// ---------------------------------------------------------------------------
+// Estimator registry
+// ---------------------------------------------------------------------------
+
+export interface EstimatorRegistryEntry {
+	name: string;
+	/** Windows this estimator is meaningful for; it is skipped on the others. */
+	windows: readonly BacktestWindowKind[];
+	/**
+	 * Whether the estimator needs weeks of history before it can answer, which
+	 * decides how far before the scoring range rows are loaded.
+	 */
+	needsDeepHistory: boolean;
+	make: () => Estimator;
+}
+
+const BOTH_WINDOWS = ["five_hour", "seven_day"] as const;
+const FIVE_HOUR_ONLY = ["five_hour"] as const;
+const SEVEN_DAY_ONLY = ["seven_day"] as const;
+
+/**
+ * Every estimator the runner can score, and where it applies.
+ *
+ * The 5-hour window is a THROTTLE (does the burst in progress hit the cap) and
+ * the weekly one is a BUDGET (does the week's spend last), so the candidates
+ * are deliberately split: short segment-aware slopes for the former, multi-day
+ * burn averages for the latter. The three baselines run on both because they
+ * are what is shipping on both.
+ */
+export const ESTIMATOR_REGISTRY: readonly EstimatorRegistryEntry[] = [
+	{
+		name: "ols",
+		windows: BOTH_WINDOWS,
+		needsDeepHistory: false,
+		make: () => makeOlsEstimator(),
+	},
+	{
+		name: "lifetime",
+		windows: BOTH_WINDOWS,
+		needsDeepHistory: false,
+		make: () => lifetimeAverageEstimator,
+	},
+	{
+		name: "naive",
+		windows: BOTH_WINDOWS,
+		needsDeepHistory: false,
+		make: () => naivePersistenceEstimator,
+	},
+	{
+		name: "endpoint-seg-30m",
+		windows: FIVE_HOUR_ONLY,
+		needsDeepHistory: false,
+		make: () => makeEndpointSlopeEstimator(30 * MINUTE_MS),
+	},
+	{
+		name: "endpoint-seg-1h",
+		windows: FIVE_HOUR_ONLY,
+		needsDeepHistory: false,
+		make: () => makeEndpointSlopeEstimator(HOUR_MS),
+	},
+	{
+		name: "endpoint-seg-2h",
+		windows: FIVE_HOUR_ONLY,
+		needsDeepHistory: false,
+		make: () => makeEndpointSlopeEstimator(2 * HOUR_MS),
+	},
+	{
+		name: "ols-1h",
+		windows: FIVE_HOUR_ONLY,
+		needsDeepHistory: false,
+		make: () => makeOlsEstimator(HOUR_MS),
+	},
+	{
+		name: "trailing-3d",
+		windows: SEVEN_DAY_ONLY,
+		needsDeepHistory: true,
+		make: () => makeTrailingBurnEstimator(72 * HOUR_MS),
+	},
+	{
+		name: "trailing-7d",
+		windows: SEVEN_DAY_ONLY,
+		needsDeepHistory: true,
+		make: () => makeTrailingBurnEstimator(7 * 24 * HOUR_MS),
+	},
+	{
+		name: "dow-seasonal",
+		windows: SEVEN_DAY_ONLY,
+		needsDeepHistory: true,
+		make: () => makeDowSeasonalEstimator(),
+	},
+];
+
+const REGISTRY_BY_NAME = new Map(ESTIMATOR_REGISTRY.map((e) => [e.name, e]));
+
+/** Parse and VALIDATE `--estimators=a,b,c`; an unknown name is a hard error. */
+export function parseEstimatorList(value: string): string[] {
+	const names = value
+		.split(",")
+		.map((n) => n.trim())
+		.filter((n) => n.length > 0);
+	if (names.length === 0) throw new Error("--estimators needs at least one name");
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const name of names) {
+		if (!REGISTRY_BY_NAME.has(name)) {
+			throw new Error(
+				`Unknown estimator: ${name}\nKnown: ${[...REGISTRY_BY_NAME.keys()].join(", ")}`,
+			);
+		}
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(name);
+	}
+	return out;
+}
+
+/** The selected estimators that apply to one window, in registry order. */
+export function estimatorsForWindow(
+	names: readonly string[],
+	window: BacktestWindowKind,
+): Map<string, Estimator> {
+	const selected = new Set(names);
+	const out = new Map<string, Estimator>();
+	for (const entry of ESTIMATOR_REGISTRY) {
+		if (!selected.has(entry.name)) continue;
+		if (!entry.windows.includes(window)) continue;
+		out.set(entry.name, entry.make());
+	}
+	return out;
+}
+
+/** How far before the scoring range rows must be loaded for this selection. */
+export function loadPadForEstimators(names: readonly string[]): number {
+	const deep = names.some(
+		(name) => REGISTRY_BY_NAME.get(name)?.needsDeepHistory === true,
+	);
+	return deep ? DEEP_HISTORY_PAD_BEFORE_MS : LOAD_PAD_BEFORE_MS;
+}
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -119,6 +280,8 @@ export interface BacktestRunOptions {
 	windows: BacktestWindowKind[];
 	/** Estimators to score, per window. Defaults to the three baselines. */
 	estimatorsFor?: (window: BacktestWindowKind) => Map<string, Estimator>;
+	/** Rows this far before the earliest range are loaded too. */
+	loadPadBeforeMs?: number;
 }
 
 export interface WindowRunResult {
@@ -259,18 +422,6 @@ function load429sByAccount(
 // Replay
 // ---------------------------------------------------------------------------
 
-/** First index with `points[i].t >= t`. */
-function lowerBound(points: PredictionPoint[], t: number): number {
-	let lo = 0;
-	let hi = points.length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (points[mid].t < t) lo = mid + 1;
-		else hi = mid;
-	}
-	return lo;
-}
-
 /** First index with `points[i].t > t`. */
 function upperBound(points: PredictionPoint[], t: number): number {
 	let lo = 0;
@@ -387,9 +538,12 @@ function replayWindow(
 				if (outcomeEndMs >= range.toMs) continue;
 				if (outcome.kind === "survived") sawSurvivor = true;
 
-				const lo = lowerBound(all, T - spec.lookbackMs);
-				const hi = upperBound(all, T);
-				const input = all.slice(lo, hi);
+				// EVERY loaded point up to T, not a pre-sliced lookback window.
+				// Each estimator decides for itself how far back it looks: the
+				// baselines apply the production lookback internally, while a
+				// day-of-week profile needs weeks. Pre-slicing here would silently
+				// cap every candidate at the shipped estimator's horizon.
+				const input = all.slice(0, upperBound(all, T));
 				for (const [name, estimator] of estimators) {
 					const out = estimator(input, T, spec);
 					recordsByEstimator.get(name)?.push({
@@ -448,7 +602,8 @@ export function runBacktest(
 	try {
 		const dataset = readDataset(db);
 		const loadFrom =
-			Math.min(...options.ranges.map((r) => r.fromMs)) - LOAD_PAD_BEFORE_MS;
+			Math.min(...options.ranges.map((r) => r.fromMs)) -
+			(options.loadPadBeforeMs ?? LOAD_PAD_BEFORE_MS);
 		const loadTo =
 			Math.max(...options.ranges.map((r) => r.toMs)) + LOAD_PAD_AFTER_MS;
 		const accounts = loadSeries(db, loadFrom, loadTo);
@@ -567,8 +722,10 @@ export function buildWindowBlock(
 ): ReportWindowBlock {
 	const cohort = commonCohort(window.recordsByEstimator);
 	const bootstrap: ReportBootstrapEntry[] = [];
-	const reference = bootstrapAgainst[0];
-	if (reference != null) {
+	// A LIST of references, not one: a candidate has to be measured against the
+	// estimator it would replace AND against the strongest baseline, which are
+	// not always the same estimator.
+	for (const reference of dedupe(bootstrapAgainst)) {
 		const referenceRecords = cohort.get(reference) ?? [];
 		for (const [estimator, records] of cohort) {
 			if (estimator === reference) continue;
@@ -603,18 +760,189 @@ export function buildWindowBlock(
 	};
 }
 
+function dedupe(values: readonly string[]): string[] {
+	return [...new Set(values)];
+}
+
+function isBaseline(name: string): boolean {
+	return (BASELINE_ESTIMATORS as readonly string[]).includes(name);
+}
+
+function selectionRow(
+	estimator: string,
+	records: BacktestRecord[],
+): ReportSelectionRow {
+	const metrics = scoreForSelection(records);
+	return {
+		estimator,
+		instants: metrics.instants,
+		f1: metrics.f1,
+		medianAbsErrorMinutes: metrics.absoluteEtaError.medianMinutes,
+		macroF1: macroAverageByAccount(toSelectionRecords(records)),
+		usableCoverage: usableCoverage(metrics),
+		confusion: metrics.confusion,
+	};
+}
+
+function gateMetricsOf(row: ReportSelectionRow): GateEstimatorMetrics {
+	return {
+		name: row.estimator,
+		f1: row.f1,
+		medianAbsErrorMinutes: row.medianAbsErrorMinutes,
+		usableCoverage: row.usableCoverage,
+	};
+}
+
+export interface SelectionBlockOptions {
+	/** Range the winner is reported as having been locked on. */
+	lockedOnLabel: string;
+	/**
+	 * Winner carried over from an earlier range. When set, the in-range ranking
+	 * is still reported but does NOT choose: a held-out range must not pick its
+	 * own winner.
+	 */
+	lockedWinner?: string | null;
+}
+
+/**
+ * The estimator DECISION for one window: selection scoring, the ranking, the
+ * acceptance gate, the display red rule and the bootstrap intervals.
+ *
+ * The gate is evaluated for the locked winner AND for every candidate in the
+ * run, so a candidate that loses the ranking still has its numbers on record
+ * rather than vanishing behind whoever won.
+ */
+export function buildSelectionBlock(
+	window: WindowRunResult,
+	seed: number,
+	opts: SelectionBlockOptions,
+): ReportSelectionBlock {
+	const rows = [...window.recordsByEstimator].map(([estimator, records]) =>
+		selectionRow(estimator, records),
+	);
+	const byName = new Map(rows.map((r) => [r.estimator, r]));
+	const selection = selectTuningWinner(
+		rows.map((r) => ({
+			name: r.estimator,
+			f1: r.f1,
+			medianAbsErrorMinutes: r.medianAbsErrorMinutes,
+			macroF1: r.macroF1,
+		})),
+	);
+	const winner = opts.lockedWinner ?? selection.winner;
+
+	const baselineRows = rows.filter((r) => isBaseline(r.estimator));
+	const baselines = baselineRows.map(gateMetricsOf);
+	const evaluated = dedupe([
+		...(winner != null ? [winner] : []),
+		...rows.filter((r) => !isBaseline(r.estimator)).map((r) => r.estimator),
+	]);
+
+	const gate: ReportGateRow[] = [];
+	for (const name of evaluated) {
+		const row = byName.get(name);
+		if (row == null) continue;
+		// Baselines are NOT filtered when the winner is itself a baseline: a
+		// baseline trivially satisfies a gate written against the baselines, and
+		// saying so plainly beats a criterion that reads as an error.
+		const result = evaluateHeldOutGate(gateMetricsOf(row), baselines, {
+			referenceName: "ols",
+		});
+		gate.push({ estimator: name, pass: result.pass, criteria: result.criteria });
+	}
+
+	const redRule: ReportRedRuleRow[] = [];
+	for (const name of dedupe([...evaluated, "ols"])) {
+		const records = window.recordsByEstimator.get(name);
+		if (records == null) continue;
+		redRule.push({
+			estimator: name,
+			...scoreRedRule(deploymentCohort(records)),
+		});
+	}
+
+	// Against the estimator it would replace, and against the strongest
+	// baseline: beating OLS while losing to the lifetime average is not a win.
+	const bestBaseline = selectTuningWinner(
+		baselineRows.map((r) => ({
+			name: r.estimator,
+			f1: r.f1,
+			medianAbsErrorMinutes: r.medianAbsErrorMinutes,
+			macroF1: r.macroF1,
+		})),
+	).winner;
+	const bootstrap: ReportBootstrapEntry[] = [];
+	const winnerRecords = winner
+		? window.recordsByEstimator.get(winner)
+		: undefined;
+	if (winner != null && winnerRecords != null) {
+		for (const reference of dedupe(
+			[...(byName.has("ols") ? ["ols"] : []), bestBaseline ?? ""].filter(
+				(name) => name.length > 0 && name !== winner,
+			),
+		)) {
+			const referenceRecords = window.recordsByEstimator.get(reference);
+			if (referenceRecords == null) continue;
+			for (const statistic of ["f1", "medianAbsErrorMinutes"] as const) {
+				const ci = bootstrapDelta(
+					toSelectionRecords(winnerRecords),
+					toSelectionRecords(referenceRecords),
+					{ iterations: BOOTSTRAP_ITERATIONS, seed, statistic },
+				);
+				bootstrap.push({
+					label: `${winner} minus ${reference} (selection)`,
+					statistic,
+					p2_5: ci.p2_5,
+					p50: ci.p50,
+					p97_5: ci.p97_5,
+					samples: ci.samples,
+				});
+			}
+		}
+	}
+
+	const notes: string[] = [];
+	if (opts.lockedWinner != null && selection.winner !== opts.lockedWinner) {
+		notes.push(
+			`The in-range ranking would have picked ${selection.winner ?? "nothing"}; the winner stays locked to ${opts.lockedWinner} from ${opts.lockedOnLabel}.`,
+		);
+	}
+
+	return {
+		rows,
+		winner,
+		winnerLockedOn: opts.lockedOnLabel,
+		balanceWarning: selection.balanceWarning,
+		gate,
+		redRule,
+		bootstrap,
+		notes: notes.length > 0 ? notes : undefined,
+	};
+}
+
 export function buildRanges(
 	result: BacktestRunResult,
 	seed: number,
 	bootstrapAgainst: string[] = [],
 ): ReportRange[] {
-	return result.ranges.map((range) => ({
+	// With a tuning/held-out split the winner is LOCKED on the first range and
+	// carried forward: letting the held-out range pick its own winner would be
+	// selecting on the data the gate is supposed to be blind to.
+	const lockedByWindow = new Map<BacktestWindowKind, string | null>();
+	const firstLabel = result.ranges.length ? result.ranges[0].range.label : "";
+	return result.ranges.map((range, rangeIndex) => ({
 		label: range.range.label,
 		fromIso: new Date(range.range.fromMs).toISOString(),
 		toIso: new Date(range.range.toMs).toISOString(),
-		windows: range.windows.map((w) =>
-			buildWindowBlock(w, seed, bootstrapAgainst),
-		),
+		windows: range.windows.map((w) => {
+			const selection = buildSelectionBlock(w, seed, {
+				lockedOnLabel: rangeIndex === 0 ? range.range.label : firstLabel,
+				lockedWinner:
+					rangeIndex === 0 ? null : (lockedByWindow.get(w.windowKind) ?? null),
+			});
+			if (rangeIndex === 0) lockedByWindow.set(w.windowKind, selection.winner);
+			return { ...buildWindowBlock(w, seed, bootstrapAgainst), selection };
+		}),
 	}));
 }
 
@@ -624,7 +952,10 @@ export function buildRanges(
 
 const USAGE = `Usage: bun scripts/prediction-backtest.ts [--db=<path>] [--from=<ISO>] [--to=<ISO>]
        [--split=<ISO>] [--step-minutes=10] [--window=five_hour|seven_day|both]
-       [--seed=N] [--out=<path>]`;
+       [--estimators=<comma-list>] [--seed=N] [--out=<path>]
+
+Estimators (default: ${BASELINE_ESTIMATORS.join(",")}):
+${ESTIMATOR_REGISTRY.map((e) => `  ${e.name} (${e.windows.join(", ")})`).join("\n")}`;
 
 export interface CliOptions {
 	dbPath: string | null;
@@ -633,6 +964,7 @@ export interface CliOptions {
 	splitIso: string | null;
 	stepMinutes: number;
 	window: BacktestWindowKind | "both";
+	estimators: string[];
 	seed: number;
 	outPath: string | null;
 }
@@ -645,6 +977,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
 		splitIso: null,
 		stepMinutes: 10,
 		window: "both",
+		estimators: [...BASELINE_ESTIMATORS],
 		seed: DEFAULT_SEED,
 		outPath: null,
 	};
@@ -665,6 +998,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
 				throw new Error(`Invalid --window: ${arg}`);
 			}
 			options.window = w;
+		} else if (arg.startsWith("--estimators=")) {
+			options.estimators = parseEstimatorList(arg.slice(13));
 		} else if (arg.startsWith("--seed=")) {
 			const n = Number(arg.slice(7));
 			if (!Number.isInteger(n)) throw new Error(`Invalid --seed: ${arg}`);
@@ -844,6 +1179,8 @@ async function main(): Promise<void> {
 		ranges,
 		stepMinutes: options.stepMinutes,
 		windows,
+		estimatorsFor: (window) => estimatorsForWindow(options.estimators, window),
+		loadPadBeforeMs: loadPadForEstimators(options.estimators),
 	});
 	const replayMs = Date.now() - started;
 	const reportRanges = buildRanges(result, options.seed, ["ols"]);
@@ -862,7 +1199,9 @@ async function main(): Promise<void> {
 			stepMinutes: options.stepMinutes,
 			windows: windows.join(","),
 			seed: options.seed,
-			estimators: BASELINE_ESTIMATORS.join(","),
+			estimators: options.estimators.join(","),
+			loadPadBeforeHours:
+				loadPadForEstimators(options.estimators) / HOUR_MS,
 			bootstrapIterations: BOOTSTRAP_ITERATIONS,
 			from: new Date(fromMs).toISOString(),
 			to: new Date(toMs).toISOString(),
