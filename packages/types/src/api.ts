@@ -165,6 +165,7 @@ export interface StorageUsageType {
 		| "requests"
 		| "usage_snapshots"
 		| "usage_scoped_snapshots"
+		| "quota_drift_results"
 		| "memory_snapshots"
 		| "tool_calls"
 		| "tool_errors";

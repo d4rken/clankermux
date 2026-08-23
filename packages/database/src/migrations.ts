@@ -403,6 +403,21 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_usage_scoped_snapshots_sampled_at ON usage_scoped_snapshots(sampled_at)`,
 	);
 
+	// Create quota_drift_results table — the precomputed quota-drift analysis.
+	// One row per completed precompute pass; the latest row wins and the cleanup
+	// pass keeps only the most recent few.
+	//
+	// A cache, not a record: the fit is a pure function of `usage_snapshots` and
+	// `requests`, so losing every row costs one scheduler tick and nothing else.
+	// The whole payload is one JSON blob because nothing queries INTO it — the
+	// endpoint hands it to the dashboard verbatim.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS quota_drift_results (
+			computed_at INTEGER PRIMARY KEY,
+			payload TEXT NOT NULL
+		)
+	`);
+
 	// Create memory_snapshots table — append-only time-series of the proxy
 	// process's own memory footprint (RSS + JS heap), backing the dashboard
 	// "Memory Usage" graph. One row per sample tick (no account dimension);

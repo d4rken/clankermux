@@ -190,6 +190,12 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	quota_drift_results: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["computed_at", "payload"],
+		source: "create-table-at-intro",
+	},
 	cache_keepalive_snapshots: {
 		shipped: "2026-06-18",
 		commit: "b0873329",

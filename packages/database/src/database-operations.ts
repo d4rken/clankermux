@@ -288,6 +288,9 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	// Rides the usage-snapshot retention control (one knob for one series
 	// family), so it has no control of its own — the card sums the two.
 	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
+	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
+	// rather than by a retention control of its own.
+	{ key: "quota_drift_results", table: "quota_drift_results" },
 	{ key: "memory_snapshots", table: "memory_snapshots" },
 	// Riders on the requests retention (FK cascade) — no control of their own.
 	{ key: "tool_calls", table: "request_tool_calls" },
