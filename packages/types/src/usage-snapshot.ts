@@ -23,6 +23,23 @@ export interface UsageSnapshotRow {
 	sevenDayPct: number | null;
 	/** 7-day window reset time, ms since epoch, or null when unknown. */
 	sevenDayReset: number | null;
+	/**
+	 * When the reported reading was actually OBSERVED (ms since epoch), as
+	 * opposed to `sampledAt`, which is the sampler tick's own clock. The tick
+	 * accepts any cache entry younger than the freshness bound, so the two can
+	 * differ by up to that bound. `null` on rows written before the column
+	 * existed — unknown, never "same as sampledAt".
+	 */
+	observedAt: number | null;
+	/**
+	 * The account's plan tier as of this sample (e.g. "pro", "max"), or null on
+	 * pre-column rows / when uncaptured. Recorded per sample because today's
+	 * value on the accounts row would refile the whole history under a tier the
+	 * account may have changed to since.
+	 */
+	planTier: string | null;
+	/** The account's rate-limit tier as of this sample (e.g. "20x"), or null. */
+	rateLimitTier: string | null;
 }
 
 /**
@@ -57,6 +74,23 @@ export interface UsageSnapshotSample {
 	fiveHourReset: number | null;
 	sevenDayPct: number | null;
 	sevenDayReset: number | null;
+	/**
+	 * When the reported reading was actually OBSERVED (ms since epoch), as
+	 * opposed to `sampledAt`, which is the sampler tick's own clock. The tick
+	 * accepts any cache entry younger than the freshness bound, so the two can
+	 * differ by up to that bound. `null` on rows written before the column
+	 * existed — unknown, never "same as sampledAt".
+	 */
+	observedAt: number | null;
+	/**
+	 * The account's plan tier as of this sample (e.g. "pro", "max"), or null on
+	 * pre-column rows / when uncaptured. Recorded per sample because today's
+	 * value on the accounts row would refile the whole history under a tier the
+	 * account may have changed to since.
+	 */
+	planTier: string | null;
+	/** The account's rate-limit tier as of this sample (e.g. "20x"), or null. */
+	rateLimitTier: string | null;
 }
 
 /**

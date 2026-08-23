@@ -355,6 +355,9 @@ export function ensureSchema(db: Database): void {
 			five_hour_reset INTEGER,
 			seven_day_pct REAL,
 			seven_day_reset INTEGER,
+			observed_at INTEGER,
+			plan_tier TEXT,
+			rate_limit_tier TEXT,
 			PRIMARY KEY (account_id, sampled_at),
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
@@ -877,6 +880,35 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "refresh_token_expires_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN refresh_token_expires_at INTEGER",
+	},
+	// When the usage reading a snapshot row reports was actually OBSERVED, as
+	// opposed to `sampled_at`, which is the sampler tick's own clock. The tick
+	// accepts any cache entry younger than the freshness bound
+	// (max(2 * pollInterval, 150s)), so the two can legitimately differ by up to
+	// that bound — and anything correlating the percentage clock against the
+	// request clock is wrong by exactly that unknown amount without this column.
+	// NULL on every row written before it existed: unknown, never "the same as
+	// sampled_at".
+	{
+		table: "usage_snapshots",
+		column: "observed_at",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN observed_at INTEGER",
+	},
+	// The account's plan tier and rate-limit tier AS OF THE SAMPLE. Both are
+	// otherwise only available as today's value on the accounts row, which would
+	// refile the whole history under a tier the account may have moved to
+	// yesterday — and a tier change reads exactly like a change in what the
+	// subscription buys. NULL on pre-column rows; a reader must fall back to the
+	// account's present-day value and mark that inference as assumed.
+	{
+		table: "usage_snapshots",
+		column: "plan_tier",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN plan_tier TEXT",
+	},
+	{
+		table: "usage_snapshots",
+		column: "rate_limit_tier",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN rate_limit_tier TEXT",
 	},
 ];
 

@@ -84,6 +84,10 @@ export interface SamplerCache {
 interface SamplerAccount {
 	id: string;
 	provider: string;
+	/** Plan tier as of now (e.g. "pro", "max"); undefined/null when uncaptured. */
+	identity_plan_tier?: string | null;
+	/** Rate-limit tier as of now (e.g. "20x"); undefined/null when uncaptured. */
+	identity_rate_limit_tier?: string | null;
 }
 
 /**
@@ -97,7 +101,10 @@ interface SamplerAccount {
  *    `normalizeAnthropicUsage`, so a `limits[]`-only payload (upstream is
  *    dropping the flat five_hour/seven_day keys) still yields a row — otherwise
  *    the sawtooth graph and stale-usage recovery go blank for those accounts;
- *  - skip when BOTH windows are absent/null (nothing meaningful to record).
+ *  - skip when BOTH windows are absent/null (nothing meaningful to record);
+ *  - stamp the observation clock (`now - cacheAge`) and the account's tiers as
+ *    of this sample, so a later reader is not left inferring either from
+ *    today's values.
  */
 export function buildSnapshotRows(
 	accounts: ReadonlyArray<SamplerAccount>,
@@ -168,6 +175,11 @@ export function buildSamplerRows(
 				fiveHourReset: normalized.session?.resetMs ?? null,
 				sevenDayPct,
 				sevenDayReset: normalized.weeklyAll?.resetMs ?? null,
+				// The cache entry's age is what separates the tick clock from the
+				// observation clock, and it is only knowable here.
+				observedAt: now - age,
+				planTier: account.identity_plan_tier ?? null,
+				rateLimitTier: account.identity_rate_limit_tier ?? null,
 			});
 		}
 

@@ -96,6 +96,8 @@ function usageDataWithScoped(
 interface Acct {
 	id: string;
 	provider: string;
+	identity_plan_tier?: string | null;
+	identity_rate_limit_tier?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +145,10 @@ describe("buildSnapshotRows", () => {
 			fiveHourReset: new Date(fiveReset).getTime(),
 			sevenDayPct: 7,
 			sevenDayReset: new Date(sevenReset).getTime(),
+			// The reading is as old as the cache entry, not as old as the tick.
+			observedAt: NOW - 1_000,
+			planTier: null,
+			rateLimitTier: null,
 		});
 		const codex = rows.find((r) => r.accountId === "codex-1");
 		expect(codex?.fiveHourPct).toBe(90);
@@ -348,7 +354,30 @@ describe("buildSnapshotRows", () => {
 			fiveHourReset: new Date(fiveReset).getTime(),
 			sevenDayPct: 8,
 			sevenDayReset: new Date(sevenReset).getTime(),
+			observedAt: NOW - 1_000,
+			planTier: null,
+			rateLimitTier: null,
 		});
+	});
+
+	it("stamps the observation clock and the tiers as of the sample", () => {
+		const accounts: Acct[] = [
+			{
+				id: "anth-1",
+				provider: "anthropic",
+				identity_plan_tier: "max",
+				identity_rate_limit_tier: "20x",
+			},
+		];
+		const cache = makeCache({
+			"anth-1": { ageMs: 45_000, data: usageData({ fiveHourUtil: 42 }) },
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows[0].observedAt).toBe(NOW - 45_000);
+		expect(rows[0].planTier).toBe("max");
+		expect(rows[0].rateLimitTier).toBe("20x");
 	});
 });
 
