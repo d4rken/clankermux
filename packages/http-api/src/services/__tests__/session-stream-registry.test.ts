@@ -49,8 +49,30 @@ class FakeStore implements SessionAuthStore {
 }
 
 const TICK_MS = 5;
-/** Long enough for several revalidation ticks to have run. */
-const settle = () => new Promise((r) => setTimeout(r, TICK_MS * 6));
+
+/**
+ * Wait for a revocation to land, polling rather than sleeping a fixed span.
+ *
+ * Each tick does async DB-ish work, so "how many ticks fit in N ms" is a
+ * property of machine load, not of the code under test. A fixed sleep here
+ * would be a flake generator on a busy CI box; the deadline is generous because
+ * it is only reached when the assertion is genuinely going to fail.
+ */
+async function waitFor(
+	predicate: () => boolean,
+	timeoutMs = 2_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate() && Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, TICK_MS));
+	}
+}
+
+/**
+ * Give several revalidation ticks a chance to run and assert that NOTHING
+ * happened. This one has to be a fixed span — there is no event to wait for.
+ */
+const settle = () => new Promise((r) => setTimeout(r, TICK_MS * 20));
 
 function streamRequest(token?: string): Request {
 	return new Request("http://localhost/api/requests/stream", {
@@ -87,7 +109,7 @@ describe("periodic revalidation", () => {
 			closed++;
 		});
 		store.sessions.delete(hashSessionToken(token));
-		await settle();
+		await waitFor(() => closed > 0);
 		detach();
 		expect(closed).toBeGreaterThan(0);
 	});
@@ -102,7 +124,7 @@ describe("periodic revalidation", () => {
 		});
 		// The CLI sets a password out of process; the poll is what notices.
 		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
-		await settle();
+		await waitFor(() => closed > 0);
 		detach();
 		expect(closed).toBeGreaterThan(0);
 	});
@@ -117,7 +139,7 @@ describe("periodic revalidation", () => {
 		const detach = guard.attach(streamRequest(token), () => {
 			closed++;
 		});
-		await settle();
+		await waitFor(() => closed > 0);
 		detach();
 		expect(closed).toBeGreaterThan(0);
 		// The session itself is untouched — only the connection was bounded.
