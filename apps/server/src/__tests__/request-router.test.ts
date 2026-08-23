@@ -497,6 +497,23 @@ describe("the root no longer serves agent traffic", () => {
 		}
 	}
 
+	// The refusal outranks even a manifest hit. A dashboard build cannot emit a
+	// legacy path, so this manifest is deliberately impossible - it exists to show
+	// that first position beats the branch that would otherwise answer first.
+	it("refuses a legacy path even when the manifest claims it as an asset", async () => {
+		const { deps, calls } = makeDeps({
+			dashboardManifest: { "/v1/messages": "/assets/v1-messages.js" },
+		});
+		const res = await routeRequest(
+			makeRequest("/v1/messages", { method: "POST", headers: withKey }),
+			deps,
+		);
+
+		expect(res.status).toBe(404);
+		expect(calls.dashboard).toEqual([]);
+		expect(calls.api).toEqual([]);
+	});
+
 	// The rejection sits ahead of the auth gate, so a client with no key gets
 	// told where to point itself rather than being asked for a credential it
 	// would then spend on a 404.
