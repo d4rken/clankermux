@@ -90,9 +90,16 @@ export function MetricCard({
 				<div className="flex items-center justify-between gap-item mb-1.5">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
-						<p className="text-sm text-muted-foreground truncate">{title}</p>
+						{/* The TITLE is the protected element: it is a short fixed
+						    string, so it cannot overflow the card, while a caption is
+						    caller-generated and unbounded. With the two reversed a long
+						    caption won the row and truncated the title to nothing. */}
+						<p className="text-sm text-muted-foreground shrink-0">{title}</p>
 						{caption && (
-							<span className="text-xs text-muted-foreground/70 shrink-0">
+							<span
+								className="text-xs text-muted-foreground/70 truncate min-w-0"
+								title={caption}
+							>
 								{caption}
 							</span>
 						)}
