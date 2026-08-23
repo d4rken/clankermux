@@ -109,10 +109,13 @@ afterEach(() => {
 
 describe("schema: bytes column + size index", () => {
 	it("adds `bytes` and the size index to a DB created WITHOUT the column", () => {
-		// Regression for the migration ordering trap: runMigrations() runs
-		// ensureSchema() (whose last statement is addPerformanceIndexes()) BEFORE
-		// the ADDITIVE_COLUMNS ALTERs, so an unconditional index on `bytes` would
-		// throw `no such column: bytes` at startup on every upgraded DB.
+		// Regression for the migration ordering trap: an index over a column that
+		// only ADDITIVE_COLUMNS can supply must not be created before the ALTER
+		// that supplies it, or startup throws `no such column: bytes` on every
+		// upgraded DB. runMigrations() now applies the ALTERs BEFORE
+		// ensureSchema() (whose last statement is addPerformanceIndexes()), so
+		// the index is created unconditionally and this DB must come out with
+		// both the column and the index.
 		const db = new Database(dbPath, { create: true });
 		try {
 			// The pre-`bytes` shape, exactly as an existing deployment has it.

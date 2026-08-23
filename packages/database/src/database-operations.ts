@@ -31,6 +31,7 @@ import type {
 } from "@clankermux/types";
 import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
+import { runOneShotBackfills } from "./backfills";
 import type { CleanupCounts } from "./incremental-vacuum-worker";
 import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "./inline-incremental-vacuum-worker";
 import { EMBEDDED_VACUUM_WORKER_CODE } from "./inline-vacuum-worker";
@@ -435,6 +436,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		configureSqlite(this.sqliteDb, this.dbConfig);
 
 		runMigrations(this.sqliteDb);
+
+		// Data passes that migrations deliberately do not do. Runs after the
+		// schema is complete, and each pass records that it ran so it never
+		// repeats (see backfills.ts).
+		runOneShotBackfills(this.sqliteDb);
 
 		this.adapter = new BunSqlAdapter(this.sqliteDb);
 
