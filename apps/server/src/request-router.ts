@@ -33,6 +33,7 @@ import type {
 	AuthenticationResult,
 	AuthRequirement,
 } from "@clankermux/http-api";
+import { managementAuthRequirement } from "@clankermux/http-api";
 import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
@@ -169,8 +170,10 @@ export async function routeRequest(
  * deliberate. Every request on this mount is API-key gated, so refusing an
  * identity-bound path before authenticating would let an unauthenticated caller
  * enumerate the refusal set and would leave those requests unattributed to any
- * key. At the root the opposite ordering is correct, because root `/api/*` is
- * genuinely public and the refusal must not be reachable only by key-holders.
+ * key. At the root the opposite ordering is correct: the refusal set overlaps
+ * `/api/*`, whose gate is a DASHBOARD session that agent clients neither hold
+ * nor could obtain, so gating first would answer them 401 instead of the
+ * deliberate 501.
  *
  * The API router, the dashboard branches and the `/api/*` 404 are all
  * unreachable from here. That is the entire point of the mount.
@@ -250,20 +253,23 @@ async function routeRootRequest(
 	url: URL,
 	deps: RequestRouterDeps,
 ): Promise<Response> {
-	// Try API routes first
-	const apiResponse = await deps.handleApiRequest(url, req);
-	if (apiResponse) {
-		return apiResponse;
-	}
-
 	// Identity-bound endpoints are refused before ANY other routing.
 	// Ahead of the dashboard branch specifically: that branch decides by
 	// raw pathname, so an encoded spelling like `/%76%31/code/sessions`
 	// does not look like a `/v1/` proxy path to it and would be answered
 	// with the dashboard's index.html — no credential leaked, but not the
-	// deliberate, visible refusal this is supposed to give. Ahead of the
-	// auth gate too, which is fine: `policyFor` already treats `/api/*` as
-	// public, and declining to serve an endpoint needs no credential.
+	// deliberate, visible refusal this is supposed to give.
+	//
+	// Ahead of the MANAGEMENT GATE below too, and that ordering is now
+	// load-bearing rather than incidental. Three of these paths sit under
+	// `/api/` (`/api/oauth/files…`, `/api/oauth/file_upload`,
+	// `/api/oauth/profile`) but they are AGENT traffic, not our management
+	// surface — they arrive from a Claude Code client that has no dashboard
+	// cookie and never will. Gated first, they would collect a 401 instead of
+	// the deliberate 501, and an agent client reads an auth failure as a dead
+	// session rather than as "this endpoint is not served". Declining to serve
+	// a fixed, source-visible path list discloses nothing and needs no
+	// credential.
 	//
 	// The `/v1/code/…` half of the set is ALSO refused by the proxy's
 	// ingest prologue. Both call the same predicate, so the two entry
@@ -272,6 +278,49 @@ async function routeRootRequest(
 	// token.
 	if (isIdentityBoundPath(url.pathname)) {
 		return createIdentityBoundRefusalResponse(url.pathname);
+	}
+
+	// The management gate, and it has to be HERE — above `handleApiRequest`,
+	// not inside it.
+	//
+	// `handleApiRequest` returns its response to this function, which returns it
+	// to the client; a check placed inside the API router would run after the
+	// handler had already done its work, and `handleRequest` is reachable from
+	// anywhere else that holds the router. So the boundary is the router's, and
+	// it is expressed the same way the `/wire/*` mount expresses its own: an
+	// EXPLICIT requirement passed to the auth service, rather than a
+	// classification inferred a second time from the path.
+	//
+	// `managementAuthRequirement` is the single shared classification (the auth
+	// service's `policyFor` reads the same function), so the exemptions — the
+	// three auth endpoints, and the two Claude Code telemetry paths that must
+	// keep falling through to the proxy prologue — cannot drift between the two
+	// enforcement points.
+	if (managementAuthRequirement(url.pathname) === "session") {
+		let sessionResult: AuthenticationResult;
+		try {
+			sessionResult = await deps.authenticate(
+				req,
+				url.pathname,
+				req.method,
+				"session",
+			);
+		} catch (authError) {
+			return terminalForRequestError(req, authError, "auth", url.pathname);
+		}
+		if (!sessionResult.isAuthenticated) {
+			return jsonError(
+				401,
+				"authentication_error",
+				sessionResult.error || "Authentication failed",
+			);
+		}
+	}
+
+	// Try API routes first
+	const apiResponse = await deps.handleApiRequest(url, req);
+	if (apiResponse) {
+		return apiResponse;
 	}
 
 	const p = url.pathname;
