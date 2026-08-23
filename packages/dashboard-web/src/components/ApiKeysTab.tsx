@@ -630,7 +630,15 @@ export function ApiKeysTab() {
 											</div>
 											<div className="text-xs text-muted-foreground mt-1 flex items-center gap-tight">
 												<Route className="h-3 w-3" />
-												<span>{describePinTarget(key, accounts)}</span>
+												<span>
+													{describePinTarget(
+														{
+															accountId: key.pinnedAccountId,
+															providers: key.pinnedProviders,
+														},
+														accounts,
+													)}
+												</span>
 											</div>
 											<div className="text-xs text-muted-foreground mt-1">
 												Created{" "}

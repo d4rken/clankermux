@@ -1,3 +1,5 @@
+import type { KeyRunway } from "@clankermux/core";
+import { worstKeyRunway } from "@clankermux/core";
 import { formatPercentage } from "@clankermux/ui-common";
 import {
 	AlertTriangle,
@@ -8,8 +10,7 @@ import {
 	Info,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { worstKeyRunway } from "../../lib/api-key-runway";
+import { describePinTarget } from "../../lib/api-key-pin-label";
 import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
 import {
@@ -366,13 +367,17 @@ function RunwayPanel({
 					<dd className="mt-tight min-w-0">
 						<span className="block truncate text-sm font-medium">
 							{worst && stated
-								? `${worst.eligibleAccountCount} ${
-										worst.eligibleAccountCount === 1 ? "account" : "accounts"
+								? `${worst.eligibleAccountIds.length} ${
+										worst.eligibleAccountIds.length === 1
+											? "account"
+											: "accounts"
 									}`
 								: "—"}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{worst && stated ? worst.pinLabel : "Not reported"}
+							{worst && stated
+								? describePinTarget(worst.pin, accounts)
+								: "Not reported"}
 						</span>
 					</dd>
 				</div>
@@ -411,10 +416,10 @@ function RunwayPanel({
 											<span className="font-medium">{runway.keyName}</span>
 											<span className="text-muted-foreground">
 												{" · "}
-												{runway.pinLabel}
+												{describePinTarget(runway.pin, accounts)}
 												{" · "}
-												{runway.eligibleAccountCount}{" "}
-												{runway.eligibleAccountCount === 1
+												{runway.eligibleAccountIds.length}{" "}
+												{runway.eligibleAccountIds.length === 1
 													? "account"
 													: "accounts"}
 											</span>

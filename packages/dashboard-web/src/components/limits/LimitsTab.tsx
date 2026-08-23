@@ -1,4 +1,4 @@
-import { registerUIRefresh } from "@clankermux/core";
+import { computeApiKeyRunways, registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -8,7 +8,6 @@ import {
 	usePaymentsSummary,
 	useUsageHistory,
 } from "../../hooks/queries";
-import { computeApiKeyRunways } from "../../lib/api-key-runway";
 import { dataAvailability } from "../../lib/data-availability";
 import { computePoolUsage } from "../../lib/pool-usage";
 import { LoadingSkeleton } from "../overview/LoadingSkeleton";

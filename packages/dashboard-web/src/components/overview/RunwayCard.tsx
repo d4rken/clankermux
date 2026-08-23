@@ -1,6 +1,7 @@
+import type { KeyRunway } from "@clankermux/core";
+import { worstKeyRunway } from "@clankermux/core";
 import { Hourglass } from "lucide-react";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { worstKeyRunway } from "../../lib/api-key-runway";
+import { describePinTarget } from "../../lib/api-key-pin-label";
 import {
 	describeRunwayCause,
 	formatRunwayValue,
@@ -76,7 +77,9 @@ export function RunwayCard({
 	const subRows: MetricCardSubRow[] = activeRunways.map((runway) => ({
 		label: runway.keyName,
 		value: formatRunwayValue(runway.outcome) ?? "—",
-		tooltip: runwayUnavailableReason(runway.outcome) ?? runway.pinLabel,
+		tooltip:
+			runwayUnavailableReason(runway.outcome) ??
+			describePinTarget(runway.pin, accounts),
 	}));
 
 	return (

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { AccountResponse, ApiKeyResponse } from "@clankermux/types";
+import type { ApiKeyResponse } from "@clankermux/types";
 import {
 	computeApiKeyRunways,
 	type KeyRunway,
+	type RunwayAccountSource,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
@@ -11,44 +12,14 @@ const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
+function mkAccount(partial: Partial<RunwayAccountSource>): RunwayAccountSource {
 	return {
 		id: partial.id ?? partial.name ?? "id",
 		name: partial.name ?? "acc",
 		provider: partial.provider ?? "anthropic",
-		requestCount: 0,
-		totalRequests: 0,
-		lastUsed: null,
-		created: new Date(NOW).toISOString(),
-		paused: false,
-		tokenStatus: "valid",
-		tokenExpiresAt: null,
-		rateLimitStatus: "OK",
-		rateLimitReset: null,
-		rateLimitRemaining: null,
-		rateLimitedUntil: null,
-		rateLimitedReason: null,
-		rateLimitedAt: null,
-		sessionInfo: "",
-		priority: 0,
-		autoFallbackEnabled: false,
-		autoRefreshEnabled: false,
-		autoPauseOnOverageEnabled: false,
-		peakHoursPauseEnabled: false,
-		customEndpoint: null,
-		modelMappings: null,
-		usageUtilization: null,
-		usageWindow: null,
 		usageData: null,
-		usageRateLimitedUntil: null,
-		usageThrottledUntil: null,
-		usageThrottledWindows: [],
-		hasRefreshToken: true,
-		modelFallbacks: null,
-		billingType: null,
-		sessionStats: null,
 		...partial,
-	} as AccountResponse;
+	};
 }
 
 /** Anthropic-shaped usage payload with explicit account-wide windows. */
@@ -71,7 +42,7 @@ function usage(
 }
 
 /** Barely-used account: no run-out projected inside the horizon. */
-function healthy(id: string, provider = "anthropic"): AccountResponse {
+function healthy(id: string, provider = "anthropic"): RunwayAccountSource {
 	return mkAccount({
 		id,
 		name: id,
@@ -81,7 +52,7 @@ function healthy(id: string, provider = "anthropic"): AccountResponse {
 }
 
 /** Account whose 5-hour window is already spent. */
-function spent(id: string, provider = "anthropic"): AccountResponse {
+function spent(id: string, provider = "anthropic"): RunwayAccountSource {
 	return mkAccount({
 		id,
 		name: id,
@@ -122,13 +93,13 @@ describe("computeApiKeyRunways", () => {
 		const runways = computeApiKeyRunways(keys, accounts, NOW);
 
 		const pinned = byId(runways, "k1");
-		expect(pinned.eligibleAccountCount).toBe(1);
-		expect(pinned.pinLabel).toBe("Pinned → acc-1");
+		expect(pinned.eligibleAccountIds).toEqual(["acc-1"]);
+		expect(pinned.pin).toEqual({ accountId: "acc-1", providers: null });
 		expect(pinned.outcome.kind).toBe("out-now");
 
 		// The unpinned key still has the healthy account to fall back on.
 		const open = byId(runways, "k2");
-		expect(open.eligibleAccountCount).toBe(2);
+		expect(open.eligibleAccountIds).toEqual(["acc-1", "acc-2"]);
 		expect(open.outcome.kind).toBe("beyond-horizon");
 	});
 
@@ -144,8 +115,11 @@ describe("computeApiKeyRunways", () => {
 		const runways = computeApiKeyRunways(keys, accounts, NOW);
 
 		expect(runways).toHaveLength(1);
-		expect(runways[0].eligibleAccountCount).toBe(1);
-		expect(runways[0].pinLabel).toBe("Pinned → codex");
+		expect(runways[0].eligibleAccountIds).toEqual(["codex-1"]);
+		expect(runways[0].pin).toEqual({
+			accountId: null,
+			providers: ["codex"],
+		});
 		expect(runways[0].outcome.kind).toBe("out-now");
 	});
 
@@ -156,7 +130,7 @@ describe("computeApiKeyRunways", () => {
 			NOW,
 		);
 
-		expect(runways[0].eligibleAccountCount).toBe(0);
+		expect(runways[0].eligibleAccountIds).toEqual([]);
 		expect(runways[0].outcome).toEqual({ kind: "no-accounts" });
 	});
 
@@ -175,8 +149,8 @@ describe("computeApiKeyRunways", () => {
 		expect(runways[0].keyId).toBeNull();
 		expect(runways[0].keyName).toBe(UNAUTHENTICATED_POOL_KEY_NAME);
 		expect(runways[0].isActive).toBe(true);
-		expect(runways[0].pinLabel).toBe("Unpinned");
-		expect(runways[0].eligibleAccountCount).toBe(2);
+		expect(runways[0].pin).toEqual({ accountId: null, providers: null });
+		expect(runways[0].eligibleAccountIds).toEqual(["acc-1", "acc-2"]);
 		expect(runways[0].outcome.kind).toBe("beyond-horizon");
 	});
 
@@ -201,7 +175,7 @@ describe("computeApiKeyRunways", () => {
 			NOW,
 		);
 
-		expect(runways[0].eligibleAccountCount).toBe(1);
+		expect(runways[0].eligibleAccountIds).toEqual(["local"]);
 		expect(runways[0].outcome.kind).toBe("beyond-horizon");
 		if (runways[0].outcome.kind !== "beyond-horizon") {
 			throw new Error("unreachable");
@@ -255,6 +229,43 @@ describe("computeApiKeyRunways", () => {
 
 		expect(runways[0].outcome.kind).toBe("out-now");
 	});
+
+	it("feeds each account's server prediction into its own windows", () => {
+		// A rising regression on the 5h window projects a run-out the lifetime
+		// average would not: 30% used with a 20%/h slope is spent in 3.5h, inside
+		// the window. `prediction` being optional is what lets AccountResponse be
+		// passed here unchanged.
+		const resetMs = NOW + 4 * HOUR;
+		const runways = computeApiKeyRunways(
+			[mkKey({ id: "k1" })],
+			[
+				mkAccount({
+					id: "acc-1",
+					name: "acc-1",
+					usageData: usage(30, resetMs, 5, NOW + 6 * DAY),
+					prediction: {
+						fiveHour: {
+							state: "rising",
+							slopePerHour: 20,
+							etaExhaustMs: NOW + 3.5 * HOUR,
+							predictedAtReset: 100,
+							resetsAtMs: resetMs,
+							willExhaustBeforeReset: true,
+							lowConfidence: false,
+						},
+					},
+				}),
+			],
+			NOW,
+		);
+
+		expect(runways[0].outcome.kind).toBe("runway");
+		if (runways[0].outcome.kind !== "runway") throw new Error("unreachable");
+		expect(runways[0].outcome.exhaustsAtMs).toBe(NOW + 3.5 * HOUR);
+		expect(runways[0].outcome.causes).toEqual([
+			{ accountId: "acc-1", windowKind: "five_hour" },
+		]);
+	});
 });
 
 function row(outcome: KeyRunway["outcome"], isActive = true): KeyRunway {
@@ -262,8 +273,8 @@ function row(outcome: KeyRunway["outcome"], isActive = true): KeyRunway {
 		keyId: `k-${outcome.kind}`,
 		keyName: outcome.kind,
 		isActive,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 1,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1"],
 		outcome,
 	};
 }
@@ -286,8 +297,8 @@ function runwayRow(durationMs: number, keyId: string): KeyRunway {
 		keyId,
 		keyName: keyId,
 		isActive: true,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 1,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1"],
 		outcome: {
 			kind: "runway",
 			exhaustsAtMs: NOW + durationMs,

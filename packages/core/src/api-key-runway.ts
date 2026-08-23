@@ -1,24 +1,35 @@
+import type {
+	AccountUsagePrediction,
+	ApiKeyResponse,
+	FullUsageData,
+	RunwayKeyEntry,
+	RunwayOutcome,
+} from "@clankermux/types";
+import { isAccountAllowedByPin, type RoutingPin } from "./api-key-pin";
 import {
 	computeCapacityRunway,
-	computeWindowStartMs,
+	type RunwayAccountInput,
+	type RunwayWindowInput,
+} from "./capacity-runway";
+import { computeWindowStartMs } from "./throttle-utils";
+import {
 	type ExtractedValue,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
-	isAccountAllowedByPin,
-	type RunwayAccountInput,
-	type RunwayOutcome,
-	type RunwayWindowInput,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
-} from "@clankermux/core";
-import type { AccountResponse, ApiKeyResponse } from "@clankermux/types";
-import { describePinTarget } from "./api-key-pin-label";
+} from "./usage-window-extract";
 
 /**
  * Quota runway per API key.
  *
  * Per KEY rather than pool-wide, because a provider-pinned key runs out when
  * its own provider's accounts run out however healthy the rest of the pool is.
+ *
+ * Lives in core rather than the dashboard because the SERVER composes it now
+ * (`GET /api/runway`): resolving each key's pin to its eligible accounts and
+ * mapping those onto the runway model is the part a non-dashboard client would
+ * otherwise have to reimplement.
  *
  * Pure QUOTA scope: `paused`, `rateLimitedUntil`, `usageThrottledUntil` and
  * `providerOverloadedUntil` are deliberately NOT read. Runway answers "when
@@ -35,15 +46,29 @@ import { describePinTarget } from "./api-key-pin-label";
  */
 export const UNAUTHENTICATED_POOL_KEY_NAME = "No API keys (unauthenticated)";
 
-export interface KeyRunway {
-	/** null for the synthetic unauthenticated-pool row. */
-	keyId: string | null;
-	keyName: string;
-	isActive: boolean;
-	pinLabel: string;
-	eligibleAccountCount: number;
-	outcome: RunwayOutcome;
+/**
+ * The account fields the runway needs, and nothing else. Narrow on purpose so
+ * both callers can satisfy it: the server builds these straight off
+ * `getAllAccounts()` + the usage cache, and `AccountResponse` structurally
+ * satisfies it as-is.
+ *
+ * `prediction` is OPTIONAL because `AccountResponse.prediction` is declared
+ * optional; requiring it here would leave `AccountResponse` unassignable.
+ */
+export interface RunwayAccountSource {
+	id: string;
+	name: string;
+	provider: string;
+	usageData: FullUsageData | null;
+	prediction?: AccountUsagePrediction | null;
 }
+
+/**
+ * One runway row. The same declaration the `/api/runway` response serves
+ * ({@link RunwayKeyEntry}), aliased rather than restated so the computed row and
+ * the wire row cannot drift apart.
+ */
+export type KeyRunway = RunwayKeyEntry;
 
 function windowInput(
 	windowKind: "five_hour" | "seven_day",
@@ -72,7 +97,7 @@ function windowInput(
  * token window but no weekly one) contributes just that window and stays
  * metered.
  */
-function toRunwayAccount(account: AccountResponse): RunwayAccountInput {
+function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 	const hasFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(account.provider);
 	const hasSevenDay = SEVEN_DAY_ELIGIBLE_PROVIDERS.has(account.provider);
 	if (!hasFiveHour && !hasSevenDay) {
@@ -102,19 +127,17 @@ function toRunwayAccount(account: AccountResponse): RunwayAccountInput {
 }
 
 function runwayFor(
-	key: Pick<ApiKeyResponse, "pinnedAccountId" | "pinnedProviders">,
-	accounts: AccountResponse[],
+	pin: RoutingPin,
+	accounts: RunwayAccountSource[],
 	now: number,
-): { eligibleAccountCount: number; outcome: RunwayOutcome } {
-	const pin = {
-		accountId: key.pinnedAccountId,
-		providers: key.pinnedProviders,
-	};
+): { eligibleAccountIds: string[]; outcome: RunwayOutcome } {
 	const eligible = accounts.filter((account) =>
 		isAccountAllowedByPin(pin, account),
 	);
 	return {
-		eligibleAccountCount: eligible.length,
+		// The IDS, not a count: a consumer that wants the count takes `.length`,
+		// but nothing can recover which accounts a key reaches from a number.
+		eligibleAccountIds: eligible.map((account) => account.id),
 		outcome: computeCapacityRunway(eligible.map(toRunwayAccount), now),
 	};
 }
@@ -130,10 +153,10 @@ function runwayFor(
  */
 export function computeApiKeyRunways(
 	keys: ApiKeyResponse[],
-	accounts: AccountResponse[],
+	accounts: RunwayAccountSource[],
 	now: number,
 ): KeyRunway[] {
-	const unpinned = { pinnedAccountId: null, pinnedProviders: null };
+	const unpinned: RoutingPin = { accountId: null, providers: null };
 
 	if (!keys.some((key) => key.isActive)) {
 		return [
@@ -141,19 +164,25 @@ export function computeApiKeyRunways(
 				keyId: null,
 				keyName: UNAUTHENTICATED_POOL_KEY_NAME,
 				isActive: true,
-				pinLabel: describePinTarget(unpinned, accounts),
+				pin: unpinned,
 				...runwayFor(unpinned, accounts, now),
 			},
 		];
 	}
 
-	return keys.map((key) => ({
-		keyId: key.id,
-		keyName: key.name,
-		isActive: key.isActive,
-		pinLabel: describePinTarget(key, accounts),
-		...runwayFor(key, accounts, now),
-	}));
+	return keys.map((key) => {
+		const pin: RoutingPin = {
+			accountId: key.pinnedAccountId,
+			providers: key.pinnedProviders,
+		};
+		return {
+			keyId: key.id,
+			keyName: key.name,
+			isActive: key.isActive,
+			pin,
+			...runwayFor(pin, accounts, now),
+		};
+	});
 }
 
 /**

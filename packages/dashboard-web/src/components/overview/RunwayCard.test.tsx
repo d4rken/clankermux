@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { KeyRunway } from "@clankermux/core";
+import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "../../lib/api-key-runway";
 import { RunwayCard } from "./RunwayCard";
 
 const HOUR = 60 * 60 * 1000;
@@ -17,8 +17,8 @@ function row(overrides: Partial<KeyRunway> = {}): KeyRunway {
 		keyId: "k1",
 		keyName: "prod",
 		isActive: true,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 2,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1", "acc-2"],
 		outcome: {
 			kind: "beyond-horizon",
 			horizonMs: 14 * DAY,
@@ -212,7 +212,7 @@ describe("RunwayCard", () => {
 				row({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
+					pin: { accountId: null, providers: ["codex"] },
 					outcome: {
 						kind: "runway",
 						exhaustsAtMs: 1,

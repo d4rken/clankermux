@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { KeyRunway } from "@clankermux/core";
+import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "../../lib/api-key-runway";
 import type { FamilyWeeklyUsage, PoolUsageResult } from "../../lib/pool-usage";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
@@ -19,8 +19,8 @@ function keyRunway(overrides: Partial<KeyRunway> = {}): KeyRunway {
 		keyId: "k1",
 		keyName: "prod",
 		isActive: true,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 2,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1", "acc-2"],
 		outcome: {
 			kind: "beyond-horizon",
 			horizonMs: 14 * DAY,
@@ -381,8 +381,8 @@ describe("LimitsCapacityOverview runway panel", () => {
 				keyRunway({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
-					eligibleAccountCount: 1,
+					pin: { accountId: null, providers: ["codex"] },
+					eligibleAccountIds: ["acc-1"],
 					outcome: {
 						kind: "runway",
 						exhaustsAtMs: NOW + 4 * HOUR,
@@ -449,8 +449,8 @@ describe("LimitsCapacityOverview runway panel", () => {
 				keyRunway({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
-					eligibleAccountCount: 1,
+					pin: { accountId: null, providers: ["codex"] },
+					eligibleAccountIds: ["acc-1"],
 					outcome: {
 						kind: "runway",
 						exhaustsAtMs: NOW + 4 * HOUR,

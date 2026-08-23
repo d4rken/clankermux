@@ -6,6 +6,13 @@ export {
 	type RoutingPin,
 } from "./api-key-pin";
 export {
+	computeApiKeyRunways,
+	type KeyRunway,
+	type RunwayAccountSource,
+	UNAUTHENTICATED_POOL_KEY_NAME,
+	worstKeyRunway,
+} from "./api-key-runway";
+export {
 	// Test-only handle (forget the captured boot commit). NOT a runtime API:
 	// re-capturing at runtime would erase the restart signal.
 	__bootProvenanceTestHooks,

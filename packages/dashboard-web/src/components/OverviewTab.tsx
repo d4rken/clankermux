@@ -1,4 +1,4 @@
-import { registerUIRefresh } from "@clankermux/core";
+import { computeApiKeyRunways, registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge } from "lucide-react";
@@ -10,7 +10,6 @@ import {
 	useApiKeys,
 	useStats,
 } from "../hooks/queries";
-import { computeApiKeyRunways } from "../lib/api-key-runway";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
