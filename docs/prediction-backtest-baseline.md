@@ -850,10 +850,24 @@ by two earlier, separate invocations, in this order:
 
 1. **Winner selection — a tuning-only invocation.** All ten estimators, scored
    on the tuning range alone (no held-out range in the run at all). This is what
-   locked `naive` for `five_hour` and `lifetime` for `seven_day`.
+   locked `naive` for `five_hour` and `lifetime` for `seven_day`. Selection used:
+
+   ```
+   bun scripts/prediction-backtest.ts --from=2026-06-02T00:00:00Z --to=2026-08-01T00:00:00Z --estimators=ols,lifetime,naive,endpoint-seg-30m,endpoint-seg-1h,endpoint-seg-2h,ols-1h,trailing-3d,trailing-7d,dow-seasonal
+   ```
+
 2. **The held-out gate — a separate baselines-plus-winner invocation.** The
    three baselines and the locked winner, over the split range, scoring the
-   acceptance criteria on the held-out side.
+   acceptance criteria on the held-out side. Both locked winners were themselves
+   baselines, so the estimator list reduced to the three baselines. The gate
+   used:
+
+   ```
+   bun scripts/prediction-backtest.ts --from=2026-08-01T00:00:00Z --to=2026-08-23T00:00:00Z --estimators=ols,lifetime,naive
+   ```
+
+Both ran at commit `ab6e3455`, read-only against the live DB, and stdout-only
+(no `--out`), which is why neither has a report file of its own.
 
 The order matters and the separation is the point: the harness locks the winner
 on the first range and carries it forward, so a held-out range can never pick
