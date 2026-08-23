@@ -179,6 +179,99 @@ describe("periodic revalidation", () => {
 	});
 });
 
+describe("a revalidation that cannot answer fails CLOSED", () => {
+	function gatedStore(): FakeStore {
+		const store = new FakeStore();
+		store.password = { verifier: "v", params: "{}", updatedAt: 0 };
+		return store;
+	}
+
+	it("closes a protected stream when the store rejects", async () => {
+		const store = gatedStore();
+		const svc = new SessionAuthService(store);
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		// SQLITE_BUSY, a corrupt read, anything: the answer to "is this session
+		// still live?" is now unknown, and unknown must not mean "keep streaming".
+		store.getManagementPassword = async () => {
+			throw new Error("database is locked");
+		};
+		const guard = createSessionStreamGuard(svc, TICK_MS);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(session.token), () => {
+			closed++;
+		});
+		await waitFor(() => closed > 0);
+		detach();
+		expect(closed).toBe(1);
+	});
+
+	it("closes a protected stream whose revalidation NEVER resolves", async () => {
+		const store = gatedStore();
+		const svc = new SessionAuthService(store);
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		// The adapter retries a busy database for minutes, so a stalled read can
+		// outlast any deadline that is only checked AFTER it returns.
+		store.getManagementPassword = () => new Promise(() => {});
+		const guard = createSessionStreamGuard(svc, TICK_MS, TICK_MS * 2);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(session.token), () => {
+			closed++;
+		});
+		await waitFor(() => closed > 0);
+		detach();
+		expect(closed).toBe(1);
+	});
+
+	it("leaves a fail-open stream alone when the store starts failing", async () => {
+		const store = new FakeStore();
+		const svc = new SessionAuthService(store);
+		const guard = createSessionStreamGuard(svc, TICK_MS);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(), () => {
+			closed++;
+		});
+		// The handshake read succeeded and said "unconfigured"; the store breaks
+		// only afterwards. Nothing was ever protected here, so nothing is revoked.
+		await new Promise((r) => setTimeout(r, TICK_MS));
+		store.getManagementPassword = async () => {
+			throw new Error("database is locked");
+		};
+		await settle();
+		detach();
+		expect(closed).toBe(0);
+	});
+
+	it("never runs two revalidation ticks at once", async () => {
+		const store = gatedStore();
+		const svc = new SessionAuthService(store);
+		const session = await svc.createSession();
+		if (!session) throw new Error("no session");
+		let inFlight = 0;
+		let peak = 0;
+		const stored = store.password;
+		// Deliberately slower than the interval: without an in-flight guard the
+		// timer stacks reads against the store it is already waiting on.
+		store.getManagementPassword = async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			await new Promise((r) => setTimeout(r, TICK_MS * 4));
+			inFlight--;
+			return stored;
+		};
+		const guard = createSessionStreamGuard(svc, TICK_MS);
+		let closed = 0;
+		const detach = guard.attach(streamRequest(session.token), () => {
+			closed++;
+		});
+		await settle();
+		detach();
+		expect(peak).toBe(1);
+		expect(closed).toBe(0);
+	});
+});
+
 describe("logout closes that session's streams immediately", () => {
 	it("closes every stream registered under the token hash", async () => {
 		const store = new FakeStore();

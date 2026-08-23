@@ -77,6 +77,19 @@ export interface StreamSessionGuard {
  * The production guard. When no password is configured the deployment is
  * fail-open, so a stream is left alone entirely — no lifetime cap, no
  * revalidation, nothing to revalidate against.
+ *
+ * Three properties keep revocation from failing OPEN, which is the only way
+ * this whole mechanism can be worse than useless:
+ *
+ *  - The hard lifetime is its OWN timer, not a comparison made after an await.
+ *    The store's busy-retry can keep a single read pending for minutes, and a
+ *    ceiling that is only checked once that read returns is not a ceiling.
+ *  - Ticks are serialized. A revalidation slower than the interval would
+ *    otherwise stack callbacks against the store it is already waiting on.
+ *  - A revalidation ERROR closes a protected stream. Whether a stream is
+ *    protected is captured at the HANDSHAKE, so the answer never comes from the
+ *    call that just failed. A SUCCESSFUL `configured: false` is the fail-open
+ *    case and is the only reading that leaves a stream running.
  */
 export function createSessionStreamGuard(
 	sessionAuth: SessionAuthService,
@@ -87,7 +100,44 @@ export function createSessionStreamGuard(
 		attach(req, close) {
 			const token = readSessionCookie(req);
 			const tokenHash = token ? hashSessionToken(token) : null;
-			const openedAt = Date.now();
+
+			let detached = false;
+			let closed = false;
+			let deadline: ReturnType<typeof setTimeout> | null = null;
+
+			const closeOnce = () => {
+				if (closed || detached) return;
+				closed = true;
+				close();
+			};
+
+			const armDeadline = () => {
+				if (deadline || detached || closed) return;
+				deadline = setTimeout(closeOnce, maxLifetimeMs);
+				deadline.unref?.();
+			};
+
+			// Handshake state. A stream that presented a cookie is protected by
+			// definition; one that did not may still have been opened on a gated
+			// deployment, and that is read ONCE, here, rather than re-derived on
+			// every tick. A handshake read that fails leaves the stream in the
+			// fail-open state it was opened under — the first SUCCESSFUL tick that
+			// reports a configured deployment closes it anyway.
+			let isProtected = tokenHash !== null;
+			if (isProtected) {
+				armDeadline();
+			} else {
+				void sessionAuth
+					.isConfigured()
+					.then((configured) => {
+						if (!configured) return;
+						isProtected = true;
+						armDeadline();
+					})
+					.catch(() => {
+						// Unknown at the handshake; see above.
+					});
+			}
 
 			if (tokenHash) {
 				let closers = streamsBySession.get(tokenHash);
@@ -95,24 +145,30 @@ export function createSessionStreamGuard(
 					closers = new Set();
 					streamsBySession.set(tokenHash, closers);
 				}
-				closers.add(close);
+				// The registry holds `closeOnce`, not `close`: a logout-driven close
+				// must also mark the stream closed here, or a tick still in flight
+				// would call the stream's closer a second time.
+				closers.add(closeOnce);
 			}
 
+			let revalidating = false;
 			const timer = setInterval(() => {
+				// One tick at a time: a store that takes longer than the interval
+				// must not accumulate overlapping reads against itself.
+				if (revalidating || closed || detached) return;
+				revalidating = true;
 				void (async () => {
 					try {
 						// Fail-open: nothing is configured, so nothing is revoked and the
 						// stream has no session to outlive.
 						if (!(await sessionAuth.isConfigured())) return;
-						if (Date.now() - openedAt >= maxLifetimeMs) {
-							close();
-							return;
-						}
+						isProtected = true;
+						armDeadline();
 						// A password exists but this stream never presented a cookie: it
 						// was opened while the deployment was still fail-open. It must not
 						// keep running now that it is not.
 						if (!tokenHash || !(await sessionAuth.isSessionLive(tokenHash))) {
-							close();
+							closeOnce();
 						}
 					} catch (error) {
 						log.debug(
@@ -120,6 +176,12 @@ export function createSessionStreamGuard(
 								error instanceof Error ? error.message : String(error)
 							}`,
 						);
+						// Fail CLOSED. The stream carries management events and we no
+						// longer know whether its session exists; closing costs a browser
+						// reconnect, which re-runs the full handshake check.
+						if (isProtected) closeOnce();
+					} finally {
+						revalidating = false;
 					}
 				})();
 			}, revalidateMs);
@@ -127,11 +189,16 @@ export function createSessionStreamGuard(
 			timer.unref?.();
 
 			return () => {
+				detached = true;
 				clearInterval(timer);
+				if (deadline) {
+					clearTimeout(deadline);
+					deadline = null;
+				}
 				if (!tokenHash) return;
 				const closers = streamsBySession.get(tokenHash);
 				if (!closers) return;
-				closers.delete(close);
+				closers.delete(closeOnce);
 				if (closers.size === 0) streamsBySession.delete(tokenHash);
 			};
 		},
