@@ -23,11 +23,21 @@
 			"@clankermux/dashboard-web/dist/*": ["./packages/dashboard-web/dist/*"]
 		}
 	},
-	"include": ["packages/*/src/**/*", "apps/*/src/**/*"],
+	"include": [
+		"packages/*/src/**/*",
+		"apps/*/src/**/*",
+		// The backtest harness is a development tool, but it is real code with a
+		// unit-tested core, so both it and its integration test are typechecked.
+		// The other scripts/ files stay as they are.
+		"scripts/prediction-backtest.ts",
+		"scripts/prediction-backtest.test.ts"
+	],
 	"exclude": [
 		"**/__tests__",
-		"**/*.test.ts",
-		"**/*.test.tsx",
+		"packages/**/*.test.ts",
+		"packages/**/*.test.tsx",
+		"apps/**/*.test.ts",
+		"apps/**/*.test.tsx",
 		"**/*.dom-test.ts",
 		"**/*.dom-test.tsx"
 	]

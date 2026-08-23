@@ -8,6 +8,66 @@ const RESET_JITTER_TOLERANCE_MS = 60_000;
 const LIMIT = 100;
 
 /**
+ * WINDOW-LIFECYCLE boundary: `prev` and `cur` belong to different quota
+ * windows. True when `resets_at` changed by more than the jitter tolerance,
+ * counting a null <-> value transition as a change (idle vs active).
+ *
+ * This is deliberately NOT the estimator's segmentation rule: a refund drops
+ * utilization without ending the quota window. Ground-truth labelling (see
+ * `prediction-backtest.ts`) must split on THIS predicate so a window that gets
+ * refunded and later exhausts is still one window.
+ */
+export function isResetBoundary(
+	prev: PredictionPoint,
+	cur: PredictionPoint,
+): boolean {
+	const prevReset = prev.resetsAt ?? null;
+	const curReset = cur.resetsAt ?? null;
+	if (prevReset == null && curReset == null) return false;
+	if (prevReset == null || curReset == null) return true;
+	return Math.abs(curReset - prevReset) > RESET_JITTER_TOLERANCE_MS;
+}
+
+/**
+ * FIT boundary: the point at which the regression restarts. A reset boundary,
+ * or a utilization drop larger than `RESET_DROP_THRESHOLD` (a refund, or a
+ * reset the `resets_at` column has not caught up with yet).
+ */
+export function isFitBoundary(
+	prev: PredictionPoint,
+	cur: PredictionPoint,
+): boolean {
+	return (
+		isResetBoundary(prev, cur) ||
+		cur.utilization < prev.utilization - RESET_DROP_THRESHOLD
+	);
+}
+
+/**
+ * Split an ascending-by-time series wherever `predicate(prev, cur)` holds.
+ * No idle filtering, no gating — a plain partition, so callers can segment by
+ * window lifecycle (`isResetBoundary`) or by fit (`isFitBoundary`).
+ */
+export function splitSeries(
+	points: PredictionPoint[],
+	predicate: (prev: PredictionPoint, cur: PredictionPoint) => boolean,
+): PredictionPoint[][] {
+	if (points.length === 0) return [];
+	const out: PredictionPoint[][] = [];
+	let current: PredictionPoint[] = [points[0]];
+	for (let i = 1; i < points.length; i++) {
+		if (predicate(points[i - 1], points[i])) {
+			out.push(current);
+			current = [points[i]];
+		} else {
+			current.push(points[i]);
+		}
+	}
+	out.push(current);
+	return out;
+}
+
+/**
  * Pure least-squares usage-window exhaustion predictor.
  *
  * Ported/adapted from robsonek's upstream PR tombii/better-ccflare#294. Unlike
@@ -53,17 +113,7 @@ export function computeUsagePrediction(
 	// beyond jitter tolerance OR a drop larger than RESET_DROP_THRESHOLD.
 	let segStart = 0;
 	for (let i = 1; i < pts.length; i++) {
-		const prev = pts[i - 1];
-		const cur = pts[i];
-		const prevReset = prev.resetsAt ?? null;
-		const curReset = cur.resetsAt ?? null;
-		let resetChanged: boolean;
-		if (prevReset == null && curReset == null) resetChanged = false;
-		else if (prevReset == null || curReset == null) resetChanged = true;
-		else
-			resetChanged = Math.abs(curReset - prevReset) > RESET_JITTER_TOLERANCE_MS;
-		const dropped = cur.utilization < prev.utilization - RESET_DROP_THRESHOLD;
-		if (resetChanged || dropped) segStart = i;
+		if (isFitBoundary(pts[i - 1], pts[i])) segStart = i;
 	}
 	const segment = pts.slice(segStart);
 	if (segment.length < MIN_POINTS)
