@@ -6,8 +6,10 @@
  * and is deliberately NOT re-asserted here.
  *
  *  1. Cohorting: accounts group by (provider, plan tier, rate-limit tier), the
- *     per-sample tiers win over today's accounts row, and ONE assumed member
- *     marks the whole cohort assumed.
+ *     per-sample tiers win over today's accounts row, an account whose recorded
+ *     tier changes contributes each stretch of its history to the cohort that
+ *     stretch belongs to, and ONE assumed member marks the whole cohort assumed.
+ *  1b. The pooled `other` column stays inside the fit and off the wire.
  *  2. An account with no snapshots is ABSENT, not a zero-filled cohort member.
  *  3. The endpoint says `computing` until a pass has stored a row.
  *  4. The compute path and the core segment builder agree on segment
@@ -115,6 +117,47 @@ describe("quota-drift cohorting", () => {
 		expect(assumed?.planTier).toBe("pro");
 	});
 
+	it("files each stretch of history under the tier recorded for it", () => {
+		// Every upgraded database has this shape: old snapshots with null tier
+		// columns, newer ones carrying values. Resolving ONE tier per account and
+		// applying it backwards refiles the old history under a tier that was not
+		// in force then, hides the assumed-tier disclosure, and turns a real
+		// subscription change into a manufactured changepoint.
+		seedTieredAccount(db);
+
+		const cohorts = collectCohortSegments(db);
+		const earlier = cohorts.find((c) => c.key === COHORT_ASSUMED);
+		const later = cohorts.find((c) => c.key === COHORT_MAX);
+
+		// The account appears in BOTH cohorts, once per tier it was sampled under.
+		expect([...(earlier?.accountIds ?? [])]).toContain(ACCOUNT_TIERED);
+		expect([...(later?.accountIds ?? [])]).toContain(ACCOUNT_TIERED);
+
+		const segmentsIn = (cohort: typeof earlier) =>
+			(cohort?.segmentsByWindow.get("seven_day") ?? []).filter(
+				(s) => s.accountId === ACCOUNT_TIERED,
+			);
+		expect(segmentsIn(earlier).length).toBeGreaterThan(0);
+		expect(segmentsIn(later).length).toBeGreaterThan(0);
+		// The untiered half really is the earlier one, not a stray segment.
+		expect(
+			Math.max(...segmentsIn(earlier).map((s) => s.t1)),
+		).toBeLessThanOrEqual(Math.min(...segmentsIn(later).map((s) => s.t0)));
+		// Run ids stay distinct across the split, so the bootstrap cannot treat
+		// two partitions' runs as one block.
+		const runIds = new Set(
+			[...segmentsIn(earlier), ...segmentsIn(later)].map((s) => s.runId),
+		);
+		expect(runIds.size).toBe(
+			new Set(segmentsIn(earlier).map((s) => s.runId)).size +
+				new Set(segmentsIn(later).map((s) => s.runId)).size,
+		);
+		// The cohort carrying inferred history has to say so; the other must not
+		// be downgraded by it.
+		expect(earlier?.tierProvenance).toBe("assumed");
+		expect(later?.tierProvenance).toBe("recorded");
+	});
+
 	it("omits an account with no snapshots rather than zero-filling it", () => {
 		const payload = computeQuotaDrift(db, {
 			now: FIXTURE_NOW,
@@ -152,6 +195,35 @@ describe("quota-drift cohorting", () => {
 		const codexFiveHour = codex?.windows.find((w) => w.window === "five_hour");
 		expect(codexFiveHour?.models.map((m) => m.key)).toContain("gpt-5.6-codex");
 	});
+
+	it("reports a sub-share model as its own unmeasurable series, never as `other`", () => {
+		// The pooled column has to stay in the FIT — it absorbs the sub-share tail
+		// so the kept columns do not — but its membership changes as rare models
+		// come and go, so a coefficient or a change verdict for it would present
+		// composition change as quota drift.
+		seedRareModelRequests(db);
+
+		const payload = computeQuotaDrift(db, {
+			now: FIXTURE_NOW,
+			...TEST_BOOTSTRAP,
+		});
+
+		const everyModel = payload.cohorts.flatMap((c) =>
+			c.windows.flatMap((w) => w.models),
+		);
+		expect(everyModel.length).toBeGreaterThan(0);
+		expect(everyModel.map((m) => m.key)).not.toContain("other");
+
+		// The rare model is still present as a model, with the gap the panel needs
+		// rather than a number it cannot support.
+		const rare = everyModel.filter((m) => m.key === RARE_MODEL_KEY);
+		expect(rare.length).toBeGreaterThan(0);
+		for (const model of rare) {
+			expect(model.latest?.identified ?? false).toBe(false);
+			expect(model.points.length).toBeGreaterThan(0);
+			expect(model.points.every((p) => !p.identified)).toBe(true);
+		}
+	});
 });
 
 describe("quota-drift segment assembly", () => {
@@ -163,6 +235,11 @@ describe("quota-drift segment assembly", () => {
 			const expected = buildSegments(fixtureWindowSamples(account, window), {
 				window,
 				tokensFor: () => ({}),
+				// This account recorded ONE tier throughout, so its history is a
+				// single tier partition and the compute path's run ids carry
+				// partition 0. Run ids are compared, not just boundaries: they are
+				// the bootstrap's resampling unit.
+				runIdPrefix: `${window}:0`,
 			});
 			const actual = (
 				cohorts
@@ -360,4 +437,79 @@ describe("GET /api/analytics/quota-drift", () => {
 
 function boundary(segment: QuotaSegment): [number, number, number, string] {
 	return [segment.t0, segment.t1, segment.dpct, segment.runId];
+}
+
+/** Account whose snapshots record no tier for the first half of its history. */
+const ACCOUNT_TIERED = "qd-acct-tier-change";
+
+/** Normalized key of the trace-volume model seeded by `seedRareModelRequests`. */
+const RARE_MODEL_KEY = "claude-haiku-4-5";
+
+/**
+ * A handful of tiny requests for one more model, far below the 2% share floor,
+ * so the fit pools them into `other` while the model itself still exists.
+ */
+function seedRareModelRequests(db: Database): void {
+	const account = fixtureAccount(ACCOUNT_MAX_A);
+	const first = account.requests[0].timestamp;
+	const last = account.requests[account.requests.length - 1].timestamp;
+	const insert = db.prepare(
+		`INSERT INTO requests (
+			id, timestamp, method, path, account_used, status_code, success,
+			response_time_ms, failover_attempts, model, total_tokens, cost_usd,
+			input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+			output_tokens, billing_type
+		) VALUES (?, ?, 'POST', '/v1/messages', ?, 200, 1, 800, 0,
+			'claude-haiku-4-5-20251001', 900, 0.0001, 900, 0, 0, 0, 'plan')`,
+	);
+	db.transaction(() => {
+		for (let i = 0; i < 24; i++) {
+			const timestamp = first + Math.round(((last - first) * i) / 24) + 1_000;
+			insert.run(`${ACCOUNT_MAX_A}-rare-${i}`, timestamp, ACCOUNT_MAX_A);
+		}
+	})();
+}
+
+/**
+ * Seed one account with 48h of weekly-window samples whose recorded tier
+ * appears only halfway through: the exact shape an upgraded database has, where
+ * the tier columns start carrying values at the restart that added them.
+ *
+ * Only the weekly window is populated. A null 5h percentage is absence of
+ * evidence, so it yields no runs and no segments at all, which keeps the
+ * fixture to the one axis under test.
+ */
+function seedTieredAccount(db: Database): void {
+	const STEP = 5 * 60_000;
+	const SAMPLES = 576; // 48h at 5-minute cadence
+	const start = FIXTURE_NOW - SAMPLES * STEP;
+	db.run(
+		`INSERT INTO accounts (id, name, provider, created_at,
+			identity_plan_tier, identity_rate_limit_tier)
+		 VALUES (?, ?, 'anthropic', ?, 'pro', NULL)`,
+		[ACCOUNT_TIERED, ACCOUNT_TIERED, start],
+	);
+	const insert = db.prepare(
+		`INSERT INTO usage_snapshots (
+			account_id, provider, sampled_at, five_hour_pct, five_hour_reset,
+			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
+		) VALUES (?, 'anthropic', ?, NULL, NULL, ?, ?, ?, ?, ?)`,
+	);
+	const reset = FIXTURE_NOW + 3 * 24 * 60 * 60_000;
+	db.transaction(() => {
+		for (let i = 0; i < SAMPLES; i++) {
+			const sampledAt = start + i * STEP;
+			// The tier columns only start carrying values at the halfway point.
+			const recorded = i >= SAMPLES / 2;
+			insert.run(
+				ACCOUNT_TIERED,
+				sampledAt,
+				(i * 100) / SAMPLES,
+				reset,
+				sampledAt,
+				recorded ? "max" : null,
+				recorded ? "20x" : null,
+			);
+		}
+	})();
 }

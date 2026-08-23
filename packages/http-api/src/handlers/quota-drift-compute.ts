@@ -43,6 +43,15 @@
  * amount. Samples are re-sorted on that effective clock because `observed_at`
  * is `tick - cacheAge` and a varying age can reorder two adjacent ticks; the
  * core builder documents that it requires ordered input.
+ *
+ * ## Which tier
+ *
+ * Tiers are resolved PER SAMPLE, and an account's ordered samples are split
+ * wherever the resolved tier changes. One tier per account cannot be right: on
+ * any upgraded database the tier columns are null until the restart that added
+ * them, so a single resolution files pre-column history under a tier that was
+ * not in force then. A subscription change would then look like a change in
+ * what the subscription buys, which is the very thing being measured.
  */
 
 import type { Database } from "bun:sqlite";
@@ -56,6 +65,7 @@ import {
 	fitWithIntervals,
 	INFERENCE_BOOTSTRAP_B,
 	normalizeModelKey,
+	OTHER_MODEL_KEY,
 	type QuotaSegment,
 	type QuotaWindowKind,
 	type SeriesPoint,
@@ -207,7 +217,12 @@ export interface CohortSegments {
 	rateLimitTier: string | null;
 	/** Accounts that contributed at least one segment. */
 	accountIds: Set<string>;
-	/** `assumed` as soon as ONE contributing account's tier was inferred. */
+	/**
+	 * `assumed` as soon as ONE contributing stretch of history had its tier
+	 * inferred from today's accounts row rather than recorded per sample. An
+	 * account whose tier changed contributes to several cohorts, so this is a
+	 * property of the segments in THIS cohort, not of any account as a whole.
+	 */
 	tierProvenance: TierProvenance;
 	/** Per-window segments, tokens already attached. */
 	segmentsByWindow: Map<QuotaWindowKind, QuotaSegment[]>;
@@ -238,43 +253,74 @@ export function collectCohortSegments(db: Database): CohortSegments[] {
 		// for invites the reader to attribute the cohort's number to it.
 		if (rows.length === 0) continue;
 
-		const segmentLists = WINDOWS.map((window) =>
-			buildSegments(toSamples(account.id, rows, window), {
-				window,
-				tokensFor: NO_TOKENS,
-			}),
-		);
-		if (segmentLists.every((list) => list.length === 0)) continue;
-		attachRequestTokens(requestScan, account, segmentLists);
-
-		const tier = resolveTier(account, rows);
-		const key = cohortKey(account.provider, tier);
-		let cohort = cohorts.get(key);
-		if (!cohort) {
-			cohort = {
-				key,
-				provider: account.provider,
-				planTier: tier.planTier,
-				rateLimitTier: tier.rateLimitTier,
-				accountIds: new Set(),
-				tierProvenance: "recorded",
-				segmentsByWindow: new Map(),
-			};
-			cohorts.set(key, cohort);
+		// Segments are built PER TIER PARTITION, so a stretch of history recorded
+		// under one tier is never filed under another. The run id prefix carries
+		// the partition, because `buildSegments` numbers runs from 1 within each
+		// call and colliding ids would merge two partitions' runs into one
+		// bootstrap block.
+		const tagged: TaggedSegments[] = [];
+		for (const partition of partitionByTier(account, rows)) {
+			for (const window of WINDOWS) {
+				tagged.push({
+					window,
+					tier: partition.tier,
+					segments: buildSegments(
+						toSamples(account.id, partition.rows, window),
+						{
+							window,
+							tokensFor: NO_TOKENS,
+							runIdPrefix: `${window}:${partition.index}`,
+						},
+					),
+				});
+			}
 		}
-		cohort.accountIds.add(account.id);
-		// One assumed member taints the cohort: the reader cannot tell which
-		// account's history was refiled, so the whole cohort has to say so.
-		if (tier.provenance === "assumed") cohort.tierProvenance = "assumed";
-		for (let i = 0; i < WINDOWS.length; i++) {
-			if (segmentLists[i].length === 0) continue;
-			const existing = cohort.segmentsByWindow.get(WINDOWS[i]);
-			if (existing) existing.push(...segmentLists[i]);
-			else cohort.segmentsByWindow.set(WINDOWS[i], [...segmentLists[i]]);
+		if (tagged.every((entry) => entry.segments.length === 0)) continue;
+		// One request scan for the whole account, merged into every partition's
+		// lists at once: the lists are disjoint in time and each carries its own
+		// forward cursor, so re-scanning per partition would only cost I/O.
+		attachRequestTokens(
+			requestScan,
+			account,
+			tagged.map((entry) => entry.segments),
+		);
+
+		for (const entry of tagged) {
+			if (entry.segments.length === 0) continue;
+			const key = cohortKey(account.provider, entry.tier);
+			let cohort = cohorts.get(key);
+			if (!cohort) {
+				cohort = {
+					key,
+					provider: account.provider,
+					planTier: entry.tier.planTier,
+					rateLimitTier: entry.tier.rateLimitTier,
+					accountIds: new Set(),
+					tierProvenance: "recorded",
+					segmentsByWindow: new Map(),
+				};
+				cohorts.set(key, cohort);
+			}
+			cohort.accountIds.add(account.id);
+			// One assumed partition taints the cohort: the reader cannot tell which
+			// stretch of history was refiled, so the whole cohort has to say so.
+			if (entry.tier.provenance === "assumed") {
+				cohort.tierProvenance = "assumed";
+			}
+			const existing = cohort.segmentsByWindow.get(entry.window);
+			if (existing) existing.push(...entry.segments);
+			else cohort.segmentsByWindow.set(entry.window, [...entry.segments]);
 		}
 	}
 
 	return [...cohorts.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** One window's segments from one tier partition, before cohorting. */
+interface TaggedSegments {
+	window: QuotaWindowKind;
+	tier: ResolvedTier;
+	segments: QuotaSegment[];
 }
 
 /** Stable cohort key: `provider|planTier|rateLimitTier`. */
@@ -475,35 +521,77 @@ export function attachRequestTokens(
 }
 
 /**
- * Which tier a cohort files this account under.
+ * Which tier ONE sample was taken under.
  *
- * PREFERS the per-sample columns: the account's present-day tier refiles its
- * whole history under a tier it may have moved to yesterday, and a tier change
- * reads exactly like a change in what the subscription buys. The newest sample
- * that recorded a plan tier wins; falling back to today's values marks the
- * cohort `assumed`, which the panel must disclose.
+ * PREFERS the row's own columns. Resolving a single tier per account and
+ * applying it to that account's whole history is what every upgraded database
+ * would hit: old rows have null tier columns, newer ones carry values, and a
+ * backward scan for "the newest recorded tier" then files the old rows under a
+ * tier that was not in force when they were sampled. That both suppresses the
+ * assumed-tier disclosure the panel owes the reader and turns a real
+ * subscription change into a manufactured changepoint.
  *
  * A null `rate_limit_tier` on a recorded row is a real value, not a gap —
  * Codex reports none — so recordedness keys off `plan_tier` only.
  */
-export function resolveTier(
+export function resolveRowTier(
 	account: ComputeAccount,
-	rows: readonly SnapshotScanRow[],
+	row: SnapshotScanRow,
 ): ResolvedTier {
-	for (let i = rows.length - 1; i >= 0; i--) {
-		if (rows[i].plan_tier != null) {
-			return {
-				planTier: rows[i].plan_tier,
-				rateLimitTier: rows[i].rate_limit_tier ?? null,
-				provenance: "recorded",
-			};
-		}
+	if (row.plan_tier != null) {
+		return {
+			planTier: row.plan_tier,
+			rateLimitTier: row.rate_limit_tier ?? null,
+			provenance: "recorded",
+		};
 	}
 	return {
 		planTier: account.currentPlanTier,
 		rateLimitTier: account.currentRateLimitTier,
 		provenance: "assumed",
 	};
+}
+
+/** A maximal stretch of consecutive samples sharing one resolved tier. */
+export interface TierPartition {
+	/** Position in the account's history, from 0 — part of the run id prefix. */
+	index: number;
+	tier: ResolvedTier;
+	rows: SnapshotScanRow[];
+}
+
+/**
+ * Split one account's ordered samples wherever the resolved tier changes.
+ *
+ * Provenance is part of the partition key, not just the values: a stretch whose
+ * tier had to be inferred from today's accounts row is not the same evidence as
+ * a stretch that recorded the same tier, even when the two strings match. The
+ * cohorts they land in may merge, but the merged cohort then has to disclose
+ * that some of its history was assumed.
+ */
+export function partitionByTier(
+	account: ComputeAccount,
+	rows: readonly SnapshotScanRow[],
+): TierPartition[] {
+	const partitions: TierPartition[] = [];
+	let current: TierPartition | null = null;
+	for (const row of rows) {
+		const tier = resolveRowTier(account, row);
+		if (current === null || !sameTier(current.tier, tier)) {
+			current = { index: partitions.length, tier, rows: [] };
+			partitions.push(current);
+		}
+		current.rows.push(row);
+	}
+	return partitions;
+}
+
+function sameTier(a: ResolvedTier, b: ResolvedTier): boolean {
+	return (
+		a.planTier === b.planTier &&
+		a.rateLimitTier === b.rateLimitTier &&
+		a.provenance === b.provenance
+	);
 }
 
 /**
@@ -565,6 +653,12 @@ function fitWindow(
 
 	const keys = new Set<string>(series.keys());
 	for (const coef of latestFit.coefficients) keys.add(coef.key);
+	// The pooled column stays in every fit — it has to absorb the sub-share tail,
+	// or that exposure would be pushed onto whichever kept column co-occurred
+	// with it — but it is not a model. Its membership changes as rare models come
+	// and go, so reporting a coefficient or a change verdict for it would present
+	// pure composition change as quota drift.
+	keys.delete(OTHER_MODEL_KEY);
 
 	const models: QuotaDriftModel[] = [];
 	for (const key of [...keys].sort()) {
