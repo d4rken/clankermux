@@ -29,6 +29,18 @@ export const MAX_RELATIVE_CI_WIDTH = 0.5;
 export const MIN_SEGMENTS_FOR_FIT = 20;
 
 /**
+ * Fewest distinct runs a fit needs before its interval means anything.
+ *
+ * The bootstrap resamples whole RUNS, so a fit whose segments all come from one
+ * run has every resample identical to the original: the interval collapses onto
+ * the point estimate, the relative-width criterion passes trivially, and a
+ * number derived from a sample containing no independent unit is reported as
+ * measured. Not hypothetical — one account with one complete seven-day monotone
+ * run yields ~28 segments at 6h anchors and clears the segment floor on its own.
+ */
+export const MIN_RUNS_FOR_INTERVAL = 2;
+
+/**
  * Lowest tolerance (`1 - R²` of this column regressed on the others) that still
  * counts as separately identified. Equivalently VIF <= 10.
  *
@@ -315,6 +327,10 @@ export interface FitOptions {
  * the column's tolerance is at least `MIN_TOLERANCE`. A point estimate pinned
  * at 0 yields infinite relative width and is unidentified, which is correct: it
  * means the data could not distinguish the model's cost from nothing.
+ *
+ * The interval itself is only computed when the fit has at least
+ * `MIN_RUNS_FOR_INTERVAL` distinct runs — see that constant for why a
+ * single-run fit would otherwise report a zero-width interval as a measurement.
  */
 export function fitWithIntervals(
 	segments: readonly QuotaSegment[],
@@ -344,7 +360,15 @@ export function fitWithIntervals(
 		keys.join(","),
 		segments.length,
 	]);
-	const draws = bootstrapCoefficients(segments, keys, b, seed);
+	// Below the run floor there is nothing to resample: every draw would be the
+	// original sample again. Leaving the interval inputs empty makes both bounds
+	// NaN, so every coefficient with a positive estimate falls to
+	// `wide-interval` (the rest are already `zero-estimate`) and none can be
+	// identified — a stated absence rather than a zero-width interval.
+	const draws =
+		groupByRun(segments).size >= MIN_RUNS_FOR_INTERVAL
+			? bootstrapCoefficients(segments, keys, b, seed)
+			: [];
 
 	const tail = (1 - CI_COVERAGE) / 2;
 	const coefficients: CoefficientEstimate[] = keys.map((key, j) => {
@@ -427,13 +451,38 @@ export interface RollingOptions extends FitOptions {
 }
 
 /**
+ * Every model key that appears with positive exposure anywhere in `segments`.
+ *
+ * Sorted, and NEVER including the pooled `other` column: that column is a
+ * nuisance regressor which absorbs the sub-share tail so the kept columns do
+ * not, and a coefficient for a changing mixture of unrelated models is not a
+ * quantity anything may be claimed about.
+ */
+export function actualModelKeys(segments: readonly QuotaSegment[]): string[] {
+	const keys = new Set<string>();
+	for (const seg of segments) {
+		for (const [key, tokens] of Object.entries(seg.eqTokensByModel)) {
+			if (tokens > 0 && key !== OTHER_MODEL_KEY) keys.add(key);
+		}
+	}
+	return [...keys].sort();
+}
+
+/**
  * Rolling fits over a sliding window — the display series.
  *
  * Each window is fitted independently, so a model that only becomes
- * identifiable partway through the history simply starts having points there.
- * Unidentified windows still emit a point with null estimates: the panel needs
- * to draw a GAP, and dropping the point entirely would let the line join across
- * a stretch where nothing was measured.
+ * identifiable partway through the history simply starts having identified
+ * points there.
+ *
+ * EVERY grid window emits one point per model, including windows the model was
+ * pooled out of, windows with no proxy traffic at all, and windows falling in
+ * an inactivity gap. The panel draws an unidentified point as a GAP; omitting
+ * the point instead lets the line join straight across a stretch where nothing
+ * was measured, which is the one thing the series must never do. It also keeps
+ * the LAST point on the last grid window, so a caller reading "latest" off the
+ * series gets the current window rather than the newest one that happened to
+ * produce a fit.
  */
 export function fitRolling(
 	segments: readonly QuotaSegment[],
@@ -449,6 +498,9 @@ export function fitRolling(
 	const to = options.toMs ?? sorted[sorted.length - 1].t1;
 	if (!(to > from)) return series;
 
+	const modelKeys = actualModelKeys(sorted);
+	if (modelKeys.length === 0) return series;
+
 	for (
 		let start = from;
 		start + windowMs <= Math.max(to, from + windowMs);
@@ -456,24 +508,27 @@ export function fitRolling(
 	) {
 		const end = start + windowMs;
 		const inWindow = sorted.filter((s) => s.t0 >= start && s.t1 <= end);
-		if (inWindow.length === 0) continue;
-		const result = fitWithIntervals(inWindow, {
-			...options,
-			seedParts: [...(options.seedParts ?? []), start],
-		});
-		for (const coef of result.coefficients) {
-			const list = series.get(coef.key) ?? [];
+		const result =
+			inWindow.length > 0
+				? fitWithIntervals(inWindow, {
+						...options,
+						seedParts: [...(options.seedParts ?? []), start],
+					})
+				: null;
+		for (const key of modelKeys) {
+			const coef = result?.coefficients.find((c) => c.key === key) ?? null;
+			const list = series.get(key) ?? [];
 			list.push({
 				windowStartMs: start,
 				windowEndMs: end,
-				pointEstimate: coef.pointEstimate,
-				ciLow: coef.ciLow,
-				ciHigh: coef.ciHigh,
-				impliedCapacityMtok: coef.impliedCapacityMtok,
-				identified: coef.identified,
-				nSegments: result.nSegments,
+				pointEstimate: coef?.pointEstimate ?? null,
+				ciLow: coef?.ciLow ?? null,
+				ciHigh: coef?.ciHigh ?? null,
+				impliedCapacityMtok: coef?.impliedCapacityMtok ?? null,
+				identified: coef?.identified ?? false,
+				nSegments: inWindow.length,
 			});
-			series.set(coef.key, list);
+			series.set(key, list);
 		}
 		if (end >= to) break;
 	}

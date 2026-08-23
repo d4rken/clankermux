@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	actualModelKeys,
 	fitRolling,
 	fitWithIntervals,
 	MIN_SEGMENTS_FOR_FIT,
@@ -141,6 +142,34 @@ describe("fitWithIntervals gate", () => {
 		);
 	});
 
+	it("refuses to identify anything from a single run, however many segments", () => {
+		// The bootstrap resamples whole RUNS, so with one unique run every
+		// resample is the original sample and the interval collapses onto the
+		// point estimate. All four criteria then pass and a number with zero
+		// uncertainty gets reported as measured. One account's single complete
+		// weekly run really does look like this: ~28 segments at 6h anchors.
+		const segments = makeSyntheticSegments({
+			weights: { "claude-opus-5": 0.19 },
+			runs: 1,
+			segmentsPerRun: 28,
+			segmentMs: 6 * HOUR,
+			meanTokens: 20_000_000,
+			seed: 128,
+		});
+		expect(segments).toHaveLength(28);
+		expect(new Set(segments.map((s) => s.runId)).size).toBe(1);
+		expect(segments.length).toBeGreaterThanOrEqual(MIN_SEGMENTS_FOR_FIT);
+
+		const result = fitWithIntervals(segments, { bootstrapB: 100 });
+
+		const coef = result.coefficients.find((c) => c.key === "claude-opus-5");
+		expect(coef?.identified).toBe(false);
+		expect(coef?.unidentifiedReasons).toContain("wide-interval");
+		expect(coef?.pointEstimate).toBeNull();
+		expect(coef?.ciLow).toBeNull();
+		expect(coef?.ciHigh).toBeNull();
+	});
+
 	it("lists every contributing account", () => {
 		const segments = makeSyntheticSegments({
 			weights: { "claude-opus-5": 2.4 },
@@ -211,7 +240,115 @@ describe("fitRolling", () => {
 		expect(points.every((p) => p.pointEstimate === null)).toBe(true);
 	});
 
+	it("emits a point for every grid window, including an inactivity gap", () => {
+		// A window with no segments must still produce a point. Skipping it lets
+		// the chart join two fits straight across unmeasured time, and it leaves
+		// "latest" pointing at whatever window last happened to fit.
+		const early = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4 },
+			runs: 20,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START,
+			seed: 77,
+		});
+		const late = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4 },
+			runs: 20,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			// 20 idle days between the two stretches.
+			startMs: START + 40 * DAY_MS,
+			seed: 88,
+		});
+		const segments = [...early, ...late];
+
+		const points =
+			fitRolling(segments, {
+				windowMs: 14 * DAY_MS,
+				stepMs: 2 * DAY_MS,
+				bootstrapB: 20,
+			}).get("claude-opus-5") ?? [];
+
+		expect(points.length).toBeGreaterThan(5);
+		for (let i = 0; i + 1 < points.length; i++) {
+			expect(points[i + 1].windowStartMs - points[i].windowStartMs).toBe(
+				2 * DAY_MS,
+			);
+		}
+		// The gap is represented, not skipped.
+		const empty = points.filter((p) => p.nSegments === 0);
+		expect(empty.length).toBeGreaterThan(0);
+		for (const point of empty) {
+			expect(point.identified).toBe(false);
+			expect(point.pointEstimate).toBeNull();
+			expect(point.ciLow).toBeNull();
+			expect(point.ciHigh).toBeNull();
+			expect(point.impliedCapacityMtok).toBeNull();
+		}
+		// The series runs to the end of the history: the last point is the last
+		// GRID window, so a caller reading "latest" off it can only be behind by
+		// the grid step, never by however long the newest quiet stretch ran.
+		const last = points[points.length - 1];
+		const historyEnd = Math.max(...segments.map((s) => s.t1));
+		expect(historyEnd - last.windowEndMs).toBeLessThan(2 * DAY_MS);
+	});
+
+	it("emits a series for a pooled model, and never one for `other`", () => {
+		// A model below the share floor has no column of its own in the fit, but
+		// it is still a real model: it gets a series of unidentified points. The
+		// pooled `other` column is not a model at all and must not get one.
+		const base = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4 },
+			runs: 30,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START,
+			seed: 99,
+		});
+		const segments = base.map((s) => ({
+			...s,
+			eqTokensByModel: { ...s.eqTokensByModel, "claude-haiku-4-5": 500 },
+		}));
+		expect(selectKeys(segments)).toContain("other");
+
+		const series = fitRolling(segments, {
+			windowMs: 14 * DAY_MS,
+			stepMs: 2 * DAY_MS,
+			bootstrapB: 20,
+		});
+
+		expect([...series.keys()].sort()).toEqual([
+			"claude-haiku-4-5",
+			"claude-opus-5",
+		]);
+		const rare = series.get("claude-haiku-4-5") ?? [];
+		expect(rare.length).toBe(series.get("claude-opus-5")?.length);
+		expect(rare.every((p) => !p.identified)).toBe(true);
+		expect(rare.every((p) => p.pointEstimate === null)).toBe(true);
+	});
+
 	it("returns an empty series for no segments", () => {
 		expect(fitRolling([]).size).toBe(0);
+	});
+});
+
+describe("actualModelKeys", () => {
+	it("is the sorted union of every model with positive exposure", () => {
+		const segments = [
+			segment({ eqTokensByModel: { b: 10, a: 5 } }),
+			segment({ eqTokensByModel: { c: 1, a: 0 } }),
+		];
+
+		expect(actualModelKeys(segments)).toEqual(["a", "b", "c"]);
+	});
+
+	it("never returns the pooled `other` column", () => {
+		const segments = [segment({ eqTokensByModel: { real: 10, other: 5 } })];
+
+		expect(actualModelKeys(segments)).toEqual(["real"]);
 	});
 });

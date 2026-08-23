@@ -27,6 +27,7 @@ export {
 	OPENAI_EQ_WEIGHTS,
 } from "./eq-tokens";
 export {
+	actualModelKeys,
 	bootstrapCoefficients,
 	buildFitInput,
 	CI_COVERAGE,
@@ -39,6 +40,7 @@ export {
 	INFERENCE_BOOTSTRAP_B,
 	MAX_RELATIVE_CI_WIDTH,
 	MIN_MODEL_SHARE,
+	MIN_RUNS_FOR_INTERVAL,
 	MIN_SEGMENTS_FOR_FIT,
 	MIN_TOLERANCE,
 	mulberry32,
