@@ -146,6 +146,65 @@ describe("RunwayCard", () => {
 		expect(html).not.toContain(">0<");
 	});
 
+	it("captions nothing while the read is still in flight", () => {
+		// The caption renders above MetricCard's skeleton, so an outcome-derived
+		// caption would state a runway the card is simultaneously still loading.
+		const html = render({ loading: true });
+
+		expect(html).not.toContain("no run-out within 14d");
+		expect(html).not.toContain("∞");
+		expect(html).not.toContain(">0<");
+	});
+
+	it("captions nothing when the backing read failed", () => {
+		const html = render({ unavailableReason: "API key data unavailable" });
+
+		expect(html).toContain("API key data unavailable");
+		expect(html).not.toContain("no run-out within 14d");
+	});
+
+	it("keeps the other keys' figures reachable under an unknown headline", () => {
+		// `unknown` outranks a finite runway for the headline, but it is a
+		// RESOLVED outcome: routing it through MetricCard's unavailable slot would
+		// take the whole per-key breakdown down with it.
+		const html = render({
+			runways: [
+				row({ keyId: "k1", keyName: "prod", outcome: { kind: "unknown" } }),
+				row({
+					keyId: "k2",
+					keyName: "codex-only",
+					outcome: {
+						kind: "runway",
+						exhaustsAtMs: 1,
+						durationMs: 4 * HOUR,
+						causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
+						unprojectableAccountIds: [],
+					},
+				}),
+			],
+		});
+
+		expect(html).toContain("No quota evidence for any account");
+		expect(html).toContain("codex-only");
+		expect(html).toContain("4h");
+		expect(html).toContain("—");
+		expect(html).not.toContain(">0<");
+	});
+
+	it("still suppresses the breakdown when a backing read failed", () => {
+		const html = render({
+			unavailableReason: "API key data unavailable",
+			runways: [
+				row({ keyId: "k1", keyName: "prod" }),
+				row({ keyId: "k2", keyName: "codex-only" }),
+			],
+		});
+
+		expect(html).toContain("API key data unavailable");
+		expect(html).not.toContain("codex-only");
+		expect(html).not.toContain("∞");
+	});
+
 	it("lists one sub-row per active key and names the limiting one", () => {
 		const html = render({
 			runways: [

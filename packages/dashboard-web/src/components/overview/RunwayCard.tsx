@@ -42,21 +42,32 @@ export function RunwayCard({
 	const worst = worstKeyRunway(runways);
 	const activeRunways = runways.filter((runway) => runway.isActive);
 
-	// Precedence in MetricCard is unavailable -> loading -> resolved, so a failed
-	// read is never dressed up as a pending one, and an outcome that cannot be
-	// stated renders an explicit dash rather than a fabricated zero.
+	// `unavailableReason` is reserved for BACKING-READ failures — the incoming
+	// prop, and a runway list with nothing active to speak for. MetricCard drops
+	// the sub-rows along with the value when it is set, so an outcome that merely
+	// cannot be STATED (unknown, no-accounts) must not travel through it: the
+	// other keys' definite figures have to stay reachable. Precedence in
+	// MetricCard is unavailable -> loading -> resolved, so a failed read is never
+	// dressed up as a pending one.
 	const unavailable =
 		unavailableReason ??
-		(worst === null
-			? "No active API keys or accounts"
-			: (runwayUnavailableReason(worst.outcome) ?? undefined));
+		(worst === null ? "No active API keys or accounts" : undefined);
+	// Only a resolved read may speak. The caption sits ABOVE MetricCard's
+	// value/skeleton/dash branch and renders unconditionally, so anything derived
+	// from `worst` has to be gated here or a pending or failed read would print a
+	// resolved-sounding caption next to its own skeleton.
+	const resolved = !loading && unavailable == null;
 
 	const captionParts: string[] = [];
-	if (worst) {
+	if (worst && resolved) {
 		// With one route there is nothing to disambiguate, so the key name is only
 		// worth the width when several keys could be the limiting one.
 		if (activeRunways.length > 1) captionParts.push(worst.keyName);
-		const cause = describeRunwayCause(worst.outcome, accounts);
+		// An unstateable outcome takes the "why" slot; the two are exclusive,
+		// since an outcome that names a cause is one that can be stated.
+		const cause =
+			runwayUnavailableReason(worst.outcome) ??
+			describeRunwayCause(worst.outcome, accounts);
 		if (cause) captionParts.push(cause);
 		const qualifier = runwayQualifier(worst.outcome);
 		if (qualifier) captionParts.push(qualifier);
