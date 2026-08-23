@@ -23,6 +23,8 @@ import type {
 	PaymentSource,
 	RankedSnapshot,
 	RateLimitReason,
+	ScopedUsageSnapshotRow,
+	ScopedUsageSnapshotSample,
 	StorageUsageType,
 	StrategyStore,
 	ToolCallStat,
@@ -65,6 +67,7 @@ import {
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
 
@@ -282,6 +285,9 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
+	// Rides the usage-snapshot retention control (one knob for one series
+	// family), so it has no control of its own — the card sums the two.
+	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
 	{ key: "memory_snapshots", table: "memory_snapshots" },
 	// Riders on the requests retention (FK cascade) — no control of their own.
 	{ key: "tool_calls", table: "request_tool_calls" },
@@ -379,6 +385,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private apiKeys: ApiKeyRepository;
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
+	private usageScopedSnapshots: UsageScopedSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
@@ -461,6 +468,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.usageSnapshots = retrying(
 			new UsageSnapshotRepository(this.adapter),
 			"usageSnapshots",
+		);
+		this.usageScopedSnapshots = retrying(
+			new UsageScopedSnapshotRepository(this.adapter),
+			"usageScopedSnapshots",
 		);
 		this.memorySnapshots = retrying(
 			new MemorySnapshotRepository(this.adapter),
@@ -2206,6 +2217,28 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Scoped (per-model-family weekly) usage snapshot operations ────────────
+
+	async insertScopedUsageSnapshots(
+		rows: ScopedUsageSnapshotRow[],
+	): Promise<void> {
+		await this.usageScopedSnapshots.insertSnapshots(rows);
+	}
+
+	async getRecentScopedUsageSnapshotsForAccounts(
+		accountIds: string[],
+		sinceMs: number,
+	): Promise<ScopedUsageSnapshotSample[]> {
+		return this.usageScopedSnapshots.getRecentSnapshotsForAccounts(
+			accountIds,
+			sinceMs,
+		);
+	}
+
+	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
+		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
 	}
 
 	// ── Memory snapshot operations delegated to repository ─────────────────────

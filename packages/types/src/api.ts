@@ -164,6 +164,7 @@ export interface StorageUsageType {
 		| "payloads"
 		| "requests"
 		| "usage_snapshots"
+		| "usage_scoped_snapshots"
 		| "memory_snapshots"
 		| "tool_calls"
 		| "tool_errors";

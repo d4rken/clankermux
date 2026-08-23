@@ -177,6 +177,19 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["sampled_at", "rss_bytes", "heap_used_bytes"],
 		source: "executed",
 	},
+	usage_scoped_snapshots: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: [
+			"account_id",
+			"sampled_at",
+			"family",
+			"display_name",
+			"pct",
+			"reset_at",
+		],
+		source: "create-table-at-intro",
+	},
 	cache_keepalive_snapshots: {
 		shipped: "2026-06-18",
 		commit: "b0873329",

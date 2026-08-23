@@ -58,3 +58,47 @@ export interface UsageSnapshotSample {
 	sevenDayPct: number | null;
 	sevenDayReset: number | null;
 }
+
+/**
+ * Write shape for one per-model-family weekly window observed at a sampler tick
+ * (`usage_scoped_snapshots`). One row per (account, tick, family): a single tick
+ * emits as many rows as the provider reported scoped windows.
+ *
+ * `family` is the ROUTING family (opus/sonnet/haiku/fable). `displayName` is the
+ * provider's own scope label ("Claude Opus 5") kept beside it because the family
+ * mapping is lossy across generations — two generations of the same family are
+ * indistinguishable from `family` alone, and history cannot be backfilled.
+ *
+ * `pct`/`resetAt` are nullable for the same reason the account-wide windows are:
+ * absence of evidence is null, never a concrete 0.
+ */
+export interface ScopedUsageSnapshotRow {
+	accountId: string;
+	/** Sample time, ms since epoch — the sampler tick's shared `now`. */
+	sampledAt: number;
+	/** Routing family the provider's scope label resolved to. */
+	family: string;
+	/** The provider's scope model display name, or null when it had none. */
+	displayName: string | null;
+	/** Reported utilization % for this family's weekly window, or null. */
+	pct: number | null;
+	/** Window reset time, ms since epoch, or null when unknown. */
+	resetAt: number | null;
+}
+
+/**
+ * Raw read shape returned by the scoped-snapshot repository — one row per stored
+ * sample at its real sample time (no bucketing). Structurally identical to
+ * {@link ScopedUsageSnapshotRow}; kept as a separate name so the read and write
+ * sides can diverge (as `UsageSnapshotRow` / `UsageSnapshotSample` already have)
+ * without a rename at every call site.
+ */
+export interface ScopedUsageSnapshotSample {
+	accountId: string;
+	/** epoch ms — the real sample time, not a bucket. */
+	sampledAt: number;
+	family: string;
+	displayName: string | null;
+	pct: number | null;
+	resetAt: number | null;
+}

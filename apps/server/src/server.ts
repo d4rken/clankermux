@@ -1521,6 +1521,10 @@ Available endpoints:
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
+		// Per-model-family weekly windows, recorded from the same tick. Capture
+		// only for now: nothing reads this series yet, but it cannot be
+		// reconstructed after the fact.
+		insertScopedSnapshots: (rows) => dbOps.insertScopedUsageSnapshots(rows),
 		// Persisted history for the weekly burn-slope fit that sizes the
 		// pool-liveness reserve's release horizon.
 		getRecentSnapshots: (accountIds, sinceMs) =>

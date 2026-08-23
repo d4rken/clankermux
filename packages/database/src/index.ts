@@ -48,6 +48,7 @@ export {
 } from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export { StatsRepository } from "./repositories/stats.repository";
+export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 // Re-export retry utilities for external use (from your improvements)
 export { withDatabaseRetry } from "./retry";

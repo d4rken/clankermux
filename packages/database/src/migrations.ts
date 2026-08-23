@@ -366,6 +366,40 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
 	);
 
+	// Create usage_scoped_snapshots table — append-only time-series of the
+	// PER-MODEL-FAMILY weekly windows Anthropic reports in its generic `limits[]`
+	// array (`kind: "weekly_scoped"`). A different axis from usage_snapshots,
+	// which records the account-wide 5h/7d windows only; a family can be spent
+	// while the account-wide weekly window still has headroom, and that is
+	// invisible in the account-wide series.
+	//
+	// `family` is the ROUTING family (opus/sonnet/haiku/fable) resolved by
+	// getModelFamily(). `display_name` is stored alongside it because that
+	// resolution is lossy in exactly the dimension a quota-drift analysis cares
+	// about: "Claude Opus 4.8" and "Claude Opus 5" both map to `opus`. If a
+	// provider ever scopes a weekly window per generation, the family column
+	// alone could not tell them apart, and history cannot be backfilled.
+	//
+	// account_id CASCADE: deleting an account removes its history.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS usage_scoped_snapshots (
+			account_id TEXT NOT NULL,
+			sampled_at INTEGER NOT NULL,
+			family TEXT NOT NULL,
+			display_name TEXT,
+			pct REAL,
+			reset_at INTEGER,
+			PRIMARY KEY (account_id, sampled_at, family),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Index on sampled_at for retention pruning; (account_id, sampled_at, family)
+	// lookups are served by the primary key.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_usage_scoped_snapshots_sampled_at ON usage_scoped_snapshots(sampled_at)`,
+	);
+
 	// Create memory_snapshots table — append-only time-series of the proxy
 	// process's own memory footprint (RSS + JS heap), backing the dashboard
 	// "Memory Usage" graph. One row per sample tick (no account dimension);

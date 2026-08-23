@@ -519,11 +519,23 @@ async function runCleanup(
 		// millions of rows, so it must not run as one writer-slot-holding
 		// statement. Deletes rows only — page reclamation to disk is the hourly
 		// "vacuum" kind's job.
-		const removedSnapshots = await tryDeleteSnapshotsBatched(
-			db,
-			"usage_snapshots",
-			usageSnapshotCutoff,
-		);
+		//
+		// `usage_scoped_snapshots` is pruned on the SAME cutoff and its deletions
+		// are FOLDED INTO removedSnapshots. Both tables are the per-account usage
+		// series and are governed by the one `usage_snapshot_retention_days`
+		// control, so splitting the report would offer a second number for a knob
+		// that has only one.
+		const removedSnapshots =
+			(await tryDeleteSnapshotsBatched(
+				db,
+				"usage_snapshots",
+				usageSnapshotCutoff,
+			)) +
+			(await tryDeleteSnapshotsBatched(
+				db,
+				"usage_scoped_snapshots",
+				usageSnapshotCutoff,
+			));
 		const removedMemorySnapshots = await tryDeleteSnapshotsBatched(
 			db,
 			"memory_snapshots",
