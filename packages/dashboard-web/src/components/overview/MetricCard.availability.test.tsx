@@ -50,6 +50,25 @@ describe("MetricCard availability states", () => {
 		expect(html).not.toContain("Claude");
 	});
 
+	it("keeps the title visible next to a long caption", () => {
+		// Regression: the title carried `truncate` while the caption carried
+		// `shrink-0`, so a long caption won the single-line row and the title
+		// rendered as an empty ellipsis.
+		const caption = "11 keys · no run-out within 14d · 3 accounts unknown";
+		const html = renderToStaticMarkup(
+			<MetricCard
+				title="Quota Runway"
+				value="7"
+				icon={Users}
+				caption={caption}
+			/>,
+		);
+		expect(html).toContain(">Quota Runway</p>");
+		expect(html).toContain(caption);
+		// The caption is the element that yields, and keeps its full text on hover.
+		expect(html).toContain(`title="${caption}"`);
+	});
+
 	it("keeps a stale value visible but labels its age", () => {
 		const html = renderToStaticMarkup(
 			<MetricCard

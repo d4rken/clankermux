@@ -6,6 +6,14 @@ export {
 	type RoutingPin,
 } from "./api-key-pin";
 export {
+	computeApiKeyRunways,
+	effectiveRunwayOutcome,
+	type KeyRunway,
+	type RunwayAccountSource,
+	UNAUTHENTICATED_POOL_KEY_NAME,
+	worstKeyRunway,
+} from "./api-key-runway";
+export {
 	// Test-only handle (forget the captured boot commit). NOT a runtime API:
 	// re-capturing at runtime would erase the restart signal.
 	__bootProvenanceTestHooks,
@@ -181,6 +189,17 @@ export {
 	normalizeAnthropicUsage,
 } from "./usage-normalizer";
 export { computeUsagePrediction } from "./usage-prediction";
+export {
+	type ExtractedValue,
+	extractFiveHour,
+	extractSevenDay,
+	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	isAlibabaShape,
+	isAnthropicStyleShape,
+	isZaiShape,
+	normalizeResetMs,
+	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+} from "./usage-window-extract";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

@@ -8,7 +8,7 @@ import {
 	useRenameAccount,
 } from "../hooks/queries";
 import { useApiError } from "../hooks/useApiError";
-import { queryKeys } from "../lib/query-keys";
+import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
 import { resolveRefreshUsageError } from "../lib/refresh-usage";
 import {
 	AccountAddForm,
@@ -48,12 +48,16 @@ export function AccountsTab() {
 
 	// Reload accounts AND refetch the global force-account state together, so the
 	// per-account toggle + banner can't go stale after any account-mutating
-	// action or background refresh (R7).
+	// action or background refresh (R7). The refresh-usage / force-reset / reload
+	// paths all land here, and every one of them can move the served runway, so
+	// this routes through the shared capacity invalidation rather than refetching
+	// the accounts query alone.
 	const loadAccounts = async () => {
 		await Promise.all([
 			loadAccountsQuery(),
 			queryClient.invalidateQueries({ queryKey: queryKeys.forcedAccount() }),
 		]);
+		invalidateCapacityQueries(queryClient);
 	};
 
 	const refetchForcedAccount = () =>

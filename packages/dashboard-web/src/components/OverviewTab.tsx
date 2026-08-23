@@ -7,10 +7,9 @@ import { REFRESH_INTERVALS } from "../constants";
 import {
 	useAccounts,
 	useAnalytics,
-	useApiKeys,
+	useRunway,
 	useStats,
 } from "../hooks/queries";
-import { computeApiKeyRunways } from "../lib/api-key-runway";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
@@ -70,11 +69,11 @@ export const OverviewTab = React.memo(() => {
 	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
-	// The runway tile is per API key, so it needs the key list as well as the
-	// accounts: a provider-pinned key runs out when its own provider's accounts
-	// do, however healthy the rest of the pool is.
-	const apiKeysQuery = useApiKeys();
-	const { data: apiKeys, isLoading: apiKeysLoading } = apiKeysQuery;
+	// The runway is computed server-side and arrives with the account names its
+	// pin labels and causes need. That is what lets the tile speak for ONE read
+	// instead of being blocked whenever /api/accounts fails.
+	const runwayQuery = useRunway();
+	const { data: runway, isLoading: runwayLoading } = runwayQuery;
 
 	// This page renders PROGRESSIVELY: there is no whole-page gate, because one
 	// slow section (activeSessions dominates /api/analytics) used to hide the
@@ -101,9 +100,9 @@ export const OverviewTab = React.memo(() => {
 	const accountsAvailability = dataAvailability(accountsQuery, accountsLoading);
 	const accountsUnavailable = accountsAvailability.state === "unavailable";
 	const accountsPending = accountsLoading && !accounts;
-	const apiKeysAvailability = dataAvailability(apiKeysQuery, apiKeysLoading);
-	const apiKeysUnavailable = apiKeysAvailability.state === "unavailable";
-	const apiKeysPending = apiKeysLoading && !apiKeys;
+	const runwayAvailability = dataAvailability(runwayQuery, runwayLoading);
+	const runwayUnavailable = runwayAvailability.state === "unavailable";
+	const runwayPending = runwayLoading && !runway;
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
@@ -125,9 +124,9 @@ export const OverviewTab = React.memo(() => {
 		accountsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
 			: undefined;
-	const apiKeysStaleNote =
-		apiKeysAvailability.state === "stale"
-			? `Last updated ${staleAgeLabel(apiKeysAvailability.lastUpdatedAt, now)}`
+	const runwayStaleNote =
+		runwayAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
 	useEffect(() => {
@@ -147,11 +146,6 @@ export const OverviewTab = React.memo(() => {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
-	const keyRunways = useMemo(
-		() => computeApiKeyRunways(apiKeys ?? [], accounts ?? [], now),
-		[apiKeys, accounts, now],
-	);
-
 	// Memoize percentage change calculation (must be at top level)
 	const pctChange = useCallback(
 		(current: number, previous: number): number | null => {
@@ -314,21 +308,18 @@ export const OverviewTab = React.memo(() => {
 					}
 					staleNote={accountsStaleNote}
 				/>
-				{/* Needs BOTH reads: an empty key list would otherwise be read as
-				    "authentication is off", and empty accounts as "nothing to route
-				    to" — neither of which a failed or pending read can claim. */}
+				{/* Gated on the runway read ALONE. The response carries the account
+				    names it needs, so a failing /api/accounts — which blanks the two
+				    pool tiles beside it — must not blank this one too. */}
 				<RunwayCard
-					runways={keyRunways}
-					accounts={accounts ?? []}
-					loading={accountsPending || apiKeysPending}
+					runways={runway?.keys ?? []}
+					accounts={runway?.accounts ?? []}
+					now={now}
+					loading={runwayPending}
 					unavailableReason={
-						accountsUnavailable
-							? "Account data unavailable"
-							: apiKeysUnavailable
-								? "API key data unavailable"
-								: undefined
+						runwayUnavailable ? "Runway data unavailable" : undefined
 					}
-					staleNote={accountsStaleNote ?? apiKeysStaleNote}
+					staleNote={runwayStaleNote}
 				/>
 			</div>
 

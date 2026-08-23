@@ -1,5 +1,6 @@
 import type { AccountResponse, UsageHistoryResponse } from "@clankermux/types";
 import { format } from "date-fns";
+import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import type { PoolWindow } from "../../lib/pool-usage";
@@ -17,9 +18,15 @@ import {
 	CardTitle,
 } from "../ui/card";
 
-interface UsageWindowChartState {
+export interface UsageWindowChartState {
 	usageHistory: UsageHistoryResponse | undefined;
+	/** This window's usage-history read is in flight with nothing cached yet. */
 	loading: boolean;
+	/**
+	 * Set when that read FAILED with nothing cached. Precedence is
+	 * `unavailableReason` -> `loading` -> resolved.
+	 */
+	unavailableReason?: string;
 	/** Selected time range; also re-keys this window's usage-history query. */
 	range: string;
 	onRangeChange: (range: string) => void;
@@ -214,10 +221,18 @@ function buildWindowChart(
 	return { data, lines, isEmpty };
 }
 
+/**
+ * One window's panel. `EMPTY_MESSAGE` is a RESOLVED claim — that no history
+ * exists — so it may only be reached once this window's read has come back. A
+ * pending or failed read yields no rows either, and would otherwise tell a
+ * deployment with months of snapshots the exact opposite of the truth.
+ * Precedence: unavailable -> loading -> empty -> chart.
+ */
 function WindowChartPanel({
 	label,
 	chart,
 	loading,
+	unavailableReason,
 	range,
 	onRangeChange,
 	selectorLabel,
@@ -225,10 +240,12 @@ function WindowChartPanel({
 	label: string;
 	chart: WindowChart;
 	loading: boolean;
+	unavailableReason?: string;
 	range: string;
 	onRangeChange: (range: string) => void;
 	selectorLabel: string;
 }) {
+	const pending = loading && unavailableReason == null;
 	return (
 		<div>
 			<div className="mb-2 flex items-center justify-between gap-group">
@@ -239,7 +256,19 @@ function WindowChartPanel({
 					ariaLabel={selectorLabel}
 				/>
 			</div>
-			{chart.isEmpty ? (
+			{unavailableReason != null ? (
+				// Same 300px box as the chart and the empty state, so the panel keeps
+				// its height whichever branch wins.
+				<div
+					className="flex items-center justify-center"
+					style={{ height: 300 }}
+				>
+					<p className="flex items-center gap-item text-sm text-warning-strong">
+						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+						{unavailableReason}
+					</p>
+				</div>
+			) : !pending && chart.isEmpty ? (
 				<div
 					className="flex items-center justify-center"
 					style={{ height: 300 }}
@@ -249,10 +278,12 @@ function WindowChartPanel({
 					</p>
 				</div>
 			) : (
+				// While pending this renders the chart container's spinner at the same
+				// "medium" 300px height, never the (nonexistent) rows.
 				<BaseLineChart
 					data={chart.data as unknown as ChartDataPoint[]}
 					lines={chart.lines}
-					loading={loading}
+					loading={pending}
 					height="medium"
 					lineType="linear"
 					showLegend
@@ -328,6 +359,7 @@ export function UsageSawtoothChart({
 					label="5-hour window"
 					chart={fiveHour}
 					loading={fiveHourState.loading}
+					unavailableReason={fiveHourState.unavailableReason}
 					range={fiveHourState.range}
 					onRangeChange={fiveHourState.onRangeChange}
 					selectorLabel="5-hour graph time range"
@@ -336,6 +368,7 @@ export function UsageSawtoothChart({
 					label="7-day window"
 					chart={sevenDay}
 					loading={sevenDayState.loading}
+					unavailableReason={sevenDayState.unavailableReason}
 					range={sevenDayState.range}
 					onRangeChange={sevenDayState.onRangeChange}
 					selectorLabel="7-day graph time range"

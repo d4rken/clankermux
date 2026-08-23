@@ -1,8 +1,13 @@
 import type { AnalyticsSection } from "@clankermux/types";
+import type { QueryClient } from "@tanstack/react-query";
 
 export const queryKeys = {
 	all: ["clankermux"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
+	// Server-computed per-key quota runway. Derived from BOTH the account state
+	// and the API-key set (with their routing pins), so it is invalidated
+	// wherever either changes — see invalidateCapacityQueries below.
+	runway: () => [...queryKeys.all, "runway"] as const,
 	forcedAccount: () => [...queryKeys.all, "forced-account"] as const,
 	stats: (errorsSinceHours?: number) =>
 		errorsSinceHours !== undefined
@@ -67,3 +72,23 @@ export const queryKeys = {
 	storageUsage: () => [...queryKeys.all, "storage-usage"] as const,
 	systemStatus: () => [...queryKeys.all, "system-status"] as const,
 } as const;
+
+/**
+ * Invalidate everything that describes routable capacity: the accounts, the API
+ * keys, and the runway derived from both.
+ *
+ * ONE helper rather than a second `invalidateQueries` call at each of the
+ * dozen-odd mutation sites, because that enumeration is exactly what drifts —
+ * a surface invalidating one key while another surface reads a second key
+ * derived from it is how the runway would go stale after an account change.
+ * Anything that mutates an account or a key routes through here.
+ *
+ * Some callers only touch one of the three (regenerating a key's secret changes
+ * no runway field, for instance). They still use this: a redundant invalidation
+ * costs one refetch, a missing one is a wrong number on screen.
+ */
+export function invalidateCapacityQueries(queryClient: QueryClient): void {
+	queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+	queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+	queryClient.invalidateQueries({ queryKey: queryKeys.runway() });
+}

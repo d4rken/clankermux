@@ -12,6 +12,7 @@
  * already on the page.
  */
 import { describe, expect, it } from "bun:test";
+import type { RunwayResponse } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
@@ -63,6 +64,56 @@ function seedError(queryClient: QueryClient, key: readonly unknown[]): void {
 			dataUpdatedAt: 0,
 			errorUpdatedAt: Date.now(),
 		});
+}
+
+/**
+ * A resolved `/api/runway` payload with one finite runway. `exhaustsAtMs` is
+ * anchored far enough ahead that the tile's live countdown cannot cross it
+ * while the test runs.
+ */
+function runwayResponse(): RunwayResponse {
+	const now = Date.now();
+	const HOUR = 60 * 60 * 1000;
+	const DAY = 24 * HOUR;
+	return {
+		generatedAt: now,
+		horizonMs: 14 * DAY,
+		worstKeyId: "k1",
+		keys: [
+			{
+				keyId: "k1",
+				keyName: "prod",
+				isActive: true,
+				pin: { accountId: null, providers: null },
+				eligibleAccountIds: ["acc-1", "acc-2"],
+				outcome: {
+					kind: "runway",
+					exhaustsAtMs: now + 3 * DAY + 2 * HOUR,
+					durationMs: 3 * DAY + 2 * HOUR,
+					causes: [{ accountId: "acc-2", windowKind: "seven_day" }],
+					unprojectableAccountIds: [],
+				},
+			},
+		],
+		accounts: [
+			{
+				id: "acc-1",
+				name: "Primary",
+				provider: "anthropic",
+				metered: true,
+				usageAsOfMs: now,
+				windows: [],
+			},
+			{
+				id: "acc-2",
+				name: "Backup",
+				provider: "anthropic",
+				metered: true,
+				usageAsOfMs: now,
+				windows: [],
+			},
+		],
+	};
 }
 
 const analyticsKey = queryKeys.analytics(
@@ -119,6 +170,36 @@ describe("OverviewTab progressive render", () => {
 		// "—" for the headline, never a percentage nothing measured.
 		expect(html).not.toContain("0%");
 		expect(html).not.toContain("active)");
+	});
+
+	it("keeps the runway readable when the accounts read fails outright", () => {
+		// The whole point of serving the runway with its own account block: the
+		// tile speaks for /api/runway alone, so the read that blanks the two pool
+		// tiles beside it must leave this one standing.
+		const queryClient = client(false);
+		seedError(queryClient, queryKeys.accounts());
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+
+		const html = render(queryClient);
+
+		expect(html).toContain("Account data unavailable");
+		expect(html).toContain("3d 2h");
+		expect(html).toContain("Backup weekly");
+		expect(html).not.toContain("Runway data unavailable");
+	});
+
+	it("says the runway is unavailable when its own read fails", () => {
+		const queryClient = client(false);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		seedError(queryClient, queryKeys.runway());
+
+		const html = render(queryClient);
+
+		expect(html).toContain("Runway data unavailable");
+		// The em-dash unavailable state, never a fabricated figure or a zero.
+		expect(html).toContain("—");
+		expect(html).not.toContain("∞");
+		expect(html).not.toContain('class="text-2xl font-bold">0<');
 	});
 
 	it("renders no error badge on the health strip while stats is pending", () => {

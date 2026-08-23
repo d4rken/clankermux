@@ -39,8 +39,6 @@ import {
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
 	type MinimaxUsageData,
-	parseCodexCreditsHeaders,
-	parseCodexUsageHeaders,
 	USAGE_CACHE_TTL_MS,
 	type UsageData,
 	usageCache,
@@ -65,7 +63,6 @@ import {
 } from "@clankermux/proxy";
 import type {
 	Account,
-	AccountUsagePrediction,
 	AnthropicUsageData,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResponse,
@@ -89,10 +86,8 @@ import {
 	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
-import {
-	type AccountPredictionInput,
-	buildAccountUsagePredictions,
-} from "../services/build-account-predictions";
+import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
+import { getCachedOrPersistedCodexUsage } from "../services/resolve-codex-usage";
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
@@ -121,14 +116,6 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
  * Module-level to avoid per-request allocation.
  */
 const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
-
-/**
- * How far back to pull stored usage snapshots when computing the per-account
- * exhaustion prediction. 24h gives the 7-day-window regression a recent pace
- * while `buildAccountUsagePredictions` internally caps the 5h window to 6h.
- * Inline named constant (no env knobs, per project rule).
- */
-const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Mirror of the usage-snapshot sampler cadence
@@ -379,261 +366,6 @@ export function presentRateLimitStatus(
 	} | null,
 ): string {
 	return resolveRateLimitPresentation(fields, now, accountWideExhausted).status;
-}
-
-export function normalizeCodexUsageData(usage: UsageData): UsageData | null {
-	const now = Date.now();
-	const normalized: UsageData = {
-		five_hour: usage.five_hour ? { ...usage.five_hour } : null,
-		seven_day: { ...usage.seven_day },
-	};
-	// Codex retired its 5h window. A rolled/expired Codex 5h window is absent, not
-	// a 0% card, so collapse a stale reset to `null` (hidden) rather than a
-	// fabricated `{0, null}` placeholder. `normalizeCodexUsageData` only ever runs
-	// for codex accounts, so `null` here is always correct.
-	if (
-		normalized.five_hour?.resets_at &&
-		new Date(normalized.five_hour.resets_at).getTime() <= now
-	) {
-		normalized.five_hour = null;
-	}
-	if (
-		normalized.seven_day.resets_at &&
-		new Date(normalized.seven_day.resets_at).getTime() <= now
-	) {
-		normalized.seven_day = { utilization: 0, resets_at: null };
-	}
-	// Preserve the synthetic per-model `limits[]` (Codex scoped weekly windows),
-	// dropping any entry whose reset has already passed — parity with the flat
-	// window zeroing above. A stale-reset entry is a spent window, not a live one.
-	if (usage.limits) {
-		normalized.limits = usage.limits.filter((entry) => {
-			if (!entry.resets_at) return true;
-			const resetMs = new Date(entry.resets_at).getTime();
-			return !Number.isFinite(resetMs) || resetMs > now;
-		});
-	}
-	// Keep the payload alive when any per-model scoped weekly limit survived the
-	// filter above, even if both flat windows have gone stale. Codex no longer
-	// reports a 5-hour window (`five_hour.resets_at` is always null), so gating
-	// solely on the flat windows would discard a still-live Spark scoped card the
-	// moment the account-wide weekly reset lapses in a stale cache snapshot.
-	const hasLiveLimits = (normalized.limits?.length ?? 0) > 0;
-	return (normalized.five_hour?.resets_at ?? null) !== null ||
-		normalized.seven_day.resets_at !== null ||
-		hasLiveLimits
-		? normalized
-		: null;
-}
-
-/**
- * The newest usable Codex usage reconstructed from stored request payloads,
- * together with the timestamp of the response it came from. This is the LEGACY
- * recovery channel: the headers belong to whatever request happened to be
- * retained, so the reading can be arbitrarily old relative to the account's
- * current window. Returns null when no retained payload yields usable windows.
- *
- * Deliberately does NOT touch the usage cache — the caller decides whether this
- * candidate actually wins before re-seeding anything.
- */
-async function scanCodexUsageFromPayloads(
-	db: ReturnType<DatabaseOperations["getAdapter"]>,
-	accountId: string,
-	accountName: string,
-): Promise<{ data: UsageData; timestampMs: number } | null> {
-	const rows = await db.query<{ json: string; timestamp: number | null }>(
-		`SELECT rp.json, COALESCE(rp.timestamp, r.timestamp) as timestamp
-		 FROM request_payloads rp
-		 JOIN requests r ON rp.id = r.id
-		 WHERE r.account_used = ?
-		 ORDER BY r.timestamp DESC
-		 LIMIT 20`,
-		[accountId],
-	);
-
-	for (const row of rows) {
-		if (!row.json || !row.timestamp) continue;
-
-		try {
-			const payload = JSON.parse(row.json) as {
-				response?: { headers?: Record<string, string>; status?: number };
-				meta?: { timestamp?: number };
-			};
-			const headerEntries = Object.entries(payload.response?.headers ?? {});
-			if (headerEntries.length === 0) continue;
-
-			const codexStatus = payload.response?.status;
-			const payloadTimestamp = payload.meta?.timestamp ?? row.timestamp;
-			const usage = parseCodexUsageHeaders(new Headers(headerEntries), {
-				baseTimeMs: payloadTimestamp,
-				allowRelativeResetAfter: true,
-				defaultUtilization: codexStatus === 429 ? 100 : 0,
-			});
-			if (!usage) continue;
-
-			const normalizedUsage = normalizeCodexUsageData(usage);
-			if (!normalizedUsage) continue;
-
-			// Recover credits state from the same stored headers so the chip
-			// survives a server restart / cache eviction.
-			const credits = parseCodexCreditsHeaders(new Headers(headerEntries));
-			if (credits) normalizedUsage.codexCredits = credits;
-
-			return { data: normalizedUsage, timestampMs: payloadTimestamp };
-		} catch (error) {
-			log.warn(
-				`Failed to recover Codex usage from stored payload for ${accountName}:`,
-				error instanceof Error ? error.message : String(error),
-			);
-		}
-	}
-
-	return null;
-}
-
-/**
- * The persisted `accounts.codex_usage_json` snapshot, split into the part that
- * expires and the part that does not.
- *
- * `data` is the snapshot normalized for display — null when the column is empty,
- * unparseable, or contains nothing still live. `codexCredits` is the credits
- * state the same JSON carries, and it is retained EVEN WHEN `data` is null: an
- * account being on credits is not a window that lapses when its reset passes, so
- * dropping it with the spent windows would blank the credits chip for every idle
- * account after a restart.
- */
-function readPersistedCodexUsageColumn(
-	persistedJson: string | null,
-	accountName: string,
-): { data: FullUsageData | null; codexCredits: CodexCreditsInfo | null } {
-	if (!persistedJson) return { data: null, codexCredits: null };
-	try {
-		const parsed = JSON.parse(persistedJson) as UsageData;
-		const credits = parsed.codexCredits ?? null;
-		const normalized = normalizeCodexUsageData(parsed);
-		if (!normalized) return { data: null, codexCredits: credits };
-		// normalizeCodexUsageData only carries the windows; reattach the credits
-		// state the same way the live-cache branch does.
-		if (credits) normalized.codexCredits = credits;
-		return { data: normalized as FullUsageData, codexCredits: credits };
-	} catch (error) {
-		log.warn(
-			`Failed to parse the persisted Codex usage snapshot for ${accountName}:`,
-			error instanceof Error ? error.message : String(error),
-		);
-		return { data: null, codexCredits: null };
-	}
-}
-
-/**
- * Resolve a Codex account's usage, reporting WHERE it came from and (for the
- * persisted column) WHEN it was observed.
- *
- * Three channels, newest wins, each reported under its own `source` so callers
- * can tell them apart:
- *   1. `"cache"` — the live usage cache, the only source the response may label
- *      with the cache entry's own sample time;
- *   2. `"column"` — `accounts.codex_usage_json`, written by every Codex
- *      observation and stamped with `codex_usage_observed_at`;
- *   3. `"payload"` — the legacy scan over stored request payloads, whose headers
- *      may predate the account's current window by hours.
- *
- * The distinction matters beyond labelling: only `"cache"` and `"payload"` are
- * reflected in the live usage cache (the payload scan re-seeds it), so only they
- * describe a reading the PROXY can also see. A `"column"` reading is
- * display-only.
- *
- * The column is compared against `last_used` because that is the only cheap
- * upper bound on how new a payload candidate could possibly be: when the column
- * is at least as new as the account's last request, no payload can beat it and
- * the scan is skipped entirely. A winning column candidate is deliberately NOT
- * written back into the usage cache — re-seeding would relabel aged data as a
- * fresh live reading, which is the exact defect this resolution order fixes.
- */
-async function getCachedOrPersistedCodexUsage(
-	db: ReturnType<DatabaseOperations["getAdapter"]>,
-	accountId: string,
-	accountName: string,
-	cacheData: FullUsageData | null,
-	persistedJson: string | null,
-	persistedObservedAt: number | null,
-	lastUsed: number | null,
-): Promise<{
-	data: FullUsageData | null;
-	source: "cache" | "column" | "payload" | null;
-	observedAtMs: number | null;
-	persistedCredits: CodexCreditsInfo | null;
-}> {
-	// Read the column FIRST, whichever source ends up winning: its credits state
-	// is reported unconditionally so a caller can fall back to it when the served
-	// reading carries none.
-	const column = readPersistedCodexUsageColumn(persistedJson, accountName);
-	const persistedCredits = column.codexCredits;
-
-	if (cacheData) {
-		const normalizedCache = normalizeCodexUsageData(cacheData as UsageData);
-		if (normalizedCache) {
-			// Preserve live credits state through normalization (which only
-			// carries the 5h/7d windows).
-			const cacheCredits = (cacheData as UsageData).codexCredits;
-			if (cacheCredits) normalizedCache.codexCredits = cacheCredits;
-			return {
-				data: normalizedCache as FullUsageData,
-				source: "cache",
-				observedAtMs: null,
-				persistedCredits,
-			};
-		}
-	}
-
-	const columnData = column.data;
-	const columnObservedAt = columnData ? persistedObservedAt : null;
-	const serveColumn = () => {
-		log.debug(`Served the persisted Codex usage snapshot for ${accountName}`);
-		return {
-			data: columnData,
-			source: "column" as const,
-			observedAtMs: columnObservedAt,
-			persistedCredits,
-		};
-	};
-
-	if (
-		columnData &&
-		(lastUsed == null ||
-			(columnObservedAt != null && columnObservedAt >= lastUsed))
-	) {
-		// Nothing the payload scan could find is newer — skip it.
-		return serveColumn();
-	}
-
-	const payloadCandidate = await scanCodexUsageFromPayloads(
-		db,
-		accountId,
-		accountName,
-	);
-
-	if (
-		columnData &&
-		(!payloadCandidate ||
-			payloadCandidate.timestampMs <=
-				(columnObservedAt ?? Number.NEGATIVE_INFINITY))
-	) {
-		return serveColumn();
-	}
-
-	if (payloadCandidate) {
-		usageCache.set(accountId, payloadCandidate.data);
-		log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
-		return {
-			data: payloadCandidate.data as FullUsageData,
-			source: "payload",
-			observedAtMs: null,
-			persistedCredits,
-		};
-	}
-
-	return { data: null, source: null, observedAtMs: null, persistedCredits };
 }
 
 /**
@@ -928,68 +660,22 @@ export function createAccountsListHandler(
 		);
 
 		// Best-effort per-account exhaustion prediction: least-squares regression
-		// over recent stored snapshots + the live reading, attached below. A DB or
-		// compute failure must NEVER break the accounts response — on error every
-		// account simply gets `prediction: null`.
+		// over recent stored snapshots + the live reading, attached below. The
+		// whole operation — eligibility, lookback, snapshot query and the
+		// empty-map-on-failure policy — lives in the shared service so this
+		// endpoint and `/api/runway` cannot drift. A DB or compute failure must
+		// NEVER break the accounts response; on error every account simply gets
+		// `prediction: null`.
 		//
-		// Sourced from `routingFreshUsageByAccount`, NOT the display view:
-		// buildAccountUsagePredictions appends this reading with `t: now`, so a
-		// reading that is minutes old would enter the regression claiming to be
-		// current and flatten or skew the forecast. An account whose reading has
-		// aged past the routing TTL simply predicts from its stored snapshots
-		// (or gets `prediction: null`) until the next poll lands.
-		const isoToMs = (s: string | null | undefined): number | null => {
-			if (s == null) return null;
-			const ms = Date.parse(s);
-			return Number.isFinite(ms) ? ms : null;
-		};
-		const predictionInputs: AccountPredictionInput[] = [];
-		for (const a of accounts) {
-			const provider = a.provider || "anthropic";
-			// Only Anthropic-style providers expose the 5h/7d windows the
-			// prediction model consumes.
-			if (provider !== "anthropic" && provider !== "codex") continue;
-			const live = routingFreshUsageByAccount.get(a.id);
-			if (!live || typeof live !== "object") continue;
-			const fiveHour = (live as AnthropicUsageData).five_hour;
-			const sevenDay = (live as AnthropicUsageData).seven_day;
-			// Skip accounts with neither window (e.g. non-Anthropic-shaped cache
-			// data) — they fall through to `prediction: null`.
-			if (!fiveHour && !sevenDay) continue;
-			predictionInputs.push({
-				accountId: a.id,
-				fiveHour: fiveHour
-					? {
-							utilization: fiveHour.utilization ?? null,
-							resetsAtMs: isoToMs(fiveHour.resets_at),
-						}
-					: null,
-				sevenDay: sevenDay
-					? {
-							utilization: sevenDay.utilization ?? null,
-							resetsAtMs: isoToMs(sevenDay.resets_at),
-						}
-					: null,
-			});
-		}
-
-		let predictionByAccount = new Map<string, AccountUsagePrediction>();
-		const predictionIds = predictionInputs.map((i) => i.accountId);
-		if (predictionIds.length > 0) {
-			try {
-				const samples = await dbOps.getRecentUsageSnapshotsForAccounts(
-					predictionIds,
-					now - PREDICTION_LOOKBACK_MS,
-				);
-				predictionByAccount = buildAccountUsagePredictions(
-					predictionInputs,
-					samples,
-					now,
-				);
-			} catch (err) {
-				log.warn(`Failed to compute usage predictions: ${err}`);
-			}
-		}
+		// Sourced from `routingFreshUsageByAccount`, NOT the display view: the
+		// service appends this reading with `t: now`, so a reading that is minutes
+		// old would enter the regression claiming to be current.
+		const predictionByAccount = await buildPredictionsForAccounts(
+			dbOps,
+			accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),
+			routingFreshUsageByAccount,
+			now,
+		);
 
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {

@@ -1,5 +1,8 @@
+import type { KeyRunway } from "@clankermux/core";
+import { effectiveRunwayOutcome, worstKeyRunway } from "@clankermux/core";
 import { formatPercentage } from "@clankermux/ui-common";
 import {
+	AlertCircle,
 	AlertTriangle,
 	BarChart3,
 	ChevronDown,
@@ -8,8 +11,7 @@ import {
 	Info,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { worstKeyRunway } from "../../lib/api-key-runway";
+import { describePinTarget } from "../../lib/api-key-pin-label";
 import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
 import {
@@ -33,6 +35,7 @@ import {
 } from "../ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Progress } from "../ui/progress";
+import { Skeleton } from "../ui/skeleton";
 
 type OutlookTone = "neutral" | "success" | "warning" | "destructive";
 
@@ -123,6 +126,21 @@ interface WindowPanelProps {
 	result: PoolUsageResult;
 	window: PoolWindow;
 	now: number;
+	/**
+	 * Set while the first `/api/accounts` fetch is in flight and nothing is
+	 * cached.
+	 *
+	 * Required rather than inferable from `result`: `computePoolUsage([], …)`
+	 * returns an all-empty result that reads as "no accounts contribute to this
+	 * window" — a measurement claim an unread account list never made.
+	 */
+	loading: boolean;
+	/**
+	 * Set when that read FAILED with nothing cached. Precedence is
+	 * `unavailableReason` -> `loading` -> resolved, so a failed read is never
+	 * dressed up as a pending one.
+	 */
+	unavailableReason?: string;
 }
 
 function WindowPanel({
@@ -131,8 +149,14 @@ function WindowPanel({
 	result,
 	window,
 	now,
+	loading,
+	unavailableReason,
 }: WindowPanelProps) {
-	const outlook = quotaOutlook(result);
+	const pending = loading && unavailableReason == null;
+	const resolved = !pending && unavailableReason == null;
+	const outlook: Outlook = resolved
+		? quotaOutlook(result)
+		: { label: pending ? "Loading" : "Unavailable", tone: "neutral" };
 	const toneClasses = TONE_CLASSES[outlook.tone];
 	const eligibleTotal =
 		result.contributing.length +
@@ -146,11 +170,12 @@ function WindowPanel({
 			: Math.max(0, result.earliestResetMs - now);
 	const familyAlert = familyWeeklyBadge(result.familyWeekly);
 	const hasBreakdown =
-		result.contributing.length > 0 ||
-		result.exhausted.length > 0 ||
-		result.excluded.length > 0 ||
-		result.fallback.length > 0 ||
-		result.familyWeekly.length > 0;
+		resolved &&
+		(result.contributing.length > 0 ||
+			result.exhausted.length > 0 ||
+			result.excluded.length > 0 ||
+			result.fallback.length > 0 ||
+			result.familyWeekly.length > 0);
 	const reportingNotes = [
 		result.exhausted.length > 0
 			? countLabel(result.exhausted.length, "unavailable")
@@ -171,7 +196,25 @@ function WindowPanel({
 			</div>
 
 			<div className="mt-group">
-				{result.average == null ? (
+				{unavailableReason != null ? (
+					<>
+						<p className="figure-xl text-muted-foreground">—</p>
+						<p className="mt-tight flex items-center gap-item text-xs text-warning-strong">
+							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+							{unavailableReason}
+						</p>
+					</>
+				) : pending ? (
+					<>
+						{/* Same line box as the resolved headline (.figure-xl is a fixed
+						    1.75rem = h-7), so the panel keeps its height when the
+						    accounts land. */}
+						<Skeleton className="h-7 w-20" />
+						<p className="mt-tight text-xs text-muted-foreground">
+							Reading accounts
+						</p>
+					</>
+				) : result.average == null ? (
 					<>
 						<p className={cn("figure-xl", toneClasses.figure)}>—</p>
 						<p className="mt-tight text-xs text-muted-foreground">
@@ -204,14 +247,18 @@ function WindowPanel({
 					<dt className="label-caps">Reporting</dt>
 					<dd className="mt-tight min-w-0">
 						<span className="block truncate text-sm font-medium">
-							{result.contributing.length} of {eligibleTotal} accounts
+							{resolved
+								? `${result.contributing.length} of ${eligibleTotal} accounts`
+								: "—"}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{reportingNotes.length > 0
-								? reportingNotes.join(" · ")
-								: eligibleTotal > 0
-									? "All reporting"
-									: "No eligible accounts"}
+							{!resolved
+								? "Not reported"
+								: reportingNotes.length > 0
+									? reportingNotes.join(" · ")
+									: eligibleTotal > 0
+										? "All reporting"
+										: "No eligible accounts"}
 						</span>
 					</dd>
 				</div>
@@ -219,28 +266,34 @@ function WindowPanel({
 					<dt className="label-caps">Next checkpoint</dt>
 					<dd
 						className="mt-tight min-w-0"
-						title={result.earliestResetAccountName ?? undefined}
+						title={
+							resolved
+								? (result.earliestResetAccountName ?? undefined)
+								: undefined
+						}
 					>
 						<span className="block truncate text-sm font-medium">
-							{checkpointRemaining == null
+							{!resolved || checkpointRemaining == null
 								? "—"
 								: `in ${formatDurationDhm(checkpointRemaining)}`}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{result.earliestResetMs == null
-								? "No checkpoint reported"
-								: [
-										result.earliestResetAccountName,
-										formatCheckpointStamp(result.earliestResetMs, window),
-									]
-										.filter(Boolean)
-										.join(" · ")}
+							{!resolved
+								? "Not reported"
+								: result.earliestResetMs == null
+									? "No checkpoint reported"
+									: [
+											result.earliestResetAccountName,
+											formatCheckpointStamp(result.earliestResetMs, window),
+										]
+											.filter(Boolean)
+											.join(" · ")}
 						</span>
 					</dd>
 				</div>
 			</dl>
 
-			{(result.atRisk.length > 0 || familyAlert.label != null) && (
+			{resolved && (result.atRisk.length > 0 || familyAlert.label != null) && (
 				<div className="mt-group space-y-item">
 					{result.atRisk.length > 0 && (
 						<div className="flex items-start gap-item rounded-md border border-warning/30 bg-warning/10 px-row py-item text-xs text-warning-strong">
@@ -288,8 +341,15 @@ function WindowPanel({
 interface RunwayPanelProps {
 	runways: KeyRunway[];
 	accounts: { id: string; name: string }[];
+	/**
+	 * The tab's ticking clock. Rendered durations are derived from
+	 * `outcome.exhaustsAtMs` against this, so a countdown served by
+	 * `/api/runway` keeps running between polls rather than freezing at the
+	 * server's snapshot.
+	 */
+	now: number;
 	loading: boolean;
-	/** Set when a backing read failed and nothing is cached. */
+	/** Set when the runway read failed and nothing is cached. */
 	unavailableReason?: string;
 }
 
@@ -304,10 +364,11 @@ interface RunwayPanelProps {
 function RunwayPanel({
 	runways,
 	accounts,
+	now,
 	loading,
 	unavailableReason,
 }: RunwayPanelProps) {
-	const worst = worstKeyRunway(runways);
+	const worst = worstKeyRunway(runways, now);
 	const activeRunways = runways.filter((runway) => runway.isActive);
 	// Three distinct states, kept apart on purpose:
 	//  - readBlocked: the backing read failed, or is still in flight. The parent
@@ -330,12 +391,13 @@ function RunwayPanel({
 		: null;
 	const blockingReason = unavailableReason ?? outcomeReason;
 	const stated = dataResolved && worst !== null && outcomeReason == null;
-	const outlook = runwayOutlook(worst, blockingReason, loading);
+	const outlook = runwayOutlook(worst, blockingReason, loading, now);
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const value = worst && stated ? formatRunwayValue(worst.outcome) : null;
-	const qualifier = worst && stated ? runwayQualifier(worst.outcome) : null;
+	const value = worst && stated ? formatRunwayValue(worst.outcome, now) : null;
+	const qualifier =
+		worst && stated ? runwayQualifier(worst.outcome, now) : null;
 	const cause =
-		worst && stated ? describeRunwayCause(worst.outcome, accounts) : null;
+		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
 
 	return (
 		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
@@ -366,13 +428,17 @@ function RunwayPanel({
 					<dd className="mt-tight min-w-0">
 						<span className="block truncate text-sm font-medium">
 							{worst && stated
-								? `${worst.eligibleAccountCount} ${
-										worst.eligibleAccountCount === 1 ? "account" : "accounts"
+								? `${worst.eligibleAccountIds.length} ${
+										worst.eligibleAccountIds.length === 1
+											? "account"
+											: "accounts"
 									}`
 								: "—"}
 						</span>
 						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{worst && stated ? worst.pinLabel : "Not reported"}
+							{worst && stated
+								? describePinTarget(worst.pin, accounts)
+								: "Not reported"}
 						</span>
 					</dd>
 				</div>
@@ -411,16 +477,16 @@ function RunwayPanel({
 											<span className="font-medium">{runway.keyName}</span>
 											<span className="text-muted-foreground">
 												{" · "}
-												{runway.pinLabel}
+												{describePinTarget(runway.pin, accounts)}
 												{" · "}
-												{runway.eligibleAccountCount}{" "}
-												{runway.eligibleAccountCount === 1
+												{runway.eligibleAccountIds.length}{" "}
+												{runway.eligibleAccountIds.length === 1
 													? "account"
 													: "accounts"}
 											</span>
 										</span>
 										<span className="shrink-0 tabular-nums">
-											{formatRunwayValue(runway.outcome) ??
+											{formatRunwayValue(runway.outcome, now) ??
 												runwayUnavailableReason(runway.outcome) ??
 												"—"}
 										</span>
@@ -445,6 +511,7 @@ function runwayOutlook(
 	worst: KeyRunway | null,
 	blockingReason: string | null,
 	loading: boolean,
+	now: number,
 ): Outlook {
 	if (loading && blockingReason == null) {
 		return { label: "Loading", tone: "neutral" };
@@ -452,7 +519,9 @@ function runwayOutlook(
 	if (blockingReason != null || worst === null) {
 		return { label: "Runway unknown", tone: "neutral" };
 	}
-	switch (worst.outcome.kind) {
+	// Read the outcome AT `now`, so a served runway whose deadline has passed
+	// takes the out-of-quota chip rather than still reading "Runs out".
+	switch (effectiveRunwayOutcome(worst.outcome, now).kind) {
 		case "out-now":
 			return { label: "Out of quota", tone: "destructive" };
 		case "runway":
@@ -466,9 +535,17 @@ interface LimitsCapacityOverviewProps {
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
 	now: number;
-	/** Per-key quota runways from `computeApiKeyRunways`. */
+	/** Per-key runway rows, straight from `/api/runway`. */
 	runways: KeyRunway[];
+	/** Account names for the pin labels and causes, from the same response. */
 	accounts: { id: string; name: string }[];
+	/**
+	 * State of the `/api/accounts` read the two window panels are computed from.
+	 * Scoped to those panels alone: it says nothing about the runway beside them,
+	 * which comes from its own endpoint.
+	 */
+	windowsLoading?: boolean;
+	windowsUnavailableReason?: string;
 	runwaysLoading: boolean;
 	runwaysUnavailableReason?: string;
 }
@@ -484,6 +561,8 @@ export function LimitsCapacityOverview({
 	now,
 	runways,
 	accounts,
+	windowsLoading = false,
+	windowsUnavailableReason,
 	runwaysLoading,
 	runwaysUnavailableReason,
 }: LimitsCapacityOverviewProps) {
@@ -536,6 +615,8 @@ export function LimitsCapacityOverview({
 						result={fiveHour}
 						window="five_hour"
 						now={now}
+						loading={windowsLoading}
+						unavailableReason={windowsUnavailableReason}
 					/>
 					<WindowPanel
 						title="7-day window"
@@ -543,10 +624,13 @@ export function LimitsCapacityOverview({
 						result={sevenDay}
 						window="seven_day"
 						now={now}
+						loading={windowsLoading}
+						unavailableReason={windowsUnavailableReason}
 					/>
 					<RunwayPanel
 						runways={runways}
 						accounts={accounts}
+						now={now}
 						loading={runwaysLoading}
 						unavailableReason={runwaysUnavailableReason}
 					/>

@@ -1,6 +1,18 @@
-import type { UsagePrediction } from "@clankermux/types";
+import type {
+	RunwayCause,
+	RunwayOutcome,
+	UsagePrediction,
+} from "@clankermux/types";
 import { isUsablePrediction } from "@clankermux/types";
 import { TIME_CONSTANTS } from "./constants";
+
+/**
+ * The outcome vocabulary lives in `@clankermux/types` (see `types/runway.ts`)
+ * so the `/api/runway` wire types can reference it without making the leaf
+ * types package depend on core. Re-exported here so this module stays the one
+ * import site for everything runway-shaped on the server and the dashboard.
+ */
+export type { RunwayCause, RunwayOutcome };
 
 /**
  * Quota-exhaustion estimation, and the pool-level "runway" built on top of it.
@@ -174,32 +186,6 @@ export interface RunwayAccountInput {
 	unmetered: boolean;
 	windows: RunwayWindowInput[];
 }
-
-export interface RunwayCause {
-	accountId: string;
-	windowKind: string;
-}
-
-export type RunwayOutcome =
-	| { kind: "no-accounts" }
-	| { kind: "unknown" }
-	| {
-			kind: "out-now";
-			causes: RunwayCause[];
-			unprojectableAccountIds: string[];
-	  }
-	| {
-			kind: "beyond-horizon";
-			horizonMs: number;
-			unprojectableAccountIds: string[];
-	  }
-	| {
-			kind: "runway";
-			exhaustsAtMs: number;
-			durationMs: number;
-			causes: RunwayCause[];
-			unprojectableAccountIds: string[];
-	  };
 
 /** A half-open [startMs, endMs) span during which something has no quota. */
 interface DeadInterval {
