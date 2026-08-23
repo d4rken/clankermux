@@ -44,6 +44,7 @@ import {
 import {
 	extractCodexIdentity,
 	fetchAnthropicProfile,
+	fetchCodexModelCatalog,
 	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
@@ -53,11 +54,13 @@ import {
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
+	CodexModelCatalogCache,
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
+	getValidAccessToken,
 	handleProxy,
 	markCapacityRestoredProbePending,
 	type ProxyContext,
@@ -98,6 +101,7 @@ import {
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { waitForDrainIdle } from "./drain-idle";
+import { handleModelsRoute } from "./models-route";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -1213,6 +1217,18 @@ export default async function startServer(options?: {
 		// hot-reload of the flag takes effect on the next request automatically.
 	});
 
+	// Codex reads its model catalog from `GET /v1/models`, and the catalog is
+	// per-subscription — so it comes from one of OUR Codex accounts, not from the
+	// client, which authenticates with a ClankerMux API key and holds no
+	// upstream-valid token. Best-effort throughout: `getCatalog` returning null
+	// puts the route back on the static list it served before.
+	const codexModelCatalog = new CodexModelCatalogCache({
+		listAccounts: () => proxyContext.dbOps.getAllAccounts(),
+		getApiKeyPin: (apiKeyId) => proxyContext.dbOps.getApiKeyPin(apiKeyId),
+		getAccessToken: (account) => getValidAccessToken(account, proxyContext),
+		fetchCatalog: fetchCodexModelCatalog,
+	});
+
 	// Everything the front door needs, bound once. `fetch` is a thin wrapper
 	// around routeRequest so the routing itself — which namespace a request
 	// belongs to, whether it needs a key, which handler owns it — is reachable
@@ -1232,7 +1248,15 @@ export default async function startServer(options?: {
 				apiKeyId,
 				apiKeyName,
 			),
-		handleModels: handleModelsRequest,
+		handleModels: (url, apiKeyId) =>
+			handleModelsRoute(
+				url,
+				{
+					getCatalog: (keyId) => codexModelCatalog.get(keyId),
+					staticModels: handleModelsRequest,
+				},
+				apiKeyId ?? null,
+			),
 		withDashboard,
 		dashboardManifest,
 		serveDashboardFile,
