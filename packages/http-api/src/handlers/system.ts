@@ -1,5 +1,10 @@
 import type { Config } from "@clankermux/config";
-import { getEventLoopStats, getPricingGaps } from "@clankermux/core";
+import {
+	evaluateBunRuntime,
+	getEventLoopStats,
+	getPricingGaps,
+	MIN_BUN_VERSION,
+} from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type {
 	EventLoopLagStats,
@@ -116,10 +121,24 @@ export function createSystemInfoHandler() {
 			// Detect if running in Docker
 			const isDocker = detectRunningInDocker();
 
+			// `process.versions.bun` alone is misleading: a canary build of X.Y.Z
+			// reports the bare "X.Y.Z" (verified 2026-08-23 on the 1.4.0-canary.1
+			// binary this proxy is deployed on, whose `bun --revision` prints
+			// 1.4.0-canary.1+8326d1bd3). The revision is the only field that
+			// separates two builds claiming the same version, and the floor
+			// verdict is what the boot guard concluded about this runtime.
+			const runtimeCheck = evaluateBunRuntime(process.versions.bun ?? null);
+
 			const systemInfo = {
 				packageManager,
 				nodeVersion: process.version,
 				bunVersion: process.versions.bun || null,
+				bunRevision: typeof Bun === "undefined" ? null : Bun.revision || null,
+				bunRuntimeFloor: {
+					required: MIN_BUN_VERSION,
+					verdict: runtimeCheck.verdict,
+					detail: runtimeCheck.message,
+				},
 				platform: process.platform,
 				arch: process.arch,
 				isBinary,

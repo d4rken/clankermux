@@ -27,7 +27,7 @@
 		"restart": "./scripts/restart.sh"
 	},
 	"engines": {
-		"bun": ">=1.3.14"
+		"bun": ">=1.4.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.4.10",
