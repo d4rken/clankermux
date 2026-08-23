@@ -1,11 +1,11 @@
-import { computeApiKeyRunways, registerUIRefresh } from "@clankermux/core";
+import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
 	useAnalytics,
-	useApiKeys,
 	usePaymentsSummary,
+	useRunway,
 	useUsageHistory,
 } from "../../hooks/queries";
 import { dataAvailability } from "../../lib/data-availability";
@@ -19,7 +19,11 @@ import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
 // Account Performance table plus the plan-cost / burn-rate summary band, both
 // of which come from `totals`.
-const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
+//
+// Exported so tests seeding the query cache key on the SAME list — a divergent
+// list yields `undefined` analytics and this tab falls back to its whole-page
+// skeleton.
+export const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
 	"accountPerformance",
 ];
@@ -33,10 +37,10 @@ export const LimitsTab = React.memo(() => {
 
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
-	// The runway panel is per API key, so this tab owns that query and hands the
-	// computed rows down; LimitsCapacityOverview stays a pure view component.
-	const apiKeysQuery = useApiKeys();
-	const { data: apiKeys, isLoading: apiKeysLoading } = apiKeysQuery;
+	// The runway is computed server-side; this tab owns the query and hands the
+	// rows down, so LimitsCapacityOverview stays a pure view component.
+	const runwayQuery = useRunway();
+	const { data: runway, isLoading: runwayLoading } = runwayQuery;
 	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
@@ -69,21 +73,14 @@ export const LimitsTab = React.memo(() => {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
-	const keyRunways = useMemo(
-		() => computeApiKeyRunways(apiKeys ?? [], accounts ?? [], now),
-		[apiKeys, accounts, now],
-	);
-	// Both reads are load-bearing: an empty key list would otherwise read as
-	// "authentication is off", and empty accounts as "nothing to route to".
-	const accountsUnavailable =
-		dataAvailability(accountsQuery, accountsLoading).state === "unavailable";
-	const apiKeysUnavailable =
-		dataAvailability(apiKeysQuery, apiKeysLoading).state === "unavailable";
-	const runwaysUnavailableReason = accountsUnavailable
-		? "Account data unavailable"
-		: apiKeysUnavailable
-			? "API key data unavailable"
-			: undefined;
+	// Gated on the runway read ALONE. The response carries the account names its
+	// pin labels and causes need, so a failing /api/accounts — which empties the
+	// two window panels beside it — must not empty this one too.
+	const runwayUnavailable =
+		dataAvailability(runwayQuery, runwayLoading).state === "unavailable";
+	const runwaysUnavailableReason = runwayUnavailable
+		? "Runway data unavailable"
+		: undefined;
 
 	const loading = accountsLoading || analyticsLoading;
 	const ready = accounts && analytics;
@@ -107,9 +104,9 @@ export const LimitsTab = React.memo(() => {
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
 				now={now}
-				runways={keyRunways}
-				accounts={accountList}
-				runwaysLoading={apiKeysLoading && !apiKeys}
+				runways={runway?.keys ?? []}
+				accounts={runway?.accounts ?? []}
+				runwaysLoading={runwayLoading && !runway}
 				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>
 

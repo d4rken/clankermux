@@ -8,10 +8,39 @@ import { formatDurationDhm } from "./format-prediction";
  *
  * Copy says QUOTA, never "available": the runway ignores pauses, cooldowns,
  * throttling and the overload breaker by design.
+ *
+ * Everything that renders a duration takes `now`. The outcome is served from
+ * `/api/runway` and refreshed on a poll, so rendering the server's
+ * `durationMs` verbatim would freeze the countdown between polls and could
+ * still read "runway" after its own deadline had passed. The remaining time is
+ * computed from `exhaustsAtMs` against the caller's clock instead — the same
+ * 30s UI tick the surrounding tiles already run on.
  */
 
 /** Rendered for `beyond-horizon`: no run-out inside the modelled window. */
 export const BEYOND_HORIZON_GLYPH = "∞";
+
+/**
+ * The outcome as it stands AT `now`.
+ *
+ * A `runway` whose `exhaustsAtMs` has passed with no newer data is not a
+ * runway of zero, and it is not still counting down: the metric is a
+ * projection throughout, and its own answer once the deadline passes is that
+ * there is no quota. So it renders exactly as `out-now`, carrying the same
+ * causes and unprojectable accounts.
+ */
+export function effectiveRunwayOutcome(
+	outcome: RunwayOutcome,
+	now: number,
+): RunwayOutcome {
+	if (outcome.kind !== "runway") return outcome;
+	if (outcome.exhaustsAtMs - now > 0) return outcome;
+	return {
+		kind: "out-now",
+		causes: outcome.causes,
+		unprojectableAccountIds: outcome.unprojectableAccountIds,
+	};
+}
 
 /**
  * Why a runway cannot be stated at all, or null when it can. Callers render
@@ -33,16 +62,22 @@ export function runwayUnavailableReason(outcome: RunwayOutcome): string | null {
  * A finite runway computed while some accounts were unreadable is a LOWER
  * BOUND, so it carries a `≥`.
  */
-export function formatRunwayValue(outcome: RunwayOutcome): string | null {
-	switch (outcome.kind) {
+export function formatRunwayValue(
+	outcome: RunwayOutcome,
+	now: number,
+): string | null {
+	const effective = effectiveRunwayOutcome(outcome, now);
+	switch (effective.kind) {
 		case "out-now":
 			return "Out of quota";
 		case "beyond-horizon":
 			return BEYOND_HORIZON_GLYPH;
-		case "runway":
-			return outcome.unprojectableAccountIds.length > 0
-				? `≥ ${formatDurationDhm(outcome.durationMs)}`
-				: formatDurationDhm(outcome.durationMs);
+		case "runway": {
+			const remaining = effective.exhaustsAtMs - now;
+			return effective.unprojectableAccountIds.length > 0
+				? `≥ ${formatDurationDhm(remaining)}`
+				: formatDurationDhm(remaining);
+		}
 		default:
 			return null;
 	}
@@ -62,10 +97,12 @@ export function runwayWindowLabel(windowKind: string): string {
 export function describeRunwayCause(
 	outcome: RunwayOutcome,
 	accounts: { id: string; name: string }[],
+	now: number,
 ): string | null {
+	const effective = effectiveRunwayOutcome(outcome, now);
 	const causes: RunwayCause[] =
-		outcome.kind === "out-now" || outcome.kind === "runway"
-			? outcome.causes
+		effective.kind === "out-now" || effective.kind === "runway"
+			? effective.causes
 			: [];
 	const first = causes[0];
 	if (!first) return null;
@@ -92,12 +129,16 @@ export function unprojectableCount(outcome: RunwayOutcome): number {
  * The note that qualifies the headline: what the `beyond-horizon` glyph
  * actually checked, or how many accounts the figure could not see.
  */
-export function runwayQualifier(outcome: RunwayOutcome): string | null {
+export function runwayQualifier(
+	outcome: RunwayOutcome,
+	now: number,
+): string | null {
+	const effective = effectiveRunwayOutcome(outcome, now);
 	const parts: string[] = [];
-	if (outcome.kind === "beyond-horizon") {
-		parts.push(`no run-out within ${formatDurationDhm(outcome.horizonMs)}`);
+	if (effective.kind === "beyond-horizon") {
+		parts.push(`no run-out within ${formatDurationDhm(effective.horizonMs)}`);
 	}
-	const unknown = unprojectableCount(outcome);
+	const unknown = unprojectableCount(effective);
 	if (unknown > 0) {
 		parts.push(`${unknown} account${unknown === 1 ? "" : "s"} unknown`);
 	}

@@ -11,11 +11,18 @@ import {
 import { MetricCard, type MetricCardSubRow } from "./MetricCard";
 
 interface RunwayCardProps {
-	/** Per-key runways from `computeApiKeyRunways`. */
+	/** Per-key runway rows, straight from `/api/runway`. */
 	runways: KeyRunway[];
+	/** Account names for the pin labels and causes, from the same response. */
 	accounts: { id: string; name: string }[];
+	/**
+	 * The parent's ticking clock. Every rendered duration is derived from
+	 * `outcome.exhaustsAtMs` against this, so a countdown served by the endpoint
+	 * keeps running between polls instead of freezing at the server snapshot.
+	 */
+	now: number;
 	loading?: boolean;
-	/** Set when the accounts or API-keys read failed and nothing is cached. */
+	/** Set when the runway read failed and nothing is cached. */
 	unavailableReason?: string;
 	staleNote?: string;
 }
@@ -30,12 +37,12 @@ interface RunwayCardProps {
  *
  * This is QUOTA, not availability: pauses, rate-limit cooldowns, usage
  * throttling and the provider-overload breaker are deliberately not counted, so
- * the copy must never promise routability. `now` is not read here — the parent
- * recomputes the runways on its existing 30s UI refresh.
+ * the copy must never promise routability.
  */
 export function RunwayCard({
 	runways,
 	accounts,
+	now,
 	loading,
 	unavailableReason,
 	staleNote,
@@ -68,15 +75,15 @@ export function RunwayCard({
 		// since an outcome that names a cause is one that can be stated.
 		const cause =
 			runwayUnavailableReason(worst.outcome) ??
-			describeRunwayCause(worst.outcome, accounts);
+			describeRunwayCause(worst.outcome, accounts, now);
 		if (cause) captionParts.push(cause);
-		const qualifier = runwayQualifier(worst.outcome);
+		const qualifier = runwayQualifier(worst.outcome, now);
 		if (qualifier) captionParts.push(qualifier);
 	}
 
 	const subRows: MetricCardSubRow[] = activeRunways.map((runway) => ({
 		label: runway.keyName,
-		value: formatRunwayValue(runway.outcome) ?? "—",
+		value: formatRunwayValue(runway.outcome, now) ?? "—",
 		tooltip:
 			runwayUnavailableReason(runway.outcome) ??
 			describePinTarget(runway.pin, accounts),
@@ -86,7 +93,7 @@ export function RunwayCard({
 		<MetricCard
 			title="Quota Runway"
 			icon={Hourglass}
-			value={worst ? (formatRunwayValue(worst.outcome) ?? "—") : "—"}
+			value={worst ? (formatRunwayValue(worst.outcome, now) ?? "—") : "—"}
 			caption={captionParts.length > 0 ? captionParts.join(" · ") : undefined}
 			unavailableReason={unavailable}
 			staleNote={staleNote}

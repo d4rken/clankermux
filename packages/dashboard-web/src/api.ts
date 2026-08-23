@@ -21,6 +21,7 @@ import type {
 	RequestResponse,
 	RetentionGetResponse,
 	RetentionSetRequest,
+	RunwayResponse,
 	StatsWithErrors,
 	StorageUsageResponse,
 	SystemStatusResponse,
@@ -201,6 +202,15 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	/**
+	 * Per-API-key quota runway, computed server-side. The response carries the
+	 * account evidence it was built from, so this read alone is enough to render
+	 * the runway surfaces — they must not be gated on `/api/accounts`.
+	 */
+	async getRunway(): Promise<RunwayResponse> {
+		return this.get<RunwayResponse>("/api/runway");
 	}
 
 	async initAddAccount(data: {

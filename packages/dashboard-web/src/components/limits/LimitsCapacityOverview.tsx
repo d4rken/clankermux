@@ -15,6 +15,7 @@ import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
+	effectiveRunwayOutcome,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,
@@ -289,8 +290,15 @@ function WindowPanel({
 interface RunwayPanelProps {
 	runways: KeyRunway[];
 	accounts: { id: string; name: string }[];
+	/**
+	 * The tab's ticking clock. Rendered durations are derived from
+	 * `outcome.exhaustsAtMs` against this, so a countdown served by
+	 * `/api/runway` keeps running between polls rather than freezing at the
+	 * server's snapshot.
+	 */
+	now: number;
 	loading: boolean;
-	/** Set when a backing read failed and nothing is cached. */
+	/** Set when the runway read failed and nothing is cached. */
 	unavailableReason?: string;
 }
 
@@ -305,6 +313,7 @@ interface RunwayPanelProps {
 function RunwayPanel({
 	runways,
 	accounts,
+	now,
 	loading,
 	unavailableReason,
 }: RunwayPanelProps) {
@@ -331,12 +340,13 @@ function RunwayPanel({
 		: null;
 	const blockingReason = unavailableReason ?? outcomeReason;
 	const stated = dataResolved && worst !== null && outcomeReason == null;
-	const outlook = runwayOutlook(worst, blockingReason, loading);
+	const outlook = runwayOutlook(worst, blockingReason, loading, now);
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const value = worst && stated ? formatRunwayValue(worst.outcome) : null;
-	const qualifier = worst && stated ? runwayQualifier(worst.outcome) : null;
+	const value = worst && stated ? formatRunwayValue(worst.outcome, now) : null;
+	const qualifier =
+		worst && stated ? runwayQualifier(worst.outcome, now) : null;
 	const cause =
-		worst && stated ? describeRunwayCause(worst.outcome, accounts) : null;
+		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
 
 	return (
 		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
@@ -425,7 +435,7 @@ function RunwayPanel({
 											</span>
 										</span>
 										<span className="shrink-0 tabular-nums">
-											{formatRunwayValue(runway.outcome) ??
+											{formatRunwayValue(runway.outcome, now) ??
 												runwayUnavailableReason(runway.outcome) ??
 												"—"}
 										</span>
@@ -450,6 +460,7 @@ function runwayOutlook(
 	worst: KeyRunway | null,
 	blockingReason: string | null,
 	loading: boolean,
+	now: number,
 ): Outlook {
 	if (loading && blockingReason == null) {
 		return { label: "Loading", tone: "neutral" };
@@ -457,7 +468,9 @@ function runwayOutlook(
 	if (blockingReason != null || worst === null) {
 		return { label: "Runway unknown", tone: "neutral" };
 	}
-	switch (worst.outcome.kind) {
+	// Read the outcome AT `now`, so a served runway whose deadline has passed
+	// takes the out-of-quota chip rather than still reading "Runs out".
+	switch (effectiveRunwayOutcome(worst.outcome, now).kind) {
 		case "out-now":
 			return { label: "Out of quota", tone: "destructive" };
 		case "runway":
@@ -471,8 +484,9 @@ interface LimitsCapacityOverviewProps {
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
 	now: number;
-	/** Per-key quota runways from `computeApiKeyRunways`. */
+	/** Per-key runway rows, straight from `/api/runway`. */
 	runways: KeyRunway[];
+	/** Account names for the pin labels and causes, from the same response. */
 	accounts: { id: string; name: string }[];
 	runwaysLoading: boolean;
 	runwaysUnavailableReason?: string;
@@ -552,6 +566,7 @@ export function LimitsCapacityOverview({
 					<RunwayPanel
 						runways={runways}
 						accounts={accounts}
+						now={now}
 						loading={runwaysLoading}
 						unavailableReason={runwaysUnavailableReason}
 					/>

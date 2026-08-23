@@ -15,7 +15,7 @@ import { useState } from "react";
 import { type Account, api } from "../api";
 import { fetchApiKeys, useAccounts } from "../hooks/queries";
 import { describePinTarget } from "../lib/api-key-pin-label";
-import { queryKeys } from "../lib/query-keys";
+import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
 import { CopyButton } from "./CopyButton";
 import { Button } from "./ui/button";
 import {
@@ -229,9 +229,11 @@ export function ApiKeysTab() {
 		});
 
 	// Fetch API keys - only when not showing the generated key dialog.
-	// Shares `queryKeys.apiKeys()` and the shared fetcher with `useApiKeys`, so
-	// the runway surfaces on Overview and Usage see every create/enable/disable/
-	// delete/rename/re-pin performed here. Two caches for one resource drift.
+	// Shares `queryKeys.apiKeys()` and the shared fetcher with `useApiKeys`: two
+	// caches for one resource drift. Every mutation below goes through
+	// `invalidateCapacityQueries`, which also refreshes the server-computed
+	// runway — it embeds the key set and their routing pins, so a create /
+	// enable / disable / delete / rename / re-pin here changes it.
 	const {
 		data: apiKeysList,
 		isLoading: isLoadingKeys,
@@ -254,7 +256,7 @@ export function ApiKeysTab() {
 			setGeneratedKey({ apiKey: data.apiKey, source: "created" });
 			setNewKeyName("");
 			setIsCreateDialogOpen(false);
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 		onError: (error: Error) => {
@@ -275,7 +277,7 @@ export function ApiKeysTab() {
 			return api.post(endpoint);
 		},
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 	});
@@ -288,7 +290,7 @@ export function ApiKeysTab() {
 		onSuccess: () => {
 			setSelectedKey(null);
 			setIsDeleteDialogOpen(false);
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 			queryClient.invalidateQueries({ queryKey: ["api-keys-stats"] });
 		},
 	});
@@ -308,7 +310,7 @@ export function ApiKeysTab() {
 			setSelectedKey(null);
 			setIsRegenerateDialogOpen(false);
 			setGeneratedKey({ apiKey: data.apiKey, source: "regenerated" });
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 		},
 		onError: (error: Error) => {
 			// Inline error UI shows mutation.error in the regenerate dialog body;
@@ -333,7 +335,7 @@ export function ApiKeysTab() {
 			setIsRenameDialogOpen(false);
 			setSelectedKey(null);
 			setRenameValue("");
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 			// counts don't change on rename → intentionally NOT invalidating
 			// ["api-keys-stats"]
 		},
@@ -361,7 +363,7 @@ export function ApiKeysTab() {
 		},
 		onSuccess: () => {
 			setEditingPinKeyId(null);
-			queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
+			invalidateCapacityQueries(queryClient);
 		},
 		onError: (error: Error) => {
 			// Inline error UI surfaces mutation.error next to the editor's Save
