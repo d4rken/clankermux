@@ -195,7 +195,13 @@ async function routeMountedRequest(
 			"api_key",
 		);
 	} catch (authError) {
-		return terminalForRequestError(req, authError, "auth");
+		return terminalForRequestError(
+			req,
+			authError,
+			"auth",
+			canonicalUrl.pathname,
+			WIRE_MOUNTS[dialect],
+		);
 	}
 	if (!authResult.isAuthenticated) {
 		return jsonError(
@@ -225,7 +231,13 @@ async function routeMountedRequest(
 	try {
 		return await serveAgentRequest(req, canonicalUrl, authResult, deps);
 	} catch (dispatchError) {
-		return terminalForRequestError(req, dispatchError, "dispatch");
+		return terminalForRequestError(
+			req,
+			dispatchError,
+			"dispatch",
+			canonicalUrl.pathname,
+			WIRE_MOUNTS[dialect],
+		);
 	}
 }
 
@@ -323,7 +335,7 @@ async function routeRootRequest(
 	try {
 		authResult = await deps.authenticate(req, p, req.method);
 	} catch (authError) {
-		return terminalForRequestError(req, authError, "auth");
+		return terminalForRequestError(req, authError, "auth", url.pathname);
 	}
 
 	if (!authResult.isAuthenticated) {
@@ -341,7 +353,12 @@ async function routeRootRequest(
 	try {
 		return await serveAgentRequest(req, url, authResult, deps);
 	} catch (dispatchError) {
-		return terminalForRequestError(req, dispatchError, "dispatch");
+		return terminalForRequestError(
+			req,
+			dispatchError,
+			"dispatch",
+			url.pathname,
+		);
 	}
 }
 
