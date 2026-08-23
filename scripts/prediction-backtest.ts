@@ -422,18 +422,6 @@ function load429sByAccount(
 // Replay
 // ---------------------------------------------------------------------------
 
-/** First index with `points[i].t > t`. */
-function upperBound(points: PredictionPoint[], t: number): number {
-	let lo = 0;
-	let hi = points.length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (points[mid].t <= t) lo = mid + 1;
-		else hi = mid;
-	}
-	return lo;
-}
-
 interface SurvivedWindow {
 	accountId: string;
 	windowKind: BacktestWindowKind;
@@ -461,9 +449,10 @@ function accountContributions(
 		entry.instants++;
 		if (r.outcome.kind === "censored") continue;
 		entry.scored++;
+		// Ground truth, so the window's own end decides: `labelResetAtMs`.
 		if (
 			r.outcome.kind === "exhausted" &&
-			(r.resetAtMs == null || r.outcome.atMs < r.resetAtMs)
+			(r.labelResetAtMs == null || r.outcome.atMs < r.labelResetAtMs)
 		) {
 			entry.positives++;
 		}
@@ -487,6 +476,12 @@ function accountContributions(
  * with evidence from the held-out range. Ranges are half-open `[from, to)`, so
  * an outcome landing exactly ON `to` already belongs to the next range, and
  * resets routinely land on exact clock boundaries.
+ *
+ * Two resets are stamped on every record and they are NOT interchangeable. The
+ * window's final sample gives `labelResetAtMs` (ground truth); the sample AT the
+ * instant gives `knownResetAtMs`, which is all a deployment could have known.
+ * They diverge near a reset, where `resets_at` drifts forward inside the
+ * jitter tolerance that holds the window together.
  */
 function replayWindow(
 	windowKind: BacktestWindowKind,
@@ -505,10 +500,18 @@ function replayWindow(
 	)) {
 		const all = account.points[windowKind];
 		if (all.length === 0) continue;
+		// ONE append-only prefix per account, extended by a cursor as the instants
+		// step forward. Re-slicing `all` per instant would copy an ever-growing
+		// prefix and make the replay quadratic in the number of samples. The same
+		// array object is handed to every estimator (they treat it as readonly),
+		// which is also exactly what the day-of-week estimator's prefix cache
+		// expects: it keys on the first element and extends in place.
+		const input: PredictionPoint[] = [];
+		let cursor = 0;
 		const windows = splitSeries(all, isResetBoundary);
 		for (let wi = 0; wi < windows.length; wi++) {
 			const series = windows[wi];
-			const resetAtMs = series[series.length - 1].resetsAt;
+			const labelResetAtMs = series[series.length - 1].resetsAt;
 			const next = wi + 1 < windows.length ? windows[wi + 1] : null;
 			const nextWindowStartsMs = next ? next[0].t : null;
 
@@ -525,14 +528,14 @@ function replayWindow(
 				const outcome = deriveOutcome(
 					series,
 					T,
-					resetAtMs,
+					labelResetAtMs,
 					nextWindowStartsMs,
 				);
 				const outcomeEndMs =
 					outcome.kind === "exhausted"
 						? outcome.atMs
 						: Math.min(
-								resetAtMs ?? Number.POSITIVE_INFINITY,
+								labelResetAtMs ?? Number.POSITIVE_INFINITY,
 								nextWindowStartsMs ?? Number.POSITIVE_INFINITY,
 							);
 				if (outcomeEndMs >= range.toMs) continue;
@@ -543,7 +546,12 @@ function replayWindow(
 				// baselines apply the production lookback internally, while a
 				// day-of-week profile needs weeks. Pre-slicing here would silently
 				// cap every candidate at the shipped estimator's horizon.
-				const input = all.slice(0, upperBound(all, T));
+				while (cursor < all.length && all[cursor].t <= T) {
+					input.push(all[cursor++]);
+				}
+				// `T` is itself a stored sample, so the newest point in the prefix
+				// IS the reading a deployment would have held at that instant.
+				const knownResetAtMs = input[input.length - 1]?.resetsAt ?? null;
 				for (const [name, estimator] of estimators) {
 					const out = estimator(input, T, spec);
 					recordsByEstimator.get(name)?.push({
@@ -556,14 +564,15 @@ function replayWindow(
 						predictsExhaust: out.predictsExhaust,
 						predictedEtaMs: out.predictedEtaMs,
 						outcome,
-						resetAtMs,
+						knownResetAtMs,
+						labelResetAtMs,
 						windowMs: spec.windowMs,
 					});
 				}
 			}
 			if (sawSurvivor) {
 				const endMs = Math.min(
-					resetAtMs ?? Number.POSITIVE_INFINITY,
+					labelResetAtMs ?? Number.POSITIVE_INFINITY,
 					nextWindowStartsMs ?? Number.POSITIVE_INFINITY,
 				);
 				survived.push({
@@ -832,7 +841,17 @@ export function buildSelectionBlock(
 	const winner = opts.lockedWinner ?? selection.winner;
 
 	const baselineRows = rows.filter((r) => isBaseline(r.estimator));
-	const baselines = baselineRows.map(gateMetricsOf);
+	// EVERY baseline, whether or not the run scored it. A gate that only compares
+	// against the baselines that happen to be in the run would let
+	// `--estimators=ols,dow-seasonal` report "F1 at least every baseline" while
+	// the lifetime and naive baselines were never measured. An absent baseline
+	// contributes nulls, which fail the F1 criterion and name it in the detail.
+	const baselines: GateEstimatorMetrics[] = BASELINE_ESTIMATORS.map((name) => {
+		const row = byName.get(name);
+		return row != null
+			? gateMetricsOf(row)
+			: { name, f1: null, medianAbsErrorMinutes: null, usableCoverage: null };
+	});
 	const evaluated = dedupe([
 		...(winner != null ? [winner] : []),
 		...rows.filter((r) => !isBaseline(r.estimator)).map((r) => r.estimator),

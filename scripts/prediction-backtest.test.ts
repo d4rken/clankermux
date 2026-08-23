@@ -4,7 +4,11 @@ import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Estimator } from "../packages/core/src/prediction-backtest";
-import { scoreRecords } from "../packages/core/src/prediction-backtest";
+import {
+	deploymentCohort,
+	scoreRecords,
+	scoreRedRule,
+} from "../packages/core/src/prediction-backtest";
 import type { PredictionPoint } from "../packages/types/src/usage-prediction";
 import {
 	assertSafeOutPath,
@@ -28,6 +32,8 @@ const tempDir = mkdtempSync(join(tmpdir(), "prediction-backtest-"));
 const dbPath = join(tempDir, "fixture.db");
 const boundaryDbPath = join(tempDir, "boundary.db");
 const weeklyDbPath = join(tempDir, "weekly.db");
+const driftDbPath = join(tempDir, "drift.db");
+const dowDbPath = join(tempDir, "dow.db");
 
 afterAll(() => {
 	rmSync(tempDir, { recursive: true, force: true });
@@ -254,6 +260,107 @@ function buildWeeklyDb(): void {
 
 buildWeeklyDb();
 
+/**
+ * A DENSE weekly fixture: five 7-day windows sampled every 10 minutes, burning
+ * faster on weekdays than at the weekend.
+ *
+ * The 30-minute fixture above is too sparse for the burn-rate estimators — a
+ * 30-minute step is wider than the 15-minute gap they accept as observed, so
+ * they abstain on every instant and prove nothing. This one is inside the
+ * tolerance and long enough to give every UTC day of week its day of exposure,
+ * so `trailing-*` and `dow-seasonal` actually answer.
+ */
+const DAY_MS = 24 * HOUR_MS;
+const DOW_T0 = Date.parse("2026-04-06T00:00:00.000Z"); // a Monday
+const DOW_RANGE = {
+	label: "Dense weekly",
+	fromMs: DOW_T0 + 28 * DAY_MS,
+	toMs: DOW_T0 + 35 * DAY_MS + HOUR_MS,
+};
+
+function buildDowDb(): void {
+	const db = new Database(dowDbPath, { create: true });
+	createTables(db);
+	const insert = db.prepare(
+		`INSERT INTO usage_snapshots
+		 (account_id, provider, sampled_at, five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset)
+		 VALUES ('dense-1', 'anthropic', ?, NULL, NULL, ?, ?)`,
+	);
+	const step = 10 * MIN_MS;
+	// Weekdays burn four times as fast as the weekend, which is the rhythm a
+	// day-of-week profile exists to pick up. The window being SCORED burns far
+	// harder than the profile, so the estimators project real exhaustion times
+	// instead of a flat "will not run out" on every instant.
+	const perDay = (windowIndex: number, dow: number) => {
+		if (windowIndex === 4) return 40;
+		return dow === 0 || dow === 6 ? 3 : 12;
+	};
+	db.run("BEGIN");
+	for (let w = 0; w < 6; w++) {
+		const windowStart = DOW_T0 + w * 7 * DAY_MS;
+		const reset = windowStart + 7 * DAY_MS;
+		let pct = 0;
+		// The sixth window only needs its first day: it exists so the fifth has an
+		// observed successor.
+		const end = w === 5 ? windowStart + DAY_MS : reset;
+		for (let t = windowStart; t < end; t += step) {
+			insert.run(t, Math.min(99, Number(pct.toFixed(4))), reset);
+			pct += (perDay(w, new Date(t).getUTCDay()) * step) / DAY_MS;
+		}
+	}
+	db.run("COMMIT");
+	db.close();
+}
+
+buildDowDb();
+
+/**
+ * A window whose `resets_at` DRIFTS forward sample by sample, each step inside
+ * the 60 s jitter tolerance so the whole thing stays ONE window.
+ *
+ * At `DRIFT_T` the newest sample carries a reset that has already passed, while
+ * the window's final sample carries one that is still ahead of `DRIFT_T`. That
+ * is the real shape behind the point-in-time/ground-truth split: a deployment
+ * at `DRIFT_T` would have rendered nothing, but the finished window's reset says
+ * otherwise.
+ */
+const DRIFT_T = T0 + 60 * MIN_MS;
+const DRIFT_KNOWN_RESET = T0 + 59 * MIN_MS;
+const DRIFT_LABEL_RESET = T0 + 61 * MIN_MS;
+
+function buildDriftDb(): void {
+	const db = new Database(driftDbPath, { create: true });
+	createTables(db);
+	const rows: SnapshotFixture[] = [];
+	const push = (sampledAt: number, pct: number, reset: number) =>
+		rows.push({
+			accountId: "drifty",
+			provider: "anthropic",
+			sampledAt,
+			fiveHourPct: pct,
+			fiveHourReset: reset,
+		});
+
+	// Ten-minute samples up to DRIFT_T, the reset creeping forward 60 s a step
+	// and crossing the sample time between the last two.
+	for (let i = 0; i <= 6; i++) {
+		push(T0 + i * 10 * MIN_MS, 20 + i, T0 + (53 + i) * MIN_MS);
+	}
+	// Two more samples, still the same window: the reset creeps past DRIFT_T.
+	push(T0 + 62 * MIN_MS, 27, T0 + 60 * MIN_MS);
+	push(T0 + 64 * MIN_MS, 28, DRIFT_LABEL_RESET);
+	// The successor window, so the drifting one has an observed end.
+	const nextReset = T0 + 6 * HOUR_MS;
+	for (let i = 0; i <= 5; i++) {
+		push(T0 + (66 + i * 10) * MIN_MS, 3 + i, nextReset);
+	}
+
+	insertSnapshots(db, rows);
+	db.close();
+}
+
+buildDriftDb();
+
 const FULL_RANGE = {
 	label: "All",
 	fromMs: T0,
@@ -339,10 +446,11 @@ describe("runBacktest", () => {
 		});
 		const records =
 			coarse.ranges[0].windows[0].recordsByEstimator.get("ols") ?? [];
-		// Spacing is enforced INSIDE a window series (resetAtMs identifies one).
+		// Spacing is enforced INSIDE a window series (its final reset identifies
+		// one).
 		const byWindow = new Map<string, number[]>();
 		for (const r of records) {
-			const key = `${r.accountId} ${r.resetAtMs}`;
+			const key = `${r.accountId} ${r.labelResetAtMs}`;
 			const list = byWindow.get(key) ?? [];
 			list.push(r.T);
 			byWindow.set(key, list);
@@ -527,6 +635,57 @@ describe("runBacktest", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Point-in-time reset knowledge
+// ---------------------------------------------------------------------------
+
+describe("known vs label reset", () => {
+	const driftRecords = () =>
+		runBacktest(driftDbPath, {
+			ranges: [{ label: "Drift", fromMs: T0, toMs: T0 + 3 * HOUR_MS }],
+			stepMinutes: 10,
+			windows: ["five_hour"],
+			estimatorsFor: (w) => estimatorsForWindow(["ols"], w),
+		}).ranges[0].windows[0].recordsByEstimator.get("ols") ?? [];
+
+	test("the two resets are stamped from different samples", () => {
+		const records = driftRecords();
+		const at = records.find((r) => r.T === DRIFT_T);
+		expect(at).toBeDefined();
+		expect(at?.knownResetAtMs).toBe(DRIFT_KNOWN_RESET);
+		expect(at?.labelResetAtMs).toBe(DRIFT_LABEL_RESET);
+		// Every instant of the drifting window shares its final reset.
+		expect(
+			records
+				.filter((r) => r.T <= DRIFT_T)
+				.every((r) => r.labelResetAtMs === DRIFT_LABEL_RESET),
+		).toBe(true);
+	});
+
+	test("an instant whose known reset has expired is out of the deployment cohort", () => {
+		const records = driftRecords();
+		const cohort = deploymentCohort(records);
+		expect(cohort.some((r) => r.T === DRIFT_T)).toBe(false);
+		// The window's final reset IS ahead of that instant, so the exclusion is
+		// the point-in-time rule and not the outcome or the range.
+		expect(DRIFT_LABEL_RESET).toBeGreaterThan(DRIFT_T);
+		// An earlier instant of the SAME window, whose known reset is still ahead,
+		// stays in the cohort.
+		expect(cohort.some((r) => r.T === T0 + 50 * MIN_MS)).toBe(true);
+	});
+
+	test("the excluded instant cannot be scored by the red rule either", () => {
+		const records = driftRecords().filter((r) => r.T === DRIFT_T);
+		expect(records).toHaveLength(1);
+		expect(scoreRedRule(deploymentCohort(records)).scored).toBe(0);
+	});
+
+	test("its ground-truth label is unaffected", () => {
+		const at = driftRecords().find((r) => r.T === DRIFT_T);
+		expect(at?.outcome.kind).toBe("survived");
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Estimator registry and the --estimators allowlist
 // ---------------------------------------------------------------------------
 
@@ -686,6 +845,75 @@ describe("estimator input contract", () => {
 		}
 	});
 
+	test("the shared growing prefix is equivalent to a fresh slice per instant", () => {
+		// Replay hands every estimator ONE append-only array instead of copying an
+		// ever-growing prefix per instant (which was quadratic). Wrapping each
+		// estimator so it receives a private copy re-creates the old contract: if
+		// sharing the array changed any estimator's answer, these runs diverge.
+		// The weekly fixture is the one that matters here, because the day-of-week
+		// estimator carries a prefix cache across calls.
+		const copying =
+			(inner: Estimator): Estimator =>
+			(points, T, window) =>
+				inner(points.slice(), T, window);
+		const replay = (
+			path: string,
+			range: typeof FULL_RANGE,
+			windowKind: "five_hour" | "seven_day",
+			names: string[],
+			wrap: boolean,
+		) =>
+			runBacktest(path, {
+				ranges: [range],
+				stepMinutes: 60,
+				windows: [windowKind],
+				estimatorsFor: (w) => {
+					const out = new Map<string, Estimator>();
+					for (const [name, estimator] of estimatorsForWindow(names, w)) {
+						out.set(name, wrap ? copying(estimator) : estimator);
+					}
+					return out;
+				},
+				loadPadBeforeMs: loadPadForEstimators(names),
+			}).ranges[0].windows[0];
+
+		const cases: [string, typeof FULL_RANGE, "five_hour" | "seven_day", string[]][] =
+			[
+				// Real answers: this fixture's 10-minute sampling is inside every
+				// estimator's gap tolerance.
+				[
+					dbPath,
+					FULL_RANGE,
+					"five_hour",
+					["ols", "lifetime", "naive", "endpoint-seg-1h", "ols-1h"],
+				],
+				// The cache-carrying estimators, which are the ones a shared array
+				// could actually corrupt.
+				[
+					dowDbPath,
+					DOW_RANGE,
+					"seven_day",
+					["ols", "trailing-3d", "trailing-7d", "dow-seasonal"],
+				],
+			];
+		for (const [path, range, windowKind, names] of cases) {
+			const shared = replay(path, range, windowKind, names, false);
+			const sliced = replay(path, range, windowKind, names, true);
+			// The comparison is only worth anything if the estimators answered.
+			const answered = names.filter((name) =>
+				(shared.recordsByEstimator.get(name) ?? []).some(
+					(r) => r.usable && r.predictedEtaMs != null,
+				),
+			);
+			expect(answered).toEqual(names);
+			for (const name of names) {
+				expect(shared.recordsByEstimator.get(name)).toEqual(
+					sliced.recordsByEstimator.get(name) as never,
+				);
+			}
+		}
+	});
+
 	test("baseline metrics on the fixture are the ones the harness landed with", () => {
 		// Captured from the committed harness before per-horizon candidates were
 		// added. These numbers are the regression fence around the input-contract
@@ -797,6 +1025,30 @@ describe("selection block", () => {
 			expect(g.pass).toBe(g.criteria.every((c) => c.pass));
 		}
 		expect(block.redRule.some((r) => r.estimator === "ols")).toBe(true);
+	});
+
+	test("a baseline missing from the run FAILS the gate and is named", () => {
+		// `--estimators=ols,endpoint-seg-1h` leaves the lifetime and naive
+		// baselines unmeasured. The gate says "F1 at least every baseline", so it
+		// must compare against all three regardless of what the run scored.
+		const partial = runBacktest(dbPath, {
+			ranges: [FULL_RANGE],
+			stepMinutes: 10,
+			windows: ["five_hour"],
+			estimatorsFor: (w) => estimatorsForWindow(["ols", "endpoint-seg-1h"], w),
+		}).ranges[0].windows[0];
+		const block = buildSelectionBlock(partial, 20260823, {
+			lockedOnLabel: "All",
+		});
+		expect(block.gate.length).toBeGreaterThan(0);
+		for (const g of block.gate) {
+			const f1Criterion = g.criteria[0];
+			expect(f1Criterion.name).toContain("every baseline");
+			expect(f1Criterion.pass).toBe(false);
+			expect(f1Criterion.detail).toContain("lifetime");
+			expect(f1Criterion.detail).toContain("naive");
+			expect(g.pass).toBe(false);
+		}
 	});
 
 	test("the winner is locked from the first range, never re-picked on the second", () => {

@@ -152,9 +152,21 @@ const rec = (over: Partial<BacktestRecord> = {}): BacktestRecord => ({
 	predictsExhaust: false,
 	predictedEtaMs: null,
 	outcome: { kind: "survived" },
-	resetAtMs: T0 + 4 * HOUR_MS,
+	knownResetAtMs: T0 + 4 * HOUR_MS,
+	labelResetAtMs: T0 + 4 * HOUR_MS,
 	windowMs: FIVE_HOUR_WINDOW_MS,
 	...over,
+});
+
+/**
+ * The ordinary case: the reset known at `T` is the one the window turned out to
+ * have. Fixtures that need the two to DIVERGE set the fields individually.
+ */
+const resets = (
+	ms: number | null,
+): Pick<BacktestRecord, "knownResetAtMs" | "labelResetAtMs"> => ({
+	knownResetAtMs: ms,
+	labelResetAtMs: ms,
 });
 
 /**
@@ -199,7 +211,7 @@ const HAND_RECORDS: BacktestRecord[] = [
 	// TP, predicted 50 min LATE, actual lead 600 min (reset far enough out that
 	// the exhaustion is still inside the window)
 	rec({
-		resetAtMs: T0 + 12 * HOUR_MS,
+		...resets(T0 + 12 * HOUR_MS),
 		predictsExhaust: true,
 		predictedEtaMs: T0 + 650 * MIN_MS,
 		outcome: { kind: "exhausted", atMs: T0 + 600 * MIN_MS },
@@ -297,7 +309,7 @@ describe("scoreRecords", () => {
 		const reset = T0 + 60 * MIN_MS;
 		const m = scoreRecords([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				predictsExhaust: true,
 				predictedEtaMs: T0 + 50 * MIN_MS,
 				outcome: { kind: "exhausted", atMs: T0 + 70 * MIN_MS },
@@ -1376,25 +1388,43 @@ describe("makeDowSeasonalEstimator", () => {
 describe("deploymentCohort", () => {
 	test("keeps instants production would actually have shown something for", () => {
 		const cohort = deploymentCohort([
-			rec({ T: 1, resetAtMs: 1 + HOUR_MS }),
+			rec({ T: 1, ...resets(1 + HOUR_MS) }),
 			// reset unknown: production renders nothing at all
-			rec({ T: 2, resetAtMs: null }),
+			rec({ T: 2, ...resets(null) }),
 			// reset already spent
-			rec({ T: 3, resetAtMs: 3 }),
-			rec({ T: 4, resetAtMs: 4 - MIN_MS }),
+			rec({ T: 3, ...resets(3) }),
+			rec({ T: 4, ...resets(4 - MIN_MS) }),
 			// unobservable outcome
-			rec({ T: 5, resetAtMs: 5 + HOUR_MS, outcome: { kind: "censored" } }),
+			rec({ T: 5, ...resets(5 + HOUR_MS), outcome: { kind: "censored" } }),
 		]);
 		expect(cohort.map((r) => r.T)).toEqual([1]);
 	});
 
 	test("is estimator-independent: usability never enters it", () => {
-		const base = { T: 1, resetAtMs: 1 + HOUR_MS } as const;
+		const base = { T: 1, ...resets(1 + HOUR_MS) } as const;
 		expect(
 			deploymentCohort([
 				rec({ ...base, usable: false, unusableReason: "insufficient_data" }),
 			]),
 		).toHaveLength(1);
+	});
+
+	test("the reset it reads is the one KNOWN at T, not the window's final one", () => {
+		// Near a reset the sample at T can carry a null or already expired
+		// `resets_at` while the window's last sample carries a future one. Reading
+		// the final reset here would admit instants production would have refused
+		// to render anything for.
+		const stale = rec({
+			T: 10,
+			knownResetAtMs: 10 - MIN_MS,
+			labelResetAtMs: 10 + HOUR_MS,
+		});
+		const unknown = rec({
+			T: 11,
+			knownResetAtMs: null,
+			labelResetAtMs: 11 + HOUR_MS,
+		});
+		expect(deploymentCohort([stale, unknown])).toEqual([]);
 	});
 });
 
@@ -1406,15 +1436,15 @@ describe("scoreForSelection", () => {
 		const m = scoreForSelection([
 			// abstains on a window that DID exhaust -> a miss, not an excuse
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				usable: false,
 				unusableReason: "low_confidence",
 				outcome: exhausted,
 			}),
 			// abstains on a window that survived -> a correct silence
-			rec({ resetAtMs: reset, usable: false, unusableReason: "no_slope" }),
+			rec({ ...resets(reset), usable: false, unusableReason: "no_slope" }),
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				predictsExhaust: true,
 				predictedEtaMs: T0 + 20 * MIN_MS,
 				outcome: exhausted,
@@ -1431,10 +1461,10 @@ describe("scoreForSelection", () => {
 
 	test("scores only the deployment cohort", () => {
 		const m = scoreForSelection([
-			rec({ T: 1, resetAtMs: null, outcome: exhausted }),
-			rec({ T: 2, resetAtMs: 2, outcome: exhausted }),
-			rec({ T: 3, resetAtMs: 3 + HOUR_MS, outcome: { kind: "censored" } }),
-			rec({ T: 4, resetAtMs: 4 + HOUR_MS }),
+			rec({ T: 1, ...resets(null), outcome: exhausted }),
+			rec({ T: 2, ...resets(2), outcome: exhausted }),
+			rec({ T: 3, ...resets(3 + HOUR_MS), outcome: { kind: "censored" } }),
+			rec({ T: 4, ...resets(4 + HOUR_MS) }),
 		]);
 		expect(m.instants).toBe(1);
 		expect(m.confusion).toEqual({ tp: 0, fp: 0, tn: 1, fn: 0 });
@@ -1443,7 +1473,7 @@ describe("scoreForSelection", () => {
 	test("an abstention contributes no ETA error", () => {
 		const m = scoreForSelection([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				usable: false,
 				unusableReason: "insufficient_data",
 				outcome: exhausted,
@@ -1461,7 +1491,7 @@ describe("scoreRedRule", () => {
 	test("red needs a margin STRICTLY wider than the fraction of the window", () => {
 		const onBoundary = scoreRedRule([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				windowMs,
 				predictsExhaust: true,
 				predictedEtaMs: reset - 30 * MIN_MS,
@@ -1472,7 +1502,7 @@ describe("scoreRedRule", () => {
 
 		const justPast = scoreRedRule([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				windowMs,
 				predictsExhaust: true,
 				predictedEtaMs: reset - 31 * MIN_MS,
@@ -1486,20 +1516,20 @@ describe("scoreRedRule", () => {
 	test("an unusable estimate, a missing ETA or a missing reset can never be red", () => {
 		const m = scoreRedRule([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				windowMs,
 				usable: false,
 				unusableReason: "no_slope",
 				predictedEtaMs: null,
 			}),
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				windowMs,
 				predictsExhaust: true,
 				predictedEtaMs: null,
 			}),
 			rec({
-				resetAtMs: null,
+				...resets(null),
 				windowMs,
 				predictsExhaust: true,
 				predictedEtaMs: T0,
@@ -1512,7 +1542,7 @@ describe("scoreRedRule", () => {
 	test("censored instants are excluded", () => {
 		const m = scoreRedRule([
 			rec({
-				resetAtMs: reset,
+				...resets(reset),
 				windowMs,
 				predictedEtaMs: T0,
 				outcome: { kind: "censored" },
@@ -1523,13 +1553,76 @@ describe("scoreRedRule", () => {
 
 	test("the margin fraction is configurable", () => {
 		const record = rec({
-			resetAtMs: reset,
+			...resets(reset),
 			windowMs,
 			predictedEtaMs: reset - 20 * MIN_MS,
 			outcome: { kind: "survived" },
 		});
 		expect(scoreRedRule([record]).confusion.tn).toBe(1);
 		expect(scoreRedRule([record], 0.05).confusion.fp).toBe(1);
+	});
+
+	test("the margin is measured against the reset KNOWN at T", () => {
+		// The window ended up resetting an hour out, but at T the newest sample
+		// carried no usable reset. The dashboard had nothing to measure the
+		// projection against, so nothing could have gone red.
+		const known = (knownResetAtMs: number | null) =>
+			rec({
+				knownResetAtMs,
+				labelResetAtMs: reset,
+				windowMs,
+				predictsExhaust: true,
+				predictedEtaMs: reset - 60 * MIN_MS,
+				outcome: { kind: "exhausted", atMs: reset - MIN_MS },
+			});
+		expect(scoreRedRule([known(null)]).confusion).toEqual({
+			tp: 0,
+			fp: 0,
+			tn: 0,
+			fn: 1,
+		});
+		// An expired reset is no better: the margin would be negative anyway, but
+		// the point is that the window-final reset never enters the rule.
+		expect(scoreRedRule([known(T0 - MIN_MS)]).confusion).toEqual({
+			tp: 0,
+			fp: 0,
+			tn: 0,
+			fn: 1,
+		});
+		// The same record with the reset actually in hand IS an alarm, so the two
+		// above are the knowledge rule and not an empty fixture.
+		expect(scoreRedRule([known(reset)]).confusion).toEqual({
+			tp: 1,
+			fp: 0,
+			tn: 0,
+			fn: 0,
+		});
+	});
+});
+
+describe("ground truth vs point-in-time knowledge", () => {
+	test("the label reads the window-final reset even when T knew none", () => {
+		// An exhaustion before the window's own end is a POSITIVE, whatever the
+		// sample at T happened to carry: the label is a fact about the window.
+		const m = scoreRecords([
+			rec({
+				knownResetAtMs: null,
+				labelResetAtMs: T0 + 4 * HOUR_MS,
+				predictsExhaust: true,
+				predictedEtaMs: T0 + 30 * MIN_MS,
+				outcome: { kind: "exhausted", atMs: T0 + 40 * MIN_MS },
+			}),
+			// The same window-final reset, but the exhaustion lands after it: a
+			// negative, so the label is genuinely reading that field.
+			rec({
+				knownResetAtMs: null,
+				labelResetAtMs: T0 + 4 * HOUR_MS,
+				predictsExhaust: true,
+				predictedEtaMs: T0 + 30 * MIN_MS,
+				outcome: { kind: "exhausted", atMs: T0 + 5 * HOUR_MS },
+			}),
+		]);
+		expect(m.confusion).toEqual({ tp: 1, fp: 1, tn: 0, fn: 0 });
 	});
 });
 

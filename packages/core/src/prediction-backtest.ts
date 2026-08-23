@@ -65,7 +65,20 @@ export interface BacktestRecord {
 	predictsExhaust: boolean;
 	predictedEtaMs: number | null;
 	outcome: BacktestOutcome;
-	resetAtMs: number | null;
+	/**
+	 * The reset the newest sample at or before `T` carried: POINT-IN-TIME
+	 * knowledge, and the only reset a deployment could have acted on. Near a
+	 * reset it can be null or already expired while the window's final sample
+	 * carries a future one, because `resets_at` drifts forward within the
+	 * jitter tolerance that defines a window.
+	 */
+	knownResetAtMs: number | null;
+	/**
+	 * The reset the window's FINAL sample carried: the window's own end, used
+	 * for GROUND TRUTH only. It is not knowledge available at `T`, so nothing
+	 * that models what a deployment would have done may read it.
+	 */
+	labelResetAtMs: number | null;
 	windowMs: number;
 }
 
@@ -116,12 +129,17 @@ export function deriveOutcome(
 	return { kind: "survived" };
 }
 
-/** Did this window actually exhaust before its reset? (the positive class) */
+/**
+ * Did this window actually exhaust before its reset? (the positive class)
+ *
+ * GROUND TRUTH, so it reads the window-final reset: whether the exhaustion beat
+ * the window's end is a fact about the window, not about what was known at `T`.
+ */
 function isActualPositive(record: BacktestRecord): boolean {
 	const { outcome } = record;
 	if (outcome.kind !== "exhausted") return false;
-	if (record.resetAtMs == null) return true;
-	return outcome.atMs < record.resetAtMs;
+	if (record.labelResetAtMs == null) return true;
+	return outcome.atMs < record.labelResetAtMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,13 +380,20 @@ export function scoreRecords(
  * otherwise), and an instant whose outcome was never observed cannot be
  * scored. Both conditions are properties of the DATA, never of an estimator, so
  * every estimator is selected on exactly the same instants.
+ *
+ * The reset read here is `knownResetAtMs`, what the newest sample at `T`
+ * carried. Using the window's final reset would admit instants production would
+ * have refused: near a reset the sample at `T` can carry a null or already
+ * expired `resets_at` while the window's last sample carries a future one.
  */
 export function deploymentCohort(
 	records: readonly BacktestRecord[],
 ): BacktestRecord[] {
 	return records.filter(
 		(r) =>
-			r.resetAtMs != null && r.resetAtMs > r.T && r.outcome.kind !== "censored",
+			r.knownResetAtMs != null &&
+			r.knownResetAtMs > r.T &&
+			r.outcome.kind !== "censored",
 	);
 }
 
@@ -421,6 +446,10 @@ export interface RedRuleMetrics {
  * tighter margin sits inside the extrapolation's error and stays amber. What a
  * user sees as an alarm is therefore this rule, not `predictsExhaust`, and its
  * precision is what a false alarm costs.
+ *
+ * The margin is measured against `knownResetAtMs`: the dashboard compares the
+ * projection with the reset it has in hand at that moment, never with a reset
+ * only the finished window reveals.
  */
 export function scoreRedRule(
 	records: readonly BacktestRecord[],
@@ -434,8 +463,8 @@ export function scoreRedRule(
 		const red =
 			r.usable &&
 			r.predictedEtaMs != null &&
-			r.resetAtMs != null &&
-			r.resetAtMs - r.predictedEtaMs > marginFraction * r.windowMs;
+			r.knownResetAtMs != null &&
+			r.knownResetAtMs - r.predictedEtaMs > marginFraction * r.windowMs;
 		const actual = isActualPositive(r);
 		if (red && actual) confusion.tp++;
 		else if (red && !actual) confusion.fp++;
@@ -1579,7 +1608,9 @@ const METHODOLOGY = `## Methodology
   instants: samples minutes apart within one account are correlated.
 - **Deployment cohort.** Selection and the held-out gate score only instants
   where the window's reset was known and still ahead, because that is the only
-  case in which production renders a projection at all. The cohort is a
+  case in which production renders a projection at all. "Known" is
+  POINT-IN-TIME: the \`resets_at\` the newest sample at or before \`T\` carried,
+  never the one the finished window turned out to have. The cohort is a
   property of the DATA, so every estimator is judged on the same instants.
 - **Abstentions are negatives for selection.** On the deployment cohort an
   unusable estimate is scored as "no exhaustion predicted", which is what the
