@@ -26,6 +26,8 @@ interface Calls {
 	dispatch: { pathname: string; search: string; apiKeyId?: string | null }[];
 	responses: { pathname: string; search: string }[];
 	models: number;
+	/** The URLs `handleModels` was handed, so the query string can be asserted. */
+	modelUrls: { pathname: string; search: string }[];
 	dashboard: { assetPath: string }[];
 	auth: { path: string; method: string; requirement?: AuthRequirement }[];
 }
@@ -55,6 +57,7 @@ function makeDeps(options: Options = {}): {
 		dispatch: [],
 		responses: [],
 		models: 0,
+		modelUrls: [],
 		dashboard: [],
 		auth: [],
 	};
@@ -107,8 +110,9 @@ function makeDeps(options: Options = {}): {
 				status: 200,
 			});
 		},
-		handleModels() {
+		async handleModels(url) {
 			calls.models++;
+			calls.modelUrls.push({ pathname: url.pathname, search: url.search });
 			return new Response(JSON.stringify({ handler: "models" }), {
 				status: 200,
 			});
@@ -223,6 +227,30 @@ describe("mounted agent traffic", () => {
 		expect(await models.json()).toEqual({ handler: "models" });
 		expect(calls.models).toBe(1);
 		expect(calls.dispatch).toEqual([]);
+	});
+
+	// Codex's models-manager identifies itself with `?client_version=`, and the
+	// handler picks the reply SHAPE from it. If the mount strip dropped the query
+	// string, every Codex fetch would silently get the OpenAI list shape instead
+	// of a catalog — the exact failure this route was changed to fix.
+	it("preserves the models query string through both mounts", async () => {
+		const { deps, calls } = makeDeps();
+
+		await routeRequest(
+			makeRequest("/v1/models?client_version=0.149.0", { headers: withKey }),
+			deps,
+		);
+		await routeRequest(
+			makeRequest("/wire/openai/v1/models?client_version=0.149.0", {
+				headers: withKey,
+			}),
+			deps,
+		);
+
+		expect(calls.modelUrls).toEqual([
+			{ pathname: "/v1/models", search: "?client_version=0.149.0" },
+			{ pathname: "/v1/models", search: "?client_version=0.149.0" },
+		]);
 	});
 
 	it("rejects a WebSocket upgrade on the mounted Responses path", async () => {

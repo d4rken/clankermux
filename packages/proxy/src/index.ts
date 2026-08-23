@@ -24,6 +24,12 @@ export {
 export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
 export {
+	CODEX_MODEL_CATALOG_TTL_MS,
+	CodexModelCatalogCache,
+	type CodexModelCatalogCacheDeps,
+	type CodexModelCatalogEntry,
+} from "./codex-model-catalog-cache";
+export {
 	type CodexResetCreditApplyDeps,
 	CodexResetCreditApplyScheduler,
 	createCodexResetCreditApplyScheduler,

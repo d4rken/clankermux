@@ -73,8 +73,13 @@ export interface RequestRouterDeps {
 		apiKeyId?: string | null,
 		apiKeyName?: string | null,
 	): Promise<Response>;
-	/** The static, advisory OpenAI-format model list. */
-	handleModels(): Response;
+	/**
+	 * `GET /v1/models`. Takes the URL because the reply's SHAPE depends on it:
+	 * a `client_version` parameter marks a Codex models-manager fetch, which
+	 * wants the per-account `{"models": […]}` catalog, and its absence marks an
+	 * ordinary OpenAI-format client, which wants `{"object":"list","data":[…]}`.
+	 */
+	handleModels(url: URL): Promise<Response>;
 	withDashboard: boolean;
 	dashboardManifest: Record<string, string> | null;
 	serveDashboardFile(
@@ -400,13 +405,13 @@ async function serveAgentRequest(
 		);
 	}
 
-	// Codex CLI probes GET /v1/models to list/validate models. ClankerMux
-	// has no models route, so without this it falls through to the proxy
-	// and 400s ("Provider cannot handle path: /v1/models") on every Codex
-	// startup. Serve a static OpenAI-format model list (advisory — model
-	// names are forwarded verbatim by the responses adapter).
+	// Codex CLI probes GET /v1/models on startup to populate its model picker
+	// and validate the configured model. ClankerMux has no models route, so
+	// without this it falls through to the proxy and 400s ("Provider cannot
+	// handle path: /v1/models") on every Codex startup. The reply shape depends
+	// on the query string; see RequestRouterDeps.handleModels.
 	if (req.method === "GET" && url.pathname === "/v1/models") {
-		return deps.handleModels();
+		return await deps.handleModels(url);
 	}
 
 	return await deps.dispatchProxy(
