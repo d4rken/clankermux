@@ -269,7 +269,7 @@ export class APIRouter {
 		const apiKeysStatsHandler = createApiKeysStatsHandler(dbOps);
 
 		// Register routes
-		this.handlers.set("GET:/health", (_req, url) => healthHandler(url));
+		this.handlers.set("GET:/health", () => healthHandler());
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
 		this.handlers.set("GET:/api/storage", (_req, _url) => storageHandler());

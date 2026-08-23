@@ -1,4 +1,4 @@
-import type { RateLimitReason, UsageExhaustionBinding } from "./account";
+import type { RateLimitReason } from "./account";
 
 /** Whether a given integrity probe is a fast page-structure check or the
  *  slower full check (page structure + index/table cross-checks + foreign
@@ -677,45 +677,29 @@ export interface PoolStatus {
 	 * window or the rolling 5-hour session — is at/above 100% (with a future
 	 * reset), even though no `rate_limited_until` lock is set.
 	 * Optional/additive: absent when usage evidence wasn't available. Family-scoped
-	 * exhaustion does NOT count here (it's per-model, surfaced in accounts_detail).
+	 * exhaustion does NOT count here — it is per-model, and surfaced per account
+	 * on `/api/accounts` and `/public/v1/accounts`.
 	 */
 	usage_exhausted?: number;
 	next_available_at: string | null; // ISO timestamp when earliest rate-limit OR usage window recovers
 }
 
-// Account detail for ?detail=1
-export interface AccountDetail {
-	name: string;
-	status: "available" | "paused" | "rate_limited" | "usage_exhausted";
-	rate_limited_until: number | null;
-	rate_limited_reason: RateLimitReason | null;
-	rate_limited_at: number | null;
-	/**
-	 * Reset (ms) of the binding account-wide window — a weekly one or the rolling
-	 * 5-hour session — when status is `usage_exhausted`.
-	 */
-	usage_exhausted_until?: number | null;
-	/**
-	 * WHICH account-wide window class bound, when status is `usage_exhausted`.
-	 * Lets an operator tell a ~minutes-long session wait from a multi-day weekly
-	 * one. Emitted only alongside the `usage_exhausted` headline.
-	 */
-	usage_exhausted_binding?: UsageExhaustionBinding | null;
-	/**
-	 * Per-model-family weekly windows currently exhausted (e.g. ["fable"]). Detail
-	 * only — a scoped-only exhausted account stays routable (status `available`).
-	 */
-	usage_exhausted_families?: string[];
-}
-
-// Health check response
+/**
+ * Health check response.
+ *
+ * Deliberately TERSE: a rollup and nothing per-account. `/health` is
+ * unauthenticated (a container health check has to be able to reach it), and
+ * the old `?detail=1` view answered it with account names and per-account
+ * availability. The detailed read now lives on the read-only widget API
+ * (`/public/v1/status` and `/public/v1/accounts`), which is designed for
+ * unauthenticated consumption and states exactly what it discloses.
+ */
 export interface HealthResponse {
 	status: string;
 	accounts: number;
 	timestamp: string;
 	strategy: string;
 	pool?: PoolStatus;
-	accounts_detail?: Array<AccountDetail>;
 	runtime?: {
 		asyncWriter?: {
 			healthy: boolean;

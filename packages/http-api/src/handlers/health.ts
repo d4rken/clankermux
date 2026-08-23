@@ -1,19 +1,13 @@
 import type { Config } from "@clankermux/config";
 import {
 	accountWideExhaustion,
-	getExhaustedFamilies,
 	isAccountAvailable,
-	isIndependentBlock,
 	TtlCache,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import { usageCache } from "@clankermux/providers";
-import type {
-	Account,
-	AccountDetail,
-	AnthropicUsageData,
-} from "@clankermux/types";
+import type { Account, AnthropicUsageData } from "@clankermux/types";
 import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
 
 type AsyncWriterHealthFn = () => {
@@ -142,18 +136,26 @@ function toHttpStatus(status: HealthResponse["status"]): 200 | 503 {
 	return status === "ok" ? 200 : 503;
 }
 
+/**
+ * `GET /health` — a rollup, and UNCONDITIONALLY terse.
+ *
+ * There is no `?detail=1` any more. This endpoint is unauthenticated (a
+ * container health check has to reach it before anything else works), and the
+ * detail view answered it with account names and per-account availability. The
+ * detailed read now lives on `/public/v1/status` and `/public/v1/accounts`,
+ * which are designed for unauthenticated consumption and state exactly what
+ * they disclose. Query parameters are ignored rather than rejected, so an old
+ * caller's `?detail=1` still gets a valid health check.
+ */
 export function createHealthHandler(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getAsyncWriterHealth?: AsyncWriterHealthFn,
 	getIntegrityStatus?: IntegrityStatusFn,
 ) {
-	const normalCache = new TtlCache<HealthResponse>(2000);
-	const detailCache = new TtlCache<HealthResponse>(2000);
+	const cache = new TtlCache<HealthResponse>(2000);
 
-	return async (url: URL): Promise<Response> => {
-		const withDetail = url.searchParams.get("detail") === "1";
-		const cache = withDetail ? detailCache : normalCache;
+	return async (): Promise<Response> => {
 		const cached = cache.get();
 		if (cached) {
 			return jsonResponse(cached, toHttpStatus(cached.status));
@@ -225,80 +227,6 @@ export function createHealthHandler(
 					lastFullSkipReason: integrity.lastFullSkipReason,
 				},
 			};
-		}
-
-		// Support ?detail=1 for per-account details.
-		if (withDetail) {
-			response.accounts_detail = accounts.map((a) => {
-				const locked = !!(
-					!a.paused &&
-					a.rate_limited_until &&
-					a.rate_limited_until >= now
-				);
-				const usage = getUsage(a);
-				// Account-wide exhaustion — a spent weekly window OR the spent 5-hour
-				// session — sidelines the whole account. A live cooldown lock does NOT
-				// hide it: the lock is the mechanism, the spent window is the cause,
-				// and reporting the mechanism made identically-exhausted accounts read
-				// differently depending on whether a cooldown happened to still be
-				// ticking. Paused stays excluded — a paused account is not routable for
-				// an unrelated reason.
-				const { exhausted, resetMs, binding } = a.paused
-					? ({ exhausted: false, resetMs: null, binding: null } as const)
-					: accountWideExhaustion(usage, now);
-				// …with ONE carve-out, shared with `/api/accounts` via
-				// `isIndependentBlock`: an administrative/billing block (a stored
-				// `payment_required` / `blocked`, or an `out_of_credits` cooldown) is
-				// not explained by a spent quota, and reporting `usage_exhausted`
-				// there would tell the operator to wait for a weekly reset when the
-				// real action is to pay. Gated to LOCKED accounts on purpose: an
-				// unlocked account with a stored `payment_required` is still routable
-				// (`isAccountAvailable` is true), so its spent account-wide window is
-				// the more accurate health headline. A locked account with a GENERIC
-				// lock still yields to `usage_exhausted`.
-				const exhaustionTakesHeadline =
-					exhausted &&
-					!(
-						locked &&
-						isIndependentBlock(a.rate_limit_status, a.rate_limited_reason)
-					);
-				// Family-scoped exhaustion is DETAIL only — it never changes the
-				// account's routability, so it's surfaced without touching `status`.
-				const scopedFamilies = getExhaustedFamilies(usage, now).map(
-					(f) => f.family,
-				);
-
-				const detail: AccountDetail = {
-					name: a.name,
-					// Cause before mechanism: `usage_exhausted` outranks the cooldown
-					// lock. The lock itself is still reported in the fields below.
-					status: a.paused
-						? "paused"
-						: exhaustionTakesHeadline
-							? "usage_exhausted"
-							: locked
-								? "rate_limited"
-								: "available",
-					rate_limited_until: locked ? (a.rate_limited_until ?? null) : null,
-					rate_limited_reason: locked ? (a.rate_limited_reason ?? null) : null,
-					rate_limited_at: locked ? (a.rate_limited_at ?? null) : null,
-				};
-				// Gated on the HEADLINE, not on bare `exhausted`: a locked
-				// `out_of_credits` / `payment_required` account reports
-				// `status: "rate_limited"`, and emitting `usage_exhausted_*` beside it
-				// would make the response contradict itself — telling the operator to
-				// wait for a window reset when the real action is to pay.
-				if (exhaustionTakesHeadline && resetMs !== null) {
-					detail.usage_exhausted_until = resetMs;
-				}
-				if (exhaustionTakesHeadline && binding !== null) {
-					detail.usage_exhausted_binding = binding;
-				}
-				if (scopedFamilies.length > 0) {
-					detail.usage_exhausted_families = scopedFamilies;
-				}
-				return detail;
-			});
 		}
 
 		cache.set(response);
