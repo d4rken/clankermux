@@ -24,9 +24,22 @@ export interface AuthStatusResponse {
 }
 
 /**
- * Read a bounded JSON body. Returns null when the body is absent, too large,
- * or not an object — every one of which must be refused BEFORE anything
- * expensive runs.
+ * A bounded read's outcome. `tooLarge` is carried separately from every other
+ * unusable body because it is the one the CALLER cannot see in what they sent:
+ * a perfectly well-formed payload is refused purely for its size, and telling
+ * them the password field was missing sends them looking at the wrong thing on
+ * the one endpoint people reach for when something is already broken.
+ */
+type BoundedJsonResult =
+	| { ok: true; body: Record<string, unknown> }
+	| { ok: false; tooLarge: boolean };
+
+const UNUSABLE_BODY: BoundedJsonResult = { ok: false, tooLarge: false };
+const OVERSIZE_BODY: BoundedJsonResult = { ok: false, tooLarge: true };
+
+/**
+ * Read a bounded JSON body. Refuses an absent, oversized or non-object body —
+ * every one of which must be settled BEFORE anything expensive runs.
  *
  * The body is consumed INCREMENTALLY and the reader is cancelled the moment
  * the cap is passed. `await req.text()` would buffer the whole thing first,
@@ -39,12 +52,12 @@ export interface AuthStatusResponse {
 async function readBoundedJson(
 	req: Request,
 	maxBytes: number,
-): Promise<Record<string, unknown> | null> {
+): Promise<BoundedJsonResult> {
 	// A declared length over the cap is refused without reading the body at all.
 	// It is only a claim, though: it can lie, and a chunked body has none.
 	const declared = Number(req.headers.get("content-length"));
-	if (Number.isFinite(declared) && declared > maxBytes) return null;
-	if (!req.body) return null;
+	if (Number.isFinite(declared) && declared > maxBytes) return OVERSIZE_BODY;
+	if (!req.body) return UNUSABLE_BODY;
 
 	const reader = req.body.getReader();
 	const chunks: Uint8Array[] = [];
@@ -59,13 +72,13 @@ async function readBoundedJson(
 				// Cancelling propagates to the sender's side of the stream, so the
 				// rest of an oversized body is never pulled in at all.
 				await reader.cancel().catch(() => {});
-				return null;
+				return OVERSIZE_BODY;
 			}
 			chunks.push(value);
 		}
 	} catch {
 		await reader.cancel().catch(() => {});
-		return null;
+		return UNUSABLE_BODY;
 	}
 
 	const body = new Uint8Array(total);
@@ -78,10 +91,10 @@ async function readBoundedJson(
 	try {
 		const parsed = JSON.parse(new TextDecoder().decode(body));
 		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-			? (parsed as Record<string, unknown>)
-			: null;
+			? { ok: true, body: parsed as Record<string, unknown> }
+			: UNUSABLE_BODY;
 	} catch {
-		return null;
+		return UNUSABLE_BODY;
 	}
 }
 
@@ -99,8 +112,17 @@ export function createAuthLoginHandler(
 	throttle: LoginThrottle = new LoginThrottle(),
 ) {
 	return async (req: Request): Promise<Response> => {
-		const body = await readBoundedJson(req, LOGIN_MAX_BODY_BYTES);
-		const password = body?.password;
+		const read = await readBoundedJson(req, LOGIN_MAX_BODY_BYTES);
+		if (!read.ok && read.tooLarge) {
+			// Answered before the missing-password check, and named: the size bound
+			// refuses valid payloads too, and "Password required" would send an
+			// operator hunting a field that was there all along.
+			return jsonResponse(
+				{ error: "Request body too large", limit: LOGIN_MAX_BODY_BYTES },
+				413,
+			);
+		}
+		const password = read.ok ? read.body.password : undefined;
 		if (typeof password !== "string" || password.length === 0) {
 			return jsonResponse({ error: "Password required" }, 400);
 		}

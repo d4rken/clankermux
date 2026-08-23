@@ -177,8 +177,33 @@ describe("POST /api/auth/login", () => {
 		const res = await createAuthLoginHandler(svc)(
 			loginRequest({ password: "hunter2", pad: "x".repeat(8_192) }),
 		);
-		expect(res.status).toBe(400);
+		expect(res.status).toBe(413);
 		expect(hasher.verifyCalls).toBe(0);
+	});
+
+	it("says the body was too large instead of blaming the password field", async () => {
+		// The bound refuses VALID payloads too, purely for their size, and the
+		// caller cannot see that in what they sent. Reporting "Password required"
+		// for a body that carried a password sends an operator looking at the one
+		// thing that was fine — on the endpoint people reach for when something is
+		// already wrong.
+		await configure("hunter2");
+		const handler = createAuthLoginHandler(svc);
+		const oversize = await handler(
+			loginRequest({ password: "hunter2", pad: "x".repeat(8_192) }),
+		);
+		const empty = await handler(loginRequest({}));
+
+		expect(oversize.status).toBe(413);
+		expect(empty.status).toBe(400);
+		expect(oversize.status).not.toBe(empty.status);
+		const oversizeBody = (await oversize.json()) as Record<string, unknown>;
+		expect(oversizeBody).not.toEqual(
+			(await empty.json()) as Record<string, unknown>,
+		);
+		// The limit is named, so the fix is "send less" without guesswork.
+		expect(oversizeBody.error).toBe("Request body too large");
+		expect(oversizeBody.limit).toBe(LOGIN_MAX_BODY_BYTES);
 	});
 
 	it("STOPS READING an oversized body instead of buffering it first", async () => {
@@ -207,7 +232,7 @@ describe("POST /api/auth/login", () => {
 
 		const res = await createAuthLoginHandler(svc)(req);
 
-		expect(res.status).toBe(400);
+		expect(res.status).toBe(413);
 		expect(cancelled).toBe(true);
 		// A 4 KiB cap over 1 KiB chunks: a handful of pulls, not an endless body.
 		expect(pulls).toBeLessThanOrEqual(LOGIN_MAX_BODY_BYTES / 1_024 + 2);
@@ -259,7 +284,7 @@ describe("POST /api/auth/login", () => {
 			duplex: "half",
 		} as RequestInit & { duplex: "half" });
 
-		expect((await createAuthLoginHandler(svc)(req)).status).toBe(400);
+		expect((await createAuthLoginHandler(svc)(req)).status).toBe(413);
 		expect(cancelled).toBe(true);
 		expect(hasher.verifyCalls).toBe(0);
 	});
