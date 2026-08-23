@@ -14,14 +14,15 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative as relativePath } from "node:path";
 import {
 	AuthRepository,
 	BunSqlAdapter,
 	ensureSchema,
 } from "@clankermux/database";
+import { FLOOR_SCHEMA_SQL } from "../packages/database/src/__tests__/schema-floor.fixture";
 import { scryptPasswordHasher } from "@clankermux/http-api";
 import {
 	type AuthPasswordIo,
@@ -34,7 +35,9 @@ let dir: string;
 let dbPath: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "cmx-auth-cli-"));
+	// realpath: on some platforms the temp directory is itself a symlink, and
+	// the CLI reports the canonical path.
+	dir = realpathSync(mkdtempSync(join(tmpdir(), "cmx-auth-cli-")));
 	dbPath = join(dir, "clankermux.db");
 });
 
@@ -248,11 +251,12 @@ describe("--set", () => {
 		after.close();
 	});
 
-	it("works on a database that predates the auth tables", async () => {
-		// A live deployment upgrades on its next restart; the operator must be
-		// able to set a password before that happens.
+	it("works on a database at the supported schema floor", async () => {
+		// The oldest schema we support: a clone from when the repository went
+		// public, with no auth tables yet. A live deployment picks those up on its
+		// next restart, and the operator must be able to set a password first.
 		const db = new Database(dbPath, { create: true });
-		db.run("CREATE TABLE placeholder (id INTEGER PRIMARY KEY)");
+		db.exec(FLOOR_SCHEMA_SQL);
 		db.close();
 
 		expect(
@@ -264,6 +268,97 @@ describe("--set", () => {
 		const { repo, close } = openRepo();
 		expect(await repo.getPassword()).not.toBeNull();
 		close();
+	});
+});
+
+describe("a file that is not a ClankerMux database is refused, not adopted", () => {
+	/**
+	 * The failure this guards is the reassuring one: `existsSync` passes,
+	 * `runMigrations()` creates the whole schema, and the command reports the
+	 * password was set — while the real deployment is untouched and still open,
+	 * and somebody else's database has been rewritten.
+	 */
+	async function attemptSet(): Promise<{ code: number; output: string }> {
+		const out = io(["a new password", "a new password"]);
+		const code = await runAuthPasswordCommand({ action: "set", dbPath }, out);
+		return { code, output: out.lines.join("\n") };
+	}
+
+	it("refuses a zero-byte file and creates no schema in it", async () => {
+		await Bun.write(dbPath, "");
+		const { code, output } = await attemptSet();
+		expect(code).toBe(1);
+		expect(output).toContain("not a ClankerMux database");
+		expect(output).toContain("no tables at all");
+
+		const db = new Database(dbPath, { readwrite: true, create: false });
+		const tables = db
+			.query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+			.all();
+		db.close();
+		expect(tables).toEqual([]);
+	});
+
+	it("refuses an unrelated SQLite database without modifying it", async () => {
+		const db = new Database(dbPath, { create: true });
+		db.run("CREATE TABLE placeholder (id INTEGER PRIMARY KEY)");
+		db.close();
+
+		const { code, output } = await attemptSet();
+		expect(code).toBe(1);
+		expect(output).toContain('no "accounts" table');
+
+		const after = new Database(dbPath, { readwrite: true, create: false });
+		const tables = (
+			after
+				.query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+				.all() as Array<{ name: string }>
+		).map((row) => row.name);
+		after.close();
+		expect(tables).toEqual(["placeholder"]);
+	});
+
+	it("refuses a database whose accounts table is somebody else's", async () => {
+		const db = new Database(dbPath, { create: true });
+		db.run("CREATE TABLE accounts (id TEXT PRIMARY KEY, balance REAL)");
+		db.run("CREATE TABLE requests (id TEXT PRIMARY KEY)");
+		db.close();
+
+		const { code, output } = await attemptSet();
+		expect(code).toBe(1);
+		expect(output).toContain('Its "accounts" table is missing');
+	});
+
+	it("never prompts for a password it is not going to store", async () => {
+		await Bun.write(dbPath, "");
+		let prompts = 0;
+		const code = await runAuthPasswordCommand(
+			{ action: "set", dbPath },
+			{
+				print: () => {},
+				readPassword: async () => {
+					prompts++;
+					return "a new password";
+				},
+			},
+		);
+		expect(code).toBe(1);
+		expect(prompts).toBe(0);
+	});
+
+	it("names the absolute path it checked", async () => {
+		await Bun.write(dbPath, "");
+		const out = io([]);
+		await runAuthPasswordCommand({ action: "status", dbPath }, out);
+		expect(out.lines.join("\n")).toContain(`Checked: ${dbPath}`);
+	});
+
+	it("reports an absolute path even when given a relative one", async () => {
+		createDb();
+		const relative = relativePath(process.cwd(), dbPath);
+		const out = io([]);
+		await runAuthPasswordCommand({ action: "status", dbPath: relative }, out);
+		expect(out.lines[0]).toBe(`Database: ${dbPath}`);
 	});
 });
 

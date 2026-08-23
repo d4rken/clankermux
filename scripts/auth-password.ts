@@ -13,12 +13,13 @@
  *
  * Two safety properties matter more than convenience here:
  *
- *  - The resolved database path is ALWAYS printed. `resolveDbPath()` reads a
- *    per-user platform config directory, so the same command run as a different
- *    user names a different file.
- *  - A missing database is a hard error, never created. Silently creating an
- *    empty one would print every success message while changing nothing about
- *    the deployment the operator meant to protect.
+ *  - The resolved ABSOLUTE path is ALWAYS printed, symlinks included.
+ *    `resolveDbPath()` reads a per-user platform config directory, so the same
+ *    command run as a different user names a different file.
+ *  - A missing database is a hard error, never created, and an existing file
+ *    that is not recognisably a ClankerMux database is refused rather than
+ *    migrated. Either one, taken silently, would print every success message
+ *    while the deployment the operator meant to protect stayed open.
  *
  * Usage:
  *   bun run auth:password --set              # prompt twice, no echo
@@ -28,7 +29,8 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	AuthRepository,
 	BunSqlAdapter,
@@ -39,6 +41,62 @@ import { scryptPasswordHasher } from "@clankermux/http-api";
 
 /** Shortest password the CLI will store. */
 export const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * What a ClankerMux database must already contain before this command will
+ * touch it.
+ *
+ * `existsSync` is not a check. An empty file, a placeholder, or somebody
+ * else's SQLite database all pass it, and `runMigrations()` would then happily
+ * CREATE the whole ClankerMux schema there — printing "Password set." over a
+ * database the deployment has never heard of, while the real one stays
+ * unprotected. That is the worst failure this control can have, because it
+ * fails silently in the reassuring direction.
+ *
+ * These two tables and their columns predate the auth tables and are present
+ * in every schema back to the supported floor (see schema-floor.fixture.ts), so
+ * requiring them still lets an operator set a password on a database that has
+ * not been migrated yet, which is the case the migration call exists for.
+ */
+const REQUIRED_SCHEMA: ReadonlyArray<{
+	table: string;
+	columns: readonly string[];
+}> = [
+	{ table: "accounts", columns: ["id", "name", "provider", "api_key"] },
+	{ table: "requests", columns: ["id", "timestamp", "method", "path"] },
+];
+
+/**
+ * Null when `db` is recognisably a ClankerMux database, otherwise a sentence
+ * naming what is missing.
+ */
+export function findSchemaProblem(db: Database): string | null {
+	const tables = new Set(
+		(
+			db
+				.query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+				.all() as Array<{ name: string }>
+		).map((row) => row.name),
+	);
+	if (tables.size === 0) {
+		return "It has no tables at all — an empty or newly created file.";
+	}
+	for (const { table, columns } of REQUIRED_SCHEMA) {
+		if (!tables.has(table)) {
+			return `It has no "${table}" table.`;
+		}
+		const present = new Set(
+			(
+				db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+			).map((row) => row.name),
+		);
+		const missing = columns.filter((column) => !present.has(column));
+		if (missing.length > 0) {
+			return `Its "${table}" table is missing: ${missing.join(", ")}.`;
+		}
+	}
+	return null;
+}
 
 export type AuthPasswordAction = "set" | "clear" | "status";
 
@@ -107,9 +165,13 @@ export async function runAuthPasswordCommand(
 	options: AuthPasswordOptions,
 	io: AuthPasswordIo,
 ): Promise<number> {
-	io.print(`Database: ${options.dbPath}`);
+	// Always absolute: a relative path names a different file per working
+	// directory, and this message is the operator's only confirmation of WHICH
+	// deployment they are about to change.
+	const dbPath = resolve(options.dbPath);
+	io.print(`Database: ${dbPath}`);
 
-	if (!existsSync(options.dbPath)) {
+	if (!existsSync(dbPath)) {
 		io.print("");
 		io.print("No database at that path.");
 		io.print(
@@ -124,8 +186,33 @@ export async function runAuthPasswordCommand(
 		return 1;
 	}
 
-	const db = new Database(options.dbPath, { readwrite: true, create: false });
+	// Symlinks are resolved and reported, so "which file" is unambiguous even
+	// when the path given was a link.
+	const canonicalPath = realpathSync(dbPath);
+	if (canonicalPath !== dbPath) {
+		io.print(`Resolved through symlinks to: ${canonicalPath}`);
+	}
+
+	const db = new Database(canonicalPath, { readwrite: true, create: false });
 	try {
+		const problem = findSchemaProblem(db);
+		if (problem) {
+			io.print("");
+			io.print("That file is not a ClankerMux database.");
+			io.print(problem);
+			io.print(
+				"Refusing to migrate it: creating our schema on an empty or unrelated",
+			);
+			io.print(
+				"file would report a password was set while the deployment you meant to",
+			);
+			io.print(
+				"protect stayed open — and would modify a database that is not ours.",
+			);
+			io.print(`Checked: ${canonicalPath}`);
+			return 1;
+		}
+
 		// Bring the schema forward: on a database created before the auth tables
 		// existed, `--set` has to work without waiting for a server restart.
 		runMigrations(db);
