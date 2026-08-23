@@ -489,6 +489,7 @@ export function attachRequestTokens(
 				cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
 			},
 			provider,
+			key,
 		);
 		if (!(exposure > 0)) continue;
 		const ts = Number(row.timestamp);

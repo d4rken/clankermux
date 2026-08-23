@@ -24,6 +24,7 @@ export {
 	type EqTokenWeights,
 	eqTokenProviderFor,
 	eqTokens,
+	MODEL_EQ_WEIGHT_OVERRIDES,
 	OPENAI_EQ_WEIGHTS,
 } from "./eq-tokens";
 export {

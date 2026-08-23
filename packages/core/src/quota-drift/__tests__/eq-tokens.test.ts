@@ -5,8 +5,10 @@ import {
 	type EqTokenWeights,
 	eqTokenProviderFor,
 	eqTokens,
+	MODEL_EQ_WEIGHT_OVERRIDES,
 	OPENAI_EQ_WEIGHTS,
 } from "../eq-tokens";
+import { normalizeModelKey } from "../model-key";
 
 interface ModelCost {
 	input: number;
@@ -39,28 +41,29 @@ function entriesFor(provider: string): Array<[string, ModelCost]> {
  */
 const RATIO_TOLERANCE = 1e-9;
 
-/**
- * Models whose list price does NOT follow their provider's usual ratios, with
- * the ratio each one actually carries.
- *
- * These are recorded, not skipped: the entry pins the exact divergent value, so
- * this model moving again, or any OTHER model diverging, still fails. Removing
- * an entry when the provider re-aligns a price is the intended maintenance.
- *
- * `gpt-5.3-codex-spark` is priced 1.75 in / 14 out, an 8x output ratio against
- * the 6x every other Codex-served model carries. Its exposure is therefore
- * understated by the shared weight — inert today (the model has zero recorded
- * requests in this deployment), but it is a real bias if that ever changes.
- */
-const KNOWN_RATIO_DIVERGENCES: Readonly<
-	Record<
-		string,
-		Partial<Record<"output" | "cache_read" | "cache_write", number>>
-	>
+/** Which weight field a bundled price-table rate class is compared against. */
+const WEIGHT_FIELD: Readonly<
+	Record<"output" | "cache_read" | "cache_write", keyof EqTokenWeights>
 > = {
-	"gpt-5.3-codex-spark": { output: 8 },
+	output: "output",
+	cache_read: "cacheRead",
+	cache_write: "cacheCreate",
 };
 
+/**
+ * A model whose list price does NOT follow its provider's usual ratios is
+ * expected to be PRICED on its own override, not merely documented.
+ *
+ * The expectation is read straight out of `MODEL_EQ_WEIGHT_OVERRIDES`, so three
+ * things fail here: a new divergent model with no override, an override that no
+ * longer matches the price table, and a provider re-price. Removing an override
+ * once a provider re-aligns a price is the intended maintenance.
+ *
+ * `gpt-5.3-codex-spark` is priced 1.75 in / 14 out, an 8x output ratio against
+ * the 6x every other Codex-served model carries. A ratio error is systematic:
+ * no confidence interval can correct it, because every bootstrap resample
+ * carries the same wrong exposure.
+ */
 function assertRatios(provider: string, weights: EqTokenWeights): void {
 	const entries = entriesFor(provider);
 	expect(entries.length).toBeGreaterThan(0);
@@ -74,7 +77,8 @@ function assertRatios(provider: string, weights: EqTokenWeights): void {
 		actual: number,
 		providerWeight: number,
 	) => {
-		const want = KNOWN_RATIO_DIVERGENCES[id]?.[kind] ?? providerWeight;
+		const override = MODEL_EQ_WEIGHT_OVERRIDES[normalizeModelKey(id)];
+		const want = override ? override[WEIGHT_FIELD[kind]] : providerWeight;
 		if (Math.abs(actual - want) > RATIO_TOLERANCE) {
 			mismatches.push(`${id}: ${kind} ratio ${actual}, expected ${want}`);
 		}
@@ -108,18 +112,26 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		assertRatios("openai", OPENAI_EQ_WEIGHTS);
 	});
 
-	it("still pins a model that diverges from its provider's ratios", () => {
-		// The divergence list is not an escape hatch: the exact value is asserted,
-		// so this model moving again fails just as loudly as a new divergence.
+	it("prices a model that diverges from its provider's ratios on its own weights", () => {
+		// The override is not an escape hatch: the exact value is asserted, so
+		// this model moving again fails just as loudly as a new divergence.
 		const spark = entriesFor("openai").find(
 			([id]) => id === "gpt-5.3-codex-spark",
 		);
 		expect(spark).toBeDefined();
 		const [, cost] = spark as [string, ModelCost];
 		expect(cost.output / cost.input).toBeCloseTo(8, 9);
-		// It is priced above the shared weight, so the shared weight understates
-		// its exposure rather than overstating it.
+		// It is priced above the shared weight, so the shared weight would
+		// understate its exposure and inflate its fitted coefficient.
 		expect(cost.output / cost.input).toBeGreaterThan(OPENAI_EQ_WEIGHTS.output);
+
+		const override = MODEL_EQ_WEIGHT_OVERRIDES["gpt-5.3-codex-spark"];
+		expect(override).toBeDefined();
+		expect(override.output).toBeCloseTo(cost.output / cost.input, 9);
+		// Only the diverging class differs; the rest stay on the provider ratios.
+		expect(override.input).toBe(OPENAI_EQ_WEIGHTS.input);
+		expect(override.cacheRead).toBe(OPENAI_EQ_WEIGHTS.cacheRead);
+		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
 	});
 
 	it("tolerates a Codex entry that omits cache_write", () => {
@@ -133,26 +145,36 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 });
 
 describe("eqTokens", () => {
-	it("weights each class by its provider's ratios", () => {
-		const counts = {
-			inputTokens: 1000,
-			outputTokens: 100,
-			cacheReadInputTokens: 10_000,
-			cacheCreationInputTokens: 400,
-		};
+	const counts = {
+		inputTokens: 1000,
+		outputTokens: 100,
+		cacheReadInputTokens: 10_000,
+		cacheCreationInputTokens: 400,
+	};
 
-		expect(eqTokens(counts, "anthropic")).toBeCloseTo(
+	it("weights each class by its provider's ratios", () => {
+		expect(eqTokens(counts, "anthropic", "claude-opus-5")).toBeCloseTo(
 			1000 + 400 * 1.25 + 10_000 * 0.1 + 100 * 5,
 			9,
 		);
-		expect(eqTokens(counts, "openai")).toBeCloseTo(
+		expect(eqTokens(counts, "openai", "gpt-5.6-codex")).toBeCloseTo(
 			1000 + 400 * 1.25 + 10_000 * 0.1 + 100 * 6,
 			9,
 		);
 	});
 
+	it("prefers a model's own weights over its provider's", () => {
+		// The 8x output ratio, not the shared 6x. Fitting an output-heavy model on
+		// the shared weight inflates its coefficient by about a third, and no
+		// interval can correct a systematic weight error.
+		expect(eqTokens(counts, "openai", "gpt-5.3-codex-spark")).toBeCloseTo(
+			1000 + 400 * 1.25 + 10_000 * 0.1 + 100 * 8,
+			9,
+		);
+	});
+
 	it("treats missing, negative and non-finite counts as zero", () => {
-		expect(eqTokens({}, "anthropic")).toBe(0);
+		expect(eqTokens({}, "anthropic", "claude-opus-5")).toBe(0);
 		expect(
 			eqTokens(
 				{
@@ -161,6 +183,7 @@ describe("eqTokens", () => {
 					cacheReadInputTokens: 10,
 				},
 				"anthropic",
+				"claude-opus-5",
 			),
 		).toBeCloseTo(1, 9);
 	});

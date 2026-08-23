@@ -45,19 +45,38 @@ export const ANTHROPIC_EQ_WEIGHTS: EqTokenWeights = {
  * the invariant test skips a rate class an entry intentionally omits rather
  * than failing on it.
  *
- * ONE currently-priced model does not follow this ratio: `gpt-5.3-codex-spark`
- * is 1.75 in / 14 out, an 8x output ratio. A single shared weight therefore
- * understates its output exposure by a quarter, which would bias its fitted
- * coefficient upward. That is inert today — the model has no recorded requests
- * in this deployment — and the invariant test pins the divergence by name so it
- * cannot drift further unnoticed. If it ever carries real traffic, the weight
- * has to become per-model rather than per-provider.
+ * Models whose list price does not follow these ratios are corrected by
+ * {@link MODEL_EQ_WEIGHT_OVERRIDES} rather than left to the provider default.
  */
 export const OPENAI_EQ_WEIGHTS: EqTokenWeights = {
 	input: 1,
 	cacheCreate: 1.25,
 	cacheRead: 0.1,
 	output: 6,
+};
+
+/**
+ * Weights for models whose list price does NOT follow their provider's usual
+ * ratios, keyed by NORMALIZED model key (see `normalizeModelKey`).
+ *
+ * A ratio error is systematic: it biases a model's fitted coefficient by a
+ * fixed factor no confidence interval can correct, because every resample
+ * carries the same wrong exposure. `gpt-5.3-codex-spark` is priced 1.75 in /
+ * 14 out — an 8x output ratio against the 6x every other Codex-served model
+ * carries — so the provider-wide weight understates its output exposure by a
+ * quarter and inflates its coefficient by roughly a third on output-heavy
+ * traffic. It has no recorded requests in this deployment today, which makes
+ * this a trap that arms itself the first time the model is routed rather than a
+ * live defect.
+ *
+ * `eq-tokens.test.ts` derives its expectations from this map, so an entry that
+ * stops matching the bundled price table fails, and so does a NEW divergence
+ * with no entry.
+ */
+export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
+	Record<string, EqTokenWeights>
+> = {
+	"gpt-5.3-codex-spark": { ...OPENAI_EQ_WEIGHTS, output: 8 },
 };
 
 /** Provider axis the weights are selected on. */
@@ -85,12 +104,19 @@ export function eqTokenProviderFor(
  * Equivalent tokens for one set of token counts. Negative or non-finite counts
  * are treated as zero: a malformed row must not subtract exposure from a
  * segment, which would push a coefficient up.
+ *
+ * `modelKey` is the NORMALIZED model key the counts belong to. A model with its
+ * own entry in {@link MODEL_EQ_WEIGHT_OVERRIDES} is priced on that entry; every
+ * other model is priced on its provider's shared ratios. The argument is
+ * required rather than optional because a forgotten key would silently fall
+ * back to the shared ratios, which is exactly the bias the map exists to close.
  */
 export function eqTokens(
 	counts: Partial<TokenCounts>,
 	provider: EqTokenProvider,
+	modelKey: string,
 ): number {
-	const w = EQ_WEIGHTS[provider];
+	const w = MODEL_EQ_WEIGHT_OVERRIDES[modelKey] ?? EQ_WEIGHTS[provider];
 	return (
 		safe(counts.inputTokens) * w.input +
 		safe(counts.cacheCreationInputTokens) * w.cacheCreate +
