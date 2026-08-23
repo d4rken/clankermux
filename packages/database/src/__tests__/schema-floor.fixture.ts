@@ -213,6 +213,18 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	auth_password: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["id", "verifier", "params", "updated_at"],
+		source: "create-table-at-intro",
+	},
+	auth_sessions: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["token_hash", "created_at", "expires_at", "last_seen_at"],
+		source: "create-table-at-intro",
+	},
 	codex_reset_credit_events: {
 		shipped: "2026-07-20",
 		commit: "372eab98",

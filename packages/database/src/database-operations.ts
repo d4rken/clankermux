@@ -45,6 +45,11 @@ import { AccountRepository } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
+	AuthRepository,
+	type AuthSessionRecord,
+	type StoredPasswordVerifier,
+} from "./repositories/auth.repository";
+import {
 	type CacheKeepaliveHistoryPoint,
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
@@ -377,6 +382,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private strategy: StrategyRepository;
 	private stats: StatsRepository;
 	private apiKeys: ApiKeyRepository;
+	private auth: AuthRepository;
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
@@ -457,6 +463,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.strategy = retrying(new StrategyRepository(this.adapter), "strategy");
 		this.stats = retrying(new StatsRepository(this.adapter), "stats");
 		this.apiKeys = retrying(new ApiKeyRepository(this.adapter), "apiKeys");
+		this.auth = retrying(new AuthRepository(this.adapter), "auth");
 		this.combo = retrying(new ComboRepository(this.adapter), "combo");
 		this.usageSnapshots = retrying(
 			new UsageSnapshotRepository(this.adapter),
@@ -1318,6 +1325,58 @@ OAuth tokens will need to be re-authenticated.
 
 	async cleanupExpiredOAuthSessions(): Promise<number> {
 		return this.oauth.cleanupExpiredSessions();
+	}
+
+	// Management session auth, delegated to repository. The rotation methods
+	// (`setManagementPassword` / `clearManagementPassword`) revoke every session
+	// in the same transaction as the verifier write — see AuthRepository.
+	async getManagementPassword(): Promise<StoredPasswordVerifier | null> {
+		return this.auth.getPassword();
+	}
+
+	async setManagementPassword(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<number> {
+		return this.auth.setPassword(verifier, params, updatedAt);
+	}
+
+	async clearManagementPassword(): Promise<number> {
+		return this.auth.clearPassword();
+	}
+
+	async createManagementSession(record: AuthSessionRecord): Promise<void> {
+		return this.auth.createSession(record);
+	}
+
+	async getManagementSession(
+		tokenHash: string,
+	): Promise<AuthSessionRecord | null> {
+		return this.auth.getSession(tokenHash);
+	}
+
+	async touchManagementSession(
+		tokenHash: string,
+		now: number,
+		staleBeforeMs: number,
+	): Promise<number> {
+		return this.auth.touchSession(tokenHash, now, staleBeforeMs);
+	}
+
+	async deleteManagementSession(tokenHash: string): Promise<number> {
+		return this.auth.deleteSession(tokenHash);
+	}
+
+	async deleteAllManagementSessions(): Promise<number> {
+		return this.auth.deleteAllSessions();
+	}
+
+	async cleanupExpiredManagementSessions(
+		now: number,
+		idleCutoff: number,
+	): Promise<number> {
+		return this.auth.deleteExpiredSessions(now, idleCutoff);
 	}
 
 	// Strategy operations delegated to repository
