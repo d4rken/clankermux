@@ -186,6 +186,123 @@ describe("estimateWindowExhaustion", () => {
 		expect(result.lowConfidence).toBe(true);
 	});
 
+	it("defaults to low confidence when no policy is supplied", () => {
+		// The field is optional and its absence must reproduce the old behaviour
+		// exactly — every window that was amber-capped before still is.
+		const implicit = estimateWindowExhaustion(
+			{
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+			},
+			NOW,
+		);
+		const explicit = estimateWindowExhaustion(
+			{
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+				lifetimeConfidence: "low",
+			},
+			NOW,
+		);
+
+		expect(implicit).toEqual(explicit);
+		expect(implicit.source).toBe("lifetime-average");
+		expect(implicit.lowConfidence).toBe(true);
+	});
+
+	it("reports the lifetime average as primary when the caller declares it", () => {
+		const low = estimateWindowExhaustion(
+			{
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+			},
+			NOW,
+		);
+		const full = estimateWindowExhaustion(
+			{
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+				lifetimeConfidence: "full",
+			},
+			NOW,
+		);
+
+		expect(full.source).toBe("lifetime-primary");
+		expect(full.lowConfidence).toBe(false);
+		// Only the confidence differs — the projection itself is the same number,
+		// so the policy cannot move an ETA, only how loudly it is rendered.
+		expect(full.slopePctPerHour).toBe(low.slopePctPerHour);
+		expect(full.exhaustsAtMs).toBe(low.exhaustsAtMs);
+	});
+
+	it("applies the policy only to the lifetime branch", () => {
+		const resetsAtMs = NOW + 2 * HOUR;
+		const base = {
+			resetsAtMs,
+			windowStartMs: NOW - 3 * HOUR,
+			lifetimeConfidence: "full" as const,
+		};
+
+		// A usable regression still owns the slope, and its source name is unchanged.
+		expect(
+			estimateWindowExhaustion(
+				{
+					...base,
+					utilizationPct: 50,
+					prediction: prediction({
+						resetsAtMs,
+						slopePerHour: 20,
+						etaExhaustMs: NOW + HOUR,
+					}),
+				},
+				NOW,
+			).source,
+		).toBe("regression");
+		expect(
+			estimateWindowExhaustion(
+				{ ...base, utilizationPct: 0, prediction: null },
+				NOW,
+			).source,
+		).toBe("no-usage");
+		expect(
+			estimateWindowExhaustion(
+				{ ...base, utilizationPct: 100, prediction: null },
+				NOW,
+			).source,
+		).toBe("already-exhausted");
+		expect(
+			estimateWindowExhaustion(
+				{ ...base, resetsAtMs: NOW - 1, utilizationPct: 50, prediction: null },
+				NOW,
+			).source,
+		).toBe("none");
+	});
+
+	it("keeps the lifetime ETA now-anchored on the primary path too", () => {
+		const input = {
+			utilizationPct: 75,
+			resetsAtMs: NOW + 2 * HOUR,
+			windowStartMs: NOW - 3 * HOUR,
+			prediction: null,
+			lifetimeConfidence: "full" as const,
+		};
+
+		const first = estimateWindowExhaustion(input, NOW);
+		const later = estimateWindowExhaustion(input, NOW + 60_000);
+
+		expect(later.exhaustsAtMs as number).toBeGreaterThan(
+			first.exhaustsAtMs as number,
+		);
+	});
+
 	it("moves the lifetime-average ETA with now (it is not sample-anchored)", () => {
 		const input = {
 			utilizationPct: 75,
@@ -279,6 +396,26 @@ describe("computeCapacityRunway", () => {
 		);
 
 		expect(result).toEqual({ kind: "unknown" });
+	});
+
+	it("threads the lifetime-confidence policy without letting it move the runway", () => {
+		// The policy is a DISPLAY confidence: it decides how loudly a projection
+		// may be rendered, never what is projected. The runway is the projection
+		// itself, so declaring the weekly window's lifetime average primary must
+		// leave every instant it reports exactly where it was.
+		const windows = (lifetimeConfidence?: "low" | "full") => [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * DAY,
+				windowStartMs: NOW - 5 * DAY,
+				lifetimeConfidence,
+			}),
+		];
+
+		expect(computeCapacityRunway([account("a", windows("full"))], NOW)).toEqual(
+			computeCapacityRunway([account("a", windows())], NOW),
+		);
 	});
 
 	it("keeps an unmetered account alive for the whole horizon", () => {

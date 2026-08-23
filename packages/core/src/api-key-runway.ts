@@ -8,6 +8,7 @@ import type {
 import { isAccountAllowedByPin, type RoutingPin } from "./api-key-pin";
 import {
 	computeCapacityRunway,
+	type LifetimeConfidence,
 	type RunwayAccountInput,
 	type RunwayWindowInput,
 } from "./capacity-runway";
@@ -98,6 +99,7 @@ function windowInput(
 	windowKind: "five_hour" | "seven_day",
 	extracted: ExtractedValue | null,
 	prediction: RunwayWindowInput["prediction"],
+	lifetimeConfidence?: LifetimeConfidence,
 ): RunwayWindowInput | null {
 	if (extracted == null || extracted.pct == null) return null;
 	return {
@@ -109,6 +111,7 @@ function windowInput(
 				? null
 				: computeWindowStartMs(extracted.resetMs, windowKind),
 		prediction,
+		lifetimeConfidence,
 	};
 }
 
@@ -148,6 +151,10 @@ function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 			"seven_day",
 			usageData ? extractSevenDay(usageData) : (observations?.sevenDay ?? null),
 			account.prediction?.sevenDay,
+			// The weekly display estimator IS the lifetime average (it beat the
+			// regression on held-out data), so its projection is a measured best
+			// estimate rather than a fallback nobody checked.
+			"full",
 		);
 		if (window) windows.push(window);
 	}

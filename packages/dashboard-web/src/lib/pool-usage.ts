@@ -14,6 +14,7 @@ import type {
 	AnthropicUsageData,
 	UsagePrediction,
 } from "@clankermux/types";
+import { weeklyLifetimeConfidence } from "./lifetime-confidence";
 
 export type PoolWindow = "five_hour" | "seven_day";
 
@@ -389,6 +390,7 @@ export function computePoolUsage(
 				resetsAtMs: c.resetMs,
 				windowStartMs: computeWindowStartMs(c.resetMs, window),
 				prediction: predictions.get(c.accountId),
+				lifetimeConfidence: weeklyLifetimeConfidence(window),
 			},
 			now,
 		);

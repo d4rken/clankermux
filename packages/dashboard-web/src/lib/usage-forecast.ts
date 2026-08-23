@@ -5,6 +5,7 @@ import {
 	extractSevenDay,
 } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
+import { weeklyLifetimeConfidence } from "./lifetime-confidence";
 import type { PoolWindow } from "./pool-usage";
 
 /**
@@ -141,6 +142,10 @@ function deriveLiveState(
 				resetsAtMs: resetMs,
 				windowStartMs: burnStartMs,
 				prediction: pred,
+				// Only the slope is read here, and the lifetime slope is the same
+				// number either way — passed so this line cannot silently drift from
+				// the policy the message and the at-risk list apply.
+				lifetimeConfidence: weeklyLifetimeConfidence(window),
 			},
 			now,
 		).slopePctPerHour ?? 0;

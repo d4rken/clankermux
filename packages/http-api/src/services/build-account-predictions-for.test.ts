@@ -65,6 +65,46 @@ describe("buildPredictionsForAccounts", () => {
 		expect(predictions.get("acc-1")?.fiveHour?.state).toBe("rising");
 	});
 
+	it("never serves a weekly prediction, however much weekly history exists", async () => {
+		const reset = NOW + 3 * HOUR_MS;
+		const predictions = await buildPredictionsForAccounts(
+			makeDbOps({ snapshots: risingSnapshots("acc-1", reset) }),
+			[{ id: "acc-1", provider: "anthropic" }],
+			new Map([["acc-1", usage(60, reset)]]),
+			NOW,
+		);
+
+		// The weekly display path reads the lifetime average instead; a regression
+		// here would be a worse estimator the client would prefer over it.
+		expect(predictions.get("acc-1")?.sevenDay).toBeUndefined();
+		expect(Object.keys(predictions.get("acc-1") ?? {})).toEqual(["fiveHour"]);
+	});
+
+	it("still predicts for a reading that carries only the weekly window", async () => {
+		// The eligibility guard is unchanged: an account whose live payload has no
+		// 5h block can still have 5h history in the snapshots, so dropping it here
+		// would lose a prediction the sampler already paid for.
+		const reset = NOW + 3 * HOUR_MS;
+		const predictions = await buildPredictionsForAccounts(
+			makeDbOps({ snapshots: risingSnapshots("acc-1", reset) }),
+			[{ id: "acc-1", provider: "anthropic" }],
+			new Map([
+				[
+					"acc-1",
+					{
+						seven_day: {
+							utilization: 20,
+							resets_at: new Date(reset).toISOString(),
+						},
+					} as unknown as AnyUsageData,
+				],
+			]),
+			NOW,
+		);
+
+		expect(predictions.get("acc-1")?.fiveHour?.state).toBe("rising");
+	});
+
 	it("looks back 24 hours for snapshots", async () => {
 		let seen: { accountIds: string[]; since: number } | null = null;
 		await buildPredictionsForAccounts(

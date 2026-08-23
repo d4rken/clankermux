@@ -19,6 +19,7 @@ import {
 	type ProjectionTone,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "../../lib/format-prediction";
+import { weeklyLifetimeConfidence } from "../../lib/lifetime-confidence";
 import {
 	classifyUsageCard,
 	usageWindowCategoryKey,
@@ -176,18 +177,22 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
 }
 
 /**
- * Copy + tone for the fallback projection: a thin mapper over the shared
- * `estimateWindowExhaustion`, which is also what the pool at-risk list and the
- * forecast chart read. The estimator returns facts only, so the wording here is
- * unchanged from when this function did the arithmetic itself.
+ * Copy + tone for the projection that is not backed by a usable regression: a
+ * thin mapper over the shared `estimateWindowExhaustion`, which is also what
+ * the pool at-risk list and the forecast chart read. The estimator returns facts
+ * only, so the wording here is unchanged from when this function did the
+ * arithmetic itself.
  *
  * Severity is capped at amber on a LOW-CONFIDENCE estimate, not on "this
- * function ran". The lifetime-average path is a single-snapshot average over
- * the whole elapsed window rather than a recent slope: a burst in the first ten
- * minutes of a five-hour window projects confident exhaustion for an account
- * that has since gone idle, and keeps projecting it until the window resets. It
- * is what every non-Anthropic and every scoped-weekly window falls back to, so
- * red there would be red almost everywhere.
+ * function ran". On most windows the lifetime average is a single-snapshot
+ * average over the whole elapsed window rather than a recent slope: a burst in
+ * the first ten minutes of a five-hour window projects confident exhaustion for
+ * an account that has since gone idle, and keeps projecting it until the window
+ * resets. It is what every non-Anthropic and every scoped-weekly window falls
+ * back to, so red there would be red almost everywhere.
+ *
+ * The account-wide weekly window is the measured exception — see
+ * {@link weeklyLifetimeConfidence}.
  */
 function computeProjectedMessage(
 	resetTime: string | null,
@@ -207,6 +212,7 @@ function computeProjectedMessage(
 				? computeWindowStartMs(resetMs, window)
 				: null,
 			prediction,
+			lifetimeConfidence: weeklyLifetimeConfidence(window),
 		},
 		now,
 	);

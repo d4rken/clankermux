@@ -560,6 +560,71 @@ describe("RateLimitProgress", () => {
 			expect(html).not.toContain("text-destructive-strong");
 		});
 
+		// The weekly window is the one place the lifetime average is the MEASURED
+		// best estimator rather than a fallback, so it is not amber-capped: it goes
+		// through the same margin rule the regression does. Without a server
+		// prediction for this window — which is what production now serves — red has
+		// to be reachable here, or a weekly account burning out days early would
+		// only ever get the same amber as one that is barely ahead of pace.
+		it("lets the weekly lifetime average reach red on a wide margin", () => {
+			const now = Date.now();
+			const DAY = 24 * HOUR;
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			// 80% used four days into a seven-day window: 20%/day, so the last 20%
+			// takes one more day and exhaustion lands two days before the reset —
+			// far past 10% of the window (about 17 hours).
+			const weeklyReset = new Date(now + 3 * DAY).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						// Behind pace, so the 5-hour card contributes no fill class.
+						five_hour: { utilization: 5, resets_at: fiveHourReset },
+						seven_day: { utilization: 80, resets_at: weeklyReset },
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-destructive");
+			expect(html).toContain("text-destructive-strong");
+		});
+
+		it("still caps the weekly lifetime average at amber on a thin margin", () => {
+			const now = Date.now();
+			const DAY = 24 * HOUR;
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			// 76% used five days into a seven-day window: the remaining 24% lasts
+			// about 38 hours against 48 to the reset, so the ~10-hour shortfall is
+			// well inside 10% of a seven-day window (about 17 hours).
+			const weeklyReset = new Date(now + 2 * DAY).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 5, resets_at: fiveHourReset },
+						seven_day: { utilization: 76, resets_at: weeklyReset },
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("text-destructive-strong");
+		});
+
 		// The threshold is a fraction of the window, so it can only be wrong in a
 		// way a five-hour case would miss: a margin that is decisive over five hours
 		// is noise over seven days. This pins `computeWindowDurationMs` deriving the

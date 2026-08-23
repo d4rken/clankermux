@@ -29,6 +29,7 @@ export {
 export {
 	computeCapacityRunway,
 	estimateWindowExhaustion,
+	type LifetimeConfidence,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayCause,

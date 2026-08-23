@@ -311,6 +311,12 @@ describe("GET /api/runway", () => {
 		expect(bare?.windows.find((w) => w.kind === "five_hour")?.prediction).toBe(
 			null,
 		);
+		// The weekly window is served with `prediction: null` even though the same
+		// snapshots carry a full weekly history: the server no longer fits one,
+		// because the lifetime average the client falls back to measured better.
+		expect(
+			rising?.windows.find((w) => w.kind === "seven_day")?.prediction,
+		).toBe(null);
 	});
 
 	it("reports no as-of time when the utilization it would describe is null", async () => {

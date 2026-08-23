@@ -45,12 +45,36 @@ export type WindowExhaustionSource =
 	| "regression"
 	/** Legacy lifetime-average fallback; `exhaustsAtMs` is NOW-anchored. */
 	| "lifetime-average"
+	/**
+	 * Lifetime average as the window's PRIMARY estimator rather than a fallback;
+	 * `exhaustsAtMs` is NOW-anchored, same arithmetic as "lifetime-average".
+	 * Distinct only in confidence: the caller has declared it the measured best
+	 * estimator for this window, so it is not capped at amber.
+	 */
+	| "lifetime-primary"
 	/** Utilization is already at/above 100. */
 	| "already-exhausted"
 	/** Window is readable, but nothing has been used yet. */
 	| "no-usage"
 	/** No usable evidence at all. */
 	| "none";
+
+/**
+ * How much the CALLER trusts the lifetime average for one particular window.
+ *
+ * `"low"` (the default when the field is absent) is the historical behaviour:
+ * the lifetime average is a fallback nobody measured, so it is flagged
+ * low-confidence and every surface caps its severity at amber.
+ *
+ * `"full"` says the caller has evidence that the lifetime average is the best
+ * estimator available for THAT window, so it should be rendered with the same
+ * confidence as a regression.
+ *
+ * Deliberately caller-supplied and never derived here from window duration or
+ * kind: which estimator wins on which horizon is a measured, changeable fact
+ * about the data, not a property of the arithmetic in this module.
+ */
+export type LifetimeConfidence = "low" | "full";
 
 export interface WindowExhaustionInput {
 	utilizationPct: number;
@@ -59,6 +83,8 @@ export interface WindowExhaustionInput {
 	windowStartMs: number | null;
 	/** Passed UNGATED — the estimator applies `isUsablePrediction` itself. */
 	prediction: UsagePrediction | null | undefined;
+	/** Absent means `"low"` — see {@link LifetimeConfidence}. */
+	lifetimeConfidence?: LifetimeConfidence;
 }
 
 export interface WindowExhaustion {
@@ -68,9 +94,10 @@ export interface WindowExhaustion {
 	/** Projected 100% instant, or null when not projected to exhaust. */
 	exhaustsAtMs: number | null;
 	/**
-	 * True on the lifetime-average path. Callers cap severity on THIS, not on
-	 * which function ran, so the "the fallback projection never renders red"
-	 * rule survives the consolidation.
+	 * True on the lifetime-average path unless the caller declared
+	 * `lifetimeConfidence: "full"` for that window. Callers cap severity on THIS,
+	 * not on which function ran, so the "the fallback projection never renders
+	 * red" rule survives the consolidation.
 	 */
 	lowConfidence: boolean;
 }
@@ -100,13 +127,21 @@ const NO_EVIDENCE: WindowExhaustion = {
  *     the lifetime average.
  *  4. Nothing used yet. Placed AFTER the regression branch because a usable
  *     prediction wins at 0% too.
- *  5. Lifetime average over the elapsed window, anchored at `now`.
+ *  5. Lifetime average over the elapsed window, anchored at `now`. Its
+ *     confidence is whatever the caller declared for this window
+ *     ({@link LifetimeConfidence}); the arithmetic is identical either way.
  */
 export function estimateWindowExhaustion(
 	input: WindowExhaustionInput,
 	now: number,
 ): WindowExhaustion {
-	const { utilizationPct: pct, resetsAtMs, windowStartMs, prediction } = input;
+	const {
+		utilizationPct: pct,
+		resetsAtMs,
+		windowStartMs,
+		prediction,
+		lifetimeConfidence,
+	} = input;
 
 	if (!Number.isFinite(pct)) return NO_EVIDENCE;
 
@@ -148,11 +183,12 @@ export function estimateWindowExhaustion(
 	const elapsed = now - windowStartMs;
 	if (elapsed <= 0) return NO_EVIDENCE;
 
+	const isPrimary = lifetimeConfidence === "full";
 	return {
-		source: "lifetime-average",
+		source: isPrimary ? "lifetime-primary" : "lifetime-average",
 		slopePctPerHour: (pct / elapsed) * HOUR_MS,
 		exhaustsAtMs: now + ((100 - pct) / pct) * elapsed,
-		lowConfidence: true,
+		lowConfidence: !isPrimary,
 	};
 }
 
@@ -178,6 +214,12 @@ export interface RunwayWindowInput {
 	resetsAtMs: number | null;
 	windowStartMs: number | null;
 	prediction: UsagePrediction | null | undefined;
+	/**
+	 * Threaded verbatim to {@link estimateWindowExhaustion}. Absent means
+	 * `"low"`; `windowKind` is NOT consulted to derive it, so the policy stays
+	 * with the caller that measured it.
+	 */
+	lifetimeConfidence?: LifetimeConfidence;
 }
 
 export interface RunwayAccountInput {
@@ -338,6 +380,7 @@ export function computeCapacityRunway(
 					resetsAtMs: window.resetsAtMs,
 					windowStartMs: window.windowStartMs,
 					prediction: window.prediction,
+					lifetimeConfidence: window.lifetimeConfidence,
 				},
 				now,
 			);
