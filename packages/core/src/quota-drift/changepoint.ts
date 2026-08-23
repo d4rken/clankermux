@@ -154,6 +154,11 @@ interface ScanOutcome {
 	 * both restricted sides identified the key, and the difference bootstrap
 	 * produced usable draws. False on every path where the scan could not get
 	 * that far — those must never surface as `stable`.
+	 *
+	 * A no-change outcome additionally requires the candidate grid to be
+	 * CONNECTED: an internal hole leaves a stretch of history no comparison could
+	 * reach, and "found nothing" across it would be unearned. A change that WAS
+	 * found stays a change regardless — it rests on the dates it was measured at.
 	 */
 	viable: boolean;
 	nCandidates: number;
@@ -235,6 +240,25 @@ function scanOnce(
 		return { change: null, viable: false, nCandidates: 0 };
 	}
 
+	// --- Is the examined history CONNECTED? ---------------------------------
+	//
+	// Dropping dates at which no account spans the split can leave an INTERNAL
+	// hole: a cohort whose membership turns over near the middle of history keeps
+	// valid candidates on both sides while no shared account bridges the centre.
+	// A provider change AT the turnover is then unidentifiable in principle, and
+	// no amount of comparing dates on either side of the hole says anything about
+	// the step across it — so "the test ran and found nothing" is a claim the data
+	// does not support.
+	//
+	// This is not the same as the `minSideDays` exclusions at each END of history.
+	// Those trim the examined span; they leave what remains connected, and a
+	// change inside it is still reachable. An internal hole disconnects it.
+	//
+	// The grid is daily, so an unbroken candidate set steps by exactly one day.
+	const coverageComplete = candidates.every(
+		(candidate, i) => i === 0 || candidate.t - candidates[i - 1].t === DAY_MS,
+	);
+
 	// --- Argmax over candidates on the standardised difference --------------
 	//
 	// `bestScore` starts below every attainable score so an exactly flat series
@@ -294,8 +318,15 @@ function scanOnce(
 	const after = afterCoef.pointEstimate;
 	const relativeChange = (after - before) / before;
 	if (Math.abs(relativeChange) < minRelative) {
-		// A COMPLETED test: both sides measured, the move is too small to report.
-		return { change: null, viable: true, nCandidates: candidates.length };
+		// A completed test: both sides measured, the move is too small to report.
+		// Only reportable as `stable` if the scan's coverage was connected — a
+		// finding of nothing across a hole is a finding about a comparison that
+		// could not be made.
+		return {
+			change: null,
+			viable: coverageComplete,
+			nCandidates: candidates.length,
+		};
 	}
 
 	// --- Calibrate at the argmax only, at the adjusted level -----------------
@@ -350,7 +381,13 @@ function scanOnce(
 	const hi = difference + halfWidth;
 	const excludesZero = lo > 0 || hi < 0;
 	if (!excludesZero) {
-		return { change: null, viable: true, nCandidates: candidates.length };
+		// Measured and not significant — `stable` only where the coverage was
+		// connected, for the same reason as above.
+		return {
+			change: null,
+			viable: coverageComplete,
+			nCandidates: candidates.length,
+		};
 	}
 
 	return {

@@ -147,12 +147,12 @@ describe("changepoint detection", () => {
 		// Such a date is not a candidate AT ALL — it cannot be selected, scored or
 		// reported.
 		//
-		// The verdict is nonetheless `stable`, not `insufficient-evidence`: the
-		// remaining dates are all strictly inside one account's own history, they
-		// clear the floors, and the scan really does compare them and find nothing.
-		// The scan's coverage has a hole around the turnover, exactly as it has one
-		// at each end of the history, and neither hole makes the comparisons it DID
-		// run unevaluated.
+		// The verdict is `insufficient-evidence`, not `stable`. The turnover leaves
+		// an INTERNAL hole in the candidate grid: dates before and after it are
+		// scanned, but no account bridges the middle, so a step AT the turnover is
+		// unidentifiable and the comparisons on either side establish nothing
+		// across it. That is unlike the `minSideDays` exclusions at each END of
+		// history, which trim the examined span but leave what remains connected.
 		const boundary = START + 40 * DAY_MS;
 		const segments = series({
 			days: 82,
@@ -172,11 +172,12 @@ describe("changepoint detection", () => {
 		});
 
 		expect(result.changes).toEqual([]);
-		expect(result.verdict).toBe("stable");
-		// Every scanned date sits inside one account's own history; the twenty-day
-		// stretch around the turnover offers no shared account and is absent from
-		// the candidate set, so the Bonferroni divisor never counts it either.
-		expect(result.nCandidates).toBeGreaterThan(0);
+		expect(result.verdict).toBe("insufficient-evidence");
+		// Comparisons really did run outside the hole: every scanned date sits
+		// inside one account's own history, and the twenty-day stretch around the
+		// turnover offers no shared account, so it is absent from the candidate set
+		// and the Bonferroni divisor never counts it either.
+		expect(result.nCandidates).toBe(42);
 	});
 
 	it("records the adjusted level it cleared", () => {
