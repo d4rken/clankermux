@@ -138,10 +138,19 @@ describe("changepoint detection", () => {
 		expect(fired).toBe(0);
 	});
 
-	it("refuses to attribute a difference when the two sides share no account", () => {
+	it("never attributes a difference across a boundary the two sides do not share", () => {
 		// A cohort whose entire membership turned over at the boundary changed
-		// composition; the difference is not the provider's doing, and with no
-		// account on both sides there is no like-for-like comparison to make.
+		// composition; the difference there is not the provider's doing, and with
+		// no account on both sides there is no like-for-like comparison to make.
+		// Such a date is not a candidate AT ALL — it cannot be selected, scored or
+		// reported.
+		//
+		// The verdict is nonetheless `stable`, not `insufficient-evidence`: the
+		// remaining dates are all strictly inside one account's own history, they
+		// clear the floors, and the scan really does compare them and find nothing.
+		// The scan's coverage has a hole around the turnover, exactly as it has one
+		// at each end of the history, and neither hole makes the comparisons it DID
+		// run unevaluated.
 		const boundary = START + 40 * DAY_MS;
 		const segments = series({
 			days: 82,
@@ -161,7 +170,11 @@ describe("changepoint detection", () => {
 		});
 
 		expect(result.changes).toEqual([]);
-		expect(result.verdict).toBe("insufficient-evidence");
+		expect(result.verdict).toBe("stable");
+		// Every scanned date sits inside one account's own history; the twenty-day
+		// stretch around the turnover offers no shared account and is absent from
+		// the candidate set, so the Bonferroni divisor never counts it either.
+		expect(result.nCandidates).toBeGreaterThan(0);
 	});
 
 	it("records the adjusted level it cleared", () => {
@@ -229,6 +242,64 @@ describe("changepoint detection", () => {
 		expect(
 			Math.abs(result.changes[0].boundaryMs - boundary),
 		).toBeLessThanOrEqual(3 * DAY_MS);
+	});
+
+	it("restricts to the shared accounts BEFORE choosing the boundary", () => {
+		// Restricting only AFTER the argmax measures a different dataset than it
+		// selected on. A transient account is enough to break it: its arrival is a
+		// composition change, so the unrestricted difference at that date is large
+		// and wins the scan, and the genuine step is never even scored.
+		const boundary = START + 15 * DAY_MS;
+		const base = series({
+			days: 82,
+			weights: { "claude-opus-5": 2.4, "claude-sonnet-5": 0.9 },
+			stepAtMs: boundary,
+			stepWeights: { "claude-opus-5": 1.9, "claude-sonnet-5": 0.9 },
+			seed: 4711,
+		});
+
+		// The control: one account, planted step, correctly found.
+		const alone = detectChanges(base, "claude-opus-5", {
+			bootstrapB: 200,
+			seedParts: ["f11-control"],
+			maxDepth: 1,
+		});
+		expect(alone.verdict).toBe("changed");
+		expect(
+			Math.abs(alone.changes[0].boundaryMs - boundary),
+		).toBeLessThanOrEqual(3 * DAY_MS);
+
+		// A second account appears for ONE 23-hour run on day 50, an order of
+		// magnitude more expensive. It shares no boundary with the planted step.
+		const transient = makeSyntheticSegments({
+			weights: { "claude-opus-5": 20, "claude-sonnet-5": 0.9 },
+			runs: 1,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START + 50 * DAY_MS,
+			seed: 6011,
+			accountIds: ["acct-transient"],
+		});
+		const withTransient = [...base, ...transient].sort((a, b) => a.t0 - b.t0);
+
+		const result = detectChanges(withTransient, "claude-opus-5", {
+			bootstrapB: 200,
+			seedParts: ["f11"],
+			maxDepth: 1,
+		});
+
+		// The transient account is on ONE side of every boundary, so it is never
+		// shared and never enters the comparison. The verdict must be the control's.
+		expect(result.verdict).toBe("changed");
+		expect(result.changes).toHaveLength(1);
+		expect(
+			Math.abs(result.changes[0].boundaryMs - boundary),
+		).toBeLessThanOrEqual(3 * DAY_MS);
+		// The counts are the RESTRICTED ones, and they cleared the floors the
+		// candidate was admitted on rather than merely the unrestricted ones.
+		expect(result.changes[0].nSegmentsBefore).toBeGreaterThanOrEqual(50);
+		expect(result.changes[0].nSegmentsAfter).toBeGreaterThanOrEqual(50);
 	});
 
 	it("reports insufficient-evidence when neither side can identify the key", () => {

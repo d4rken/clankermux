@@ -89,7 +89,10 @@ export interface ChangepointResult {
  * restricted to the accounts present on BOTH sides of the split. That last
  * requirement is substantive: if the cohort gained or lost an account at the
  * boundary, the difference across the full sets is a composition change and is
- * not attributable to the provider.
+ * not attributable to the provider. The restriction is applied BEFORE the
+ * boundary is chosen — selecting on the unrestricted data and reporting on the
+ * restricted data is how a composition change wins the scan and the real step
+ * goes unreported.
  */
 export function detectChanges(
 	segments: readonly QuotaSegment[],
@@ -136,6 +139,22 @@ interface ScanOutcome {
 	nCandidates: number;
 }
 
+/**
+ * One eligible boundary together with the segments the comparison at it is
+ * made of.
+ *
+ * The two sides are stored, not recomputed later: everything downstream — the
+ * argmax score, the refits, the difference bootstrap and the reported counts —
+ * has to read the SAME restricted arrays the candidate was admitted on. Any
+ * path that re-derives a side from `sorted` would reintroduce the unrestricted
+ * fit through the back door.
+ */
+interface Candidate {
+	t: number;
+	before: QuotaSegment[];
+	after: QuotaSegment[];
+}
+
 function scanOnce(
 	segments: readonly QuotaSegment[],
 	key: string,
@@ -154,18 +173,43 @@ function scanOnce(
 	const first = sorted[0].t0;
 	const last = sorted[sorted.length - 1].t1;
 
-	const candidates: number[] = [];
+	// --- Candidates, ALREADY restricted to the shared accounts ---------------
+	//
+	// The confound is real — a cohort that gained or lost an account at the
+	// boundary shows a composition change that is not the provider's doing — but
+	// requiring the two account sets to be IDENTICAL closes the test along with
+	// it. On the live pool two accounts joined mid-history, so all 62 candidate
+	// splits differ and no model can ever reach a verdict. Intersecting and
+	// restricting BOTH sides to the shared accounts keeps the comparison
+	// like-for-like while leaving the detector able to fire.
+	//
+	// The restriction happens HERE, before eligibility and before the argmax,
+	// because a scan that selects on one dataset and measures on another selects
+	// composition change and then reports whatever the restricted data happens to
+	// say at that date. One transient account is enough: its arrival shifts the
+	// unrestricted coefficient sharply, wins the argmax, and the refit at that
+	// date — over accounts that never changed — then reports "no change" and
+	// buries the real step. The floors are applied to the restricted sides for
+	// the same reason: they are what the reported counts have to clear.
+	const candidates: Candidate[] = [];
 	const gridStart = Math.ceil(first / DAY_MS) * DAY_MS;
 	for (let t = gridStart; t < last; t += DAY_MS) {
-		const before = sorted.filter((s) => s.t1 <= t);
-		const after = sorted.filter((s) => s.t0 >= t);
+		const rawBefore = sorted.filter((s) => s.t1 <= t);
+		const rawAfter = sorted.filter((s) => s.t0 >= t);
+		const afterAccounts = new Set(rawAfter.map((s) => s.accountId));
+		const shared = new Set(
+			rawBefore.map((s) => s.accountId).filter((id) => afterAccounts.has(id)),
+		);
+		if (shared.size === 0) continue;
+		const before = rawBefore.filter((s) => shared.has(s.accountId));
+		const after = rawAfter.filter((s) => shared.has(s.accountId));
 		if (before.length < minSideSegments || after.length < minSideSegments) {
 			continue;
 		}
 		if (spanDays(before) < minSideDays || spanDays(after) < minSideDays) {
 			continue;
 		}
-		candidates.push(t);
+		candidates.push({ t, before, after });
 	}
 	if (candidates.length === 0) {
 		return { change: null, viable: false, nCandidates: 0 };
@@ -178,16 +222,12 @@ function scanOnce(
 	// nowhere is a completed test that found nothing; only a series with no
 	// scorable candidate at all is unevaluable, and `scorable` is what tells
 	// those two apart.
-	let bestT: number | null = null;
+	let best: Candidate | null = null;
 	let bestScore = Number.NEGATIVE_INFINITY;
 	let scorable = 0;
-	let bestBefore: QuotaSegment[] = [];
-	let bestAfter: QuotaSegment[] = [];
-	for (const t of candidates) {
-		const before = sorted.filter((s) => s.t1 <= t);
-		const after = sorted.filter((s) => s.t0 >= t);
-		const wBefore = coefficientFor(before, key);
-		const wAfter = coefficientFor(after, key);
+	for (const candidate of candidates) {
+		const wBefore = coefficientFor(candidate.before, key);
+		const wAfter = coefficientFor(candidate.after, key);
 		if (wBefore === null || wAfter === null) continue;
 		// Standardise by the pooled scale so a boundary between two big
 		// coefficients is not automatically preferred over one between two small.
@@ -197,35 +237,17 @@ function scanOnce(
 		const score = Math.abs(wAfter - wBefore) / scale;
 		if (score > bestScore) {
 			bestScore = score;
-			bestT = t;
-			bestBefore = before;
-			bestAfter = after;
+			best = candidate;
 		}
 	}
-	if (scorable === 0 || bestT === null) {
+	if (scorable === 0 || best === null) {
 		// No candidate yielded a comparable coefficient on both sides, so nothing
 		// was ever compared. NOT `stable`.
 		return { change: null, viable: false, nCandidates: candidates.length };
 	}
-
-	// --- Compare like for like: the accounts present on BOTH sides -----------
-	//
-	// The confound is real — a cohort that gained or lost an account at the
-	// boundary shows a composition change that is not the provider's doing — but
-	// requiring the two account sets to be IDENTICAL closes the test along with
-	// it. On the live pool two accounts joined mid-history, so all 62 candidate
-	// splits differ and no model can ever reach a verdict. Intersecting and
-	// restricting BOTH sides to the shared accounts keeps the comparison
-	// like-for-like while leaving the detector able to fire.
-	const afterAccounts = new Set(bestAfter.map((s) => s.accountId));
-	const shared = new Set(
-		bestBefore.map((s) => s.accountId).filter((id) => afterAccounts.has(id)),
-	);
-	if (shared.size === 0) {
-		return { change: null, viable: false, nCandidates: candidates.length };
-	}
-	const beforeSegments = bestBefore.filter((s) => shared.has(s.accountId));
-	const afterSegments = bestAfter.filter((s) => shared.has(s.accountId));
+	const bestT = best.t;
+	const beforeSegments = best.before;
+	const afterSegments = best.after;
 
 	// --- Both restricted sides must be independently identified -------------
 	const beforeFit = fitWithIntervals(beforeSegments, {
