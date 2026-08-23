@@ -13,7 +13,7 @@ import {
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
-import { queryKeys } from "../lib/query-keys";
+import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
 import type { RequestQueryParams } from "../lib/request-filters";
 
 /**
@@ -164,6 +164,25 @@ export const useAccounts = () => {
 		refetchInterval: 60000, // Refresh every minute for usage data
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused
 		gcTime: 5 * 60 * 1000, // Keep in cache for 5 minutes
+	});
+};
+
+/**
+ * Per-API-key quota runway, computed server-side.
+ *
+ * Polled on the same cadence as the accounts read it replaced as the runway's
+ * source, because it describes the same live quota state. The response carries
+ * the account names the runway surfaces need, so those surfaces gate on THIS
+ * query alone — a failing `/api/accounts` must not blank the runway.
+ */
+export const useRunway = () => {
+	return useQuery({
+		queryKey: queryKeys.runway(),
+		queryFn: () => api.getRunway(),
+		staleTime: 20000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 5 * 60 * 1000,
 	});
 };
 
@@ -415,7 +434,7 @@ export const useCreatePayment = () => {
 			queryClient.invalidateQueries({
 				queryKey: queryKeys.paymentsSummaries(),
 			});
-			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+			invalidateCapacityQueries(queryClient);
 		},
 	});
 };
@@ -428,7 +447,7 @@ export const useDeletePayment = () => {
 			queryClient.invalidateQueries({
 				queryKey: queryKeys.paymentsSummaries(),
 			});
-			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+			invalidateCapacityQueries(queryClient);
 		},
 	});
 };
@@ -588,7 +607,7 @@ export const useRemoveAccount = () => {
 			confirmInput: string;
 		}) => api.removeAccount(accountId, confirmInput),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+			invalidateCapacityQueries(queryClient);
 		},
 	});
 };
@@ -604,7 +623,7 @@ export const useRenameAccount = () => {
 			newName: string;
 		}) => api.renameAccount(accountId, newName),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+			invalidateCapacityQueries(queryClient);
 		},
 	});
 };
@@ -726,7 +745,7 @@ export const useSetUsageThrottling = () => {
 		}) => api.setUsageThrottling(settings),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["usage-throttling"] });
-			queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
+			invalidateCapacityQueries(queryClient);
 		},
 	});
 };

@@ -4,14 +4,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
 	useAccounts,
 	useAnalytics,
-	useApiKeys,
 	usePaymentsSummary,
+	useRunway,
 	useUsageHistory,
 } from "../../hooks/queries";
-import { computeApiKeyRunways } from "../../lib/api-key-runway";
 import { dataAvailability } from "../../lib/data-availability";
 import { computePoolUsage } from "../../lib/pool-usage";
-import { LoadingSkeleton } from "../overview/LoadingSkeleton";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
@@ -20,7 +18,11 @@ import { UsageSawtoothChart } from "./UsageSawtoothChart";
 
 // Account Performance table plus the plan-cost / burn-rate summary band, both
 // of which come from `totals`.
-const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
+//
+// Exported so tests seeding the query cache key on the SAME list — a divergent
+// list yields `undefined` analytics, and the sections computed from it render
+// their own pending state instead of the numbers under test.
+export const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
 	"accountPerformance",
 ];
@@ -34,23 +36,28 @@ export const LimitsTab = React.memo(() => {
 
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
-	// The runway panel is per API key, so this tab owns that query and hands the
-	// computed rows down; LimitsCapacityOverview stays a pure view component.
-	const apiKeysQuery = useApiKeys();
-	const { data: apiKeys, isLoading: apiKeysLoading } = apiKeysQuery;
-	const { data: analytics, isLoading: analyticsLoading } = useAnalytics(
+	// The runway is computed server-side; this tab owns the query and hands the
+	// rows down, so LimitsCapacityOverview stays a pure view component.
+	const runwayQuery = useRunway();
+	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	const analyticsQuery = useAnalytics(
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
 		"normal",
 		false,
 		{ sections: LIMITS_SECTIONS },
 	);
+	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
+	// One query per window: each graph states the availability of its OWN read.
+	const fiveHourUsageQuery = useUsageHistory(fiveHourUsageRange);
 	const { data: fiveHourUsageHistory, isLoading: fiveHourUsageHistoryLoading } =
-		useUsageHistory(fiveHourUsageRange);
+		fiveHourUsageQuery;
+	const sevenDayUsageQuery = useUsageHistory(sevenDayUsageRange);
 	const { data: sevenDayUsageHistory, isLoading: sevenDayUsageHistoryLoading } =
-		useUsageHistory(sevenDayUsageRange);
+		sevenDayUsageQuery;
 	// Payments-ledger spend summary follows the Account Performance card's range.
-	const { data: paymentsSummary } = usePaymentsSummary(perfRange);
+	const paymentsQuery = usePaymentsSummary(perfRange);
+	const { data: paymentsSummary, isLoading: paymentsLoading } = paymentsQuery;
 
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
@@ -70,34 +77,57 @@ export const LimitsTab = React.memo(() => {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
-	const keyRunways = useMemo(
-		() => computeApiKeyRunways(apiKeys ?? [], accounts ?? [], now),
-		[apiKeys, accounts, now],
-	);
-	// Both reads are load-bearing: an empty key list would otherwise read as
-	// "authentication is off", and empty accounts as "nothing to route to".
+	// There is deliberately no page-wide loading gate. Each section states the
+	// availability of the ONE query it is computed from, so a slow or failed read
+	// can only blank the section that depends on it. `/api/analytics` is the
+	// slowest read on this page; letting it hold the whole tab hostage is exactly
+	// what hid a resolved runway behind an unrelated request.
+	//
+	// `pending` is `isLoading && !data`, so a background refetch never blanks a
+	// section that already has numbers to show.
 	const accountsUnavailable =
 		dataAvailability(accountsQuery, accountsLoading).state === "unavailable";
-	const apiKeysUnavailable =
-		dataAvailability(apiKeysQuery, apiKeysLoading).state === "unavailable";
-	const runwaysUnavailableReason = accountsUnavailable
+	const accountsPending = accountsLoading && !accounts;
+	const accountsUnavailableReason = accountsUnavailable
 		? "Account data unavailable"
-		: apiKeysUnavailable
-			? "API key data unavailable"
-			: undefined;
-
-	const loading = accountsLoading || analyticsLoading;
-	const ready = accounts && analytics;
-	if (loading && !ready) {
-		return <LoadingSkeleton />;
-	}
+		: undefined;
+	const analyticsUnavailable =
+		dataAvailability(analyticsQuery, analyticsLoading).state === "unavailable";
+	const analyticsPending = analyticsLoading && !analytics;
+	// The sawtooth graphs claim "Collecting data" when they have no rows, which
+	// asserts that no history EXISTS. That claim is only true once the read has
+	// resolved, so each window carries its own pending/unavailable state.
+	const fiveHourUsageUnavailable =
+		dataAvailability(fiveHourUsageQuery, fiveHourUsageHistoryLoading).state ===
+		"unavailable";
+	const sevenDayUsageUnavailable =
+		dataAvailability(sevenDayUsageQuery, sevenDayUsageHistoryLoading).state ===
+		"unavailable";
+	const paymentsUnavailable =
+		dataAvailability(paymentsQuery, paymentsLoading).state === "unavailable";
+	const paymentsPending = paymentsLoading && !paymentsSummary;
+	// Gated on the runway read ALONE. The response carries the account names its
+	// pin labels and causes need, so a failing /api/accounts — which empties the
+	// two window panels beside it — must not empty this one too.
+	const runwayUnavailable =
+		dataAvailability(runwayQuery, runwayLoading).state === "unavailable";
+	const runwaysUnavailableReason = runwayUnavailable
+		? "Runway data unavailable"
+		: undefined;
 
 	const totals = analytics?.totals;
 	const accountList = accounts ?? [];
+	// Null, never 0: an unresolved analytics read has no figure, and "$0.00"
+	// would read as a range that genuinely cost nothing.
+	const analyticsResolved = !analyticsPending && !analyticsUnavailable;
 	const costSummary = {
-		planCostUsd: totals?.planCostUsd ?? 0,
-		avgDailyPlanCostUsd: totals?.avgDailyPlanCostUsd ?? 0,
-		avgWeeklyPlanCostUsd: totals?.avgWeeklyPlanCostUsd ?? 0,
+		planCostUsd: analyticsResolved ? (totals?.planCostUsd ?? null) : null,
+		avgDailyPlanCostUsd: analyticsResolved
+			? (totals?.avgDailyPlanCostUsd ?? null)
+			: null,
+		avgWeeklyPlanCostUsd: analyticsResolved
+			? (totals?.avgWeeklyPlanCostUsd ?? null)
+			: null,
 	};
 
 	return (
@@ -108,15 +138,22 @@ export const LimitsTab = React.memo(() => {
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
 				now={now}
-				runways={keyRunways}
-				accounts={accountList}
-				runwaysLoading={apiKeysLoading && !apiKeys}
+				runways={runway?.keys ?? []}
+				accounts={runway?.accounts ?? []}
+				windowsLoading={accountsPending}
+				windowsUnavailableReason={accountsUnavailableReason}
+				runwaysLoading={runwayLoading && !runway}
 				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>
 
 			{/* Per-account live utilization — grouped with the pool tiles above as the
 			    live, range-independent capacity view (no range selector). */}
-			<AccountUtilizationCard accounts={accountList} now={now} />
+			<AccountUtilizationCard
+				accounts={accountList}
+				now={now}
+				loading={accountsPending}
+				unavailableReason={accountsUnavailableReason}
+			/>
 
 			{/* Recorded usage history + forecast; each graph owns its range picker. */}
 			<UsageSawtoothChart
@@ -124,13 +161,19 @@ export const LimitsTab = React.memo(() => {
 				now={now}
 				fiveHour={{
 					usageHistory: fiveHourUsageHistory,
-					loading: fiveHourUsageHistoryLoading,
+					loading: fiveHourUsageHistoryLoading && !fiveHourUsageHistory,
+					unavailableReason: fiveHourUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
 					range: fiveHourUsageRange,
 					onRangeChange: setFiveHourUsageRange,
 				}}
 				sevenDay={{
 					usageHistory: sevenDayUsageHistory,
-					loading: sevenDayUsageHistoryLoading,
+					loading: sevenDayUsageHistoryLoading && !sevenDayUsageHistory,
+					unavailableReason: sevenDayUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
 					range: sevenDayUsageRange,
 					onRangeChange: setSevenDayUsageRange,
 				}}
@@ -140,7 +183,8 @@ export const LimitsTab = React.memo(() => {
 			    own range picker in the card header. */}
 			<AccountPerformanceSection
 				accountPerformance={analytics?.accountPerformance ?? []}
-				loading={loading}
+				loading={analyticsPending}
+				unavailable={analyticsUnavailable}
 				range={perfRange}
 				onRangeChange={setPerfRange}
 				costSummary={costSummary}
@@ -148,7 +192,13 @@ export const LimitsTab = React.memo(() => {
 			/>
 
 			{/* Recent payments-ledger entries (auto renewals + manual credits). */}
-			<PaymentsHistoryCard payments={paymentsSummary?.recentPayments ?? []} />
+			<PaymentsHistoryCard
+				payments={paymentsSummary?.recentPayments ?? []}
+				loading={paymentsPending}
+				unavailableReason={
+					paymentsUnavailable ? "Payments data unavailable" : undefined
+				}
+			/>
 		</div>
 	);
 });

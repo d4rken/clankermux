@@ -107,6 +107,7 @@ import {
 	createRequestsSummaryHandler,
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
+import { createRunwayHandler } from "./handlers/runway";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import {
 	createIntegrityCheckHandler,
@@ -174,6 +175,7 @@ export class APIRouter {
 			config,
 			getStrategy,
 		);
+		const runwayHandler = createRunwayHandler(dbOps);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
@@ -256,6 +258,7 @@ export class APIRouter {
 			integrityCheckHandler(req),
 		);
 		this.handlers.set("GET:/api/accounts", () => accountsHandler());
+		this.handlers.set("GET:/api/runway", () => runwayHandler());
 		this.handlers.set("POST:/api/accounts", (req) => accountAddHandler(req));
 		this.handlers.set("POST:/api/accounts/zai", (req) =>
 			zaiAccountAddHandler(req),

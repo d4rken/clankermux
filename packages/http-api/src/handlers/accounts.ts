@@ -65,7 +65,6 @@ import {
 } from "@clankermux/proxy";
 import type {
 	Account,
-	AccountUsagePrediction,
 	AnthropicUsageData,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResponse,
@@ -89,10 +88,7 @@ import {
 	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
-import {
-	type AccountPredictionInput,
-	buildAccountUsagePredictions,
-} from "../services/build-account-predictions";
+import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
@@ -121,14 +117,6 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
  * Module-level to avoid per-request allocation.
  */
 const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
-
-/**
- * How far back to pull stored usage snapshots when computing the per-account
- * exhaustion prediction. 24h gives the 7-day-window regression a recent pace
- * while `buildAccountUsagePredictions` internally caps the 5h window to 6h.
- * Inline named constant (no env knobs, per project rule).
- */
-const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Mirror of the usage-snapshot sampler cadence
@@ -928,68 +916,22 @@ export function createAccountsListHandler(
 		);
 
 		// Best-effort per-account exhaustion prediction: least-squares regression
-		// over recent stored snapshots + the live reading, attached below. A DB or
-		// compute failure must NEVER break the accounts response — on error every
-		// account simply gets `prediction: null`.
+		// over recent stored snapshots + the live reading, attached below. The
+		// whole operation — eligibility, lookback, snapshot query and the
+		// empty-map-on-failure policy — lives in the shared service so this
+		// endpoint and `/api/runway` cannot drift. A DB or compute failure must
+		// NEVER break the accounts response; on error every account simply gets
+		// `prediction: null`.
 		//
-		// Sourced from `routingFreshUsageByAccount`, NOT the display view:
-		// buildAccountUsagePredictions appends this reading with `t: now`, so a
-		// reading that is minutes old would enter the regression claiming to be
-		// current and flatten or skew the forecast. An account whose reading has
-		// aged past the routing TTL simply predicts from its stored snapshots
-		// (or gets `prediction: null`) until the next poll lands.
-		const isoToMs = (s: string | null | undefined): number | null => {
-			if (s == null) return null;
-			const ms = Date.parse(s);
-			return Number.isFinite(ms) ? ms : null;
-		};
-		const predictionInputs: AccountPredictionInput[] = [];
-		for (const a of accounts) {
-			const provider = a.provider || "anthropic";
-			// Only Anthropic-style providers expose the 5h/7d windows the
-			// prediction model consumes.
-			if (provider !== "anthropic" && provider !== "codex") continue;
-			const live = routingFreshUsageByAccount.get(a.id);
-			if (!live || typeof live !== "object") continue;
-			const fiveHour = (live as AnthropicUsageData).five_hour;
-			const sevenDay = (live as AnthropicUsageData).seven_day;
-			// Skip accounts with neither window (e.g. non-Anthropic-shaped cache
-			// data) — they fall through to `prediction: null`.
-			if (!fiveHour && !sevenDay) continue;
-			predictionInputs.push({
-				accountId: a.id,
-				fiveHour: fiveHour
-					? {
-							utilization: fiveHour.utilization ?? null,
-							resetsAtMs: isoToMs(fiveHour.resets_at),
-						}
-					: null,
-				sevenDay: sevenDay
-					? {
-							utilization: sevenDay.utilization ?? null,
-							resetsAtMs: isoToMs(sevenDay.resets_at),
-						}
-					: null,
-			});
-		}
-
-		let predictionByAccount = new Map<string, AccountUsagePrediction>();
-		const predictionIds = predictionInputs.map((i) => i.accountId);
-		if (predictionIds.length > 0) {
-			try {
-				const samples = await dbOps.getRecentUsageSnapshotsForAccounts(
-					predictionIds,
-					now - PREDICTION_LOOKBACK_MS,
-				);
-				predictionByAccount = buildAccountUsagePredictions(
-					predictionInputs,
-					samples,
-					now,
-				);
-			} catch (err) {
-				log.warn(`Failed to compute usage predictions: ${err}`);
-			}
-		}
+		// Sourced from `routingFreshUsageByAccount`, NOT the display view: the
+		// service appends this reading with `t: now`, so a reading that is minutes
+		// old would enter the regression claiming to be current.
+		const predictionByAccount = await buildPredictionsForAccounts(
+			dbOps,
+			accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),
+			routingFreshUsageByAccount,
+			now,
+		);
 
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { KeyRunway } from "@clankermux/core";
+import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "../../lib/api-key-runway";
 import type { FamilyWeeklyUsage, PoolUsageResult } from "../../lib/pool-usage";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
@@ -19,8 +19,8 @@ function keyRunway(overrides: Partial<KeyRunway> = {}): KeyRunway {
 		keyId: "k1",
 		keyName: "prod",
 		isActive: true,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 2,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1", "acc-2"],
 		outcome: {
 			kind: "beyond-horizon",
 			horizonMs: 14 * DAY,
@@ -71,13 +71,14 @@ function renderOverview(
 		runways?: KeyRunway[];
 		runwaysLoading?: boolean;
 		runwaysUnavailableReason?: string;
+		now?: number;
 	} = {},
 ) {
 	return renderToStaticMarkup(
 		<LimitsCapacityOverview
 			fiveHour={fiveHour}
 			sevenDay={sevenDay}
-			now={NOW}
+			now={runwayProps.now ?? NOW}
 			runways={runwayProps.runways ?? [keyRunway()]}
 			accounts={RUNWAY_ACCOUNTS}
 			runwaysLoading={runwayProps.runwaysLoading ?? false}
@@ -96,6 +97,7 @@ function renderRunway(
 		runways?: KeyRunway[];
 		runwaysLoading?: boolean;
 		runwaysUnavailableReason?: string;
+		now?: number;
 	} = {},
 ) {
 	return renderOverview(poolResult(), poolResult(), runwayProps);
@@ -276,7 +278,7 @@ describe("LimitsCapacityOverview runway panel", () => {
 				keyRunway({
 					outcome: {
 						kind: "runway",
-						exhaustsAtMs: NOW + 3 * DAY,
+						exhaustsAtMs: NOW + 3 * DAY + 2 * HOUR,
 						durationMs: 3 * DAY + 2 * HOUR,
 						causes: [{ accountId: "acc-2", windowKind: "seven_day" }],
 						unprojectableAccountIds: [],
@@ -381,8 +383,8 @@ describe("LimitsCapacityOverview runway panel", () => {
 				keyRunway({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
-					eligibleAccountCount: 1,
+					pin: { accountId: null, providers: ["codex"] },
+					eligibleAccountIds: ["acc-1"],
 					outcome: {
 						kind: "runway",
 						exhaustsAtMs: NOW + 4 * HOUR,
@@ -402,6 +404,35 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(html).not.toContain("retired");
 		// The worst ACTIVE key drives the headline.
 		expect(html).toContain("4h");
+	});
+
+	it("counts a served runway down, then calls it out of quota at its deadline", () => {
+		const runways = [
+			keyRunway({
+				outcome: {
+					kind: "runway",
+					exhaustsAtMs: NOW + 4 * HOUR,
+					durationMs: 4 * HOUR,
+					causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
+					unprojectableAccountIds: [],
+				},
+			}),
+		];
+
+		const fresh = renderRunway({ runways, now: NOW });
+		expect(fresh).toContain("4h");
+		expect(fresh).toContain("Runs out");
+
+		const later = renderRunway({ runways, now: NOW + HOUR });
+		expect(later).toContain("3h");
+
+		// The rows are served from a poll, so a figure that outlived its own
+		// deadline must not keep counting or drop to a zero.
+		const expired = renderRunway({ runways, now: NOW + 5 * HOUR });
+		expect(expired).toContain("Out of quota");
+		expect(expired).toContain("alpha 5-hour");
+		expect(expired).not.toContain("Runs out");
+		expect(expired).not.toContain(">0<");
 	});
 
 	it("labels the synthetic row when authentication is off", () => {
@@ -449,8 +480,8 @@ describe("LimitsCapacityOverview runway panel", () => {
 				keyRunway({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
-					eligibleAccountCount: 1,
+					pin: { accountId: null, providers: ["codex"] },
+					eligibleAccountIds: ["acc-1"],
 					outcome: {
 						kind: "runway",
 						exhaustsAtMs: NOW + 4 * HOUR,

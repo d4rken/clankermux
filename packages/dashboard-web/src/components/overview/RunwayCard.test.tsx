@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import type { KeyRunway } from "@clankermux/core";
+import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { KeyRunway } from "../../lib/api-key-runway";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "../../lib/api-key-runway";
 import { RunwayCard } from "./RunwayCard";
 
 const HOUR = 60 * 60 * 1000;
+const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
 const DAY = 24 * HOUR;
 
 const accounts = [
@@ -17,8 +18,8 @@ function row(overrides: Partial<KeyRunway> = {}): KeyRunway {
 		keyId: "k1",
 		keyName: "prod",
 		isActive: true,
-		pinLabel: "Unpinned",
-		eligibleAccountCount: 2,
+		pin: { accountId: null, providers: null },
+		eligibleAccountIds: ["acc-1", "acc-2"],
 		outcome: {
 			kind: "beyond-horizon",
 			horizonMs: 14 * DAY,
@@ -30,7 +31,7 @@ function row(overrides: Partial<KeyRunway> = {}): KeyRunway {
 
 function render(props: Partial<Parameters<typeof RunwayCard>[0]> = {}) {
 	return renderToStaticMarkup(
-		<RunwayCard runways={[row()]} accounts={accounts} {...props} />,
+		<RunwayCard runways={[row()]} accounts={accounts} now={NOW} {...props} />,
 	);
 }
 
@@ -50,7 +51,7 @@ describe("RunwayCard", () => {
 				row({
 					outcome: {
 						kind: "runway",
-						exhaustsAtMs: 1,
+						exhaustsAtMs: NOW + 3 * DAY + 2 * HOUR,
 						durationMs: 3 * DAY + 2 * HOUR,
 						causes: [{ accountId: "acc-2", windowKind: "seven_day" }],
 						unprojectableAccountIds: [],
@@ -70,7 +71,7 @@ describe("RunwayCard", () => {
 				row({
 					outcome: {
 						kind: "runway",
-						exhaustsAtMs: 1,
+						exhaustsAtMs: NOW + 12 * HOUR,
 						durationMs: 12 * HOUR,
 						causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
 						unprojectableAccountIds: ["acc-9"],
@@ -175,7 +176,7 @@ describe("RunwayCard", () => {
 					keyName: "codex-only",
 					outcome: {
 						kind: "runway",
-						exhaustsAtMs: 1,
+						exhaustsAtMs: NOW + 4 * HOUR,
 						durationMs: 4 * HOUR,
 						causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
 						unprojectableAccountIds: [],
@@ -212,10 +213,10 @@ describe("RunwayCard", () => {
 				row({
 					keyId: "k2",
 					keyName: "codex-only",
-					pinLabel: "Pinned → codex",
+					pin: { accountId: null, providers: ["codex"] },
 					outcome: {
 						kind: "runway",
-						exhaustsAtMs: 1,
+						exhaustsAtMs: NOW + 4 * HOUR,
 						durationMs: 4 * HOUR,
 						causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
 						unprojectableAccountIds: [],
@@ -232,6 +233,31 @@ describe("RunwayCard", () => {
 		// The worst active key drives the headline and is named in the caption.
 		expect(html).toContain("4h");
 		expect(html).toContain("codex-only · Primary 5-hour");
+	});
+
+	it("counts a served runway down against its own clock", () => {
+		// The rows come from a poll, so rendering the server's `durationMs` would
+		// freeze the figure between refreshes.
+		const runways = [
+			row({
+				outcome: {
+					kind: "runway",
+					exhaustsAtMs: NOW + 4 * HOUR,
+					durationMs: 4 * HOUR,
+					causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
+					unprojectableAccountIds: [],
+				},
+			}),
+		];
+
+		expect(render({ runways, now: NOW })).toContain("4h");
+		expect(render({ runways, now: NOW + HOUR })).toContain("3h");
+		// Past its own deadline with no newer data, the projection's answer is
+		// that there is no quota — not a stale "4h" and not a zero.
+		const expired = render({ runways, now: NOW + 5 * HOUR });
+		expect(expired).toContain("Out of quota");
+		expect(expired).not.toContain("4h");
+		expect(expired).not.toContain(">0<");
 	});
 
 	it("labels the synthetic row when authentication is off", () => {
