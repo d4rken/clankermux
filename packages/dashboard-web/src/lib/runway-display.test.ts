@@ -128,13 +128,25 @@ describe("countdown against a fixed response", () => {
 		expect(formatRunwayValue(fixed, NOW + 5 * HOUR)).toBe("Out of quota");
 	});
 
-	it("keeps the lower-bound marker off the expired rendering", () => {
+	it("hedges the expired rendering when the pool was not fully seen", () => {
 		const bounded = runwayOutcome(4 * HOUR, ["acc-9"]);
 		expect(formatRunwayValue(bounded, NOW)).toBe("≥ 4h");
-		expect(formatRunwayValue(bounded, NOW + 4 * HOUR)).toBe("Out of quota");
-		// The unreadable account is still reported, just not as a bound on a
+		// The scan DROPPED an unreadable account before running, so "spent" is
+		// what the readable accounts showed, not a fact about the whole pool —
+		// the dropped one may be perfectly healthy. "Out of quota" would assert
+		// what the evidence cannot support.
+		expect(formatRunwayValue(bounded, NOW + 4 * HOUR)).toBe(
+			"Spent, unconfirmed",
+		);
+		// The unreadable account is still counted, just not as a bound on a
 		// figure that no longer exists.
 		expect(runwayQualifier(bounded, NOW + 4 * HOUR)).toBe("1 account unknown");
+	});
+
+	it("states the expired rendering plainly when every account was read", () => {
+		expect(formatRunwayValue(runwayOutcome(4 * HOUR), NOW + 4 * HOUR)).toBe(
+			"Out of quota",
+		);
 	});
 
 	it("carries the causes across the transition", () => {
