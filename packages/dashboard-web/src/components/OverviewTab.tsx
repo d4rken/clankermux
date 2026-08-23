@@ -4,7 +4,13 @@ import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { REFRESH_INTERVALS } from "../constants";
-import { useAccounts, useAnalytics, useStats } from "../hooks/queries";
+import {
+	useAccounts,
+	useAnalytics,
+	useApiKeys,
+	useStats,
+} from "../hooks/queries";
+import { computeApiKeyRunways } from "../lib/api-key-runway";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { computePoolUsage } from "../lib/pool-usage";
@@ -15,6 +21,7 @@ import { MetricCard } from "./overview/MetricCard";
 import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
+import { RunwayCard } from "./overview/RunwayCard";
 import { SpendSummaryBand } from "./overview/SpendSummaryBand";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemHealthStrip } from "./overview/SystemHealthStrip";
@@ -63,6 +70,11 @@ export const OverviewTab = React.memo(() => {
 	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
+	// The runway tile is per API key, so it needs the key list as well as the
+	// accounts: a provider-pinned key runs out when its own provider's accounts
+	// do, however healthy the rest of the pool is.
+	const apiKeysQuery = useApiKeys();
+	const { data: apiKeys, isLoading: apiKeysLoading } = apiKeysQuery;
 
 	// This page renders PROGRESSIVELY: there is no whole-page gate, because one
 	// slow section (activeSessions dominates /api/analytics) used to hide the
@@ -89,6 +101,9 @@ export const OverviewTab = React.memo(() => {
 	const accountsAvailability = dataAvailability(accountsQuery, accountsLoading);
 	const accountsUnavailable = accountsAvailability.state === "unavailable";
 	const accountsPending = accountsLoading && !accounts;
+	const apiKeysAvailability = dataAvailability(apiKeysQuery, apiKeysLoading);
+	const apiKeysUnavailable = apiKeysAvailability.state === "unavailable";
+	const apiKeysPending = apiKeysLoading && !apiKeys;
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
@@ -110,6 +125,10 @@ export const OverviewTab = React.memo(() => {
 		accountsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
 			: undefined;
+	const apiKeysStaleNote =
+		apiKeysAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(apiKeysAvailability.lastUpdatedAt, now)}`
+			: undefined;
 
 	useEffect(() => {
 		return registerUIRefresh({
@@ -127,6 +146,10 @@ export const OverviewTab = React.memo(() => {
 	const weeklyPool = useMemo(
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
+	);
+	const keyRunways = useMemo(
+		() => computeApiKeyRunways(apiKeys ?? [], accounts ?? [], now),
+		[apiKeys, accounts, now],
 	);
 
 	// Memoize percentage change calculation (must be at top level)
@@ -236,8 +259,9 @@ export const OverviewTab = React.memo(() => {
 				requested={OVERVIEW_SECTIONS}
 			/>
 
-			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-3 gap-group">
+			{/* Metrics Grid. Four tiles: two columns from md, four once there is room,
+			    so the runway tile never lands alone on a half-empty row. */}
+			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-group">
 				<MetricCard
 					title="Total Requests"
 					value={formatNumber(analytics?.totals?.requests || 0)}
@@ -289,6 +313,22 @@ export const OverviewTab = React.memo(() => {
 						accountsUnavailable ? "Account data unavailable" : undefined
 					}
 					staleNote={accountsStaleNote}
+				/>
+				{/* Needs BOTH reads: an empty key list would otherwise be read as
+				    "authentication is off", and empty accounts as "nothing to route
+				    to" — neither of which a failed or pending read can claim. */}
+				<RunwayCard
+					runways={keyRunways}
+					accounts={accounts ?? []}
+					loading={accountsPending || apiKeysPending}
+					unavailableReason={
+						accountsUnavailable
+							? "Account data unavailable"
+							: apiKeysUnavailable
+								? "API key data unavailable"
+								: undefined
+					}
+					staleNote={accountsStaleNote ?? apiKeysStaleNote}
 				/>
 			</div>
 
