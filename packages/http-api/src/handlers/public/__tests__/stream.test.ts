@@ -190,6 +190,62 @@ describe("the surface is unauthenticated, so it bounds itself", () => {
 		expect(connect(handler).status).toBe(200);
 	});
 
+	it("frees the slot and the listener when the client aborts", async () => {
+		// An abort is how these connections normally END: the widget's device
+		// sleeps, the tab closes, the panel restarts. If the slot leaked here the
+		// 32-connection cap would become a permanent 503 on this lane after a day
+		// of ordinary reconnects — the resource bound turning into the outage.
+		const before = requestEvents.listenerCount("event");
+		const aborter = new AbortController();
+		const res = createPublicStreamHandler(60_000)(
+			new Request("http://localhost/public/v1/stream", {
+				signal: aborter.signal,
+			}),
+		);
+		expect(publicStreamConnectionCount()).toBe(1);
+		expect(requestEvents.listenerCount("event")).toBe(before + 1);
+
+		aborter.abort();
+
+		expect(publicStreamConnectionCount()).toBe(0);
+		expect(requestEvents.listenerCount("event")).toBe(before);
+		await res.body?.cancel().catch(() => {});
+	});
+
+	it("frees them EXACTLY ONCE when an aborted connection is also cancelled", async () => {
+		// Every teardown path can run for the same connection, and they routinely
+		// do: the body is cancelled and the request aborts. Releasing a slot twice
+		// raises the effective cap for the life of the process; removing a listener
+		// twice reaches into somebody else's connection. A second connection stays
+		// open throughout so either would show.
+		const before = requestEvents.listenerCount("event");
+		const handler = createPublicStreamHandler(60_000);
+		const aborter = new AbortController();
+		const doomed = handler(
+			new Request("http://localhost/public/v1/stream", {
+				signal: aborter.signal,
+			}),
+		);
+		const survivor = handler(new Request("http://localhost/public/v1/stream"));
+		expect(publicStreamConnectionCount()).toBe(2);
+		expect(requestEvents.listenerCount("event")).toBe(before + 2);
+
+		// First teardown: the consumer goes away.
+		await doomed.body?.cancel().catch(() => {});
+		expect(publicStreamConnectionCount()).toBe(1);
+		expect(requestEvents.listenerCount("event")).toBe(before + 1);
+
+		// Second teardown for the SAME connection, arriving after it is gone.
+		aborter.abort();
+		expect(publicStreamConnectionCount()).toBe(1);
+		expect(requestEvents.listenerCount("event")).toBe(before + 1);
+
+		closeAllSseStreams();
+		await survivor.body?.cancel().catch(() => {});
+		expect(publicStreamConnectionCount()).toBe(0);
+		expect(requestEvents.listenerCount("event")).toBe(before);
+	});
+
 	it("drops a consumer that has stopped reading", async () => {
 		const before = requestEvents.listenerCount("event");
 		const res = connect(createPublicStreamHandler(60_000));
