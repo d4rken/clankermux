@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Config, type RuntimeConfig } from "@clankermux/config";
 import {
+	assertBunRuntimeFloor,
+	BunRuntimeFloorError,
 	CACHE,
 	captureBootProvenance,
 	DEFAULT_STRATEGY,
@@ -42,6 +44,7 @@ import {
 import {
 	extractCodexIdentity,
 	fetchAnthropicProfile,
+	fetchCodexModelCatalog,
 	getFreshCapacity,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
@@ -51,11 +54,13 @@ import {
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
+	CodexModelCatalogCache,
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
+	getValidAccessToken,
 	handleProxy,
 	markCapacityRestoredProbePending,
 	type ProxyContext,
@@ -95,6 +100,8 @@ import {
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
+import { waitForDrainIdle } from "./drain-idle";
+import { handleModelsRoute } from "./models-route";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -611,6 +618,18 @@ export default async function startServer(options?: {
 			},
 		};
 	}
+
+	// Refuse an unsupported runtime before anything else runs. Below the floor
+	// the proxy segfaults natively whenever a client aborts a streaming
+	// response (oven-sh/bun#32111) — uncatchable, so this string comparison is
+	// the only chance to say why. See packages/core/src/bun-runtime-floor.ts
+	// for the trade this makes and why only a positively-parsed low version
+	// refuses.
+	//
+	// This is the earliest point in *our* code, not the earliest point in the
+	// process: the whole import graph above already executed. A runtime too old
+	// to parse this file is beyond anything we can report on.
+	assertBunRuntimeFloor();
 
 	// Stamp the commit this process boots on, before anything else can spend
 	// time. The checkout IS the deployment, so HEAD moves under us whenever work
@@ -1198,6 +1217,18 @@ export default async function startServer(options?: {
 		// hot-reload of the flag takes effect on the next request automatically.
 	});
 
+	// Codex reads its model catalog from `GET /v1/models`, and the catalog is
+	// per-subscription — so it comes from one of OUR Codex accounts, not from the
+	// client, which authenticates with a ClankerMux API key and holds no
+	// upstream-valid token. Best-effort throughout: `getCatalog` returning null
+	// puts the route back on the static list it served before.
+	const codexModelCatalog = new CodexModelCatalogCache({
+		listAccounts: () => proxyContext.dbOps.getAllAccounts(),
+		getApiKeyPin: (apiKeyId) => proxyContext.dbOps.getApiKeyPin(apiKeyId),
+		getAccessToken: (account) => getValidAccessToken(account, proxyContext),
+		fetchCatalog: fetchCodexModelCatalog,
+	});
+
 	// Everything the front door needs, bound once. `fetch` is a thin wrapper
 	// around routeRequest so the routing itself — which namespace a request
 	// belongs to, whether it needs a key, which handler owns it — is reachable
@@ -1217,7 +1248,15 @@ export default async function startServer(options?: {
 				apiKeyId,
 				apiKeyName,
 			),
-		handleModels: handleModelsRequest,
+		handleModels: (url, apiKeyId) =>
+			handleModelsRoute(
+				url,
+				{
+					getCatalog: (keyId) => codexModelCatalog.get(keyId),
+					staticModels: handleModelsRequest,
+				},
+				apiKeyId ?? null,
+			),
 		withDashboard,
 		dashboardManifest,
 		serveDashboardFile,
@@ -1362,7 +1401,6 @@ Agent base URLs (the mount names the wire dialect the client speaks, not the acc
 - OpenAI Responses:   ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.openai}
 
 Available endpoints:
-- POST   ${protocol}://localhost:${serverInstance.port}/v1/*            → Proxy to Claude API (legacy root)
 - GET    ${protocol}://localhost:${serverInstance.port}/api/accounts    → List accounts
 - POST   ${protocol}://localhost:${serverInstance.port}/api/accounts    → Add account
 - DELETE ${protocol}://localhost:${serverInstance.port}/api/accounts/:id → Remove account
@@ -1649,7 +1687,14 @@ Available endpoints:
 // app is back), so a long drain doesn't extend the client-visible outage — it
 // only lets long agentic streams on the draining process run to completion.
 // 300s (up from 85s) covers most real agentic turns; streams that outlive the
-// watchdog are still severed when it fires. COUPLED CONFIG — keep in sync:
+// watchdog are still severed when it fires.
+//
+// This is the HARD cap, not the usual exit path: a drain that has gone idle
+// ends earlier via the `waitForDrainIdle` backstop below. Reaching 300s means
+// either requests really are still running, or something later in shutdown is
+// stuck (a hung force-close, a disposal that never settles, a stalled loop).
+//
+// COUPLED CONFIG — keep in sync:
 //  - systemd TimeoutStopSec=330 (deploy/systemd/.../stop-timeout.conf) must
 //    exceed this value, else systemd SIGKILLs mid-drain (default is only 90s).
 //  - Caddy lb_try_duration 330s (deploy/caddy/Caddyfile) must cover the
@@ -1674,8 +1719,10 @@ async function handleGracefulShutdown(signal: string) {
 	// Hard upper bound on shutdown duration. unref'd so it doesn't itself
 	// prevent a clean exit if everything else finishes first. Exits with 0
 	// because the watchdog only fires on an expected SIGTERM that ran long,
-	// not on a failure — code 1 would make systemd Restart=on-failure
-	// auto-restart the unit instead of treating it as a normal stop.
+	// not on a failure — a non-zero code here would leave the unit in `failed`
+	// state after an ordinary `systemctl restart` and bury real crashes in the
+	// noise. (It would NOT change whether systemd restarts us: the live unit is
+	// Restart=always, and a requested stop suppresses Restart= regardless.)
 	const watchdog = setTimeout(() => {
 		console.error(
 			`⚠️ Shutdown watchdog (${SHUTDOWN_WATCHDOG_MS}ms) expired, forcing exit`,
@@ -1788,12 +1835,51 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop accepting new connections and wait for in-flight HTTP requests
 		// (including streaming responses) to complete. stop() without args is
 		// Bun's graceful variant; stop(true) would force-close active conns.
+		//
+		// stop() is RACED against an idle watcher rather than awaited alone: it
+		// has been observed not resolving long after the last real request
+		// finished (see drain-idle.ts). On a normal drain stop() wins and
+		// nothing changes; the watcher only wins when the drain is stuck with
+		// no work left, and then we force-close whatever is holding it.
 		if (serverInstance) {
 			console.log("Draining in-flight HTTP requests...");
-			try {
-				await serverInstance.stop();
-			} catch (err) {
-				console.warn("⚠️ serverInstance.stop() threw:", err);
+			const server = serverInstance;
+			// `stop()` can reject OR throw synchronously. Either way the drain
+			// is over as far as this branch is concerned, but a REJECTED stop is
+			// not evidence the server actually stopped, so it force-closes too.
+			const stopped = (async () => {
+				try {
+					await server.stop();
+					return "stopped" as const;
+				} catch (err) {
+					console.warn("⚠️ serverInstance.stop() threw:", err);
+					return "stop-failed" as const;
+				}
+			})();
+			const idleWatcher = waitForDrainIdle({
+				getPendingCount: () =>
+					server.pendingRequests + server.pendingWebSockets,
+			});
+			const outcome = await Promise.race([
+				stopped,
+				idleWatcher.promise.then(() => "idle" as const),
+			]);
+			idleWatcher.cancel();
+			if (outcome !== "stopped") {
+				// The pending counts go into the log on purpose: if the idle
+				// branch keeps winning, they are the evidence for why a graceful
+				// stop() outlives the work it is supposed to be draining.
+				console.warn(
+					`⚠️ HTTP drain ended as "${outcome}" (pendingRequests=${server.pendingRequests}, pendingWebSockets=${server.pendingWebSockets}); force-closing remaining connections`,
+				);
+				try {
+					// Awaited: the disposal below must not race connections that
+					// are still being torn down. The shutdown watchdog bounds a
+					// force-close that hangs in turn.
+					await server.stop(true);
+				} catch (err) {
+					console.warn("⚠️ serverInstance.stop(true) threw:", err);
+				}
 			}
 			serverInstance = null;
 			console.log("HTTP drain complete");
@@ -1870,6 +1956,20 @@ if (import.meta.main) {
 		process.env.SSL_CERT_PATH = sslCertPath;
 	}
 
-	// Start the server asynchronously
-	void startServer({ port, sslKeyPath, sslCertPath });
+	// Start the server asynchronously. This is the only boundary allowed to end
+	// the process: startServer() is also an exported programmatic entrypoint, so
+	// everything below it reports failure by throwing, never by exiting.
+	// Previously this was a bare `void` call, which surfaced a startup failure
+	// as an unhandled rejection with no exit code we could give meaning to.
+	startServer({ port, sslKeyPath, sslCertPath }).catch((error: unknown) => {
+		if (error instanceof BunRuntimeFloorError) {
+			// A configuration error a restart cannot fix. The distinct status
+			// lets systemd stop retrying — see
+			// deploy/systemd/clankermux.service.d/runtime-floor.conf.
+			console.error(error.message);
+			process.exit(error.exitCode);
+		}
+		console.error("❌ Server failed to start:", error);
+		process.exit(1);
+	});
 }

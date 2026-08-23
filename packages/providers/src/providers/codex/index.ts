@@ -4,6 +4,14 @@ export {
 	pollCodexForToken,
 } from "./device-oauth";
 export { extractCodexIdentity } from "./identity";
+export type {
+	CodexModelCatalogResult,
+	FetchCodexModelCatalogArgs,
+} from "./models-catalog";
+export {
+	CODEX_MODEL_CATALOG_URL,
+	fetchCodexModelCatalog,
+} from "./models-catalog";
 export { sendCodexNativePing } from "./native-ping";
 export { CodexOAuthProvider } from "./oauth";
 export {

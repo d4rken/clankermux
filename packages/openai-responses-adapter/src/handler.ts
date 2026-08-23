@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Logger } from "@clankermux/logger";
 import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	parseUpstreamError,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import { translateRequestToAnthropic } from "./request-translator";
@@ -10,6 +11,61 @@ import { translateAnthropicStreamToResponses } from "./stream-translator";
 import type { HandleProxyFn, ResponseItem, ResponsesRequest } from "./types";
 
 const log = new Logger("openai-responses-adapter");
+
+/**
+ * Upper bound on how much of a FAILED upstream body is buffered before it is
+ * parsed for a diagnostic. Error envelopes are tiny and the extracted message
+ * is capped at a few hundred characters regardless, so an unbounded read would
+ * only let a misbehaving upstream — or an intermediary's HTML error page —
+ * pull arbitrary bytes into the handler for nothing.
+ */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/**
+ * Reads at most `MAX_ERROR_BODY_BYTES` of a response body as UTF-8, returning
+ * "" when the body is missing or nothing arrived before the stream failed.
+ *
+ * A stream that errors after the headers arrived must not reject the whole
+ * request: the status code is still meaningful and the caller can fall back to
+ * its generic message, which is what happened before this branch read the body
+ * at all for non-JSON responses.
+ *
+ * Bytes are copied straight into one fixed-size buffer rather than collected as
+ * chunks and merged. A stream may hand back a chunk of any size, so holding
+ * whole chunks would let a single oversized one defeat the cap twice over —
+ * once retained, once copied — for a string that gets truncated to a few
+ * hundred characters anyway.
+ */
+async function readBoundedText(resp: Response): Promise<string> {
+	if (!resp.body) return "";
+	const reader = resp.body.getReader();
+	let buffer: Uint8Array | null = null;
+	let filled = 0;
+	try {
+		while (filled < MAX_ERROR_BODY_BYTES) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value || value.byteLength === 0) continue;
+			if (!buffer) buffer = new Uint8Array(MAX_ERROR_BODY_BYTES);
+			const room = MAX_ERROR_BODY_BYTES - filled;
+			const take = value.byteLength <= room ? value : value.subarray(0, room);
+			buffer.set(take, filled);
+			filled += take.byteLength;
+		}
+	} catch (err) {
+		// Keep whatever arrived before the failure: a truncated envelope simply
+		// fails to parse and the caller falls back to its generic message.
+		log.warn(`Failed to read upstream error body: ${String(err)}`);
+	} finally {
+		// Signal we are done without awaiting: the response is discarded either
+		// way, and an awaited cancel can hang on a stalled upstream. cancel()
+		// rejects on an already-errored stream, hence the swallowed catch.
+		void reader.cancel().catch(() => {});
+	}
+
+	if (!buffer || filled === 0) return "";
+	return new TextDecoder().decode(buffer.subarray(0, filled));
+}
 
 export async function handleResponsesRequest(
 	req: Request,
@@ -178,40 +234,56 @@ export async function handleResponsesRequest(
 
 	// 7. Translate non-200 Anthropic errors to OpenAI error shape
 	if (anthropicResp.status !== 200) {
-		let errorBody: { error: { message: string; type: string; code: string } };
-		const contentType = anthropicResp.headers.get("content-type") ?? "";
-		if (contentType.includes("application/json")) {
-			try {
-				const anthropicError = (await anthropicResp.json()) as {
-					type?: string;
-					error?: { type?: string; message?: string };
-				};
-				const errType = anthropicError?.error?.type ?? "api_error";
-				errorBody = {
-					error: {
-						message: anthropicError?.error?.message ?? "Unknown error",
-						type: errType,
-						code: errType,
-					},
-				};
-			} catch {
-				errorBody = {
-					error: {
-						message: "Unknown error",
-						type: "api_error",
-						code: "api_error",
-					},
-				};
-			}
-		} else {
-			errorBody = {
-				error: {
-					message: "Unknown error",
-					type: "api_error",
-					code: "api_error",
-				},
+		// The proxy forwards a failed upstream response VERBATIM, so this body is
+		// not necessarily an Anthropic envelope: on a codex account it is whatever
+		// the ChatGPT backend raised, typically FastAPI's
+		// `{"detail":"Unsupported parameter: max_output_tokens"}`. Reading only
+		// `error.message` reduced every one of those to the constant
+		// "Unknown error" and destroyed the sole copy of the diagnostic the
+		// client ever sees (issue #5).
+		//
+		// Read the body once and parse it twice: once for the typed `error.type`,
+		// and once through the shared envelope parser for the message.
+		// `error.message` still wins when present so an Anthropic error reaches
+		// the client exactly as before, unprefixed by its type.
+		// parseUpstreamError is used rather than a raw-body excerpt deliberately:
+		// it emits only what upstream put in a recognized error field, never
+		// arbitrary bytes, so tokens or echoed prompt text in an unrecognized
+		// body cannot be relayed to the caller.
+		//
+		// Neither parse is gated on the content-type header. Upstreams mislabel
+		// error responses (a 401 `{"detail":"Not authenticated"}` sent as
+		// text/plain is real), and JSON.parse is the authoritative test of
+		// whether a body is JSON anyway.
+		const rawErrorBody = await readBoundedText(anthropicResp);
+		let errType = "api_error";
+		let message: string | null = null;
+
+		try {
+			const anthropicError = JSON.parse(rawErrorBody) as {
+				type?: string;
+				error?: { type?: string; message?: string };
 			};
+			// Blank values count as absent: an empty `error.message` used to
+			// win over the fallback and emit an error with no text at all.
+			if (anthropicError?.error?.type?.trim()) {
+				errType = anthropicError.error.type.trim();
+			}
+			if (anthropicError?.error?.message?.trim()) {
+				message = anthropicError.error.message;
+			}
+		} catch {
+			// Not JSON (or malformed) — fall through to the shared parser, which
+			// tolerates anything and returns null when it recognizes nothing.
 		}
+
+		const errorBody = {
+			error: {
+				message: message ?? parseUpstreamError(rawErrorBody) ?? "Unknown error",
+				type: errType,
+				code: errType,
+			},
+		};
 		return new Response(JSON.stringify(errorBody), {
 			status: anthropicResp.status,
 			headers: { "Content-Type": "application/json" },
