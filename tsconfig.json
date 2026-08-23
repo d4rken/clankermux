@@ -30,7 +30,12 @@
 		// unit-tested core, so both it and its integration test are typechecked.
 		// The other scripts/ files stay as they are.
 		"scripts/prediction-backtest.ts",
-		"scripts/prediction-backtest.test.ts"
+		"scripts/prediction-backtest.test.ts",
+		// Same reasoning, and more load-bearing: this is the only way to set the
+		// management password and the only way to recover from a forgotten one,
+		// so it must not be the one file a type error can reach production in.
+		"scripts/auth-password.ts",
+		"scripts/auth-password.test.ts"
 	],
 	"exclude": [
 		"**/__tests__",
