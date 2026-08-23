@@ -1,5 +1,8 @@
-import { computeWindowStartMs } from "@clankermux/core";
-import { type AccountResponse, isUsablePrediction } from "@clankermux/types";
+import {
+	computeWindowStartMs,
+	estimateWindowExhaustion,
+} from "@clankermux/core";
+import type { AccountResponse } from "@clankermux/types";
 import {
 	extractFiveHour,
 	extractSevenDay,
@@ -9,12 +12,12 @@ import {
 /**
  * Forward usage projection for the Limits-tab sawtooth charts.
  *
- * For an actively-burning account the forward slope comes from the server-side
- * regression prediction (`AccountResponse.prediction`) when one is trustworthy
- * for that window (`isUsablePrediction`); otherwise it falls back to the linear
- * burn-rate model used by `computePoolUsage`'s `atRisk` calculation: given an
- * account's current utilization `pct` observed `elapsed` ms into its window,
- * assume that same lifetime-average rate continues. Either way the projection
+ * For an actively-burning account the forward slope comes from
+ * `estimateWindowExhaustion`, shared with the progress-bar projection and the
+ * pool at-risk list: the server-side regression prediction
+ * (`AccountResponse.prediction`) when one is trustworthy for that window,
+ * otherwise the lifetime-average burn rate (current utilization `pct` observed
+ * `elapsed` ms into the window, assumed to continue). Either way the projection
  * is anchored at "now" (so the dashed forecast line meets the solid history
  * line) and runs forward until it stops — at 100% for an account projected to
  * exhaust before reset, or at the window reset / chart horizon otherwise.
@@ -116,45 +119,48 @@ function deriveLiveState(
 
 	const remainingMs = resetMs - now;
 
-	// Slope source: prefer a trustworthy server-side regression prediction for
-	// this window when one exists; otherwise fall back to the legacy
-	// lifetime-average burn rate. Only the *slope* changes — the flat-hold
-	// branch above (paused / cooldown / exhausted) is never reached here, so a
-	// positive regression slope can never make a held account burn.
+	// Slope source: the shared estimator, which prefers a trustworthy server-side
+	// regression prediction for this window and otherwise falls back to the
+	// lifetime-average burn rate. Only the *slope* is taken from it — the
+	// flat-hold branch above (paused / cooldown / exhausted) is never reached
+	// here, so neither a positive regression slope nor the estimator's
+	// "already-exhausted" reading can make a held account burn.
 	//
-	// The regression line is anchored at the live utilization `pct` at `now` via
-	// a *virtual* window start (`now - pct/slope`), so `projectAt`, `stateEndMs`
-	// and `buildPoints` are reused verbatim for both paths: at `now` the line
-	// reads `pct`, and it reaches exactly 100 at the recomputed exhaustion time.
+	// The line is anchored at the live utilization `pct` at `now` via a *virtual*
+	// window start (`now - pct/slope`), so `projectAt`, `stateEndMs` and
+	// `buildPoints` are reused verbatim for both paths: at `now` the line reads
+	// `pct`, and it reaches exactly 100 at the recomputed exhaustion time. This
+	// anchor is chart rendering, deliberately different from the progress-bar
+	// message's anchor, and so stays here rather than moving into the estimator.
 	const pred =
 		window === "five_hour"
 			? account.prediction?.fiveHour
 			: account.prediction?.sevenDay;
+	const slopePerHour =
+		estimateWindowExhaustion(
+			{
+				utilizationPct: pct,
+				resetsAtMs: resetMs,
+				windowStartMs: burnStartMs,
+				prediction: pred,
+			},
+			now,
+		).slopePctPerHour ?? 0;
 
 	let slopePerMs: number;
 	let startMs: number;
 	let timeToExhaustMs: number;
-	if (isUsablePrediction(pred, resetMs)) {
-		// Usable regression owns the slope. A non-positive recent slope (stable /
-		// recently idle / refunded) holds FLAT at the current utilization — it must
-		// NOT revert to the lifetime-average burn-rate, which is exactly the copy
-		// this feature replaces.
-		const perHour = Math.max(0, pred.slopePerHour);
-		if (perHour > 0) {
-			slopePerMs = perHour / 3_600_000; // % per hour -> % per ms
-			startMs = now - pct / slopePerMs; // virtual origin so pct(now) === pct
-			timeToExhaustMs = (100 - pct) / slopePerMs;
-		} else {
-			slopePerMs = 0; // flat hold (projectAt returns `pct` for slope 0)
-			startMs = now;
-			timeToExhaustMs = Number.POSITIVE_INFINITY;
-		}
+	if (slopePerHour > 0) {
+		slopePerMs = slopePerHour / 3_600_000; // % per hour -> % per ms
+		startMs = now - pct / slopePerMs; // virtual origin so pct(now) === pct
+		timeToExhaustMs = (100 - pct) / slopePerMs;
 	} else {
-		slopePerMs = pct / elapsed;
-		startMs = burnStartMs;
-		// Time to climb the remaining (100 - pct) at the current rate — same model
-		// as pool-usage.ts atRisk: timeToExhaust = ((1 - f) / f) * elapsed.
-		timeToExhaustMs = ((100 - pct) / pct) * elapsed;
+		// A non-positive recent slope (stable / recently idle / refunded) holds
+		// FLAT at the current utilization — it must NOT revert to the
+		// lifetime-average burn rate, which is exactly the copy this replaces.
+		slopePerMs = 0; // flat hold (projectAt returns `pct` for slope 0)
+		startMs = now;
+		timeToExhaustMs = Number.POSITIVE_INFINITY;
 	}
 	const isSafe = timeToExhaustMs >= remainingMs;
 

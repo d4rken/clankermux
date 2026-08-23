@@ -67,8 +67,11 @@ const CERTAIN_MARGIN_FRACTION = 0.1;
  * margin wide enough to survive the extrapolation's own error; a tighter margin,
  * or a window whose length is unknown and whose margin therefore has nothing to
  * be measured against, stays amber.
+ *
+ * Exported so the fallback projection can share the rule. Callers must cap it at
+ * "warning" for a low-confidence estimate: red is reserved for the regression.
  */
-function earlyExhaustionTone(
+export function earlyExhaustionTone(
 	marginMs: number,
 	windowDurationMs: number | null,
 ): ProjectionTone {

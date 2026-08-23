@@ -639,6 +639,85 @@ describe("computePoolUsage", () => {
 			expect(result.atRisk[0].name).toBe("weekly-burner");
 			expect(result.atRisk[0].resetMs).toBe(resetMs);
 		});
+
+		// The at-risk list reads the same shared estimator the progress bars and
+		// the forecast lines do, so a trustworthy server-side regression outranks
+		// the lifetime average here too. Before that, this list was the only
+		// surface still projecting purely from the window-long average, and it
+		// could flag an account the bar next to it called safe.
+		it("prefers a usable regression prediction over the lifetime average", () => {
+			// One hour into a five-hour window at 20%: exactly on flat pace, so the
+			// lifetime average projects exhaustion AT the reset and flags nothing.
+			// The recent slope is far steeper and runs out an hour from now.
+			const elapsedMs = 60 * 60 * 1000;
+			const resetMs = NOW + (FIVE_HOUR_MS - elapsedMs);
+			const account = mkAnthropicAt("recent-burst", 20, resetMs);
+			account.prediction = {
+				fiveHour: {
+					state: "rising",
+					slopePerHour: 80,
+					etaExhaustMs: NOW + 60 * 60 * 1000,
+					predictedAtReset: null,
+					resetsAtMs: resetMs,
+					willExhaustBeforeReset: true,
+					lowConfidence: false,
+				},
+			};
+
+			const result = computePoolUsage([account], "five_hour", NOW);
+
+			expect(result.atRisk).toHaveLength(1);
+			expect(result.atRisk[0].name).toBe("recent-burst");
+			expect(result.atRisk[0].exhaustsAtMs).toBe(NOW + 60 * 60 * 1000);
+			expect(result.atRisk[0].timeToExhaustMs).toBe(60 * 60 * 1000);
+		});
+
+		it("clears an at-risk flag when the recent trend has gone flat", () => {
+			// 91% at 4.5h in: the lifetime average projects exhaustion before the
+			// reset. The account has since gone idle, so the regression holds flat
+			// and there is nothing to warn about.
+			const elapsedMs = 4.5 * 60 * 60 * 1000;
+			const resetMs = NOW + (FIVE_HOUR_MS - elapsedMs);
+			const account = mkAnthropicAt("gone-idle", 91, resetMs);
+			account.prediction = {
+				fiveHour: {
+					state: "stable",
+					slopePerHour: 0,
+					etaExhaustMs: null,
+					predictedAtReset: null,
+					resetsAtMs: resetMs,
+					willExhaustBeforeReset: false,
+					lowConfidence: false,
+				},
+			};
+
+			const result = computePoolUsage([account], "five_hour", NOW);
+
+			expect(result.atRisk).toEqual([]);
+		});
+
+		it("keeps the lifetime average when the prediction is untrustworthy", () => {
+			const elapsedMs = 4.5 * 60 * 60 * 1000;
+			const resetMs = NOW + (FIVE_HOUR_MS - elapsedMs);
+			const account = mkAnthropicAt("burner", 91, resetMs);
+			account.prediction = {
+				fiveHour: {
+					state: "stable",
+					slopePerHour: 0,
+					etaExhaustMs: null,
+					predictedAtReset: null,
+					resetsAtMs: resetMs,
+					willExhaustBeforeReset: false,
+					// Low-confidence fits never replace the lifetime average.
+					lowConfidence: true,
+				},
+			};
+
+			const result = computePoolUsage([account], "five_hour", NOW);
+
+			expect(result.atRisk).toHaveLength(1);
+			expect(result.atRisk[0].name).toBe("burner");
+		});
 	});
 
 	it("contributes a limits[]-only anthropic account to both pools via the normalizer", () => {
@@ -671,12 +750,22 @@ describe("computePoolUsage", () => {
 
 		const five = computePoolUsage(accounts, "five_hour", NOW);
 		expect(five.contributing).toEqual([
-			{ name: "limits-only", pct: 40, resetMs: NOW + 1_000_000 },
+			{
+				accountId: "limits-only",
+				name: "limits-only",
+				pct: 40,
+				resetMs: NOW + 1_000_000,
+			},
 		]);
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.contributing).toEqual([
-			{ name: "limits-only", pct: 70, resetMs: NOW + 2_000_000 },
+			{
+				accountId: "limits-only",
+				name: "limits-only",
+				pct: 70,
+				resetMs: NOW + 2_000_000,
+			},
 		]);
 	});
 
@@ -764,7 +853,7 @@ describe("computePoolUsage", () => {
 		expect(fiveHour.average).toBe(82);
 		expect(fiveHour.activeAverage).toBe(28);
 		expect(fiveHour.contributing).toEqual([
-			{ name: "codex", pct: 28, resetMs: null },
+			{ accountId: "codex", name: "codex", pct: 28, resetMs: null },
 		]);
 		expect(fiveHour.exhausted).toEqual([
 			{
@@ -786,7 +875,7 @@ describe("computePoolUsage", () => {
 		expect(sevenDay.average).toBe(83.75);
 		expect(sevenDay.activeAverage).toBe(35);
 		expect(sevenDay.contributing).toEqual([
-			{ name: "codex", pct: 35, resetMs: null },
+			{ accountId: "codex", name: "codex", pct: 35, resetMs: null },
 		]);
 		expect(sevenDay.exhausted).toEqual([
 			{

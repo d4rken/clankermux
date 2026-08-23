@@ -1,4 +1,8 @@
-import { computeWindowStartMs, registerUIRefresh } from "@clankermux/core";
+import {
+	computeWindowStartMs,
+	estimateWindowExhaustion,
+	registerUIRefresh,
+} from "@clankermux/core";
 import type {
 	AccountUsagePrediction,
 	FullUsageData,
@@ -8,6 +12,7 @@ import type {
 import { isUsablePrediction } from "@clankermux/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import {
+	earlyExhaustionTone,
 	formatDuration,
 	formatPredictionMessage,
 	type ProjectedUsage,
@@ -170,40 +175,64 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
 	});
 }
 
+/**
+ * Copy + tone for the fallback projection: a thin mapper over the shared
+ * `estimateWindowExhaustion`, which is also what the pool at-risk list and the
+ * forecast chart read. The estimator returns facts only, so the wording here is
+ * unchanged from when this function did the arithmetic itself.
+ *
+ * Severity is capped at amber on a LOW-CONFIDENCE estimate, not on "this
+ * function ran". The lifetime-average path is a single-snapshot average over
+ * the whole elapsed window rather than a recent slope: a burst in the first ten
+ * minutes of a five-hour window projects confident exhaustion for an account
+ * that has since gone idle, and keeps projecting it until the window resets. It
+ * is what every non-Anthropic and every scoped-weekly window falls back to, so
+ * red there would be red almost everywhere.
+ */
 function computeProjectedMessage(
 	resetTime: string | null,
 	window: string | null,
 	percentage: number | null,
 	now: number,
+	prediction: UsagePrediction | undefined,
+	windowDurationMs: number | null,
 ): ProjectedUsage | null {
 	if (!resetTime || !window || percentage === null) return null;
 	const resetMs = new Date(resetTime).getTime();
-	const startMs = computeWindowStartMs(resetMs, window);
-	if (startMs === null) return null;
-	const elapsed = now - startMs;
-	const remaining = resetMs - now;
-	if (elapsed <= 0 || remaining <= 0) return null;
-	const f = percentage / 100;
-	if (f <= 0)
+	const estimate = estimateWindowExhaustion(
+		{
+			utilizationPct: percentage,
+			resetsAtMs: Number.isFinite(resetMs) ? resetMs : null,
+			windowStartMs: Number.isFinite(resetMs)
+				? computeWindowStartMs(resetMs, window)
+				: null,
+			prediction,
+		},
+		now,
+	);
+
+	if (estimate.source === "none") return null;
+	if (estimate.source === "no-usage") {
 		return { message: "No usage recorded yet in this window", tone: "neutral" };
-	const timeToExhaustMs = ((1 - f) / f) * elapsed;
-	if (timeToExhaustMs < remaining) {
+	}
+	if (estimate.source === "already-exhausted") {
+		// A spent window with no live reset left has no margin to report.
+		if (!Number.isFinite(resetMs) || resetMs <= now) return null;
 		return {
-			message: `Runs out ${formatDuration(remaining - timeToExhaustMs)} before reset`,
-			// Amber, never red, no matter how large the projected shortfall. This
-			// path is a single-snapshot average over the whole elapsed window rather
-			// than a recent slope: a burst in the first ten minutes of a five-hour
-			// window projects confident exhaustion for an account that has since
-			// gone idle, and it stays projecting it until the window resets. It is
-			// what every non-Anthropic and every scoped-weekly window falls back to,
-			// so red here would be red almost everywhere. The regression path in
-			// `formatPredictionMessage` is the only source trusted with red.
+			message: `Runs out ${formatDuration(resetMs - now)} before reset`,
 			tone: "warning",
 		};
 	}
+
+	if (estimate.exhaustsAtMs === null || estimate.exhaustsAtMs >= resetMs) {
+		return { message: RESETS_BEFORE_EXHAUSTION_MESSAGE, tone: "safe" };
+	}
+	const marginMs = resetMs - estimate.exhaustsAtMs;
 	return {
-		message: RESETS_BEFORE_EXHAUSTION_MESSAGE,
-		tone: "safe",
+		message: `Runs out ${formatDuration(marginMs)} before reset`,
+		tone: estimate.lowConfidence
+			? "warning"
+			: earlyExhaustionTone(marginMs, windowDurationMs),
 	};
 }
 
@@ -636,6 +665,8 @@ export function RateLimitProgress({
 								usage.window,
 								percentage ?? null,
 								now,
+								windowPrediction,
+								windowDurationMs,
 							);
 				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can
