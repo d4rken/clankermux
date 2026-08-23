@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { RunwayCause, RunwayOutcome } from "@clankermux/core";
+import { effectiveRunwayOutcome } from "@clankermux/core";
 import {
 	BEYOND_HORIZON_GLYPH,
 	describeRunwayCause,
-	effectiveRunwayOutcome,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,

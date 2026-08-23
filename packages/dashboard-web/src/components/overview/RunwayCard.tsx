@@ -47,7 +47,7 @@ export function RunwayCard({
 	unavailableReason,
 	staleNote,
 }: RunwayCardProps) {
-	const worst = worstKeyRunway(runways);
+	const worst = worstKeyRunway(runways, now);
 	const activeRunways = runways.filter((runway) => runway.isActive);
 
 	// `unavailableReason` is reserved for BACKING-READ failures — the incoming

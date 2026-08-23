@@ -186,6 +186,32 @@ export function computeApiKeyRunways(
 }
 
 /**
+ * The outcome as it stands AT `now`.
+ *
+ * A `runway` whose `exhaustsAtMs` has passed with no newer data is not a
+ * runway of zero, and it is not still counting down: the metric is a
+ * projection throughout, and its own answer once the deadline passes is that
+ * there is no quota. So it reads exactly as `out-now`, carrying the same
+ * causes and unprojectable accounts.
+ *
+ * Outcome logic rather than presentation, so it lives here: the ranking in
+ * {@link worstKeyRunway} and every surface that renders a row have to agree on
+ * what a served row MEANS, or a headline can contradict the rows beneath it.
+ */
+export function effectiveRunwayOutcome(
+	outcome: RunwayOutcome,
+	now: number,
+): RunwayOutcome {
+	if (outcome.kind !== "runway") return outcome;
+	if (outcome.exhaustsAtMs - now > 0) return outcome;
+	return {
+		kind: "out-now",
+		causes: outcome.causes,
+		unprojectableAccountIds: outcome.unprojectableAccountIds,
+	};
+}
+
+/**
  * Severity order for the headline, worst first:
  *
  *  - `no-accounts`    — definite immediate unavailability: nothing to route to.
@@ -204,28 +230,50 @@ const OUTCOME_SEVERITY: Record<RunwayOutcome["kind"], number> = {
 	"beyond-horizon": 4,
 };
 
-/** The worst runway across ACTIVE keys, or null when none is active. */
-export function worstKeyRunway(runways: KeyRunway[]): KeyRunway | null {
+/**
+ * The worst runway across ACTIVE keys, or null when none is active.
+ *
+ * Ranks the outcomes AT `now` rather than as served. The rows come from a poll,
+ * so a `runway` whose deadline has since passed is already out of quota; ranking
+ * the raw outcome would leave the headline reporting `unknown` while the row
+ * beneath it reads "Out of quota".
+ *
+ * The shortest-first tiebreak compares REMAINING time for the same reason: the
+ * ordering must not depend on when the response was generated, which is what
+ * the served `durationMs` encodes.
+ */
+export function worstKeyRunway(
+	runways: KeyRunway[],
+	now: number,
+): KeyRunway | null {
 	let worst: KeyRunway | null = null;
+	let worstOutcome: RunwayOutcome | null = null;
 	for (const candidate of runways) {
 		if (!candidate.isActive) continue;
-		if (worst === null) {
+		const candidateOutcome = effectiveRunwayOutcome(candidate.outcome, now);
+		if (worst === null || worstOutcome === null) {
 			worst = candidate;
+			worstOutcome = candidateOutcome;
 			continue;
 		}
-		const candidateRank = OUTCOME_SEVERITY[candidate.outcome.kind];
-		const worstRank = OUTCOME_SEVERITY[worst.outcome.kind];
+		const candidateRank = OUTCOME_SEVERITY[candidateOutcome.kind];
+		const worstRank = OUTCOME_SEVERITY[worstOutcome.kind];
 		if (candidateRank < worstRank) {
 			worst = candidate;
+			worstOutcome = candidateOutcome;
 			continue;
 		}
 		if (
 			candidateRank === worstRank &&
-			candidate.outcome.kind === "runway" &&
-			worst.outcome.kind === "runway" &&
-			candidate.outcome.durationMs < worst.outcome.durationMs
+			candidateOutcome.kind === "runway" &&
+			worstOutcome.kind === "runway"
 		) {
-			worst = candidate;
+			const candidateRemaining = candidateOutcome.exhaustsAtMs - now;
+			const worstRemaining = worstOutcome.exhaustsAtMs - now;
+			if (candidateRemaining < worstRemaining) {
+				worst = candidate;
+				worstOutcome = candidateOutcome;
+			}
 		}
 	}
 	return worst;

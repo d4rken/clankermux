@@ -193,7 +193,7 @@ export function createRunwayHandler(
 		}));
 
 		const runways = computeApiKeyRunways(keys, sources, now);
-		const worst = worstKeyRunway(runways);
+		const worst = worstKeyRunway(runways, now);
 
 		const response: RunwayResponse = {
 			generatedAt: now,

@@ -1,5 +1,5 @@
 import type { KeyRunway } from "@clankermux/core";
-import { worstKeyRunway } from "@clankermux/core";
+import { effectiveRunwayOutcome, worstKeyRunway } from "@clankermux/core";
 import { formatPercentage } from "@clankermux/ui-common";
 import {
 	AlertTriangle,
@@ -15,7 +15,6 @@ import { formatDurationDhm } from "../../lib/format-prediction";
 import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
-	effectiveRunwayOutcome,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,
@@ -317,7 +316,7 @@ function RunwayPanel({
 	loading,
 	unavailableReason,
 }: RunwayPanelProps) {
-	const worst = worstKeyRunway(runways);
+	const worst = worstKeyRunway(runways, now);
 	const activeRunways = runways.filter((runway) => runway.isActive);
 	// Three distinct states, kept apart on purpose:
 	//  - readBlocked: the backing read failed, or is still in flight. The parent

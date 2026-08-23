@@ -1,4 +1,5 @@
 import type { RunwayCause, RunwayOutcome } from "@clankermux/core";
+import { effectiveRunwayOutcome } from "@clankermux/core";
 import { formatDurationDhm } from "./format-prediction";
 
 /**
@@ -15,32 +16,13 @@ import { formatDurationDhm } from "./format-prediction";
  * still read "runway" after its own deadline had passed. The remaining time is
  * computed from `exhaustsAtMs` against the caller's clock instead — the same
  * 30s UI tick the surrounding tiles already run on.
+ *
+ * Reading a served outcome AT `now` is `effectiveRunwayOutcome`, which lives in
+ * `@clankermux/core` beside the ranking that has to agree with it, not here.
  */
 
 /** Rendered for `beyond-horizon`: no run-out inside the modelled window. */
 export const BEYOND_HORIZON_GLYPH = "∞";
-
-/**
- * The outcome as it stands AT `now`.
- *
- * A `runway` whose `exhaustsAtMs` has passed with no newer data is not a
- * runway of zero, and it is not still counting down: the metric is a
- * projection throughout, and its own answer once the deadline passes is that
- * there is no quota. So it renders exactly as `out-now`, carrying the same
- * causes and unprojectable accounts.
- */
-export function effectiveRunwayOutcome(
-	outcome: RunwayOutcome,
-	now: number,
-): RunwayOutcome {
-	if (outcome.kind !== "runway") return outcome;
-	if (outcome.exhaustsAtMs - now > 0) return outcome;
-	return {
-		kind: "out-now",
-		causes: outcome.causes,
-		unprojectableAccountIds: outcome.unprojectableAccountIds,
-	};
-}
 
 /**
  * Why a runway cannot be stated at all, or null when it can. Callers render

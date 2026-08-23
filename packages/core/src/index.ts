@@ -7,6 +7,7 @@ export {
 } from "./api-key-pin";
 export {
 	computeApiKeyRunways,
+	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
 	UNAUTHENTICATED_POOL_KEY_NAME,

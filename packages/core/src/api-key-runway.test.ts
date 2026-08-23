@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { ApiKeyResponse } from "@clankermux/types";
 import {
 	computeApiKeyRunways,
+	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
 	UNAUTHENTICATED_POOL_KEY_NAME,
@@ -309,51 +310,115 @@ function runwayRow(durationMs: number, keyId: string): KeyRunway {
 	};
 }
 
+describe("effectiveRunwayOutcome", () => {
+	it("reads a runway past its own deadline as out of quota", () => {
+		const outcome = runwayRow(4 * HOUR, "a").outcome;
+
+		const effective = effectiveRunwayOutcome(outcome, NOW + 5 * HOUR);
+
+		expect(effective.kind).toBe("out-now");
+		if (effective.kind !== "out-now") throw new Error("unreachable");
+		expect(effective.causes).toEqual([]);
+		expect(effective.unprojectableAccountIds).toEqual([]);
+	});
+
+	it("leaves an outcome that has not expired exactly as served", () => {
+		const outcome = runwayRow(4 * HOUR, "a").outcome;
+
+		expect(effectiveRunwayOutcome(outcome, NOW)).toBe(outcome);
+		expect(effectiveRunwayOutcome({ kind: "unknown" }, NOW + 5 * HOUR)).toEqual(
+			{ kind: "unknown" },
+		);
+	});
+});
+
 describe("worstKeyRunway", () => {
 	it("returns null when there is nothing active to report", () => {
-		expect(worstKeyRunway([])).toBeNull();
-		expect(worstKeyRunway([row({ kind: "unknown" }, false)])).toBeNull();
+		expect(worstKeyRunway([], NOW)).toBeNull();
+		expect(worstKeyRunway([row({ kind: "unknown" }, false)], NOW)).toBeNull();
 	});
 
 	it("ranks no-accounts worst: the key can reach nothing at all", () => {
-		expect(worstKeyRunway([BEYOND, OUT_NOW, NO_ACCOUNTS])?.outcome.kind).toBe(
-			"no-accounts",
-		);
+		expect(
+			worstKeyRunway([BEYOND, OUT_NOW, NO_ACCOUNTS], NOW)?.outcome.kind,
+		).toBe("no-accounts");
 	});
 
 	it("ranks out-now above unknown", () => {
-		expect(worstKeyRunway([UNKNOWN, OUT_NOW])?.outcome.kind).toBe("out-now");
+		expect(worstKeyRunway([UNKNOWN, OUT_NOW], NOW)?.outcome.kind).toBe(
+			"out-now",
+		);
 	});
 
 	// Unknown poisons the headline: it could be worse than any finite value, so
 	// the headline must not claim better while the per-key rows still show their
 	// own definite numbers.
 	it("ranks unknown above any finite runway", () => {
-		expect(worstKeyRunway([runwayRow(HOUR, "a"), UNKNOWN])?.outcome.kind).toBe(
-			"unknown",
-		);
+		expect(
+			worstKeyRunway([runwayRow(HOUR, "a"), UNKNOWN], NOW)?.outcome.kind,
+		).toBe("unknown");
 	});
 
 	it("ranks a finite runway above beyond-horizon", () => {
-		expect(worstKeyRunway([BEYOND, runwayRow(5 * DAY, "a")])?.keyId).toBe("a");
+		expect(worstKeyRunway([BEYOND, runwayRow(5 * DAY, "a")], NOW)?.keyId).toBe(
+			"a",
+		);
 	});
 
 	it("prefers the shortest runway among finite ones", () => {
-		const worst = worstKeyRunway([
-			runwayRow(5 * DAY, "long"),
-			runwayRow(2 * HOUR, "short"),
-			runwayRow(12 * HOUR, "medium"),
-		]);
+		const worst = worstKeyRunway(
+			[
+				runwayRow(5 * DAY, "long"),
+				runwayRow(2 * HOUR, "short"),
+				runwayRow(12 * HOUR, "medium"),
+			],
+			NOW,
+		);
 
 		expect(worst?.keyId).toBe("short");
 	});
 
 	it("ignores inactive keys entirely", () => {
-		const worst = worstKeyRunway([
-			row({ kind: "no-accounts" }, false),
-			runwayRow(5 * DAY, "live"),
-		]);
+		const worst = worstKeyRunway(
+			[row({ kind: "no-accounts" }, false), runwayRow(5 * DAY, "live")],
+			NOW,
+		);
 
 		expect(worst?.keyId).toBe("live");
+	});
+
+	// The rows come from a poll. Ranking the outcome AS SERVED would leave the
+	// headline on `unknown` while the row beneath it already reads "Out of
+	// quota", because `unknown` outranks `runway` in the severity order.
+	it("ranks an expired runway as out-now, ahead of an unknown key", () => {
+		const expired = runwayRow(4 * HOUR, "expired");
+		const at = NOW + 5 * HOUR;
+
+		const worst = worstKeyRunway([UNKNOWN, expired], at);
+
+		expect(worst?.keyId).toBe("expired");
+		expect(effectiveRunwayOutcome(expired.outcome, at).kind).toBe("out-now");
+	});
+
+	// `durationMs` is measured from the moment the response was generated, so
+	// rows generated at different times are not comparable through it. Remaining
+	// time against the caller's clock is.
+	it("orders by remaining time, not by the served durationMs", () => {
+		const soon = runwayRow(6 * HOUR, "soon");
+		// Served with a SHORTER durationMs, but its deadline is later: it was
+		// generated earlier and has more time left at `now`.
+		const later: KeyRunway = {
+			...runwayRow(2 * HOUR, "later"),
+			outcome: {
+				kind: "runway",
+				exhaustsAtMs: NOW + 8 * HOUR,
+				durationMs: 2 * HOUR,
+				causes: [],
+				unprojectableAccountIds: [],
+			},
+		};
+
+		expect(worstKeyRunway([later, soon], NOW)?.keyId).toBe("soon");
+		expect(worstKeyRunway([soon, later], NOW)?.keyId).toBe("soon");
 	});
 });
