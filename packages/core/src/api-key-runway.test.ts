@@ -5,6 +5,7 @@ import {
 	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
+	summarizeKeyRunways,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
@@ -420,5 +421,154 @@ describe("worstKeyRunway", () => {
 
 		expect(worstKeyRunway([later, soon], NOW)?.keyId).toBe("soon");
 		expect(worstKeyRunway([soon, later], NOW)?.keyId).toBe("soon");
+	});
+});
+
+describe("windowObservations fallback", () => {
+	it("projects from pre-extracted readings when there is no payload", () => {
+		const accounts = [
+			mkAccount({
+				id: "restored",
+				name: "restored",
+				usageData: null,
+				windowObservations: {
+					fiveHour: { pct: 100, resetMs: NOW + 2 * HOUR },
+					sevenDay: { pct: 20, resetMs: NOW + 6 * DAY },
+				},
+			}),
+		];
+
+		const runways = computeApiKeyRunways([mkKey({ id: "k1" })], accounts, NOW);
+
+		// Without the fallback this account has no readable window and the key is
+		// `unknown`; with it, the spent 5-hour window is seen.
+		expect(byId(runways, "k1").outcome.kind).toBe("out-now");
+	});
+
+	it("ignores the readings when a live payload is present", () => {
+		const accounts = [
+			mkAccount({
+				id: "live",
+				name: "live",
+				usageData: usage(10, NOW + 4 * HOUR, 5, NOW + 6 * DAY),
+				windowObservations: {
+					fiveHour: { pct: 100, resetMs: NOW + 2 * HOUR },
+					sevenDay: { pct: 100, resetMs: NOW + 6 * DAY },
+				},
+			}),
+		];
+
+		const runways = computeApiKeyRunways([mkKey({ id: "k1" })], accounts, NOW);
+
+		// The payload wins outright. A merge would let one window come from the
+		// live read and the other from an older one.
+		expect(byId(runways, "k1").outcome.kind).toBe("beyond-horizon");
+	});
+
+	it("leaves an account unprojectable when neither source reads", () => {
+		const accounts = [mkAccount({ id: "cold", name: "cold", usageData: null })];
+
+		const runways = computeApiKeyRunways([mkKey({ id: "k1" })], accounts, NOW);
+
+		expect(byId(runways, "k1").outcome.kind).toBe("unknown");
+	});
+});
+
+describe("summarizeKeyRunways", () => {
+	function rowWith(
+		keyId: string,
+		outcome: KeyRunway["outcome"],
+		isActive = true,
+	): KeyRunway {
+		return {
+			keyId,
+			keyName: keyId,
+			isActive,
+			pin: { accountId: null, providers: null },
+			eligibleAccountIds: [],
+			outcome,
+		};
+	}
+
+	const BEYOND: KeyRunway["outcome"] = {
+		kind: "beyond-horizon",
+		horizonMs: 14 * DAY,
+		unprojectableAccountIds: [],
+	};
+	const UNKNOWN: KeyRunway["outcome"] = { kind: "unknown" };
+
+	it("keeps a stateable figure when another key has no evidence", () => {
+		const summary = summarizeKeyRunways(
+			[rowWith("known", BEYOND), rowWith("cold", UNKNOWN)],
+			NOW,
+		);
+
+		// The whole point: `worstKeyRunway` would rank the unknown key worst and
+		// the headline would have nothing to say, even though `known` has perfect
+		// evidence.
+		expect(
+			worstKeyRunway([rowWith("known", BEYOND), rowWith("cold", UNKNOWN)], NOW)
+				?.keyId,
+		).toBe("cold");
+		expect(summary.worst?.keyId).toBe("known");
+		expect(summary.statedKeyCount).toBe(1);
+		expect(summary.unobservedKeyCount).toBe(1);
+		expect(summary.activeKeyCount).toBe(2);
+	});
+
+	it("reports nothing stateable when every active key is unknown", () => {
+		const summary = summarizeKeyRunways(
+			[rowWith("a", UNKNOWN), rowWith("b", UNKNOWN)],
+			NOW,
+		);
+
+		// The floor holds: with no evidence anywhere the headline still refuses to
+		// name a figure rather than reaching for the least-bad row.
+		expect(summary.worst).toBeNull();
+		expect(summary.statedKeyCount).toBe(0);
+		expect(summary.unobservedKeyCount).toBe(2);
+	});
+
+	it("keeps no-accounts in the headline", () => {
+		const summary = summarizeKeyRunways(
+			[rowWith("empty", { kind: "no-accounts" }), rowWith("ok", BEYOND)],
+			NOW,
+		);
+
+		// "This key can reach nothing" is a definite finding and the most severe
+		// one there is — only MISSING EVIDENCE is set aside.
+		expect(summary.worst?.keyId).toBe("empty");
+		expect(summary.unobservedKeyCount).toBe(0);
+	});
+
+	it("ignores inactive keys entirely", () => {
+		const summary = summarizeKeyRunways(
+			[rowWith("live", BEYOND), rowWith("disabled", UNKNOWN, false)],
+			NOW,
+		);
+
+		expect(summary.activeKeyCount).toBe(1);
+		expect(summary.unobservedKeyCount).toBe(0);
+		expect(summary.worst?.keyId).toBe("live");
+	});
+
+	it("ranks a served runway past its deadline as out-now", () => {
+		const expired: KeyRunway["outcome"] = {
+			kind: "runway",
+			exhaustsAtMs: NOW - HOUR,
+			durationMs: HOUR,
+			causes: [],
+			unprojectableAccountIds: [],
+		};
+
+		const summary = summarizeKeyRunways(
+			[rowWith("beyond", BEYOND), rowWith("expired", expired)],
+			NOW,
+		);
+
+		expect(summary.worst?.keyId).toBe("expired");
+		expect(
+			effectiveRunwayOutcome(summary.worst?.outcome ?? UNKNOWN, NOW).kind,
+		).toBe("out-now");
 	});
 });

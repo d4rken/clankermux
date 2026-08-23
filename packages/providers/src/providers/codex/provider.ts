@@ -22,7 +22,10 @@ import {
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
-import { clampChatGptBackendReasoningEffort } from "./backend-params";
+import {
+	clampChatGptBackendReasoningEffort,
+	sanitizeChatGptBackendBody,
+} from "./backend-params";
 import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage } from "./usage";
 
@@ -666,12 +669,15 @@ export class CodexProvider extends BaseProvider {
 	 *   (mirrors the translator's handling; see the adapter's note).
 	 * Plus, ONLY when the account actually targets the ChatGPT/Codex backend,
 	 * the backend-compatibility sanitation that backend requires (see
-	 * `backend-params.ts`): drop `max_output_tokens` and clamp
-	 * `reasoning.effort` into the accepted set. Without it a client that sets
-	 * either (observed: opencode via the ai-sdk) gets a raw 400 with no
+	 * `backend-params.ts`): drop the top-level parameters it is KNOWN to reject
+	 * (`max_output_tokens`, `temperature`, `metadata`, `user`) and clamp a
+	 * known-rejected `reasoning.effort` to an accepted neighbour (an effort we
+	 * do not recognise is deliberately left alone). Without it a client that sets
+	 * any of them (observed: opencode via the ai-sdk) gets a raw 400 with no
 	 * failover, because the body reaches upstream verbatim.
-	 * Everything else — tools of ALL types (web_search etc.), reasoning
-	 * siblings, instructions — is forwarded untouched.
+	 * Everything else — tools of ALL types (web_search etc.), unrecognised
+	 * top-level fields, reasoning siblings, instructions — is forwarded
+	 * untouched.
 	 */
 	private async transformNativeResponsesBody(
 		request: Request,
@@ -700,18 +706,25 @@ export class CodexProvider extends BaseProvider {
 			body.store = false;
 			delete body.previous_response_id;
 			if (targetsChatGptCodexBackend(account)) {
-				delete body.max_output_tokens;
-				const reasoning = body.reasoning;
-				if (
-					typeof reasoning === "object" &&
-					reasoning !== null &&
-					!Array.isArray(reasoning)
-				) {
-					const effort = (reasoning as Record<string, unknown>).effort;
-					if (typeof effort === "string") {
-						(reasoning as Record<string, unknown>).effort =
-							clampChatGptBackendReasoningEffort(effort);
-					}
+				const sanitation = sanitizeChatGptBackendBody(body);
+				// Debug, not warn: dropping `temperature` really does change how the
+				// model samples, but a client that sets it sets it on EVERY request
+				// (opencode does), so a per-request warning would drown the log for a
+				// condition the operator cannot act on. Debug keeps the evidence
+				// reachable when someone is actually diagnosing a behaviour change.
+				const changes: string[] = sanitation.droppedParams.map(
+					(param) => `dropped ${param}`,
+				);
+				if (sanitation.clampedEffort) {
+					const { from, to } = sanitation.clampedEffort;
+					changes.push(`clamped reasoning.effort ${from} to ${to}`);
+				}
+				// Names only, never values: `metadata` and `user` are client-supplied
+				// identifiers and have no business in the log.
+				if (changes.length > 0) {
+					log.debug(
+						`Native Responses passthrough: ChatGPT backend sanitation for ${account?.name ?? "unknown account"}: ${changes.join(", ")}`,
+					);
 				}
 			}
 

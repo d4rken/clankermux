@@ -329,7 +329,11 @@ describe("LimitsCapacityOverview runway panel", () => {
 			],
 		});
 
-		expect(html).toContain("Out of quota");
+		// Hedged rather than categorical, and warning rather than destructive:
+		// acc-9 was DROPPED before the scan ran, so "spent" describes the accounts
+		// that could be read, not the whole pool. The dropped one may be healthy.
+		expect(html).toContain("Spent, unconfirmed");
+		expect(html).not.toContain("Out of quota");
 		expect(html).toContain("alpha 5-hour +1 more");
 		expect(html).toContain("1 account unknown");
 		expect(html).not.toContain(">0<");

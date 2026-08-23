@@ -61,6 +61,30 @@ export interface RunwayAccountSource {
 	provider: string;
 	usageData: FullUsageData | null;
 	prediction?: AccountUsagePrediction | null;
+	/**
+	 * Pre-extracted window readings, used ONLY when `usageData` is null.
+	 *
+	 * The server's persisted `usage_snapshots` history stores the four scalars
+	 * these windows are made of, not a provider usage payload, so a caller
+	 * restoring an account from a snapshot has nothing to put in `usageData`
+	 * short of fabricating a payload shape. Feeding the already-extracted
+	 * readings instead keeps the extractors the single place that knows how each
+	 * provider's payload is laid out.
+	 *
+	 * Optional, so `AccountResponse` still structurally satisfies this interface.
+	 */
+	windowObservations?: RunwayWindowObservations | null;
+}
+
+/**
+ * The two account-wide quota windows, already extracted from whatever source
+ * produced them. `null` for a window the source could not read; `{ pct: null }`
+ * for one it read as carrying no percentage — the same distinction the
+ * extractors draw.
+ */
+export interface RunwayWindowObservations {
+	fiveHour: ExtractedValue | null;
+	sevenDay: ExtractedValue | null;
 }
 
 /**
@@ -104,12 +128,17 @@ function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 		return { accountId: account.id, unmetered: true, windows: [] };
 	}
 
+	// A live payload always wins; the pre-extracted readings are a FALLBACK for
+	// the caller that has no payload at all, never a merge. Mixing the two would
+	// let one window come from a live read and the other from an older one, and
+	// the runway would then be projected from two different instants.
 	const usageData = account.usageData ?? null;
+	const observations = usageData ? null : (account.windowObservations ?? null);
 	const windows: RunwayWindowInput[] = [];
 	if (hasFiveHour) {
 		const window = windowInput(
 			"five_hour",
-			usageData ? extractFiveHour(usageData) : null,
+			usageData ? extractFiveHour(usageData) : (observations?.fiveHour ?? null),
 			account.prediction?.fiveHour,
 		);
 		if (window) windows.push(window);
@@ -117,7 +146,7 @@ function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 	if (hasSevenDay) {
 		const window = windowInput(
 			"seven_day",
-			usageData ? extractSevenDay(usageData) : null,
+			usageData ? extractSevenDay(usageData) : (observations?.sevenDay ?? null),
 			account.prediction?.sevenDay,
 		);
 		if (window) windows.push(window);
@@ -277,4 +306,66 @@ export function worstKeyRunway(
 		}
 	}
 	return worst;
+}
+
+/**
+ * What a HEADLINE may say about a set of runway rows.
+ *
+ * `worstKeyRunway` answers "what is the worst outcome", and `unknown` outranks
+ * every finite one because it could be worse than any of them. That is the
+ * right answer for ranking, and the wrong thing to put in a single-figure
+ * summary: one key whose accounts have no readable window takes the whole
+ * headline to "unstateable", even when every other key has perfectly good
+ * evidence.
+ *
+ * So a headline ranks only the rows it can STATE, and reports separately how
+ * many it could not. The two numbers have to travel together, because the
+ * honesty of the figure depends on the count beside it:
+ *
+ *  - WITHIN a key, dropping an unreadable account can only SHORTEN the runway
+ *    (fewer accounts to survive on), so the served figure is a lower bound.
+ *  - ACROSS keys, dropping an unstateable key can only LENGTHEN the headline
+ *    (the hidden key might be the worst one), so the figure is an UPPER bound.
+ *
+ * A surface that renders `worst` without also rendering `unobservedKeyCount` is
+ * therefore claiming more than it knows. `null` for `worst` when nothing can be
+ * stated keeps the floor: with no evidence anywhere, the headline still refuses
+ * to name a figure.
+ */
+export interface RunwayHeadline {
+	/** Worst STATEABLE outcome among active keys, or null when none is. */
+	worst: KeyRunway | null;
+	/** Active keys the headline covers. */
+	statedKeyCount: number;
+	/** Active keys whose outcome at `now` is `unknown`. */
+	unobservedKeyCount: number;
+	/** Every active key, i.e. `statedKeyCount + unobservedKeyCount`. */
+	activeKeyCount: number;
+}
+
+/**
+ * The headline reading of a set of runway rows.
+ *
+ * `no-accounts` is deliberately NOT excluded: "this key can reach nothing" is a
+ * definite, stateable finding and the most severe one there is. Only `unknown`
+ * — evidence missing — is set aside.
+ *
+ * Ranking is by {@link worstKeyRunway} over the stateable subset, so the
+ * headline and the per-key breakdown can never disagree about which row is
+ * worse.
+ */
+export function summarizeKeyRunways(
+	runways: KeyRunway[],
+	now: number,
+): RunwayHeadline {
+	const active = runways.filter((runway) => runway.isActive);
+	const stateable = active.filter(
+		(runway) => effectiveRunwayOutcome(runway.outcome, now).kind !== "unknown",
+	);
+	return {
+		worst: worstKeyRunway(stateable, now),
+		statedKeyCount: stateable.length,
+		unobservedKeyCount: active.length - stateable.length,
+		activeKeyCount: active.length,
+	};
 }

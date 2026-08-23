@@ -278,6 +278,35 @@ outlier robustness matters more than smoothness.
 Smallest, most contained change of the seven — it lives entirely inside
 `computeUsagePrediction`. Tune τ with the harness rather than by taste.
 
+#### Measured outcome (2026-08-23)
+
+**Tried and rejected.** Item 3 was implemented behind the item-0 harness,
+tuned on the tuning range and scored on the held-out range. It **failed the
+pre-declared acceptance gate**, so no estimator change landed:
+`computeUsagePrediction` is still unweighted OLS.
+
+τ was locked on the tuning range at **15 min** for `five_hour` and **24 h** for
+`seven_day`. On the held-out common cohort:
+
+- **`five_hour`** — EWLS-15m scored F1 **0.186**, against **0.202** for naive
+  persistence and **0.195** for the lifetime average. Median absolute ETA error
+  was **32.8 min**, against **20.0 min** for unweighted OLS.
+- **`seven_day`** — EWLS-24h scored F1 **0.625**, against **0.715** for the
+  lifetime average. Median absolute ETA error was **1515.8 min**, against
+  **1507.7 min** for OLS.
+- Account-grouped bootstrap CIs on the F1 delta **straddle zero** against OLS on
+  both windows, and point **negative** against the best baseline on both. So the
+  weighting is not merely unproven, the point estimate is the wrong sign.
+
+The EWLS code itself was **not kept** — the committed harness CLI has no τ
+flags. A re-attempt should start from the committed harness plus these numbers,
+not from scratch and not from the assumption that recency weighting helps.
+
+Note what the same run says about item 4: on held-out data the **lifetime
+average was the strongest weekly estimator** and **naive persistence the
+strongest 5-hour one**. Two different estimators won the two horizons, which is
+direct evidence for splitting them.
+
 ### Item 4 — a different estimator per horizon
 
 The 5-hour and weekly windows currently get the same regression with only the

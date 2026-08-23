@@ -10,6 +10,9 @@ export {
 	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
+	type RunwayHeadline,
+	type RunwayWindowObservations,
+	summarizeKeyRunways,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
@@ -23,6 +26,15 @@ export {
 	getBootProvenance,
 	isRestartPending,
 } from "./boot-provenance";
+export {
+	assertBunRuntimeFloor,
+	type BunRuntimeCheck,
+	BunRuntimeFloorError,
+	type BunRuntimeVerdict,
+	evaluateBunRuntime,
+	MIN_BUN_VERSION,
+	UNSUPPORTED_RUNTIME_EXIT_CODE,
+} from "./bun-runtime-floor";
 export {
 	computeCapacityRunway,
 	estimateWindowExhaustion,
@@ -188,7 +200,12 @@ export {
 	type NormalizedUsageWindow,
 	normalizeAnthropicUsage,
 } from "./usage-normalizer";
-export { computeUsagePrediction } from "./usage-prediction";
+export {
+	computeUsagePrediction,
+	isFitBoundary,
+	isResetBoundary,
+	splitSeries,
+} from "./usage-prediction";
 export {
 	type ExtractedValue,
 	extractFiveHour,

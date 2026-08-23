@@ -1,10 +1,12 @@
 import {
 	computeApiKeyRunways,
+	type ExtractedValue,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountSource,
+	type RunwayWindowObservations,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 	worstKeyRunway,
 } from "@clankermux/core";
@@ -12,6 +14,7 @@ import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import {
 	type AnyUsageData,
+	UI_STALE_HORIZON_MS,
 	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "@clankermux/providers";
@@ -31,6 +34,11 @@ import {
 	getCachedOrPersistedCodexUsage,
 	loadPersistedCodexUsageColumns,
 } from "../services/resolve-codex-usage";
+import {
+	loadRecentSnapshotObservations,
+	projectableWindows,
+	snapshotWithin,
+} from "../services/resolve-snapshot-usage";
 
 /**
  * `GET /api/runway` — the quota runway per API key, plus the account evidence it
@@ -69,11 +77,24 @@ import {
  *    what makes `usageAsOfMs` mean anything — sourced from routing-fresh data it
  *    could never exceed 10 minutes.
  *
- * The two cannot disagree. Inside 10 minutes the display entry and the
- * routing-fresh entry are the same object; past it the routing-fresh side is
- * null, so no prediction is emitted and the scan reports the account as
- * unprojectable. There is no case where a served utilization and a served
- * prediction come from different readings.
+ * The two cannot disagree about WHICH READING an account has, because both are
+ * chosen from one list of timestamped candidates (`UsageCandidate`) — they
+ * differ only in how fresh a reading has to be for their purpose. No prediction
+ * is ever emitted for a reading the routing bar rejects, so a served
+ * utilization and a served prediction always come from the same observation.
+ *
+ * SNAPSHOT FALLBACK — the usage cache is in-memory, so a restart empties it for
+ * EVERY provider, not just Codex. Until the poller has been round again, a key
+ * whose accounts are all cold has no readable window and its outcome is
+ * `unknown`. The persisted `usage_snapshots` history therefore joins the
+ * candidate list, bounded by the display horizon, and each view picks the
+ * FRESHEST candidate it will accept. Ranking by observation time rather than by
+ * source is load-bearing: source precedence is how a three-day-old persisted
+ * Codex column came to outrank a two-minute snapshot sitting unread beside it.
+ * Predictions are deliberately NOT restored from snapshots — see
+ * `resolve-snapshot-usage.ts`, which also documents why `sampled_at` is an upper
+ * bound on recency rather than an exact observation instant, and that the
+ * sampler covers Anthropic and Codex only.
  *
  * CODEX — the usage cache is in-memory, so after any restart a Codex account
  * has nothing in it until Codex traffic repopulates it. `/api/accounts` has
@@ -126,20 +147,32 @@ function servablePrediction(
 
 function windowSummary(
 	kind: RunwayWindowKind,
-	usageData: FullUsageData | null,
+	extracted: ExtractedValue | null,
 	prediction: UsagePrediction | undefined,
 ): RunwayWindowSummary {
-	const extracted =
-		usageData == null
-			? null
-			: kind === "five_hour"
-				? extractFiveHour(usageData)
-				: extractSevenDay(usageData);
 	return {
 		kind,
 		utilizationPct: extracted?.pct ?? null,
 		resetsAtMs: extracted?.resetMs ?? null,
 		prediction: servablePrediction(prediction),
+	};
+}
+
+/**
+ * Pull both account-wide windows out of a provider usage payload.
+ *
+ * Extracting ONCE per account, up front, is what lets the scan and the evidence
+ * block below read the same resolution — including when that resolution came
+ * from a persisted snapshot, which is already a pair of extracted readings and
+ * never a payload.
+ */
+function observationsFrom(
+	usageData: FullUsageData | null,
+): RunwayWindowObservations | null {
+	if (usageData == null) return null;
+	return {
+		fiveHour: extractFiveHour(usageData),
+		sevenDay: extractSevenDay(usageData),
 	};
 }
 
@@ -153,7 +186,7 @@ function windowSummary(
  */
 function accountSummary(
 	account: Account,
-	usageData: FullUsageData | null,
+	observations: RunwayWindowObservations | null,
 	sampledAtMs: number | null,
 	prediction: AccountUsagePrediction | undefined,
 ): RunwayAccountSummary {
@@ -163,10 +196,22 @@ function accountSummary(
 
 	const windows: RunwayWindowSummary[] = [];
 	if (hasFiveHour) {
-		windows.push(windowSummary("five_hour", usageData, prediction?.fiveHour));
+		windows.push(
+			windowSummary(
+				"five_hour",
+				observations?.fiveHour ?? null,
+				prediction?.fiveHour,
+			),
+		);
 	}
 	if (hasSevenDay) {
-		windows.push(windowSummary("seven_day", usageData, prediction?.sevenDay));
+		windows.push(
+			windowSummary(
+				"seven_day",
+				observations?.sevenDay ?? null,
+				prediction?.sevenDay,
+			),
+		);
 	}
 
 	// An "as of" stamp is only honest next to a value it describes. With no
@@ -193,6 +238,64 @@ function accountSummary(
 interface ResolvedCodexUsage {
 	data: FullUsageData | null;
 	sampledAtMs: number | null;
+}
+
+/**
+ * One reading of an account's windows, with when it was observed.
+ *
+ * `observedAtMs` is `null` when the source cannot honestly say — today only the
+ * Codex stored-payload reconstruction, which has no trustworthy timestamp. That
+ * is a real answer, not a missing field, and the selection below treats it as
+ * one: such a reading may be REPORTED but never DERIVED from.
+ */
+interface UsageCandidate {
+	windows: RunwayWindowObservations;
+	observedAtMs: number | null;
+	/**
+	 * Where it came from. Only the scan's fallback tier cares, and it cares for
+	 * one reason: `codex-persisted` is the single source this endpoint has
+	 * decided may project from OUTSIDE the routing bar (see the CODEX paragraph
+	 * of the header comment). An aged `cache` reading may not, and neither may an
+	 * aged `snapshot` — for those the honest answer is that the account is
+	 * unprojectable, which is the behaviour this endpoint already ships.
+	 */
+	source: "cache" | "codex-persisted" | "snapshot";
+}
+
+/**
+ * The freshest candidate, optionally restricted to those younger than
+ * `maxAgeMs`. Null when there is nothing to choose from.
+ *
+ * Ranks by OBSERVATION TIME rather than by source. That is the whole point: the
+ * sources have no natural precedence over one another, and ordering them by
+ * source is how a three-day-old persisted Codex column came to beat a
+ * two-minute snapshot sitting unread beside it.
+ *
+ * A candidate that cannot say when it was observed sorts last and wins only when
+ * nothing else is available — a reading with no time is still a reading, but it
+ * can never be shown to be the more recent one. A future-stamped reading is
+ * skipped for the reason `snapshotWithin` skips one: clock skew must not let an
+ * obsolete reading pass as current.
+ */
+function freshestCandidate(
+	candidates: UsageCandidate[],
+	now: number,
+	maxAgeMs = Number.POSITIVE_INFINITY,
+): UsageCandidate | null {
+	let best: UsageCandidate | null = null;
+	let untimed: UsageCandidate | null = null;
+	for (const candidate of candidates) {
+		if (candidate.observedAtMs == null) {
+			untimed ??= candidate;
+			continue;
+		}
+		const ageMs = now - candidate.observedAtMs;
+		if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) continue;
+		if (best == null || candidate.observedAtMs > (best.observedAtMs ?? 0)) {
+			best = candidate;
+		}
+	}
+	return best ?? untimed;
 }
 
 export function createRunwayHandler(
@@ -284,21 +387,136 @@ export function createRunwayHandler(
 			);
 		}
 
-		const usageDataByAccount = new Map<string, FullUsageData | null>(
-			accounts.map((a) => [
-				a.id,
-				a.provider === "codex"
-					? (codexUsageByAccount.get(a.id)?.data ?? null)
-					: ((routingFreshUsageByAccount.get(a.id) ??
-							null) as FullUsageData | null),
-			]),
+		// Persisted snapshot history, loaded once at the WIDEST horizon either
+		// consumer needs and narrowed per use below. The sampler writes these
+		// every ~2 minutes for every metered account and only when the reading
+		// behind them was fresh, so they are what a restart-emptied cache falls
+		// back to. See `resolve-snapshot-usage.ts` for why this does not loosen
+		// the freshness contract.
+		const snapshotByAccount = await loadRecentSnapshotObservations(
+			dbOps,
+			accounts.map((a) => a.id),
+			now,
+			UI_STALE_HORIZON_MS,
+		);
+
+		// Every account's readings as TIMESTAMPED CANDIDATES, so the scan and the
+		// evidence block pick from one list under their own age bars instead of
+		// each hard-coding a source order. That is what keeps them from
+		// disagreeing about which reading an account HAS while differing only, as
+		// documented, on how fresh a reading has to be for each purpose.
+		//
+		// The live candidate is the routing-fresh cache entry for most providers
+		// and the resolved cache/column/payload reading for Codex. Only Codex can
+		// carry an unknown or arbitrarily old observation time, because only its
+		// resolution reaches past the cache.
+		const candidatesByAccount = new Map<string, UsageCandidate[]>(
+			accounts.map((a) => {
+				const resolvedCodex =
+					a.provider === "codex"
+						? (codexUsageByAccount.get(a.id) ?? null)
+						: null;
+				const entry = entryByAccount.get(a.id) ?? null;
+				// The DISPLAY reading, deliberately — `peekWithAge` already stops
+				// serving at 30 minutes, so this is pre-filtered, and the scan's own
+				// bar below decides separately whether it is fresh enough to project
+				// from. Building this from the routing-fresh map instead would delete
+				// the 10-to-30-minute band from the evidence block entirely.
+				const live = observationsFrom(
+					resolvedCodex
+						? resolvedCodex.data
+						: ((entry?.data ?? null) as FullUsageData | null),
+				);
+				// Bounded here rather than trusting the query's `sinceMs`: this
+				// reader states its own admissibility, and a row older than the
+				// display horizon is not evidence for either view.
+				const snapshot = snapshotWithin(
+					snapshotByAccount,
+					a.id,
+					now,
+					UI_STALE_HORIZON_MS,
+				);
+				const candidates: UsageCandidate[] = [];
+				if (live) {
+					candidates.push({
+						windows: live,
+						observedAtMs: resolvedCodex
+							? resolvedCodex.sampledAtMs
+							: (entry?.sampledAtMs ?? null),
+						// Every Codex reading is labelled `codex-persisted`, including
+						// one that actually came from the cache. That is exact rather
+						// than sloppy: a cache-sourced reading inside the bar wins on its
+						// own merits and never reaches the fallback tier, and one outside
+						// the bar is precisely what the resolved Codex path has always
+						// projected from here.
+						source: resolvedCodex ? "codex-persisted" : "cache",
+					});
+				}
+				if (snapshot) {
+					candidates.push({
+						windows: snapshot,
+						observedAtMs: snapshot.sampledAtMs,
+						source: "snapshot",
+					});
+				}
+				return [a.id, candidates];
+			}),
+		);
+
+		// The windows the SCAN projects from, in two tiers:
+		//
+		//  1. the freshest candidate inside the ROUTING bar, whatever its source;
+		//  2. failing that, the persisted CODEX reading and nothing else.
+		//
+		// Tier 2 is not a general licence for stale data — it is the single
+		// exception the CODEX paragraph of the header comment already argued for
+		// and this endpoint already ships. An aged cache entry still leaves its
+		// account unprojectable, which is the documented behaviour and what keeps
+		// "no prediction is emitted for a reading the routing bar rejects" true.
+		//
+		// What CHANGED here is only tier 1's ordering: candidates rank by
+		// observation time rather than by source, so a two-minute snapshot can no
+		// longer lose to a three-day-old persisted column merely because the
+		// column was consulted first.
+		//
+		// Never a merge across candidates: a runway projected from a live 5-hour
+		// reading and an older weekly one would be anchored to two different
+		// instants.
+		const scanObservationsByAccount = new Map<
+			string,
+			RunwayWindowObservations | null
+		>(
+			accounts.map((a) => {
+				const candidates = candidatesByAccount.get(a.id) ?? [];
+				const winner =
+					freshestCandidate(candidates, now, USAGE_CACHE_TTL_MS) ??
+					freshestCandidate(
+						candidates.filter((c) => c.source === "codex-persisted"),
+						now,
+					);
+				if (!winner) return [a.id, null];
+				return [
+					a.id,
+					// A snapshot's windows may have rolled over since the row was
+					// written; a live reading's cannot have.
+					winner.source === "snapshot"
+						? projectableWindows(
+								{ ...winner.windows, sampledAtMs: winner.observedAtMs ?? now },
+								now,
+							)
+						: winner.windows,
+				];
+			}),
 		);
 
 		const sources: RunwayAccountSource[] = accounts.map((account) => ({
 			id: account.id,
 			name: account.name,
 			provider: account.provider || "anthropic",
-			usageData: usageDataByAccount.get(account.id) ?? null,
+			// Already extracted above, so the scan and the evidence block below
+			// cannot end up reading two different resolutions of the same account.
+			usageData: null,
+			windowObservations: scanObservationsByAccount.get(account.id) ?? null,
 			prediction: predictionByAccount.get(account.id) ?? null,
 		}));
 
@@ -310,26 +528,30 @@ export function createRunwayHandler(
 			horizonMs: RUNWAY_HORIZON_MS,
 			worstKeyId: worst?.keyId ?? null,
 			keys: runways,
-			// The DISPLAY reading, not the routing-fresh one: this block reports an
-			// observation with its age, and `peekWithAge` exists to serve exactly
-			// that. Only the predictions above are held to the routing TTL, because
-			// only they derive a value modelling "now". For Codex the display
-			// reading is the resolved one (cache / column / payload), which is also
-			// what `sources` above scans.
+			// The DISPLAY view of the SAME candidates the scan chose from: freshest
+			// first, untimed last, and NO further age bar. Each candidate is already
+			// display-filtered where it was produced — `peekWithAge` yields nothing
+			// past 30 minutes, and the snapshot load is bounded by the same horizon
+			// — so a bar here would only ever cut the one candidate that is
+			// deliberately unbounded, the persisted Codex column, and this endpoint
+			// would then show LESS than `/api/accounts` for exactly the accounts the
+			// column exists to cover.
+			//
+			// That is the whole scan/display split: this block reports an
+			// observation with its age, while only the scan and the predictions
+			// derive a value modelling "now" and are held to the routing TTL. A
+			// reading with no trustworthy observation time is reported here too,
+			// with `usageAsOfMs: null` saying exactly that.
 			accounts: accounts.map((account) => {
-				const resolvedCodex =
-					account.provider === "codex"
-						? (codexUsageByAccount.get(account.id) ?? null)
-						: null;
+				const winner = freshestCandidate(
+					candidatesByAccount.get(account.id) ?? [],
+					now,
+					Number.POSITIVE_INFINITY,
+				);
 				return accountSummary(
 					account,
-					resolvedCodex
-						? resolvedCodex.data
-						: ((entryByAccount.get(account.id)?.data ??
-								null) as FullUsageData | null),
-					resolvedCodex
-						? resolvedCodex.sampledAtMs
-						: (entryByAccount.get(account.id)?.sampledAtMs ?? null),
+					winner?.windows ?? null,
+					winner?.observedAtMs ?? null,
 					predictionByAccount.get(account.id),
 				);
 			}),

@@ -41,22 +41,44 @@ export function runwayUnavailableReason(outcome: RunwayOutcome): string | null {
 
 /**
  * The headline figure, or null when {@link runwayUnavailableReason} applies.
- * A finite runway computed while some accounts were unreadable is a LOWER
- * BOUND, so it carries a `≥`.
+ *
+ * A finite runway computed while some of the key's accounts were unreadable is
+ * a LOWER BOUND on that key's own runway — dropping an account can only shorten
+ * it — so it carries a `≥`.
+ *
+ * `suppressBound` withdraws that notation. A caller that has itself set some
+ * KEYS aside is no longer describing one key: excluding a key can only make the
+ * figure LONGER than the truth, which is the opposite direction, and `≥ 6h` is
+ * then a claim that is simply false if a hidden key runs out in two. With the
+ * two uncertainties pointing opposite ways the compound direction is
+ * indeterminate, so the honest render is the bare duration, scoped by whatever
+ * the caller says about the keys it did and did not count.
  */
 export function formatRunwayValue(
 	outcome: RunwayOutcome,
 	now: number,
+	options?: { suppressBound?: boolean },
 ): string | null {
 	const effective = effectiveRunwayOutcome(outcome, now);
 	switch (effective.kind) {
 		case "out-now":
-			return "Out of quota";
+			// An `out-now` is only as categorical as the pool it was computed over.
+			// Accounts with no readable window are DROPPED before the scan runs, so
+			// a key can read as spent purely because the accounts that could be read
+			// were spent, while one that was merely un-polled sits there possibly
+			// healthy. "Out of quota" is a definite claim and must not be made on a
+			// pool that was not fully seen; the hedged form says the same thing
+			// without asserting what the evidence cannot support, and the caller's
+			// unobserved-count row says how much was missed.
+			return effective.unprojectableAccountIds.length > 0
+				? "Spent, unconfirmed"
+				: "Out of quota";
 		case "beyond-horizon":
 			return BEYOND_HORIZON_GLYPH;
 		case "runway": {
 			const remaining = effective.exhaustsAtMs - now;
-			return effective.unprojectableAccountIds.length > 0
+			return effective.unprojectableAccountIds.length > 0 &&
+				!options?.suppressBound
 				? `≥ ${formatDurationDhm(remaining)}`
 				: formatDurationDhm(remaining);
 		}

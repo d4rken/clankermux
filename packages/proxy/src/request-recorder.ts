@@ -8,10 +8,10 @@ import {
 	type ContextComposition,
 	NO_ACCOUNT_ID,
 	type ProjectAttributionSource,
+	parseUpstreamError,
 	type RequestResponse,
 	type ToolCallStat,
 } from "@clankermux/types";
-import { parseUpstreamError } from "./upstream-error";
 
 const log = new Logger("RequestRecorder");
 
