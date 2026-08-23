@@ -181,6 +181,17 @@ export {
 	normalizeAnthropicUsage,
 } from "./usage-normalizer";
 export { computeUsagePrediction } from "./usage-prediction";
+export {
+	type ExtractedValue,
+	extractFiveHour,
+	extractSevenDay,
+	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	isAlibabaShape,
+	isAnthropicStyleShape,
+	isZaiShape,
+	normalizeResetMs,
+	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+} from "./usage-window-extract";
 export { levenshteinDistance } from "./utils";
 export {
 	patterns,

@@ -1,20 +1,18 @@
 import {
 	computeCapacityRunway,
 	computeWindowStartMs,
-	isAccountAllowedByPin,
-	type RunwayAccountInput,
-	type RunwayOutcome,
-	type RunwayWindowInput,
-} from "@clankermux/core";
-import type { AccountResponse, ApiKeyResponse } from "@clankermux/types";
-import { describePinTarget } from "./api-key-pin-label";
-import {
 	type ExtractedValue,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	isAccountAllowedByPin,
+	type RunwayAccountInput,
+	type RunwayOutcome,
+	type RunwayWindowInput,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
-} from "./pool-usage";
+} from "@clankermux/core";
+import type { AccountResponse, ApiKeyResponse } from "@clankermux/types";
+import { describePinTarget } from "./api-key-pin-label";
 
 /**
  * Quota runway per API key.
