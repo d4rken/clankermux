@@ -19,7 +19,10 @@ import {
 	type ProjectionTone,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "../../lib/format-prediction";
-import { weeklyLifetimeConfidence } from "../../lib/lifetime-confidence";
+import {
+	usageObservedAtMs,
+	weeklyLifetimeConfidence,
+} from "../../lib/lifetime-confidence";
 import {
 	classifyUsageCard,
 	usageWindowCategoryKey,
@@ -192,7 +195,11 @@ function formatThrottledUntil(throttledUntilMs: number, now: number): string {
  * back to, so red there would be red almost everywhere.
  *
  * The account-wide weekly window is the measured exception — see
- * {@link weeklyLifetimeConfidence}.
+ * {@link weeklyLifetimeConfidence}. Because that window can reach red, its
+ * estimate is anchored to `observedAtMs` — when the server sampled the reading
+ * — rather than to the card's 30-second `now` ticker. A now-anchored lifetime
+ * ETA slides later faster than real time, which walks the reset margin across
+ * the red threshold between two ticks on evidence that never changed.
  */
 function computeProjectedMessage(
 	resetTime: string | null,
@@ -201,6 +208,7 @@ function computeProjectedMessage(
 	now: number,
 	prediction: UsagePrediction | undefined,
 	windowDurationMs: number | null,
+	observedAtMs: number | null,
 ): ProjectedUsage | null {
 	if (!resetTime || !window || percentage === null) return null;
 	const resetMs = new Date(resetTime).getTime();
@@ -213,6 +221,7 @@ function computeProjectedMessage(
 				: null,
 			prediction,
 			lifetimeConfidence: weeklyLifetimeConfidence(window),
+			observedAtMs,
 		},
 		now,
 	);
@@ -452,6 +461,10 @@ export function RateLimitProgress({
 	// them can be aged.
 	const agedAsOfText = agedLiveUsageAsOf(usageAsOfIso, now);
 
+	// The instant the rendered reading was sampled. Independent of `now`, which
+	// is what lets the weekly projection hold still between the card's ticks.
+	const observedAtMs = usageObservedAtMs(usageAsOfIso);
+
 	// Which of the five card shapes this account gets. The branch conditions live
 	// in `classifyUsageCard` alone so the cross-account "resets next" comparison
 	// in `computeSoonestWindowResets` sees exactly the windows rendered here.
@@ -673,6 +686,7 @@ export function RateLimitProgress({
 								now,
 								windowPrediction,
 								windowDurationMs,
+								observedAtMs,
 							);
 				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can

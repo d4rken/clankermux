@@ -212,18 +212,36 @@ describe("estimateWindowExhaustion", () => {
 		expect(implicit).toEqual(explicit);
 		expect(implicit.source).toBe("lifetime-average");
 		expect(implicit.lowConfidence).toBe(true);
-	});
 
-	it("reports the lifetime average as primary when the caller declares it", () => {
-		const low = estimateWindowExhaustion(
+		// An observation time changes nothing on the low path: it is read only by
+		// the full-confidence branch, so the historical arithmetic is untouched
+		// whether or not the surface happens to know when it sampled.
+		const lowWithObservation = estimateWindowExhaustion(
 			{
 				utilizationPct: 75,
 				resetsAtMs: NOW + 2 * HOUR,
 				windowStartMs: NOW - 3 * HOUR,
 				prediction: null,
+				lifetimeConfidence: "low",
+				observedAtMs: NOW - 90 * 60_000,
 			},
 			NOW,
 		);
+		const implicitWithObservation = estimateWindowExhaustion(
+			{
+				utilizationPct: 75,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+				observedAtMs: NOW - 90 * 60_000,
+			},
+			NOW,
+		);
+		expect(lowWithObservation).toEqual(explicit);
+		expect(implicitWithObservation).toEqual(explicit);
+	});
+
+	it("reports the lifetime average as primary when the caller declares it", () => {
 		const full = estimateWindowExhaustion(
 			{
 				utilizationPct: 75,
@@ -231,16 +249,51 @@ describe("estimateWindowExhaustion", () => {
 				windowStartMs: NOW - 3 * HOUR,
 				prediction: null,
 				lifetimeConfidence: "full",
+				observedAtMs: NOW,
 			},
 			NOW,
 		);
 
 		expect(full.source).toBe("lifetime-primary");
 		expect(full.lowConfidence).toBe(false);
-		// Only the confidence differs — the projection itself is the same number,
-		// so the policy cannot move an ETA, only how loudly it is rendered.
-		expect(full.slopePctPerHour).toBe(low.slopePctPerHour);
-		expect(full.exhaustsAtMs).toBe(low.exhaustsAtMs);
+		// 75% three hours in: 25 %/h, so the last 25% takes one more hour. Same
+		// arithmetic as the low path — what differs is the anchor it is measured
+		// from, which here happens to coincide with `now`.
+		expect(full.slopePctPerHour).toBeCloseTo(25, 9);
+		expect(full.exhaustsAtMs).toBe(NOW + HOUR);
+	});
+
+	// Full confidence is earned by the PAIR (policy and observation time). Without
+	// an instant to anchor to, the only estimate available is the now-anchored one
+	// — and that one may not reach red, so the request degrades rather than
+	// borrowing `now` as a stand-in observation.
+	it("degrades a full-confidence request with no usable observation time", () => {
+		const base = {
+			utilizationPct: 75,
+			resetsAtMs: NOW + 2 * HOUR,
+			windowStartMs: NOW - 3 * HOUR,
+			prediction: null,
+		};
+		const low = estimateWindowExhaustion(base, NOW);
+
+		const unusableObservations = [
+			undefined,
+			null,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			// Not after the window opened, so it measures nothing.
+			NOW - 3 * HOUR,
+			NOW - 4 * HOUR,
+		];
+		for (const observedAtMs of unusableObservations) {
+			const degraded = estimateWindowExhaustion(
+				{ ...base, lifetimeConfidence: "full" as const, observedAtMs },
+				NOW,
+			);
+			expect(degraded).toEqual(low);
+			expect(degraded.source).toBe("lifetime-average");
+			expect(degraded.lowConfidence).toBe(true);
+		}
 	});
 
 	it("applies the policy only to the lifetime branch", () => {
@@ -286,21 +339,56 @@ describe("estimateWindowExhaustion", () => {
 		).toBe("none");
 	});
 
-	it("keeps the lifetime ETA now-anchored on the primary path too", () => {
+	// The full-confidence lifetime estimate can render red, so it has to be a
+	// function of the READING and not of when the surface last ticked. Anchored at
+	// `now` the ETA slides later by 1 + (100 - pct)/pct per unit of wall clock, so
+	// the reset margin shrinks on evidence that never changed — which is what
+	// walks a projection sitting near the red threshold across it between two
+	// 30-second dashboard ticks.
+	it("anchors the full-confidence lifetime estimate at its observation", () => {
 		const input = {
-			utilizationPct: 75,
-			resetsAtMs: NOW + 2 * HOUR,
-			windowStartMs: NOW - 3 * HOUR,
+			utilizationPct: 80,
+			resetsAtMs: NOW + 2 * DAY,
+			windowStartMs: NOW - 5 * DAY,
 			prediction: null,
 			lifetimeConfidence: "full" as const,
+			observedAtMs: NOW,
 		};
 
 		const first = estimateWindowExhaustion(input, NOW);
-		const later = estimateWindowExhaustion(input, NOW + 60_000);
+		const later = estimateWindowExhaustion(input, NOW + 30_000);
+		const muchLater = estimateWindowExhaustion(input, NOW + 25 * 60_000);
 
-		expect(later.exhaustsAtMs as number).toBeGreaterThan(
-			first.exhaustsAtMs as number,
+		expect(first.source).toBe("lifetime-primary");
+		expect(first.lowConfidence).toBe(false);
+		// 80% five days in: 16 %/day, so the last 20% takes another 1.25 days.
+		expect(first.slopePctPerHour).toBeCloseTo(80 / (5 * 24), 9);
+		expect(first.exhaustsAtMs).toBe(NOW + 1.25 * DAY);
+		expect(later).toEqual(first);
+		expect(muchLater).toEqual(first);
+	});
+
+	// The anchor is the OBSERVATION, not the newest of the two: a reading sampled
+	// minutes ago projects from where it was sampled, which is also what stops the
+	// estimate moving while that reading is what the surface still holds.
+	it("projects a full-confidence estimate from an older observation", () => {
+		const observedAtMs = NOW - 6 * HOUR;
+		const result = estimateWindowExhaustion(
+			{
+				utilizationPct: 80,
+				resetsAtMs: NOW + 2 * DAY,
+				windowStartMs: NOW - 5 * DAY,
+				prediction: null,
+				lifetimeConfidence: "full",
+				observedAtMs,
+			},
+			NOW,
 		);
+
+		const elapsed = observedAtMs - (NOW - 5 * DAY);
+		expect(result.source).toBe("lifetime-primary");
+		expect(result.exhaustsAtMs).toBe(observedAtMs + 0.25 * elapsed);
+		expect(result.slopePctPerHour).toBeCloseTo((80 / elapsed) * HOUR, 9);
 	});
 
 	it("moves the lifetime-average ETA with now (it is not sample-anchored)", () => {
@@ -398,24 +486,52 @@ describe("computeCapacityRunway", () => {
 		expect(result).toEqual({ kind: "unknown" });
 	});
 
-	it("threads the lifetime-confidence policy without letting it move the runway", () => {
-		// The policy is a DISPLAY confidence: it decides how loudly a projection
-		// may be rendered, never what is projected. The runway is the projection
-		// itself, so declaring the weekly window's lifetime average primary must
-		// leave every instant it reports exactly where it was.
-		const windows = (lifetimeConfidence?: "low" | "full") => [
+	it("threads the lifetime-confidence policy and its observation time verbatim", () => {
+		// Both fields are carried straight to the estimator, and the pair is what
+		// decides the answer. Declaring the weekly window's lifetime average primary
+		// with no observation time to anchor it degrades to the amber-capped
+		// now-anchored estimate, so the runway is exactly the low path's.
+		const windows = (
+			lifetimeConfidence?: "low" | "full",
+			observedAtMs?: number,
+		) => [
 			window({
 				windowKind: "seven_day",
-				utilizationPct: 75,
+				utilizationPct: 80,
 				resetsAtMs: NOW + 2 * DAY,
 				windowStartMs: NOW - 5 * DAY,
 				lifetimeConfidence,
+				observedAtMs,
 			}),
 		];
 
 		expect(computeCapacityRunway([account("a", windows("full"))], NOW)).toEqual(
 			computeCapacityRunway([account("a", windows())], NOW),
 		);
+
+		// Given one, the window runs out where the READING says it does — 80% over
+		// the 114 hours to the observation leaves 28.5 more — and stays there while
+		// `now` walks on, so the runway does not drift between polls.
+		const observedAtMs = NOW - 6 * HOUR;
+		const anchoredAtNow = computeCapacityRunway(
+			[account("a", windows("full", observedAtMs))],
+			NOW,
+		);
+		const anchoredLater = computeCapacityRunway(
+			[account("a", windows("full", observedAtMs))],
+			NOW + 30_000,
+		);
+
+		expect(anchoredAtNow).toEqual({
+			kind: "runway",
+			exhaustsAtMs: NOW + 22.5 * HOUR,
+			durationMs: 22.5 * HOUR,
+			causes: [{ accountId: "a", windowKind: "seven_day" }],
+			unprojectableAccountIds: [],
+		});
+		expect(
+			anchoredLater.kind === "runway" ? anchoredLater.exhaustsAtMs : null,
+		).toBe(NOW + 22.5 * HOUR);
 	});
 
 	it("keeps an unmetered account alive for the whole horizon", () => {

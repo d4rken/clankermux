@@ -26,3 +26,29 @@ export function weeklyLifetimeConfidence(
 ): LifetimeConfidence | undefined {
 	return windowKind === "seven_day" ? "full" : undefined;
 }
+
+/**
+ * The other half of the `"full"` policy: WHEN the reading being projected from
+ * was sampled, parsed out of `AccountResponse.usageAsOfIso`.
+ *
+ * Lives beside {@link weeklyLifetimeConfidence} because the two are one input.
+ * A full-confidence lifetime estimate may render red, and its ETA is
+ * `anchor + ((100 - pct) / pct) · (anchor - windowStart)` — anchored at `now`
+ * that slides later by more than a second per second of wall clock, so a
+ * projection near the red threshold flips between two 30-second UI ticks on
+ * evidence that never changed. Anchored at the observation it is a function of
+ * the reading alone and holds still until the next refetch.
+ *
+ * Null when the server could not say (no live cache entry behind the reading,
+ * or a Codex reading rebuilt from a stored payload). That is a real answer:
+ * the estimator degrades those windows to the amber-capped now-anchored
+ * estimate. NEVER substitute render time — `Date.now()` here is the drift, not
+ * a fix for it.
+ */
+export function usageObservedAtMs(
+	usageAsOfIso: string | null | undefined,
+): number | null {
+	if (!usageAsOfIso) return null;
+	const asOfMs = new Date(usageAsOfIso).getTime();
+	return Number.isFinite(asOfMs) ? asOfMs : null;
+}

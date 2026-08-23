@@ -5,7 +5,10 @@ import {
 	extractSevenDay,
 } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
-import { weeklyLifetimeConfidence } from "./lifetime-confidence";
+import {
+	usageObservedAtMs,
+	weeklyLifetimeConfidence,
+} from "./lifetime-confidence";
 import type { PoolWindow } from "./pool-usage";
 
 /**
@@ -142,10 +145,13 @@ function deriveLiveState(
 				resetsAtMs: resetMs,
 				windowStartMs: burnStartMs,
 				prediction: pred,
-				// Only the slope is read here, and the lifetime slope is the same
-				// number either way — passed so this line cannot silently drift from
-				// the policy the message and the at-risk list apply.
+				// Only the slope is read here — passed so this line cannot silently
+				// drift from the policy the message and the at-risk list apply. The
+				// pair matters for the slope too: a full-confidence lifetime slope is
+				// `pct` over the elapsed time AT THE OBSERVATION, so the forecast line
+				// stops shallowing out between refetches as `now` walks forward.
 				lifetimeConfidence: weeklyLifetimeConfidence(window),
+				observedAtMs: usageObservedAtMs(account.usageAsOfIso),
 			},
 			now,
 		).slopePctPerHour ?? 0;

@@ -47,9 +47,10 @@ export type WindowExhaustionSource =
 	| "lifetime-average"
 	/**
 	 * Lifetime average as the window's PRIMARY estimator rather than a fallback;
-	 * `exhaustsAtMs` is NOW-anchored, same arithmetic as "lifetime-average".
-	 * Distinct only in confidence: the caller has declared it the measured best
-	 * estimator for this window, so it is not capped at amber.
+	 * `exhaustsAtMs` is OBSERVATION-anchored (see `observedAtMs`). Distinct from
+	 * "lifetime-average" in two ways: the caller has declared it the measured best
+	 * estimator for this window so it is not capped at amber, and because it may
+	 * therefore reach red it is anchored to the reading rather than to `now`.
 	 */
 	| "lifetime-primary"
 	/** Utilization is already at/above 100. */
@@ -68,7 +69,8 @@ export type WindowExhaustionSource =
  *
  * `"full"` says the caller has evidence that the lifetime average is the best
  * estimator available for THAT window, so it should be rendered with the same
- * confidence as a regression.
+ * confidence as a regression. It requires an `observedAtMs` to go with it and
+ * DEGRADES to `"low"` without one — see {@link WindowExhaustionInput}.
  *
  * Deliberately caller-supplied and never derived here from window duration or
  * kind: which estimator wins on which horizon is a measured, changeable fact
@@ -85,6 +87,22 @@ export interface WindowExhaustionInput {
 	prediction: UsagePrediction | null | undefined;
 	/** Absent means `"low"` — see {@link LifetimeConfidence}. */
 	lifetimeConfidence?: LifetimeConfidence;
+	/**
+	 * When the reading in `utilizationPct` was OBSERVED — the live-usage fetch
+	 * time, or the sample time of the snapshot it came from. Null/absent when the
+	 * source cannot honestly say (a payload-reconstructed reading), which is a
+	 * real answer and never `Date.now()` at render time.
+	 *
+	 * Read ONLY by the `lifetimeConfidence: "full"` path, and required there.
+	 * The lifetime ETA is `anchor + ((100 - pct) / pct) · (anchor - windowStart)`,
+	 * so anchoring it at `now` moves it later by MORE than a second per second of
+	 * wall clock on evidence that has not changed. Amber-capped that is invisible;
+	 * on the full-confidence path it walks the reset margin across the red
+	 * threshold between two UI ticks. Anchoring at the observation instant makes
+	 * the estimate a function of the reading alone, so it holds still until the
+	 * next refetch.
+	 */
+	observedAtMs?: number | null;
 }
 
 export interface WindowExhaustion {
@@ -127,9 +145,11 @@ const NO_EVIDENCE: WindowExhaustion = {
  *     the lifetime average.
  *  4. Nothing used yet. Placed AFTER the regression branch because a usable
  *     prediction wins at 0% too.
- *  5. Lifetime average over the elapsed window, anchored at `now`. Its
- *     confidence is whatever the caller declared for this window
- *     ({@link LifetimeConfidence}); the arithmetic is identical either way.
+ *  5. Lifetime average over the elapsed window. The caller's
+ *     {@link LifetimeConfidence} for this window decides both how loudly it may
+ *     be rendered AND what it is anchored to: `"full"` with a usable
+ *     `observedAtMs` anchors at the OBSERVATION, `"low"` (or `"full"` with no
+ *     observation time, which degrades to `"low"`) anchors at `now`.
  */
 export function estimateWindowExhaustion(
 	input: WindowExhaustionInput,
@@ -141,6 +161,7 @@ export function estimateWindowExhaustion(
 		windowStartMs,
 		prediction,
 		lifetimeConfidence,
+		observedAtMs,
 	} = input;
 
 	if (!Number.isFinite(pct)) return NO_EVIDENCE;
@@ -180,15 +201,35 @@ export function estimateWindowExhaustion(
 		};
 	}
 
+	// Full confidence is earned by the pair (policy AND observation time), never
+	// by the policy alone: without an instant to anchor to, the only estimate
+	// available is the now-anchored one, and that one may not reach red. So a
+	// "full" request with no usable observation DEGRADES to the low path rather
+	// than borrowing `now` as a stand-in observation — fail-safe, because the
+	// borrowed anchor is precisely the drift this guards against.
+	if (
+		lifetimeConfidence === "full" &&
+		observedAtMs != null &&
+		Number.isFinite(observedAtMs) &&
+		observedAtMs > windowStartMs
+	) {
+		const observedElapsed = observedAtMs - windowStartMs;
+		return {
+			source: "lifetime-primary",
+			slopePctPerHour: (pct / observedElapsed) * HOUR_MS,
+			exhaustsAtMs: observedAtMs + ((100 - pct) / pct) * observedElapsed,
+			lowConfidence: false,
+		};
+	}
+
 	const elapsed = now - windowStartMs;
 	if (elapsed <= 0) return NO_EVIDENCE;
 
-	const isPrimary = lifetimeConfidence === "full";
 	return {
-		source: isPrimary ? "lifetime-primary" : "lifetime-average",
+		source: "lifetime-average",
 		slopePctPerHour: (pct / elapsed) * HOUR_MS,
 		exhaustsAtMs: now + ((100 - pct) / pct) * elapsed,
-		lowConfidence: !isPrimary,
+		lowConfidence: true,
 	};
 }
 
@@ -220,6 +261,12 @@ export interface RunwayWindowInput {
 	 * with the caller that measured it.
 	 */
 	lifetimeConfidence?: LifetimeConfidence;
+	/**
+	 * When this window's reading was observed. Threaded verbatim to
+	 * {@link WindowExhaustionInput.observedAtMs}, where it is required by (and
+	 * read only by) the `"full"` confidence path.
+	 */
+	observedAtMs?: number | null;
 }
 
 export interface RunwayAccountInput {
@@ -381,6 +428,7 @@ export function computeCapacityRunway(
 					windowStartMs: window.windowStartMs,
 					prediction: window.prediction,
 					lifetimeConfidence: window.lifetimeConfidence,
+					observedAtMs: window.observedAtMs,
 				},
 				now,
 			);

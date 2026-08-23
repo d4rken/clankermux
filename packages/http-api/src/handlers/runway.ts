@@ -482,9 +482,19 @@ export function createRunwayHandler(
 		// Never a merge across candidates: a runway projected from a live 5-hour
 		// reading and an older weekly one would be anchored to two different
 		// instants.
+		//
+		// The winner's OBSERVATION TIME travels with its windows. The weekly
+		// window's full-confidence estimate anchors its ETA there rather than at
+		// `now`, so a reading that has not changed cannot walk its own projection
+		// later between two polls. A candidate that cannot say when it was observed
+		// (the Codex payload reconstruction) carries null, and the weekly window
+		// falls back to the amber-capped now-anchored estimate.
 		const scanObservationsByAccount = new Map<
 			string,
-			RunwayWindowObservations | null
+			{
+				windows: RunwayWindowObservations;
+				observedAtMs: number | null;
+			} | null
 		>(
 			accounts.map((a) => {
 				const candidates = candidatesByAccount.get(a.id) ?? [];
@@ -497,28 +507,39 @@ export function createRunwayHandler(
 				if (!winner) return [a.id, null];
 				return [
 					a.id,
-					// A snapshot's windows may have rolled over since the row was
-					// written; a live reading's cannot have.
-					winner.source === "snapshot"
-						? projectableWindows(
-								{ ...winner.windows, sampledAtMs: winner.observedAtMs ?? now },
-								now,
-							)
-						: winner.windows,
+					{
+						// A snapshot's windows may have rolled over since the row was
+						// written; a live reading's cannot have.
+						windows:
+							winner.source === "snapshot"
+								? projectableWindows(
+										{
+											...winner.windows,
+											sampledAtMs: winner.observedAtMs ?? now,
+										},
+										now,
+									)
+								: winner.windows,
+						observedAtMs: winner.observedAtMs,
+					},
 				];
 			}),
 		);
 
-		const sources: RunwayAccountSource[] = accounts.map((account) => ({
-			id: account.id,
-			name: account.name,
-			provider: account.provider || "anthropic",
-			// Already extracted above, so the scan and the evidence block below
-			// cannot end up reading two different resolutions of the same account.
-			usageData: null,
-			windowObservations: scanObservationsByAccount.get(account.id) ?? null,
-			prediction: predictionByAccount.get(account.id) ?? null,
-		}));
+		const sources: RunwayAccountSource[] = accounts.map((account) => {
+			const scan = scanObservationsByAccount.get(account.id) ?? null;
+			return {
+				id: account.id,
+				name: account.name,
+				provider: account.provider || "anthropic",
+				// Already extracted above, so the scan and the evidence block below
+				// cannot end up reading two different resolutions of the same account.
+				usageData: null,
+				windowObservations: scan?.windows ?? null,
+				usageObservedAtMs: scan?.observedAtMs ?? null,
+				prediction: predictionByAccount.get(account.id) ?? null,
+			};
+		});
 
 		const runways = computeApiKeyRunways(keys, sources, now);
 		const worst = worstKeyRunway(runways, now);

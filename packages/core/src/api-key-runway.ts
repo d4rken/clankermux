@@ -75,6 +75,16 @@ export interface RunwayAccountSource {
 	 * Optional, so `AccountResponse` still structurally satisfies this interface.
 	 */
 	windowObservations?: RunwayWindowObservations | null;
+	/**
+	 * When the reading behind `usageData` / `windowObservations` was OBSERVED.
+	 *
+	 * Required for the weekly window's full-confidence projection, which anchors
+	 * its ETA to the reading rather than to `now` so it cannot drift between
+	 * polls (see `WindowExhaustionInput.observedAtMs`). A caller that
+	 * cannot say honestly passes null, and the weekly window falls back to the
+	 * amber-capped now-anchored estimate — never a substituted `Date.now()`.
+	 */
+	usageObservedAtMs?: number | null;
 }
 
 /**
@@ -99,6 +109,7 @@ function windowInput(
 	windowKind: "five_hour" | "seven_day",
 	extracted: ExtractedValue | null,
 	prediction: RunwayWindowInput["prediction"],
+	observedAtMs: number | null,
 	lifetimeConfidence?: LifetimeConfidence,
 ): RunwayWindowInput | null {
 	if (extracted == null || extracted.pct == null) return null;
@@ -112,6 +123,11 @@ function windowInput(
 				: computeWindowStartMs(extracted.resetMs, windowKind),
 		prediction,
 		lifetimeConfidence,
+		// Carried on every window, not just the one that reads it today: both
+		// windows come from the SAME resolved reading, so its observation time
+		// describes both, and stating it only where the current policy happens to
+		// consume it would make the field look like a property of the weekly window.
+		observedAtMs,
 	};
 }
 
@@ -137,12 +153,15 @@ function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 	// the runway would then be projected from two different instants.
 	const usageData = account.usageData ?? null;
 	const observations = usageData ? null : (account.windowObservations ?? null);
+	// One instant for both windows, because both are read out of one resolution.
+	const observedAtMs = account.usageObservedAtMs ?? null;
 	const windows: RunwayWindowInput[] = [];
 	if (hasFiveHour) {
 		const window = windowInput(
 			"five_hour",
 			usageData ? extractFiveHour(usageData) : (observations?.fiveHour ?? null),
 			account.prediction?.fiveHour,
+			observedAtMs,
 		);
 		if (window) windows.push(window);
 	}
@@ -151,9 +170,12 @@ function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
 			"seven_day",
 			usageData ? extractSevenDay(usageData) : (observations?.sevenDay ?? null),
 			account.prediction?.sevenDay,
+			observedAtMs,
 			// The weekly display estimator IS the lifetime average (it beat the
 			// regression on held-out data), so its projection is a measured best
-			// estimate rather than a fallback nobody checked.
+			// estimate rather than a fallback nobody checked. It reaches red, so it
+			// is anchored to `observedAtMs` above; with no observation time it
+			// degrades back to the amber-capped now-anchored estimate.
 			"full",
 		);
 		if (window) windows.push(window);

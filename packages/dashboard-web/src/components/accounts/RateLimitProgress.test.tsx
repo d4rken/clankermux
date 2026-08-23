@@ -560,12 +560,35 @@ describe("RateLimitProgress", () => {
 			expect(html).not.toContain("text-destructive-strong");
 		});
 
+		it("keeps the five-hour amber cap on a stamped reading", () => {
+			// The sample stamp is what the WEEKLY window needs to reach red. It is
+			// not a licence for the five-hour one, whose lifetime average lost the
+			// measurement and stays a fallback: same fixture as above, now stamped,
+			// same amber.
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					{...fiveHourProps(80, 4 * HOUR)}
+					usageAsOfIso={new Date(Date.now()).toISOString()}
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("text-destructive-strong");
+		});
+
 		// The weekly window is the one place the lifetime average is the MEASURED
 		// best estimator rather than a fallback, so it is not amber-capped: it goes
 		// through the same margin rule the regression does. Without a server
 		// prediction for this window — which is what production now serves — red has
 		// to be reachable here, or a weekly account burning out days early would
 		// only ever get the same amber as one that is barely ahead of pace.
+		//
+		// It needs `usageAsOfIso` to get there: a projection that can render red is
+		// anchored to when the reading was SAMPLED, so it cannot walk its own reset
+		// margin across the threshold as the card's 30-second ticker advances.
 		it("lets the weekly lifetime average reach red on a wide margin", () => {
 			const now = Date.now();
 			const DAY = 24 * HOUR;
@@ -584,6 +607,7 @@ describe("RateLimitProgress", () => {
 						five_hour: { utilization: 5, resets_at: fiveHourReset },
 						seven_day: { utilization: 80, resets_at: weeklyReset },
 					}}
+					usageAsOfIso={new Date(now).toISOString()}
 					provider="anthropic"
 					showWeekly
 					inlineProjection
@@ -593,6 +617,36 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("before reset");
 			expect(html).toContain("bg-destructive");
 			expect(html).toContain("text-destructive-strong");
+		});
+
+		// No sample stamp means no instant to anchor to, and an unanchored lifetime
+		// projection may not claim red however wide its margin looks — the same
+		// fixture as above, which reaches red once the reading is stamped.
+		it("caps the weekly lifetime average at amber when the reading is unstamped", () => {
+			const now = Date.now();
+			const DAY = 24 * HOUR;
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			const weeklyReset = new Date(now + 3 * DAY).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 5, resets_at: fiveHourReset },
+						seven_day: { utilization: 80, resets_at: weeklyReset },
+					}}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("bg-warning");
+			expect(html).toContain("text-warning-strong");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).not.toContain("text-destructive-strong");
 		});
 
 		it("still caps the weekly lifetime average at amber on a thin margin", () => {
@@ -612,6 +666,7 @@ describe("RateLimitProgress", () => {
 						five_hour: { utilization: 5, resets_at: fiveHourReset },
 						seven_day: { utilization: 76, resets_at: weeklyReset },
 					}}
+					usageAsOfIso={new Date(now).toISOString()}
 					provider="anthropic"
 					showWeekly
 					inlineProjection
