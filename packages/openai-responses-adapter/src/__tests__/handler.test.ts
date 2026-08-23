@@ -627,5 +627,49 @@ describe("handleResponsesRequest", () => {
 			const body = await resp.json();
 			expect(body.error.message).toBe("Not authenticated");
 		});
+
+		test("recovers an Anthropic envelope sent with the wrong content-type", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "invalid_request_error", message: "bad model" },
+					}),
+					{ status: 400, headers: { "Content-Type": "text/plain" } },
+				),
+			);
+
+			const body = await resp.json();
+			// Unprefixed message and the real type, same as a correctly-labelled body.
+			expect(body.error.message).toBe("bad model");
+			expect(body.error.type).toBe("invalid_request_error");
+		});
+
+		test("a body stream that fails mid-read still yields the upstream status", async () => {
+			// The status code is meaningful on its own; a broken body must not turn
+			// into a rejected promise out of the handler.
+			const failing = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode('{"detail":"partial'));
+					controller.error(new Error("connection reset"));
+				},
+			});
+			const resp = await translate(
+				new Response(failing, {
+					status: 502,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+			expect(resp.status).toBe(502);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("an empty body falls back to the generic message", async () => {
+			const resp = await translate(new Response(null, { status: 504 }));
+			expect(resp.status).toBe(504);
+			expect((await resp.json()).error.message).toBe("Unknown error");
+		});
 	});
 });

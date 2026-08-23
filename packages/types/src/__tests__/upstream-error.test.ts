@@ -279,4 +279,39 @@ describe("parseUpstreamError", () => {
 	it("keeps returning null when no convention matches", () => {
 		expect(parseUpstreamError('{"foo":"bar"}')).toBeNull();
 	});
+
+	it("counts unrenderable entries in the omitted suffix", () => {
+		// The suffix means "entries not represented above", whether they were cut
+		// by the cap or skipped as unrecognizable — so its position in the list
+		// must not change the count.
+		const usable = { loc: ["body", "f"], msg: "Field required" };
+		const junk = { foo: "bar" };
+		expect(parseUpstreamError(JSON.stringify({ detail: [usable, junk] }))).toBe(
+			"body.f: Field required; (+1 more)",
+		);
+		expect(parseUpstreamError(JSON.stringify({ detail: [junk, usable] }))).toBe(
+			"body.f: Field required; (+1 more)",
+		);
+	});
+
+	it("skips blank and non-scalar loc segments", () => {
+		const body = JSON.stringify({
+			detail: [
+				{ loc: ["body", "   ", null, "messages", 2], msg: "bad" },
+				{ loc: ["  "], msg: "no usable path" },
+			],
+		});
+		expect(parseUpstreamError(body)).toBe(
+			"body.messages.2: bad; no usable path",
+		);
+	});
+
+	it("ignores whitespace-only nested message fields", () => {
+		expect(
+			parseUpstreamError(
+				'{"error":{"type":"  ","message":"  "},"detail":"real"}',
+			),
+		).toBe("real");
+		expect(parseUpstreamError('{"detail":[{"msg":"   "}]}')).toBeNull();
+	});
 });

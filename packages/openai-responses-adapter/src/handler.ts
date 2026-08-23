@@ -12,6 +12,58 @@ import type { HandleProxyFn, ResponseItem, ResponsesRequest } from "./types";
 
 const log = new Logger("openai-responses-adapter");
 
+/**
+ * Upper bound on how much of a FAILED upstream body is buffered before it is
+ * parsed for a diagnostic. Error envelopes are tiny and the extracted message
+ * is capped at a few hundred characters regardless, so an unbounded read would
+ * only let a misbehaving upstream — or an intermediary's HTML error page —
+ * pull arbitrary bytes into the handler for nothing.
+ */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/**
+ * Reads at most `MAX_ERROR_BODY_BYTES` of a response body as UTF-8, returning
+ * "" when the body is missing or the stream fails partway.
+ *
+ * A stream that errors after the headers arrived must not reject the whole
+ * request: the status code is still meaningful and the caller can fall back to
+ * its generic message, which is what happened before this branch read the body
+ * at all for non-JSON responses.
+ */
+async function readBoundedText(resp: Response): Promise<string> {
+	if (!resp.body) return "";
+	const reader = resp.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (total < MAX_ERROR_BODY_BYTES) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			chunks.push(value);
+			total += value.byteLength;
+		}
+	} catch (err) {
+		log.warn(`Failed to read upstream error body: ${String(err)}`);
+	} finally {
+		// Release the lock without waiting on cancel() — the caller is done with
+		// this response either way and an awaited cancel can hang on a stalled
+		// upstream.
+		void reader.cancel().catch(() => {});
+	}
+
+	if (chunks.length === 0) return "";
+	const merged = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		merged.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(
+		merged.subarray(0, Math.min(total, MAX_ERROR_BODY_BYTES)),
+	);
+}
+
 export async function handleResponsesRequest(
 	req: Request,
 	url: URL,
@@ -187,37 +239,39 @@ export async function handleResponsesRequest(
 		// "Unknown error" and destroyed the sole copy of the diagnostic the
 		// client ever sees (issue #5).
 		//
-		// Read the body as text and parse it twice: once for the typed
-		// `error.type`, and once through the shared envelope parser for the
-		// message. `error.message` still wins when present so an Anthropic error
-		// reaches the client exactly as before, unprefixed by its type.
+		// Read the body once and parse it twice: once for the typed `error.type`,
+		// and once through the shared envelope parser for the message.
+		// `error.message` still wins when present so an Anthropic error reaches
+		// the client exactly as before, unprefixed by its type.
 		// parseUpstreamError is used rather than a raw-body excerpt deliberately:
 		// it emits only what upstream put in a recognized error field, never
 		// arbitrary bytes, so tokens or echoed prompt text in an unrecognized
 		// body cannot be relayed to the caller.
-		const rawErrorBody = await anthropicResp.text();
+		//
+		// Neither parse is gated on the content-type header. Upstreams mislabel
+		// error responses (a 401 `{"detail":"Not authenticated"}` sent as
+		// text/plain is real), and JSON.parse is the authoritative test of
+		// whether a body is JSON anyway.
+		const rawErrorBody = await readBoundedText(anthropicResp);
 		let errType = "api_error";
 		let message: string | null = null;
 
-		const contentType = anthropicResp.headers.get("content-type") ?? "";
-		if (contentType.includes("application/json")) {
-			try {
-				const anthropicError = JSON.parse(rawErrorBody) as {
-					type?: string;
-					error?: { type?: string; message?: string };
-				};
-				// Blank values count as absent: an empty `error.message` used to
-				// win over the fallback and emit an error with no text at all.
-				if (anthropicError?.error?.type?.trim()) {
-					errType = anthropicError.error.type.trim();
-				}
-				if (anthropicError?.error?.message?.trim()) {
-					message = anthropicError.error.message;
-				}
-			} catch {
-				// Malformed JSON — fall through to the shared parser, which is
-				// tolerant of anything and returns null when it recognizes nothing.
+		try {
+			const anthropicError = JSON.parse(rawErrorBody) as {
+				type?: string;
+				error?: { type?: string; message?: string };
+			};
+			// Blank values count as absent: an empty `error.message` used to
+			// win over the fallback and emit an error with no text at all.
+			if (anthropicError?.error?.type?.trim()) {
+				errType = anthropicError.error.type.trim();
 			}
+			if (anthropicError?.error?.message?.trim()) {
+				message = anthropicError.error.message;
+			}
+		} catch {
+			// Not JSON (or malformed) — fall through to the shared parser, which
+			// tolerates anything and returns null when it recognizes nothing.
 		}
 
 		const errorBody = {

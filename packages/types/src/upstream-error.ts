@@ -27,9 +27,9 @@ const SSE_TAIL_SCAN_BYTES = 16 * 1024;
 
 /**
  * How many entries of a structured `detail` list are rendered before the rest
- * are elided. `normalizeAndTruncate` would cap the joined string anyway, but
- * cutting at an entry boundary keeps the result readable instead of ending
- * mid-field-path.
+ * are elided. This bounds the work and keeps the common case readable; it is
+ * NOT the authoritative limit — `normalizeAndTruncate` still caps the joined
+ * string and can cut inside an entry when the messages are long.
  */
 const MAX_DETAIL_ENTRIES = 5;
 
@@ -71,11 +71,12 @@ function renderDetailLocation(loc: unknown): string | null {
 	if (!Array.isArray(loc)) return null;
 	const segments: string[] = [];
 	for (const segment of loc) {
-		if (typeof segment === "string") {
-			if (segment.length > 0) segments.push(segment);
-		} else if (typeof segment === "number" && Number.isFinite(segment)) {
+		if (typeof segment === "number" && Number.isFinite(segment)) {
 			segments.push(String(segment));
+			continue;
 		}
+		const text = nonBlankString(segment);
+		if (text) segments.push(text);
 	}
 	return segments.length > 0 ? segments.join(".") : null;
 }
@@ -124,15 +125,16 @@ function extractFromDetailValue(detail: unknown): string | null {
 
 	if (Array.isArray(detail)) {
 		const parts: string[] = [];
-		let consumed = 0;
 		for (const entry of detail) {
-			consumed++;
 			const rendered = renderDetailEntry(entry);
 			if (rendered) parts.push(rendered);
 			if (parts.length === MAX_DETAIL_ENTRIES) break;
 		}
 		if (parts.length === 0) return null;
-		const omitted = detail.length - consumed;
+		// Counted against the rendered parts rather than against how far the loop
+		// walked, so the suffix means exactly "entries not represented above"
+		// whether they were elided by the cap or skipped as unrecognizable.
+		const omitted = detail.length - parts.length;
 		if (omitted > 0) parts.push(`(+${omitted} more)`);
 		return parts.join("; ");
 	}
