@@ -8,7 +8,7 @@ import {
 	type fetchCodexModelCatalog,
 	readChatgptAccountId,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import { type Account, isKnownProvider } from "@clankermux/types";
 
 const log = new Logger("CodexModelCatalogCache");
 
@@ -30,8 +30,25 @@ export const CODEX_MODEL_CATALOG_TTL_MS = 6 * 60 * 60 * 1_000;
  * the client for the sum of those timeouts. A Codex startup would give up
  * waiting long before we returned the 200 we promise it, so the loop needs its
  * own ceiling rather than inheriting N times the fetcher's.
+ *
+ * Enforced as a RACE, not as a check between attempts. A per-attempt check
+ * cannot bound anything: an attempt starting one millisecond inside the budget
+ * still runs to its own timeout, and token acquisition has no timeout at all
+ * (`getValidAccessToken` may refresh OAuth over a fetch with no deadline). A
+ * hang there would otherwise never settle the in-flight entry, wedging the
+ * scope permanently — every later cold caller awaiting a promise that cannot
+ * resolve.
  */
 export const CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS = 12_000;
+
+/**
+ * How long a scope waits before another upstream attempt after a failed one.
+ *
+ * Without it a failed refresh leaves `fetchedAt` expired, so every subsequent
+ * request starts its own attempt: one unreachable backend becomes a stream of
+ * authenticated calls, which is the traffic shape this must not generate.
+ */
+export const CODEX_MODEL_CATALOG_RETRY_AFTER_MS = 60_000;
 
 /**
  * Most distinct pin scopes cached at once, least recently written evicted
@@ -60,6 +77,8 @@ export interface CodexModelCatalogCacheDeps {
 	getAccessToken: (account: Account) => Promise<string>;
 	fetchCatalog: typeof fetchCodexModelCatalog;
 	now?: () => number;
+	/** Overridable so tests can exercise the deadline without waiting for it. */
+	lookupBudgetMs?: number;
 }
 
 interface CacheSlot {
@@ -99,9 +118,15 @@ export class CodexModelCatalogCache {
 		string,
 		Promise<CodexModelCatalogEntry | null>
 	>();
+	/** Per-scope epoch-ms before which no further upstream attempt is made. */
+	private readonly retryAfter = new Map<string, number>();
 
 	constructor(deps: CodexModelCatalogCacheDeps) {
-		this.deps = { now: Date.now, ...deps };
+		this.deps = {
+			now: Date.now,
+			lookupBudgetMs: CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS,
+			...deps,
+		};
 	}
 
 	/**
@@ -124,11 +149,25 @@ export class CodexModelCatalogCache {
 			if (age < CODEX_MODEL_CATALOG_TTL_MS) return slot.entry;
 			// Stale-while-revalidate. The refresh is deliberately not awaited; its
 			// rejection cannot escape because refresh() resolves rather than throws.
-			void this.startRefresh(key, pin);
+			if (!this.inBackoff(key)) void this.startRefresh(key, pin);
 			return slot.entry;
 		}
 
+		// Cold and recently failed: answer now rather than spending the budget
+		// again. The caller's fallback is the static list.
+		if (this.inBackoff(key)) return null;
+
 		return this.startRefresh(key, pin);
+	}
+
+	private inBackoff(key: string): boolean {
+		const until = this.retryAfter.get(key);
+		if (until === undefined) return false;
+		if (this.deps.now() >= until) {
+			this.retryAfter.delete(key);
+			return false;
+		}
+		return true;
 	}
 
 	/** Join the in-flight refresh for `key`, or start one. */
@@ -166,7 +205,13 @@ export class CodexModelCatalogCache {
 			return { kind: "refused" };
 		}
 
-		if (!raw) return { kind: "allowed", key: "", pin: null };
+		// A null row means the key does not exist, NOT that it is unpinned — an
+		// unpinned key returns an object whose fields are null. We only get here
+		// with a non-null id, i.e. a request that authenticated, so a missing row
+		// means the key was deleted underneath us. Reading that as "unpinned"
+		// would widen a formerly pinned key to the whole pool during that race.
+		if (!raw) return { kind: "refused" };
+
 		// A pin we cannot parse is corruption; the routing layer fails closed on
 		// it and so does this. Serving a pooled catalog here would be the same
 		// mistake one step earlier.
@@ -178,17 +223,40 @@ export class CodexModelCatalogCache {
 		};
 		if (!isPinActive(pin)) return { kind: "allowed", key: "", pin: null };
 
-		const key = pin.accountId
-			? `account:${pin.accountId}`
-			: `providers:${[...(pin.providers ?? [])].sort().join(",")}`;
-		return { kind: "allowed", key, pin };
+		if (pin.accountId) {
+			return { kind: "allowed", key: `account:${pin.accountId}`, pin };
+		}
+
+		const providers = [...(pin.providers ?? [])];
+		// The stored list is only checked for "non-empty array of strings", so a
+		// tampered row can hold anything. Refuse names we do not know rather than
+		// key on them: the encoding below must be injective, and a value like
+		// "anthropic,codex" is exactly the sort of thing that collapses two
+		// distinct pins onto one cache entry.
+		if (!providers.every((name) => isKnownProvider(name))) {
+			return { kind: "refused" };
+		}
+
+		// JSON, not a comma join: `["a","b"]` and `["a,b"]` join identically, and
+		// a shared key would serve one pin's catalog to the other.
+		return {
+			kind: "allowed",
+			key: `providers:${JSON.stringify(providers.sort())}`,
+			pin,
+		};
 	}
 
 	private async refresh(
 		key: string,
 		pin: RoutingPin | null,
 	): Promise<CodexModelCatalogEntry | null> {
-		const fetched = await this.fetchFromAnyAccount(pin);
+		const fetched = await this.withDeadline(this.fetchFromAnyAccount(pin));
+		if (!fetched) {
+			this.retryAfter.set(
+				key,
+				this.deps.now() + CODEX_MODEL_CATALOG_RETRY_AFTER_MS,
+			);
+		}
 		if (fetched) {
 			// Delete before set so insertion order tracks write recency: Map keeps a
 			// re-`set` key in its original position, which would make eviction drop
@@ -212,6 +280,51 @@ export class CodexModelCatalogCache {
 			return stale.entry;
 		}
 		return null;
+	}
+
+	/**
+	 * Resolve `work`, or `null` once the lookup budget expires — whichever comes
+	 * first.
+	 *
+	 * A losing `work` is abandoned, not cancelled: `getValidAccessToken` exposes
+	 * no signal, so the only thing we control is how long anyone waits on it.
+	 * That is the point. The in-flight entry settles on the deadline and clears,
+	 * so a dependency that never settles costs one slow lookup rather than
+	 * wedging the scope forever. An abandoned attempt that later succeeds is
+	 * simply discarded; it can never write to the cache, because the write
+	 * happens here, downstream of the race.
+	 */
+	private async withDeadline(
+		work: Promise<CodexModelCatalogEntry | null>,
+	): Promise<CodexModelCatalogEntry | null> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<null>((resolve) => {
+			timer = setTimeout(() => {
+				log.warn(
+					"Model-catalog lookup exceeded its budget; falling back for now",
+				);
+				resolve(null);
+			}, this.deps.lookupBudgetMs);
+			// Never hold the process open for a catalog read.
+			(timer as { unref?: () => void }).unref?.();
+		});
+
+		// Neutralise the rejection here rather than relying on the race: once the
+		// deadline wins, nothing is awaiting `work`, and a late rejection would
+		// surface as an unhandled one with no caller left to blame.
+		const settled = work.catch((error: unknown) => {
+			log.warn(
+				"Model-catalog lookup rejected:",
+				error instanceof Error ? error.message : String(error),
+			);
+			return null;
+		});
+
+		try {
+			return await Promise.race([settled, deadline]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	/**
@@ -241,20 +354,41 @@ export class CodexModelCatalogCache {
 			return null;
 		}
 
-		const candidates = accounts.filter(
-			(account) =>
-				account.provider === "codex" &&
-				!account.paused &&
-				isAccountAllowedByPin(pin, account),
-		);
+		const candidates = accounts
+			.filter(
+				(account) =>
+					account.provider === "codex" &&
+					!account.paused &&
+					isAccountAllowedByPin(pin, account),
+			)
+			// Sorted, not database order. When a scope admits several accounts the
+			// catalog we serve is one of theirs, and which one must not depend on
+			// row order or on who answered first — otherwise the models Codex is
+			// shown can change with no configuration change behind it.
+			.sort((a, b) => a.id.localeCompare(b.id));
 		if (candidates.length === 0) return null;
 
-		const deadline = this.deps.now() + CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS;
+		if (candidates.length > 1) {
+			// Entitlement is per-subscription, so in a multi-account scope the
+			// catalog describes ONE account while inference may load-balance to
+			// another. A model listed here but missing there fails upstream and
+			// falls over to the next account, so this costs an attempt rather than
+			// a request — but it is worth being able to find in a log.
+			log.debug(
+				`Model-catalog scope admits ${candidates.length} accounts; serving '${candidates[0].name}'`,
+			);
+		}
+
+		// Two bounds, because they stop different things. This one keeps a loop of
+		// attempts that each RETURN from consuming the budget several times over;
+		// the race in withDeadline is the backstop for a single attempt that never
+		// returns at all, which no amount of checking between attempts can catch.
+		const deadline = this.deps.now() + this.deps.lookupBudgetMs;
 
 		for (const account of candidates) {
 			if (this.deps.now() >= deadline) {
 				log.warn(
-					"Model-catalog lookup ran out of time before every account was tried",
+					"Model-catalog lookup ran out of budget before every account was tried",
 				);
 				break;
 			}

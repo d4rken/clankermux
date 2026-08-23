@@ -3,6 +3,7 @@ import type { Account } from "@clankermux/types";
 import {
 	CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS,
 	CODEX_MODEL_CATALOG_MAX_ENTRIES,
+	CODEX_MODEL_CATALOG_RETRY_AFTER_MS,
 	CODEX_MODEL_CATALOG_TTL_MS,
 	CodexModelCatalogCache,
 } from "../codex-model-catalog-cache";
@@ -216,6 +217,61 @@ describe("CodexModelCatalogCache", () => {
 		expect(fetchCalls.length).toBeLessThan(10);
 	});
 
+	// The real hazard is not a slow dependency but one that never settles:
+	// getValidAccessToken refreshes OAuth over a fetch with no timeout. Without a
+	// hard deadline the in-flight entry never clears and the scope is wedged for
+	// the life of the process.
+	test("gives up on a dependency that never settles, and recovers afterwards", async () => {
+		let release: (() => void) | undefined;
+		const cache = new CodexModelCatalogCache({
+			listAccounts: async () => [account()],
+			getApiKeyPin: async () => null,
+			getAccessToken: () =>
+				new Promise<string>((resolve) => {
+					release = () => resolve("token");
+				}),
+			fetchCatalog: async () => ({
+				ok: true,
+				bodyText: '{"models":[]}',
+				etag: null,
+			}),
+			// Real timers: the deadline is a setTimeout, so this asserts it fires
+			// rather than that a fake clock was advanced past it. Shortened so the
+			// test costs 50ms instead of the production budget.
+			now: Date.now,
+			lookupBudgetMs: 50,
+		});
+
+		const started = Date.now();
+		expect(await cache.get(null)).toBeNull();
+		// Returned on the deadline, not on the hung dependency.
+		expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+		expect(Date.now() - started).toBeLessThan(2_000);
+
+		// The abandoned attempt settling later must not corrupt anything.
+		release?.();
+		await flushMicrotasks();
+	});
+
+	// One unreachable backend must not turn every request into another
+	// authenticated attempt.
+	test("holds off after a failure instead of retrying on every request", async () => {
+		const { cache, fetchCalls, advance } = harness({
+			results: [{ ok: false }],
+		});
+
+		expect(await cache.get(null)).toBeNull();
+		const afterFirst = fetchCalls.length;
+
+		expect(await cache.get(null)).toBeNull();
+		expect(await cache.get(null)).toBeNull();
+		expect(fetchCalls.length).toBe(afterFirst);
+
+		advance(CODEX_MODEL_CATALOG_RETRY_AFTER_MS + 1);
+		await cache.get(null);
+		expect(fetchCalls.length).toBeGreaterThan(afterFirst);
+	});
+
 	test("a throwing fetcher degrades to the next account, then to null", async () => {
 		const attempted: string[] = [];
 		const cache = new CodexModelCatalogCache({
@@ -304,6 +360,61 @@ describe("CodexModelCatalogCache", () => {
 
 		// The routing layer fails closed on a corrupt pin; serving a pooled
 		// catalog here would be the same mistake one step earlier.
+		// Which account serves an ambiguous scope must not depend on row order or
+		// on who answers first, or the models Codex sees can change with no
+		// configuration change behind it.
+		test("picks deterministically when several accounts are eligible", async () => {
+			const run = async (accounts: Account[]) => {
+				const { cache, fetchCalls } = harness({
+					accounts,
+					getApiKeyPin: async () => ({
+						pinnedAccountId: null,
+						pinnedProviders: ["codex"],
+						malformed: false,
+					}),
+				});
+				await cache.get("key-1");
+				return fetchCalls[0].token;
+			};
+
+			const forward = await run([
+				account({ id: "aaa" }),
+				account({ id: "bbb" }),
+				account({ id: "ccc" }),
+			]);
+			const reversed = await run([
+				account({ id: "ccc" }),
+				account({ id: "bbb" }),
+				account({ id: "aaa" }),
+			]);
+
+			expect(forward).toBe("token-aaa");
+			expect(reversed).toBe(forward);
+		});
+
+		// A null row means the key does not exist, not that it is unpinned. An
+		// unpinned key returns an object of nulls.
+		test("fails closed when the key row has vanished", async () => {
+			const { cache, fetchCalls } = harness({ getApiKeyPin: async () => null });
+
+			expect(await cache.get("deleted-key")).toBeNull();
+			expect(fetchCalls).toHaveLength(0);
+		});
+
+		test("fails closed on a provider pin naming an unknown provider", async () => {
+			const { cache, fetchCalls } = harness({
+				getApiKeyPin: async () => ({
+					pinnedAccountId: null,
+					// What a comma-joined key would have collapsed into two providers.
+					pinnedProviders: ["anthropic,codex"],
+					malformed: false,
+				}),
+			});
+
+			expect(await cache.get("key-1")).toBeNull();
+			expect(fetchCalls).toHaveLength(0);
+		});
+
 		test("fails closed on a malformed pin", async () => {
 			const { cache, fetchCalls } = harness(
 				pinned({
