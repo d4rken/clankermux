@@ -25,6 +25,7 @@ describe("isIdentityBoundPath", () => {
 		"/api/oauth/files/",
 		"/api/oauth/files/abc123",
 		"/api/oauth/file_upload",
+		"/api/oauth/profile",
 		"/v1/code/",
 		"/v1/code/sessions",
 		"/v1/code/auth/refresh",
@@ -40,7 +41,6 @@ describe("isIdentityBoundPath", () => {
 		"/v1/messages/count_tokens",
 		"/v1/models",
 		"/api/oauth/usage",
-		"/api/oauth/profile",
 		"/api/event_logging/batch",
 		"/api/system/package-manager",
 	]) {

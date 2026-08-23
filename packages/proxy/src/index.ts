@@ -89,6 +89,7 @@ export {
 // depend on this package.
 export { createClientAbortResponse } from "./handlers/client-abort-response";
 export {
+	canonicalize,
 	createIdentityBoundRefusalResponse,
 	IDENTITY_BOUND_PATH_PREFIXES,
 	isIdentityBoundPath,
