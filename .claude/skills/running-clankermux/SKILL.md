@@ -26,7 +26,7 @@ is also accepted).
 For OpenRouter, always use model `z-ai/glm-4.5-air:free`:
 
 ```bash
-curl -X POST http://localhost:8081/v1/messages \
+curl -X POST http://localhost:8081/wire/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer test" \
   -d '{"model":"z-ai/glm-4.5-air:free","messages":[{"role":"user","content":"test"}],"max_tokens":10}'

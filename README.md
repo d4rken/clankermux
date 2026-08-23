@@ -83,13 +83,20 @@ bun start           # serves the proxy + dashboard on http://localhost:8080
 
 Add your provider accounts in the dashboard, then point your coding client at the proxy.
 
+Agent traffic is served only under the wire mounts: `/wire/anthropic` for clients that
+speak the Anthropic Messages API and `/wire/openai` for clients that speak the OpenAI
+Responses API. The mount names the wire format the client speaks, not the account pool
+the request is served from. The old root endpoints (`/v1/*` and `/messages/*` directly
+on the port) have been removed and now answer 404, so a client still configured with a
+bare base URL has to be repointed at the mount for its format.
+
 ## Use it with Claude Code
 
 Set `ANTHROPIC_BASE_URL` to the ClankerMux endpoint. With a logged-in Claude Pro/Team
 CLI you don't need a token:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
 claude
 ```
 
@@ -98,7 +105,7 @@ also set a token — `dummy-key` when ClankerMux runs open, or a generated key w
 protected:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
 export ANTHROPIC_AUTH_TOKEN=dummy-key     # or a key generated in the dashboard
 claude
 ```
@@ -116,7 +123,7 @@ model_provider = "clankermux"
 
 [model_providers.clankermux]
 name = "ClankerMux"
-base_url = "http://localhost:8080/v1"
+base_url = "http://localhost:8080/wire/openai/v1"
 wire_api = "responses"
 env_key = "CLANKERMUX_API_KEY"
 ```
