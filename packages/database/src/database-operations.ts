@@ -28,6 +28,7 @@ import type {
 	StorageUsageType,
 	StrategyStore,
 	ToolCallStat,
+	UnifiedClaimObservationRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
 } from "@clankermux/types";
@@ -77,9 +78,11 @@ import {
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-observation.repository";
 import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
+import { runStorageUsageScanInWorker } from "./storage-usage-runner";
 
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
@@ -276,6 +279,19 @@ const DEFAULT_USAGE_SNAPSHOT_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 const DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS = 14 * TIME_CONSTANTS.DAY;
 
 /**
+ * Retention for the request-aligned `unified_claim_observations` series. FIXED,
+ * with no operator control and no fallback parameter: every caller of
+ * `cleanupOldRequests()` prunes it on this value.
+ *
+ * Deliberately NOT the `usage_snapshot_retention_days` knob, whose default is
+ * 3650 days — this table grows with request volume times claims-per-response,
+ * so a decade of it is a different order of magnitude from a decade of poll
+ * ticks. 90 days is long enough to fit a full weekly-window analysis several
+ * times over.
+ */
+export const UNIFIED_CLAIM_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * How long a per-data-type storage-usage measurement is reused before the next
  * dashboard read triggers a fresh scan. The byte sums require a full-table
  * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
@@ -298,6 +314,10 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	// Rides the usage-snapshot retention control (one knob for one series
 	// family), so it has no control of its own — the card sums the two.
 	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
+	// Request-aligned claim series. Measured beside the usage snapshots because
+	// it is the same kind of data, but it rides a FIXED retention of its own
+	// (UNIFIED_CLAIM_OBSERVATION_RETENTION_MS), not the usage-snapshot control.
+	{ key: "unified_claim_observations", table: "unified_claim_observations" },
 	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
 	// rather than by a retention control of its own.
 	{ key: "quota_drift_results", table: "quota_drift_results" },
@@ -306,6 +326,19 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	{ key: "tool_calls", table: "request_tool_calls" },
 	{ key: "tool_errors", table: "request_tool_errors" },
 ];
+
+/**
+ * bun:sqlite treats exactly `":memory:"` and `""` as a private in-memory
+ * database. Neither can be opened by the scan worker — it would get its own
+ * unrelated empty DB and report confident zeros — so both route to the inline
+ * scan path. Exact matches only: the constructor opens without SQLITE_OPEN_URI,
+ * so URI-looking strings (`file::memory:`) are LITERAL disk filenames here and
+ * must go through the worker like any other file, not get substring-matched
+ * into the inline path where a real multi-GB file would block the loop again.
+ */
+function isInMemoryDbPath(path: string): boolean {
+	return path === "" || path === ":memory:";
+}
 
 /**
  * Approximate per-data-type storage usage. `measuredAt` is epoch ms (the
@@ -388,6 +421,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	} | null = null;
 	/** Dedups concurrent storage-usage computations so a slow scan runs once. */
 	private retentionUsageInFlight: Promise<RetentionStorageUsage> | null = null;
+	/**
+	 * Bumped by every cleanup so a scan that STARTED before the cleanup cannot
+	 * write its pre-cleanup counts into the cache after the invalidation — a
+	 * multi-minute worker scan can easily straddle a cleanup, and without this
+	 * the stale measurement would win and stick for the whole TTL.
+	 */
+	private retentionUsageGeneration = 0;
 
 	// Repositories
 	private accounts: AccountRepository;
@@ -400,6 +440,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private usageScopedSnapshots: UsageScopedSnapshotRepository;
+	private unifiedClaimObservations: UnifiedClaimObservationRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
@@ -488,6 +529,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.usageScopedSnapshots = retrying(
 			new UsageScopedSnapshotRepository(this.adapter),
 			"usageScopedSnapshots",
+		);
+		this.unifiedClaimObservations = retrying(
+			new UnifiedClaimObservationRepository(this.adapter),
+			"unifiedClaimObservations",
 		);
 		this.quotaDriftResults = retrying(
 			new QuotaDriftResultRepository(this.adapter),
@@ -829,13 +874,21 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		if (this.retentionUsageInFlight) {
 			return this.retentionUsageInFlight;
 		}
+		const generation = this.retentionUsageGeneration;
 		const inFlight = this.computeRetentionStorageUsage()
 			.then((value) => {
-				this.retentionUsageCache = { value, computedAt: Date.now() };
+				// A cleanup may have invalidated mid-scan; its bump makes this
+				// scan's snapshot stale, so return it to the callers who asked
+				// for it but keep it out of the cache.
+				if (generation === this.retentionUsageGeneration) {
+					this.retentionUsageCache = { value, computedAt: Date.now() };
+				}
 				return value;
 			})
 			.finally(() => {
-				this.retentionUsageInFlight = null;
+				if (this.retentionUsageInFlight === inFlight) {
+					this.retentionUsageInFlight = null;
+				}
 			});
 		this.retentionUsageInFlight = inFlight;
 		return inFlight;
@@ -846,24 +899,62 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		const dbBytes = await this.getDbSizeBytes();
 		const walBytes = await this.getWalSizeBytes();
 
-		const types = await Promise.all(
-			RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
-				const { rowCount, approxBytes } =
-					await this.measureTableLogicalSize(table);
-				return { key, table, rowCount, approxBytes };
-			}),
-		);
+		// The byte sums are full-table scans, and bun:sqlite is synchronous —
+		// run here they block the event loop for the whole scan (observed
+		// 94–130 s against a cold OS page cache after a restart, freezing ALL
+		// HTTP serving). The worker opens its own readonly handle instead; WAL
+		// readers don't block this connection's writer. An in-memory DB cannot
+		// be shared with a worker, so it scans inline — it is by definition
+		// small enough not to block anything.
+		if (isInMemoryDbPath(this.resolvedDbPath)) {
+			const types = await Promise.all(
+				RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
+					const { rowCount, approxBytes } =
+						await this.measureTableLogicalSize(table);
+					return { key, table, rowCount, approxBytes };
+				}),
+			);
+			return { available: true, measuredAt, dbBytes, walBytes, types };
+		}
 
+		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
+			tables: RETENTION_USAGE_TABLES,
+			busyTimeoutMs: 10000,
+		});
+		if (!scan.ok) {
+			console.warn(`[storage-usage] scan worker failed: ${scan.error}`);
+			return {
+				available: false,
+				measuredAt,
+				dbBytes,
+				walBytes,
+				types: RETENTION_USAGE_TABLES.map(({ key, table }) => ({
+					key,
+					table,
+					rowCount: 0,
+					approxBytes: 0,
+				})),
+			};
+		}
+		// Re-key by table so response order is the constant list's order even if
+		// a worker ever reordered its output.
+		const byTable = new Map(scan.types.map((t) => [t.table, t]));
+		const types = RETENTION_USAGE_TABLES.map(({ key, table }) => ({
+			key,
+			table,
+			rowCount: byTable.get(table)?.rowCount ?? 0,
+			approxBytes: byTable.get(table)?.approxBytes ?? 0,
+		}));
 		return { available: true, measuredAt, dbBytes, walBytes, types };
 	}
 
 	/**
-	 * Approximate logical byte size + row count of a single SQLite table,
-	 * computed as `SUM(LENGTH(col))` over every column (discovered via
-	 * `PRAGMA table_info`). LENGTH counts the text representation of values
-	 * (raw bytes for BLOBs), so this undercounts SQLite's varint integer
-	 * encoding and ignores index/page overhead — an intentional "content
-	 * bytes" approximation, labeled as such in the UI. Returns zeros (never
+	 * Inline fallback for in-memory databases ONLY — a `:memory:` DB cannot be
+	 * opened by the scan worker, and is small enough that the synchronous scan
+	 * cannot meaningfully block. File-backed databases always go through
+	 * `runStorageUsageScanInWorker`; this method blocks the event loop for the
+	 * whole scan and must not be pointed at one. Same approximation as the
+	 * worker: `SUM(LENGTH(col))` over every column, zeros on error (never
 	 * throws) so one bad table can't sink the whole measurement.
 	 */
 	private async measureTableLogicalSize(
@@ -1486,12 +1577,15 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — five explicit passes:
+	// Cleanup operations — six explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
 	// Pass 3: delete usage snapshots older than snapshotRetentionMs
 	// Pass 4: delete memory snapshots older than memorySnapshotRetentionMs
-	// Pass 5: evict oldest payloads until their content fits payloadMaxBytes
+	// Pass 5: delete claim observations older than the FIXED
+	//         UNIFIED_CLAIM_OBSERVATION_RETENTION_MS (no parameter — that series
+	//         has no operator control)
+	// Pass 6: evict oldest payloads until their content fits payloadMaxBytes
 	//
 	// `snapshotRetentionMs` and `memorySnapshotRetentionMs` are optional so
 	// existing callers (including the http-api "Clean up now" handler) prune
@@ -1514,6 +1608,7 @@ OAuth tokens will need to be re-authenticated.
 		removedPayloadsBySize: number;
 		removedSnapshots: number;
 		removedMemorySnapshots: number;
+		removedUnifiedClaimObservations: number;
 	}> {
 		const now = Date.now();
 
@@ -1541,6 +1636,10 @@ OAuth tokens will need to be re-authenticated.
 			Number.isFinite(memorySnapshotRetentionMs)
 				? memorySnapshotRetentionMs
 				: DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS);
+		// No parameter and no fallback: this series has one fixed retention for
+		// every caller (see UNIFIED_CLAIM_OBSERVATION_RETENTION_MS).
+		const unifiedClaimObservationCutoff =
+			now - UNIFIED_CLAIM_OBSERVATION_RETENTION_MS;
 
 		const empty = {
 			removedRequests: 0,
@@ -1548,6 +1647,7 @@ OAuth tokens will need to be re-authenticated.
 			removedPayloadsBySize: 0,
 			removedSnapshots: 0,
 			removedMemorySnapshots: 0,
+			removedUnifiedClaimObservations: 0,
 		};
 
 		const worker = this.spawnIncrementalVacuumWorker();
@@ -1565,6 +1665,7 @@ OAuth tokens will need to be re-authenticated.
 					requestCutoff,
 					usageSnapshotCutoff,
 					memorySnapshotCutoff,
+					unifiedClaimObservationCutoff,
 					payloadMaxBytes,
 				});
 			});
@@ -1587,7 +1688,13 @@ OAuth tokens will need to be re-authenticated.
 			// Row counts/sizes may have changed (even a partial/failed run) — drop
 			// the cached storage-usage measurement so the next dashboard read
 			// recomputes. Must happen on THIS instance; the worker can't touch it.
+			// The generation bump stops an in-flight pre-cleanup scan from
+			// re-caching its stale snapshot, and detaching the in-flight promise
+			// makes the dashboard's immediate post-cleanup refetch start a fresh
+			// scan instead of adopting the pre-cleanup one.
+			this.retentionUsageGeneration += 1;
 			this.retentionUsageCache = null;
+			this.retentionUsageInFlight = null;
 		}
 	}
 
@@ -2320,6 +2427,19 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Request-aligned unified claim observations ────────────────────────────
+
+	/**
+	 * Record one response's per-claim rate-limit readings. Idempotent on
+	 * (request_id, claim); real constraint violations still throw. Retention for
+	 * this series is the cleanup worker's, not a repository method.
+	 */
+	async saveUnifiedClaimObservations(
+		rows: UnifiedClaimObservationRow[],
+	): Promise<void> {
+		await this.unifiedClaimObservations.insertMany(rows);
 	}
 
 	// ── Precomputed quota-drift results ───────────────────────────────────────

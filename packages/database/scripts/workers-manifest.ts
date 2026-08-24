@@ -52,6 +52,12 @@ export const WORKERS: Worker[] = [
 		bundle: "payload-write-worker.js",
 		constName: "EMBEDDED_PAYLOAD_WRITE_WORKER_CODE",
 	},
+	{
+		source: "storage-usage-worker.ts",
+		inline: "inline-storage-usage-worker.ts",
+		bundle: "storage-usage-worker.js",
+		constName: "EMBEDDED_STORAGE_USAGE_WORKER_CODE",
+	},
 ];
 
 /**

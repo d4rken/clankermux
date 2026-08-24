@@ -366,6 +366,31 @@ Re-run the committed study after any of these. Its thresholds are pre-declared
 and its report is frozen per range, so a later run is a comparison rather than a
 fresh hunt for a cell that scores well.
 
+**Progress on requirements 1–3 (2026-08-24).** The proxy now captures the
+request-aligned utilization series into `unified_claim_observations`: one row
+per claim (`5h`, `7d`, scoped windows such as `7d_oi`) per Anthropic response,
+carrying the reported utilization, the claim status, the claim's own reset, the
+HTTP status, the request start time and the headers-arrival time. Keepalive and
+auto-refresh dispatches are captured too, tagged by `source`, so synthetic spend
+is visible where the ledger has it excluded. Capture only — nothing reads the
+table yet.
+
+What it does and does not change for a re-run:
+
+- Utilization arrives at the provider's own precision on the response rather
+  than through a 120 s poll, and it arrives once per request instead of once per
+  tick. Whether that resolves the silent-bin problem is a measurement, not an
+  assumption: the header may be quantised at the source too.
+- `request_started_at` is stored per observation, so a lag sweep can be run
+  against request start instead of terminal-persist time.
+- Retention is a FIXED 90 days
+  (`UNIFIED_CLAIM_OBSERVATION_RETENTION_MS`), independent of the request and
+  usage-snapshot controls. Observations and `requests` rows therefore age out on
+  different clocks, so any analysis joining them must MEASURE its join coverage
+  over the range it uses rather than assume the two tables span it equally.
+- The feasibility re-run waits on data accumulating — the table starts empty at
+  the deploy that lands it.
+
 **Consequence for item 1.** Item 1 (pool load redistribution) was planned to
 take its demand figure from this model, and that prerequisite is gone for now.
 Re-plan it against per-account slopes — the ones `estimateWindowExhaustion`

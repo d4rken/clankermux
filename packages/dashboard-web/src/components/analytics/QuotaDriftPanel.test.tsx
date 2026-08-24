@@ -20,6 +20,7 @@ import {
 	measuredModel,
 	multiGapModel,
 	preChangeCohort,
+	recoveredModel,
 	retiredModel,
 	unidentifiedModel,
 	windowResult,
@@ -100,6 +101,41 @@ describe("QuotaDriftPanel", () => {
 		);
 	});
 
+	it("keeps the whole gap report collapsed, with nothing visible by default", () => {
+		// The cost table above the charts already names each model's current
+		// reason, so the chart section renders NO gap prose until the reader
+		// opens the expander. Static markup still contains the <details>
+		// children, so the split is asserted by position relative to the tag.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort([
+					windowResult("five_hour", [
+						measuredModel(),
+						retiredModel(),
+						recoveredModel(),
+					]),
+				])}
+			/>,
+		);
+
+		const visible = html.slice(0, html.indexOf("<details"));
+		expect(visible).not.toContain("Not separately measurable");
+		expect(visible).not.toContain("claude-opus-4-8</span>");
+		expect(visible).not.toContain("claude-sonnet-4-6");
+
+		const collapsed = html.slice(html.indexOf("<details"));
+		expect(collapsed).toContain(
+			"What this analysis could not measure, and why",
+		);
+		expect(collapsed).toMatch(
+			/claude-opus-4-8<\/span> — not in use since \d+ \w+/,
+		);
+		expect(collapsed).toContain("claude-sonnet-4-6");
+		expect(collapsed).toMatch(
+			/too little of this window.{0,6}s traffic to measure from/,
+		);
+	});
+
 	it("names the model and the period a model stopped being routed", () => {
 		// The biggest empty regions on the live chart. The chart itself just
 		// breaks its line; without this the reader has no way to tell "we could
@@ -144,6 +180,7 @@ describe("QuotaDriftPanel", () => {
 		);
 
 		expect(html).not.toContain("What this analysis could not measure");
+		expect(html).not.toContain("<details");
 	});
 
 	it("states a window the provider never moved, below the chart", () => {

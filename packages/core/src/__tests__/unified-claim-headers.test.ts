@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
+	type ExtractedClaimReading,
+	extractUnifiedClaimReadings,
 	getAccountWideClaimHeadroom,
 	getScopedClaimRejection,
 	hasAccountWideUnifiedRejection,
 	isScopedOnlyUnifiedRejection,
+	parseStrictDecimal,
 } from "../unified-claim-headers";
 
 // The production 429 headers of 2026-08-02T15:36:28Z, verbatim (same fixture
@@ -195,5 +198,170 @@ describe("isScopedOnlyUnifiedRejection", () => {
 
 	it("is false for a burst shape (no unified headers)", () => {
 		expect(isScopedOnlyUnifiedRejection(h({}))).toBe(false);
+	});
+});
+
+describe("parseStrictDecimal", () => {
+	it("parses a plain decimal", () => {
+		expect(parseStrictDecimal("0.94")).toBe(0.94);
+	});
+
+	it("parses a zero as 0, not null (a reading of zero is a reading)", () => {
+		expect(parseStrictDecimal("0")).toBe(0);
+		expect(parseStrictDecimal("0.0")).toBe(0);
+	});
+
+	it("rejects a prefix-parseable value", () => {
+		expect(parseStrictDecimal("0.94x")).toBeNull();
+		expect(parseStrictDecimal("0x1")).toBeNull();
+	});
+
+	it("rejects null and the empty string", () => {
+		expect(parseStrictDecimal(null)).toBeNull();
+		expect(parseStrictDecimal("")).toBeNull();
+	});
+
+	// Regression: the strict-decimal SHAPE alone admits a digit string long
+	// enough to overflow to Infinity, which then reads as a finite utilization
+	// (or reset) everywhere downstream.
+	it("rejects a digit string that overflows to Infinity", () => {
+		const huge = `1${"0".repeat(400)}`;
+		expect(Number.parseFloat(huge)).toBe(Number.POSITIVE_INFINITY);
+		expect(parseStrictDecimal(huge)).toBeNull();
+	});
+});
+
+describe("extractUnifiedClaimReadings", () => {
+	const byClaim = (readings: ExtractedClaimReading[]) =>
+		Object.fromEntries(readings.map((r) => [r.claim, r]));
+
+	it("extracts the account-wide and scoped claims of the incident shape", () => {
+		const readings = extractUnifiedClaimReadings(h(incidentHeaders()));
+		expect(readings.map((r) => r.claim).sort()).toEqual(["5h", "7d", "7d_oi"]);
+		const claims = byClaim(readings);
+		expect(claims["5h"]).toEqual({
+			claim: "5h",
+			status: "allowed",
+			utilization: 0,
+			resetMs: INCIDENT_5H_RESET_MS,
+		});
+		expect(claims["7d"]).toEqual({
+			claim: "7d",
+			status: "allowed_warning",
+			utilization: 0.94,
+			resetMs: INCIDENT_WEEKLY_RESET_MS,
+		});
+		expect(claims["7d_oi"]).toEqual({
+			claim: "7d_oi",
+			status: "rejected",
+			utilization: 1,
+			resetMs: INCIDENT_WEEKLY_RESET_MS,
+		});
+	});
+
+	it("excludes the overage axis (a billing state, not a window)", () => {
+		const readings = extractUnifiedClaimReadings(h(incidentHeaders()));
+		expect(readings.some((r) => r.claim === "overage")).toBe(false);
+	});
+
+	it("ignores the summary status line (it carries no claim token)", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-status": "rejected",
+				"anthropic-ratelimit-unified-reset": "1785736800",
+			}),
+		);
+		expect(readings).toEqual([]);
+	});
+
+	it("returns [] for a burst shape (no unified headers at all)", () => {
+		expect(extractUnifiedClaimReadings(h({ "retry-after": "5" }))).toEqual([]);
+	});
+
+	it("keeps a status verbatim, including an unknown vocabulary entry", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({ "anthropic-ratelimit-unified-5h-status": "banana" }),
+		);
+		expect(readings).toEqual([
+			{ claim: "5h", status: "banana", utilization: null, resetMs: null },
+		]);
+	});
+
+	it("records a zero utilization as 0, never as null", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-utilization": "0",
+			}),
+		);
+		expect(readings[0].utilization).toBe(0);
+	});
+
+	it("nulls a missing or unparseable utilization", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-utilization": "0.94x",
+			}),
+		);
+		const claims = byClaim(readings);
+		expect(claims["5h"].utilization).toBeNull();
+		expect(claims["7d"].utilization).toBeNull();
+	});
+
+	it("nulls a utilization that overflows to Infinity", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-utilization": `1${"0".repeat(400)}`,
+			}),
+		);
+		expect(readings[0].utilization).toBeNull();
+	});
+
+	it("nulls a reset that is fractional, absurd, or unparseable", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-reset": "1785685200.1234",
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-reset": "99999999999999999999",
+				"anthropic-ratelimit-unified-7d_oi-status": "allowed",
+				"anthropic-ratelimit-unified-7d_oi-reset": "later",
+			}),
+		);
+		const claims = byClaim(readings);
+		expect(claims["5h"].resetMs).toBeNull();
+		expect(claims["7d"].resetMs).toBeNull();
+		expect(claims["7d_oi"].resetMs).toBeNull();
+	});
+
+	it("accepts any scoped-window token shape, not just 7d_oi", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h_oi-status": "allowed",
+				"anthropic-ratelimit-unified-5h_oi-utilization": "0.25",
+				"anthropic-ratelimit-unified-5h_oi-reset": "1785685200",
+			}),
+		);
+		expect(readings).toEqual([
+			{
+				claim: "5h_oi",
+				status: "allowed",
+				utilization: 0.25,
+				resetMs: INCIDENT_5H_RESET_MS,
+			},
+		]);
+	});
+
+	it("yields nothing for a claim with no status line of its own", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
+				"anthropic-ratelimit-unified-7d-utilization": "0.94",
+			}),
+		);
+		expect(readings).toEqual([]);
 	});
 });
