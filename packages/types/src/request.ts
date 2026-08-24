@@ -124,6 +124,15 @@ export interface RequestRow {
 	// Per-request reasoning effort: "thinking:<budget>"/"thinking" (Anthropic)
 	// or the raw reasoning.effort string (OpenAI Responses), NULL when absent.
 	reasoning_effort: string | null;
+	/**
+	 * When a persistable token vector first became known for this request, ms
+	 * epoch. Distinct from `timestamp`, which is stamped at PERSISTENCE time
+	 * (after the async writer drains) — anything correlating token spend against
+	 * a rate-limit clock is skewed by that unknown lag without this column.
+	 * NULL = no usable usage ever arrived (waived, or a summary with no model),
+	 * or the row predates the column.
+	 */
+	usage_finalized_at: number | null;
 }
 
 // Domain model
@@ -158,6 +167,11 @@ export interface Request {
 	billingType?: string;
 	comboName?: string;
 	reasoningEffort?: string;
+	/**
+	 * Ms epoch at which a persistable token vector first became known. Absent
+	 * when none ever did, or when the row predates the column.
+	 */
+	usageFinalizedAt?: number;
 }
 
 // API response type
@@ -316,6 +330,10 @@ export function toRequest(row: RequestRow): Request {
 		billingType: row.billing_type || undefined,
 		comboName: row.combo_name || undefined,
 		reasoningEffort: row.reasoning_effort || undefined,
+		usageFinalizedAt:
+			row.usage_finalized_at != null
+				? Number(row.usage_finalized_at)
+				: undefined,
 	};
 }
 

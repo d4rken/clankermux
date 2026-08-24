@@ -338,6 +338,17 @@ export function DataRetentionCard() {
 						.
 					</p>
 				)}
+				{/* No data at all = the measurement is pending, or a request timed
+				    out and a retry/refetch is coming — the server keeps scanning
+				    either way, so "measuring" stays true. Distinct from a resolved
+				    `available: false` (a failed scan), which renders nothing rather
+				    than claim progress that isn't happening. */}
+				{!usage && (
+					<p className="text-xs text-muted-foreground pt-1">
+						Measuring storage usage… the first measurement after a restart scans
+						the whole database and can take a couple of minutes.
+					</p>
+				)}
 
 				<div className="flex items-center justify-between pt-2 pb-1">
 					<div>

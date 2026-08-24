@@ -179,6 +179,9 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
 					unifiedClaimObservationCutoff: CUTOFF,
+					unifiedSummaryObservationCutoff: CUTOFF,
+					internalDispatchSpendCutoff: CUTOFF,
+					providerWindowObservationCutoff: CUTOFF,
 					// Byte budget disabled — these cases exercise the age rules only.
 					payloadMaxBytes: 0,
 				});
@@ -315,6 +318,9 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
 					unifiedClaimObservationCutoff: CUTOFF,
+					unifiedSummaryObservationCutoff: CUTOFF,
+					internalDispatchSpendCutoff: CUTOFF,
+					providerWindowObservationCutoff: CUTOFF,
 					payloadMaxBytes: 0,
 				});
 			});
@@ -400,6 +406,9 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
 					unifiedClaimObservationCutoff: CUTOFF,
+					unifiedSummaryObservationCutoff: CUTOFF,
+					internalDispatchSpendCutoff: CUTOFF,
+					providerWindowObservationCutoff: CUTOFF,
 					// Byte budget disabled — these cases exercise the age rules only.
 					payloadMaxBytes: 0,
 				});
@@ -433,6 +442,10 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 				removedSnapshots: 0,
 				removedMemorySnapshots: 0,
 				removedUnifiedClaimObservations: 0,
+				removedUnifiedSummaryObservations: 0,
+				removedInternalDispatchSpend: 0,
+				removedCodexWindowObservations: 0,
+				removedOpenAiBucketObservations: 0,
 			});
 		} finally {
 			await dbOps.close();

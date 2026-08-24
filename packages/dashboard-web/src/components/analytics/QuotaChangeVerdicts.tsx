@@ -40,8 +40,9 @@ export function QuotaChangeVerdicts({
 	const computing = data?.status === "computing";
 	const cohorts = data?.cohorts ?? [];
 
-	// Every model whose verdict is safe to report as a verdict. A `stable` on an
-	// unidentified coefficient is deliberately excluded — see isReportableVerdict.
+	// Every model whose verdict is safe to report as a verdict. A
+	// `no-change-detected` on an unidentified coefficient is deliberately
+	// excluded — see isReportableVerdict.
 	const callouts = cohorts.flatMap((cohort) =>
 		cohort.windows.flatMap((window) =>
 			window.models
@@ -50,7 +51,9 @@ export function QuotaChangeVerdicts({
 		),
 	);
 	const changed = callouts.filter((c) => c.model.verdict === "changed");
-	const stable = callouts.filter((c) => c.model.verdict === "stable");
+	const unchanged = callouts.filter(
+		(c) => c.model.verdict === "no-change-detected",
+	);
 	const anyAssumed = cohorts.some((c) => c.tierProvenance === "assumed");
 	const hiddenLowerBound = Math.max(
 		0,
@@ -117,10 +120,10 @@ export function QuotaChangeVerdicts({
 								</p>
 							)),
 						)}
-						{stable.length > 0 ? (
+						{unchanged.length > 0 ? (
 							<p className="text-sm text-muted-foreground">
 								No change detected for{" "}
-								{stable
+								{unchanged
 									.map(
 										(c) =>
 											`${c.model.key} (${quotaWindowLabel(c.window.window).toLowerCase()})`,
@@ -149,6 +152,13 @@ export function QuotaChangeVerdicts({
 							A change in how the provider weights input, output and cached
 							tokens against each other is indistinguishable here from a change
 							in capacity.
+						</li>
+						<li>
+							Implied capacity is denominated in{" "}
+							<span className="font-medium">price-equivalent tokens</span>: it
+							is conditional on the provider's list-price ratios between input,
+							output and cached tokens holding, and is not a measurement of a
+							raw-token quota. A shift in those ratios alone moves it.
 						</li>
 						<li>
 							Usage on the same account that did not go through this proxy

@@ -81,6 +81,14 @@ export interface RequestData {
 		tokensPerSecond?: number;
 		tokensPerSecondApproximate?: boolean;
 	};
+	/**
+	 * Ms epoch at which a persistable token vector first became known for the
+	 * request — NOT when the row was written. Null/absent = never (usage waived,
+	 * or a summary with no model). Never overwritten once set: both the upsert
+	 * and {@link RequestRepository.updateUsage} COALESCE the stored value first,
+	 * so the EARLIEST stamp survives a late patch.
+	 */
+	usageFinalizedAt?: number | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -130,9 +138,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_system_chars, context_tools_chars, context_tool_count,
 					context_messages_chars, context_message_count, context_tool_result_chars,
 					context_largest_tool_chars, context_largest_tool_name,
-					context_binary_chars
+					context_binary_chars, usage_finalized_at
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -170,7 +178,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				context_tool_result_chars = COALESCE(EXCLUDED.context_tool_result_chars, requests.context_tool_result_chars),
 				context_largest_tool_chars = COALESCE(EXCLUDED.context_largest_tool_chars, requests.context_largest_tool_chars),
 				context_largest_tool_name = COALESCE(EXCLUDED.context_largest_tool_name, requests.context_largest_tool_name),
-				context_binary_chars = COALESCE(EXCLUDED.context_binary_chars, requests.context_binary_chars)
+				context_binary_chars = COALESCE(EXCLUDED.context_binary_chars, requests.context_binary_chars),
+				-- Stored value FIRST: the earliest moment a usable usage vector
+				-- existed is the fact this column records, so a re-upsert (or a
+				-- later patch) must never move it forward.
+				usage_finalized_at = COALESCE(requests.usage_finalized_at, EXCLUDED.usage_finalized_at)
 		`,
 			[
 				data.id,
@@ -215,6 +227,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				// Attachment bytes stripped out of the char buckets, stored as one
 				// figure: images + documents.
 				comp ? comp.imagePayloadChars + comp.documentPayloadChars : null,
+				data.usageFinalizedAt ?? null,
 			],
 		);
 	}
@@ -290,9 +303,18 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}
 	}
 
+	/**
+	 * Patch a persisted row's usage columns (the recorder's late-summary seam).
+	 *
+	 * `usageFinalizedAt` is COALESCE'd with the STORED value first, not last: the
+	 * column records the earliest moment a usable usage vector existed, so a late
+	 * patch may fill it in but must never move it forward. Same rule as the
+	 * upsert in {@link RequestRepository.save}.
+	 */
 	async updateUsage(
 		requestId: string,
 		usage: RequestData["usage"],
+		usageFinalizedAt?: number | null,
 	): Promise<void> {
 		if (!usage) return;
 
@@ -300,6 +322,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			`
 			UPDATE requests
 			SET
+				usage_finalized_at = COALESCE(usage_finalized_at, ?),
 				model = COALESCE(?, model),
 				prompt_tokens = COALESCE(?, prompt_tokens),
 				completion_tokens = COALESCE(?, completion_tokens),
@@ -314,6 +337,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			WHERE id = ?
 		`,
 			[
+				usageFinalizedAt ?? null,
 				usage.model || null,
 				usage.promptTokens || null,
 				usage.completionTokens || null,

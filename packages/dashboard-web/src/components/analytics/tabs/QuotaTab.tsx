@@ -1,6 +1,11 @@
 import { useQuotaDrift } from "../../../hooks/queries";
 import { cohortLabel } from "../../../lib/quota-drift-display";
-import { ModelWindowCostPanel, QuotaChangeVerdicts, QuotaDriftPanel } from "..";
+import {
+	ClaimSeriesAuditPanel,
+	ModelWindowCostPanel,
+	QuotaChangeVerdicts,
+	QuotaDriftPanel,
+} from "..";
 
 /**
  * Quota view: what a model actually costs against a usage window, and whether
@@ -53,6 +58,12 @@ export function QuotaTab() {
 					</section>
 				))
 			)}
+
+			{/* The material every panel above is built on, collapsed and last: it is
+			    a census of the captured readings, not an analysis, and a reader who
+			    wants to know whether a verdict rests on anything comes here after
+			    seeing the verdict. */}
+			<ClaimSeriesAuditPanel audit={data?.claimAudit} />
 		</div>
 	);
 }

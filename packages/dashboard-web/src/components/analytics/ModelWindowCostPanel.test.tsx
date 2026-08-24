@@ -46,7 +46,7 @@ describe("ModelWindowCostPanel", () => {
 		// 100 / 45 = 2.22 points per 1M eq-tokens.
 		expect(html).toContain("2.22%");
 		expect(html).toContain("2.04 – 2.40%");
-		expect(html).toContain("45.0M tokens");
+		expect(html).toContain("45.0M eq-tokens");
 		expect(html).toContain("64.0%");
 	});
 
@@ -65,7 +65,7 @@ describe("ModelWindowCostPanel", () => {
 		expect(html).toContain("5-hour window");
 		expect(html).toContain("Weekly window");
 		expect(html).toContain("73 observations");
-		expect(html).toContain("900M tokens");
+		expect(html).toContain("900M eq-tokens");
 	});
 
 	it("gives an unidentified model a reason, never a number", () => {
@@ -119,6 +119,47 @@ describe("ModelWindowCostPanel", () => {
 		);
 
 		expect(html).toContain("inferred from today&#x27;s account values");
+	});
+
+	it("denominates BOTH numeric columns in price-equivalent tokens", () => {
+		// The prose above the table is not enough: a reader scanning columns takes
+		// "/ 1M" as raw tokens and "45.0M tokens" as a raw-token budget. Neither
+		// column measures raw tokens — both are list-price-weighted equivalents.
+		const html = renderToStaticMarkup(
+			<ModelWindowCostPanel
+				cohort={cohort([windowResult("five_hour", [measuredModel()])])}
+			/>,
+		);
+
+		expect(html).toContain("% of window / 1M eq-tokens");
+		expect(html).toContain("45.0M eq-tokens");
+		expect(html).not.toContain("45.0M tokens");
+		expect(html).toContain("price-equivalent tokens");
+	});
+
+	it("states the cluster support behind a printed coefficient", () => {
+		// The interval cannot express this: the bootstrap resamples whole runs, so
+		// a coefficient resting on two runs and one resting on forty print
+		// indistinguishable widths.
+		const html = renderToStaticMarkup(
+			<ModelWindowCostPanel
+				cohort={cohort([windowResult("five_hour", [measuredModel()])])}
+			/>,
+		);
+
+		expect(html).toContain("exposure in 12 runs across 3 accounts");
+	});
+
+	it("never shows support on a row that prints a reason instead of a number", () => {
+		const html = renderToStaticMarkup(
+			<ModelWindowCostPanel
+				cohort={cohort([
+					windowResult("five_hour", [unidentifiedModel(), retiredModel()]),
+				])}
+			/>,
+		);
+
+		expect(html).not.toContain("exposure in");
 	});
 
 	it("says so when a window carried no measurable models at all", () => {

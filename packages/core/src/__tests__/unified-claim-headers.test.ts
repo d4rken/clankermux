@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	type ExtractedClaimReading,
 	extractUnifiedClaimReadings,
+	extractUnifiedSummaryReading,
 	getAccountWideClaimHeadroom,
 	getScopedClaimRejection,
 	hasAccountWideUnifiedRejection,
@@ -244,18 +245,22 @@ describe("extractUnifiedClaimReadings", () => {
 			status: "allowed",
 			utilization: 0,
 			resetMs: INCIDENT_5H_RESET_MS,
+			// The 5h line of this response carried no threshold at all.
+			surpassedThreshold: null,
 		});
 		expect(claims["7d"]).toEqual({
 			claim: "7d",
 			status: "allowed_warning",
 			utilization: 0.94,
 			resetMs: INCIDENT_WEEKLY_RESET_MS,
+			surpassedThreshold: 0.75,
 		});
 		expect(claims["7d_oi"]).toEqual({
 			claim: "7d_oi",
 			status: "rejected",
 			utilization: 1,
 			resetMs: INCIDENT_WEEKLY_RESET_MS,
+			surpassedThreshold: 1,
 		});
 	});
 
@@ -283,8 +288,28 @@ describe("extractUnifiedClaimReadings", () => {
 			h({ "anthropic-ratelimit-unified-5h-status": "banana" }),
 		);
 		expect(readings).toEqual([
-			{ claim: "5h", status: "banana", utilization: null, resetMs: null },
+			{
+				claim: "5h",
+				status: "banana",
+				utilization: null,
+				resetMs: null,
+				surpassedThreshold: null,
+			},
 		]);
+	});
+
+	it("records a zero surpassed-threshold as 0 and an unparseable one as null", () => {
+		const readings = extractUnifiedClaimReadings(
+			h({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-surpassed-threshold": "0",
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75x",
+			}),
+		);
+		const claims = byClaim(readings);
+		expect(claims["5h"].surpassedThreshold).toBe(0);
+		expect(claims["7d"].surpassedThreshold).toBeNull();
 	});
 
 	it("records a zero utilization as 0, never as null", () => {
@@ -351,6 +376,7 @@ describe("extractUnifiedClaimReadings", () => {
 				status: "allowed",
 				utilization: 0.25,
 				resetMs: INCIDENT_5H_RESET_MS,
+				surpassedThreshold: null,
 			},
 		]);
 	});
@@ -363,5 +389,99 @@ describe("extractUnifiedClaimReadings", () => {
 			}),
 		);
 		expect(readings).toEqual([]);
+	});
+});
+
+describe("extractUnifiedSummaryReading", () => {
+	it("extracts the whole summary block of the production 429", () => {
+		expect(extractUnifiedSummaryReading(h(incidentHeaders()))).toEqual({
+			status: "rejected",
+			resetMs: INCIDENT_WEEKLY_RESET_MS,
+			remaining: null,
+			representativeClaim: "seven_day_overage_included",
+			fallback: null,
+			fallbackPercentage: 0.5,
+			overageStatus: "rejected",
+			overageDisabledReason: "org_level_disabled",
+			// Verbatim: 51811 seconds is ~14 hours, and the unit is only a
+			// convention — the string is what arrived.
+			retryAfter: "51811",
+		});
+	});
+
+	it("extracts the summary of a healthy 200", () => {
+		expect(
+			extractUnifiedSummaryReading(
+				h({
+					"anthropic-ratelimit-unified-status": "allowed",
+					"anthropic-ratelimit-unified-reset": "1785685200",
+					"anthropic-ratelimit-unified-remaining": "84",
+					"anthropic-ratelimit-unified-representative-claim": "five_hour",
+					"anthropic-ratelimit-unified-fallback": "claude-sonnet-4-5",
+					"anthropic-ratelimit-unified-overage-status": "allowed",
+				}),
+			),
+		).toEqual({
+			status: "allowed",
+			resetMs: INCIDENT_5H_RESET_MS,
+			// VERBATIM text — never coerced to a number whose unit we are guessing.
+			remaining: "84",
+			representativeClaim: "five_hour",
+			fallback: "claude-sonnet-4-5",
+			fallbackPercentage: null,
+			overageStatus: "allowed",
+			overageDisabledReason: null,
+			retryAfter: null,
+		});
+	});
+
+	it("returns a row for a retry-after-only burst 429", () => {
+		const reading = extractUnifiedSummaryReading(h({ "retry-after": "5" }));
+		expect(reading).not.toBeNull();
+		expect(reading?.retryAfter).toBe("5");
+		expect(reading?.status).toBeNull();
+	});
+
+	it("returns null when the response carries no summary field at all", () => {
+		expect(
+			extractUnifiedSummaryReading(
+				h({
+					"anthropic-ratelimit-unified-5h-status": "allowed",
+					"anthropic-ratelimit-unified-5h-utilization": "0.1",
+					"content-type": "application/json",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("keeps the row when a summary header is present but unparseable", () => {
+		// A malformed `-reset` still PROVES the response carried a summary block;
+		// dropping the row would hide exactly the shapes worth seeing.
+		const reading = extractUnifiedSummaryReading(
+			h({ "anthropic-ratelimit-unified-reset": "later" }),
+		);
+		expect(reading).not.toBeNull();
+		expect(reading?.resetMs).toBeNull();
+	});
+
+	it("nulls a reset that is fractional or out of the safe-integer range", () => {
+		expect(
+			extractUnifiedSummaryReading(
+				h({ "anthropic-ratelimit-unified-reset": "1785685200.1234" }),
+			)?.resetMs,
+		).toBeNull();
+		expect(
+			extractUnifiedSummaryReading(
+				h({ "anthropic-ratelimit-unified-reset": "99999999999999999999" }),
+			)?.resetMs,
+		).toBeNull();
+	});
+
+	it("records a zero fallback percentage as 0, never as null", () => {
+		expect(
+			extractUnifiedSummaryReading(
+				h({ "anthropic-ratelimit-unified-fallback-percentage": "0" }),
+			)?.fallbackPercentage,
+		).toBe(0);
 	});
 });

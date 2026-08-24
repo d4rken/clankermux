@@ -1,3 +1,4 @@
+import { getAppVersionSync } from "@clankermux/core";
 import {
 	type Account,
 	type AccountIdentity,
@@ -29,7 +30,99 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 	];
 }
 
+/** The account's stored tier pair, as it was before an identity write. */
+interface StoredTiers {
+	plan_tier: string | null;
+	rate_limit_tier: string | null;
+}
+
 export class AccountRepository extends BaseRepository<Account> {
+	/**
+	 * Run an identity-bearing account UPDATE and, when it actually changed the
+	 * account's EFFECTIVE tier pair, append the matching `account_tier_history`
+	 * row — both in ONE transaction.
+	 *
+	 * Three properties this exists to guarantee, none of which a caller-side
+	 * "update then insert" would have:
+	 *
+	 *  1. **Change-only.** The identity writes are COALESCE merges, so an
+	 *     incoming null PRESERVES the stored tier. The comparison is therefore
+	 *     against the merged effective values, not against the incoming ones —
+	 *     otherwise every token refresh that omits the tier would record a
+	 *     spurious "changed to null" transition.
+	 *  2. **CAS-honest.** `updateTokens` guards its write on the refresh token it
+	 *     exchanged. A rejected write changes nothing, so it must not leave a
+	 *     history row claiming a tier the account never adopted — hence the
+	 *     `changes > 0` gate.
+	 *  3. **Atomic.** A crash between the two writes would either lose the
+	 *     transition or invent one; one transaction cannot.
+	 *
+	 * ## Why it runs through the adapter and not the raw handle
+	 *
+	 * The transaction goes to {@link BunSqlAdapter.runTransaction}, which wraps it
+	 * in the SAME async SQLITE_BUSY retry loop every other write on this
+	 * connection gets. Calling `db.transaction(fn)()` directly would drop these
+	 * writes to the bare C-level busy_timeout (250ms), and the writes coming
+	 * through here are token refreshes: when the cleanup/vacuum worker holds the
+	 * writer slot, a fail-fast refresh takes the account out of the pool until the
+	 * next attempt.
+	 *
+	 * A no-identity call has nothing to compare and no history row to append, so
+	 * it stays the single `runWithChanges` statement it has always been — same
+	 * retry envelope, no transaction it does not need.
+	 *
+	 * Returns the UPDATE's affected-row count so CAS callers can report it.
+	 */
+	private async writeIdentityWithTierHistory(
+		accountId: string,
+		sql: string,
+		params: unknown[],
+		identity: AccountIdentity | null | undefined,
+	): Promise<number> {
+		if (!identity) return this.runWithChanges(sql, params);
+
+		const db = this.adapter.getSQLiteDb();
+		return this.adapter.runTransaction(() => {
+			const before = db
+				.query(
+					`SELECT identity_plan_tier AS plan_tier,
+					        identity_rate_limit_tier AS rate_limit_tier
+					 FROM accounts WHERE id = ?`,
+				)
+				.get(accountId) as StoredTiers | null | undefined;
+
+			const changes = db.run(sql, params as never[]).changes;
+			if (changes === 0 || !before) return changes;
+
+			// COALESCE-merged effective values — exactly what the UPDATE just wrote.
+			const planTier = identity.planTier ?? before.plan_tier;
+			const rateLimitTier = identity.rateLimitTier ?? before.rate_limit_tier;
+			if (
+				planTier === before.plan_tier &&
+				rateLimitTier === before.rate_limit_tier
+			) {
+				return changes;
+			}
+
+			db.run(
+				`INSERT INTO account_tier_history (
+					account_id, observed_at, plan_tier, rate_limit_tier, source, app_version
+				) VALUES (?, ?, ?, ?, 'identity-capture', ?)`,
+				[
+					accountId,
+					Date.now(),
+					planTier,
+					rateLimitTier,
+					// getAppVersionSync, NEVER getVersionSync — see the note in
+					// backfills.ts: getVersionSync's no-environment fallback is the Claude
+					// CLI compat version, which is not the build that made this record.
+					getAppVersionSync(),
+				] as never[],
+			);
+			return changes;
+		});
+	}
+
 	async findAll(): Promise<Account[]> {
 		const rows = await this.query<AccountRow>(`
 			SELECT
@@ -176,7 +269,8 @@ export class AccountRepository extends BaseRepository<Account> {
 			expectedRefreshToken != null ? [expectedRefreshToken] : [];
 		const newRefreshTokenExpiresAt = options?.refreshTokenExpiresAt ?? null;
 		if (refreshToken) {
-			const changes = await this.runWithChanges(
+			const changes = await this.writeIdentityWithTierHistory(
+				accountId,
 				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, refresh_token_expires_at = CASE WHEN ? IS NOT NULL THEN ? WHEN refresh_token = ? THEN refresh_token_expires_at ELSE NULL END${identitySet} WHERE id = ?${casClause}`,
 				[
 					accessToken,
@@ -190,12 +284,15 @@ export class AccountRepository extends BaseRepository<Account> {
 					accountId,
 					...casParams,
 				],
+				identity,
 			);
 			return changes > 0;
 		}
-		const changes = await this.runWithChanges(
+		const changes = await this.writeIdentityWithTierHistory(
+			accountId,
 			`UPDATE accounts SET access_token = ?, expires_at = ?${identitySet} WHERE id = ?${casClause}`,
 			[accessToken, expiresAt, ...identityParams, accountId, ...casParams],
+			identity,
 		);
 		return changes > 0;
 	}
@@ -220,13 +317,15 @@ export class AccountRepository extends BaseRepository<Account> {
 		identity: AccountIdentity,
 	): Promise<void> {
 		const now = Date.now();
-		await this.run(
+		await this.writeIdentityWithTierHistory(
+			accountId,
 			`UPDATE accounts SET
 				${IDENTITY_COALESCE_SET},
 				identity_captured_at = ?,
 				identity_profile_fetched_at = ?
 			WHERE id = ?`,
 			[...identityBindParams(identity), now, now, accountId],
+			identity,
 		);
 	}
 
@@ -248,12 +347,14 @@ export class AccountRepository extends BaseRepository<Account> {
 		identity: AccountIdentity,
 	): Promise<void> {
 		const now = Date.now();
-		await this.run(
+		await this.writeIdentityWithTierHistory(
+			accountId,
 			`UPDATE accounts SET
 				${IDENTITY_COALESCE_SET},
 				identity_captured_at = ?
 			WHERE id = ?`,
 			[...identityBindParams(identity), now, accountId],
+			identity,
 		);
 	}
 
