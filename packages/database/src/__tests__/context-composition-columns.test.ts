@@ -16,11 +16,11 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tempDbTracker } from "@clankermux/test-support";
 import { DatabaseOperations } from "../database-operations";
 import { ensureSchema, runMigrations } from "../migrations";
+
+const tmpDb = tempDbTracker("test-context-comp");
 
 const CONTEXT_COLUMNS = [
 	"context_system_chars",
@@ -109,13 +109,15 @@ describe("context composition persistence through saveRequest", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(
-			join(tmpdir(), `test-context-comp-${randomBytes(6).toString("hex")}.db`),
-		);
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	async function readRow(id: string): Promise<ContextRow | null> {

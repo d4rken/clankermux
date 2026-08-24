@@ -15,11 +15,11 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tempDbTracker } from "@clankermux/test-support";
 import { DatabaseOperations } from "../database-operations";
 import { ensureSchema, runMigrations } from "../migrations";
+
+const tmpDb = tempDbTracker("test-proj-source");
 
 const COLUMN = "project_attribution_source";
 
@@ -70,13 +70,15 @@ describe("project_attribution_source persistence through saveRequest", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(
-			join(tmpdir(), `test-proj-source-${randomBytes(6).toString("hex")}.db`),
-		);
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	async function readSource(id: string): Promise<string | null | undefined> {

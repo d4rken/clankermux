@@ -5,14 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 // We construct with an in-memory SQLite DB so no file I/O is needed.
 // ---------------------------------------------------------------------------
 
-import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tempDbTracker } from "@clankermux/test-support";
 import { DatabaseOperations } from "../database-operations";
 
-function tempDbPath(): string {
-	return join(tmpdir(), `test-integrity-${randomBytes(6).toString("hex")}.db`);
-}
+const tmpDb = tempDbTracker("test-integrity");
 
 // ---------------------------------------------------------------------------
 // Tests: integrity status cache (no real DB needed)
@@ -22,11 +18,15 @@ describe("DatabaseOperations.getIntegrityStatus / recordIntegrityResult", () => 
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(tempDbPath());
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("returns unchecked status on fresh instance", () => {
@@ -173,11 +173,15 @@ describe("DatabaseOperations.recordIntegrityResult skipped outcomes", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(tempDbPath());
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("a full skipped after a full ok preserves the ok verdict and collapses to skipped", () => {
@@ -290,11 +294,15 @@ describe("DatabaseOperations integrity PRAgMA checks", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(tempDbPath());
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("runQuickIntegrityCheck returns 'ok' on a valid database", async () => {
@@ -326,11 +334,15 @@ describe("DatabaseOperations.getStorageMetrics", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbOps = new DatabaseOperations(tempDbPath());
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("returns an object with all expected keys", async () => {
@@ -408,12 +420,16 @@ describe("DatabaseOperations.generateRecoveryInstructions", () => {
 	let dbPath: string;
 
 	beforeEach(() => {
-		dbPath = tempDbPath();
+		dbPath = tmpDb.next();
 		dbOps = new DatabaseOperations(dbPath);
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("returns a non-empty string", () => {
