@@ -2,7 +2,7 @@ import type {
 	QuotaDriftCohort,
 	QuotaDriftWindowResult,
 } from "@clankermux/types";
-import { Activity } from "lucide-react";
+import { Activity, ChevronDown } from "lucide-react";
 import { useMemo } from "react";
 import {
 	Area,
@@ -24,6 +24,7 @@ import {
 	lastObservedValueNotice,
 	notReportedNotice,
 	quotaWindowLabel,
+	summarizeCurrentGaps,
 	summarizeModelGaps,
 } from "../../lib/quota-drift-display";
 import { formatAxisTime } from "../../lib/time-format";
@@ -154,6 +155,10 @@ function WindowSeries({
 	// window, including the ones with no line at all — a model that was never
 	// separable has no series to inspect, so this list is the only place a
 	// reader learns it exists and why it is missing.
+	const currentGaps = useMemo(
+		() => (window ? summarizeCurrentGaps(window.models) : []),
+		[window],
+	);
 	const gaps = useMemo(
 		() => (window ? summarizeModelGaps(window.models) : []),
 		[window],
@@ -284,12 +289,27 @@ function WindowSeries({
 					{flatNotice}
 				</p>
 			) : null}
-			{gaps.length > 0 ? (
+			{currentGaps.length > 0 ? (
 				<div className="space-y-0.5 max-w-prose">
 					<p className="text-xs font-medium">
-						What this analysis could not measure, and why
+						Not separately measurable right now
 					</p>
 					<ul className="text-xs text-muted-foreground space-y-0.5">
+						{currentGaps.map((gap) => (
+							<li key={gap.key}>
+								<span className="font-medium">{gap.key}</span> — {gap.text}
+							</li>
+						))}
+					</ul>
+				</div>
+			) : null}
+			{gaps.length > 0 ? (
+				<details className="group max-w-prose">
+					<summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+						What this analysis could not measure, and why
+						<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+					</summary>
+					<ul className="mt-1 text-xs text-muted-foreground space-y-0.5">
 						{gaps.map((model) => (
 							<li key={model.key}>
 								<span className="font-medium">{model.key}</span>
@@ -308,7 +328,7 @@ function WindowSeries({
 							</li>
 						))}
 					</ul>
-				</div>
+				</details>
 			) : null}
 		</div>
 	);

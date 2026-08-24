@@ -168,6 +168,52 @@ export function retiredModel(
 }
 
 /**
+ * A model that had an unmeasurable stretch but is measurable again by the
+ * newest fit: history for the collapsed stretch list, nothing for the
+ * always-visible "right now" line.
+ */
+export function recoveredModel(key = "claude-sonnet-4-6"): QuotaDriftModel {
+	const capacityMtok = 90;
+	const estimate = 100 / capacityMtok;
+	const reasonsAt: (QuotaDriftUnidentifiedReason | null)[] = [
+		null,
+		"low-share",
+		"low-share",
+		null,
+		null,
+	];
+	const points: QuotaDriftPoint[] = reasonsAt.map((reason, index) => {
+		const windowEndMs = FIXED_NOW - (reasonsAt.length - index) * 2 * DAY;
+		return {
+			windowStartMs: windowEndMs - 14 * DAY,
+			windowEndMs,
+			pointEstimate: reason === null ? estimate : null,
+			ciLow: reason === null ? estimate * 0.95 : null,
+			ciHigh: reason === null ? estimate * 1.05 : null,
+			impliedCapacityMtok: reason === null ? capacityMtok : null,
+			identified: reason === null,
+			nSegments: 120,
+			unidentifiedReasons: reason === null ? [] : [reason],
+		};
+	});
+	return {
+		key,
+		points,
+		latest: {
+			pointEstimate: estimate,
+			ciLow: estimate * 0.95,
+			ciHigh: estimate * 1.05,
+			impliedCapacityMtok: capacityMtok,
+			shareOfWindow: 0.1,
+			identified: true,
+			unidentifiedReasons: [],
+		},
+		changes: [],
+		verdict: "insufficient-evidence",
+	};
+}
+
+/**
  * A model whose reason for being unmeasurable CHANGED over the series: below
  * the share floor early, measurable in the middle, out of use at the end.
  *

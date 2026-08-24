@@ -27,6 +27,7 @@ import {
 	notReportedNotice,
 	primaryReason,
 	quotaWindowLabel,
+	summarizeCurrentGaps,
 	summarizeGaps,
 	summarizeModelGaps,
 	UNIDENTIFIED_COPY,
@@ -494,6 +495,49 @@ describe("summarizeModelGaps", () => {
 		expect(ids).toHaveLength(3);
 		expect(new Set(ids).size).toBe(3);
 		for (const id of ids) expect(id.startsWith("claude-opus-4-8@")).toBe(true);
+	});
+});
+
+describe("summarizeCurrentGaps", () => {
+	it("lists only models whose newest fit could not measure them", () => {
+		const gaps = summarizeCurrentGaps([
+			// Gap in the middle, measurable again by the end: history only.
+			gapModel("claude-opus-5", [null, ["low-share"], null]),
+			// Still out of use at the newest fit: current.
+			gapModel("claude-opus-4-8", [null, ["no-exposure"], ["no-exposure"]]),
+			// Never gapped at all.
+			gapModel("claude-fable-5", [null, null, null]),
+		]);
+
+		expect(gaps.map((g) => `${g.key} — ${g.text}`)).toEqual([
+			"claude-opus-4-8 — not in use since 3 Aug",
+		]);
+	});
+
+	it("speaks with the ongoing stretch's reason, not an older one", () => {
+		// The older stretch is longer; the CURRENT answer is still "not in use".
+		const gaps = summarizeCurrentGaps([
+			gapModel("claude-sonnet-5", [
+				["low-share"],
+				["low-share"],
+				["low-share"],
+				null,
+				["no-exposure"],
+			]),
+		]);
+
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].text).toBe("not in use since 9 Aug");
+	});
+
+	it("keeps the throughout wording for a never-measurable model", () => {
+		const gaps = summarizeCurrentGaps([
+			gapModel("claude-haiku-4-5", [["collinear"], ["collinear"]]),
+		]);
+
+		expect(gaps[0].text).toBe(
+			"always runs alongside another model, so its own cost cannot be separated",
+		);
 	});
 });
 
