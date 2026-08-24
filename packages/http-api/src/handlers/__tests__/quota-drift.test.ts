@@ -41,6 +41,8 @@ import { ensureSchema } from "@clankermux/database";
 import type { QuotaDriftResponse } from "@clankermux/types";
 import {
 	attachRequestTokens,
+	CLAIM_AUDIT_SCAN_SQL,
+	CLAIM_AUDIT_WINDOW_MS,
 	collectCohortSegments,
 	collectWindowObservations,
 	computeQuotaDrift,
@@ -423,6 +425,94 @@ describe("quota-drift request scan", () => {
 
 		expect(detail).toContain("idx_requests_account_timestamp");
 		expect(detail).not.toContain("SCAN requests");
+	});
+});
+
+describe("quota-drift claim audit", () => {
+	it("uses the observed_at index rather than scanning the claim series", () => {
+		// The table grows with request volume times claims-per-response, so a
+		// degradation to a table scan here is a defect, not a slowdown.
+		const plan = db
+			.prepare<{ detail: string }, [number, number]>(
+				`EXPLAIN QUERY PLAN ${CLAIM_AUDIT_SCAN_SQL}`,
+			)
+			.all(0, FIXTURE_NOW);
+		const detail = plan.map((r) => r.detail).join(" | ");
+
+		expect(detail).toContain("idx_unified_claim_obs_observed_at");
+		expect(detail).not.toContain("SCAN unified_claim_observations");
+	});
+
+	it("audits the captured rows and states the span it covers", () => {
+		const start = FIXTURE_NOW - 3 * 60 * 60 * 1000;
+		const reset = FIXTURE_NOW + 60 * 60 * 1000;
+		const insert = db.prepare(
+			`INSERT INTO unified_claim_observations (
+				request_id, account_id, source, request_started_at, observed_at,
+				http_status, claim, status, utilization, reset_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		insert.run(
+			"aud-1",
+			ACCOUNT_MAX_A,
+			"client",
+			start,
+			start + 1_000,
+			200,
+			"5h",
+			"allowed",
+			0.1,
+			reset,
+		);
+		insert.run(
+			"aud-2",
+			ACCOUNT_MAX_A,
+			"keepalive",
+			start + 2_000,
+			start + 3_000,
+			200,
+			"5h",
+			"allowed",
+			0.12,
+			reset,
+		);
+		insert.run(
+			"aud-3",
+			ACCOUNT_MAX_A,
+			"client",
+			start + 4_000,
+			start + 5_000,
+			429,
+			"7d",
+			"rejected",
+			null,
+			null,
+		);
+
+		const payload = computeQuotaDrift(db, {
+			now: FIXTURE_NOW,
+			...TEST_BOOTSTRAP,
+		});
+
+		const audit = payload.claimAudit;
+		expect(audit).not.toBeNull();
+		expect(audit?.toMs).toBe(FIXTURE_NOW);
+		expect(audit?.fromMs).toBe(FIXTURE_NOW - CLAIM_AUDIT_WINDOW_MS);
+		const fiveHour = audit?.claims.find((c) => c.claim === "5h");
+		expect(fiveHour?.rows).toBe(2);
+		expect(fiveHour?.transitions).toBe(1);
+		expect(fiveHour?.positiveIncrements).toBe(1);
+		expect(fiveHour?.composition.bySource.map((s) => s.label).sort()).toEqual([
+			"client",
+			"keepalive",
+		]);
+		const weekly = audit?.claims.find((c) => c.claim === "7d");
+		expect(weekly?.nullUtilizationRows).toBe(1);
+		// One row, so no rate and no grid share exist to state.
+		expect(weekly?.rowsPerDay).toBeNull();
+		expect(weekly?.gridShare01).toBeNull();
+
+		db.run(`DELETE FROM unified_claim_observations`);
 	});
 });
 

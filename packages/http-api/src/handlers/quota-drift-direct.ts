@@ -139,6 +139,10 @@ export function normalizeQuotaDriftPayload(
 ): QuotaDriftResponse {
 	return {
 		...payload,
+		// Null, never an empty audit: `{claims: []}` renders as "the series is
+		// empty", which is a measurement claim, and the opposite of "this payload
+		// predates the audit".
+		claimAudit: payload.claimAudit ?? null,
 		cohorts: asArray(payload.cohorts).map(
 			(cohort): QuotaDriftCohort => ({
 				...cohort,

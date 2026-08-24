@@ -70,7 +70,9 @@
 
 import type { Database } from "bun:sqlite";
 import {
+	auditClaimSeries,
 	buildSegments,
+	type ClaimObservationInput,
 	DISPLAY_BOOTSTRAP_B,
 	detectChanges,
 	eqTokenProviderFor,
@@ -90,6 +92,7 @@ import {
 	type WindowSample,
 } from "@clankermux/core";
 import type {
+	QuotaClaimAudit,
 	QuotaDriftAccountScope,
 	QuotaDriftChange,
 	QuotaDriftCohort,
@@ -231,7 +234,80 @@ export function computeQuotaDrift(
 		computedAt: now,
 		computeMs: Math.round(performance.now() - startedAt),
 		cohorts: out,
+		claimAudit: auditClaimObservations(db, now),
 	};
+}
+
+/** How far back the claim-series audit looks: the series' own retention window. */
+export const CLAIM_AUDIT_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * The scan the claim audit runs.
+ *
+ * Bounded by `observed_at` and ordered by it, so it plans as a range scan on
+ * `idx_unified_claim_obs_observed_at`. The `request_id` tie-break is what makes
+ * a transition well-defined when two rows share a millisecond: without it the
+ * pairing — and therefore every increment statistic — could differ between two
+ * passes over identical data.
+ */
+export const CLAIM_AUDIT_SCAN_SQL = `SELECT account_id, claim, request_id, observed_at,
+       request_started_at, http_status, source, status, utilization, reset_at
+FROM unified_claim_observations
+WHERE observed_at >= ? AND observed_at < ?
+ORDER BY observed_at, request_id`;
+
+/** Rows the claim-audit scan yields. */
+interface ClaimAuditScanRow {
+	account_id: string;
+	claim: string;
+	request_id: string;
+	observed_at: number;
+	request_started_at: number;
+	http_status: number;
+	source: string;
+	status: string;
+	utilization: number | null;
+	reset_at: number | null;
+}
+
+/**
+ * Run the standing claim-series audit over the retained observation window.
+ *
+ * Rows are consumed through `.iterate()` and mapped one at a time, so the whole
+ * window — which grows with request volume times claims-per-response — is never
+ * materialized. The audit's own state is bounded (see the claim-audit module),
+ * so this stays O(1) in memory regardless of how many rows the scan yields.
+ *
+ * Returns null when the table does not exist yet, which is the state of a
+ * database created before the series shipped: an empty audit would say the
+ * series is empty, which is a different claim.
+ */
+function auditClaimObservations(
+	db: Database,
+	now: number,
+): QuotaClaimAudit | null {
+	if (!tableExists(db, "unified_claim_observations")) return null;
+	const fromMs = now - CLAIM_AUDIT_WINDOW_MS;
+	const scan = db.prepare<ClaimAuditScanRow, [number, number]>(
+		CLAIM_AUDIT_SCAN_SQL,
+	);
+	function* rows(): Generator<ClaimObservationInput> {
+		for (const row of scan.iterate(fromMs, now)) {
+			yield {
+				accountId: row.account_id,
+				claim: row.claim,
+				requestId: row.request_id,
+				observedAt: row.observed_at,
+				requestStartedAt: row.request_started_at,
+				httpStatus: row.http_status,
+				source: row.source,
+				status: row.status,
+				utilization: row.utilization,
+				resetAt: row.reset_at,
+			};
+		}
+	}
+	return auditClaimSeries(rows(), { fromMs, toMs: now });
 }
 
 /** Shared empty token map — `buildSegments` is called for boundaries only. */
@@ -1039,6 +1115,26 @@ export function cohortKey(provider: string, tier: ResolvedTier): string {
  * them has every row legitimately without them, and that is exactly the
  * `tierProvenance: "assumed"` case rather than an error.
  */
+/**
+ * Does this table exist at all?
+ *
+ * Distinct from {@link tableHasColumn}: a database created before a whole table
+ * shipped has no row of it to be missing a column, and PRAGMA table_info on an
+ * absent table returns an empty list rather than failing.
+ */
+function tableExists(db: Database, table: string): boolean {
+	try {
+		const row = db
+			.prepare<{ name: string }, [string]>(
+				`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+			)
+			.get(table);
+		return row != null;
+	} catch {
+		return false;
+	}
+}
+
 function tableHasColumn(db: Database, table: string, column: string): boolean {
 	try {
 		const rows = db

@@ -88,6 +88,10 @@ export type ModelMappingData = {
 	modelMappings?: ModelMapping;
 };
 export type ModelFallback = { [modelFamily: string]: string };
+// The standing claim-series audit, on the same terms as the quota-drift
+// estimator below: pure, DB-free, and reachable from http-api only through this
+// root entry.
+export * from "./claim-audit";
 export { isDebugEnabled, readEnv } from "./env";
 export {
 	drainEventLoopSnapshotMaxLagMs,

@@ -339,6 +339,78 @@ export interface QuotaDriftCohort {
 	windows: QuotaDriftWindowResult[];
 }
 
+/** One value of the claim series and how often it occurred. */
+export interface QuotaClaimValueCount {
+	value: number;
+	count: number;
+}
+
+/** One label of the claim series and how often it occurred. */
+export interface QuotaClaimLabelCount {
+	label: string;
+	count: number;
+}
+
+/**
+ * How the CAPTURED claim rows break down. Deliberately not "coverage": these
+ * counts say nothing about responses that were never captured.
+ */
+export interface QuotaClaimComposition {
+	bySource: QuotaClaimLabelCount[];
+	byStatus: QuotaClaimLabelCount[];
+	byHttpStatus: QuotaClaimLabelCount[];
+}
+
+/**
+ * The audit of ONE claim token's observation series.
+ *
+ * Descriptive throughout: counts, shares of a stated denominator, and
+ * quantiles. Nothing here concludes anything about the provider — it says what
+ * is in the series that any later analysis would have to be built on.
+ *
+ * Same null rule as everything else on this wire: an output with no denominator
+ * is null, never 0.
+ */
+export interface QuotaClaimAuditEntry {
+	claim: string;
+	nSeries: number;
+	nAccounts: number;
+	rows: number;
+	firstObservedAt: number | null;
+	lastObservedAt: number | null;
+	/** Rows per day over the OBSERVED span, or null when the span is zero. */
+	rowsPerDay: number | null;
+	nullUtilizationRows: number;
+	nullUtilizationShare: number | null;
+	/** A LOWER BOUND when `distinctValuesExact` is false (tracker capped). */
+	distinctValues: number;
+	distinctValuesExact: boolean;
+	topValues: QuotaClaimValueCount[];
+	onGrid01: number;
+	onGrid001: number;
+	gridShare01: number | null;
+	gridShare001: number | null;
+	transitions: number;
+	positiveIncrements: number;
+	minPositiveIncrement: number | null;
+	/** Null when there were none, and also when the tracker was truncated. */
+	medianPositiveIncrement: number | null;
+	/** Transitions where both readings carried the SAME window's reset. */
+	stableResetTransitions: number;
+	stableResetNegatives: number;
+	giftDrops: number;
+	giftDropsOrderingSuspect: number;
+	giftDropsUnexplained: number;
+	composition: QuotaClaimComposition;
+}
+
+/** The claim-series audit block: one entry per claim, plus the span covered. */
+export interface QuotaClaimAudit {
+	fromMs: number;
+	toMs: number;
+	claims: QuotaClaimAuditEntry[];
+}
+
 /**
  * Response from `GET /api/analytics/quota-drift`.
  *
@@ -353,4 +425,15 @@ export interface QuotaDriftResponse {
 	/** Wall-clock the precompute pass took, ms; null while computing. */
 	computeMs: number | null;
 	cohorts: QuotaDriftCohort[];
+	/**
+	 * The standing claim-series audit, or null when the payload predates it.
+	 *
+	 * OPTIONAL for the same reason as the window-movement fields: the blob is a
+	 * cache refreshed every 30 minutes and served without schema validation, so
+	 * for up to one refresh interval after a deploy the newest stored payload was
+	 * written by a version that had no audit. Normalized to null, never to an
+	 * empty audit — an empty `claims` list would render as "the series is empty",
+	 * which is a claim, and the opposite of "we have not measured it".
+	 */
+	claimAudit?: QuotaClaimAudit | null;
 }
