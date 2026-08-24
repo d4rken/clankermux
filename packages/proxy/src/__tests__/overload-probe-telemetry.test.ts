@@ -234,15 +234,19 @@ describe("overload breaker telemetry", () => {
 		}
 		const line = cap.lines.find((l) => l.includes("settled reopened"));
 		expect(line).toBeDefined();
-		expect(line).toContain("anthropic-upstream:opus");
-		expect(line).toContain("anthropic-upstream");
-		expect(line).toContain("superseded:");
+		// Assert the STRUCTURE, not substrings: "anthropic-upstream" is a prefix
+		// of "anthropic-upstream:opus", so a containment check on the shorter key
+		// is satisfied by the longer one and proves nothing about which side of
+		// the line it landed on.
+		expect(line).toMatch(/settled reopened for anthropic-upstream after \d+ms/);
+		expect(line).toContain("(superseded: anthropic-upstream:opus)");
 	});
 
 	it("distinguishes a re-trip from half-open from an ongoing storm", async () => {
 		// Both push the deadline forward, so a naive "did the deadline move?"
-		// check calls them both extended. They mean different things: one is a
-		// recovery attempt that failed, the other is the storm still running.
+		// check calls them both extended, but they are different STATES: the
+		// breaker had already lapsed in one case and was still open in the other.
+		// Deliberately not a claim about cause — see the classifier's comment.
 		await tripToHalfOpen("claude-opus-4-5");
 		const cap = captureLogs("warn");
 		try {
