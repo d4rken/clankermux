@@ -346,42 +346,66 @@ describe("transparent overload hold", () => {
 		// Same incident, same breaker, opposite outcomes, decided purely by
 		// whether the loop had already started.
 		//
-		// The cooldown is SHORTER than the hold budget on purpose. An earlier
-		// version used a 60s cooldown against a 300ms budget, which the
-		// holdability check rejects outright — it proved only that the terminal
-		// changed from 503 to 529, and would have passed with wake and
-		// reselection completely broken. Recovering to a 200 is the assertion
-		// that actually matters.
-		const first = makeAccount({ id: "acc-first", name: "First" });
-		const second = makeAccount({ id: "acc-second", name: "Second" });
+		// The cooldown is SHORTER than the hold budget on purpose, and attempts
+		// are identified BY ACCOUNT rather than counted. Two earlier versions of
+		// this test passed for the wrong reason: one paired a 60s cooldown with a
+		// 300ms budget, which the holdability check rejects outright; the next
+		// counted calls, and was satisfied by the hold simply RE-ATTEMPTING the
+		// account that had already failed, while the gated account it was
+		// supposedly waiting for was never tried at all.
+		//
+		// The invariant that matters: `first` fails, and the account that serves
+		// the request afterwards is `second` — the one the late gate skipped.
+		// Distinct credentials so each attempt is attributable on the wire. NOT
+		// via a ctx.provider override: `proxyWithAccount` resolves the REAL
+		// provider per account (`getProvider(account.provider)`), so ctx.provider
+		// is only a fallback and overriding it does nothing for these.
+		const first = makeAccount({
+			id: "acc-first",
+			name: "First",
+			api_key: "key-first",
+		});
+		const second = makeAccount({
+			id: "acc-second",
+			name: "Second",
+			api_key: "key-second",
+		});
 
-		let calls = 0;
-		globalThis.fetch = upstreamOnlyFetch(async () => {
-			calls++;
-			if (calls === 1) {
+		const ctx = makeContext([first, second]);
+
+		const attempts: string[] = [];
+		globalThis.fetch = upstreamOnlyFetch(async (input) => {
+			const headers = input instanceof Request ? input.headers : new Headers();
+			const key =
+				headers.get("x-api-key") ??
+				headers.get("authorization")?.replace(/^Bearer /, "") ??
+				"unknown";
+			const who =
+				key === "key-first" ? "First" : key === "key-second" ? "Second" : key;
+			attempts.push(who);
+			if (who === "First") {
 				// Fails ORDINARILY, so nothing records an overload suppression. It
 				// must FAIL OVER rather than be forwarded — a non-2xx response goes
 				// back to the client as-is and never reaches the end of the loop —
 				// so throw, as the production attempts did. Meanwhile the breaker
-				// trips, as it would from another request's 529, leaving the second
-				// candidate to be dropped by the late gate.
+				// trips, as it would from another request's 529, leaving `second`
+				// to be dropped by the late gate.
 				applyProviderOverloadCooldown("anthropic", Date.now() + 400, MODEL);
 				throw new Error("upstream connection reset");
 			}
 			return ok200(MODEL);
 		}) as never;
 
-		const ctx = makeContext([first, second]);
 		const res = await callHandleProxy(
 			modelRequest(MODEL),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);
 
-		// Held through the cooldown, woke, re-selected and served — rather than
-		// 503ing on the spot.
 		expect(res.status).toBe(200);
-		expect(calls).toBeGreaterThanOrEqual(2);
+		// Held through the cooldown, woke, and served from the account the gate
+		// had skipped — NOT by retrying the one that already failed.
+		expect(attempts).toEqual(["First", "Second"]);
 	}, 15_000);
 
 	it("does NOT hold for a gated candidate that could never serve the path", async () => {

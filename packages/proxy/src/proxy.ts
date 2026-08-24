@@ -1192,7 +1192,17 @@ async function handleIngestedProxy(
 				// multi-minute hold and then a 529. A candidate that cannot serve
 				// the path is not evidence of anything about the breaker.
 				if (canAccountServePath(list[i])) {
-					holds.noteOverloadGateSkip(list[i], overloadedUntil);
+					// Carries the model the gate DECIDED on, so the hold and the
+					// terminal key on the same bucket. Re-deriving it per account
+					// picks a different one under per-account model mapping: the
+					// gate skips on sonnet, the hold finds opus closed and retries
+					// at once, and the terminal refreshes a deadline that was never
+					// the reason for the skip.
+					holds.noteOverloadGateSkip(
+						list[i],
+						overloadedUntil,
+						modelOverride ?? effectiveRequestModel ?? null,
+					);
 				}
 				continue;
 			}
@@ -1244,7 +1254,18 @@ async function handleIngestedProxy(
 						// running to completion. This loop serves both the main pass and
 						// the combo-fallback pass.
 						signal: req.signal,
-						onOutcome: (o) => holds.noteOverloadSuppression(list[i], o),
+						onOutcome: (o) => {
+							holds.noteOverloadSuppression(list[i], o);
+							// An ORDINARY failure (auth / network / 429 / model) — not
+							// an overload suppression, which has its own verdict to
+							// wait on. Recorded so a hold entered later in THIS request
+							// does not re-attempt, and get served by, the account that
+							// just failed, leaving the gated one it was waiting for
+							// untried.
+							if (o.kind !== "overload_suppressed") {
+								holds.noteOrdinaryFailure(list[i].id);
+							}
+						},
 					},
 				);
 			});
