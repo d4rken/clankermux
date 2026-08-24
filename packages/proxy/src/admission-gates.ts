@@ -41,7 +41,25 @@ import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 const log = new Logger("Proxy");
 
 /** An account the provider-overload gate excluded, with its block deadline. */
-export type ProviderOverloadedAccount = { account: Account; until: number };
+export type ProviderOverloadedAccount = {
+	account: Account;
+	until: number;
+	/**
+	 * The model whose bucket actually caused this account to be gated.
+	 *
+	 * Present when the CALLER resolved a specific model to make the decision —
+	 * the attempt loop's late gate keys on the combo override or the request's
+	 * logical model, which is not necessarily what `modelForAccount` returns for
+	 * an account with per-account model mapping. Without carrying it, the hold
+	 * and the terminal re-derive a DIFFERENT bucket: gate skips on sonnet, hold
+	 * finds opus closed and retries immediately, terminal refreshes the wrong
+	 * deadline.
+	 *
+	 * Absent (undefined) means "no specific model was resolved" — the
+	 * pre-selection gate, which the hold may key by `modelForAccount` as before.
+	 */
+	gatedModel?: string | null;
+};
 
 /**
  * Everything the admission gates need from the request that produced them.
