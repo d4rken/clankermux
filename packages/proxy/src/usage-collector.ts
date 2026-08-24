@@ -25,9 +25,12 @@ import type { SlimUsageSummary } from "./request-recorder";
  *         `message_delta` supplies the authoritative cumulative
  *         `output_tokens`; `message_stop` sets `sawMessageStop`.
  *       - Codex-Responses (`response.*`, native Responses passthrough):
- *         `response.created` supplies the model; `response.completed` supplies
- *         the authoritative usage (input/output + cached-token details) and
- *         sets `sawMessageStop`. All other `response.*` events are no-ops.
+ *         `response.created` supplies the model; the FIRST of
+ *         `response.completed` / `.incomplete` / `.failed` supplies the
+ *         authoritative usage (input/output + cached-token details), and
+ *         `response.completed` alone additionally sets `sawMessageStop`,
+ *         since only it asserts a clean ending. All other `response.*` events
+ *         are no-ops.
  *     `content_block_delta`/`text_delta`/`response.output_text.delta` are
  *     NEVER parsed for tokens.
  *
@@ -43,9 +46,10 @@ import type { SlimUsageSummary } from "./request-recorder";
  *     can attach.
  *
  * PRECEDENCE: an explicit `providerReportedOutput` flag is set ONLY by
- * `message_delta` (streaming) or a non-stream `usage` object — never by
- * `message_start` (whose `output_tokens` is a placeholder 0/1). If the provider
- * reported a count AND the stream ended cleanly, we trust it (even if 0).
+ * `message_delta` (streaming), a Responses terminal event carrying usage, or a
+ * non-stream `usage` object — never by `message_start` (whose `output_tokens`
+ * is a placeholder 0/1). If the provider reported a count AND the stream ended
+ * cleanly, we trust it (even if 0).
  * Otherwise we approximate from streamed bytes (ceil(bytes/4)) and flag it.
  *
  * R5 (non-clean endings): on a disconnect/timeout/error the provider may have
@@ -63,14 +67,15 @@ export interface UsageState {
 	cacheCreationInputTokens: number;
 	/**
 	 * The authoritative cumulative output-token count last seen from the
-	 * provider (`message_delta` while streaming, or a non-stream `usage`
-	 * object). `undefined` until the provider reports one.
+	 * provider (`message_delta` or a Responses terminal while streaming, or a
+	 * non-stream `usage` object). `undefined` until the provider reports one.
 	 */
 	providerFinalOutputTokens: number | undefined;
 	/**
 	 * True once the provider reported an output-token count we should trust.
-	 * Set ONLY by `message_delta` (streaming) or a non-stream `usage` object —
-	 * never by `message_start` (whose `output_tokens` is a placeholder 0/1).
+	 * Set ONLY by `message_delta` (streaming), the first Responses terminal event
+	 * carrying usage, or a non-stream `usage` object — never by `message_start`
+	 * (whose `output_tokens` is a placeholder 0/1).
 	 */
 	providerReportedOutput: boolean;
 	/** Total response bytes seen (drives the bytes/4 output fallback). */
@@ -93,8 +98,33 @@ export interface UsageState {
 	 * `event:`/`data:` pair split over a boundary still associates correctly.
 	 */
 	currentEvent: string | undefined;
-	/** True once a `message_stop` event was seen (clean-ending signal). */
+	/**
+	 * True once a CLEAN terminal was seen — Anthropic's `message_stop`, or the
+	 * Responses analogue `response.completed`.
+	 *
+	 * Not diagnostic, despite what an older comment here claimed: paired with
+	 * `providerReportedOutput` this is `terminalSeen` in response-handler, which
+	 * reclassifies a subsequent generic read error as a success, settles the
+	 * stream probe as recovered, and passes `endedCleanly`. So it must stay
+	 * keyed to a SUCCESSFUL terminal. `response.incomplete` and
+	 * `response.failed` deliberately do NOT set it — they carry trustworthy
+	 * usage (see {@link sawResponsesTerminal}) but they are not clean endings,
+	 * and conflating the two would silently turn failed responses into
+	 * successes.
+	 */
 	sawMessageStop: boolean;
+	/**
+	 * True once ANY Responses terminal (`response.completed` / `.incomplete` /
+	 * `.failed`) was seen, clean or not.
+	 *
+	 * Separate from `sawMessageStop` because the two questions are different:
+	 * this one is "are the provider's numbers final?", that one is "did the
+	 * stream end cleanly?". It also makes the FIRST terminal authoritative — a
+	 * stray terminal frame arriving after one already landed is ignored rather
+	 * than allowed to overwrite exact counts, mirroring the Codex transformer's
+	 * own stray-terminal guard.
+	 */
+	sawResponsesTerminal: boolean;
 	/**
 	 * True once a `message_start` event was seen. Every Anthropic-shape streaming
 	 * `/v1/messages` 200 opens with one — including the translated Codex /
@@ -146,6 +176,7 @@ export function createUsageState(): UsageState {
 		lineBuffer: "",
 		currentEvent: undefined,
 		sawMessageStop: false,
+		sawResponsesTerminal: false,
 		sawMessageStart: false,
 		skippingOverlongLine: false,
 	};
@@ -199,10 +230,11 @@ interface SseParsed {
 	};
 	/**
 	 * Codex-Responses vocabulary (native Responses passthrough):
-	 * `response.created` / `response.completed` carry a `response` envelope —
-	 * model on created, OpenAI-shaped usage (cached-token info nested under
-	 * `input_tokens_details`) on completed. Mirrors the shape
-	 * CodexProvider.transformStreamingResponse parses.
+	 * `response.created` and the terminals (`response.completed` /
+	 * `.incomplete` / `.failed`) carry a `response` envelope — model on
+	 * created, OpenAI-shaped usage (cached-token info nested under
+	 * `input_tokens_details`) on a terminal, when the terminal carries usage at
+	 * all. Mirrors the shape CodexProvider.transformStreamingResponse parses.
 	 */
 	response?: {
 		model?: string;
@@ -286,9 +318,32 @@ function applySseData(
 		state.model = parsed.response.model;
 	}
 
-	const isResponseCompleted =
-		parsed.type === "response.completed" || eventType === "response.completed";
-	if (isResponseCompleted) {
+	// All three of these terminate a Responses stream, and all three carry the
+	// same `response` envelope — which CAN carry usage, though nothing
+	// guarantees it does. Only `response.completed` was recognized before, so a
+	// native Codex stream that stopped early (`response.incomplete`, whether
+	// from an output ceiling, a content filter, or a reason that does not exist
+	// yet) or died mid-generation (`response.failed`) left
+	// `providerReportedOutput` false: finalize then fell back to the bytes/4
+	// estimate, and the request row persisted with invented token counts and a
+	// cost derived from them, despite the backend having reported exact numbers
+	// in the event being ignored.
+	//
+	// FIRST terminal wins. A stray terminal frame after one has already landed
+	// is ignored outright rather than allowed to overwrite exact counts with
+	// whatever the trailing frame carries. The Codex transformer guards the same
+	// sequence for the same reason (see its stray-terminal handling), and
+	// without this a `completed usage=135` followed by `failed usage=1` would
+	// bill the request for one output token.
+	const isResponseTerminal =
+		parsed.type === "response.completed" ||
+		parsed.type === "response.incomplete" ||
+		parsed.type === "response.failed" ||
+		eventType === "response.completed" ||
+		eventType === "response.incomplete" ||
+		eventType === "response.failed";
+	if (isResponseTerminal && !state.sawResponsesTerminal) {
+		state.sawResponsesTerminal = true;
 		const usage = parsed.response?.usage;
 		if (usage) {
 			const inputTokenDetails = usage.input_tokens_details;
@@ -313,8 +368,10 @@ function applySseData(
 				state.cacheReadInputTokens = inputTokenDetails.cached_tokens;
 			}
 			if (typeof usage.output_tokens === "number") {
-				// `response.completed` is the terminal event — its count is the Codex
-				// analogue of Anthropic's authoritative `message_delta`.
+				// A Responses terminal event is the Codex analogue of Anthropic's
+				// authoritative `message_delta` count — including on an incomplete or
+				// failed response, where the backend still reports exactly what it
+				// generated before stopping.
 				state.providerFinalOutputTokens = usage.output_tokens;
 				state.providerReportedOutput = true;
 			}
@@ -326,9 +383,18 @@ function applySseData(
 					inputTokenDetails.cache_creation_input_tokens;
 			}
 		}
-		// Terminal event — the Codex analogue of message_stop (diagnostic-only
-		// clean-ending signal; endedCleanly is still the caller's flag).
-		state.sawMessageStop = true;
+		// Only a COMPLETED response is the Codex analogue of `message_stop`.
+		// `sawMessageStop` feeds response-handler's `terminalSeen`, which turns a
+		// following generic read error into a recorded success — so setting it
+		// for `.incomplete` / `.failed` would quietly reclassify failed responses
+		// as successful ones. Their usage is still trusted above; only the
+		// clean-ending claim is withheld.
+		const isCleanTerminal =
+			parsed.type === "response.completed" ||
+			eventType === "response.completed";
+		if (isCleanTerminal) {
+			state.sawMessageStop = true;
+		}
 	}
 }
 

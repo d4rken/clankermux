@@ -1146,6 +1146,121 @@ describe("usage-collector", () => {
 			expect(state.providerFinalOutputTokens).toBe(44);
 		});
 
+		it.each([
+			"response.incomplete",
+			"response.failed",
+		])("%s reports its usage instead of falling back to bytes/4", async (terminal) => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(state, codexTextDelta("x".repeat(400)), 1100);
+			feedChunk(
+				state,
+				sse(terminal, {
+					type: terminal,
+					response: {
+						id: "resp_term",
+						model: "gpt-5.5-codex",
+						usage: {
+							input_tokens: 120,
+							output_tokens: 9,
+							input_tokens_details: { cached_tokens: 100 },
+						},
+					},
+				}),
+				1200,
+			);
+
+			// The backend reported exactly what it generated before stopping, so
+			// the estimate must not be used and cached input must still be split
+			// out of the cache-inclusive total.
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.inputTokens).toBe(20);
+			expect(state.cacheReadInputTokens).toBe(100);
+			expect(state.providerFinalOutputTokens).toBe(9);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.usage.outputTokens).toBe(9);
+			expect(summary.outputApproximate).toBeUndefined();
+		});
+
+		it.each([
+			"response.incomplete",
+			"response.failed",
+		])("%s trusts usage but does NOT claim a clean ending", (terminal) => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(
+				state,
+				sse(terminal, {
+					type: terminal,
+					response: {
+						id: "r",
+						model: "gpt-5.5-codex",
+						usage: { input_tokens: 10, output_tokens: 4 },
+					},
+				}),
+				1100,
+			);
+
+			// The two questions are answered separately on purpose: the numbers
+			// are final, the stream did not end cleanly. `sawMessageStop` paired
+			// with providerReportedOutput is response-handler's `terminalSeen`,
+			// which reclassifies a following read error as a SUCCESS — so a
+			// failed response setting it would launder failures into successes.
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.sawResponsesTerminal).toBe(true);
+			expect(state.sawMessageStop).toBe(false);
+		});
+
+		it("response.completed does claim a clean ending", () => {
+			const state = createUsageState();
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(
+				state,
+				sse("response.completed", {
+					type: "response.completed",
+					response: {
+						id: "r",
+						model: "gpt-5.5-codex",
+						usage: { input_tokens: 10, output_tokens: 4 },
+					},
+				}),
+				1100,
+			);
+			expect(state.sawMessageStop).toBe(true);
+			expect(state.sawResponsesTerminal).toBe(true);
+		});
+
+		it.each([
+			["response.completed", "response.failed"],
+			["response.failed", "response.completed"],
+			["response.completed", "response.completed"],
+		])("first terminal wins: %s then %s", (first, second) => {
+			const state = createUsageState();
+			const terminal = (type: string, out: number) =>
+				sse(type, {
+					type,
+					response: {
+						id: "r",
+						model: "gpt-5.5-codex",
+						usage: { input_tokens: 10, output_tokens: out },
+					},
+				});
+			feedChunk(state, codexCreated(), 1000);
+			feedChunk(state, terminal(first, 135), 1100);
+			feedChunk(state, terminal(second, 1), 1200);
+
+			// Without the guard a stray trailing frame would bill this request for
+			// one output token instead of 135.
+			expect(state.providerFinalOutputTokens).toBe(135);
+			// The clean-ending claim is likewise fixed by the FIRST terminal.
+			expect(state.sawMessageStop).toBe(first === "response.completed");
+		});
+
 		it("usage-less Codex stream falls back to bytes/4 as today", async () => {
 			const state = createUsageState();
 			feedChunk(state, codexCreated(), 1000);
