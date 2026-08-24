@@ -882,6 +882,7 @@ describe("computeFamilyWeeklyUsage", () => {
 			name: "acct-a",
 			pct: 45,
 			resetMs: FUTURE_RESET,
+			exhaustsAtMs: null,
 		});
 	});
 
@@ -1139,5 +1140,176 @@ describe("computeFamilyWeeklyUsage", () => {
 		];
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.familyWeekly).toEqual(computeFamilyWeeklyUsage(accounts, NOW));
+	});
+
+	describe("at-risk projection", () => {
+		const DAY = 86_400_000;
+		// A reset 3 days out puts the scoped window's start 4 days BEHIND now
+		// (scoped weeklies are 7 days), so `elapsed` is 4d and the lifetime
+		// average is exactly (100 - pct) / pct * 4d. Every expectation below is
+		// derived from those two numbers rather than from the implementation.
+		const RESET_3D = NOW + 3 * DAY;
+
+		it("projects an account past its scoped reset and reports the instant", () => {
+			// 80% over 4d burns 20%/d, so the remaining 20% takes 1d — inside the
+			// 3d left on the window.
+			const result = computeFamilyWeeklyUsage(
+				[mkScopedAccount("hot", [scopedEntry("Fable", 80, RESET_3D)])],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].accounts[0].exhaustsAtMs).toBe(NOW + DAY);
+			expect(result[0].atRiskCount).toBe(1);
+			expect(result[0].soonestExhaustsAtMs).toBe(NOW + DAY);
+		});
+
+		it("leaves an account that clears its reset unprojected", () => {
+			// 50% over 4d needs another 4d for the rest, but the window resets in 3d.
+			const result = computeFamilyWeeklyUsage(
+				[mkScopedAccount("steady", [scopedEntry("Fable", 50, RESET_3D)])],
+				NOW,
+			);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("does not count an already-exhausted account as at risk", () => {
+			// >=100% is spent, not projected to become spent: it belongs to
+			// exhaustedCount, and double-counting it here would inflate the
+			// user-visible "N of M projected to run out".
+			const result = computeFamilyWeeklyUsage(
+				[mkScopedAccount("spent", [scopedEntry("Fable", 100, RESET_3D)])],
+				NOW,
+			);
+			expect(result[0].exhaustedCount).toBe(1);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("reports 0% as unprojected rather than as an immediate run-out", () => {
+			const result = computeFamilyWeeklyUsage(
+				[mkScopedAccount("idle", [scopedEntry("Fable", 0, RESET_3D)])],
+				NOW,
+			);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].atRiskCount).toBe(0);
+		});
+
+		it("counts each at-risk account and takes the soonest instant", () => {
+			// Both burn past the reset; 90% over 4d has ~10.7h left, 80% has 1d,
+			// so the soonest is the 90% account.
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("later", [scopedEntry("Fable", 80, RESET_3D)]),
+					mkScopedAccount("sooner", [scopedEntry("Fable", 90, RESET_3D)]),
+					mkScopedAccount("fine", [scopedEntry("Fable", 50, RESET_3D)]),
+				],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].accounts).toHaveLength(3);
+			expect(result[0].atRiskCount).toBe(2);
+			const sooner = result[0].accounts.find((a) => a.name === "sooner");
+			expect(result[0].soonestExhaustsAtMs).toBe(
+				sooner?.exhaustsAtMs ?? Number.NaN,
+			);
+			expect(result[0].soonestExhaustsAtMs).toBe(NOW + (10 / 90) * 4 * DAY);
+		});
+
+		it("projects each family independently", () => {
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("multi", [
+						scopedEntry("Fable", 80, RESET_3D),
+						scopedEntry("Claude Opus 4.8", 50, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			const fable = result.find((f) => f.family === "fable");
+			const opus = result.find((f) => f.family !== "fable");
+			expect(fable?.atRiskCount).toBe(1);
+			expect(fable?.soonestExhaustsAtMs).toBe(NOW + DAY);
+			expect(opus?.atRiskCount).toBe(0);
+			expect(opus?.soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("projects across every window folded into one family, not just the binding one", () => {
+			// Both display names normalize to `fable`. The 90% window BINDS the
+			// displayed percent but clears in 12h, so it is not projected to exhaust
+			// ((10/90) * 6.5d elapsed ~= 17h > 12h). The 80% window is the one that
+			// actually runs out, in 1d. Taking only the binding window's projection
+			// would report this account as not at risk at all.
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("dual", [
+						scopedEntry("Fable", 90, NOW + 12 * 3_600_000),
+						scopedEntry("Mythos 5", 80, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].family).toBe("fable");
+			// The binding window still owns the displayed percent and reset.
+			expect(result[0].accounts).toHaveLength(1);
+			expect(result[0].accounts[0].pct).toBe(90);
+			expect(result[0].accounts[0].resetMs).toBe(NOW + 12 * 3_600_000);
+			// ...but the projection comes from the window that actually runs out.
+			expect(result[0].accounts[0].exhaustsAtMs).toBe(NOW + DAY);
+			expect(result[0].atRiskCount).toBe(1);
+			expect(result[0].soonestExhaustsAtMs).toBe(NOW + DAY);
+		});
+
+		it("never reports an account as both exhausted and at risk for one family", () => {
+			// Fable at 100% binds the row; Mythos at 80% would fold in a 1d
+			// projection. Counting both would put one account in exhaustedCount AND
+			// atRiskCount, and print a run-out time beside the 100% on the same row.
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("spent-and-burning", [
+						scopedEntry("Fable", 100, RESET_3D),
+						scopedEntry("Mythos 5", 80, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].accounts).toHaveLength(1);
+			expect(result[0].accounts[0].pct).toBe(100);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].exhaustedCount).toBe(1);
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("keeps a folded family unprojected when no constituent window runs out", () => {
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("dual-safe", [
+						scopedEntry("Fable", 90, NOW + 12 * 3_600_000),
+						scopedEntry("Mythos 5", 50, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("drops a window whose reset has already passed rather than projecting it", () => {
+			// normalizeWeeklyScoped rejects `resets_at <= now`, so the family never
+			// reaches the bucket at all — there is no row to project from, and in
+			// particular no row that would be projected against a reset in the past.
+			expect(
+				computeFamilyWeeklyUsage(
+					[mkScopedAccount("stale", [scopedEntry("Fable", 80, NOW - DAY)])],
+					NOW,
+				),
+			).toEqual([]);
+		});
 	});
 });

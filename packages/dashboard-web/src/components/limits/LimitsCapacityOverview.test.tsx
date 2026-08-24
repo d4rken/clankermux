@@ -140,11 +140,14 @@ describe("LimitsCapacityOverview", () => {
 			elevated: true,
 			exhaustedCount: 0,
 			elevatedCount: 1,
+			atRiskCount: 0,
+			soonestExhaustsAtMs: null,
 			accounts: [
 				{
 					name: "weekly-hot",
 					pct: 92,
 					resetMs: NOW + 2 * 24 * 60 * 60_000,
+					exhaustsAtMs: null,
 				},
 			],
 		};
@@ -211,11 +214,14 @@ describe("LimitsCapacityOverview", () => {
 			elevated: true,
 			exhaustedCount: 1,
 			elevatedCount: 1,
+			atRiskCount: 0,
+			soonestExhaustsAtMs: null,
 			accounts: [
 				{
 					name: "weekly-hot",
 					pct: 100,
 					resetMs: NOW + 2 * 24 * 60 * 60_000,
+					exhaustsAtMs: null,
 				},
 			],
 		};
